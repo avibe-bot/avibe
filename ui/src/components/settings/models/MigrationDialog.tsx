@@ -348,6 +348,8 @@ export const MigrationDialog: React.FC<{
   const toggle = (backend: AgentBackend) => {
     const group = grouped.find((item) => item.backend === backend);
     if (!group || !groupSelectable(group)) return;
+    // The reason explained the batch that was refused, not the one now selected.
+    setApplyError(null);
     if (controlled) {
       // Toggling any member selects or deselects the whole linked group.
       const next = new Set(value.selectedBackends);
@@ -499,7 +501,10 @@ export const MigrationDialog: React.FC<{
               <div className="flex items-start gap-3 rounded-xl border border-border px-3.5 py-3">
                 <Checkbox
                   checked={cleanApiKeys}
-                  onCheckedChange={setCleanApiKeys}
+                  onCheckedChange={(checked) => {
+                    setCleanApiKeys(checked);
+                    setApplyError(null);
+                  }}
                   disabled={applying}
                   label={t('settings.models.migration.cleanApiKeys') as string}
                   className="mt-px"

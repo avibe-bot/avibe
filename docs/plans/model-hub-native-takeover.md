@@ -158,13 +158,12 @@ explicitly authorized acceptance check.
   that are then idle, and checks for external CLI users, which are never
   terminated. The interruption runs as a forced backend restart, which keeps
   admission closed until its teardown completes. Because the user's work is
-  already interrupted by then, the switch waits for that teardown, bounded by a
-  settle limit that covers the teardown's own bounded steps (owner cancellation,
-  then a runtime stop escalating from SIGTERM to SIGKILL, with a backend's
-  cached runtimes stopped side by side so the stop does not grow with how many
-  are open); only a teardown still running past it refuses, and migration
-  reports that refusal, or a retry beside the teardown it handed off, as
-  `migration_runtime_stopping`. An ordinary restart in progress stays
+  already interrupted by then, the switch waits for that teardown. The wait
+  has a fault threshold, not a proof over every runtime: a healthy teardown
+  takes seconds, and one still running past the threshold keeps the switch's
+  exclusions until it settles. Migration reports that refusal, and a retry
+  beside the teardown it handed off, as `migration_runtime_stopping`, so a
+  retry after the teardown proceeds. An ordinary restart in progress stays
   `migration_native_busy`. Leaving early, by timeout or cancellation, never
   cuts the teardown short. A mode switch in
   either direction enters it, since a turn left running keeps the mode it

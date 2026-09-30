@@ -21,13 +21,12 @@ _POLL_INTERVAL_SECONDS = 0.1
 # After an interruption only teardown remains: native processes exiting and
 # requests to a stopped runtime failing. By then the user's work is already
 # interrupted, so the switch waits for that teardown rather than refusing
-# beside it. The teardown's own steps are bounded: owner cancellation and
-# tidy-up (2 s each), then a runtime stop that escalates from SIGTERM to
-# SIGKILL (up to 10 s). A backend's cached runtimes (Codex working
-# directories, Claude sessions) stop side by side, so that stop bound does not
-# grow with how many are open. This bound covers them with room for slow
-# storage. Work still live past it is a fault.
-_INTERRUPT_SETTLE_SECONDS = 60.0
+# beside it. This is a fault threshold, not a proof over every runtime: a
+# healthy teardown takes seconds even on slow storage, and one still running
+# past it keeps the switch's exclusions until it settles, so the refusal is
+# accurate and a retry afterwards proceeds. It stays well inside the 300 s
+# Model Hub RPC timeout the Web UI waits under.
+_INTERRUPT_SETTLE_SECONDS = 120.0
 _NATIVE_BACKENDS = frozenset({"claude", "codex", "opencode"})
 _T = TypeVar("_T")
 

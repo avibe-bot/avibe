@@ -210,9 +210,9 @@ async def test_busy_guard_interrupts_running_work_then_retires_and_yields(drain_
 async def test_switch_waits_out_a_teardown_that_takes_its_bounded_worst_case(monkeypatch):
     """MH-MIG-013: by the time the switch waits, the user's work is already
     interrupted. Refusing beside the teardown loses the work and the switch
-    together, so a teardown that takes its own bounded worst case (owner
-    cancellation and tidy-up, then a SIGTERM-to-SIGKILL runtime stop) must
-    complete the switch under the production settle bound."""
+    together, so a healthy teardown that runs well past the old 10 s window,
+    as the forced stop of a live runtime does on slow storage, must complete
+    the switch under the production threshold."""
     controller, _, admissions, turns = controller_fixture(busy=True)
     service = controller.agent_service
     coordinator = BackendRestartCoordinator(
@@ -226,7 +226,7 @@ async def test_switch_waits_out_a_teardown_that_takes_its_bounded_worst_case(mon
 
     async def slow_teardown(backend, forced):
         nonlocal elapsed
-        # 2 s + 2 s owner cancellation, 10 s runtime stop, 1 s slow storage.
+        # Owner cancellation and tidy-up plus a SIGTERM-to-SIGKILL runtime stop.
         elapsed += 15.0
         await asyncio.sleep(0.01)
         service.backend_runtime_active.return_value = False

@@ -1036,20 +1036,11 @@ class ClaudeAgent(BaseAgent):
         """Reconnect Claude runtime so future requests load fresh auth."""
         session_ids = self.runtime_turn_keys()
 
-        # Each session owns its own CLI process and generation lock, so they
-        # disconnect side by side: a refresh, and the switch waiting on it,
-        # takes one session's disconnect bound however many are open. Every
-        # session is cleaned up before the first failure is raised.
-        results = await asyncio.gather(
-            *(
-                self._cleanup_runtime_session(composite_id, reason="auth_refresh")
-                for composite_id in session_ids
-            ),
-            return_exceptions=True,
-        )
-        failure = next((result for result in results if isinstance(result, BaseException)), None)
-        if failure is not None:
-            raise failure
+        for composite_id in session_ids:
+            await self._cleanup_runtime_session(
+                composite_id,
+                reason="auth_refresh",
+            )
 
         logger.info("Refreshed Claude auth state across %d runtime session(s)", len(session_ids))
 

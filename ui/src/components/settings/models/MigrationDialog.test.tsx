@@ -943,6 +943,20 @@ describe('MigrationDialog — the setup scope', () => {
     expect(applied).toEqual([[CODEX_KEY.id], [LEGACY.id]]);
   });
 
+  it('drops the refusal once the selection it explained changes', async () => {
+    vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(new ApiCallError('migration_runtime_stopping'));
+    renderSetup({ scan: [CODEX_KEY, LEGACY] });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+    await within(dialog).findByRole('alert');
+
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
+    expect(within(dialog).queryByRole('alert')).toBeNull();
+  });
+
   it('returns to the same selection after a failed batch', async () => {
     vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(
       new ApiCallError('migration_native_busy', 'busy'),

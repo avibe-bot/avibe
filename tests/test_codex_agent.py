@@ -837,33 +837,6 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_refresh_auth_state_stops_cached_transports_side_by_side(self):
-        """MH-MIG-013: stopping cached transports one after another takes one
-        stop bound per working directory, so a switch waiting on the refresh
-        outlives its settle bound and refuses beside the teardown."""
-        agent = object.__new__(CodexAgent)
-        stopping = []
-        all_stopping = asyncio.Event()
-
-        def transport(name):
-            async def stop():
-                stopping.append(name)
-                if len(stopping) == 3:
-                    all_stopping.set()
-                await all_stopping.wait()
-
-            return SimpleNamespace(stop=stop)
-
-        agent._transports = {f"/tmp/{name}": transport(name) for name in "abc"}
-        agent._session_mgr = SimpleNamespace(all_base_sessions=lambda: [])
-        agent._turn_registry = SimpleNamespace()
-        agent.controller = SimpleNamespace(model_hub_runtime=SimpleNamespace(retire_process_scope=Mock()))
-
-        await asyncio.wait_for(agent.refresh_auth_state(), timeout=5)
-
-        self.assertEqual(sorted(stopping), ["a", "b", "c"])
-        self.assertEqual(agent._transports, {})
-
     async def test_refresh_auth_state_retires_generation_before_transport_stop(self):
         agent = object.__new__(CodexAgent)
         activation = RuntimeActivationRegistry()

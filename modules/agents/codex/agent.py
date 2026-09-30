@@ -1276,8 +1276,8 @@ class CodexAgent(BaseAgent):
             self._transport_locks = {}
         transport_items = list(self._transports.items())
         self._session_last_activity.clear()
-
-        async def stop_generation(cwd: str, transport: CodexTransport) -> bool:
+        stopped = 0
+        for cwd, transport in transport_items:
             lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
             async with lock:
                 try:
@@ -1287,24 +1287,11 @@ class CodexAgent(BaseAgent):
                     )
                 except Exception as exc:
                     logger.warning("Failed to stop Codex transport during auth refresh: %s", exc)
-                    return False
+                    continue
                 if not detached:
-                    return False
+                    continue
                 self._retire_model_hub_process_scope(cwd)
-                return True
-
-        # Each working directory owns its own app-server process, so they stop
-        # side by side: a refresh, and the switch waiting on it, takes one
-        # transport's stop bound however many directories are cached. Every
-        # generation settles before the first escaped failure is raised.
-        results = await asyncio.gather(
-            *(stop_generation(cwd, transport) for cwd, transport in transport_items),
-            return_exceptions=True,
-        )
-        failure = next((result for result in results if isinstance(result, BaseException)), None)
-        if failure is not None:
-            raise failure
-        stopped = sum(results)
+                stopped += 1
 
         for base_session_id in base_session_ids:
             self._session_mgr.invalidate_thread(base_session_id)

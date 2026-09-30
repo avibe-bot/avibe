@@ -2410,36 +2410,6 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(session_key, agent._pending_reactions)
         self.assertNotIn(session_key, agent._pending_requests)
 
-    async def test_refresh_auth_state_disconnects_open_sessions_side_by_side(self):
-        """MH-MIG-013: disconnecting open sessions one after another takes one
-        disconnect bound per session, so a switch waiting on the refresh outlives
-        its settle bound and refuses beside the teardown."""
-        controller = _StubController()
-        agent = ClaudeAgent(controller)
-        disconnecting = []
-        all_disconnecting = asyncio.Event()
-
-        class _SlowClient(_StubClient):
-            def __init__(self, name):
-                super().__init__()
-                self.name = name
-
-            async def disconnect(self):
-                disconnecting.append(self.name)
-                if len(disconnecting) == 3:
-                    all_disconnecting.set()
-                await all_disconnecting.wait()
-                self.disconnected = True
-
-        clients = {f"wechat_o{index}:/tmp/work": _SlowClient(index) for index in range(3)}
-        controller.claude_sessions.update(clients)
-
-        await asyncio.wait_for(agent.refresh_auth_state(), timeout=5)
-
-        self.assertEqual(sorted(disconnecting), [0, 1, 2])
-        self.assertTrue(all(client.disconnected for client in clients.values()))
-        self.assertEqual(controller.claude_sessions, {})
-
     async def test_cleanup_runtime_session_delegates_runtime_cleanup_to_session_handler(self):
         controller = _StubController()
         cleanup_calls = []

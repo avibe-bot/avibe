@@ -1329,9 +1329,6 @@ scenarios:
     kind: migration
     layer: unit
     test: tests/test_native_takeover_lifecycle.py::test_switch_waits_out_a_teardown_that_takes_its_bounded_worst_case
-    related_tests:
-      - tests/test_codex_agent.py::CodexAgentStopTests::test_refresh_auth_state_stops_cached_transports_side_by_side
-      - tests/test_claude_agent_sessions.py
   - id: MH-MIG-014
     name: A migration refused while Avibe's own interrupted work is still stopping says so in the dialog, not that an outside CLI holds the backend
     status: covered
