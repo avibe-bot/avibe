@@ -389,14 +389,31 @@ def test_opencode_overlay_addresses_bare_ids_through_their_native_provider():
         opencode_model_for_overlay("missing", overlay)
 
 
-def test_opencode_overlay_never_repairs_a_prefixed_identifier():
+def test_opencode_overlay_runs_a_provider_qualified_selection_on_its_menu_row():
+    """MH-SWITCH-002: a Direct-era ``<provider>/<model>`` selection names the
+    Gateway row for its model part; an exact menu id always wins."""
+
     overlay = SimpleNamespace(
-        model_provider_ids=(("gpt-5", "avibe-openai"),),
-        checked_identifiers=("gpt-5",),
-        available_identifiers=("gpt-5",),
+        model_provider_ids=(
+            ("gpt-5", "avibe-openai"),
+            ("kimi-k2", "avibe-openai"),
+            ("moonshotai/kimi-k2", "avibe-anthropic"),
+        ),
+        checked_identifiers=("gpt-5", "kimi-k2", "moonshotai/kimi-k2"),
+        available_identifiers=("gpt-5", "kimi-k2", "moonshotai/kimi-k2"),
     )
-    with pytest.raises(ModelHubError):
-        opencode_model_for_overlay("openai/gpt-5", overlay)
+    for selection in ("openai/gpt-5", "anthropic/gpt-5", "avibe-openai/gpt-5"):
+        assert opencode_requested_model_for_overlay(selection, overlay) == "gpt-5"
+        assert opencode_model_for_overlay(selection, overlay) == "avibe-openai/gpt-5"
+    assert opencode_model_for_overlay("moonshotai/kimi-k2", overlay) == (
+        "avibe-anthropic/moonshotai/kimi-k2"
+    )
+    assert opencode_model_for_overlay("openrouter/moonshotai/kimi-k2", overlay) == (
+        "avibe-anthropic/moonshotai/kimi-k2"
+    )
+    for unserved in ("openai/gpt-6", "gpt-5/", "/gpt-5"):
+        with pytest.raises(ModelHubError):
+            opencode_model_for_overlay(unserved, overlay)
 
 
 def test_fallback_launch_identity_is_stable_for_same_route():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,7 @@ from core.handlers.model_hub.provenance import BoundedProvenanceStore
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
 from core.handlers.model_hub.service import (
     PRE_ATTEMPT_SETTLEMENT_GENERATION,
+    ModelHubError,
     ModelHubService,
 )
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -44,6 +46,8 @@ from modules.agents.model_hub import (
     ModelHubRuntimeRouter,
     bind_launch,
     bind_persisted_launch,
+    opencode_model_for_overlay,
+    opencode_requested_model_for_overlay,
     persisted_launch_identity,
 )
 
@@ -322,6 +326,159 @@ def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
             assert launch.target_model == _source_model_id("claude")
         finally:
             await gateway.close()
+
+    asyncio.run(exercise())
+
+
+@asynccontextmanager
+async def _idle_switch_guard(backends, *, external_processes=True):
+    async def verify_idle() -> None:
+        return None
+
+    yield verify_idle
+
+
+def test_mh_switch_001_switching_to_gateway_keeps_agent_models_runnable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH-SWITCH-001: entering Gateway mode carries each enabled Agent's model
+    into the backend menu when a Source serves it, so the first OpenCode turn
+    of a Direct-era ``openai/...`` selection runs through the gateway."""
+
+    native_home = tmp_path / "native-home"
+    for name, path in {
+        "HOME": native_home,
+        "XDG_CONFIG_HOME": native_home / ".config",
+        "XDG_DATA_HOME": native_home / ".local" / "share",
+        "XDG_CACHE_HOME": native_home / ".cache",
+        "CLAUDE_CONFIG_DIR": native_home / ".claude",
+        "CODEX_HOME": native_home / ".codex",
+    }.items():
+        monkeypatch.setenv(name, str(path))
+    monkeypatch.setattr(Path, "home", lambda: native_home)
+
+    def api_source(source_id: str, vendor: str, protocol: str, models: list[str]) -> ModelHubSourceConfig:
+        return ModelHubSourceConfig(
+            id=source_id,
+            kind="api_key",
+            vendor=vendor,
+            display_name=source_id,
+            protocol=protocol,
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[
+                ModelHubModelConfig(
+                    id=model_id, provenance="discovered", reasoning_efforts=["low", "high"],
+                )
+                for model_id in models
+            ],
+            credential_ref=f"cred_{source_id}",
+        )
+
+    anthropic = api_source("src_anthropic", "anthropic", "anthropic", ["claude-opus-5-5"])
+    openai = api_source(
+        "src_openai01", "openai", "openai_responses", ["gpt-5.6-sol", "gpt-removed", "relay-custom-1"],
+    )
+    config = ModelHubConfig(
+        sources=[anthropic, openai],
+        agents={
+            backend: ModelHubAgentSupplyConfig.default(backend, mode="direct")
+            for backend in ("claude", "codex", "opencode")
+        },
+    )
+    for agent in config.agents.values():
+        agent.sources = ModelHubAgentSourcesConfig(order=[anthropic.id, openai.id])
+    # An explicit removal made during an earlier Gateway period stays removed.
+    config.agents["opencode"].removed_model_ids = ["gpt-removed"]
+    codex_menu_before = [model.to_payload() for model in config.agents["codex"].models]
+    selections = {
+        "claude": [],
+        "codex": [("codex", "gpt-5.6-sol"), ("relay", "relay-custom-1")],
+        "opencode": [
+            ("opencode", "openai/gpt-5.6-sol"),
+            ("writer", "anthropic/claude-opus-5-5"),
+            ("pruned", "openai/gpt-removed"),
+            ("stranger", "openai/not-served"),
+        ],
+    }
+    store = MemoryStore(config)
+    adapter = AdapterBoundaryFake([
+        AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}', recovery_verified=True),
+    ])
+    service = _service(tmp_path, store, adapter, now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc))
+    service.migration_home = native_home
+    service.migration_guard = _idle_switch_guard
+    service.named_agents_override = lambda backend: selections[backend]
+    service.requested_model_override = lambda backend: dict(selections[backend]).get(backend)
+
+    async def exercise() -> None:
+        opencode = await service.set_agent_mode("opencode", "hub")
+        codex = await service.set_agent_mode("codex", "hub")
+
+        catalog = {model.id: model for model in store.load().agents["opencode"].models}
+        assert list(catalog) == ["gpt-5.6-sol", "claude-opus-5-5"]
+        assert store.load().agents["opencode"].menu.checked == list(catalog)
+        assert {model_id: (model.origin, model.native_protocol, model.reasoning_efforts)
+                for model_id, model in catalog.items()} == {
+            "gpt-5.6-sol": ("provider", "openai_responses", ["low", "high"]),
+            "claude-opus-5-5": ("provider", "anthropic", ["low", "high"]),
+        }
+        assert opencode["selected_model_id"] == "gpt-5.6-sol"
+        assert {row["name"]: (row["effective_model_id"], row["supply_status"], row["route_reason"])
+                for row in opencode["named_agents"]} == {
+            "opencode": ("gpt-5.6-sol", "ok", None),
+            "writer": ("claude-opus-5-5", "ok", None),
+            "pruned": ("openai/gpt-removed", "interrupted", "route_unconfigured"),
+            "stranger": ("openai/not-served", "interrupted", "route_unconfigured"),
+        }
+        # A fixed menu gains only what it lacked; its built-in rows are untouched.
+        codex_models = [model.to_payload() for model in store.load().agents["codex"].models]
+        assert codex_models[:-1] == codex_menu_before
+        assert codex_models[-1]["id"] == "relay-custom-1"
+        assert {row["name"]: row["supply_status"] for row in codex["named_agents"]} == {
+            "codex": "ok", "relay": "ok",
+        }
+
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(
+            service=service, turn_gateway=gateway, overlay_path=tmp_path / "overlay.json",
+        )
+        try:
+            overlay = await router.prepare_opencode_overlay()
+            assert overlay is not None
+            requested = opencode_requested_model_for_overlay("openai/gpt-5.6-sol", overlay)
+            assert requested == "gpt-5.6-sol"
+            assert opencode_model_for_overlay("openai/gpt-5.6-sol", overlay) == "avibe-openai/gpt-5.6-sol"
+            launch = await router.resolve_opencode_overlay_launch(overlay, requested)
+            assert (launch.source_id, launch.target_model) == (openai.id, "gpt-5.6-sol")
+            status, body = await _post_turn(
+                launch, endpoint="responses",
+                payload={"model": launch.runtime_model, "input": "hello", "stream": False},
+            )
+            assert (status, body) == (200, b'{"ok":true}')
+            assert adapter.invocations == [(openai.id, "gpt-5.6-sol", "opencode")]
+        finally:
+            await gateway.close()
+
+        # The row now runs an Agent, so removing it names that Agent.
+        baseline = service.backend_catalog_models("opencode")
+        with pytest.raises(ModelHubError) as refused:
+            await service.set_agent_models(
+                "opencode", baseline, [row for row in baseline if row["id"] != "gpt-5.6-sol"],
+            )
+        assert refused.value.data["would_interrupt"] == [
+            {"backend": "opencode", "model_id": "openai/gpt-5.6-sol", "agents": ["opencode"]},
+        ]
+
+        # Leaving the Gateway keeps the catalog, and Direct runs each Agent's
+        # own spelling again.
+        direct = await service.set_agent_mode("opencode", "direct")
+        assert list(model.id for model in store.load().agents["opencode"].models) == list(catalog)
+        assert {row["name"]: row["effective_model_id"] for row in direct["named_agents"]} == dict(
+            selections["opencode"]
+        )
 
     asyncio.run(exercise())
 

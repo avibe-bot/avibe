@@ -91,6 +91,29 @@ OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL = {
 }
 
 
+def opencode_menu_model_candidates(selected: str) -> tuple[str, ...]:
+    """The OpenCode menu ids one Agent model selection can name, exact first.
+
+    OpenCode addresses a model as ``<provider>/<model>``, split on the first
+    ``/``. A selection made in Direct mode names one of the user's own
+    providers, which Gateway mode never loads, so only its model part can name
+    a Gateway menu row. The whole selection still comes first: a menu id may
+    itself carry a slash (``moonshotai/kimi-k2``) and then names its own row.
+    """
+
+    provider, separator, model = selected.partition("/")
+    return (selected, model) if provider and separator and model else (selected,)
+
+
+def opencode_menu_model_id(selected: str, menu_ids: Container[str]) -> str:
+    """Return the OpenCode menu id a selection names, or the selection itself."""
+
+    return next(
+        (candidate for candidate in opencode_menu_model_candidates(selected) if candidate in menu_ids),
+        selected,
+    )
+
+
 def normalized_model_id(value: str) -> str:
     """Spell one identifier the one way this product spells it.
 

@@ -1202,6 +1202,20 @@ scenarios:
     kind: selection
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_unpinned_hub_projection_is_null_while_explicit_turn_resolves
+  - id: MH-SWITCH-001
+    name: Entering Gateway mode keeps each enabled Agent's model runnable when a Source serves it
+    status: covered
+    kind: selection
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_switch_001_switching_to_gateway_keeps_agent_models_runnable
+    related_tests:
+      - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_switch_001_migration_carries_agent_models_into_the_switched_menu
+  - id: MH-SWITCH-002
+    name: A Direct-era OpenCode provider/model selection runs on the Gateway menu row its model part names
+    status: covered
+    kind: selection
+    layer: unit
+    test: tests/test_model_hub_injection.py::test_opencode_overlay_runs_a_provider_qualified_selection_on_its_menu_row
   - id: MH-MIG-001
     name: Native migration takes over selected credentials and cleans replaced native auth
     status: covered

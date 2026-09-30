@@ -142,6 +142,8 @@ class MigrationHost(Protocol):
 
     def _save_config(self, config: ModelHubConfig) -> ModelHubConfig: ...
 
+    def _carry_agent_selections(self, config: ModelHubConfig, backend: Any) -> None: ...
+
     def _reconcile_native_auth(self, backends: tuple[str, ...]) -> None: ...
 
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None: ...
@@ -1896,7 +1898,9 @@ async def _prepare_takeover(
         }
         updated.enabled = True
         for backend in backends:
-            updated.agents[backend].mode = "hub"
+            if updated.agents[backend].mode != "hub":
+                updated.agents[backend].mode = "hub"
+                host._carry_agent_selections(updated, backend)
         updated = ModelHubConfig.from_payload(updated.to_payload())
         for edit in edits:
             edit.check()

@@ -1670,6 +1670,12 @@ and under v4 the two modes no longer share a namespace at all (§4.8.3).
    applies the Codex admission rule; the retired "three buckets" repair of `custom/` prefixes
    does not exist. Two different vendors' models that share an id cannot coexist in one
    OpenCode menu — the same rule Codex already has.
+6. **Agent selections cross the switch** (amendment,
+   `model-hub-gateway-switch-agent-models.md`). Menu ids stay bare and are never
+   repaired. An Agent's selection is not a menu id: in Gateway mode it names the row
+   equal to the whole selection, otherwise the row equal to its OpenCode model part, so
+   a Direct-era `openai/gpt-5.6-sol` runs the row `gpt-5.6-sol`. Entering Gateway mode
+   adds a row for each Agent selection that a Source in default routing lists.
 
 History: 07-23 locked `provider/model` with a standard-vendor segment and no `avibe-`
 namespace so ids read like native OpenCode and survived Gateway⇄Direct switches. 09-04 the

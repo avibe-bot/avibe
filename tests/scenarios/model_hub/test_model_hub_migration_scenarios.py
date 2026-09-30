@@ -1365,6 +1365,43 @@ def test_opencode_native_provider_without_stable_identifier_is_visible_blocker(
     assert item.selected is False
 
 
+def test_mh_switch_001_migration_carries_agent_models_into_the_switched_menu(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """MH-SWITCH-001: accepting migration carries each Agent's Direct selection
+    into the menu it switches, served by the Sources that migration imported."""
+
+    native_home = tmp_path / "native-home"
+    _write_opencode(native_home)
+    _isolate_native_home(monkeypatch, native_home)
+    service, store, _ = _service(tmp_path)
+    store.config.agents["opencode"].mode = "direct"
+    service.named_agents_override = lambda backend: [
+        ("opencode", "openrouter/openrouter-model"),
+        ("zhipu", "zhipuai/zhipuai-model"),
+        ("stranger", "openai/not-served"),
+    ] if backend == "opencode" else []
+
+    items = [item["id"] for item in service.migration_scan()["items"] if item["backend"] == "opencode"]
+    assert asyncio.run(service.migration_apply(items))["applied"] == 2
+
+    agent = _assert_canonical_round_trip(store.config).agents["opencode"]
+    assert agent.mode == "hub"
+    assert [(model.id, model.origin, model.native_protocol) for model in agent.models] == [
+        ("openrouter-model", "provider", "openai_responses"),
+        ("zhipuai-model", "provider", "openai_responses"),
+    ]
+    assert {
+        row["name"]: (row["effective_model_id"], row["route_reason"])
+        for row in service.get_agent_sources("opencode")["named_agents"]
+    } == {
+        "opencode": ("openrouter-model", None),
+        "zhipu": ("zhipuai-model", None),
+        "stranger": ("openai/not-served", "route_unconfigured"),
+    }
+
+
 def test_scan_keeps_invalid_endpoint_visible_while_valid_backend_items_remain_usable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -20,7 +20,10 @@ from core.handlers.model_hub.events import (
     EventAgent,
     EventReason,
 )
-from core.handlers.model_hub.identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL
+from core.handlers.model_hub.identifiers import (
+    OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL,
+    opencode_menu_model_id,
+)
 from core.handlers.model_hub.provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
     PreparedGatewayRoute,
@@ -1242,6 +1245,7 @@ def opencode_requested_model_for_overlay(
         if not overlay.available_identifiers:
             raise ModelHubError("mapping_target_unavailable", status=409)
         return overlay.available_identifiers[0]
+    candidate = opencode_menu_model_id(candidate, overlay.checked_identifiers)
     if candidate in overlay.checked_identifiers:
         return candidate
     raise ModelHubError("mapping_target_unavailable", status=409)

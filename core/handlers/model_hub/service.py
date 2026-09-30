@@ -101,7 +101,13 @@ from .events import (
     contains_credential_material,
 )
 from .errors import ModelDiscoveryError
-from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_id, normalized_model_id
+from .identifiers import (
+    OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL,
+    canonical_model_id,
+    normalized_model_id,
+    opencode_menu_model_candidates,
+    opencode_menu_model_id,
+)
 from .migration import (
     MigrationConflictError,
     MigrationCredentialsInvalidError,
@@ -1055,8 +1061,24 @@ class ModelHubService:
                 self.requested_model_override(cast(BackendName, agent.backend)) or ""
             ).strip()
             if requested_model:
-                return requested_model
+                return self._menu_model_for_selection(agent, requested_model)
         return ""
+
+    @staticmethod
+    def _menu_model_for_selection(
+        agent: ModelHubAgentSupplyConfig,
+        selected: str,
+    ) -> str:
+        """Name the menu row an Agent's model selection runs on in Gateway mode.
+
+        Only OpenCode spells a Direct selection differently from its Gateway
+        menu id; the turn path applies the same rule to its overlay snapshot.
+        Direct mode runs the selection as it is spelled.
+        """
+
+        if agent.backend != "opencode" or agent.mode != "hub":
+            return selected
+        return opencode_menu_model_id(selected, {model.id for model in agent.models})
 
     def _agent_model_ids(
         self,
@@ -3801,7 +3823,10 @@ class ModelHubService:
 
         if self.named_agents_override is not None:
             for name, pinned_model in self.named_agents_override(backend):
-                add(pinned_model, name)
+                add(
+                    self._menu_model_for_selection(agent, str(pinned_model or "").strip()),
+                    name,
+                )
         for model in agent.models:
             add(model.id)
         for model_id, route in agent.routes.items():
@@ -4511,7 +4536,9 @@ class ModelHubService:
         named_agents = []
         if self.named_agents_override is not None:
             for name, pinned_model in self.named_agents_override(backend):
-                requested = str(pinned_model or "").strip()
+                requested = self._menu_model_for_selection(
+                    agent, str(pinned_model or "").strip()
+                )
                 named_resolution = resolve_model_hub_turn(
                     config,
                     backend,
@@ -4617,6 +4644,66 @@ class ModelHubService:
             logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
             return {}
 
+    def _provider_candidate(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+        model_id: str,
+        match: Mapping[str, Any] | None,
+    ) -> tuple[ModelHubBackendModelConfig, list[dict], tuple[str, ...]] | None:
+        """Build the catalog row a provider-supplied model is added as.
+
+        Returns the admitted row, its suppliers in Source order, and the
+        models.dev fields that filled it, or None when the id is not admissible.
+        """
+
+        from vibe.models_dev_catalog import native_protocol_for_model_id
+
+        suppliers, display_name, reasoning_efforts = self._candidate_suppliers(
+            config,
+            backend,
+            model_id,
+        )
+        # Suppliers speak first, models.dev fills what they left unsaid, and
+        # an unstated ladder falls back to the tiers the backend's request
+        # protocol accepts, unless models.dev says the model cannot reason.
+        enrichment = (
+            {field: match[field] for field in _MODELS_DEV_CANDIDATE_FIELDS}
+            if match is not None
+            else {}
+        )
+        if reasoning_efforts and enrichment.get("supports_reasoning") is False:
+            # A supplier's ladder outranks the catalog's flag, and a false
+            # flag would suppress that ladder at launch.
+            enrichment["supports_reasoning"] = None
+        display_name = display_name or (match or {}).get("display_name")
+        if not reasoning_efforts and match is not None:
+            reasoning_efforts = list(match["reasoning_efforts"])
+        if not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
+            request_protocol = _FIXED_BACKEND_PROTOCOLS.get(
+                backend
+            ) or native_protocol_for_model_id(model_id)
+            reasoning_efforts = list(PROTOCOL_REASONING_EFFORT_DEFAULTS[request_protocol])
+        admitted = admissible_backend_model(
+            backend,
+            model_id,
+            {
+                "origin": "provider",
+                "display_name": display_name,
+                "reasoning_efforts": reasoning_efforts,
+                **enrichment,
+                **(
+                    {"native_protocol": native_protocol_for_model_id(model_id)}
+                    if backend == "opencode"
+                    else {}
+                ),
+            },
+            claude_builtin_ids=_builtin_model_ids("claude"),
+        )
+        if admitted is None:
+            return None
+        return admitted, suppliers, tuple(enrichment)
+
     def agent_model_candidates(self, backend: str) -> dict:
         agent_backend = cast(BackendName, backend)
         config = self.store.load()
@@ -4697,46 +4784,15 @@ class ModelHubService:
         providers = []
         described = self._models_dev_descriptions(provider_ids)
         for model_id in provider_ids:
-            suppliers, display_name, reasoning_efforts = self._candidate_suppliers(
+            candidate = self._provider_candidate(
                 config,
                 agent_backend,
                 model_id,
+                described.get(model_id),
             )
-            # Suppliers speak first, models.dev fills what they left unsaid, and
-            # an unstated ladder falls back to the tiers the backend's request
-            # protocol accepts, unless models.dev says the model cannot reason.
-            match = described.get(model_id)
-            enrichment = (
-                {field: match[field] for field in _MODELS_DEV_CANDIDATE_FIELDS}
-                if match is not None
-                else {}
-            )
-            if reasoning_efforts and enrichment.get("supports_reasoning") is False:
-                # A supplier's ladder outranks the catalog's flag, and a false
-                # flag would suppress that ladder at launch.
-                enrichment["supports_reasoning"] = None
-            display_name = display_name or (match or {}).get("display_name")
-            if not reasoning_efforts and match is not None:
-                reasoning_efforts = list(match["reasoning_efforts"])
-            if not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
-                request_protocol = _FIXED_BACKEND_PROTOCOLS.get(
-                    agent_backend
-                ) or native_protocol_for_model_id(model_id)
-                reasoning_efforts = list(PROTOCOL_REASONING_EFFORT_DEFAULTS[request_protocol])
-            admitted = admissible_backend_model(
-                agent_backend,
-                model_id,
-                {
-                    "origin": "provider",
-                    "display_name": display_name,
-                    "reasoning_efforts": reasoning_efforts,
-                    **enrichment,
-                    **protocol_payload(model_id),
-                },
-                claude_builtin_ids=_builtin_model_ids("claude"),
-            )
-            if admitted is None:
+            if candidate is None:
                 continue
+            admitted, suppliers, enriched_fields = candidate
             providers.append(
                 {
                     "id": admitted.id,
@@ -4746,7 +4802,7 @@ class ModelHubService:
                     "origin": "provider",
                     **{
                         field: getattr(admitted, field)
-                        for field in enrichment
+                        for field in enriched_fields
                     },
                     **protocol_payload(admitted.id),
                 }
@@ -4836,6 +4892,67 @@ class ModelHubService:
         )
         return any(item.backend == backend and item.config_blocker for item in available)
 
+    def _carry_agent_selections(
+        self,
+        config: ModelHubConfig,
+        backend: BackendName,
+    ) -> None:
+        """Give each Agent's model a Gateway menu row when a Source serves it.
+
+        Called as a backend enters Gateway mode. Direct mode never reads the
+        Gateway menu, so an Agent there keeps a model its CLI offered, and an
+        OpenCode one spells it with its own provider (``openai/gpt-5.6-sol``).
+        The row added is the one the picker adds for a provider model, only
+        when a Source in this backend's default routing lists it. The Agent's
+        selection itself is untouched, so switching back to Direct still runs
+        it. A row the user removed stays removed, and a selection nothing
+        serves stays visible as an Agent that needs attention.
+        """
+
+        if self.named_agents_override is None:
+            return
+        agent = config.agents[backend]
+        carried: list[str] = []
+        for _name, selected in self.named_agents_override(backend):
+            selected = str(selected or "").strip()
+            menu_ids = {model.id for model in agent.models}
+            if not selected or self._menu_model_for_selection(agent, selected) in menu_ids:
+                continue
+            candidates = (
+                opencode_menu_model_candidates(selected)
+                if backend == "opencode"
+                else (selected,)
+            )
+            served = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate not in agent.removed_model_ids
+                    and candidate not in carried
+                    and self._matching_menu_model_hops(config, backend, candidate)
+                ),
+                None,
+            )
+            if served is not None:
+                carried.append(served)
+        if not carried:
+            return
+        described = self._models_dev_descriptions(carried)
+        for model_id in carried:
+            candidate = self._provider_candidate(
+                config,
+                backend,
+                model_id,
+                described.get(model_id),
+            )
+            if candidate is not None:
+                agent.models.append(candidate[0])
+        if backend == "opencode":
+            agent.menu = ModelHubMenuConfig(
+                view=agent.menu.view if agent.menu else "featured",
+                checked=[model.id for model in agent.models],
+            )
+
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"}:
             raise ModelHubError("mode_switch_blocked")
@@ -4872,6 +4989,8 @@ class ModelHubService:
                             raise ModelHubError("mode_switch_blocked", status=409)
                         config = self._clone_config(previous)
                         self._agent(config, backend).mode = mode
+                        if mode == "hub":
+                            self._carry_agent_selections(config, cast(BackendName, backend))
                         await self._commit_synced(previous, config)
                         committed = self.store.load()
                         return self._agent_payload(committed, self._agent(committed, backend))
