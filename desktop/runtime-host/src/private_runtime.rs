@@ -187,6 +187,44 @@ impl PrivateRuntimeBundle {
         install_result
     }
 
+    /// Hashes a reused install slot in full and withdraws it if it no longer
+    /// matches the manifest.
+    ///
+    /// `prepare()` reuses a slot from metadata alone, so a change metadata cannot
+    /// see would otherwise be served on every launch. This repeats the check a
+    /// launch used to run inline, meant for a background thread while the
+    /// Runtime starts. A failing slot loses its marker. The daemon that may be
+    /// running from it is untouched, because nothing it executes is removed. The
+    /// next `prepare()` then treats the slot as invalid and reinstalls the
+    /// verified archive, by the same repair path as a slot rejected inline.
+    pub fn audit(&self, root: &Path) -> Result<(), PrivateRuntimeError> {
+        let manifest = self.read_manifest()?;
+        validate_manifest(&manifest)?;
+        let digest_prefix = manifest
+            .archive_sha256
+            .get(..16)
+            .ok_or(PrivateRuntimeError::ManifestInvalid)?;
+        let version_dir = self.install_root.join(&manifest.runtime_version);
+        if !install_slots(&version_dir, digest_prefix)
+            .iter()
+            .any(|slot| slot == root)
+        {
+            return Err(PrivateRuntimeError::Install(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "audited Runtime is not an install slot of the bundled manifest",
+            )));
+        }
+        let verified = verify_installed_tree(root, &manifest);
+        if verified.is_err() {
+            match fs::remove_file(root.join(INSTALL_MARKER_NAME)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(PrivateRuntimeError::Install(error)),
+            }
+        }
+        verified
+    }
+
     /// Removes private Runtime trees that are no longer used by the active
     /// desktop-managed daemon.
     ///
@@ -494,8 +532,9 @@ fn required_runtime_files(manifest: &RuntimeBundleManifest) -> [(PathBuf, bool);
 /// Hashes every file of a freshly extracted tree against `tree_sha256`.
 ///
 /// This runs once per install, on the staging directory, before the marker is
-/// written and the slot is published. Reuse relies on that ordering instead of
-/// repeating the hash; see [`verify_installed_shape`].
+/// written and the slot is published, and again by
+/// [`PrivateRuntimeBundle::audit`] off the launch path. Reuse itself checks
+/// only [`verify_installed_shape`].
 fn verify_installed_tree(root: &Path, manifest: &RuntimeBundleManifest) -> Result<(), PrivateRuntimeError> {
     let mut files = verify_installed_shape(root, manifest)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
@@ -522,14 +561,14 @@ fn verify_installed_tree(root: &Path, manifest: &RuntimeBundleManifest) -> Resul
 /// every launch read the whole tree (about 390MB in 17k files) before the first
 /// health probe: 3.5s at the median and 12.6s at p90 over 250 recorded launches.
 ///
-/// What reaches an installed tree afterwards is a process writing into it
-/// (bytecode, #2273), a file being removed, or a file being truncated. Each
-/// changes the regular-file count or the unpacked size, and a link or special
-/// file is rejected outright, so the metadata walk keeps every such tree from
-/// being reused. A same-size rewrite of a file's content is not detected here:
-/// that needs write access to the user's own data directory, which already
-/// grants control of `~/.avibe` and the login shell, so it is not a boundary a
-/// launch-time hash defends.
+/// What commonly reaches an installed tree afterwards is a process writing into
+/// it (bytecode, #2273), a file being removed or truncated, or its permissions
+/// changing. Each changes the regular-file count, the unpacked size, or a mode
+/// this walk already reads, and a link or special file is rejected outright, so
+/// none of those trees is reused. What metadata cannot see (a rename, an
+/// equal-size rewrite, data lost in a crash before it reached the disk) is left
+/// to [`PrivateRuntimeBundle::audit`], which repeats the full hash off the
+/// launch path and withdraws a slot that fails it.
 fn verify_installed_shape(
     root: &Path,
     manifest: &RuntimeBundleManifest,
@@ -573,6 +612,16 @@ fn collect_tree_files(
         }
         if !file_type.is_file() {
             return Err(PrivateRuntimeError::ArchiveVerification);
+        }
+        // The install hash opened every file as this user, so a file without
+        // the owner read bit was changed afterwards and would fail the Runtime
+        // that imports it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o400 == 0 {
+                return Err(PrivateRuntimeError::ArchiveVerification);
+            }
         }
         let relative_path = path
             .strip_prefix(root)
@@ -851,26 +900,113 @@ mod tests {
         }
     }
 
-    /// Reuse decides from metadata alone. A published slot was hashed in full
-    /// before its marker was written, and reading the whole tree again on every
-    /// launch is what delayed the first health probe by seconds.
+    /// A file the Runtime can no longer read is visible from its mode, so it is
+    /// repaired before the launch rather than failing the Runtime that imports it.
     #[cfg(unix)]
     #[test]
-    fn reuse_reads_no_file_content() {
+    fn an_unreadable_file_is_repaired_before_reuse() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = scratch("reuse-metadata-only");
-        write_bundle(&root, Some("lib/data.txt"));
+        let root = scratch("unreadable");
+        let manifest = write_bundle(&root, Some("lib/data.txt"));
         let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
         let first = bundle.prepare().expect("first install");
         let data = first.root.join("lib/data.txt");
         fs::set_permissions(&data, fs::Permissions::from_mode(0o000)).expect("make content unreadable");
 
-        let second = bundle.prepare().expect("reuse without reading content");
+        let next = bundle.prepare().expect("repair install");
 
-        assert!(second.reused);
-        assert_eq!(second.root, first.root);
+        assert!(!next.reused, "the unreadable tree was reused");
+        assert!(next
+            .root
+            .ends_with(format!("{}-repair", &manifest.archive_sha256[..16])));
+        assert_eq!(
+            fs::read(next.root.join("lib/data.txt")).expect("repaired file"),
+            b"runtime"
+        );
         fs::set_permissions(&data, fs::Permissions::from_mode(0o644)).ok();
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Reuse reads no file content, so a change that keeps every count and size
+    /// is served once; the audit that follows withdraws the slot and the next
+    /// launch reinstalls the verified archive.
+    #[test]
+    fn what_metadata_cannot_see_is_withdrawn_by_the_audit() {
+        type Mutation = (&'static str, fn(&Path));
+        let mutations: [Mutation; 2] = [
+            ("equal-size rewrite", |root| {
+                fs::write(root.join("lib/data.txt"), b"RUNTIME").expect("rewrite")
+            }),
+            ("rename", |root| {
+                fs::rename(root.join("lib/data.txt"), root.join("lib/atad.txt")).expect("rename")
+            }),
+        ];
+        for (label, mutate) in mutations {
+            let root = scratch("audit");
+            let manifest = write_bundle(&root, Some("lib/data.txt"));
+            let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+            let first = bundle.prepare().expect("first install");
+            mutate(&first.root);
+
+            let reused = bundle.prepare().expect("metadata-only reuse");
+            assert!(reused.reused, "{label}: reuse must not read file content");
+            assert_eq!(reused.root, first.root);
+
+            assert!(
+                matches!(
+                    bundle.audit(&reused.root),
+                    Err(PrivateRuntimeError::ArchiveVerification)
+                ),
+                "{label}: the audit accepted a changed tree"
+            );
+            assert!(
+                !first.root.join(INSTALL_MARKER_NAME).exists(),
+                "{label}: slot not withdrawn"
+            );
+
+            let next = bundle.prepare().expect("repair install");
+            assert!(!next.reused, "{label}: the withdrawn slot was reused");
+            assert!(
+                next.root
+                    .ends_with(format!("{}-repair", &manifest.archive_sha256[..16])),
+                "{label}: the verified archive was not reinstalled into the repair slot"
+            );
+            assert_eq!(
+                fs::read(next.root.join("lib/data.txt")).expect("repaired file"),
+                b"runtime"
+            );
+            fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
+    fn an_intact_slot_survives_its_audit() {
+        let root = scratch("audit-intact");
+        write_bundle(&root, Some("lib/data.txt"));
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+        let first = bundle.prepare().expect("first install");
+
+        bundle.audit(&first.root).expect("an intact slot passes");
+        let next = bundle.prepare().expect("reuse");
+
+        assert!(next.reused);
+        assert_eq!(next.root, first.root);
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// The audit deletes a marker, so it acts only on a slot this bundle owns.
+    #[test]
+    fn the_audit_touches_only_an_install_slot_of_the_bundle() {
+        let root = scratch("audit-foreign");
+        write_bundle(&root, None);
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+        let foreign = root.join("elsewhere");
+        fs::create_dir_all(&foreign).expect("foreign directory");
+        fs::write(foreign.join(INSTALL_MARKER_NAME), b"{}").expect("foreign marker");
+
+        assert!(matches!(bundle.audit(&foreign), Err(PrivateRuntimeError::Install(_))));
+        assert!(foreign.join(INSTALL_MARKER_NAME).exists());
         fs::remove_dir_all(root).ok();
     }
 

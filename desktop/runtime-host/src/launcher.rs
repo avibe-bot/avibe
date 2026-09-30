@@ -368,6 +368,14 @@ impl RuntimeLauncher for BundledVibeLauncher {
         let prepared = self.bundle.prepare();
         record_runtime_prepare(&self.log, &prepared, started.elapsed());
         let runtime = prepared.map_err(|_| LaunchError::RuntimeInstall)?;
+        if runtime.reused && claim_audit(&runtime.root) {
+            let (bundle, root, log) = (self.bundle.clone(), runtime.root.clone(), self.log.clone());
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let audited = bundle.audit(&root);
+                record_runtime_audit(&log, &audited, started.elapsed());
+            });
+        }
         let runtime_id = runtime.runtime_id.clone();
         Ok(Arc::new(ResolvedVibeExecutable {
             command: RuntimeCommand::private(
@@ -819,6 +827,33 @@ fn record_runtime_prepare(
             detail,
         ],
     );
+}
+
+/// Whether this process has yet to audit `root`.
+///
+/// Every bootstrap attempt resolves the Runtime again, and one full hash per
+/// reused slot per process is enough: a slot it withdraws is not reused again,
+/// and one it passes is not rehashed on each retry.
+fn claim_audit(root: &Path) -> bool {
+    static AUDITED: OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    AUDITED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(root.to_owned())
+}
+
+/// A withdrawn slot is the only trace that the next launch will reinstall, so
+/// the verdict is recorded next to the prepare that reused it.
+fn record_runtime_audit(log: &BootstrapLog, audited: &Result<(), PrivateRuntimeError>, elapsed: Duration) {
+    let mut fields = vec![
+        ("outcome", if audited.is_ok() { "intact" } else { "failed" }.to_owned()),
+        ("ms", elapsed.as_millis().to_string()),
+    ];
+    if let Err(error) = audited {
+        fields.push(("error", format!("{error:?}")));
+    }
+    log.record("runtime.audit", &fields);
 }
 
 fn parse_endpoint_descriptor(bytes: &[u8]) -> Result<LoopbackOrigin, LaunchError> {
@@ -1999,6 +2034,47 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A slot withdrawn by the audit is the one reason a later launch
+    /// reinstalls without a failure of its own, so the log has to say so.
+    #[test]
+    fn an_audit_records_whether_the_reused_slot_was_intact() {
+        let dir = scratch_dir("audit-record");
+        let log = BootstrapLog::at(dir.join("bootstrap.log"));
+
+        record_runtime_audit(&log, &Ok(()), Duration::from_millis(2_400));
+        record_runtime_audit(
+            &log,
+            &Err(PrivateRuntimeError::ArchiveVerification),
+            Duration::from_millis(900),
+        );
+
+        let written = std::fs::read_to_string(dir.join("bootstrap.log")).expect("the audits are recorded");
+        let records: Vec<&str> = written.lines().collect();
+        assert_eq!(records.len(), 2, "{written}");
+        assert!(
+            records[0].contains("runtime.audit") && records[0].contains("outcome=\"intact\""),
+            "{}",
+            records[0]
+        );
+        assert!(
+            records[1].contains("outcome=\"failed\"") && records[1].contains("ArchiveVerification"),
+            "{}",
+            records[1]
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Each bootstrap retry resolves the Runtime again; only the first reuse of
+    /// a slot in this process pays for its full hash.
+    #[test]
+    fn a_slot_is_audited_once_per_process() {
+        let root = scratch_dir("audit-claim").join("3.1.1/20aa5822aa3595e1");
+
+        assert!(claim_audit(&root));
+        assert!(!claim_audit(&root));
+        assert!(claim_audit(&root.with_file_name("20aa5822aa3595e1-repair")));
     }
 
     /// The bootstrap loop aborts a doomed wait on this verdict, so it has to be
