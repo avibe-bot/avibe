@@ -1219,9 +1219,13 @@ function Confirm-Purge {
     return $false
 }
 
+# Name a vibe left on PATH, other than a managed launcher that could not be
+# removed, which is reported as such.
 function Write-RemainingVibe {
+    param([string[]]$Launchers)
+
     $remaining = Get-Command vibe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($remaining) {
+    if ($remaining -and $Launchers -notcontains $remaining.Source) {
         Write-Info "Another vibe command remains at $($remaining.Source). This installer did not install it, so it was left in place."
         Write-Host "  If it is a pip install of Avibe, remove it with that pip: pip uninstall avibe-os vibe-remote"
     }
@@ -1415,7 +1419,7 @@ function Uninstall-Avibe {
         }
     }
 
-    Write-RemainingVibe
+    Write-RemainingVibe -Launchers $launchers
 
     Write-Host ""
     if ($failed) {

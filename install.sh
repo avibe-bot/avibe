@@ -1231,16 +1231,24 @@ confirm_purge() {
     return 1
 }
 
-# Name a vibe left on PATH. This installer never uses pip, so an Avibe console
-# script there came from a pip install, which only that pip can remove.
+# Name a vibe left on PATH, other than a managed launcher (the arguments) that
+# could not be removed, which is reported as such. This installer never uses
+# pip, so an Avibe console script there came from a pip install, which only
+# that pip can remove.
 report_remaining_vibe() {
     local remaining=""
     local interpreter=""
+    local launcher=""
 
     remaining="$(PATH="$ORIGINAL_PATH" command -v vibe 2>/dev/null || true)"
     if [ -z "$remaining" ] || { [ ! -e "$remaining" ] && [ ! -L "$remaining" ]; }; then
         return 0
     fi
+    for launcher in "$@"; do
+        if [ "$launcher" = "$remaining" ]; then
+            return 0
+        fi
+    done
     if ! is_avibe_launcher "$remaining"; then
         info "Another vibe command remains at $remaining. This installer did not install it, so it was left in place."
         return 0
@@ -1487,7 +1495,7 @@ uninstall_avibe() {
         done
     fi
 
-    report_remaining_vibe
+    report_remaining_vibe "${launchers[@]}"
 
     echo ""
     if [ "$failed" -ne 0 ]; then

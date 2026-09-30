@@ -752,16 +752,18 @@ def test_uninstall_deletes_the_generation_root_only_through_real_directories(lay
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can remove from a read-only directory")
 def test_uninstall_keeps_the_generation_root_while_a_launcher_could_not_be_removed(installed):
     layout, first, second, foreign, legacy_home, env = installed
-    layout.installer_dir.chmod(0o555)  # as a system directory the user cannot write
+    first.parent.chmod(0o555)  # as a system directory the user cannot write
     try:
         result = _installer_shell(layout, "main --uninstall", **env)
     finally:
-        layout.installer_dir.chmod(0o755)
+        first.parent.chmod(0o755)
 
     assert result.returncode == 1
-    assert second.is_file() and not first.is_symlink()
+    assert first.is_symlink() and not second.exists()
     assert {path.name for path in layout.root.iterdir()} == {"current", "older"}
-    assert f"Left {layout.root} in place: {second} could not be removed" in result.stdout
+    assert f"Left {layout.root} in place: {first} could not be removed" in result.stdout
+    # It is reported once, as the managed launcher it is, not as another install.
+    assert f"remains at {first}" not in result.stdout
 
 
 @pytest.mark.skipif(not os.path.exists("/proc/self/exe"), reason="Linux names each process's executable")
