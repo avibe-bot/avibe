@@ -596,49 +596,49 @@ def text_only_model_ids(
     model_ids: Iterable[str],
     catalog: dict[str, Any],
 ) -> set[str]:
-    """The ids whose every closest models.dev copy declares text input without images.
+    """The ids models.dev declares text-only, where any doubt is a veto.
 
-    Closest is the ``exact_models_dev_matches`` rank: a full ``provider/model``
-    identity beats the bare id, which matches a copy's id or a relay's last
-    path segment spelled identically. The answer hides images from the model,
-    so it reads the raw copies rather than the picker's admitted rows: a copy
-    the picker rejects still describes a deployment of the id. A copy counts
-    only when ``modalities.input`` is a non-empty list of strings, compared as
-    the engine compares them, trimmed and case-insensitively. Any other copy
-    leaves its id unknown, and so does a copy that accepts images.
+    The answer hides images from the model, so it must hold for every copy
+    that could describe the id. An entry is a copy of each requested id whose
+    last path segment, trimmed and case-folded, equals that of the entry's key
+    or ``id``: a full ``provider/model`` identity, a bare id, and a relay's
+    namespaced id all meet there. Raw entries are read rather than the
+    picker's admitted rows, and no copy outranks another, so an entry can only
+    add a veto, never remove one. An id is text-only when it has a copy and
+    every copy's ``modalities.input`` is a non-empty list of strings that,
+    compared as the engine compares them, contains ``text`` and not ``image``.
+    A catalog whose providers cannot all be read declares nothing.
     """
+
+    def name_key(name: str) -> str:
+        return name.rsplit("/", 1)[-1].strip().lower()
+
+    def declares_text_only(declared: object) -> bool:
+        if not isinstance(declared, list) or not declared or not all(
+            isinstance(value, str) for value in declared
+        ):
+            return False
+        values = {value.strip().lower() for value in declared}
+        return "text" in values and "image" not in values
 
     wanted: dict[str, list[str]] = {}
     for model_id in dict.fromkeys(model_ids):
-        for key in dict.fromkeys((model_id, model_id.rsplit("/", 1)[-1])):
-            wanted.setdefault(key, []).append(model_id)
-    copies: dict[str, list[tuple[int, object]]] = {}
-    for provider_key, provider in catalog.items():
-        if not isinstance(provider, dict) or not isinstance(provider.get("models"), dict):
-            continue
-        provider_id = provider["id"] if isinstance(provider.get("id"), str) else provider_key
-        for model_key, model in provider["models"].items():
-            model_id = (
-                model["id"]
-                if isinstance(model, dict) and isinstance(model.get("id"), str)
-                else model_key
-            )
+        wanted.setdefault(name_key(model_id), []).append(model_id)
+    text_only: dict[str, bool] = {}
+    for provider in catalog.values():
+        models = provider.get("models") if isinstance(provider, dict) else None
+        if not isinstance(models, dict):
+            return set()
+        for model_key, model in models.items():
+            names = {str(model_key)}
+            if isinstance(model, dict) and isinstance(model.get("id"), str):
+                names.add(model["id"])
             modalities = model.get("modalities") if isinstance(model, dict) else None
-            declared = modalities.get("input") if isinstance(modalities, dict) else None
-            for rank, key in ((0, f"{provider_id}/{model_id}"), (1, model_id)):
-                for requested in wanted.get(key, ()):
-                    copies.setdefault(requested, []).append((rank, declared))
-    text_only: set[str] = set()
-    for requested, found in copies.items():
-        closest = min(rank for rank, _declared in found)
-        declarations = [declared for rank, declared in found if rank == closest]
-        if all(
-            isinstance(declared, list)
-            and declared
-            and all(isinstance(value, str) for value in declared)
-            and "text" in {value.strip().lower() for value in declared}
-            and "image" not in {value.strip().lower() for value in declared}
-            for declared in declarations
-        ):
-            text_only.add(requested)
-    return text_only
+            verdict = declares_text_only(
+                modalities.get("input") if isinstance(modalities, dict) else None
+            )
+            for requested in {
+                requested for name in names for requested in wanted.get(name_key(name), ())
+            }:
+                text_only[requested] = text_only.get(requested, True) and verdict
+    return {requested for requested, verdict in text_only.items() if verdict}

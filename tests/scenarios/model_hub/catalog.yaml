@@ -1365,11 +1365,11 @@ scenarios:
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_modalities_003_claude_tool_result_image_reaches_a_text_only_model_as_the_marker
   - id: MH-MODALITIES-004
-    name: A model is text-only only when every raw closest models.dev copy declares text and no image, read as the engine reads it
+    name: A model is text-only only when every raw models.dev entry that could name it declares text and no image; any doubt is a veto
     status: covered
     kind: safety
     layer: unit
-    test: tests/test_models_dev_catalog.py::test_text_only_needs_every_raw_closest_copy_to_declare_text_without_images
+    test: tests/test_models_dev_catalog.py::test_text_only_needs_every_raw_copy_to_declare_text_without_images
   - id: MH-CREDENTIAL-001
     name: Credential rejection retries once only for a refreshable credential
     status: covered
