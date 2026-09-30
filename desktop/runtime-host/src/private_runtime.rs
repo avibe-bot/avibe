@@ -247,6 +247,11 @@ impl PrivateRuntimeBundle {
             .ok_or_else(outside_root)?;
         let digest_prefix = active_slot.strip_suffix(REPAIR_SLOT_SUFFIX).unwrap_or(active_slot);
 
+        // The trees root is reached through the install root, and a link there
+        // would point the deletions below at whatever it names.
+        if !real_directory(&self.install_root)? {
+            return Ok(());
+        }
         prune_trees(&self.trees_root, active_version, digest_prefix, None)?;
         if self.trees_root != self.install_root {
             prune_trees(
@@ -262,16 +267,8 @@ impl PrivateRuntimeBundle {
     /// Removes every app-private Runtime install while leaving Avibe user state
     /// untouched. The caller must first complete a graceful `vibe stop`.
     pub fn remove_all(&self) -> Result<(), PrivateRuntimeError> {
-        let metadata = match fs::symlink_metadata(&self.install_root) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(PrivateRuntimeError::Install(error)),
-        };
-        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            return Err(PrivateRuntimeError::Install(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "private Runtime install root is not a directory",
-            )));
+        if !real_directory(&self.install_root)? {
+            return Ok(());
         }
         fs::remove_dir_all(&self.install_root).map_err(PrivateRuntimeError::Install)
     }
@@ -395,6 +392,21 @@ fn discard_install_path(trees_root: &Path, path: &Path) -> Result<(), PrivateRun
     Ok(())
 }
 
+/// Whether `path` is a directory itself, not a link to one. Absent is `false`;
+/// anything else there is an error, so a caller about to delete inside a
+/// directory never follows a link out of the private install.
+fn real_directory(path: &Path) -> Result<bool, PrivateRuntimeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
+        Ok(_) => Err(PrivateRuntimeError::Install(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "private Runtime directory is not a directory",
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(PrivateRuntimeError::Install(error)),
+    }
+}
+
 /// Removes every entry of `root` except the two slots of the served id and
 /// `keep`.
 fn prune_trees(
@@ -403,19 +415,20 @@ fn prune_trees(
     digest_prefix: &str,
     keep: Option<&Path>,
 ) -> Result<(), PrivateRuntimeError> {
+    if !real_directory(root)? {
+        return Ok(());
+    }
     let active_version = root.join(active_version);
     let served_slots = install_slots(&active_version, digest_prefix);
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(PrivateRuntimeError::Install(error)),
-    };
-    for entry in entries {
+    for entry in fs::read_dir(root).map_err(PrivateRuntimeError::Install)? {
         let path = entry.map_err(PrivateRuntimeError::Install)?.path();
         if keep == Some(path.as_path()) {
             continue;
         }
         if path == active_version {
+            if !real_directory(&path)? {
+                continue;
+            }
             for candidate in fs::read_dir(&path).map_err(PrivateRuntimeError::Install)? {
                 let candidate = candidate.map_err(PrivateRuntimeError::Install)?.path();
                 if !served_slots.contains(&candidate) {
@@ -1015,6 +1028,50 @@ mod tests {
         assert!(!old.exists());
         assert!(!staging.exists());
         fs::remove_dir_all(root).ok();
+    }
+
+    /// Pruning deletes whatever it lists, so it lists only real directories. A
+    /// link in place of the install root, or of the macOS trees directory
+    /// inside it, would otherwise aim those deletions at the directory it
+    /// names.
+    #[cfg(unix)]
+    #[test]
+    fn pruning_never_deletes_through_a_link() {
+        use std::os::unix::fs::symlink;
+
+        let cases: &[&str] = if cfg!(target_os = "macos") {
+            &["install root", "trees directory"]
+        } else {
+            &["install root"]
+        };
+        for case in cases {
+            let root = scratch("prune-link");
+            write_bundle(&root, None);
+            let outside = root.join("outside");
+            fs::create_dir_all(outside.join("documents")).expect("outside directory");
+            fs::write(outside.join("keep-me"), b"user file").expect("outside file");
+            let install_root = root.join("installs");
+            if *case == "install root" {
+                symlink(&outside, &install_root).expect("linked install root");
+            }
+            let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
+            let active = bundle.prepare().expect("install");
+            if *case == "trees directory" {
+                let trees_root = active.root.parent().and_then(Path::parent).expect("trees root");
+                fs::rename(trees_root, root.join("moved-trees")).expect("move the trees aside");
+                symlink(&outside, trees_root).expect("linked trees directory");
+            }
+
+            assert!(bundle.prune_superseded(&active.root).is_err(), "{case}");
+
+            assert_eq!(
+                fs::read(outside.join("keep-me")).expect("outside file"),
+                b"user file",
+                "{case}"
+            );
+            assert!(outside.join("documents").is_dir(), "{case}");
+            fs::remove_dir_all(root).ok();
+        }
     }
 
     #[test]
