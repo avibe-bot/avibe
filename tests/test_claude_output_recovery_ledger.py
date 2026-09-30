@@ -1110,6 +1110,34 @@ def test_classification_run_ack_does_not_remove_output_receipt_across_restart(ac
     assert activity_store.list_activities() == []
 
 
+def test_force_end_cause_survives_a_settlement_retried_after_restart(activity_store):
+    """MH-MIG-012: when settlement fails while a forced refresh ends an Activity,
+    the next start settles it again from the durable snapshot. The refresh cause
+    is recorded on the Activity itself, so that retry still reports it."""
+
+    def unavailable(_activity):
+        raise RuntimeError("database is locked")
+
+    service = AgentService(
+        SimpleNamespace(scheduled_task_service=SimpleNamespace(settle_activity_runs=unavailable)),
+        activities=SessionActivityRegistry(activity_store),
+    )
+    service.activities.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-1",
+        kind="background_task",
+        run_id="run-1",
+    )
+    service.force_end_backend_activities("claude")
+
+    restored = SessionActivityRegistry(activity_store).drain_recovered_terminals()
+    assert [(item.id, item.status, item.metadata.get("interrupt_reason")) for item in restored] == [
+        ("task-1", "killed", "backend_refresh"),
+    ]
+
+
 def test_force_end_service_ack_removes_durable_terminal_once(activity_store):
     settled = []
     service = AgentService(

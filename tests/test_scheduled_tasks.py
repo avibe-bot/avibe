@@ -8230,10 +8230,11 @@ def test_refresh_ending_the_last_activity_keeps_the_runs_first_cause(
         runtime_key="runtime-1",
         activity_id="task-last",
         status="killed",
+        metadata={"interrupt_reason": "backend_refresh"},
     )
     assert last is not None
 
-    assert service.settle_activity_runs(last, interrupt_reason="backend_refresh") == [request.id]
+    assert service.settle_activity_runs(last) == [request.id]
     terminal = request_store.get_run(request.id)
     assert terminal is not None
     assert terminal["status"] == expected_run_status
@@ -8309,13 +8310,13 @@ def test_terminal_owned_activity_settles_deferred_run_once(
         runtime_key="runtime-1",
         activity_id="task-failed",
         status=activity_status,
+        metadata={"interrupt_reason": interrupt_reason} if interrupt_reason else None,
     )
     assert activity is not None
 
     if user_cancel:
         assert request_store.cancel_run(request.id)
-    settle_kwargs = {"interrupt_reason": interrupt_reason} if interrupt_reason else {}
-    assert service.settle_activity_runs(activity, **settle_kwargs) == [request.id]
+    assert service.settle_activity_runs(activity) == [request.id]
     terminal = request_store.get_run(request.id)
     assert terminal is not None
     completed_at = terminal["completed_at"]
@@ -8326,7 +8327,7 @@ def test_terminal_owned_activity_settles_deferred_run_once(
     notice = request_store.sqlite_backend.owed_failure_notice(request.id)
     assert (notice is not None) == (expected_run_status == "failed")
 
-    assert service.settle_activity_runs(activity, **settle_kwargs) == []
+    assert service.settle_activity_runs(activity) == []
     assert request_store.get_run(request.id)["completed_at"] == completed_at
 
 

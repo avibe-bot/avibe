@@ -686,9 +686,9 @@ def test_force_end_backend_activities_settles_pending_runs() -> None:
 
     service.force_end_backend_activities("claude")
 
-    assert sorted((item.id, item.status, kwargs) for item, kwargs in settled) == [
-        ("task-active", "killed", {"interrupt_reason": "backend_refresh"}),
-        ("task-pending", "killed", {"interrupt_reason": "backend_refresh"}),
+    assert sorted((item.id, item.status, item.metadata.get("interrupt_reason")) for item, _ in settled) == [
+        ("task-active", "killed", "backend_refresh"),
+        ("task-pending", "killed", "backend_refresh"),
     ]
     assert service.activities.ack_recovered_terminal.call_count == 2
 

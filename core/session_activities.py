@@ -2293,8 +2293,18 @@ class SessionActivityRegistry:
                 or any(key[0] == identity for key in self._terminal_snapshots)
             )
 
-    def end_backend(self, backend: str, *, status: str = "killed") -> list[SessionActivity]:
-        """Settle every Activity owned by a force-terminated backend runtime."""
+    def end_backend(
+        self,
+        backend: str,
+        *,
+        status: str = "killed",
+        metadata: dict[str, Any] | None = None,
+    ) -> list[SessionActivity]:
+        """Settle every Activity owned by a force-terminated backend runtime.
+
+        ``metadata`` is recorded on each Activity this call ends, so a cause the
+        caller names survives a settlement retried after restart.
+        """
 
         identity = str(backend)
         with self._lock:
@@ -2332,6 +2342,7 @@ class SessionActivityRegistry:
                     status=status,
                     retain_terminal_snapshots=True,
                     force=True,
+                    metadata=metadata,
                 )
             )
         now = _now_iso()
@@ -2353,6 +2364,7 @@ class SessionActivityRegistry:
                 replace(
                     activity,
                     status=status if status in TERMINAL_ACTIVITY_STATUSES else "killed",
+                    metadata={**activity.metadata, **(metadata or {})},
                     updated_at=now,
                     completed_at=now,
                 )
@@ -2403,6 +2415,7 @@ class SessionActivityRegistry:
         retain_terminal_snapshots: bool = False,
         activation_identity: RuntimeActivationIdentity | None = None,
         force: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> list[SessionActivity]:
         key = (str(backend), str(runtime_key))
         if (
@@ -2462,7 +2475,7 @@ class SessionActivityRegistry:
                         if status in TERMINAL_ACTIVITY_STATUSES
                         else "disconnected"
                     ),
-                    metadata=None,
+                    metadata=metadata,
                     expects_output=False,
                     retain_terminal_snapshot=retain_terminal_snapshots,
                     activation_identity=activation_identity,

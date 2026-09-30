@@ -8200,10 +8200,11 @@ class SessionTurnManager:
                     settled_by=SETTLED_BY_BACKEND_REFRESH,
                     evidence_kind="backend_refresh",
                 )
-                if terminal.get("changed") and not owned_by_run and self.controller is not None:
-                    self._notify_backend_refresh(str(owner["session_id"]), origin_message_id, owner_id, backend)
             if terminal.get("changed"):
                 released_restored.add(str(owner["session_id"]))
+                # Starting or active, the refresh retired this conversation's input.
+                if not owned_by_run and self.controller is not None:
+                    self._notify_backend_refresh(str(owner["session_id"]), origin_message_id, owner_id, backend)
         for session_id in released_restored:
             if backend in self._draining_backends:
                 self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)

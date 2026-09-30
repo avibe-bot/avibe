@@ -7487,12 +7487,13 @@ class ScheduledTaskService:
                 lines.extend(self._deleted_definition_lines(run_id))
         return "\n".join(lines)
 
-    def settle_activity_runs(self, activity: Any, *, interrupt_reason: Optional[str] = None) -> list[str]:
+    def settle_activity_runs(self, activity: Any) -> list[str]:
         """Settle deferred Runs when a failed/stopped owned Activity is last.
 
-        ``interrupt_reason`` means the service ended the Activity itself, as a
-        forced runtime refresh does. Its Runs then settle as that interruption,
-        which owes the user a notice, instead of a silent ``canceled``.
+        An Activity whose metadata names an ``interrupt_reason`` was ended by
+        the service itself, as a forced runtime refresh does. Its Runs then
+        settle as that interruption, which owes the user a notice, instead of a
+        silent ``canceled``.
         """
 
         activity_status = str(getattr(activity, "status", "") or "").strip().lower()
@@ -7500,6 +7501,7 @@ class ScheduledTaskService:
             # A completed Claude task may still produce a user-visible follow-up;
             # that Message owns Run settlement so output and callback stay aligned.
             return []
+        interrupt_reason = str((getattr(activity, "metadata", None) or {}).get("interrupt_reason") or "") or None
         if interrupt_reason:
             terminal_status = SETTLEMENT_TERMINAL_STATUS.get(interrupt_reason, "failed")
         else:

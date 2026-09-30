@@ -5499,16 +5499,24 @@ def test_forced_backend_refresh_fails_unresolved_start_instead_of_blocking(
             dispatch_text="ambiguous during forced refresh",
         )
     manager.begin_backend_drain("codex")
+    emitted, _stamped = _capture_lost_turn_report(manager)
 
-    released = asyncio.run(
-        manager.release_for_backend_refresh(
+    async def _go() -> int:
+        released = await manager.release_for_backend_refresh(
             backend="codex",
             base_session_ids={"ses_fsm"},
         )
-    )
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return released
+
+    released = asyncio.run(_go())
 
     assert released == 1
     assert _row(engine, delivery_id)["state"] == "retired"
+    # MH-MIG-012: the refresh retired this conversation's input, so it says so.
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert emitted[0][1].startswith("⚠️ This turn was interrupted — its Agent runtime was restarted")
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)
         status = conn.execute(
