@@ -202,31 +202,36 @@ def _installer_shell(layout: Layout, command: str, **env: str) -> subprocess.Com
     )
 
 
-def _powershell_rule(layout: Layout, shell: str) -> set[str]:
+def _powershell(layout: Layout, shell: str, command: str) -> list[str]:
+    """Run install.ps1 functions against the layout; the owner's own flow runs in CI."""
     source = INSTALL_POWERSHELL.read_text(encoding="utf-8").split("\n# Each option means one thing", 1)[0]
-    script = layout.tmp / "rule.ps1"
+    script = layout.tmp / "installer-functions.ps1"
     installer_dir = str(layout.installer_dir).replace("'", "''")
     script.write_text(
-        f"{source}\n$INSTALLER_LAUNCHER_DIRS = @('{installer_dir}')\n"
-        "Get-ManagedLaunchers (Join-Path (Get-RuntimeHome) 'runtime\\install-generations')\n",
+        f"{source}\n$INSTALLER_LAUNCHER_DIRS = @('{installer_dir}')\n{command}\n",
         encoding="utf-8-sig",
     )
-    # The layout's PATH replaces this process's, so resolve the shell first.
     result = subprocess.run(
-        [shutil.which(shell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
         env={**os.environ, **layout.env(USERPROFILE=str(layout.home), AVIBE_HOME=str(layout.avibe_home))},
         capture_output=True,
         text=True,
         timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    return {os.path.normcase(line.strip()) for line in result.stdout.splitlines() if line.strip()}
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def _rule_implementations() -> list[str]:
+def _powershell_rule(layout: Layout, shell: str) -> set[str]:
+    launchers = _powershell(layout, shell, "Get-ManagedLaunchers (Join-Path (Get-RuntimeHome) 'runtime\\install-generations')")
+    return {os.path.normcase(launcher) for launcher in launchers}
+
+
+def _rule_implementations() -> list:
     if not WINDOWS:
         return ["install.sh"]
-    return [shell for shell in ("pwsh", "powershell") if shutil.which(shell)]
+    # Resolved now: each case replaces PATH with its layout's before the shell runs.
+    return [pytest.param(shutil.which(shell), id=shell) for shell in ("pwsh", "powershell") if shutil.which(shell)]
 
 
 @pytest.mark.parametrize("implementation", _rule_implementations())
@@ -266,6 +271,19 @@ def test_installer_launcher_dirs_match_the_python_owner():
     assert result.stdout.splitlines() == [
         directory.replace("~", "/home/u", 1) for directory in upgrade.INSTALLER_LAUNCHER_DIRS
     ]
+
+
+@pytest.mark.skipif(not WINDOWS, reason="Windows path roots")
+@pytest.mark.parametrize("shell", _rule_implementations())
+def test_powershell_purge_guard_refuses_roots_and_the_profile(layout, shell):
+    profile = str(layout.home)
+    unsafe = ["C:\\", "\\\\server\\share", "\\\\server\\share\\", profile, str(layout.home.parent)]
+    safe = [str(layout.avibe_home), "\\\\server\\share\\avibe"]
+    listed = ", ".join("'" + path.replace("'", "''") + "'" for path in unsafe + safe)
+
+    verdicts = _powershell(layout, shell, f"foreach ($path in @({listed})) {{ Test-PathHoldsHome $path }}")
+
+    assert verdicts == ["True"] * len(unsafe) + ["False"] * len(safe)
 
 
 posix_only = pytest.mark.skipif(WINDOWS, reason="the Windows owner runs end to end in windows-install-smoke")
@@ -523,15 +541,37 @@ def test_uninstall_options_never_imply_one_another(installed, options, message):
 
 
 @posix_only
-def test_a_purge_never_deletes_a_home_that_holds_the_user_directory(installed):
+@pytest.mark.parametrize(
+    "home, reason",
+    [("tmp", "it holds your home directory"), ("project", "it does not look like an Avibe home")],
+)
+def test_a_purge_refuses_a_home_that_is_not_safe_to_delete(installed, home, reason):
     layout, first, second, foreign, legacy_home, env = installed
+    target = layout.tmp if home == "tmp" else layout.tmp / "project"
+    (target / "runtime" if home == "tmp" else target / "config").mkdir(parents=True)
 
-    result = _installer_shell(layout, "main --uninstall --purge --yes", **{**env, "AVIBE_HOME": str(layout.tmp)})
+    result = _installer_shell(layout, "main --uninstall --purge --yes", **{**env, "AVIBE_HOME": str(target)})
 
     assert result.returncode == 1
-    assert f"Refusing to purge {layout.tmp}" in result.stdout
-    assert _calls(layout) == []
+    assert f"Refusing to purge {target}" in result.stdout and reason in result.stdout
+    assert target.is_dir() and _calls(layout) == []
     _assert_untouched(layout, first, second, foreign, legacy_home)
+
+
+@posix_only
+def test_uninstall_names_the_pip_that_can_remove_an_avibe_it_did_not_install(layout):
+    shutil.rmtree(layout.root)
+    pip_launcher = _foreign(
+        layout.path_dirs[0] / "vibe",
+        "#!/opt/python/bin/python3\nimport sys\nfrom vibe.cli import main\nif __name__ == '__main__':\n    sys.exit(main())\n",
+    )
+
+    result = _installer_shell(layout, "main --uninstall")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert pip_launcher.is_file()
+    assert f"remains at {pip_launcher}, such as a pip install" in result.stdout
+    assert "/opt/python/bin/python3 -m pip uninstall avibe-os vibe-remote" in result.stdout
 
 
 def _fake_uv(layout: Layout, tool_dir: Path) -> None:
@@ -552,7 +592,7 @@ def _fake_uv(layout: Layout, tool_dir: Path) -> None:
 def test_an_explicit_avibe_home_purges_only_that_home(installed):
     layout, first, second, foreign, legacy_home, env = installed
     instance = layout.tmp / "instance"
-    (instance / "state").mkdir(parents=True)
+    (instance / "runtime").mkdir(parents=True)
     # A global uv tool install belongs to no chosen home.
     tool = layout.tmp / "uv-tools" / "avibe-os"
     tool.mkdir(parents=True)
@@ -580,7 +620,7 @@ def test_a_purge_deletes_only_the_selected_homes_data(installed, shape):
         # Doctor reports this as a wrong link; its target is not Avibe's data.
         legacy_home.symlink_to(unrelated)
     else:
-        (legacy_home / "state").mkdir(parents=True)
+        (legacy_home / "runtime").mkdir(parents=True)
         env = {**env, "AVIBE_HOME": str(legacy_home)}
 
     result = _installer_shell(layout, "main --uninstall --purge --yes", **env)

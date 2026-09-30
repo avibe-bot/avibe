@@ -970,9 +970,14 @@ function Get-RunningAvibeProcesses {
         if (-not [int]::TryParse($text, [ref]$recorded) -or $recorded -le 0) {
             continue
         }
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $recorded" -ErrorAction SilentlyContinue
         # A pid file can outlive its process and name a reused pid, so when the
-        # command is readable, only a vibe process counts.
+        # command is readable, only a vibe process counts. Without WMI, a live
+        # pid counts.
+        try {
+            $process = Get-CimInstance Win32_Process -Filter "ProcessId = $recorded" -ErrorAction Stop
+        } catch {
+            $process = Get-Process -Id $recorded -ErrorAction SilentlyContinue
+        }
         if (-not $process -or ($process.CommandLine -and $process.CommandLine -notmatch "vibe")) {
             continue
         }
@@ -1085,13 +1090,25 @@ function Get-PurgeTargets {
     }
 }
 
-# Whether deleting a directory would delete the user's profile or a drive.
+# Whether an explicit AVIBE_HOME shows it is an Avibe home. The installer and
+# Avibe both create its runtime directory, and uninstall keeps it until a purge.
+function Test-LooksLikeAvibeHome {
+    param([string]$Path)
+
+    $entry = Get-DirectoryEntry (Join-Path $Path "runtime")
+    return $entry -and $entry.PSIsContainer -and -not ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+}
+
+# Whether deleting a directory would delete the user's profile or the root of
+# a drive or share.
 function Test-PathHoldsHome {
     param([string]$Path)
 
     $full = [System.IO.Path]::GetFullPath($Path).TrimEnd("\", "/")
+    $root = "$([System.IO.Path]::GetPathRoot($full))".TrimEnd("\", "/")
     $profile = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd("\", "/")
-    return $full -notmatch '[\\/]' -or $profile.Equals($full, [System.StringComparison]::OrdinalIgnoreCase) -or
+    return -not $root -or $root.Equals($full, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $profile.Equals($full, [System.StringComparison]::OrdinalIgnoreCase) -or
         $profile.StartsWith($full + "\", [System.StringComparison]::OrdinalIgnoreCase)
 }
 
@@ -1166,6 +1183,14 @@ function Confirm-Purge {
     return $false
 }
 
+function Write-RemainingVibe {
+    $remaining = Get-Command vibe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($remaining) {
+        Write-Info "Another vibe command remains at $($remaining.Source). This installer did not install it, so it was left in place."
+        Write-Host "  If it is a pip install of Avibe, remove it with that pip: pip uninstall avibe-os vibe-remote"
+    }
+}
+
 function Write-KeptData {
     param([string[]]$Data)
 
@@ -1203,10 +1228,15 @@ function Uninstall-Avibe {
     if ($launchers.Count -eq 0 -and $markers.Count -eq 0 -and $uvTools.Count -eq 0 -and -not (Get-DirectoryEntry $root) -and
         (-not $Purge -or $data.Count -eq 0)) {
         Write-Info "No Avibe installation was found, so nothing was removed."
+        Write-RemainingVibe
         Write-KeptData $data
         return 0
     }
     if ($Purge) {
+        if (-not (Test-UninstallingDefaultHome $runtimeHome) -and $data.Count -gt 0 -and -not (Test-LooksLikeAvibeHome $runtimeHome)) {
+            Write-Warning "Refusing to purge ${runtimeHome}: it has no runtime directory, so it does not look like an Avibe home. Nothing was removed."
+            return 1
+        }
         $doomedData = @(Get-PurgeTargets $runtimeHome)
         foreach ($item in $doomedData) {
             if (Test-PathHoldsHome $item) {
@@ -1273,10 +1303,7 @@ function Uninstall-Avibe {
         }
     }
 
-    $remaining = Get-Command vibe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($remaining) {
-        Write-Info "Another vibe command remains at $($remaining.Source). This installer did not install it, so it was left in place."
-    }
+    Write-RemainingVibe
 
     Write-Host ""
     if ($failed) {

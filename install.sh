@@ -1065,14 +1065,20 @@ running_avibe_processes() {
             ''|0|*[!0-9]*) continue ;;
         esac
         # A pid file can outlive its process and name a reused pid, so when ps
-        # can show the command, only a vibe process counts.
+        # can show the command, only a vibe process counts. Without ps, a live
+        # pid counts, including one another user owns.
         if command="$(ps -p "$pid" -o command= 2>/dev/null)"; then
             case "$command" in
                 *vibe*) ;;
                 *) continue ;;
             esac
+        elif [ -d /proc/self ]; then
+            [ -e "/proc/$pid" ] || continue
         elif ! kill -0 "$pid" 2>/dev/null; then
-            continue
+            case "$(LC_ALL=C kill -0 "$pid" 2>&1)" in
+                *"not permitted"*) ;;
+                *) continue ;;
+            esac
         fi
         printf '%s (recorded in %s)\n' "$pid" "$pid_file"
     done
@@ -1150,6 +1156,12 @@ purge_targets() {
     done < <(avibe_data_directories)
 }
 
+# Whether an explicit AVIBE_HOME shows it is an Avibe home. The installer and
+# Avibe both create its runtime directory, and uninstall keeps it until a purge.
+looks_like_avibe_home() {
+    [ -d "$1/runtime" ] && [ ! -L "$1/runtime" ]
+}
+
 # Whether deleting a directory would delete the user's home or the filesystem.
 path_holds_home() {
     [ "$1" = "/" ] && return 0
@@ -1179,6 +1191,31 @@ confirm_purge() {
     esac
     info "Purge cancelled. Nothing was removed."
     return 1
+}
+
+# Name a vibe left on PATH. This installer never uses pip, so an Avibe console
+# script there came from a pip install, which only that pip can remove.
+report_remaining_vibe() {
+    local remaining=""
+    local interpreter=""
+
+    remaining="$(PATH="$ORIGINAL_PATH" command -v vibe 2>/dev/null || true)"
+    if [ -z "$remaining" ] || { [ ! -e "$remaining" ] && [ ! -L "$remaining" ]; }; then
+        return 0
+    fi
+    if ! is_avibe_launcher "$remaining"; then
+        info "Another vibe command remains at $remaining. This installer did not install it, so it was left in place."
+        return 0
+    fi
+    interpreter="$(head -n 1 "$remaining" 2>/dev/null)"
+    interpreter="${interpreter#\#!}"
+    case "$interpreter" in
+        /*" "*|"") interpreter="python3" ;;
+        /*) ;;
+        *) interpreter="python3" ;;
+    esac
+    info "An Avibe install that this installer did not make remains at $remaining, such as a pip install."
+    echo "  Remove it with the Python that runs it: $interpreter -m pip uninstall avibe-os vibe-remote"
 }
 
 print_kept_data() {
@@ -1234,10 +1271,15 @@ uninstall_avibe() {
     if [ "${#launchers[@]}" -eq 0 ] && [ "${#markers[@]}" -eq 0 ] && [ "${#uv_tools[@]}" -eq 0 ] &&
         [ ! -e "$root" ] && [ ! -L "$root" ] && { [ "$PURGE_USER_DATA" != "1" ] || [ "${#data[@]}" -eq 0 ]; }; then
         info "No Avibe installation was found, so nothing was removed."
+        report_remaining_vibe
         print_kept_data "${data[@]}"
         return 0
     fi
     if [ "$PURGE_USER_DATA" = "1" ]; then
+        if ! uninstalling_default_home && [ "${#data[@]}" -gt 0 ] && ! looks_like_avibe_home "$AVIBE_RUNTIME_HOME"; then
+            warn "Refusing to purge $AVIBE_RUNTIME_HOME: it has no runtime directory, so it does not look like an Avibe home. Nothing was removed."
+            return 1
+        fi
         while IFS= read -r item; do
             if path_holds_home "$item"; then
                 warn "Refusing to purge $item: it holds your home directory. Nothing was removed."
@@ -1317,10 +1359,7 @@ uninstall_avibe() {
         done
     fi
 
-    item="$(PATH="$ORIGINAL_PATH" command -v vibe 2>/dev/null || true)"
-    if [ -n "$item" ] && { [ -e "$item" ] || [ -L "$item" ]; }; then
-        info "Another vibe command remains at $item. This installer did not install it, so it was left in place."
-    fi
+    report_remaining_vibe
 
     echo ""
     if [ "$failed" -ne 0 ]; then
