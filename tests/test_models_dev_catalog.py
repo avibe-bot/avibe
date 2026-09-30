@@ -375,40 +375,58 @@ def test_exact_models_dev_matches_never_borrow_a_neighbour():
     assert models_dev_catalog.exact_models_dev_matches(["gpt-target"], {}) == {}
 
 
-def test_declared_input_modalities_need_the_closest_copies_to_agree_on_images():
-    """A text-only answer hides images, so copies that disagree or stay silent declare nothing."""
+@pytest.mark.parametrize(
+    ("relay_copies", "text_only"),
+    [
+        ([{"modalities": {"input": ["text", "pdf"]}}], True),
+        ([{"modalities": {"input": [" TEXT "]}}], True),
+        ([], True),
+        ([{"modalities": {"input": ["text", "image"]}}], False),
+        ([{"modalities": {"input": ["text", "Image"]}}], False),
+        ([{"modalities": {"input": ["text", " image "]}}], False),
+        # The picker drops a copy with an empty name; the deployment it
+        # describes still accepts images.
+        ([{"name": "", "modalities": {"input": ["text", "image"]}}], False),
+        # A copy that is silent about input, or unreadable, leaves the id unknown.
+        ([{"name": "No modalities"}], False),
+        ([{"modalities": {"input": []}}], False),
+        ([{"modalities": {"input": ["text", 1]}}], False),
+        ([{"modalities": {"input": "text"}}], False),
+        (["not-an-object"], False),
+        ([{"modalities": {"input": ["image"]}}], False),
+        ([{"modalities": {"input": ["pdf"]}}], False),
+        ([{"modalities": {"input": ["text"]}}, {"modalities": {"input": ["text", "image"]}}], False),
+    ],
+)
+def test_text_only_needs_every_raw_closest_copy_to_declare_text_without_images(relay_copies, text_only):
+    """MH-MODALITIES-004: a text-only answer hides images, so every raw closest copy must declare text and no image."""
 
     catalog = {
-        "deepseek": {"models": {
-            "deepseek-text": {"modalities": {"input": ["text"]}},
-            "deepseek-vision": {"modalities": {"input": ["text", "image"]}},
-            "contested": {"modalities": {"input": ["text"]}},
-            "half-declared": {"modalities": {"input": ["text"]}},
-            "undeclared": {"name": "Undeclared"},
-        }},
-        "relay": {"models": {
-            "deepseek-text": {"modalities": {"input": ["text", "pdf"]}},
-            "contested": {"modalities": {"input": ["text", "image"]}},
-            # Silent about input: this deployment's image support is unknown.
-            "half-declared": {"modalities": {"input": ["unknown"]}},
-        }},
+        "deepseek": {"models": {"deepseek-model": {"modalities": {"input": ["text"]}}}},
+        **{f"relay-{index}": {"models": {"deepseek-model": copy}} for index, copy in enumerate(relay_copies)},
     }
 
-    declared = models_dev_catalog.declared_input_modalities(
-        [
-            "deepseek-text", "deepseek-vision", "contested", "half-declared", "undeclared", "missing",
-            "deepseek/contested",
-        ],
-        catalog,
+    assert models_dev_catalog.text_only_model_ids(["deepseek-model"], catalog) == (
+        {"deepseek-model"} if text_only else set()
     )
 
-    assert declared == {
-        # Both copies exclude images; the first-party copy is the one given.
-        "deepseek-text": ["text"],
-        "deepseek-vision": ["text", "image"],
-        # A full identity is closer than any bare-id copy, so it alone decides.
-        "deepseek/contested": ["text"],
+
+def test_text_only_prefers_a_full_identity_over_bare_id_copies():
+    """MH-MODALITIES-004: a full provider/model identity is closer than any bare-id copy, so it alone decides."""
+
+    catalog = {
+        "deepseek": {"models": {"contested": {"modalities": {"input": ["text"]}}}},
+        "relay": {"models": {
+            "contested": {"modalities": {"input": ["text", "image"]}},
+            "vendor/relayed": {"modalities": {"input": ["text"]}},
+        }},
+        "other": {"models": {"relayed": {"modalities": {"input": ["text"]}}}},
     }
+
+    assert models_dev_catalog.text_only_model_ids(
+        ["contested", "deepseek/contested", "relay/contested", "vendor/relayed", "missing"],
+        catalog,
+    ) == {"deepseek/contested", "vendor/relayed"}
 
 
 def test_first_catalog_read_reports_one_fetch_in_flight_until_it_fails(monkeypatch, tmp_path):

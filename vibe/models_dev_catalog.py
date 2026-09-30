@@ -559,66 +559,13 @@ def exact_models_dev_matches(
     lets a near neighbour silently describe a different model.
     """
 
-    if not catalog:
-        return {}
-    vendor_map = load_model_vendor_map()
-    return {
-        requested: _preferred_copy(
-            # Every closest copy names one catalog model id, so the family that
-            # decides first-party ownership is read off the catalog row.
-            closest[0][2]["model_id"],
-            closest,
-            vendor_map,
-        )
-        for requested, closest in _closest_exact_copies(
-            model_ids, catalog, vendor_map
-        ).items()
-    }
-
-
-def declared_input_modalities(
-    model_ids: Iterable[str],
-    catalog: dict[str, Any],
-) -> dict[str, list[str]]:
-    """The input modalities models.dev declares for each id it names exactly.
-
-    Exact as in ``exact_models_dev_matches``, whose preferred copy supplies
-    the list. A copy describes one provider's deployment, and copies of one id
-    can disagree about images. A text-only answer hides images from the model,
-    so an id is declared only when every closest copy declares its input and
-    all of them agree about images. One silent copy leaves the deployment the
-    id names unknown, so the id has no declaration here.
-    """
-
-    if not catalog:
-        return {}
-    vendor_map = load_model_vendor_map()
-    declared: dict[str, list[str]] = {}
-    for requested, closest in _closest_exact_copies(
-        model_ids, catalog, vendor_map
-    ).items():
-        declarations = [row["input_modalities"] for _rank, _provider, row in closest]
-        if not all(declarations) or len(
-            {"image" in modalities for modalities in declarations}
-        ) != 1:
-            continue
-        declared[requested] = list(
-            _preferred_copy(closest[0][2]["model_id"], closest, vendor_map)["input_modalities"]
-        )
-    return declared
-
-
-def _closest_exact_copies(
-    model_ids: Iterable[str],
-    catalog: dict[str, Any],
-    vendor_map: dict[str, Any],
-) -> dict[str, list[tuple[int, str, dict[str, Any]]]]:
     wanted: dict[str, list[str]] = {}
     for model_id in dict.fromkeys(model_ids):
         for key in dict.fromkeys((model_id, model_id.rsplit("/", 1)[-1])):
             wanted.setdefault(key, []).append(model_id)
-    if not wanted:
+    if not wanted or not catalog:
         return {}
+    vendor_map = load_model_vendor_map()
     by_request: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
 
     def admit(provider_id: str, model_id: str, _display_name: str):
@@ -631,8 +578,67 @@ def _closest_exact_copies(
             for requested in dict.fromkeys(requested for _rank, requested in hits):
                 rank = min(rank for rank, other in hits if other == requested)
                 by_request.setdefault(requested, []).append((rank, provider_id, row))
-    closest: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
+    matches: dict[str, dict[str, Any]] = {}
     for requested, copies in by_request.items():
         best = min(rank for rank, _provider, _row in copies)
-        closest[requested] = [copy for copy in copies if copy[0] == best]
-    return closest
+        closest = [copy for copy in copies if copy[0] == best]
+        # Every closest copy names one catalog model id, so the family that
+        # decides first-party ownership is read off the catalog row.
+        matches[requested] = _preferred_copy(
+            closest[0][2]["model_id"],
+            closest,
+            vendor_map,
+        )
+    return matches
+
+
+def text_only_model_ids(
+    model_ids: Iterable[str],
+    catalog: dict[str, Any],
+) -> set[str]:
+    """The ids whose every closest models.dev copy declares text input without images.
+
+    Closest is the ``exact_models_dev_matches`` rank: a full ``provider/model``
+    identity beats the bare id, which matches a copy's id or a relay's last
+    path segment spelled identically. The answer hides images from the model,
+    so it reads the raw copies rather than the picker's admitted rows: a copy
+    the picker rejects still describes a deployment of the id. A copy counts
+    only when ``modalities.input`` is a non-empty list of strings, compared as
+    the engine compares them, trimmed and case-insensitively. Any other copy
+    leaves its id unknown, and so does a copy that accepts images.
+    """
+
+    wanted: dict[str, list[str]] = {}
+    for model_id in dict.fromkeys(model_ids):
+        for key in dict.fromkeys((model_id, model_id.rsplit("/", 1)[-1])):
+            wanted.setdefault(key, []).append(model_id)
+    copies: dict[str, list[tuple[int, object]]] = {}
+    for provider_key, provider in catalog.items():
+        if not isinstance(provider, dict) or not isinstance(provider.get("models"), dict):
+            continue
+        provider_id = provider["id"] if isinstance(provider.get("id"), str) else provider_key
+        for model_key, model in provider["models"].items():
+            model_id = (
+                model["id"]
+                if isinstance(model, dict) and isinstance(model.get("id"), str)
+                else model_key
+            )
+            modalities = model.get("modalities") if isinstance(model, dict) else None
+            declared = modalities.get("input") if isinstance(modalities, dict) else None
+            for rank, key in ((0, f"{provider_id}/{model_id}"), (1, model_id)):
+                for requested in wanted.get(key, ()):
+                    copies.setdefault(requested, []).append((rank, declared))
+    text_only: set[str] = set()
+    for requested, found in copies.items():
+        closest = min(rank for rank, _declared in found)
+        declarations = [declared for rank, declared in found if rank == closest]
+        if all(
+            isinstance(declared, list)
+            and declared
+            and all(isinstance(value, str) for value in declared)
+            and "text" in {value.strip().lower() for value in declared}
+            and "image" not in {value.strip().lower() for value in declared}
+            for declared in declarations
+        ):
+            text_only.add(requested)
+    return text_only

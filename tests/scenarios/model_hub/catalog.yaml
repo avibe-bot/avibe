@@ -26,6 +26,7 @@ capability:
     - tests/test_ui_server_fastapi.py
     - tests/test_model_hub_quota.py
     - tests/test_model_hub_pricing.py
+    - tests/test_models_dev_catalog.py
     - ui/src/components/settings/models/QuotaTab.test.tsx
     - ui/src/components/settings/models/usageProjection.test.ts
     - ui/src/components/settings/models/format.test.ts
@@ -1346,23 +1347,29 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_mid_turn_engine_loss_never_replays_after_output_starts
   - id: MH-MODALITIES-001
-    name: Engine config declares input modalities only on openai-compatibility models and omits undeclared ones
+    name: Engine config declares text-only input only on openai-compatibility models and omits it for every other model
     status: covered
     kind: contract
     layer: unit
-    test: tests/test_model_hub_runtime.py::test_engine_config_declares_input_modalities_only_on_openai_compatibility_models
+    test: tests/test_model_hub_runtime.py::test_engine_config_declares_text_only_input_only_on_openai_compatibility_models
   - id: MH-MODALITIES-002
-    name: Engine sync reads declared input modalities from the cached models.dev copy without fetching
+    name: Engine sync marks text-only models from the cached models.dev copy without fetching
     status: covered
     kind: projection
     layer: unit
-    test: tests/test_model_hub_api.py::test_engine_sync_carries_the_cached_catalog_input_modalities_without_fetching
+    test: tests/test_model_hub_api.py::test_engine_sync_marks_cached_catalog_text_only_models_without_fetching
   - id: MH-MODALITIES-003
     name: Real gateway and pinned CPA send a text-only model the marker instead of a tool-result image after a hot reload
     status: assert
     kind: transport
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_modalities_003_claude_tool_result_image_reaches_a_text_only_model_as_the_marker
+  - id: MH-MODALITIES-004
+    name: A model is text-only only when every raw closest models.dev copy declares text and no image, read as the engine reads it
+    status: covered
+    kind: safety
+    layer: unit
+    test: tests/test_models_dev_catalog.py::test_text_only_needs_every_raw_closest_copy_to_declare_text_without_images
   - id: MH-CREDENTIAL-001
     name: Credential rejection retries once only for a refreshable credential
     status: covered

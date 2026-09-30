@@ -4999,8 +4999,8 @@ def test_public_mutations_sync_the_engine_only_when_bindings_change(tmp_path, mu
     assert service._engine_synced is True
 
 
-def test_engine_sync_carries_the_cached_catalog_input_modalities_without_fetching(tmp_path, monkeypatch):
-    """MH-MODALITIES-002: the engine learns which inventory and route-target models models.dev declares."""
+def test_engine_sync_marks_cached_catalog_text_only_models_without_fetching(tmp_path, monkeypatch):
+    """MH-MODALITIES-002: the engine learns which inventory and route-target models models.dev declares text-only."""
 
     from vibe import models_dev_catalog
 
@@ -5033,13 +5033,8 @@ def test_engine_sync_carries_the_cached_catalog_input_modalities_without_fetchin
     by_id = {binding.source_id: binding for binding in synced}
     assert by_id["src_second001"].model_ids == (_PROJECTION_MODEL,)
     assert {"routed-text-model", "undeclared-model"} <= set(by_id["src_second001"].route_model_ids)
-    assert by_id["src_first0001"].model_input_modalities == (
-        (_PROJECTION_MODEL, ("text", "image", "pdf")),
-    )
-    assert by_id["src_second001"].model_input_modalities == (
-        (_PROJECTION_MODEL, ("text", "image", "pdf")),
-        ("routed-text-model", ("text",)),
-    )
+    assert by_id["src_first0001"].text_only_model_ids == ()
+    assert by_id["src_second001"].text_only_model_ids == ("routed-text-model",)
     assert refreshes == []
 
 

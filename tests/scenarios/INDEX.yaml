@@ -80,6 +80,7 @@ capabilities:
       - tests/test_ui_server_fastapi.py
       - tests/test_model_hub_quota.py
       - tests/test_model_hub_pricing.py
+      - tests/test_models_dev_catalog.py
       - tests/test_local_deps.py
       - tests/test_opencode_server.py
       - tests/test_runtime_activation.py

@@ -1653,7 +1653,7 @@ def test_config_generation_is_private_and_never_logs_secrets(
         store.prepare_instance("install-1")
 
 
-def test_engine_config_declares_input_modalities_only_on_openai_compatibility_models(
+def test_engine_config_declares_text_only_input_only_on_openai_compatibility_models(
     tmp_path: Path,
 ) -> None:
     """MH-MODALITIES-001: CPA replaces tool-result images only for a declared text-only openai-compatibility model."""
@@ -1663,18 +1663,13 @@ def test_engine_config_declares_input_modalities_only_on_openai_compatibility_mo
     chat_ref = store.store_api_key("chat-secret", base_url="https://api.example.test/v1")
     responses_ref = store.store_api_key("responses-secret", vendor="openai", protocol="openai_responses")
     anthropic_ref = store.store_api_key("anthropic-secret", vendor="anthropic", protocol="anthropic")
-    text_only = (("text-model", ("text",)),)
     store.sync_sources(
         [
             _binding(
                 chat_ref,
-                model_ids=("text-model", "vision-model", "unknown-model"),
+                model_ids=("text-model", "unknown-model"),
                 route_model_ids=("routed-text-model",),
-                model_input_modalities=(
-                    *text_only,
-                    ("vision-model", ("text", "image")),
-                    ("routed-text-model", ("text",)),
-                ),
+                text_only_model_ids=("text-model", "routed-text-model"),
             ),
             *(
                 _binding(
@@ -1684,7 +1679,7 @@ def test_engine_config_declares_input_modalities_only_on_openai_compatibility_mo
                     protocol=protocol,
                     base_url=None,
                     model_ids=("text-model",),
-                    model_input_modalities=text_only,
+                    text_only_model_ids=("text-model",),
                 )
                 for credential_ref, source_id, vendor, protocol in (
                     (responses_ref, "src_responses1", "openai", "openai_responses"),
@@ -1710,12 +1705,6 @@ def test_engine_config_declares_input_modalities_only_on_openai_compatibility_mo
     # routed ID, so either lookup reaches the entry that carries the key.
     assert payload["openai-compatibility"][0]["models"] == [
         {"name": "text-model", "alias": "text-model", "display-name": "text-model #0", "input-modalities": ["text"]},
-        {
-            "name": "vision-model",
-            "alias": "vision-model",
-            "display-name": "vision-model #0",
-            "input-modalities": ["text", "image"],
-        },
         {"name": "unknown-model", "alias": "unknown-model", "display-name": "unknown-model #0"},
         {
             "name": "routed-text-model",
@@ -1731,7 +1720,7 @@ def test_engine_config_declares_input_modalities_only_on_openai_compatibility_mo
         ]
 
 
-def test_engine_record_reads_an_unreadable_modality_declaration_as_undeclared() -> None:
+def test_engine_record_reads_an_unreadable_text_only_list_as_undeclared() -> None:
     """Undeclared is the engine default, so a shape this release cannot read degrades to it."""
 
     record = SourceRecord.from_payload(
@@ -1744,12 +1733,12 @@ def test_engine_record_reads_an_unreadable_modality_declaration_as_undeclared() 
             "model_ids": ["text-model"],
             "prefix": "avibe-fixture",
             "model_reasoning_efforts": [],
-            "model_input_modalities": {"text-model": ["text"]},
+            "text_only_model_ids": {"text-model": ["text"]},
         }
     )
 
     assert record.model_ids == ("text-model",)
-    assert record.model_input_modalities == ()
+    assert record.text_only_model_ids == ()
 
 
 def test_mixed_anthropic_credentials_disable_cloak_only_for_api_key_entry(
