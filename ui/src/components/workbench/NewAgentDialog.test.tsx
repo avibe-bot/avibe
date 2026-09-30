@@ -72,31 +72,34 @@ afterEach(() => {
 });
 
 describe('NewAgentDialog', () => {
-  it("closes before leaving for the Model Hub catalog of a Hub backend's models", () => {
-    // Left open, the dialog would sit over the page it sent the user to.
+  it("keeps the form while the user adds a model in the Model Hub catalog", () => {
+    // Settings hides the page this dialog sits in; closing it would clear the
+    // Agent the user was halfway through defining.
     modelCatalog = { models: ['opus'], hubManaged: true };
     apiRef.current = { createVibeAgent: vi.fn() };
-    const events: string[] = [];
+    const onClose = vi.fn();
     const LocationProbe = () => {
       const location = useLocation();
-      if (location.search) events.push(`navigate ${location.pathname}${location.search}`);
-      return null;
+      return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
     };
     render(
       <InstanceAuthorizationContext.Provider
         value={{ remote: false, instanceKind: null, instanceRole: 'owner', capabilities: OWNER_INSTANCE_CAPABILITIES }}
       >
         <MemoryRouter>
-          <NewAgentDialog open onClose={() => events.push('close')} onCreated={vi.fn()} />
+          <NewAgentDialog open onClose={onClose} onCreated={vi.fn()} />
           <LocationProbe />
         </MemoryRouter>
       </InstanceAuthorizationContext.Provider>,
     );
+    fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
 
     fireEvent.click(screen.getByRole('combobox'));
     fireEvent.click(screen.getByText('chat.picker.addModel'));
 
-    expect(events).toEqual(['close', 'navigate /settings/models?manage=claude']);
+    expect(screen.getByTestId('location').textContent).toBe('/settings/models?manage=claude');
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByDisplayValue('router')).toBeTruthy();
   });
 
   it('creates with no effort when the catalog says the model has none', async () => {

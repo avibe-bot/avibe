@@ -59,9 +59,10 @@ interface AgentRoutePickerProps {
   /** Make the popover a modal layer — required when nested in a modal Dialog (the
    *  new-session sheet) so its content isn't aria-hidden/inert by the dialog. */
   modal?: boolean;
-  /** Called before navigating away (to /agents or the Model Hub) — the create
-   *  sheet uses it to close itself so the destination isn't left behind a
-   *  focus-trapped modal. */
+  /** Called before navigating to /agents — the create sheet uses it to close
+   *  itself so the destination isn't left behind a focus-trapped modal. The
+   *  Model Hub exit does not call it: Settings opens over this surface, and a
+   *  host suspends under it with its draft intact, as it does for any visit. */
   onNavigateAway?: () => void;
 }
 
@@ -206,10 +207,11 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   }, [visibleAgents]);
 
   // Fetch the active backend's model list the first time the menu opens for it;
-  // cached per backend so toggling agents doesn't refetch.
+  // cached per backend so toggling agents doesn't refetch. A menu left open
+  // under Settings reads again as it is uncovered.
   useEffect(() => {
     const loadedBackends = loadedModelBackendsRef.current;
-    if (!open || !backend || loadedBackends.has(backend)) return;
+    if (!open || !surfaceActive || !backend || loadedBackends.has(backend)) return;
     loadedBackends.add(backend);
     let reloadOnNextOpen = true;
     setLoadingModels(true);
@@ -234,7 +236,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       cancel();
       if (reloadOnNextOpen) loadedBackends.delete(backend);
     };
-  }, [open, backend, api]);
+  }, [open, surfaceActive, backend, api]);
 
   // Start each open (and every backend switch) from the full, unfiltered list.
   useEffect(() => {
@@ -454,7 +456,6 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                   label={t('chat.picker.addModel')}
                   onClick={() => {
                     setOpen(false);
-                    onNavigateAway?.();
                     navigate(addModelPath);
                   }}
                 />

@@ -275,14 +275,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
               placeholder={t('agents.detail.modelPlaceholder')}
               emptyText={t('agents.detail.modelEmpty')}
               allowCustomValue
-              // Close first, or the dialog would stay over the Model Hub it opens.
-              footerAction={addModelPath ? {
-                label: t('chat.picker.addModel'),
-                onSelect: () => {
-                  onClose();
-                  navigate(addModelPath);
-                },
-              } : undefined}
+              // The dialog stays open: Settings hides the page it sits in, and
+              // the form is here again when the user comes back.
+              footerAction={addModelPath ? { label: t('chat.picker.addModel'), onSelect: () => navigate(addModelPath) } : undefined}
             />
           </div>
           {effortOptions.length > 0 && (

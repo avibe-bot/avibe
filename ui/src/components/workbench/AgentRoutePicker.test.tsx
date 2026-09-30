@@ -18,9 +18,12 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
 
+// One client for every render, as the real context provides: the picker's
+// catalog read keys on it, so a fresh object per render would re-read on its own.
+const API = {};
 vi.mock('../../context/ApiContext', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../context/ApiContext')>()),
-  useApi: () => ({}),
+  useApi: () => API,
 }));
 
 // What the catalog answers for this render. A Hub catalog states one entry per
@@ -175,8 +178,10 @@ describe('AgentRoutePicker', () => {
     await user.click(addModel);
 
     expect(screen.getByTestId('location').textContent).toBe('/settings/models?manage=claude');
-    expect(onNavigateAway).toHaveBeenCalledOnce();
     expect(screen.queryByText('chat.picker.model')).toBeNull();
+    // Settings opens over the host, which suspends under it with its draft
+    // instead of being closed the way leaving for /agents closes it.
+    expect(onNavigateAway).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -207,6 +212,20 @@ describe('AgentRoutePicker', () => {
     await openMenu(user);
 
     // The Model Hub may have changed the list while it was covered.
+    expect(catalogReads).toBe(2);
+  });
+
+  it('reads the list again for a menu left open while Settings covered it', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<HubPicker role="owner" />);
+    await openMenu(user);
+    expect(catalogReads).toBe(1);
+
+    // A Settings command opens over the surface without dismissing the menu.
+    rerender(<HubPicker role="owner" surfaceActive={false} />);
+    rerender(<HubPicker role="owner" />);
+
+    expect(screen.getByText('chat.picker.model')).toBeTruthy();
     expect(catalogReads).toBe(2);
   });
 
