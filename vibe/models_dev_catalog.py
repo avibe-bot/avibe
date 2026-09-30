@@ -599,19 +599,25 @@ def text_only_model_ids(
     """The ids models.dev declares text-only, where any doubt is a veto.
 
     The answer hides images from the model, so it must hold for every copy
-    that could describe the id. An entry is a copy of each requested id whose
-    last path segment, trimmed and case-folded, equals that of the entry's key
-    or ``id``: a full ``provider/model`` identity, a bare id, and a relay's
-    namespaced id all meet there. Raw entries are read rather than the
-    picker's admitted rows, and no copy outranks another, so an entry can only
-    add a veto, never remove one. An id is text-only when it has a copy and
-    every copy's ``modalities.input`` is a non-empty list of strings that,
+    that could describe the id. An entry could describe each requested id
+    whose last path segment, trimmed and case-folded, equals that of the
+    entry's key or ``id``: a full ``provider/model`` identity, a bare id, and
+    a relay's namespaced id all meet there. Raw entries are read rather than
+    the picker's admitted rows, and no copy outranks another, so such an entry
+    can only add a veto. A shared last segment is doubt, not evidence, so a
+    mark also needs a copy that names the id itself: its key, ``id``, or
+    ``provider/model`` identity equals the id, trimmed and case-folded. An id
+    is text-only when it has such a copy and every copy that could describe it
+    has a ``modalities.input`` that is a non-empty list of strings which,
     compared as the engine compares them, contains ``text`` and not ``image``.
     A catalog whose providers cannot all be read declares nothing.
     """
 
+    def exact_key(name: str) -> str:
+        return name.strip().lower()
+
     def name_key(name: str) -> str:
-        return name.rsplit("/", 1)[-1].strip().lower()
+        return exact_key(name.rsplit("/", 1)[-1])
 
     def declares_text_only(declared: object) -> bool:
         if not isinstance(declared, list) or not declared or not all(
@@ -637,7 +643,11 @@ def text_only_model_ids(
     for model_id in dict.fromkeys(model_ids):
         wanted.setdefault(name_key(model_id), []).append(model_id)
     text_only: dict[str, bool] = {}
-    for provider in catalog.values():
+    named: set[str] = set()
+    for provider_key, provider in catalog.items():
+        provider_names = {str(provider_key)}
+        if isinstance(provider.get("id"), str):
+            provider_names.add(provider["id"])
         for model_key, model in provider["models"].items():
             names = {str(model_key)}
             if isinstance(model, dict) and isinstance(model.get("id"), str):
@@ -646,8 +656,15 @@ def text_only_model_ids(
             verdict = declares_text_only(
                 modalities.get("input") if isinstance(modalities, dict) else None
             )
+            spellings = {exact_key(name) for name in names} | {
+                exact_key(f"{provider_name}/{name}")
+                for provider_name in provider_names
+                for name in names
+            }
             for requested in {
                 requested for name in names for requested in wanted.get(name_key(name), ())
             }:
                 text_only[requested] = text_only.get(requested, True) and verdict
-    return {requested for requested, verdict in text_only.items() if verdict}
+                if exact_key(requested) in spellings:
+                    named.add(requested)
+    return {requested for requested, verdict in text_only.items() if verdict and requested in named}

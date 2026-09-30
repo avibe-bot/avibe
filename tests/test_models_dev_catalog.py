@@ -446,11 +446,54 @@ def test_text_only_needs_every_raw_copy_to_declare_text_without_images(relay_cop
 def test_text_only_counts_every_entry_that_could_name_the_id_as_a_copy(requested, veto_key, veto_copy):
     """MH-MODALITIES-004: an entry is a copy of every id its key or id could name, so any doubt is a veto."""
 
-    text_only = {"deepseek": {"models": {"target": _copy(["text"])}}}
+    text_only = {"deepseek": {"models": {"target": _copy(["text"])}}, "owner": {"models": {requested: _copy(["text"])}}}
     assert models_dev_catalog.text_only_model_ids([requested], text_only) == {requested}
 
     vetoed = {**text_only, "relay": {"models": {veto_key: veto_copy}}}
     assert models_dev_catalog.text_only_model_ids([requested], vetoed) == set()
+
+
+@pytest.mark.parametrize(
+    ("requested", "catalog", "text_only"),
+    [
+        # A shared last segment is doubt, not evidence: another provider's
+        # ``target`` says nothing about a custom relay's ``custom/target``.
+        ("custom/target", {"openai": {"models": {"target": _copy(["text"])}}}, False),
+        ("target", {"relay": {"models": {"vendor/target": _copy(["text"])}}}, False),
+        # A copy names the id through its key, its ``id``, or its identity.
+        ("target", {"openai": {"models": {"target": _copy(["text"])}}}, True),
+        (" TARGET ", {"openai": {"models": {"target": _copy(["text"])}}}, True),
+        ("openai/target", {"openai": {"models": {"target": _copy(["text"])}}}, True),
+        ("openai/target", {"key": {"id": "OpenAI", "models": {"target": _copy(["text"])}}}, True),
+        ("vendor/target", {"relay": {"models": {"vendor/target": _copy(["text"])}}}, True),
+        ("vendor/target", {"relay": {"models": {"hosted-7": _copy(["text"], id="vendor/target")}}}, True),
+    ],
+)
+def test_text_only_needs_a_copy_that_names_the_id_itself(requested, catalog, text_only):
+    """MH-MODALITIES-004: a mark needs a copy whose key, id, or identity is the id; a shared last segment only vetoes."""
+
+    assert models_dev_catalog.text_only_model_ids([requested], catalog) == ({requested} if text_only else set())
+
+
+@pytest.mark.parametrize("seed", range(100))
+def test_text_only_never_marks_an_id_only_a_shared_last_segment_describes(seed):
+    """MH-MODALITIES-004: whatever else the catalog holds, a namespaced id no copy names stays unmarked."""
+
+    import random
+
+    rng = random.Random(seed)
+    last = rng.choice(["target", "Beta.2", "gamma-mini"])
+    requested = f"custom/{last}"
+    catalog = {
+        f"provider-{index}": {"models": {
+            rng.choice([last, last.upper(), f" {last} ", f"relay/{last}", f"Org/Sub/{last.upper()}"]):
+                {"modalities": {"input": rng.choice(_TEXT_ONLY_DECLARATIONS)}}
+            for _ in range(rng.randrange(1, 4))
+        }}
+        for index in range(rng.randrange(1, 5))
+    }
+
+    assert models_dev_catalog.text_only_model_ids([requested], catalog) == set(), catalog
 
 
 def test_text_only_declares_nothing_from_a_catalog_it_cannot_read_whole(caplog):
