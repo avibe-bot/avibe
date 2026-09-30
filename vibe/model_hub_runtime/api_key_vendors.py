@@ -199,16 +199,38 @@ def official_api_key_base_url(vendor: str) -> str | None:
     return _LEGACY_OFFICIAL_BASE_URLS.get(normalized_vendor)
 
 
+def openai_compatible_endpoint(base_url: str) -> str:
+    """The API root the engine calls for an ``openai_chat`` Source's base URL.
+
+    CLIProxyAPI appends ``/chat/completions``; a Source origin without a path
+    uses the standard ``/v1`` root that discovery and probes use.
+    """
+    endpoint = normalize_model_hub_base_url(base_url)
+    assert endpoint is not None
+    if not urlsplit(endpoint).path.rstrip("/"):
+        endpoint = normalize_model_hub_base_url(endpoint, append_path="/v1")
+        assert endpoint is not None
+    return endpoint
+
+
+def _endpoint_identity(base_url: str) -> tuple[str, str, int | None, str, str]:
+    parts = urlsplit(openai_compatible_endpoint(base_url))
+    port = parts.port or {"http": 80, "https": 443}.get(parts.scheme)
+    return parts.scheme, parts.hostname or "", port, parts.path, parts.query
+
+
 def official_models_dev_provider(vendor: str, base_url: str | None) -> str | None:
-    """The models.dev provider describing this Source's upstream, or ``None``.
+    """The models.dev provider describing an ``openai_chat`` Source's upstream, or ``None``.
 
     Only a Source on its vendor's official endpoint is described by that
-    vendor's models.dev entries: a custom URL may front any deployment.
+    vendor's models.dev entries: a custom URL may front any deployment. The
+    endpoint is the one the engine calls, so spellings of one URL that differ
+    only by host case, a default port, or the implied ``/v1`` root agree.
     """
     entry = api_key_vendor_entry(vendor)
     if entry is None or entry.models_dev_provider is None:
         return None
-    if base_url is not None and normalize_model_hub_base_url(base_url) != entry.official_base_url:
+    if base_url is not None and _endpoint_identity(base_url) != _endpoint_identity(entry.official_base_url):
         return None
     return entry.models_dev_provider
 

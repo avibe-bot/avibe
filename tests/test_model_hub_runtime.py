@@ -52,7 +52,7 @@ from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
 from vibe.model_hub_runtime import supervisor as supervisor_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
-from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
+from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog, official_models_dev_provider
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
 from vibe.model_hub_runtime.config import write_engine_config
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
@@ -2232,6 +2232,32 @@ def test_catalog_official_base_url_composes_one_probe_endpoint(
         if segment.startswith("v") and segment[1:2].isdigit()
     ]
     assert len(versions) == 1, composed
+
+
+@pytest.mark.parametrize(
+    ("vendor", "base_url", "provider"),
+    [
+        ("deepseek", None, "deepseek"),
+        ("deepseek", "https://api.deepseek.com", "deepseek"),
+        # The engine calls one endpoint for each of these spellings.
+        ("deepseek", "https://api.deepseek.com/v1", "deepseek"),
+        ("deepseek", "https://API.DeepSeek.com/", "deepseek"),
+        ("deepseek", "https://api.deepseek.com:443/v1/", "deepseek"),
+        ("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1/", "alibaba-cn"),
+        # Any other endpoint may front another deployment.
+        ("deepseek", "https://api.deepseek.com/beta", None),
+        ("deepseek", "http://api.deepseek.com", None),
+        ("deepseek", "https://api.deepseek.com:8443", None),
+        ("deepseek", "https://relay.example/v1", None),
+        ("qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", None),
+        ("custom", None, None),
+        ("openai", None, None),
+    ],
+)
+def test_only_a_vendors_official_endpoint_is_described_by_its_models_dev_provider(vendor, base_url, provider) -> None:
+    """MH-MODALITIES-002: the vendor's models.dev entries describe the endpoint the engine calls, in any spelling."""
+
+    assert official_models_dev_provider(vendor, base_url) == provider
 
 
 @pytest.mark.parametrize(
