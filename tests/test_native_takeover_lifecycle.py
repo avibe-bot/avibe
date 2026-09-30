@@ -277,7 +277,9 @@ async def test_abandoned_switch_keeps_admission_closed_until_teardown_completes(
         # config writer starts beside it, and a retry refuses at once.
         with pytest.raises(NativeMigrationBlockedError, match="native_auth_in_progress"):
             NativeCredentialLease(("codex",)).acquire()
-        with pytest.raises(NativeMigrationBlockedError, match="backend_restart_in_progress"):
+        # The retry is refused as the handed-off teardown, not as an ordinary
+        # restart, so it can be reported as interrupted work still stopping.
+        with pytest.raises(NativeMigrationBlockedError, match="migration_teardown_in_progress"):
             async with coordinator.migration_guard(("codex",)):
                 pytest.fail("a retry entered beside an unfinished teardown")
     finally:

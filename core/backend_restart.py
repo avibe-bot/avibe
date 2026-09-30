@@ -23,8 +23,10 @@ _POLL_INTERVAL_SECONDS = 0.1
 # interrupted, so the switch waits for that teardown rather than refusing
 # beside it. The teardown's own steps are bounded: owner cancellation and
 # tidy-up (2 s each), then a runtime stop that escalates from SIGTERM to
-# SIGKILL (up to 10 s). This bound covers them with room for slow storage.
-# Work still live past it is a fault.
+# SIGKILL (up to 10 s). A backend's cached runtimes (Codex working
+# directories, Claude sessions) stop side by side, so that stop bound does not
+# grow with how many are open. This bound covers them with room for slow
+# storage. Work still live past it is a fault.
 _INTERRUPT_SETTLE_SECONDS = 60.0
 _NATIVE_BACKENDS = frozenset({"claude", "codex", "opencode"})
 _T = TypeVar("_T")
@@ -533,7 +535,16 @@ class BackendRestartCoordinator:
                 await locks.enter_async_context(self._request_locks.setdefault(backend, asyncio.Lock()))
                 restart = self._tasks.get(backend)
                 if restart is not None and not restart.done():
-                    raise NativeMigrationBlockedError("backend_restart_in_progress", (backend,))
+                    # A backend still held as migrating under its lock is a
+                    # teardown an earlier switch handed off: the work it
+                    # interrupted is still stopping. Anything else is an
+                    # ordinary restart, which may be draining live work.
+                    reason = (
+                        "migration_teardown_in_progress"
+                        if backend in self._migration_backends
+                        else "backend_restart_in_progress"
+                    )
+                    raise NativeMigrationBlockedError(reason, (backend,))
             self._assert_no_native_login(targets)
             lease = NativeCredentialLease(targets, state_dir=self._native_state_dir()).acquire(recovery=True)
             self._migration_backends.update(targets)

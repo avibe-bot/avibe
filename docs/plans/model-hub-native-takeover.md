@@ -160,9 +160,12 @@ explicitly authorized acceptance check.
   admission closed until its teardown completes. Because the user's work is
   already interrupted by then, the switch waits for that teardown, bounded by a
   settle limit that covers the teardown's own bounded steps (owner cancellation,
-  then a runtime stop escalating from SIGTERM to SIGKILL); only a teardown still
-  running past it refuses, and migration reports that refusal as
-  `migration_runtime_stopping`. Leaving early, by timeout or cancellation, never
+  then a runtime stop escalating from SIGTERM to SIGKILL, with a backend's
+  cached runtimes stopped side by side so the stop does not grow with how many
+  are open); only a teardown still running past it refuses, and migration
+  reports that refusal, or a retry beside the teardown it handed off, as
+  `migration_runtime_stopping`. An ordinary restart in progress stays
+  `migration_native_busy`. Leaving early, by timeout or cancellation, never
   cuts the teardown short. A mode switch in
   either direction enters it, since a turn left running keeps the mode it
   started in. Every interrupted conversation turn gets one visible notice, and

@@ -828,10 +828,10 @@ async def _rollback_replacement_before_settling(
         raise cancelled
 
 
-# Guard refusals that mean Avibe's own interrupted work on the selected
-# backends is still stopping. Every other refusal, such as a CLI running outside
-# Avibe, stays the generic busy code.
-_RUNTIME_STOPPING_REASONS = frozenset({"native_runtime_busy", "backend_restart_in_progress"})
+# Guard refusals that mean work a switch interrupted on the selected backends
+# is still stopping. Every other refusal, such as a CLI running outside Avibe
+# or an ordinary restart draining live work, stays the generic busy code.
+_RUNTIME_STOPPING_REASONS = frozenset({"native_runtime_busy", "migration_teardown_in_progress"})
 
 
 def _log_native_refusal(operation: str, error: Any) -> None:

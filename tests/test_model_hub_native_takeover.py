@@ -675,7 +675,10 @@ def test_mode_only_adoption_refuses_a_native_config_the_cli_cannot_parse(
 
 @pytest.mark.parametrize("reason,code", [
     ("native_runtime_busy", "migration_runtime_stopping"),
-    ("backend_restart_in_progress", "migration_runtime_stopping"),
+    ("migration_teardown_in_progress", "migration_runtime_stopping"),
+    # An ordinary restart may be draining live work for minutes, not stopping
+    # interrupted work, so it is not reported as about to finish.
+    ("backend_restart_in_progress", "migration_native_busy"),
     ("external_native_processes", "migration_native_busy"),
 ])
 def test_refused_migration_says_whether_avibe_or_an_outside_cli_holds_the_backend(
