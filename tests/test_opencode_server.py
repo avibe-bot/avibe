@@ -4,12 +4,19 @@ import importlib.util
 import io
 import json
 import os
+import signal
+import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
+from contextlib import suppress
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
+
+import psutil
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -194,7 +201,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._write_pid_file = Mock()  # type: ignore[method-assign]
         manager._clear_pid_file = Mock()  # type: ignore[method-assign]
         manager._apply_resource_governance = Mock()  # type: ignore[method-assign]
-        terminate = AsyncMock()
+        manager._terminate_tracked_process = AsyncMock()  # type: ignore[method-assign]
         create_process = AsyncMock(return_value=process)
         user_config = '{"permission":"ask"}'
 
@@ -207,18 +214,12 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(SERVER_MODULE.asyncio, "sleep", AsyncMock()),
             patch.object(SERVER_MODULE.time, "monotonic", side_effect=[0.0, 0.0, 121.0]),
             patch.object(SERVER_MODULE, "server_environment", return_value={}),
-            patch.object(SERVER_MODULE, "terminate_process_tree", terminate),
             patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": user_config, "AVIBE_OPENCODE_MODEL_HUB": "1"}),
         ):
             with self.assertRaisesRegex(RuntimeError, "failed to start within 120s"):
                 await manager._start_server()
 
-        terminate.assert_awaited_once_with(
-            process,
-            SERVER_MODULE.logger,
-            "OpenCode server after startup timeout",
-            terminate_timeout=5,
-        )
+        manager._terminate_tracked_process.assert_awaited_once_with(process, reason="startup timeout")
         self.assertEqual(manager._clear_pid_file.call_count, 2)
         self.assertEqual(create_process.await_args.kwargs["env"]["AVIBE_OPENCODE_MODEL_HUB"], "0")
         self.assertIsNone(manager._process)
@@ -3223,6 +3224,73 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
 async def _async_none():
     return None
+
+
+# Starts its tool the way OpenCode's shell tool does (``detached``, so setsid):
+# the tool leads a new session and process group, out of the server's reach.
+_SERVER_WITH_DETACHED_TOOL = """
+import subprocess, sys
+tool = subprocess.Popen(["/bin/sh", "-c", sys.argv[1], "tool", sys.argv[2]], start_new_session=True)
+print(tool.pid, flush=True)
+tool.wait()
+"""
+# Records SIGTERM and keeps going, starting a new child each second, so only
+# SIGKILL ends it and some of its children postdate any single walk.
+_TERM_SURVIVING_TOOL = 'trap \'echo TERM > "$1"\' TERM; while :; do sleep 1; done'
+
+
+def _exited(process: psutil.Process) -> bool:
+    try:
+        return not process.is_running() or process.status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+def _running_group_members(pgid: int) -> list[int]:
+    members = []
+    for process in psutil.process_iter():
+        with suppress(OSError, psutil.Error):
+            if os.getpgid(process.pid) == pgid and not _exited(process):
+                members.append(process.pid)
+    return members
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sessions and process groups")
+def test_stopping_the_server_stops_tool_commands_in_their_own_session(tmp_path):
+    term_marker = tmp_path / "tool-received-sigterm"
+    # Avibe starts the server as the leader of its own session, as here.
+    server = subprocess.Popen(
+        [sys.executable, "-c", _SERVER_WITH_DETACHED_TOOL, _TERM_SURVIVING_TOOL, str(term_marker)],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    bystander = subprocess.Popen(["/bin/sh", "-c", "while :; do sleep 1; done"], start_new_session=True)
+    tool_pid = None
+    try:
+        tool_pid = int(server.stdout.readline())
+        tool = psutil.Process(tool_pid)
+        assert os.getsid(tool_pid) == tool_pid != os.getsid(server.pid)
+        # Reaps the server the moment it exits, as Avibe's asyncio child watcher does.
+        threading.Thread(target=server.wait, daemon=True).start()
+
+        assert OpenCodeServerManager._terminate_pid_tree_sync(server.pid, timeout=2.0)
+
+        assert _exited(tool)
+        assert _running_group_members(tool_pid) == []
+        # SIGTERM came first, and only then SIGKILL.
+        assert term_marker.read_text().strip() == "TERM"
+        assert server.wait(timeout=5) == -signal.SIGTERM
+        assert bystander.poll() is None
+    finally:
+        if tool_pid is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(tool_pid, signal.SIGKILL)
+        for process in (server, bystander):
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+        server.stdout.close()
 
 
 def test_mh_runtime_002_matching_overlay_does_not_wait_for_an_unrelated_active_run():

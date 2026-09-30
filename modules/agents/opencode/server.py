@@ -24,12 +24,13 @@ from asyncio.subprocess import Process
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import aiohttp
+import psutil
 
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config, is_model_hub_enabled
 from core.handlers.model_hub.identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL
-from core.process_isolation import isolated_subprocess_kwargs, terminate_process_tree
+from core.process_isolation import isolated_subprocess_kwargs
 from core.resource_governance import is_controller_resource_governor
 from modules.agents.opencode.caller_context import ensure_plugin_installed, server_environment
 from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
@@ -265,13 +266,12 @@ class OpenCodeServerManager:
         self._start_attempt_generation = 0
         # The event loop ``_process`` was created on. Subprocess transports
         # bind their internal Future / wait helpers to the creating loop;
-        # ``process.wait()`` or ``terminate_process_tree(process)`` from a
-        # different loop raises ``RuntimeError: got Future attached to a
-        # different loop``. The singleton outlives ``asyncio.run`` calls
-        # (Flask UI server creates a new loop per request), so any code
-        # that touches ``_process`` from a non-creating loop has to
-        # detach it first. ``_process_loop`` is set alongside every
-        # ``_process`` assignment.
+        # ``process.wait()`` from a different loop raises ``RuntimeError: got
+        # Future attached to a different loop``. The singleton outlives
+        # ``asyncio.run`` calls (Flask UI server creates a new loop per
+        # request), so any code that touches ``_process`` from a
+        # non-creating loop has to detach it first. ``_process_loop`` is set
+        # alongside every ``_process`` assignment.
         self._process_loop: Optional[asyncio.AbstractEventLoop] = None
         self._base_url: Optional[str] = None
         self._http_session: Optional[aiohttp.ClientSession] = None
@@ -1689,50 +1689,102 @@ class OpenCodeServerManager:
         if not stopped and self._pid_exists(pid):
             logger.debug("Failed to terminate OpenCode server pid=%s", pid)
 
+    async def _terminate_tracked_process(self, process: Process, reason: str) -> None:
+        """Stop a server this loop started, then let its exit be reaped."""
+        await self._terminate_pid(process.pid, reason=reason)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            logger.warning("OpenCode server pid=%s did not exit after it was stopped", process.pid)
+
     @staticmethod
     def _terminate_pid_tree_sync(pid: int, timeout: float = 5.0) -> bool:
-        """Stop the dedicated OpenCode process group, including tool children."""
+        """Stop the OpenCode server and every process it started.
+
+        OpenCode starts each tool command detached, as the leader of a new
+        session and process group, so the server's own group never reaches it.
+        Only a live parent ties a process to the server, so the tree is walked
+        before anything is signalled and again before escalating. Every process
+        is held as a ``psutil.Process``, which refuses a pid reused since.
+        """
         if os.name == "nt":
             return runtime.stop_pid(pid, timeout=timeout)
         try:
-            pgid = os.getpgid(pid)
-        except (ProcessLookupError, PermissionError):
+            server = psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            return True
+        except psutil.Error:
             return not runtime.pid_alive(pid)
-        if pgid != pid:
-            return runtime.stop_pid(pid, timeout=timeout)
 
-        def group_alive() -> bool:
-            try:
-                os.killpg(pgid, 0)
-                return True
-            except ProcessLookupError:
-                return False
-            except PermissionError:
-                return True
+        def running(processes: list[psutil.Process]) -> list[psutil.Process]:
+            alive = []
+            for process in processes:
+                try:
+                    # A zombie has exited; reaping it belongs to its parent.
+                    if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                        alive.append(process)
+                except psutil.NoSuchProcess:
+                    continue
+                except psutil.Error:
+                    alive.append(process)
+            return alive
 
-        try:
-            os.killpg(pgid, signal.SIGTERM)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not group_alive():
+        own_group = os.getpgrp()
+        founded_groups: set[int] = set()
+        tree = [server]
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            found = dict.fromkeys(tree)
+            for process in tree:
+                try:
+                    found.update(dict.fromkeys(process.children(recursive=True)))
+                except psutil.Error:
+                    continue
+            tree = running(list(found))
+            if not tree:
                 return True
-            time.sleep(0.1)
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            return False
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not group_alive():
+            groups = {}
+            for process in tree:
+                try:
+                    groups[process] = os.getpgid(process.pid)
+                except OSError:
+                    continue
+            # A group is the tree's when a process of the tree founded it. It is
+            # signalled only while a live process of the tree is still in it,
+            # proof that its id was not recycled, and the group signal also
+            # reaches whatever those processes started since the walk.
+            founded_groups.update(process.pid for process, pgid in groups.items() if process.pid == pgid)
+            owned_groups = (set(groups.values()) & founded_groups) - {own_group}
+            if sig == signal.SIGKILL:
+                logger.warning("Escalating to SIGKILL for %d process(es) of OpenCode server pid=%s", len(tree), pid)
+            elif len(tree) > 1:
+                logger.info("OpenCode server pid=%s has %d descendant process(es) to stop", pid, len(tree) - 1)
+            signalled_groups = set()
+            for pgid in owned_groups:
+                try:
+                    os.killpg(pgid, sig)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    # Fall back to signalling its known members one by one.
+                    continue
+                signalled_groups.add(pgid)
+            for process in tree:
+                if groups.get(process) in signalled_groups:
+                    continue
+                try:
+                    process.send_signal(sig)
+                except psutil.NoSuchProcess:
+                    continue
+                except psutil.Error:
+                    logger.debug("Failed to signal OpenCode process pid=%s", process.pid, exc_info=True)
+            deadline = time.monotonic() + timeout
+            tree = running(tree)
+            while tree and time.monotonic() < deadline:
+                time.sleep(0.1)
+                tree = running(tree)
+            if not tree:
                 return True
-            time.sleep(0.1)
-        return not group_alive()
+        return False
 
     async def _cleanup_orphaned_managed_server(self) -> None:
         info = self._read_pid_file()
@@ -1903,13 +1955,12 @@ class OpenCodeServerManager:
         # ``self._process`` may be a stale subprocess from a previous
         # ``asyncio.run()`` call (the Flask UI server creates a new loop
         # per request, while ``OpenCodeServerManager`` is a singleton).
-        # ``terminate_process_tree`` calls ``process.wait()`` which uses
-        # the transport's internal Future — that Future is bound to the
-        # loop that created the subprocess, and awaiting it from any
-        # other loop raises "got Future attached to a different loop".
-        # The OS-level pid signaling below (``_terminate_pid`` via
-        # ``runtime.stop_pid``) is loop-agnostic and is the correct
-        # cleanup path; just detach the dangling Python object first.
+        # ``process.wait()`` uses the transport's internal Future — that
+        # Future is bound to the loop that created the subprocess, and
+        # awaiting it from any other loop raises "got Future attached to a
+        # different loop". The OS-level pid signaling below
+        # (``_terminate_pid``) is loop-agnostic and is the correct cleanup
+        # path; just detach the dangling Python object first.
         current_loop = asyncio.get_running_loop()
         self._start_attempt_generation += 1
         self._last_start_failure_pid = None
@@ -1918,7 +1969,7 @@ class OpenCodeServerManager:
             and self._process.returncode is None
             and self._process_loop is current_loop
         ):
-            await terminate_process_tree(self._process, logger, "OpenCode server", terminate_timeout=5)
+            await self._terminate_tracked_process(self._process, reason="stale server")
         elif self._process and self._process_loop is not current_loop:
             # Foreign-loop subprocess. We can't trust ``returncode`` here
             # — the transport callbacks fire on the original (now-closed)
@@ -2024,12 +2075,7 @@ class OpenCodeServerManager:
         if exit_code is None:
             # A late-starting process must not become a healthy but unmanaged
             # server after this call reports failure and clears its PID file.
-            await terminate_process_tree(
-                process,
-                logger,
-                "OpenCode server after startup timeout",
-                terminate_timeout=5,
-            )
+            await self._terminate_tracked_process(process, reason="startup timeout")
         self._clear_pid_file()
         self._process = None
         self._process_loop = None
