@@ -95,9 +95,11 @@ and is not a fallback for this case.
 The first launch verifies the embedded Runtime archive and installs it
 atomically below the operating system's application-data directory. Installs
 are versioned and content-addressed, so application updates never replace files
-used by a running Runtime. Later launches re-verify the extracted file tree and
-repair one corrupt slot from the immutable archive; a second integrity failure
-is rejected. The Controller owns the archive identity that the UI forwards
+used by a running Runtime. The extracted tree is hashed once, before its slot is
+published; later launches check its file set and sizes from metadata alone, so
+a relaunch does not re-read the whole tree before the first health probe. A
+slot that gained, lost, or resized a file is repaired from the immutable
+archive; a second integrity failure is rejected. The Controller owns the archive identity that the UI forwards
 through `/ready`; `vibe start` replaces a mismatched desktop-managed Controller
 before it can reuse the service. After a successor proves that identity, the
 shell removes superseded private Runtime trees; reopening an older app reinstalls

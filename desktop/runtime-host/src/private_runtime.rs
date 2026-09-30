@@ -491,7 +491,49 @@ fn required_runtime_files(manifest: &RuntimeBundleManifest) -> [(PathBuf, bool);
     ]
 }
 
+/// Hashes every file of a freshly extracted tree against `tree_sha256`.
+///
+/// This runs once per install, on the staging directory, before the marker is
+/// written and the slot is published. Reuse relies on that ordering instead of
+/// repeating the hash; see [`verify_installed_shape`].
 fn verify_installed_tree(root: &Path, manifest: &RuntimeBundleManifest) -> Result<(), PrivateRuntimeError> {
+    let mut files = verify_installed_shape(root, manifest)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut hasher = Sha256::new();
+    hasher.update(TREE_HASH_DOMAIN);
+    for (relative, path, size) in &files {
+        update_tree_header(&mut hasher, relative, *size);
+        let mut file = File::open(path).map_err(PrivateRuntimeError::Install)?;
+        io::copy(&mut file, &mut hasher).map_err(PrivateRuntimeError::Install)?;
+    }
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != manifest.tree_sha256 {
+        return Err(PrivateRuntimeError::ArchiveVerification);
+    }
+    Ok(())
+}
+
+/// Checks a tree's file set against the manifest without reading any file.
+///
+/// A slot is published only by renaming a staging directory whose full hash
+/// matched and whose marker was written after that, so a slot carrying the
+/// manifest's marker was hashed in full when it was extracted. Re-hashing it on
+/// every launch read the whole tree (about 390MB in 17k files) before the first
+/// health probe: 3.5s at the median and 12.6s at p90 over 250 recorded launches.
+///
+/// What reaches an installed tree afterwards is a process writing into it
+/// (bytecode, #2273), a file being removed, or a file being truncated. Each
+/// changes the regular-file count or the unpacked size, and a link or special
+/// file is rejected outright, so the metadata walk keeps every such tree from
+/// being reused. A same-size rewrite of a file's content is not detected here:
+/// that needs write access to the user's own data directory, which already
+/// grants control of `~/.avibe` and the login shell, so it is not a boundary a
+/// launch-time hash defends.
+fn verify_installed_shape(
+    root: &Path,
+    manifest: &RuntimeBundleManifest,
+) -> Result<Vec<(String, PathBuf, u64)>, PrivateRuntimeError> {
     let root_metadata = fs::symlink_metadata(root).map_err(PrivateRuntimeError::Install)?;
     if !root_metadata.file_type().is_dir() {
         return Err(PrivateRuntimeError::ArchiveInvalid);
@@ -499,28 +541,17 @@ fn verify_installed_tree(root: &Path, manifest: &RuntimeBundleManifest) -> Resul
 
     let mut files = Vec::new();
     collect_tree_files(root, root, &mut files)?;
-    files.sort_by(|left, right| left.0.cmp(&right.0));
-
-    let mut hasher = Sha256::new();
-    hasher.update(TREE_HASH_DOMAIN);
     let mut unpacked_size = 0_u64;
-    for (relative, path, size) in &files {
+    for (_, _, size) in &files {
         unpacked_size = unpacked_size
             .checked_add(*size)
             .filter(|value| *value <= manifest.unpacked_size)
             .ok_or(PrivateRuntimeError::ArchiveVerification)?;
-        update_tree_header(&mut hasher, relative, *size);
-        let mut file = File::open(path).map_err(PrivateRuntimeError::Install)?;
-        io::copy(&mut file, &mut hasher).map_err(PrivateRuntimeError::Install)?;
     }
     if files.len() as u64 != manifest.entry_count || unpacked_size != manifest.unpacked_size {
         return Err(PrivateRuntimeError::ArchiveVerification);
     }
-    let actual = format!("{:x}", hasher.finalize());
-    if actual != manifest.tree_sha256 {
-        return Err(PrivateRuntimeError::ArchiveVerification);
-    }
-    Ok(())
+    Ok(files)
 }
 
 fn collect_tree_files(
@@ -595,7 +626,10 @@ fn installed_runtime(
         return Err(PrivateRuntimeError::ArchiveInvalid);
     }
     validate_runtime_files(root, manifest)?;
-    verify_installed_tree(root, manifest)?;
+    // Every caller reaches this for a published slot, whose marker proves the
+    // full hash already passed: a reused one, one this launch just renamed into
+    // place, or one another process won the rename with.
+    verify_installed_shape(root, manifest)?;
     Ok(InstalledPrivateRuntime {
         root: root.to_owned(),
         python: root.join(&manifest.python_entrypoint),
@@ -771,6 +805,72 @@ mod tests {
             .ends_with(format!("{}-repair", &manifest.archive_sha256[..16])));
         assert_eq!(fs::read(&repaired.python).expect("repaired interpreter"), b"runtime");
         assert_eq!(bundle.prepare().expect("reuse repair").root, repaired.root);
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Any change to an installed tree's file set or sizes keeps it from being
+    /// reused, whichever file it touches.
+    #[test]
+    fn a_changed_file_set_is_never_reused() {
+        type Mutation = (&'static str, fn(&Path));
+        let mutations: [Mutation; 4] = [
+            ("bytecode written by a Runtime process", |root| {
+                fs::create_dir_all(root.join("lib/__pycache__")).expect("bytecode directory");
+                fs::write(root.join("lib/__pycache__/data.cpython-312.pyc"), b"pyc").expect("bytecode");
+            }),
+            ("file removed", |root| {
+                fs::remove_file(root.join("lib/data.txt")).expect("remove")
+            }),
+            ("file truncated", |root| {
+                fs::write(root.join("lib/data.txt"), b"").expect("truncate")
+            }),
+            ("file grown", |root| {
+                fs::write(root.join("lib/data.txt"), b"runtime+").expect("grow")
+            }),
+        ];
+        for (label, mutate) in mutations {
+            let root = scratch("installed-shape");
+            let manifest = write_bundle(&root, Some("lib/data.txt"));
+            let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+            let first = bundle.prepare().expect("first install");
+            mutate(&first.root);
+
+            let next = bundle.prepare().expect("repair install");
+
+            assert!(!next.reused, "{label}: the changed tree was reused");
+            assert!(
+                next.root
+                    .ends_with(format!("{}-repair", &manifest.archive_sha256[..16])),
+                "{label}: the verified archive was not reinstalled into the repair slot"
+            );
+            assert_eq!(
+                fs::read(next.root.join("lib/data.txt")).expect("repaired file"),
+                b"runtime"
+            );
+            fs::remove_dir_all(root).ok();
+        }
+    }
+
+    /// Reuse decides from metadata alone. A published slot was hashed in full
+    /// before its marker was written, and reading the whole tree again on every
+    /// launch is what delayed the first health probe by seconds.
+    #[cfg(unix)]
+    #[test]
+    fn reuse_reads_no_file_content() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch("reuse-metadata-only");
+        write_bundle(&root, Some("lib/data.txt"));
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
+        let first = bundle.prepare().expect("first install");
+        let data = first.root.join("lib/data.txt");
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o000)).expect("make content unreadable");
+
+        let second = bundle.prepare().expect("reuse without reading content");
+
+        assert!(second.reused);
+        assert_eq!(second.root, first.root);
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o644)).ok();
         fs::remove_dir_all(root).ok();
     }
 
