@@ -23,6 +23,7 @@ type FakeApi = {
   listProjects: ReturnType<typeof vi.fn>;
   createSession: ReturnType<typeof vi.fn>;
   connectWorkbenchEvents: ReturnType<typeof vi.fn>;
+  readModelHubAgentCatalogForModelPicker: ReturnType<typeof vi.fn>;
 };
 
 const apiRef = vi.hoisted(() => ({ current: null as FakeApi | null }));
@@ -48,7 +49,6 @@ vi.mock('./CapabilityTabs', () => ({ CapabilityTabs: () => null }));
 type FakeModelCatalog = {
   models: string[];
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
-  hubManaged?: boolean;
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
@@ -133,6 +133,8 @@ function makeApi(
       handlers = next;
       return vi.fn();
     }),
+    // No Model Hub record: the model field offers no Add model exit.
+    readModelHubAgentCatalogForModelPicker: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -1492,9 +1494,10 @@ describe('AgentsPage reconnect reconciliation', () => {
   });
 
   it("offers the Model Hub from a Hub backend's model list, and reads the list again on return", async () => {
-    modelCatalog = { models: ['gpt-hub'], hubManaged: true };
+    modelCatalog = { models: ['gpt-hub'] };
     const initial = brief('agent-a', 'description');
     const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')));
+    api.readModelHubAgentCatalogForModelPicker.mockResolvedValue({ backend: 'codex', mode: 'hub' });
     apiRef.current = api;
     const LocationProbe = () => {
       const location = useLocation();
@@ -1524,7 +1527,7 @@ describe('AgentsPage reconnect reconciliation', () => {
     // cmdk scrolls its highlighted row into view; jsdom implements no scrolling.
     Element.prototype.scrollIntoView = vi.fn();
     fireEvent.click(screen.getByRole('combobox'));
-    fireEvent.click(screen.getByText('chat.picker.addModel'));
+    fireEvent.click(await screen.findByText('chat.picker.addModel'));
     expect(screen.getByTestId('location').textContent).toBe('/settings/models?manage=codex');
   });
 

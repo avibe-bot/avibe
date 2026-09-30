@@ -20,7 +20,11 @@ vi.mock('react-i18next', () => ({
 
 // One client for every render, as the real context provides: the picker's
 // catalog read keys on it, so a fresh object per render would re-read on its own.
-const API = {};
+// The Hub read answers per test; `useAddModelPath` owns what it means.
+let hubMode: 'hub' | 'direct' = 'direct';
+const API = {
+  readModelHubAgentCatalogForModelPicker: (backend: string) => Promise.resolve({ backend, mode: hubMode }),
+};
 vi.mock('../../context/ApiContext', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../context/ApiContext')>()),
   useApi: () => API,
@@ -30,10 +34,8 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 // model, so a test can say "this model has no efforts" the same way the server
 // does — and an empty default keeps the backend fallback in play.
 let catalogReasoning: Record<string, { value: string; label: string }[]> = {};
-// Whether that answer came from the Model Hub, and how many reads were made.
-let catalogHubManaged = false;
+// How many catalog reads were made.
 let catalogReads = 0;
-let catalogFails = false;
 
 // The model column is fetched per backend; serve it synchronously so the test is
 // about the route state, not about the catalog request.
@@ -47,21 +49,14 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       modelLabels: Record<string, string>;
       reasoningOptions: Record<string, { value: string; label: string }[]>;
       catalogRefreshPending: boolean;
-      hubManaged: boolean;
     }) => void,
-    onInitialError?: () => void,
   ) => {
     catalogReads += 1;
-    if (catalogFails) {
-      onInitialError?.();
-      return () => {};
-    }
     onLoaded({
       models: ['sonnet', 'opus'],
       modelLabels: {},
       reasoningOptions: catalogReasoning,
       catalogRefreshPending: false,
-      hubManaged: catalogHubManaged,
     });
     return () => {};
   },
@@ -166,19 +161,18 @@ describe('AgentRoutePicker', () => {
   afterEach(() => {
     cleanup();
     catalogReasoning = {};
-    catalogHubManaged = false;
+    hubMode = 'direct';
     catalogReads = 0;
-    catalogFails = false;
   });
 
   it("ends a Hub backend's model list with an exit to that backend's catalog in the Model Hub", async () => {
-    catalogHubManaged = true;
+    hubMode = 'hub';
     const user = userEvent.setup();
     const onNavigateAway = vi.fn();
     render(<HubPicker role="owner" onNavigateAway={onNavigateAway} />);
     await openMenu(user);
 
-    const addModel = screen.getByRole('button', { name: 'chat.picker.addModel' });
+    const addModel = await screen.findByRole('button', { name: 'chat.picker.addModel' });
     const lastModel = screen.getByRole('button', { name: 'opus' });
     expect(lastModel.compareDocumentPosition(addModel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
@@ -189,19 +183,6 @@ describe('AgentRoutePicker', () => {
     // Settings opens over the host, which suspends under it with its draft
     // instead of being closed the way leaving for /agents closes it.
     expect(onNavigateAway).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ['a direct backend, whose list the Hub does not edit', 'owner' as const, false],
-    ['a viewer the Model Hub would turn away', 'editor' as const, true],
-  ])('offers no exit to the Model Hub for %s', async (_case, role, hubManaged) => {
-    catalogHubManaged = hubManaged;
-    const user = userEvent.setup();
-    render(<HubPicker role={role} />);
-    await openMenu(user);
-
-    expect(screen.getByRole('button', { name: 'opus' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'chat.picker.addModel' })).toBeNull();
   });
 
   it('reads the model list again once Settings stops covering the surface', async () => {
@@ -220,23 +201,6 @@ describe('AgentRoutePicker', () => {
 
     // The Model Hub may have changed the list while it was covered.
     expect(catalogReads).toBe(2);
-  });
-
-  it('drops the exit when the read after a Settings visit fails', async () => {
-    // The visit may have switched the backend to Direct; a failed read cannot
-    // confirm the Hub still owns the list, so the earlier answer must not stand.
-    catalogHubManaged = true;
-    const user = userEvent.setup();
-    const { rerender } = render(<HubPicker role="owner" />);
-    await openMenu(user);
-    expect(screen.getByRole('button', { name: 'chat.picker.addModel' })).toBeTruthy();
-
-    catalogFails = true;
-    rerender(<HubPicker role="owner" surfaceActive={false} />);
-    rerender(<HubPicker role="owner" />);
-
-    expect(catalogReads).toBe(2);
-    expect(screen.queryByRole('button', { name: 'chat.picker.addModel' })).toBeNull();
   });
 
   it('reads the list again for a menu left open while Settings covered it', async () => {

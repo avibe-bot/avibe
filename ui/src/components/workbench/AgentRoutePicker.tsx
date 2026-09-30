@@ -102,7 +102,6 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const [reasoningByBackend, setReasoningByBackend] = useState<
     Record<string, Record<string, ReasoningOption[]>>
   >({});
-  const [hubManagedByBackend, setHubManagedByBackend] = useState<Record<string, boolean>>({});
   const loadedModelBackendsRef = useRef<Set<string>>(new Set());
   const surfaceActive = useRouteSurfaceActive();
   const [loadingModels, setLoadingModels] = useState(false);
@@ -218,19 +217,16 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     const cancel = loadBackendModelsWithRefresh(
       api,
       backend,
-      ({ models, modelLabels, reasoningOptions, catalogRefreshPending, hubManaged }) => {
+      ({ models, modelLabels, reasoningOptions, catalogRefreshPending }) => {
         reloadOnNextOpen = Boolean(catalogRefreshPending);
         setReasoningByBackend((prev) => ({ ...prev, [backend]: reasoningOptions ?? {} }));
         setModelsByBackend((prev) => ({ ...prev, [backend]: models }));
         setModelLabelsByBackend((prev) => ({ ...prev, [backend]: modelLabels ?? {} }));
-        setHubManagedByBackend((prev) => ({ ...prev, [backend]: Boolean(hubManaged) }));
         setLoadingModels(false);
       },
       () => {
         loadedBackends.delete(backend);
         setModelsByBackend((prev) => ({ ...prev, [backend]: [] }));
-        // A failed read says nothing about the Hub; an earlier answer may be stale.
-        setHubManagedByBackend((prev) => ({ ...prev, [backend]: false }));
         setLoadingModels(false);
       },
     );
@@ -248,7 +244,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const models = modelsByBackend[backend] ?? [];
   const modelLabels = modelLabelsByBackend[backend] ?? {};
   const backendReasoning = reasoningByBackend[backend] ?? EMPTY_REASONING_OPTIONS;
-  const addModelPath = useAddModelPath(backend, hubManagedByBackend[backend]);
+  const addModelPath = useAddModelPath(backend, open);
   // Show the search field only when the list is long enough to warrant it, so
   // claude/codex (a handful of models) stay uncluttered.
   const showModelSearch = models.length > 8;
@@ -399,8 +395,11 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             />
           </RouteColumn>
 
-          {/* Column 2 — Model (lazy-loaded for the active backend) */}
-          <RouteColumn title={t('chat.picker.model')}>
+          {/* Column 2 — Model (lazy-loaded for the active backend). Its own
+              scroll box on phones too, where the columns stack: the sticky search
+              and Add model rows pin to the nearest scroll box, and a column that
+              never scrolls would leave them at the far ends of a long list. */}
+          <RouteColumn title={t('chat.picker.model')} className="max-h-[45vh]">
             {showModelSearch && (
               <div className="sticky top-0 z-10 -mx-1.5 mb-1 bg-panel px-1.5 pb-1 pt-0.5">
                 <div className="flex items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 focus-within:border-cyan/50">
@@ -487,8 +486,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   );
 };
 
-const RouteColumn: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
-  <div className="flex min-w-0 flex-col overflow-y-auto p-1.5 sm:max-h-[320px]">
+const RouteColumn: React.FC<{ title: string; className?: string; children: React.ReactNode }> = ({ title, className, children }) => (
+  <div className={clsx('flex min-w-0 flex-col overflow-y-auto p-1.5 sm:max-h-[320px]', className)}>
     <div className="px-2 pb-1 pt-0.5 text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{title}</div>
     {children}
   </div>

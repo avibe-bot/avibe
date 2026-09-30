@@ -1,8 +1,11 @@
+import { useEffect, useState } from 'react';
+
 import { routeableCatalogModelIds } from '../components/settings/models/backendCatalog';
 import { modelHubCatalogPath } from '../components/settings/models/modelHubRoutes';
 import type { AgentSupply } from '../components/settings/models/types';
-import { ApiError, type ApiContextType } from '../context/ApiContext';
+import { ApiError, useApi, type ApiContextType } from '../context/ApiContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
+import { useRouteSurfaceActive } from './routeSurfaceActivity';
 
 export interface BackendModels {
   /** Selectable model identifiers for the backend. */
@@ -13,8 +16,6 @@ export interface BackendModels {
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
   /** True while a background remote-catalog refresh may produce a newer snapshot. */
   catalogRefreshPending?: boolean;
-  /** True when the Model Hub supplies this backend, so its list is edited there. */
-  hubManaged?: boolean;
 }
 
 const CATALOG_REFRESH_RETRY_DELAY_MS = 3_500;
@@ -55,7 +56,7 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
       ? []
       : row.reasoning_efforts.map((effort) => ({ value: effort, label: effort }));
   }
-  return { models, modelLabels, reasoningOptions, hubManaged: true };
+  return { models, modelLabels, reasoningOptions };
 };
 
 // Single source of truth for "list the selectable models for a backend",
@@ -75,19 +76,8 @@ export async function fetchBackendModels(
   api: ApiContextType,
   backend: string,
 ): Promise<BackendModels> {
-  const agent = await api.readModelHubAgentCatalogForModelPicker(backend);
-  const hub = hubCatalogModels(agent, backend);
+  const hub = hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend);
   if (hub) return hub;
-  const native = await fetchNativeBackendModels(api, backend);
-  // A Hub backend whose catalog has not been written yet still lists natively,
-  // but its list is already the Hub's to edit.
-  return isHubAgent(agent, backend) ? { ...native, hubManaged: true } : native;
-}
-
-async function fetchNativeBackendModels(
-  api: ApiContextType,
-  backend: string,
-): Promise<BackendModels> {
   if (backend === 'claude') {
     const res = await api.claudeModels();
     return {
@@ -158,13 +148,34 @@ async function fetchNativeBackendModels(
 }
 
 /**
- * Where a model picker's "Add model" entry leads, or null when it shows none.
- * Only a Model Hub backend has a catalog to add to, and the Model Hub is an
- * Instance Owner surface that sends anyone else back home.
+ * Where a model picker's "Add model" entry leads, or null when it shows none:
+ * only a Model Hub backend has a catalog to add to, and the Model Hub is an
+ * Instance Owner surface that sends anyone else home.
+ *
+ * The one owner of that answer. It comes from a read made while the surface is
+ * showing and is dropped the moment it may be stale — the surface is covered
+ * (Settings may switch the backend to Direct), the backend changes, or `enabled`
+ * turns off — so no exit outlives the read that justified it, and a failed read
+ * shows none. `enabled` lets a picker read only while its menu is open.
  */
-export function useAddModelPath(backend: string, hubManaged: boolean | undefined): string | null {
+export function useAddModelPath(backend: string, enabled = true): string | null {
+  const api = useApi();
   const { capabilities } = useInstanceAuthorization();
-  return backend && hubManaged && capabilities.can_manage_instance ? modelHubCatalogPath(backend) : null;
+  const surfaceActive = useRouteSurfaceActive();
+  const readable = enabled && surfaceActive && Boolean(backend) && capabilities.can_manage_instance;
+  const [hubBackend, setHubBackend] = useState<string | null>(null);
+  useEffect(() => {
+    if (!readable) return;
+    let cancelled = false;
+    void api.readModelHubAgentCatalogForModelPicker(backend).then((agent) => {
+      if (!cancelled && isHubAgent(agent, backend)) setHubBackend(backend);
+    });
+    return () => {
+      cancelled = true;
+      setHubBackend(null);
+    };
+  }, [api, backend, readable]);
+  return readable && hubBackend === backend ? modelHubCatalogPath(backend) : null;
 }
 
 /**

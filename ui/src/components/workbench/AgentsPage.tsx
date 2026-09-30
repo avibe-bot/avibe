@@ -1985,7 +1985,6 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
       {
         modelOptions: ComboboxOption[];
         reasoningOptions: Record<string, { value: string; label: string }[]>;
-        hubManaged?: boolean;
       }
     >
   >({});
@@ -2010,7 +2009,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   const activeModelCatalog = modelCatalogs[agent.backend];
   const modelOptions = activeModelCatalog?.modelOptions ?? [];
   const reasoningOptions = activeModelCatalog?.reasoningOptions ?? {};
-  const addModelPath = useAddModelPath(agent.backend, activeModelCatalog?.hubManaged);
+  const addModelPath = useAddModelPath(agent.backend, canEdit);
   const navigate = useNavigate();
   const surfaceActive = useRouteSurfaceActive();
 
@@ -2077,13 +2076,12 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
     return loadBackendModelsWithRefresh(
       api,
       agent.backend,
-      ({ models, modelLabels, reasoningOptions: opts, hubManaged }) => {
+      ({ models, modelLabels, reasoningOptions: opts }) => {
         setModelCatalogs((current) => ({
           ...current,
           [agent.backend]: {
             modelOptions: models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })),
             reasoningOptions: opts ?? {},
-            hubManaged,
           },
         }));
       },

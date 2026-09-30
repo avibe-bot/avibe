@@ -9,7 +9,12 @@ import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { NewAgentDialog } from './NewAgentDialog';
 
-const apiRef = vi.hoisted(() => ({ current: null as { createVibeAgent: ReturnType<typeof vi.fn> } | null }));
+const apiRef = vi.hoisted(() => ({
+  current: null as {
+    createVibeAgent: ReturnType<typeof vi.fn>;
+    readModelHubAgentCatalogForModelPicker?: ReturnType<typeof vi.fn>;
+  } | null,
+}));
 
 vi.stubGlobal('ResizeObserver', class {
   observe() {}
@@ -35,7 +40,6 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 type FakeModelCatalog = {
   models: string[];
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
-  hubManaged?: boolean;
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
@@ -76,11 +80,14 @@ afterEach(() => {
 });
 
 describe('NewAgentDialog', () => {
-  it("keeps the form while the user adds a model in the Model Hub catalog", () => {
+  it("keeps the form while the user adds a model in the Model Hub catalog", async () => {
     // Settings hides the page this dialog sits in; closing it would clear the
     // Agent the user was halfway through defining.
-    modelCatalog = { models: ['opus'], hubManaged: true };
-    apiRef.current = { createVibeAgent: vi.fn() };
+    modelCatalog = { models: ['opus'] };
+    apiRef.current = {
+      createVibeAgent: vi.fn(),
+      readModelHubAgentCatalogForModelPicker: vi.fn().mockResolvedValue({ backend: 'claude', mode: 'hub' }),
+    };
     const onClose = vi.fn();
     const LocationProbe = () => {
       const location = useLocation();
@@ -99,7 +106,7 @@ describe('NewAgentDialog', () => {
     fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
 
     fireEvent.click(screen.getByRole('combobox'));
-    fireEvent.click(screen.getByText('chat.picker.addModel'));
+    fireEvent.click(await screen.findByText('chat.picker.addModel'));
 
     expect(screen.getByTestId('location').textContent).toBe('/settings/models?manage=claude');
     expect(onClose).not.toHaveBeenCalled();

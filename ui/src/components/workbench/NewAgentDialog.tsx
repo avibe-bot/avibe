@@ -62,12 +62,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   const [error, setError] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ComboboxOption[]>([]);
   const [reasoningOptions, setReasoningOptions] = useState<Record<string, { value: string; label: string }[]>>({});
-  // Which backend the loaded list said the Model Hub supplies, so a list still
-  // loading after a backend switch never lends the previous one's answer.
-  const [hubManagedBackend, setHubManagedBackend] = useState<BackendKey | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const navigate = useNavigate();
-  const addModelPath = useAddModelPath(backend, hubManagedBackend === backend);
+  const addModelPath = useAddModelPath(backend, open);
   const surfaceActive = useRouteSurfaceActive();
 
   useEffect(() => {
@@ -93,15 +90,11 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     return loadBackendModelsWithRefresh(
       api,
       backend,
-      ({ models, modelLabels, reasoningOptions: opts, hubManaged: managed }) => {
+      ({ models, modelLabels, reasoningOptions: opts }) => {
         setModelOptions(models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })));
         setReasoningOptions(opts ?? {});
-        setHubManagedBackend(managed ? backend : null);
       },
-      () => {
-        setModelOptions([]);
-        setHubManagedBackend(null);
-      },
+      () => setModelOptions([]),
     );
   }, [backend, open, api, surfaceActive]);
 
