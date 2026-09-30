@@ -1089,6 +1089,9 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
         async def ensure_running(self):
             return None
 
+        async def ensure_directory_ready(self, directory):
+            return None
+
         async def list_messages(self, session_id, directory):
             return []
 
@@ -1288,6 +1291,9 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
 
     class _Server:
         async def ensure_running(self):
+            return None
+
+        async def ensure_directory_ready(self, directory):
             return None
 
         async def list_messages(self, session_id, directory):
@@ -3908,6 +3914,9 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
             return overlay_reservation
 
         async def ensure_running(self):
+            return None
+
+        async def ensure_directory_ready(self, directory):
             return None
 
         async def list_messages(self, session_id, directory):

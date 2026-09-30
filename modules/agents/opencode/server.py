@@ -52,6 +52,14 @@ DEFAULT_OPENCODE_HOST = "127.0.0.1"
 # A cold OpenCode process can take more than 15 seconds to load on a busy or
 # freshly provisioned host. This is a startup ceiling, not a request timeout.
 SERVER_START_TIMEOUT = 60
+# ``/global/health`` only proves the process is serving. OpenCode bootstraps a
+# per-directory instance on that directory's first request, and with any plugin
+# configured (Avibe always installs one) the bootstrap waits for OpenCode's own
+# npm install into each config directory that has no ``node_modules`` yet: about
+# a minute on a fresh host. The bootstrap keeps running inside OpenCode if the
+# client gives up, so a later request joins it. This is a readiness ceiling, not
+# a request timeout.
+DIRECTORY_BOOTSTRAP_TIMEOUT = 300
 OPENCODE_LOG_TAIL_BYTES = 2_000_000
 MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
 _USE_CURRENT_CALLER_CONTEXT_PATH = object()
@@ -227,6 +235,10 @@ class OpenCodeManagedPolicyRefreshPendingError(RuntimeError):
 
 class OpenCodeModelHubOverlayRequiredError(RuntimeError):
     """Hub mode cannot launch OpenCode until its owner configures an overlay."""
+
+
+class OpenCodeDirectoryBootstrapTimeoutError(RuntimeError):
+    """OpenCode is still bootstrapping a directory after the readiness ceiling."""
 
 
 class OpenCodeServerManager:
@@ -2137,6 +2149,28 @@ class OpenCodeServerManager:
         # Don't terminate OpenCode server on vibe-remote shutdown.
         # Let it continue running so the next vibe-remote instance can adopt it.
         logger.info("OpenCode server left running for next vibe-remote instance to adopt")
+
+    async def ensure_directory_ready(self, directory: str) -> None:
+        """Wait until OpenCode has bootstrapped its instance for ``directory``.
+
+        Any directory-scoped request waits for that bootstrap; an idempotent read
+        takes the wait so no request with side effects can time out halfway.
+        """
+        async with self._request_scope():
+            session = await self._get_http_session()
+            try:
+                async with session.get(
+                    f"{self.base_url}/path",
+                    headers={"x-opencode-directory": _percent_encode_path(directory)},
+                    timeout=aiohttp.ClientTimeout(total=DIRECTORY_BOOTSTRAP_TIMEOUT),
+                ) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        raise RuntimeError(f"OpenCode could not prepare {directory}: {resp.status} {text}")
+            except asyncio.TimeoutError as exc:
+                raise OpenCodeDirectoryBootstrapTimeoutError(
+                    f"OpenCode did not finish preparing {directory} within {DIRECTORY_BOOTSTRAP_TIMEOUT}s"
+                ) from exc
 
     async def create_session(self, directory: str, title: Optional[str] = None) -> Dict[str, Any]:
         async with self._request_scope():

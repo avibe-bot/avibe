@@ -333,6 +333,9 @@ class _StubOpenCodeServer:
             self.start_entered.set()
             await asyncio.Event().wait()
 
+    async def ensure_directory_ready(self, _directory):
+        return None
+
     async def list_messages(self, **_kwargs):
         return []
 

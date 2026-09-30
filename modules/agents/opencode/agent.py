@@ -92,6 +92,7 @@ from .poll_loop import (
     restored_session_key_from_poll_info,
 )
 from .server import (
+    OpenCodeDirectoryBootstrapTimeoutError,
     OpenCodeManagedPolicyRefreshPendingError,
     OpenCodeModelHubOverlayRequiredError,
     OpenCodePromptRejectedError,
@@ -1065,6 +1066,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             localized_key = "error.opencodePolicyRefreshPending"
         elif isinstance(error, OpenCodeRuntimeConfigInvalidError):
             localized_key = "error.opencodeRuntimeConfigInvalid"
+        elif isinstance(error, OpenCodeDirectoryBootstrapTimeoutError):
+            localized_key = "error.opencodeDirectoryBootstrapTimeout"
         if localized_key is not None:
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
@@ -1361,6 +1364,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await server.ensure_running()
             caller_context_binding_path = _caller_context_path_for_server(server)
             activation_identity = self._attach_server_activation(server)
+            await self._session_manager.ensure_working_dir(request.working_path)
+            # A healthy server may still be bootstrapping this directory (about
+            # a minute on a fresh host). Waiting here, before the ack is deleted,
+            # keeps the turn visibly in progress and leaves session creation to
+            # its ordinary request timeout.
+            await server.ensure_directory_ready(request.working_path)
         except asyncio.CancelledError:
             await self._finish_prestart_cancellation(
                 request,
@@ -1392,7 +1401,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
         try:
             await self._delete_ack(request)
-            await self._session_manager.ensure_working_dir(request.working_path)
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
                 await self._finish_prestart_cancellation(

@@ -1316,6 +1316,9 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
         async def ensure_running(self):
             return None
 
+        async def ensure_directory_ready(self, directory):
+            return None
+
         async def list_messages(self, session_id, directory):
             return []
 
@@ -1453,6 +1456,9 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
 
     class _Server:
         async def ensure_running(self):
+            return None
+
+        async def ensure_directory_ready(self, directory):
             return None
 
         async def list_messages(self, session_id, directory):
@@ -2945,6 +2951,9 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
             return "/old-avibe-home/runtime/opencode_caller_context.json"
 
         async def ensure_running(self):
+            return None
+
+        async def ensure_directory_ready(self, directory):
             return None
 
         async def list_messages(self, session_id, directory):
