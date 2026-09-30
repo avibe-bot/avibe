@@ -156,6 +156,7 @@ from .resolver import (
     source_supports_passthrough,
     source_runnable,
     RouteHop,
+    hops_passed,
     route_hops,
     turn_ordered_candidate_hops,
 )
@@ -616,8 +617,8 @@ class ResolvedInvocation:
     credential_ref: Optional[str] = None
     settlement_generation: Optional[int] = None
     verification_pending: Optional[str] = None
-    # The effective route whose walk selected this hop, in route order.
-    route_hops: tuple[RouteHop, ...] = ()
+    # Hops the admitted walk passed before this one; none of them could serve.
+    passed_hops: tuple[RouteHop, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -7735,6 +7736,7 @@ class ModelHubService:
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
         turn_left: frozenset[RouteHop] = frozenset(),
+        turn_route: tuple[RouteHop, ...] | None = None,
     ) -> InvokeHandle:
         while True:
             await self._mutation_lock.acquire()
@@ -7773,6 +7775,9 @@ class ModelHubService:
                     candidate is None
                     or candidate.source != source
                     or candidate.model_id != model_id
+                    # The hops the walk passed are read from this route, so a
+                    # reorder since selection is a new plan even for the same hop.
+                    or (turn_route is not None and route_hops(resolution) != turn_route)
                 ):
                     raise _InvocationPlanChanged
                 if self._engine_synced:
@@ -7815,6 +7820,7 @@ class ModelHubService:
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
         turn_left: frozenset[RouteHop] = frozenset(),
+        turn_route: tuple[RouteHop, ...] | None = None,
     ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
         acquired_handle: InvokeHandle | None = None
         generation: int | None = None
@@ -7861,6 +7867,7 @@ class ModelHubService:
                     on_admitted=admitted,
                     recovery_request=recovery_request,
                     turn_left=turn_left,
+                    turn_route=turn_route,
                 )
             except InvokeCancelledError as cancelled:
                 await meter_observed(cancelled.observed, None)
@@ -8060,7 +8067,7 @@ class ModelHubService:
         supply_channel: Literal["hub"] | None = None,
         attempt_observer: Optional[AttemptObserver] = None,
         recovery_request: RecoveryRequest | None = None,
-        turn_left: frozenset[RouteHop] = frozenset(),
+        turn_left: Callable[[], frozenset[RouteHop]] | None = None,
     ) -> ResolvedInvocation:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable")
@@ -8118,9 +8125,12 @@ class ModelHubService:
                 resolution = self._invocation_resolution(
                     config, cast(BackendName, backend), model_id, supply_channel,
                 )
+                # Read at every selection, so a later pass sees the hops this
+                # request and its peers have left since the request began.
+                left = turn_left() if turn_left is not None else frozenset()
                 inspection = next(
                     (
-                        hop for hop in turn_ordered_candidate_hops(resolution, turn_left)
+                        hop for hop in turn_ordered_candidate_hops(resolution, left)
                         if hop.source_id not in globally_blocked_source_ids
                     ),
                     None,
@@ -8132,6 +8142,7 @@ class ModelHubService:
             target_model = inspection.model_id
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
+            passed = hops_passed(selected_route, left, (source.id, target_model))
             verification_pending = source.verification_pending
             if source.supply_channel == "native_cli":
                 self._emit_switch(
@@ -8142,7 +8153,7 @@ class ModelHubService:
                     source=source,
                 )
                 return ResolvedInvocation(
-                    route_hops=selected_route,
+                    passed_hops=passed,
                     backend=cast(BackendName, backend),
                     requested_model_id=model_id,
                     source_id=source.id,
@@ -8187,7 +8198,8 @@ class ModelHubService:
                     supply_channel=supply_channel,
                     on_admitted=admitted,
                     recovery_request=recovery_request,
-                    turn_left=turn_left,
+                    turn_left=left,
+                    turn_route=selected_route,
                 )
             except _InvocationPlanChanged:
                 continue
@@ -8206,7 +8218,7 @@ class ModelHubService:
                     source=source,
                 )
                 return ResolvedInvocation(
-                    route_hops=selected_route,
+                    passed_hops=passed,
                     backend=cast(BackendName, backend),
                     requested_model_id=model_id,
                     source_id=source.id,
@@ -8248,7 +8260,8 @@ class ModelHubService:
                         exact_retry=True,
                         on_admitted=admitted,
                         recovery_request=recovery_request,
-                        turn_left=turn_left,
+                        turn_left=left,
+                        turn_route=selected_route,
                     )
                 except _InvocationPlanChanged:
                     if attempt_observer is not None:
@@ -8269,7 +8282,7 @@ class ModelHubService:
                         source=source,
                     )
                     return ResolvedInvocation(
-                        route_hops=selected_route,
+                        passed_hops=passed,
                         backend=cast(BackendName, backend),
                         requested_model_id=model_id,
                         source_id=source.id,
@@ -8322,7 +8335,7 @@ class ModelHubService:
                     source=source,
                 )
                 return ResolvedInvocation(
-                    route_hops=selected_route,
+                    passed_hops=passed,
                     backend=cast(BackendName, backend),
                     requested_model_id=model_id,
                     source_id=source.id,

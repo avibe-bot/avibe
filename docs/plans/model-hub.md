@@ -596,14 +596,19 @@ in exactly two cases:
 - A request's attempt on it ends in a `fallback` decision, the Source-level failure that
   makes the walk move on.
 - A request's walk passed it before the hop that served, because it could not run when
-  reached or its Source failed during that request.
+  reached or its Source failed during that request. These hops join only once the
+  request is known to be served (its outcome settles as `return`), and they are read
+  from the walk admission validated: admission treats a route that changed since
+  selection as a new plan and selects again.
 
 A request-class failure ends the request without trying another hop, so it leaves no
 hop. A failure after output has started does not move the walk on either; the Source
 health it writes decides whether a later request can run that hop.
 
 Every request of the turn walks `C` in this order: the hops the turn has not left, in
-`C` order, then the hops it has left, in `C` order, as a last resort. So a hop that
+`C` order, then the hops it has left, in `C` order, as a last resort. A request reads the
+set at every selection, so a later pass of the same request, after a recovery wait,
+continues from the hops it and its peers have left since it began. So a hop that
 recovers mid-turn serves that turn again only when no hop the turn has not left can
 serve, and a turn that has left every hop walks `C` in order. The ordering changes
 neither membership nor eligibility, so a request that one walk can serve, the other

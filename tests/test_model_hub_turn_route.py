@@ -16,8 +16,9 @@ from config.v2_config import (
     ModelHubBackendModelConfig,
     ModelHubRouteConfig,
     ModelHubRouteHopConfig,
+    ModelHubSourceStateConfig,
 )
-from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.resolver import (
     hops_passed,
     resolve_model_hub_turn,
@@ -102,6 +103,7 @@ def test_turn_walk_tries_hops_the_turn_has_not_left_first(left, cooling, expecte
     ("a", "d", ""),
 ])
 def test_hops_a_request_passed_before_it_was_served(left, served, passed):
+    """MH-ROUTING-014: only hops before the serving hop in the turn's walk are passed."""
     route = tuple(_hop(name) for name in "abc")
     assert hops_passed(route, frozenset(map(_hop, left)), _hop(served)) == tuple(map(_hop, passed))
 
@@ -112,6 +114,10 @@ class _Clock:
 
     def now(self) -> datetime:
         return NOW + timedelta(seconds=self.elapsed)
+
+    async def sleep(self, seconds: float) -> None:
+        self.elapsed += seconds
+        await asyncio.sleep(0)
 
 
 @pytest.fixture
@@ -131,7 +137,9 @@ async def runtime(tmp_path, monkeypatch):
     clock = _Clock()
     adapter = ModelHubScenarioAdapter()
     service = service_for(tmp_path, MemoryModelHubStore(config), adapter, now=clock.now)
-    service.recovery = RecoveryPolicy(now=clock.now, monotonic=lambda: clock.elapsed, jitter=lambda low, high: low)
+    service.recovery = RecoveryPolicy(
+        now=clock.now, monotonic=lambda: clock.elapsed, jitter=lambda low, high: low, sleep=clock.sleep,
+    )
     gateway = ModelHubTurnGateway(service)
     fixture = SimpleNamespace(
         adapter=adapter, service=service, gateway=gateway, clock=clock, cwd=str(tmp_path),
@@ -313,3 +321,112 @@ async def test_a_request_class_failure_does_not_move_the_turn(runtime):
     assert status == 400
     assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
     assert [invocation[0][-1] for invocation in runtime.adapter.invocations] == ["a", "a", "a"]
+
+
+async def test_a_recovery_pass_continues_the_turn_walk(runtime):
+    """MH-ROUTING-014: after waiting out a blocked chain, a request does not retry the hop it just left."""
+    # B and C cool down until the moment A's own rate-limit backoff ends.
+    for later in runtime.service.store.config.sources[1:]:
+        later.state = ModelHubSourceStateConfig(
+            status="cooldown", retry_at=(NOW + timedelta(seconds=60)).isoformat(),
+            detail_key="models.source.cooldown.server_error",
+        )
+    runtime.adapter.invoke_results.extend([RATE_LIMITED, SUCCESS])
+    turn = await runtime.router.resolve("codex", MODELS[0], process_scope=runtime.cwd, turn_id="turn-recovery-pass")
+    runtime.service.store.config.sources[0].state = ModelHubSourceStateConfig(status="standby")
+    assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+    assert runtime.clock.elapsed == 60
+    assert [invocation[0][-1] for invocation in runtime.adapter.invocations] == ["a", "b"]
+
+
+class _RequestErrorAfterBody:
+    """A handle whose request-class error is known only once its body is read."""
+
+    observed = None
+
+    def __init__(self, outcome: RawCallOutcome) -> None:
+        self._outcome = outcome
+        self._read = False
+        self._stream = self._iterate()
+
+    async def _iterate(self):
+        yield b'{"type":"error","error":{"type":"invalid_request_error"}}'
+        self._read = True
+
+    @property
+    def stream(self):
+        return self._stream
+
+    @property
+    def outcome_available(self) -> bool:
+        return self._read
+
+    async def close_stream(self) -> None:
+        await self._stream.aclose()
+
+    async def outcome(self) -> RawCallOutcome:
+        return self._outcome
+
+
+async def test_an_unserved_request_leaves_no_passed_hop(runtime):
+    """MH-ROUTING-014: hops a walk passed join the turn's set only once its request is served."""
+    runtime.service.store.config.sources[0].state = ModelHubSourceStateConfig(
+        status="cooldown", retry_at=(NOW + timedelta(seconds=60)).isoformat(),
+        detail_key="models.source.cooldown.rate_limited",
+    )
+    runtime.adapter.invoke_results.extend([SUCCESS])
+    turn = await runtime.router.resolve("codex", MODELS[0], process_scope=runtime.cwd, turn_id="turn-unserved")
+    invoke = runtime.adapter.invoke
+
+    async def request_error_after_body(source_id, model_id, request, stream, origin, *, on_admitted=None):
+        if runtime.adapter.invocations:
+            return await invoke(source_id, model_id, request, stream, origin, on_admitted=on_admitted)
+        if on_admitted is not None:
+            on_admitted()
+        runtime.adapter.invocations.append((source_id, model_id, origin))
+        return _RequestErrorAfterBody(RawCallOutcome(
+            kind=RawOutcomeKind.HTTP_ERROR, http_status=400, error_code="invalid_request_error",
+            redacted_message=None, stream_started=False, model_id=model_id, source_id=source_id,
+        ))
+
+    runtime.adapter.invoke = request_error_after_body
+    # A is cooling, so the walk passes it and B's stream ends in a request-class error.
+    status, _body = await asyncio.wait_for(_post(turn), timeout=10)
+    assert status == 400
+    assert _served_by(runtime) == "b"
+    runtime.clock.elapsed += 3600
+    assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+    assert _served_by(runtime) == "a"
+
+
+async def test_hops_passed_follow_the_route_admission_validated(runtime):
+    """MH-ROUTING-014: a route reorder between selection and admission reselects under the new route."""
+    runtime.service.store.config.sources[0].state = ModelHubSourceStateConfig(
+        status="cooldown", retry_at=(NOW + timedelta(seconds=60)).isoformat(),
+        detail_key="models.source.cooldown.rate_limited",
+    )
+    runtime.adapter.invoke_results.extend([SUCCESS, SERVER_ERROR, SUCCESS])
+    turn = await runtime.router.resolve("codex", MODELS[0], process_scope=runtime.cwd, turn_id="turn-reorder")
+    resolution = runtime.service._invocation_resolution
+    selections = []
+
+    def reorder_after_selection(*args, **kwargs):
+        result = resolution(*args, **kwargs)
+        selections.append(result)
+        if len(selections) == 2:
+            # B stays the first runnable hop, but A no longer precedes it.
+            sources = runtime.service.store.config.sources
+            runtime.service.store.config.agents["codex"].routes[MODELS[0]] = ModelHubRouteConfig(hops=tuple(
+                ModelHubRouteHopConfig(sources[index].id, UPSTREAM) for index in (1, 0, 2)
+            ))
+        return result
+
+    runtime.service._invocation_resolution = reorder_after_selection
+    assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+    assert _served_by(runtime) == "b"
+    runtime.service._invocation_resolution = resolution
+    # The admitted walk under [B, A, C] passed nothing, so when B fails, the
+    # recovered A is next rather than a hop the stale route would have passed.
+    runtime.clock.elapsed += 3600
+    assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+    assert [invocation[0][-1] for invocation in runtime.adapter.invocations[1:]] == ["b", "a"]

@@ -12,6 +12,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
+from functools import partial
 from datetime import datetime, timezone
 from typing import BinaryIO, Final, Optional
 
@@ -43,7 +44,7 @@ from .provenance import (
 )
 from .request import FORWARDED_CALLER_HEADERS, ModelHubRequest
 from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
-from .resolver import RouteHop, hops_passed, parse_model_hub_timestamp
+from .resolver import RouteHop, parse_model_hub_timestamp
 from .stream_wire import (
     ProtocolSSEState,
     ProtocolUsageReport,
@@ -193,6 +194,9 @@ class _TurnExecution:
     # the record that this turn has already been metered. A flag would only say
     # the write was started by something whose own death could still take it.
     usage_write: asyncio.Future[None] | None = None
+    # Records the hops this request's walk passed once it is known to have been
+    # served; a request that ends unserved leaves only its fallback hops.
+    on_served: Callable[[], None] | None = None
     # OpenCode owns its public tool names; the gateway may use collision-free
     # upstream aliases, but those names must never escape back to OpenCode.
     response_tool_aliases: Mapping[str, str] = field(default_factory=dict)
@@ -907,7 +911,9 @@ class ModelHubTurnGateway:
             )
 
         turn_id = terminalizer.turn_id
-        turn_left = self._turn_left.get(turn_id, {}).get(resolution_model, frozenset()) if turn_id is not None else frozenset()
+
+        def turn_left() -> frozenset[RouteHop]:
+            return self._turn_left.get(turn_id, {}).get(resolution_model, frozenset())
 
         def observe_attempt(
             source_id: str,
@@ -960,7 +966,7 @@ class ModelHubTurnGateway:
                     supply_channel="hub",
                     attempt_observer=observe_attempt,
                     recovery_observer=terminalizer.update_recovery,
-                    turn_left=turn_left,
+                    turn_left=turn_left if turn_id is not None else None,
                 )
                 # Owned before the keepalive stops, so a cancellation while it
                 # stops still closes and meters a Source stream already won.
@@ -968,9 +974,12 @@ class ModelHubTurnGateway:
                 if resolved.handle is not None and resolved.handle.stream is not None:
                     execution.handle = resolved.handle
                     resources.push_async_callback(resolved.handle.close_stream)
-                self._leave_turn_hops(terminalizer, turn_id, resolution_model, hops_passed(
-                    resolved.route_hops, turn_left, (resolved.source_id, resolved.model_id),
-                ))
+                execution.on_served = partial(
+                    self._leave_turn_hops, terminalizer, turn_id, resolution_model, resolved.passed_hops,
+                )
+                if resolved.outcome is not None:
+                    # The resolver returns an outcome only once it has classified it as served.
+                    execution.on_served()
         except ModelHubError as exc:
             turn_outcome = exc.turn_outcome
             if turn_outcome is None and exc.code == "engine_down":
@@ -1585,6 +1594,8 @@ class ModelHubTurnGateway:
             termination_origin=termination_origin,
             record_attempt=record_attempt,
         )
+        if settlement.decision is not None and settlement.decision.action == "return" and execution.on_served is not None:
+            execution.on_served()
         if termination_origin == "downstream_cancel":
             return settlement.outcome, settlement
         assert settlement.outcome is not None
