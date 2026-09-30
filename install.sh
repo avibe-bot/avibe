@@ -1154,19 +1154,20 @@ uninstalling_default_home() {
 }
 
 # Print this home's data paths: for the default home both default names, and
-# for an explicit AVIBE_HOME that home alone.
+# for an explicit AVIBE_HOME that home alone. Only a directory or a link is a
+# home; anything else under those names is not Avibe's.
 avibe_data_directories() {
     local path=""
+    local -a paths=("${AVIBE_RUNTIME_HOME%/}")
 
     if uninstalling_default_home; then
-        for path in "$HOME/.avibe" "$HOME/.vibe_remote"; do
-            if [ -e "$path" ] || [ -L "$path" ]; then
-                printf '%s\n' "$path"
-            fi
-        done
-    elif [ -e "$AVIBE_RUNTIME_HOME" ] || [ -L "$AVIBE_RUNTIME_HOME" ]; then
-        printf '%s\n' "${AVIBE_RUNTIME_HOME%/}"
+        paths=("$HOME/.avibe" "$HOME/.vibe_remote")
     fi
+    for path in "${paths[@]}"; do
+        if [ -L "$path" ] || [ -d "$path" ]; then
+            printf '%s\n' "$path"
+        fi
+    done
 }
 
 # Print a data path for the user, naming what a link points to.
@@ -1317,12 +1318,15 @@ uninstall_avibe() {
                 doomed_data+=("$item")
             fi
         done
+        local -a listing=("${launchers[@]}" "${markers[@]}")
+        if [ -e "$root" ] || [ -L "$root" ]; then listing+=("$root"); fi
+        for item in "${uv_tools[@]}"; do listing+=("$tool_dir/$item (uv tool $item)"); done
+        for item in "${doomed_data[@]}"; do listing+=("$item    (your Avibe data)"); done
         echo ""
-        echo -e "${YELLOW}This permanently deletes:${NC}"
-        for item in "${launchers[@]}" "${markers[@]}"; do echo "  $item"; done
-        if [ -e "$root" ] || [ -L "$root" ]; then echo "  $root"; fi
-        for item in "${uv_tools[@]}"; do echo "  $tool_dir/$item (uv tool $item)"; done
-        for item in "${doomed_data[@]}"; do echo "  $item    (your Avibe data)"; done
+        if [ "${#listing[@]}" -gt 0 ]; then
+            echo -e "${YELLOW}This permanently deletes:${NC}"
+            for item in "${listing[@]}"; do echo "  $item"; done
+        fi
         if [ "${#unlinked_data[@]}" -gt 0 ]; then
             echo -e "${YELLOW}It removes these links, not what they point to:${NC}"
             for item in "${unlinked_data[@]}"; do echo "  $(describe_data_path "$item")"; done
@@ -1372,7 +1376,8 @@ uninstall_avibe() {
         return 1
     fi
     if [ "$listed" != "1" ]; then
-        warn "No process list is available here, so the uninstall could not check that nothing still uses what it deletes"
+        warn "No process list is available here, so the uninstall cannot confirm that nothing still uses what it deletes. Nothing was removed."
+        return 1
     fi
     if [ "$stopped" != "1" ]; then
         if [ "${#stoppers[@]}" -gt 0 ]; then
@@ -1452,7 +1457,7 @@ uninstall_avibe() {
     echo ""
     if [ "$failed" -ne 0 ]; then
         warn "Avibe was not completely removed. See the warnings above."
-    elif [ "$PURGE_USER_DATA" = "1" ]; then
+    elif [ "${#doomed_data[@]}" -gt 0 ]; then
         success "Avibe and its data were removed."
     else
         success "Avibe was removed."

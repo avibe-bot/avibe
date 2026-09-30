@@ -664,6 +664,30 @@ def test_powershell_waits_for_a_process_using_what_it_deletes(layout, shell):
 
 
 @posix_only
+def test_a_purge_leaves_a_file_that_merely_has_a_home_name(layout):
+    shutil.rmtree(layout.avibe_home)
+    layout.avibe_home.write_text("someone else's file", encoding="utf-8")
+
+    result = _installer_shell(layout, "main --uninstall --purge --yes")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert layout.avibe_home.read_text(encoding="utf-8") == "someone else's file"
+
+
+@posix_only
+def test_uninstall_removes_nothing_when_no_process_list_is_available(installed):
+    layout, first, second, foreign, legacy_home, env = installed
+
+    # As on a system with neither ps nor /proc.
+    result = _installer_shell(layout, "process_table() { :; }\nmain --uninstall", **env)
+
+    assert result.returncode == 1
+    assert "No process list is available here" in result.stdout
+    assert "Nothing was removed." in result.stdout
+    _assert_untouched(layout, first, second, foreign, legacy_home)
+
+
+@posix_only
 def test_uninstall_names_the_pip_that_can_remove_an_avibe_it_did_not_install(layout):
     shutil.rmtree(layout.root)
     pip_launcher = _foreign(

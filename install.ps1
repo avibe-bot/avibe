@@ -1002,6 +1002,9 @@ function Get-BlockingProcesses {
             [pscustomobject]@{ Id = [int]$_.Id; Parent = 0; Text = "$($_.Path)" }
         })
     }
+    if ($processes.Count -eq 0) {
+        throw "no process list is available"
+    }
     $parents = @{}
     foreach ($process in $processes) {
         $parents[$process.Id] = $process.Parent
@@ -1090,8 +1093,10 @@ function Get-AvibeDataDirectories {
     } else {
         @($RuntimeHome.TrimEnd("\", "/"))
     }
+    # Only a directory or a link is a home; anything else under those names is not Avibe's.
     foreach ($candidate in $candidates) {
-        if (Get-DirectoryEntry $candidate) {
+        $entry = Get-DirectoryEntry $candidate
+        if ($entry -and ($entry.PSIsContainer -or ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint))) {
             $candidate
         }
     }
@@ -1281,12 +1286,15 @@ function Uninstall-Avibe {
                 $doomedData += $item
             }
         }
+        $listing = @($launchers) + @($markers)
+        if (Get-DirectoryEntry $root) { $listing += $root }
+        $listing += @($uvTools | ForEach-Object { "$(Join-Path $toolDirectory $_) (uv tool $_)" })
+        $listing += @($doomedData | ForEach-Object { "$_    (your Avibe data)" })
         Write-Host ""
-        Write-Host "This permanently deletes:" -ForegroundColor Yellow
-        foreach ($item in $launchers + $markers) { Write-Host "  $item" }
-        if (Get-DirectoryEntry $root) { Write-Host "  $root" }
-        foreach ($item in $uvTools) { Write-Host "  $(Join-Path $toolDirectory $item) (uv tool $item)" }
-        foreach ($item in $doomedData) { Write-Host "  $item    (your Avibe data)" }
+        if ($listing.Count -gt 0) {
+            Write-Host "This permanently deletes:" -ForegroundColor Yellow
+            foreach ($item in $listing) { Write-Host "  $item" }
+        }
         if ($unlinkedData.Count -gt 0) {
             Write-Host "It removes these links, not what they point to:" -ForegroundColor Yellow
             foreach ($item in $unlinkedData) { Write-Host "  $(Get-DataPathDescription $item)" }
@@ -1310,7 +1318,12 @@ function Uninstall-Avibe {
     }
     # Children of a stopped service can take a moment to exit.
     for ($attempt = 1; $attempt -le 6; $attempt++) {
-        $running = @(Get-BlockingProcesses -Paths $doomed)
+        try {
+            $running = @(Get-BlockingProcesses -Paths $doomed)
+        } catch {
+            Write-Warning "No process list is available here, so the uninstall cannot confirm that nothing still uses what it deletes. Nothing was removed."
+            return 1
+        }
         if ($running.Count -eq 0 -or $attempt -eq 6) {
             break
         }
@@ -1380,7 +1393,7 @@ function Uninstall-Avibe {
     Write-Host ""
     if ($failed) {
         Write-Warning "Avibe was not completely removed. See the warnings above."
-    } elseif ($Purge) {
+    } elseif ($doomedData.Count -gt 0) {
         Write-Success "Avibe and its data were removed."
     } else {
         Write-Success "Avibe was removed."
