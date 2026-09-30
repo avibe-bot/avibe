@@ -43,7 +43,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "claude-agent-sdk>=0.2.162",
+    # 0.2.162 bundles Claude Code 2.1.285, the first CLI that runs Sonnet 5.5.
+    # Releases from 0.2.160 on publish no win_amd64 wheel, and the sdist has no
+    # bundled CLI, so native Windows stays on the newest release with one until
+    # upstream ships it again.
+    "claude-agent-sdk>=0.2.162; sys_platform != 'win32'",
+    "claude-agent-sdk>=0.2.158,<0.2.160; sys_platform == 'win32'",
     "anyio>=4.0.0",
     "APScheduler>=3.10.4",
     "slack-sdk>=3.26.0",
