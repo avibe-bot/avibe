@@ -235,7 +235,7 @@ impl PrivateRuntimeBundle {
             .archive_sha256
             .get(..16)
             .ok_or(PrivateRuntimeError::ManifestInvalid)?;
-        let version_dir = self.install_root.join(&manifest.runtime_version);
+        let version_dir = self.trees_root.join(&manifest.runtime_version);
         if !install_slots(&version_dir, digest_prefix)
             .iter()
             .any(|slot| slot == root)
