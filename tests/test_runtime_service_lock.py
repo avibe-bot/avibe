@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vibe import runtime
@@ -23,6 +25,7 @@ def _spawned(process):
     return spawn
 
 
+@pytest.mark.fake_pids(12345, 67890)
 class RuntimeServiceLockTests(unittest.TestCase):
     def setUp(self):
         self._extra_service_pids = patch("vibe.runtime.extra_service_process_pids", return_value=[])
@@ -964,6 +967,7 @@ class ReadinessWaitIsNeverOptionalTests(unittest.TestCase):
                 )
 
 
+@pytest.mark.fake_pids(12345)
 class ServiceReadinessGateTests(unittest.TestCase):
     """What `start_service(wait_for_ready=True)` is allowed to hand back.
 

@@ -38,6 +38,10 @@ class _BrokenStdin(_FakeStdin):
         raise BrokenPipeError
 
 
+# A supervisor that never ran: every test handing one out marks its pid fake.
+_FAKE_SUPERVISOR_PID = 1234
+
+
 class _FakeProcess:
     def __init__(
         self,
@@ -45,7 +49,7 @@ class _FakeProcess:
         stdin: _FakeStdin | None = None,
         stderr: bytes = b"",
     ) -> None:
-        self.pid = 1234
+        self.pid = _FAKE_SUPERVISOR_PID
         self.returncode = 0
         self.stdin = stdin or _FakeStdin()
         self.stderr = stderr
@@ -343,6 +347,7 @@ async def test_a_teardown_that_cannot_drain_still_kills_the_command(
     )
 
 
+@pytest.mark.fake_pids(_FAKE_SUPERVISOR_PID)
 async def test_startup_pipe_break_raises_startup_error_with_raw_detail(tmp_path: Path, monkeypatch) -> None:
     process = _FakeProcess(
         stdin=_BrokenStdin(),
@@ -366,6 +371,7 @@ async def test_startup_pipe_break_raises_startup_error_with_raw_detail(tmp_path:
     assert process.stdin.closed is True
 
 
+@pytest.mark.fake_pids(_FAKE_SUPERVISOR_PID)
 async def test_spawn_uses_the_stable_supervisor_entrypoint(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -395,6 +401,7 @@ async def test_spawn_uses_the_stable_supervisor_entrypoint(tmp_path: Path, monke
     assert kwargs["stderr"] == asyncio.subprocess.PIPE
 
 
+@pytest.mark.fake_pids(_FAKE_SUPERVISOR_PID)
 async def test_spawn_can_discard_supervisor_stderr(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
 

@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from storage import message_deliveries as delivery_store
@@ -186,6 +188,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(OpenCodeRuntimeConfigInvalidError):
                     SERVER_MODULE._managed_runtime_config_content(content)
 
+    @pytest.mark.fake_pids(4321)
     async def test_start_server_reaps_a_live_process_after_cold_start_timeout(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         process = types.SimpleNamespace(pid=4321, returncode=None)
@@ -594,6 +597,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         )
         manager._start_server.assert_not_awaited()
 
+    @pytest.mark.fake_pids(4321)
     async def test_controller_probe_prepares_overlay_before_launch(self):
         from core.resource_governance import mark_controller_resource_governor
 
@@ -897,6 +901,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._start_server.assert_not_awaited()
         self.assertTrue(manager._caller_context_plugin_refresh_pending)
 
+    @pytest.mark.fake_pids(123)
     async def test_ensure_running_preserves_an_adopted_absolute_caller_context_path(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         adopted_path = "/old-avibe-home/runtime/opencode_caller_context.json"
@@ -1089,6 +1094,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events, [("retire", True, False), ("start", True)])
 
+    @pytest.mark.fake_pids(111, 222)
     async def test_ensure_running_retires_generation_when_adopted_pid_changes(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         retired = []

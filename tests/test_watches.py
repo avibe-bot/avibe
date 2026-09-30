@@ -105,6 +105,10 @@ class _BrokenStdin(_FakeStdin):
         raise BrokenPipeError
 
 
+# A supervisor that never ran: every test handing one out marks its pid fake.
+_FAKE_SUPERVISOR_PID = 1234
+
+
 class _FakeProcess:
     def __init__(
         self,
@@ -112,7 +116,7 @@ class _FakeProcess:
         stdin: _FakeStdin | None = None,
         stderr: bytes = b"",
     ) -> None:
-        self.pid = 1234
+        self.pid = _FAKE_SUPERVISOR_PID
         self.returncode = 0
         self.stdin = stdin or _FakeStdin()
         self.stderr = stderr
@@ -372,6 +376,7 @@ def test_malformed_remote_context_disables_watch_before_waiter_spawn(tmp_path: P
     assert saved.last_error == "harness_access_forbidden"
 
 
+@pytest.mark.fake_pids(_FAKE_SUPERVISOR_PID)
 def test_managed_watch_exec_uses_stable_supervisor(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     store = ManagedWatchStore(tmp_path / "watches.json")
@@ -428,6 +433,7 @@ def test_managed_watch_exec_uses_stable_supervisor(tmp_path: Path, monkeypatch) 
     }
 
 
+@pytest.mark.fake_pids(_FAKE_SUPERVISOR_PID)
 def test_managed_watch_shell_uses_stable_supervisor(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     store = ManagedWatchStore(tmp_path / "watches.json")
@@ -484,6 +490,7 @@ def test_managed_watch_shell_uses_stable_supervisor(tmp_path: Path, monkeypatch)
     }
 
 
+@pytest.mark.fake_pids(_FAKE_SUPERVISOR_PID)
 def test_managed_watch_clears_supervisor_state_when_startup_pipe_breaks(tmp_path: Path, monkeypatch) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
@@ -523,6 +530,7 @@ def test_managed_watch_clears_supervisor_state_when_startup_pipe_breaks(tmp_path
     assert service._active_process_identities == {}
 
 
+@pytest.mark.fake_pids(_FAKE_SUPERVISOR_PID)
 def test_managed_watch_localizes_supervisor_startup_failure(tmp_path: Path, monkeypatch) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     service = ManagedWatchService(
@@ -3726,6 +3734,7 @@ def test_managed_watch_service_start_retries_malformed_runtime_before_reconcile(
     assert "Unable to read prior watch runtime state" in caplog.text
 
 
+@pytest.mark.fake_pids(4321)
 def test_managed_watch_service_start_retries_unavailable_watch_list_before_reconcile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

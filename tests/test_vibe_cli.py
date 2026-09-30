@@ -868,6 +868,7 @@ def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     assert result["summary"]["warn"] >= 1
 
 
+@pytest.mark.fake_pids(1234)
 def test_status_and_doctor_use_running_checkpoint_service_state(monkeypatch):
     monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_kwargs: 1234)
     monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: False)

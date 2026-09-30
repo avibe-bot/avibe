@@ -5,6 +5,10 @@ Without it, a fixture that made ``pid_alive`` true for fake pids let a failed
 start roll back through the real ``stop_ui()``, which sent SIGTERM to pid 5678:
 on a CI runner that pid was the pytest process itself, and the shard died with
 exit code 143.
+
+The same guard bounds the product's process lookups. A desktop start that read
+fake pid 1234's environment through psutil was refused on the one runner where a
+root process held 1234, and passed everywhere else.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import psutil
 import pytest
 
 from tests.conftest import _REAL_OS_KILL
+from vibe import runtime
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="the guard is POSIX-only; see tests/conftest.py")
 
@@ -246,3 +251,68 @@ def test_signal_zero_still_probes_any_pid(stranger):
 def test_the_opt_out_marker_delivers_a_signal_the_guard_would_refuse(stranger):
     os.kill(stranger, signal.SIGTERM)
     assert _wait_until_gone(stranger)
+
+
+def _free_pid() -> int:
+    """A pid nothing holds right now, below every pid limit, so the guard is what answers."""
+
+    for pid in range(99_998, 1, -1):
+        try:
+            _REAL_OS_KILL(pid, 0)
+        except ProcessLookupError:
+            return pid
+        except PermissionError:
+            continue
+    pytest.skip("every pid below 99999 is taken")
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        pytest.param(runtime.process_create_time, id="psutil.Process"),
+        pytest.param(runtime.pid_alive, id="signal-0-probe"),
+    ],
+)
+@pytest.mark.parametrize("holder", ["a-stranger", "nothing"])
+def test_a_product_lookup_of_a_pid_the_test_did_not_start_fails_whatever_holds_it(
+    request, lookup, holder, _foreign_signal_guard
+):
+    # Failing while nothing holds the pid is what makes a fake pid fail on every
+    # machine, instead of only where a real process happens to hold it.
+    pid = request.getfixturevalue("stranger") if holder == "a-stranger" else _free_pid()
+    with pytest.raises(pytest.fail.Exception, match="neither started nor found by listing"):
+        lookup(pid)
+    _foreign_signal_guard.violations.clear()
+
+
+@pytest.mark.fake_pids(1234)
+def test_a_fake_pid_names_no_process_on_any_machine():
+    # Pid 1234 was a root process on the runner where the desktop start was refused.
+    assert runtime.process_create_time(1234) is None
+    assert runtime.pid_alive(1234) is False
+    assert 1234 not in psutil.pids()
+
+
+def test_a_fake_pid_hides_the_process_holding_it_and_receives_no_signal(stranger, _foreign_signal_guard):
+    _foreign_signal_guard.fake_pids = frozenset({stranger})
+
+    assert runtime.process_create_time(stranger) is None
+    assert runtime.pid_alive(stranger) is False
+    with pytest.raises(ProcessLookupError):
+        os.kill(stranger, signal.SIGTERM)
+    assert _foreign_signal_guard.violations == []
+
+    _foreign_signal_guard.fake_pids = frozenset()
+    time.sleep(0.2)
+    assert _alive(stranger), "a signal to a fake pid reached the process holding it"
+
+
+def test_a_process_the_test_started_keeps_its_pid_when_it_is_marked_fake(_foreign_signal_guard):
+    child = subprocess.Popen(_SLEEP)
+    try:
+        _foreign_signal_guard.fake_pids = frozenset({child.pid})
+        assert runtime.process_create_time(child.pid) is not None
+        assert runtime.pid_alive(child.pid) is True
+    finally:
+        child.kill()
+        child.wait(timeout=10)

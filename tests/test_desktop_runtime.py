@@ -5,6 +5,7 @@ import io
 import json
 import os
 import socket
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -1342,6 +1343,7 @@ def test_ready_rejects_an_invalid_bundled_ui_identity(monkeypatch):
 def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
     monkeypatch,
     capsys,
+    request,
 ):
     """The reused-service path must start only the missing UI and become adoptable."""
 
@@ -1353,19 +1355,28 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
     spawned = []
 
     monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "a" * 64)
+    # The reused Controller is this Runtime's: a live process carrying its id,
+    # which the start's claim reads before it reuses anything.
+    controller = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+    def stop_controller():
+        controller.kill()
+        controller.wait(timeout=10)
+
+    request.addfinalizer(stop_controller)
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args: None)
     monkeypatch.setattr(cli, "_in_ssh_session", lambda: False)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
-    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: 1234)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: controller.pid)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
     monkeypatch.setattr(cli, "_open_browser", lambda _url: pytest.fail("browser is disabled"))
 
     def reused_service(**kwargs):
-        kwargs["start_info"].capture(1234, reused=True)
-        return 1234
+        kwargs["start_info"].capture(controller.pid, reused=True)
+        return controller.pid
 
     monkeypatch.setattr(cli.runtime, "start_service", reused_service)
     monkeypatch.setattr(
