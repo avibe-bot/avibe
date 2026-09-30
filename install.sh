@@ -1077,8 +1077,9 @@ process_table() {
                     break
                 fi
             done 2>/dev/null < "$dir/status"
-            printf '%s %s %s %s\n' "${dir#/proc/}" "$ppid" "$(readlink "$dir/exe" 2>/dev/null)" \
-                "$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null)"
+            value="$(readlink "$dir/exe" 2>/dev/null)"
+            printf '%s %s %s%s\n' "${dir#/proc/}" "$ppid" "$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null)" \
+                "${value:+ ($value)}"
         done
         return 0
     fi
@@ -1135,7 +1136,7 @@ blocking_processes() {
                 if ((pid in own) || (pid in descendants)) continue
                 text = command[pid] " "
                 for (j = 1; j <= count; j++) {
-                    if (paths[j] != "" && (index(text, paths[j] "/") || index(text, paths[j] " "))) {
+                    if (paths[j] != "" && (index(text, paths[j] "/") || index(text, paths[j] " ") || index(text, paths[j] ")"))) {
                         print pid " " command[pid]
                         break
                     }
@@ -1193,6 +1194,25 @@ describe_data_path() {
     else
         printf '%s\n' "$1"
     fi
+}
+
+# Print the physical path of <base>[/<rel>] for deleting it, when that cannot
+# go through a link: <base> itself and every step below it are real
+# directories, whatever its ancestors are. Every directory the uninstaller
+# deletes goes through here. Returns 2 with the resolved path when the spelled
+# path goes through a link, and 1 when it names no directory.
+verified_directory() {
+    local base="$1"
+    local rel="${2:-}"
+    local logical=""
+    local parent=""
+    local actual=""
+
+    logical="$(CDPATH= cd -L -- "$base" 2>/dev/null && pwd -L)" || return 1
+    parent="$(CDPATH= cd -P -- "$(dirname -- "$logical")" 2>/dev/null && pwd -P)" || return 1
+    actual="$(CDPATH= cd -P -- "$base${rel:+/$rel}" 2>/dev/null && pwd -P)" || return 1
+    printf '%s\n' "$actual"
+    [ "$actual" = "${parent%/}/$(basename -- "$logical")${rel:+/$rel}" ] || return 2
 }
 
 # Whether an explicit AVIBE_HOME shows it is an Avibe home. The installer and
@@ -1294,7 +1314,9 @@ uninstall_avibe() {
     local -a markers=()
     local -a uv_tools=()
     local -a data=()
+    local target=""
     local -a doomed_data=()
+    local -a doomed_physical=()
     local -a unlinked_data=()
     local -a running=()
 
@@ -1338,8 +1360,13 @@ uninstall_avibe() {
             elif path_holds_home "$item"; then
                 warn "Refusing to purge $item: it holds your home directory. Nothing was removed."
                 return 1
+            elif ! target="$(verified_directory "$item")"; then
+                warn "Refusing to purge $item: it resolves through a link to ${target:-nothing}. Nothing was removed."
+                echo "  Name the home without the link, or delete what it names by hand if it is yours."
+                return 1
             else
                 doomed_data+=("$item")
+                doomed_physical+=("$target")
             fi
         done
         local -a listing=("${launchers[@]}" "${markers[@]}")
@@ -1436,6 +1463,10 @@ uninstall_avibe() {
                 break
             fi
         done
+        local physical_root=""
+        if [ -z "$left" ] && ! physical_root="$(verified_directory "$AVIBE_RUNTIME_HOME" runtime/install-generations)"; then
+            left="$root resolves through a link to ${physical_root:-nothing}, and the uninstaller never deletes through a link"
+        fi
         for step in "${launchers[@]}"; do
             if [ -z "$left" ] && { [ -e "$step" ] || [ -L "$step" ]; }; then
                 left="$step could not be removed, and removing the root would leave it dangling"
@@ -1445,7 +1476,7 @@ uninstall_avibe() {
             warn "Left $root in place: $left."
             echo "  If it is yours, remove it with: rm -rf -- $(printf '%q' "$(physical_path "$root")")"
             failed=1
-        elif rm -rf -- "$root" 2>/dev/null && [ ! -e "$root" ] && [ ! -L "$root" ]; then
+        elif rm -rf -- "$physical_root" 2>/dev/null && [ ! -e "$physical_root" ] && [ ! -L "$physical_root" ]; then
             success "Removed $root"
         else
             warn "Could not remove $root"
@@ -1469,7 +1500,6 @@ uninstall_avibe() {
 
     if [ "$PURGE_USER_DATA" = "1" ]; then
         local -a kept_targets=()
-        local target=""
         for item in "${unlinked_data[@]}"; do
             target="$(readlink "$item" 2>/dev/null)"
             case "$target" in
@@ -1484,11 +1514,13 @@ uninstall_avibe() {
                 failed=1
             fi
         done
-        for item in "${doomed_data[@]}"; do
+        local index=0
+        for index in "${!doomed_data[@]}"; do
+            item="${doomed_physical[$index]}"
             if rm -rf -- "$item" 2>/dev/null && [ ! -e "$item" ] && [ ! -L "$item" ]; then
-                success "Deleted $item"
+                success "Deleted ${doomed_data[$index]}"
             else
-                warn "Could not delete $item"
+                warn "Could not delete ${doomed_data[$index]}"
                 failed=1
             fi
         done

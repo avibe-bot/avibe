@@ -663,6 +663,61 @@ def test_powershell_waits_for_a_process_using_what_it_deletes(layout, shell):
     assert using.pid in pids and mentioning.pid not in pids
 
 
+def _spelled_home(layout: Layout, spelling: str) -> tuple[str, Path]:
+    """Return an AVIBE_HOME spelling and the physical home it reaches."""
+    def home_at(path: Path) -> Path:
+        (path / "runtime" / "install-generations" / "g").mkdir(parents=True)
+        (path / "state").mkdir()
+        return path
+
+    if spelling == "linked-ancestor":
+        # The home is a real directory under a linked parent, as with /home -> /var/home.
+        real = home_at(layout.tmp / "var-home" / "instance")
+        _symlink(layout.tmp / "home-link", real.parent)
+        return str(layout.tmp / "home-link" / "instance"), real
+    if spelling == "dot-dot-through-a-link":
+        # Spelled x/../instance, where x is a link: bash reads it as one directory,
+        # and the kernel resolves another.
+        home_at(layout.tmp / "sub" / "instance")
+        reached = home_at(layout.tmp / "elsewhere" / "instance")
+        (layout.tmp / "elsewhere" / "deep").mkdir()
+        _symlink(layout.tmp / "sub" / "x", layout.tmp / "elsewhere" / "deep")
+        return str(layout.tmp / "sub" / "x" / ".." / "instance"), reached
+    real = home_at(layout.tmp / "instance")
+    link = _symlink(layout.tmp / "instance-link", real)
+    suffix = {"trailing-dot": "/.", "double-slash": "//", "trailing-slash": "/"}[spelling]
+    return f"{link}{suffix}", real
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "spelling, succeeds",
+    [
+        ("trailing-dot", False),
+        ("double-slash", False),
+        ("trailing-slash", False),
+        ("dot-dot-through-a-link", False),
+        ("linked-ancestor", True),
+    ],
+)
+@pytest.mark.parametrize("options", ["--uninstall", "--uninstall --purge --yes"])
+def test_uninstall_deletes_directories_only_by_their_verified_physical_path(layout, spelling, succeeds, options):
+    avibe_home, reached = _spelled_home(layout, spelling)
+    purge = "--purge" in options
+
+    result = _installer_shell(layout, f"main {options}", AVIBE_HOME=avibe_home)
+
+    if succeeds:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (reached / "runtime" / "install-generations").exists()
+        assert reached.exists() is not purge
+        return
+    assert result.returncode == 1
+    # The directory the spelling reaches keeps everything.
+    assert (reached / "runtime" / "install-generations" / "g").is_dir()
+    assert (reached / "state").is_dir()
+
+
 @posix_only
 def test_a_purge_unlinks_an_explicit_home_named_with_trailing_slashes(layout):
     target = layout.tmp / "instance"
@@ -794,7 +849,8 @@ def test_uninstall_waits_for_a_process_started_by_a_relative_path(installed):
         process.wait()
 
     assert result.returncode == 1
-    assert f"  pid {process.pid} {binary}" in result.stdout
+    # The command line shows only ./cloudflared; the executable names the generation.
+    assert f"  pid {process.pid} ./cloudflared 60 ({binary})" in result.stdout
     _assert_untouched(layout, first, second, foreign, legacy_home)
 
 
