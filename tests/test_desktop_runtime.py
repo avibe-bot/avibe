@@ -1356,14 +1356,22 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
 
     monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ID", "a" * 64)
     # The reused Controller is this Runtime's: a live process carrying its id,
-    # which the start's claim reads before it reuses anything.
-    controller = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    # which the start's claim reads before it reuses anything. Popen can return
+    # while the child is still inside execve, before the kernel has published its
+    # environment, so the test waits for the line it prints once it runs.
+    controller = subprocess.Popen(
+        [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(60)"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
 
     def stop_controller():
         controller.kill()
         controller.wait(timeout=10)
+        controller.stdout.close()
 
     request.addfinalizer(stop_controller)
+    assert controller.stdout.readline() == "ready\n"
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args: None)
