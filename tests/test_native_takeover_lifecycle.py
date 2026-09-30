@@ -258,6 +258,10 @@ async def test_guard_fails_closed_when_interruption_does_not_settle(failure, cod
     coordinator._refresh.assert_awaited_once_with("codex", True)
     controller.agent_service.agents["codex"].retire_for_native_migration.assert_not_awaited()
     assert admissions == turns == set()
+    # Deferred turns resume only on a runtime that was actually refreshed.
+    controller.session_turns.end_backend_drain.assert_awaited_once_with(
+        "codex", resume_deferred=failure != "teardown",
+    )
 
 
 @pytest.mark.asyncio

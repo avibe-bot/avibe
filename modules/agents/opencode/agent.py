@@ -1226,11 +1226,18 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         """
         cancelled: list[asyncio.Task] = []
         for base_session_id, task in list(self._active_requests.items()):
+            if task.done():
+                continue
+            state = self._steering_states.get(base_session_id)
+            if state is not None and state.task is task:
+                state.closing = True
             self._interrupted_request_tasks.add(task)
             task.add_done_callback(self._interrupted_request_tasks.discard)
-            # No native abort: the teardown that follows ends the native run.
-            if await self._abort_active_request(base_session_id, task, None, cancel_before_abort=True):
-                cancelled.append(task)
+            # Cancel without the steering lock, which the task itself may hold
+            # across a native call, and without a native abort: the teardown
+            # that follows ends the native run.
+            task.cancel()
+            cancelled.append(task)
         if cancelled:
             # Bounded like force_cancel_backend_turns: a stuck cleanup must not
             # hold the teardown, and retirement does not depend on this wait.

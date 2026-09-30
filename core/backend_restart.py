@@ -516,6 +516,7 @@ class BackendRestartCoordinator:
         """
         targets = self._migration_targets(backends)
         closed: list[str] = []
+        restarts: dict[str, asyncio.Task[None]] = {}
         async with AsyncExitStack() as locks:
             for backend in targets:
                 await locks.enter_async_context(self._request_locks.setdefault(backend, asyncio.Lock()))
@@ -537,11 +538,9 @@ class BackendRestartCoordinator:
                 # reopens admission only after the teardown. The switch waits
                 # for it at most the settle window, and leaving early, by
                 # timeout or cancellation, never cuts the teardown short.
-                restarts = {
-                    backend: self._start_restart(backend, drain_timeout=0)
-                    for backend in targets
-                    if await self._has_active_turns(backend)
-                }
+                for backend in targets:
+                    if await self._has_active_turns(backend):
+                        restarts[backend] = self._start_restart(backend, drain_timeout=0)
                 loop = asyncio.get_running_loop()
                 deadline = loop.time() + min(self._drain_timeout, _INTERRUPT_SETTLE_SECONDS)
                 for backend in targets:
@@ -594,10 +593,16 @@ class BackendRestartCoordinator:
                     self._migration_auth_owners.pop(backend, None)
                 self._migration_backends.difference_update(targets)
                 for backend in closed:
-                    # A restart still tearing down reopens admission itself.
-                    if backend not in self._blocked_backends() and not self._restarting(backend):
+                    restart = restarts.get(backend)
+                    if restart is not None and not restart.done():
+                        # Still tearing down: the restart reopens admission itself.
+                        continue
+                    if backend not in self._blocked_backends():
+                        # Like the restart path, deferred turns resume only on
+                        # a runtime that was refreshed.
+                        refreshed = restart is None or (not restart.cancelled() and restart.exception() is None)
                         self.controller.agent_service.end_backend_drain(backend)
-                        await self.controller.session_turns.end_backend_drain(backend)
+                        await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)
 
     async def request_restart(self, backend: str) -> str:
         """Begin or join a restart and return without waiting for a long drain."""
@@ -791,10 +796,6 @@ class BackendRestartCoordinator:
         self._tasks[backend] = task
         task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
         return task
-
-    def _restarting(self, backend: str) -> bool:
-        task = self._tasks.get(backend)
-        return task is not None and not task.done()
 
     async def _run(self, backend: str, drain_timeout: float | None = None) -> None:
         forced = False

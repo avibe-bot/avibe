@@ -1110,17 +1110,29 @@ def test_restore_settles_incomplete_assistant_when_unknown_status_recovers_idle(
     )
 
 
-def test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll() -> None:
+@pytest.mark.parametrize("stall", ["cleanup", "steering_lock"])
+def test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll(stall) -> None:
     """MH-MIG-009: switching to the gateway interrupts a restored poll. The
-    teardown must not wait on a cancellation cleanup that hangs, or the switch
-    spins again; and once the poll does settle it must retire its durable
-    record, or the next restart restores a run the user chose to interrupt."""
+    teardown must not wait on the poll, whether its cancellation cleanup hangs
+    or it holds its steering lock across a native call; and once the poll does
+    settle it must retire its durable record, or the next restart restores a
+    run the user chose to interrupt."""
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    if stall == "steering_lock":
+        poll.processing_indicator = {
+            "platform": "avibe",
+            "opencode_native_steering": {"target_session_id": "ses_wb", "logical_turn_id": "logical-restored"},
+        }
     active_polls = {"oc-1": poll}
     agent, _, removed, _ = _build_agent(active_polls)
     polling, release = asyncio.Event(), asyncio.Event()
 
     async def run_restored_poll_loop(poll_info):
+        if stall == "steering_lock":
+            # A native call made through the steering-aware server holds the lock.
+            async with agent._steering_states["ses_wb"].lock:
+                polling.set()
+                await asyncio.Event().wait()
         polling.set()
         try:
             await asyncio.Event().wait()
@@ -1135,7 +1147,8 @@ def test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll() -> 
         await polling.wait()
         tasks = list(agent._active_requests.values())
         await asyncio.wait_for(agent._cancel_active_requests(), timeout=5)
-        assert active_polls == {"oc-1": poll}
+        if stall == "cleanup":
+            assert active_polls == {"oc-1": poll}
         release.set()
         await asyncio.gather(*tasks, return_exceptions=True)
 
