@@ -585,8 +585,9 @@ def declared_input_modalities(
     Exact as in ``exact_models_dev_matches``, whose preferred copy supplies
     the list. A copy describes one provider's deployment, and copies of one id
     can disagree about images. A text-only answer hides images from the model,
-    so an id whose closest copies disagree about image input has no
-    declaration here, and neither has an id no copy declares.
+    so an id is declared only when every closest copy declares its input and
+    all of them agree about images. One silent copy leaves the deployment the
+    id names unknown, so the id has no declaration here.
     """
 
     if not catalog:
@@ -596,18 +597,14 @@ def declared_input_modalities(
     for requested, closest in _closest_exact_copies(
         model_ids, catalog, vendor_map
     ).items():
-        declarations = [
-            row["input_modalities"]
-            for _rank, _provider, row in closest
-            if row["input_modalities"]
-        ]
-        if len({"image" in modalities for modalities in declarations}) != 1:
+        declarations = [row["input_modalities"] for _rank, _provider, row in closest]
+        if not all(declarations) or len(
+            {"image" in modalities for modalities in declarations}
+        ) != 1:
             continue
-        preferred = _preferred_copy(
-            closest[0][2]["model_id"], closest, vendor_map
-        )["input_modalities"]
-        if preferred:
-            declared[requested] = list(preferred)
+        declared[requested] = list(
+            _preferred_copy(closest[0][2]["model_id"], closest, vendor_map)["input_modalities"]
+        )
     return declared
 
 

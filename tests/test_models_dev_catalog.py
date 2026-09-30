@@ -376,23 +376,29 @@ def test_exact_models_dev_matches_never_borrow_a_neighbour():
 
 
 def test_declared_input_modalities_need_the_closest_copies_to_agree_on_images():
-    """A text-only answer hides images, so copies that disagree declare nothing."""
+    """A text-only answer hides images, so copies that disagree or stay silent declare nothing."""
 
     catalog = {
         "deepseek": {"models": {
             "deepseek-text": {"modalities": {"input": ["text"]}},
             "deepseek-vision": {"modalities": {"input": ["text", "image"]}},
             "contested": {"modalities": {"input": ["text"]}},
+            "half-declared": {"modalities": {"input": ["text"]}},
             "undeclared": {"name": "Undeclared"},
         }},
         "relay": {"models": {
             "deepseek-text": {"modalities": {"input": ["text", "pdf"]}},
             "contested": {"modalities": {"input": ["text", "image"]}},
+            # Silent about input: this deployment's image support is unknown.
+            "half-declared": {"modalities": {"input": ["unknown"]}},
         }},
     }
 
     declared = models_dev_catalog.declared_input_modalities(
-        ["deepseek-text", "deepseek-vision", "contested", "undeclared", "missing", "deepseek/contested"],
+        [
+            "deepseek-text", "deepseek-vision", "contested", "half-declared", "undeclared", "missing",
+            "deepseek/contested",
+        ],
         catalog,
     )
 
