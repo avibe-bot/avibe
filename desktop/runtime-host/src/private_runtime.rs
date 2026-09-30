@@ -97,6 +97,11 @@ pub enum PrivateRuntimeError {
     ArchiveInvalid,
     #[error("the private Runtime could not be installed")]
     Install(#[source] io::Error),
+    /// A link or a file where the installer needs its own directory. Replacing
+    /// it with a real directory is enough: the installer re-creates what the
+    /// directory holds.
+    #[error("{0} is a link or a file, not a directory the private Runtime owns")]
+    NotARealDirectory(PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +148,11 @@ impl PrivateRuntimeBundle {
             .get(..16)
             .ok_or(PrivateRuntimeError::ManifestInvalid)?;
         let version_dir = self.trees_root.join(&manifest.runtime_version);
+        // Everything below reads, writes and deletes inside these three, so
+        // none of them may be a link to somewhere else.
+        for directory in [&self.install_root, &self.trees_root, &version_dir] {
+            own_directory(directory)?;
+        }
         let [primary_dir, repair_dir] = install_slots(&version_dir, digest_prefix);
         for candidate in [&primary_dir, &repair_dir] {
             if path_present(candidate) {
@@ -157,7 +167,6 @@ impl PrivateRuntimeBundle {
 
         let archive_path = self.bundle_dir.join(&manifest.archive);
         verify_archive(&archive_path, &manifest)?;
-        fs::create_dir_all(&self.trees_root).map_err(PrivateRuntimeError::Install)?;
         // Both independently installed copies failing integrity validation is
         // not a dead end: the verified archive is reinstalled over the primary
         // name. A daemon may still be running from that copy, since a tree that
@@ -184,9 +193,6 @@ impl PrivateRuntimeBundle {
             validate_runtime_files(&staging, &manifest)?;
             verify_installed_tree(&staging, &manifest)?;
             write_marker(&staging, &manifest)?;
-            if let Some(parent) = install_dir.parent() {
-                fs::create_dir_all(parent).map_err(PrivateRuntimeError::Install)?;
-            }
             if replaces_primary {
                 discard_install_path(&self.trees_root, &install_dir)?;
             }
@@ -393,18 +399,29 @@ fn discard_install_path(trees_root: &Path, path: &Path) -> Result<(), PrivateRun
 }
 
 /// Whether `path` is a directory itself, not a link to one. Absent is `false`;
-/// anything else there is an error, so a caller about to delete inside a
-/// directory never follows a link out of the private install.
+/// anything else there is an error, so a caller about to write or delete inside
+/// a directory never follows a link out of the private install.
 fn real_directory(path: &Path) -> Result<bool, PrivateRuntimeError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
-        Ok(_) => Err(PrivateRuntimeError::Install(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "private Runtime directory is not a directory",
-        ))),
+        Ok(_) => Err(PrivateRuntimeError::NotARealDirectory(path.to_owned())),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(PrivateRuntimeError::Install(error)),
     }
+}
+
+/// Creates `path` if it is absent and requires it to be a real directory.
+///
+/// Its ancestors are not checked: above the install root they belong to the
+/// user and the system, and below it each level is owned on the way down.
+fn own_directory(path: &Path) -> Result<(), PrivateRuntimeError> {
+    if !real_directory(path)? {
+        fs::create_dir_all(path).map_err(PrivateRuntimeError::Install)?;
+        if !real_directory(path)? {
+            return Err(PrivateRuntimeError::NotARealDirectory(path.to_owned()));
+        }
+    }
+    Ok(())
 }
 
 /// Removes every entry of `root` except the two slots of the served id and
@@ -1030,46 +1047,84 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
-    /// Pruning deletes whatever it lists, so it lists only real directories. A
-    /// link in place of the install root, or of the macOS trees directory
-    /// inside it, would otherwise aim those deletions at the directory it
-    /// names.
+    /// The installer owns every directory from the install root down to a
+    /// version, and lists, writes and deletes inside each. A link in place of
+    /// any of them is refused by prepare and by prune, and whatever it names is
+    /// left as it was; a missing one is created as on a first install.
     #[cfg(unix)]
     #[test]
-    fn pruning_never_deletes_through_a_link() {
+    fn a_link_in_place_of_an_install_directory_is_refused() {
         use std::os::unix::fs::symlink;
 
-        let cases: &[&str] = if cfg!(target_os = "macos") {
-            &["install root", "trees directory"]
-        } else {
-            &["install root"]
-        };
-        for case in cases {
-            let root = scratch("prune-link");
+        fn names(directory: &Path) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(directory)
+                .expect("directory")
+                .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+        // An installed bundle and one of its directories, by level.
+        fn installed(
+            label: &str,
+            level: &str,
+        ) -> Option<(PathBuf, PrivateRuntimeBundle, InstalledPrivateRuntime, PathBuf)> {
+            let root = scratch(label);
             write_bundle(&root, None);
-            let outside = root.join("outside");
-            fs::create_dir_all(outside.join("documents")).expect("outside directory");
-            fs::write(outside.join("keep-me"), b"user file").expect("outside file");
             let install_root = root.join("installs");
-            if *case == "install root" {
-                symlink(&outside, &install_root).expect("linked install root");
-            }
             let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
             let active = bundle.prepare().expect("install");
-            if *case == "trees directory" {
-                let trees_root = active.root.parent().and_then(Path::parent).expect("trees root");
-                fs::rename(trees_root, root.join("moved-trees")).expect("move the trees aside");
-                symlink(&outside, trees_root).expect("linked trees directory");
+            let version_dir = active.root.parent().expect("version directory").to_owned();
+            let directory = match level {
+                "install root" => install_root.clone(),
+                "trees directory" => version_dir.parent().expect("trees directory").to_owned(),
+                _ => version_dir,
+            };
+            if level == "trees directory" && directory == install_root {
+                // Outside macOS the trees sit directly in the install root.
+                fs::remove_dir_all(root).ok();
+                return None;
+            }
+            Some((root, bundle, active, directory))
+        }
+
+        for level in ["install root", "trees directory", "version directory"] {
+            for operation in ["prepare", "prune"] {
+                let Some((root, bundle, active, directory)) = installed("install-link", level) else {
+                    continue;
+                };
+                let outside = root.join("outside");
+                fs::create_dir_all(outside.join("documents")).expect("outside directory");
+                fs::write(outside.join("keep-me"), b"user file").expect("outside file");
+                fs::rename(&directory, root.join("moved-aside")).expect("move the directory aside");
+                symlink(&outside, &directory).expect("link in its place");
+
+                let result = match operation {
+                    "prepare" => bundle.prepare().map(|_| ()),
+                    _ => bundle.prune_superseded(&active.root),
+                };
+
+                assert!(
+                    matches!(&result, Err(PrivateRuntimeError::NotARealDirectory(path)) if *path == directory),
+                    "{level} {operation}: {result:?}"
+                );
+                assert_eq!(names(&outside), ["documents", "keep-me"], "{level} {operation}");
+                assert!(names(&outside.join("documents")).is_empty(), "{level} {operation}");
+                assert_eq!(fs::read(outside.join("keep-me")).expect("outside file"), b"user file");
+                fs::remove_dir_all(root).ok();
             }
 
-            assert!(bundle.prune_superseded(&active.root).is_err(), "{case}");
-
-            assert_eq!(
-                fs::read(outside.join("keep-me")).expect("outside file"),
-                b"user file",
-                "{case}"
+            let Some((root, bundle, _, directory)) = installed("install-missing", level) else {
+                continue;
+            };
+            fs::remove_dir_all(&directory).expect("remove the directory");
+            let reinstalled = bundle.prepare().expect("a missing directory is created");
+            assert!(!reinstalled.reused, "{level}");
+            assert!(reinstalled.python.is_file(), "{level}");
+            assert!(
+                fs::symlink_metadata(&directory).expect("created").file_type().is_dir(),
+                "{level}"
             );
-            assert!(outside.join("documents").is_dir(), "{case}");
             fs::remove_dir_all(root).ok();
         }
     }
