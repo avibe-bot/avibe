@@ -764,6 +764,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self._session_last_activity: Dict[str, float] = {}
         self._steering_states: Dict[str, _OpenCodeSteerState] = {}
         self._restored_poll_servers: Dict[asyncio.Task, _SteeringAwareOpenCodeServer] = {}
+        # Request tasks a forced refresh interrupted; a restored poll in this set
+        # retires its own durable record when it settles.
+        self._interrupted_request_tasks: set[asyncio.Task] = set()
 
     async def _get_server(self) -> OpenCodeServerManager:
         current_task = asyncio.current_task()
@@ -1221,23 +1224,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         owner, so without this they would poll the stopped server until their
         failure limit and report a transport error for an intended interrupt.
         """
-        cancelled: dict[asyncio.Task, str] = {}
+        cancelled: list[asyncio.Task] = []
         for base_session_id, task in list(self._active_requests.items()):
-            request_session = self._session_manager.get_request_session(base_session_id)
+            self._interrupted_request_tasks.add(task)
+            task.add_done_callback(self._interrupted_request_tasks.discard)
             # No native abort: the teardown that follows ends the native run.
             if await self._abort_active_request(base_session_id, task, None, cancel_before_abort=True):
-                cancelled[task] = request_session[0] if request_session else ""
-        if not cancelled:
-            return
-        # Like /stop, retire a durable poll only once its task has settled,
-        # however long its cancellation cleanup takes.
-        await asyncio.wait(cancelled)
-        server = self._client_manager._server_manager
-        if server is None:
-            return
-        for native_session_id in cancelled.values():
-            if native_session_id and self._active_poll_is_persisted(native_session_id):
-                await self._retire_active_poll(server, native_session_id)
+                cancelled.append(task)
+        if cancelled:
+            # Bounded like force_cancel_backend_turns: a stuck cleanup must not
+            # hold the teardown, and retirement does not depend on this wait.
+            await asyncio.wait(cancelled, timeout=2.0)
 
     async def handle_message(self, request: AgentRequest) -> None:
         lock = self._session_manager.get_session_lock(request.base_session_id)
@@ -3053,6 +3050,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     err,
                 )
         finally:
+            interrupted = current_task in self._interrupted_request_tasks
             await self._stop_caller_context_binding_renewal(
                 caller_context_binding_renewal
             )
@@ -3063,11 +3061,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     steer_state.closing = True
                 if self._steering_states.get(poll_info.base_session_id) is steer_state:
                     self._steering_states.pop(poll_info.base_session_id, None)
-            if terminal_poll_cleanup and server is not None:
+            if (terminal_poll_cleanup or interrupted) and server is not None:
                 await self._retire_active_poll(
                     server,
                     poll_info.opencode_session_id,
                 )
+            elif interrupted:
+                # Interrupted before registering a run marker: only the durable
+                # record would bring the run back after a restart.
+                self.sessions.remove_active_poll(poll_info.opencode_session_id)
             if caller_context_binding_token and not self._active_poll_is_persisted(
                 poll_info.opencode_session_id
             ):

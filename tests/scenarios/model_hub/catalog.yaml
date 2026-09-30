@@ -1275,7 +1275,7 @@ scenarios:
     related_tests:
       - tests/test_native_takeover_lifecycle.py::test_guard_fails_closed_when_interruption_does_not_settle
       - tests/test_native_takeover_lifecycle.py::test_cancelled_switch_finishes_interruption_before_reopening_admission
-      - tests/test_opencode_restore_polls.py::test_forced_refresh_retires_a_restored_poll_after_its_slow_cancellation
+      - tests/test_opencode_restore_polls.py::test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll
       - tests/test_agent_auth_service.py::AgentAuthServiceTests::test_opencode_agent_force_refresh_restarts_after_global_config_change
   - id: MH-MIG-010
     name: A refused switch to the gateway is reported where it was made and retried in place

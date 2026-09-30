@@ -1927,11 +1927,9 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             port=4096,
             request_timeout_seconds=60,
             refresh_global_config=AsyncMock(return_value=True),
-            detach_after_deferred_refresh=AsyncMock(side_effect=lambda **_kw: calls.append("detach")),
+            detach_after_deferred_refresh=AsyncMock(side_effect=lambda **_kw: calls.append(("detach", restored_poll.done()))),
             reload_runtime_config=AsyncMock(),
-            mark_run_inactive=AsyncMock(side_effect=lambda session_id: calls.append(("inactive", session_id))),
         )
-        active_polls = {"ses_restored": object()}
         # A poll restored after a restart has no turn owner to cancel it; left
         # running, it would poll the stopped server and surface a transport
         # error for an interruption the user chose.
@@ -1941,23 +1939,15 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         agent.controller = SimpleNamespace(config=SimpleNamespace(opencode=old_config))
         agent._client_manager = SimpleNamespace(
             reset_config=AsyncMock(return_value=previous_server),
-            _server_manager=previous_server,
         )
         agent._active_requests = {"base-restored": restored_poll}
         agent._steering_states = {}
-        agent._session_manager = SimpleNamespace(
-            get_request_session=lambda base_id: ("ses_restored", "/work", "scope") if base_id == "base-restored" else None
-        )
-        agent.sessions = SimpleNamespace(
-            get_all_active_polls=lambda: active_polls,
-            remove_active_poll=active_polls.pop,
-        )
+        agent._interrupted_request_tasks = set()
 
         await agent.refresh_runtime_config(new_config, force=True)
 
         self.assertTrue(restored_poll.cancelled())
-        self.assertEqual(calls, [("inactive", "ses_restored"), "detach"])
-        self.assertEqual(active_polls, {})
+        self.assertEqual(calls, [("detach", True)])
         previous_server.refresh_global_config.assert_not_awaited()
         previous_server.detach_after_deferred_refresh.assert_awaited_once_with(force=True)
         previous_server.reload_runtime_config.assert_awaited_once_with(
