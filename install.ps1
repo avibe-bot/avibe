@@ -786,49 +786,34 @@ function Get-DirectoryEntry {
         Select-Object -First 1
 }
 
-# The physical form of a path: every symbolic link or junction along it, at any
-# depth and through any chain, replaced by what it names. Every home and
-# launcher comparison goes through this one canonicalizer.
-function Resolve-PhysicalPath {
+# Follow a path's chain of symbolic links and junctions at the leaf, as far as
+# it goes, to the entry it finally names.
+function Resolve-LinkChain {
     param([string]$Path)
 
-    $pending = New-Object System.Collections.Generic.List[string]
-    $full = [System.IO.Path]::GetFullPath($Path)
-    $current = $null
-    $hops = 0
-    while ($true) {
-        if ($null -eq $current) {
-            $current = [System.IO.Path]::GetPathRoot($full)
-            $pending.InsertRange(0, [string[]]$full.Substring($current.Length).Split(
-                [char[]]@('\', '/'), [System.StringSplitOptions]::RemoveEmptyEntries))
-        }
-        if ($pending.Count -eq 0) {
+    for ($depth = 0; $depth -lt 20; $depth++) {
+        $entry = Get-DirectoryEntry $Path
+        if (-not $entry -or $entry.LinkType -notin @("SymbolicLink", "Junction")) {
             break
         }
-        $next = Join-Path $current $pending[0]
-        $pending.RemoveAt(0)
-        $entry = Get-DirectoryEntry $next
-        $target = if ($entry -and $entry.LinkType -in @("SymbolicLink", "Junction")) { @($entry.Target)[0] } else { $null }
-        if ($target -and $hops -lt 40) {
-            $hops++
-            $target = $target -replace '^\\(\\\?|\?\?)\\', ''
-            if (-not [System.IO.Path]::IsPathRooted($target)) {
-                $target = Join-Path $current $target
-            }
-            $full = [System.IO.Path]::GetFullPath($target)
-            $current = $null
-            continue
+        $target = @($entry.Target)[0]
+        if (-not $target) {
+            break
         }
-        $current = $next
+        $target = $target -replace '^\\(\\\?|\?\?)\\', ''
+        if (-not [System.IO.Path]::IsPathRooted($target)) {
+            $target = Join-Path (Split-Path -Parent $Path) $target
+        }
+        $Path = [System.IO.Path]::GetFullPath($target)
     }
-    return $current.TrimEnd("\", "/")
+    return $Path
 }
 
 function Test-PathInGenerationRoot {
     param([string]$Path, [string]$Root)
 
-    $prefix = (Resolve-PhysicalPath $Root) + "\"
-    return (Resolve-PhysicalPath $Path).StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+    $prefix = [System.IO.Path]::GetFullPath($Root).TrimEnd("\", "/") + "\"
+    return [System.IO.Path]::GetFullPath($Path).StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 # A file's SHA-256, or $null when it cannot be read. .NET computes it, so no
@@ -856,7 +841,7 @@ function Get-ContentHash {
 function Test-LauncherUsesInstallGenerations {
     param([string]$Launcher, [string]$Root)
 
-    if (Test-PathInGenerationRoot $Launcher $Root) {
+    if (Test-PathInGenerationRoot (Resolve-LinkChain $Launcher) $Root) {
         return $true
     }
     if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) {
@@ -977,7 +962,7 @@ function Test-UvToolOwnsItsLaunchers {
         if (-not (Get-DirectoryEntry $path)) {
             continue
         }
-        if (Test-PathInGenerationRoot $path $Environment) {
+        if (Test-PathInGenerationRoot (Resolve-LinkChain $path) $Environment) {
             continue
         }
         $own = Join-Path $Environment ("Scripts\" + (Split-Path -Leaf $path))
@@ -990,42 +975,31 @@ function Test-UvToolOwnsItsLaunchers {
     return $true
 }
 
-# Each live process that removal must wait for, as "pid command". One runs
-# from, or names on its command line, a path about to be deleted; another is
-# recorded in one of this home's pid files, which also covers a legacy install
-# whose Python lives outside every deleted path. The uninstaller's own process
-# tree never counts.
+# Each live process that removal must wait for, as "pid command": one that runs
+# from, or names on its command line, a path about to be deleted. The
+# uninstaller's own process tree never counts.
 function Get-BlockingProcesses {
-    param([string]$RuntimeHome, [string[]]$Paths)
+    param([string[]]$Paths)
 
     $needles = New-Object System.Collections.Generic.List[string]
     foreach ($path in $Paths) {
         if (-not $path) {
             continue
         }
-        foreach ($form in @([System.IO.Path]::GetFullPath($path).TrimEnd("\", "/"), (Resolve-PhysicalPath $path))) {
+        foreach ($form in @([System.IO.Path]::GetFullPath($path).TrimEnd("\", "/"), (Resolve-LinkChain $path).TrimEnd("\", "/"))) {
             if (-not $needles.Contains($form)) {
                 $needles.Add($form)
             }
         }
     }
-    $recorded = @{}
-    foreach ($pidFile in @(Get-ChildItem -LiteralPath (Join-Path $RuntimeHome "runtime") -Filter "*.pid" -File -Force -ErrorAction SilentlyContinue)) {
-        [int]$recordedPid = 0
-        $text = "$(Get-Content -LiteralPath $pidFile.FullName -Raw -ErrorAction SilentlyContinue)".Trim()
-        if ([int]::TryParse($text, [ref]$recordedPid) -and $recordedPid -gt 0) {
-            $recorded[$recordedPid] = $pidFile.FullName
-        }
-    }
     try {
         $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
-            [pscustomobject]@{ Id = [int]$_.ProcessId; Parent = [int]$_.ParentProcessId; Text = "$($_.ExecutablePath) $($_.CommandLine)"; Known = [bool]$_.CommandLine }
+            [pscustomobject]@{ Id = [int]$_.ProcessId; Parent = [int]$_.ParentProcessId; Text = "$($_.ExecutablePath) $($_.CommandLine)" }
         })
     } catch {
-        # Without WMI only executable paths are readable, so a live recorded
-        # pid counts whatever it runs.
+        # Without WMI only executable paths and no parents are readable.
         $processes = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
-            [pscustomobject]@{ Id = [int]$_.Id; Parent = 0; Text = "$($_.Path)"; Known = $false }
+            [pscustomobject]@{ Id = [int]$_.Id; Parent = 0; Text = "$($_.Path)" }
         })
     }
     $parents = @{}
@@ -1048,10 +1022,6 @@ function Get-BlockingProcesses {
     } while ($grew)
     foreach ($process in $processes) {
         if ($own.ContainsKey($process.Id) -or $descendants.ContainsKey($process.Id)) {
-            continue
-        }
-        if ($recorded.ContainsKey($process.Id) -and (-not $process.Known -or $process.Text -match "vibe|cloudflared")) {
-            "$($process.Id) $($process.Text.Trim()) (recorded in $($recorded[$process.Id]))"
             continue
         }
         $text = $process.Text + " "
@@ -1107,55 +1077,42 @@ function Stop-AvibeService {
 function Test-UninstallingDefaultHome {
     param([string]$RuntimeHome)
 
-    return -not $env:AVIBE_HOME -or
-        (Resolve-PhysicalPath $RuntimeHome) -eq (Resolve-PhysicalPath (Join-Path $env:USERPROFILE ".avibe"))
+    return -not $env:AVIBE_HOME -or $RuntimeHome.TrimEnd("\", "/") -eq (Join-Path $env:USERPROFILE ".avibe")
 }
 
-# This home's data: the runtime home, then each default name linking to it,
-# and for the default home a real legacy directory left beside it. A link to
-# anywhere else is not this home's, which Doctor reports as a wrong link.
+# This home's data paths: for the default home both default names, and for an
+# explicit AVIBE_HOME that home alone.
 function Get-AvibeDataDirectories {
     param([string]$RuntimeHome)
 
-    $runtimeDirectory = Resolve-PhysicalPath $RuntimeHome
-    if (Get-DirectoryEntry $RuntimeHome) {
-        $RuntimeHome
+    $candidates = if (Test-UninstallingDefaultHome $RuntimeHome) {
+        @((Join-Path $env:USERPROFILE ".avibe"), (Join-Path $env:USERPROFILE ".vibe_remote"))
+    } else {
+        @($RuntimeHome.TrimEnd("\", "/"))
     }
-    foreach ($candidate in @((Join-Path $env:USERPROFILE ".avibe"), (Join-Path $env:USERPROFILE ".vibe_remote"))) {
-        $entry = Get-DirectoryEntry $candidate
-        if ($candidate -eq $RuntimeHome -or -not $entry) {
-            continue
-        }
-        $directory = Resolve-PhysicalPath $candidate
-        if ($entry.LinkType -in @("SymbolicLink", "Junction")) {
-            if ($directory -eq $runtimeDirectory) {
-                $candidate
-            }
-        } elseif ($entry.PSIsContainer -and $directory -ne $runtimeDirectory -and (Test-UninstallingDefaultHome $RuntimeHome)) {
+    foreach ($candidate in $candidates) {
+        if (Get-DirectoryEntry $candidate) {
             $candidate
         }
     }
 }
 
-# What a purge deletes for the data directories: each link, then each distinct
-# directory it names. Every link here names this home.
-function Get-PurgeTargets {
-    param([string]$RuntimeHome)
+function Test-IsLink {
+    param([string]$Path)
 
-    $seen = @{}
-    foreach ($data in Get-AvibeDataDirectories $RuntimeHome) {
-        if ((Get-DirectoryEntry $data).LinkType -in @("SymbolicLink", "Junction")) {
-            $data
-        }
-        $directory = Resolve-PhysicalPath $data
-        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
-            continue
-        }
-        if (-not $seen.ContainsKey($directory.ToLowerInvariant())) {
-            $seen[$directory.ToLowerInvariant()] = $true
-            $directory
-        }
+    $entry = Get-DirectoryEntry $Path
+    return [bool]($entry -and ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+}
+
+# A data path for the user, naming what a link points to.
+function Get-DataPathDescription {
+    param([string]$Path)
+
+    $entry = Get-DirectoryEntry $Path
+    if ($entry -and ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        return "$Path -> $(@($entry.Target)[0])"
     }
+    return $Path
 }
 
 # Whether an explicit AVIBE_HOME shows it is an Avibe home. The installer and
@@ -1174,10 +1131,17 @@ function Test-PathHoldsHome {
 
     $full = [System.IO.Path]::GetFullPath($Path).TrimEnd("\", "/")
     $root = "$([System.IO.Path]::GetPathRoot($full))".TrimEnd("\", "/")
-    $profile = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd("\", "/")
-    return -not $root -or $root.Equals($full, [System.StringComparison]::OrdinalIgnoreCase) -or
-        $profile.Equals($full, [System.StringComparison]::OrdinalIgnoreCase) -or
-        $profile.StartsWith($full + "\", [System.StringComparison]::OrdinalIgnoreCase)
+    if (-not $root -or $root.Equals($full, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    foreach ($profile in @($env:USERPROFILE, (Resolve-LinkChain $env:USERPROFILE))) {
+        $profile = [System.IO.Path]::GetFullPath($profile).TrimEnd("\", "/")
+        if ($profile.Equals($full, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $profile.StartsWith($full + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
 }
 
 # Delete a file or directory tree. A link is removed itself and never followed:
@@ -1267,7 +1231,7 @@ function Write-KeptData {
     }
     Write-Host ""
     Write-Host "Your data was kept in:"
-    foreach ($item in $Data) { Write-Host "  $item" }
+    foreach ($item in $Data) { Write-Host "  $(Get-DataPathDescription $item)" }
     Write-Host "To delete it too (this cannot be undone), run:"
     Write-Host "  $(Get-UninstallCommand -Options @('-Purge'))"
 }
@@ -1285,6 +1249,7 @@ function Uninstall-Avibe {
     $uvTools = @(if (Test-UninstallingDefaultHome $runtimeHome) { $presentUvTools })
     $data = @(Get-AvibeDataDirectories $runtimeHome)
     $doomedData = @()
+    $unlinkedData = @()
     $failed = $false
 
     Write-Info "Uninstalling Avibe for $runtimeHome"
@@ -1301,15 +1266,19 @@ function Uninstall-Avibe {
         return 0
     }
     if ($Purge) {
-        if (-not (Test-UninstallingDefaultHome $runtimeHome) -and $data.Count -gt 0 -and -not (Test-LooksLikeAvibeHome $runtimeHome)) {
-            Write-Warning "Refusing to purge ${runtimeHome}: it has no runtime directory, so it does not look like an Avibe home. Nothing was removed."
-            return 1
-        }
-        $doomedData = @(Get-PurgeTargets $runtimeHome)
-        foreach ($item in $doomedData) {
-            if (Test-PathHoldsHome $item) {
+        # A purge never deletes through a link. It deletes real directories
+        # and removes a link itself, keeping whatever the link points to.
+        foreach ($item in $data) {
+            if (Test-IsLink $item) {
+                $unlinkedData += $item
+            } elseif (-not (Test-UninstallingDefaultHome $runtimeHome) -and -not (Test-LooksLikeAvibeHome $item)) {
+                Write-Warning "Refusing to purge ${item}: it has no runtime directory, so it does not look like an Avibe home. Nothing was removed."
+                return 1
+            } elseif (Test-PathHoldsHome $item) {
                 Write-Warning "Refusing to purge ${item}: it holds your user profile. Nothing was removed."
                 return 1
+            } else {
+                $doomedData += $item
             }
         }
         Write-Host ""
@@ -1318,6 +1287,10 @@ function Uninstall-Avibe {
         if (Get-DirectoryEntry $root) { Write-Host "  $root" }
         foreach ($item in $uvTools) { Write-Host "  $(Join-Path $toolDirectory $item) (uv tool $item)" }
         foreach ($item in $doomedData) { Write-Host "  $item    (your Avibe data)" }
+        if ($unlinkedData.Count -gt 0) {
+            Write-Host "It removes these links, not what they point to:" -ForegroundColor Yellow
+            foreach ($item in $unlinkedData) { Write-Host "  $(Get-DataPathDescription $item)" }
+        }
         Write-Host ""
         if (-not (Confirm-Purge)) {
             return 1
@@ -1329,22 +1302,36 @@ function Uninstall-Avibe {
     $stoppers = @($launchers) + @($uvTools | ForEach-Object { Join-Path $toolDirectory "$_\Scripts\vibe.exe" })
     $doomed = @($launchers) + @($root) + @($uvTools | ForEach-Object { Join-Path $toolDirectory $_ }) + @($doomedData)
     $stopped = Stop-AvibeService -Launchers $stoppers -RuntimeHome $runtimeHome
-    $running = @(Get-BlockingProcesses -RuntimeHome $runtimeHome -Paths $doomed)
+    if ($stopped) {
+        Write-Success "Stopped the Avibe service"
+    } else {
+        # Without a confirmed stop, anything still using the home counts too.
+        $doomed += $runtimeHome
+    }
+    # Children of a stopped service can take a moment to exit.
+    for ($attempt = 1; $attempt -le 6; $attempt++) {
+        $running = @(Get-BlockingProcesses -Paths $doomed)
+        if ($running.Count -eq 0 -or $attempt -eq 6) {
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
     if ($running.Count -gt 0) {
         Write-Warning "These processes still use what the uninstall would delete, so nothing was removed:"
         foreach ($item in $running) {
             Write-Host "  pid $($item.Substring(0, [Math]::Min(200, $item.Length)))"
         }
-        Write-Host "  Stop them, then run the uninstall again. A pid file named above that"
-        Write-Host "  records a process which is not Avibe can be deleted instead."
+        Write-Host "  Stop them, then run the uninstall again."
         return 1
     }
-    if ($stopped) {
-        Write-Success "Stopped the Avibe service"
-    } elseif ($stoppers.Count -gt 0) {
-        Write-Warning "The installed vibe could not stop the service; no running Avibe process was found"
-    } else {
-        Write-Info "No installed vibe could be asked to stop; no running Avibe process was found"
+    if (-not $stopped) {
+        if ($stoppers.Count -gt 0) {
+            Write-Warning "The installed vibe could not stop the service. No process runs from or names what the uninstall deletes or this home."
+        } else {
+            Write-Info "No installed vibe could be asked to stop the service. No process runs from or names what the uninstall deletes or this home."
+        }
+        Write-Host "  Processes outside those paths, such as a managed OpenCode server, could not be confirmed stopped."
+        Write-Host "  To check, run: Get-Process opencode, cloudflared -ErrorAction SilentlyContinue"
     }
 
     foreach ($item in $launchers + $markers) {
@@ -1370,8 +1357,21 @@ function Uninstall-Avibe {
         }
     }
     if ($Purge) {
+        $keptTargets = @($unlinkedData | ForEach-Object { Get-DataPathDescription $_ })
+        foreach ($item in $unlinkedData) {
+            if (-not (Remove-ReportedPath $item -Verb "Removed the link")) { $failed = $true }
+        }
         foreach ($item in $doomedData) {
             if (-not (Remove-ReportedPath $item -Verb "Deleted")) { $failed = $true }
+        }
+        foreach ($item in $keptTargets) {
+            $link, $target = $item -split ' -> ', 2
+            if (-not [System.IO.Path]::IsPathRooted($target)) {
+                $target = Join-Path (Split-Path -Parent $link) $target
+            }
+            if (Get-DirectoryEntry $target) {
+                Write-Info "Kept $target, which $link pointed to. Delete it by hand if it is yours."
+            }
         }
     }
 

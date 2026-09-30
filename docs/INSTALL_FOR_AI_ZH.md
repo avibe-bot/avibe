@@ -178,7 +178,7 @@ Windows PowerShell：
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall
 ```
 
-只有用户明确要求时，才连同数据一起删除。数据删除后无法恢复，所以先和用户确认。清除时会先列出要删除的全部内容，并在终端上确认；没有终端时（比如 agent 的 shell），不加 `--yes`（PowerShell 为 `-Yes`）就不会执行：
+只有用户明确要求时，才连同数据一起删除。数据删除后无法恢复，所以先和用户确认。清除只删除真实目录：如果 home 是通过链接到达的，只删除链接本身，并告诉用户它指向哪里，由用户自行删除。清除时会先列出要删除的全部内容，并在终端上确认；没有终端时（比如 agent 的 shell），不加 `--yes`（PowerShell 为 `-Yes`）就不会执行：
 
 ```bash
 bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'

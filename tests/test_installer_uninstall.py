@@ -203,7 +203,7 @@ def _installer_shell(layout: Layout, command: str, **env: str) -> subprocess.Com
     )
 
 
-def _powershell(layout: Layout, shell: str, command: str) -> list[str]:
+def _powershell(layout: Layout, shell: str, command: str, **env: str) -> list[str]:
     """Run install.ps1 functions against the layout; the owner's own flow runs in CI."""
     source = INSTALL_POWERSHELL.read_text(encoding="utf-8").split("\n# Each option means one thing", 1)[0]
     script = layout.tmp / "installer-functions.ps1"
@@ -218,7 +218,8 @@ def _powershell(layout: Layout, shell: str, command: str) -> list[str]:
         # Windows PowerShell cannot load; a user's own session has its default.
         env={
             **{name: value for name, value in os.environ.items() if name.upper() != "PSMODULEPATH"},
-            **layout.env(USERPROFILE=str(layout.home), AVIBE_HOME=str(layout.avibe_home)),
+            **layout.env(USERPROFILE=str(layout.home), AVIBE_HOME=str(layout.avibe_home), APPDATA=str(layout.tmp)),
+            **env,
         },
         capture_output=True,
         text=True,
@@ -362,7 +363,7 @@ def test_uninstall_removes_avibe_and_keeps_user_data(installed):
     assert f"Another vibe command remains at {foreign}" in result.stdout
     assert "Avibe was removed." in result.stdout
     kept = result.stdout.split("Your data was kept in:\n", 1)[1]
-    assert kept.startswith(f"  {layout.avibe_home}\n  {legacy_home}\n")
+    assert kept.startswith(f"  {layout.avibe_home}\n  {legacy_home} -> {layout.avibe_home}\n")
     assert "  bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'\n" in kept
 
 
@@ -447,78 +448,52 @@ def test_a_purge_piped_into_bash_confirms_on_the_terminal(installed, answer, con
 
 @posix_only
 @pytest.mark.parametrize(
-    "recorded, blocks",
-    [("vibe-service", True), ("unrelated", False), ("exited", False)],
-)
-def test_uninstall_removes_nothing_while_a_service_it_cannot_stop_runs(installed, recorded, blocks):
-    layout, first, second, foreign, legacy_home, env = installed
-    process = subprocess.Popen(["bash", "-c", f"exec -a {recorded} sleep 60"])
-    try:
-        if recorded == "exited":
-            process.kill()
-            process.wait()
-        pid_file = layout.avibe_home / "runtime" / "vibe.pid"
-        pid_file.write_text(f"{process.pid}\n", encoding="utf-8")
-
-        result = _installer_shell(layout, "main --uninstall", VIBE_TEST_STOP_STATUS="1", **env)
-    finally:
-        process.kill()
-        process.wait()
-
-    assert len(_calls(layout)) == 2  # every managed launcher was asked
-    if blocks:
-        assert result.returncode == 1
-        assert f"  pid {process.pid} vibe-service 60 (recorded in {pid_file})" in result.stdout
-        assert "so nothing was removed" in result.stdout
-        _assert_untouched(layout, first, second, foreign, legacy_home)
-    else:
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "could not stop the service; no running Avibe process was found" in result.stdout
-        assert not layout.root.exists() and not first.is_symlink()
-
-
-@posix_only
-@pytest.mark.parametrize(
-    "shape, options, blocks",
+    "shape, options, stop_status, blocks",
     [
-        ("connector-in-install-generations", "--uninstall", True),
-        ("mentions-an-unrelated-path", "--uninstall", False),
-        ("connector-in-the-kept-home", "--uninstall", False),
-        ("connector-in-the-purged-home", "--uninstall --purge --yes", True),
-        ("recorded-connector", "--uninstall", True),
+        ("connector-in-install-generations", "--uninstall", "0", True),
+        ("child-exiting-after-a-clean-stop", "--uninstall", "0", False),
+        ("mentions-an-unrelated-path", "--uninstall", "0", False),
+        ("connector-in-the-kept-home", "--uninstall", "0", False),
+        ("connector-in-the-purged-home", "--uninstall --purge --yes", "0", True),
+        ("connector-in-the-home-after-a-failed-stop", "--uninstall", "1", True),
+        ("nothing-left-after-a-failed-stop", "--uninstall", "1", False),
     ],
 )
-def test_uninstall_waits_for_any_process_using_what_it_deletes(installed, shape, options, blocks):
-    """Even after a clean stop, nothing goes while a process runs from, or names, the deletion set."""
+def test_uninstall_waits_for_any_process_using_what_it_deletes(installed, shape, options, stop_status, blocks):
+    """No process may run from, or name, what goes; without a confirmed stop, the home counts too."""
     layout, first, second, foreign, legacy_home, env = installed
     unrelated = layout.tmp / "unrelated" / "runtime" / "install-generations"
-    command = {
-        "connector-in-install-generations": f"{layout.root}/current/bin/cloudflared tunnel run",
-        "mentions-an-unrelated-path": f"harmless --config={unrelated}/current",
-        "connector-in-the-kept-home": f"{layout.avibe_home}/bin/cloudflared tunnel run",
-        "connector-in-the-purged-home": f"{layout.avibe_home}/bin/cloudflared tunnel run",
-        "recorded-connector": "cloudflared tunnel run",
+    command, seconds = {
+        "connector-in-install-generations": (f"{layout.root}/current/bin/cloudflared tunnel run", 60),
+        "child-exiting-after-a-clean-stop": (f"{layout.root}/current/bin/python -m vibe.log_sink", 2),
+        "mentions-an-unrelated-path": (f"harmless --config={unrelated}/current", 60),
+        "connector-in-the-kept-home": (f"{layout.avibe_home}/bin/cloudflared tunnel run", 60),
+        "connector-in-the-purged-home": (f"{layout.avibe_home}/bin/cloudflared tunnel run", 60),
+        "connector-in-the-home-after-a-failed-stop": (f"{layout.avibe_home}/bin/cloudflared tunnel run", 60),
+        "nothing-left-after-a-failed-stop": ("harmless", 60),
     }[shape]
-    process = subprocess.Popen(["bash", "-c", f"exec -a {shlex.quote(command)} sleep 60"])
+    process = subprocess.Popen(["bash", "-c", f"exec -a {shlex.quote(command)} sleep {seconds}"])
     try:
-        if shape == "recorded-connector":
-            (layout.avibe_home / "runtime" / "remote-access-cloudflared.pid").write_text(f"{process.pid}\n")
-
-        result = _installer_shell(layout, f"main {options}", **env)
+        result = _installer_shell(layout, f"main {options}", VIBE_TEST_STOP_STATUS=stop_status, **env)
     finally:
         process.kill()
         process.wait()
 
-    assert len(_calls(layout)) == 1  # the stop itself succeeded
+    # A failed stop asks every managed launcher; a clean one stops at the first.
+    assert len(_calls(layout)) == (1 if stop_status == "0" else 2)
     if blocks:
         assert result.returncode == 1
-        assert f"  pid {process.pid} {command} 60" in result.stdout
+        assert f"  pid {process.pid} {command} {seconds}" in result.stdout
         assert "Stop them, then run the uninstall again." in result.stdout
         _assert_untouched(layout, first, second, foreign, legacy_home)
-    else:
-        assert result.returncode == 0, result.stdout + result.stderr
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not layout.root.exists() and not first.is_symlink()
+    if stop_status == "0":
         assert "Stopped the Avibe service" in result.stdout
-        assert not layout.root.exists() and not first.is_symlink()
+    else:
+        assert "The installed vibe could not stop the service." in result.stdout
+        assert "such as a managed OpenCode server, could not be confirmed stopped" in result.stdout
 
 
 @posix_only
@@ -608,43 +583,65 @@ def test_a_purge_refuses_a_home_that_is_not_safe_to_delete(installed, home, reas
     _assert_untouched(layout, first, second, foreign, legacy_home)
 
 
-def _chained_home(layout: Layout, *, junction: bool) -> tuple[Path, Path]:
-    """~/.avibe reaches the data through a link to a link; ~/.vibe_remote links to ~/.avibe."""
-    data = layout.tmp / "data" / "avibe"
-    (data / "runtime").mkdir(parents=True)
-    (data / "state").mkdir()
+def _linked_home(layout: Layout, shape: str, *, windows: bool) -> tuple[Path, list[Path], list[Path]]:
+    """Build a home reached through links; return the profile, the links, and what they name."""
+    profile = layout.home
     shutil.rmtree(layout.avibe_home)
-    hop = _symlink(layout.tmp / "hop", data)
-    if junction:
+    (profile / "keep.txt").write_text("the user's own file", encoding="utf-8")
+    if shape == "chain":
+        # ~/.avibe reaches the data through a link to a link.
+        data = layout.tmp / "data" / "avibe"
+        (data / "runtime").mkdir(parents=True)
+        (data / "state").mkdir()
+        hop = _symlink(layout.tmp / "hop", data)
+        if windows:
+            import _winapi
+
+            _winapi.CreateJunction(str(hop), str(layout.avibe_home))
+        else:
+            _symlink(layout.avibe_home, hop)
+        legacy = _symlink(profile / ".vibe_remote", layout.avibe_home)
+        return profile, [layout.avibe_home, legacy], [data]
+    # The profile itself is reached through a link, and ~/.vibe_remote names it.
+    linked_profile = layout.tmp / "profile-link"
+    if windows:
         import _winapi
 
-        _winapi.CreateJunction(str(hop), str(layout.avibe_home))
+        _winapi.CreateJunction(str(profile), str(linked_profile))
     else:
-        _symlink(layout.avibe_home, hop)
-    return data, _symlink(layout.home / ".vibe_remote", layout.avibe_home)
+        _symlink(linked_profile, profile)
+    legacy = _symlink(profile / ".vibe_remote", linked_profile)
+    return linked_profile, [legacy], [profile]
 
 
 @posix_only
-def test_a_purge_follows_a_chain_of_links_to_the_home(layout):
-    data, legacy_home = _chained_home(layout, junction=False)
+@pytest.mark.parametrize("shape", ["chain", "link-to-the-profile"])
+def test_a_purge_removes_links_and_never_what_they_name(layout, shape):
+    profile, links, targets = _linked_home(layout, shape, windows=False)
 
-    result = _installer_shell(layout, "main --uninstall --purge --yes")
+    result = _installer_shell(layout, "main --uninstall --purge --yes", HOME=str(profile))
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert not data.exists()
-    assert not layout.avibe_home.is_symlink() and not legacy_home.is_symlink()
+    assert not any(link.is_symlink() for link in links)
+    assert all(target.is_dir() for target in targets)
+    assert (layout.home / "keep.txt").read_text(encoding="utf-8") == "the user's own file"
+    assert "It removes these links, not what they point to:" in result.stdout
+    assert "pointed to. Delete it by hand if it is yours." in result.stdout
 
 
 @pytest.mark.skipif(not WINDOWS, reason="junctions")
 @pytest.mark.parametrize("shell", _rule_implementations())
-def test_powershell_purge_follows_a_junction_to_a_link(layout, shell):
-    data, legacy_home = _chained_home(layout, junction=True)
+@pytest.mark.parametrize("shape", ["chain", "link-to-the-profile"])
+def test_powershell_purge_removes_links_and_never_what_they_name(layout, shell, shape):
+    profile, links, targets = _linked_home(layout, shape, windows=True)
 
-    targets = _powershell(layout, shell, "Remove-Item Env:AVIBE_HOME -ErrorAction SilentlyContinue; Get-PurgeTargets (Get-RuntimeHome)")
+    _powershell(
+        layout, shell, "$Purge = $true; $Yes = $true; Uninstall-Avibe | Out-Null", USERPROFILE=str(profile), AVIBE_HOME=""
+    )
 
-    assert {os.path.normcase(target) for target in targets} == {
-        os.path.normcase(str(path)) for path in (layout.avibe_home, legacy_home, data.resolve())
-    }
+    assert not any(os.path.lexists(link) for link in links)
+    assert all(target.is_dir() for target in targets)
+    assert (layout.home / "keep.txt").read_text(encoding="utf-8") == "the user's own file"
 
 
 @pytest.mark.skipif(not WINDOWS, reason="Windows process table")
@@ -717,16 +714,18 @@ def test_an_explicit_avibe_home_purges_only_that_home(installed):
 
 
 @posix_only
-@pytest.mark.parametrize("shape", ["legacy-link-elsewhere", "explicit-legacy-home"])
+@pytest.mark.parametrize("shape", ["wrong-legacy-link", "wrong-legacy-link-without-avibe-home", "explicit-legacy-home"])
 def test_a_purge_deletes_only_the_selected_homes_data(installed, shape):
     layout, first, second, foreign, legacy_home, env = installed
     legacy_home.unlink()
     unrelated = layout.tmp / "unrelated"
     unrelated.mkdir()
     (unrelated / "notes.txt").write_text("not Avibe's", encoding="utf-8")
-    if shape == "legacy-link-elsewhere":
-        # Doctor reports this as a wrong link; its target is not Avibe's data.
+    if shape.startswith("wrong-legacy-link"):
+        # Doctor reports this as a wrong link; without ~/.avibe it is also the home.
         legacy_home.symlink_to(unrelated)
+        if shape.endswith("without-avibe-home"):
+            shutil.rmtree(layout.avibe_home)
     else:
         (legacy_home / "runtime").mkdir(parents=True)
         env = {**env, "AVIBE_HOME": str(legacy_home)}
@@ -735,10 +734,11 @@ def test_a_purge_deletes_only_the_selected_homes_data(installed, shape):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert (unrelated / "notes.txt").read_text(encoding="utf-8") == "not Avibe's"
-    if shape == "legacy-link-elsewhere":
+    if shape.startswith("wrong-legacy-link"):
         assert not layout.avibe_home.exists()
-        assert legacy_home.is_symlink()
-        assert f"  {unrelated}" not in result.stdout
+        assert not legacy_home.is_symlink()
+        assert f"  {legacy_home} -> {unrelated}" in result.stdout
+        assert f"Kept {unrelated}, which {legacy_home} pointed to." in result.stdout
     else:
         assert not legacy_home.exists()
         # ~/.avibe is the home Avibe uses without AVIBE_HOME, another installation.

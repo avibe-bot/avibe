@@ -1069,57 +1069,31 @@ process_table() {
     done
 }
 
-# Print each live process that removal must wait for, as "pid command". One
-# runs from, or names on its command line, a path about to be deleted (the
-# arguments); another is recorded in one of this home's pid files, which also
-# covers a legacy install whose Python lives outside every deleted path. The
-# uninstaller's own process tree never counts.
+# Print each live process that removal must wait for, as "pid command": one
+# that runs from, or names on its command line, a path about to be deleted (the
+# arguments). The uninstaller's own process tree never counts. Returns 2 when
+# nothing can list processes.
 blocking_processes() {
     local path=""
     local physical=""
-    local pid_file=""
-    local pid=""
     local paths=""
-    local recorded=""
     local table=""
 
     for path in "$@"; do
+        [ -n "$path" ] || continue
         paths="$paths$path"$'\n'
         physical="$(physical_path "$path")"
         if [ "$physical" != "$path" ]; then
             paths="$paths$physical"$'\n'
         fi
     done
-    for pid_file in "$AVIBE_RUNTIME_HOME"/runtime/*.pid; do
-        [ -f "$pid_file" ] || continue
-        pid="$(tr -d '[:space:]' < "$pid_file" 2>/dev/null)"
-        case "$pid" in
-            ''|0|*[!0-9]*) continue ;;
-        esac
-        recorded="$recorded$pid $pid_file"$'\n'
-    done
     table="$(process_table)"
     if [ -z "$table" ]; then
-        # Nothing can show a command, so a live recorded pid counts, including
-        # one another user owns.
-        printf '%s' "$recorded" | while read -r pid pid_file; do
-            [ -n "$pid" ] || continue
-            if kill -0 "$pid" 2>/dev/null || case "$(LC_ALL=C kill -0 "$pid" 2>&1)" in *"not permitted"*) true ;; *) false ;; esac; then
-                printf '%s (recorded in %s)\n' "$pid" "$pid_file"
-            fi
-        done
-        return 0
+        return 2
     fi
-    printf '%s\n' "$table" | AVIBE_UNINSTALL_PATHS="$paths" AVIBE_UNINSTALL_RECORDED="$recorded" \
-        AVIBE_UNINSTALL_SELF="$$" awk '
+    printf '%s\n' "$table" | AVIBE_UNINSTALL_PATHS="$paths" AVIBE_UNINSTALL_SELF="$$" awk '
         BEGIN {
             count = split(ENVIRON["AVIBE_UNINSTALL_PATHS"], paths, "\n")
-            lines = split(ENVIRON["AVIBE_UNINSTALL_RECORDED"], entries, "\n")
-            for (i = 1; i <= lines; i++) {
-                if (entries[i] == "") continue
-                split(entries[i], fields, " ")
-                recorded[fields[1]] = substr(entries[i], length(fields[1]) + 2)
-            }
             self = ENVIRON["AVIBE_UNINSTALL_SELF"]
         }
         {
@@ -1144,10 +1118,6 @@ blocking_processes() {
                 pid = order[i]
                 if ((pid in own) || (pid in descendants)) continue
                 text = command[pid] " "
-                if (pid in recorded && text ~ /vibe|cloudflared/) {
-                    print pid " " command[pid] " (recorded in " recorded[pid] ")"
-                    continue
-                }
                 for (j = 1; j <= count; j++) {
                     if (paths[j] != "" && (index(text, paths[j] "/") || index(text, paths[j] " "))) {
                         print pid " " command[pid]
@@ -1180,54 +1150,32 @@ stop_avibe_service() {
 # a legacy ~/.vibe_remote directory belong to no chosen AVIBE_HOME, so only the
 # default home's uninstall removes them.
 uninstalling_default_home() {
-    [ -z "${AVIBE_HOME:-}" ] || [ "$(physical_path "$AVIBE_RUNTIME_HOME")" = "$(physical_path "$HOME/.avibe")" ]
+    [ -z "${AVIBE_HOME:-}" ] || [ "${AVIBE_RUNTIME_HOME%/}" = "$HOME/.avibe" ]
 }
 
-# Print this home's data: the runtime home, then each default name linking to
-# it, and for the default home a real legacy directory left beside it. A link
-# to anywhere else is not this home's, which Doctor reports as a wrong link.
+# Print this home's data paths: for the default home both default names, and
+# for an explicit AVIBE_HOME that home alone.
 avibe_data_directories() {
-    local runtime_home=""
     local path=""
 
-    runtime_home="$(physical_path "$AVIBE_RUNTIME_HOME")"
-    if [ -e "$AVIBE_RUNTIME_HOME" ] || [ -L "$AVIBE_RUNTIME_HOME" ]; then
-        printf '%s\n' "$AVIBE_RUNTIME_HOME"
-    fi
-    for path in "$HOME/.avibe" "$HOME/.vibe_remote"; do
-        [ "$path" != "$AVIBE_RUNTIME_HOME" ] || continue
-        if [ -L "$path" ]; then
-            if [ "$(physical_path "$path")" = "$runtime_home" ]; then
+    if uninstalling_default_home; then
+        for path in "$HOME/.avibe" "$HOME/.vibe_remote"; do
+            if [ -e "$path" ] || [ -L "$path" ]; then
                 printf '%s\n' "$path"
             fi
-        elif [ -d "$path" ] && [ "$(physical_path "$path")" != "$runtime_home" ] && uninstalling_default_home; then
-            printf '%s\n' "$path"
-        fi
-    done
+        done
+    elif [ -e "$AVIBE_RUNTIME_HOME" ] || [ -L "$AVIBE_RUNTIME_HOME" ]; then
+        printf '%s\n' "${AVIBE_RUNTIME_HOME%/}"
+    fi
 }
 
-# Print what a purge deletes for the data directories: each link, then each
-# distinct directory by its physical path. Every link here names this home.
-purge_targets() {
-    local data=""
-    local directory=""
-    local seen=":"
-
-    while IFS= read -r data; do
-        if [ -L "$data" ]; then
-            printf '%s\n' "$data"
-        fi
-        directory="$(physical_path "$data")"
-        if [ -d "$directory" ] && [ ! -L "$directory" ]; then
-            case "$seen" in
-                *":$directory:"*) ;;
-                *)
-                    seen="$seen$directory:"
-                    printf '%s\n' "$directory"
-                    ;;
-            esac
-        fi
-    done < <(avibe_data_directories)
+# Print a data path for the user, naming what a link points to.
+describe_data_path() {
+    if [ -L "$1" ]; then
+        printf '%s -> %s\n' "$1" "$(readlink "$1" 2>/dev/null)"
+    else
+        printf '%s\n' "$1"
+    fi
 }
 
 # Whether an explicit AVIBE_HOME shows it is an Avibe home. The installer and
@@ -1238,9 +1186,12 @@ looks_like_avibe_home() {
 
 # Whether deleting a directory would delete the user's home or the filesystem.
 path_holds_home() {
-    [ "$1" = "/" ] && return 0
+    local target=""
+
+    target="$(physical_path "$1")"
+    [ "$target" = "/" ] && return 0
     case "$(physical_path "$HOME")/" in
-        "$1"/*) return 0 ;;
+        "$target"/*) return 0 ;;
     esac
     return 1
 }
@@ -1299,7 +1250,7 @@ print_kept_data() {
     echo ""
     echo "Your data was kept in:"
     for item in "$@"; do
-        echo "  $item"
+        echo "  $(describe_data_path "$item")"
     done
     echo "To delete it too (this cannot be undone), run:"
     echo "  $(uninstall_command --purge)"
@@ -1319,6 +1270,7 @@ uninstall_avibe() {
     local -a uv_tools=()
     local -a data=()
     local -a doomed_data=()
+    local -a unlinked_data=()
     local -a running=()
 
     root="$(install_generations_root)"
@@ -1350,23 +1302,31 @@ uninstall_avibe() {
         return 0
     fi
     if [ "$PURGE_USER_DATA" = "1" ]; then
-        if ! uninstalling_default_home && [ "${#data[@]}" -gt 0 ] && ! looks_like_avibe_home "$AVIBE_RUNTIME_HOME"; then
-            warn "Refusing to purge $AVIBE_RUNTIME_HOME: it has no runtime directory, so it does not look like an Avibe home. Nothing was removed."
-            return 1
-        fi
-        while IFS= read -r item; do
-            if path_holds_home "$item"; then
+        # A purge never deletes through a link. It deletes real directories
+        # and removes a link itself, keeping whatever the link points to.
+        for item in "${data[@]}"; do
+            if [ -L "$item" ]; then
+                unlinked_data+=("$item")
+            elif ! uninstalling_default_home && ! looks_like_avibe_home "$item"; then
+                warn "Refusing to purge $item: it has no runtime directory, so it does not look like an Avibe home. Nothing was removed."
+                return 1
+            elif path_holds_home "$item"; then
                 warn "Refusing to purge $item: it holds your home directory. Nothing was removed."
                 return 1
+            else
+                doomed_data+=("$item")
             fi
-            doomed_data+=("$item")
-        done < <(purge_targets)
+        done
         echo ""
         echo -e "${YELLOW}This permanently deletes:${NC}"
         for item in "${launchers[@]}" "${markers[@]}"; do echo "  $item"; done
         if [ -e "$root" ] || [ -L "$root" ]; then echo "  $root"; fi
         for item in "${uv_tools[@]}"; do echo "  $tool_dir/$item (uv tool $item)"; done
         for item in "${doomed_data[@]}"; do echo "  $item    (your Avibe data)"; done
+        if [ "${#unlinked_data[@]}" -gt 0 ]; then
+            echo -e "${YELLOW}It removes these links, not what they point to:${NC}"
+            for item in "${unlinked_data[@]}"; do echo "  $(describe_data_path "$item")"; done
+        fi
         echo ""
         confirm_purge || return 1
     fi
@@ -1383,25 +1343,45 @@ uninstall_avibe() {
     doomed+=("${doomed_data[@]}")
     if stop_avibe_service "${stoppers[@]}"; then
         stopped=1
+        success "Stopped the Avibe service"
+    else
+        # Without a confirmed stop, anything still using the home counts too.
+        doomed+=("$AVIBE_RUNTIME_HOME")
     fi
-    while IFS= read -r item; do
-        if [ -n "$item" ]; then running+=("$item"); fi
-    done < <(blocking_processes "${doomed[@]}")
+    # Children of a stopped service can take a moment to exit.
+    local attempt=""
+    local blocking=""
+    local listed=1
+    for attempt in 1 2 3 4 5 6; do
+        running=()
+        blocking="$(blocking_processes "${doomed[@]}")" || listed=0
+        while IFS= read -r item; do
+            if [ -n "$item" ]; then running+=("$item"); fi
+        done <<< "$blocking"
+        if [ "${#running[@]}" -eq 0 ] || [ "$attempt" = 6 ]; then
+            break
+        fi
+        sleep 1
+    done
     if [ "${#running[@]}" -gt 0 ]; then
         warn "These processes still use what the uninstall would delete, so nothing was removed:"
         for item in "${running[@]}"; do
             echo "  pid ${item:0:200}"
         done
-        echo "  Stop them, then run the uninstall again. A pid file named above that"
-        echo "  records a process which is not Avibe can be deleted instead."
+        echo "  Stop them, then run the uninstall again."
         return 1
     fi
-    if [ "$stopped" = "1" ]; then
-        success "Stopped the Avibe service"
-    elif [ "${#stoppers[@]}" -gt 0 ]; then
-        warn "The installed vibe could not stop the service; no running Avibe process was found"
-    else
-        info "No installed vibe could be asked to stop; no running Avibe process was found"
+    if [ "$listed" != "1" ]; then
+        warn "No process list is available here, so the uninstall could not check that nothing still uses what it deletes"
+    fi
+    if [ "$stopped" != "1" ]; then
+        if [ "${#stoppers[@]}" -gt 0 ]; then
+            warn "The installed vibe could not stop the service. No process runs from or names what the uninstall deletes or this home."
+        else
+            info "No installed vibe could be asked to stop the service. No process runs from or names what the uninstall deletes or this home."
+        fi
+        echo "  Processes outside those paths, such as a managed OpenCode server, could not be confirmed stopped."
+        echo "  To check, run: ps -eo pid,args | grep -E 'opencode serve|cloudflared'"
     fi
 
     for item in "${launchers[@]}" "${markers[@]}"; do
@@ -1436,12 +1416,33 @@ uninstall_avibe() {
     done
 
     if [ "$PURGE_USER_DATA" = "1" ]; then
+        local -a kept_targets=()
+        local target=""
+        for item in "${unlinked_data[@]}"; do
+            target="$(readlink "$item" 2>/dev/null)"
+            case "$target" in
+                /*) ;;
+                *) target="$(dirname -- "$item")/$target" ;;
+            esac
+            kept_targets+=("$item -> $target")
+            if rm -f -- "$item" 2>/dev/null && [ ! -e "$item" ] && [ ! -L "$item" ]; then
+                success "Removed the link $item"
+            else
+                warn "Could not remove the link $item"
+                failed=1
+            fi
+        done
         for item in "${doomed_data[@]}"; do
             if rm -rf -- "$item" 2>/dev/null && [ ! -e "$item" ] && [ ! -L "$item" ]; then
                 success "Deleted $item"
             else
                 warn "Could not delete $item"
                 failed=1
+            fi
+        done
+        for item in "${kept_targets[@]}"; do
+            if [ -e "${item#* -> }" ] || [ -L "${item#* -> }" ]; then
+                info "Kept ${item#* -> }, which ${item%% -> *} pointed to. Delete it by hand if it is yours."
             fi
         done
     fi

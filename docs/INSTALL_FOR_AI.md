@@ -203,7 +203,7 @@ Windows PowerShell:
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall
 ```
 
-Delete the user's data too only when they explicitly ask for it. It cannot be recovered, so confirm with the user first. The purge lists everything it deletes and asks on the terminal; without one, as in an agent shell, it refuses unless `--yes` (PowerShell: `-Yes`) is added:
+Delete the user's data too only when they explicitly ask for it. It cannot be recovered, so confirm with the user first. It deletes only real directories: for a home reached through a link it removes the link and reports what it points to, which the user can delete by hand. The purge lists everything it deletes and asks on the terminal; without one, as in an agent shell, it refuses unless `--yes` (PowerShell: `-Yes`) is added:
 
 ```bash
 bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'
