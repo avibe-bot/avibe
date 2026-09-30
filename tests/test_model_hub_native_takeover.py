@@ -626,8 +626,11 @@ def test_mode_only_adoption_refuses_a_native_config_the_cli_cannot_parse(
     # Nothing is importable, yet the CLI would fail before any Hub override.
     assert not any(item["proposed_action"] == "import" for item in service.migration_scan()["items"])
 
+    entered = []
+
     @asynccontextmanager
     async def guard(backends, *, external_processes=True):
+        entered.append(backends)
         async def verify():
             return None
         yield verify
@@ -637,3 +640,6 @@ def test_mode_only_adoption_refuses_a_native_config_the_cli_cannot_parse(
         asyncio.run(service.set_agent_mode(backend, "hub"))
     assert failure.value.code == "mode_switch_blocked"
     assert store.config.agents[backend].mode == "direct"
+    # MH-MIG-009: the guard interrupts running work, so a switch that is
+    # refused anyway must be refused before it is entered.
+    assert entered == []

@@ -4817,6 +4817,25 @@ class ModelHubService:
             logger.warning("Model Hub CLI presence probe failed for %s", backend, exc_info=True)
             return False
 
+    async def _native_config_blocks_launch(self, config: ModelHubConfig, backend: str) -> bool:
+        # Native auth stays beside the Hub, but a config the CLI cannot parse
+        # fails every launch.
+        completed = self.migration_journal.completed() or {}
+        available = await asyncio.to_thread(
+            scan_native_configs, config,
+            mask_credential=_mask_credential,
+            home=self.migration_home,
+            validate_base_url=_validated_base_url,
+            legacy_auth=(
+                self.store.native_auth_snapshot((backend,))
+                if isinstance(self.store, V2ModelHubConfigStore) else None
+            ),
+            project_roots=self.migration_project_roots(),
+            clean_native_stores=completed.get("clean_native_stores"),
+            retained_native_ids=completed.get("retained_native_ids"),
+        )
+        return any(item.backend == backend and item.config_blocker for item in available)
+
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"}:
             raise ModelHubError("mode_switch_blocked")
@@ -4833,32 +4852,17 @@ class ModelHubService:
                     agent = self._agent(current, backend)
                     if agent.mode == "hub":
                         return self._agent_payload(current, agent)
+                    # The guard interrupts running work, so refuse a switch
+                    # that would be refused anyway before destroying any.
+                    if await self._native_config_blocks_launch(current, backend):
+                        raise ModelHubError("mode_switch_blocked", status=409)
                 try:
                     async with self.migration_guard((backend,), external_processes=False) as verify_idle:
                         async with self._mutation_lock:
                             # Recheck idleness after the last asynchronous drain.
                             await verify_idle()
                             previous = self.store.load()
-                            available = await asyncio.to_thread(
-                                scan_native_configs, previous,
-                                mask_credential=_mask_credential,
-                                home=self.migration_home,
-                                validate_base_url=_validated_base_url,
-                                legacy_auth=(
-                                    self.store.native_auth_snapshot((backend,))
-                                    if isinstance(self.store, V2ModelHubConfigStore) else None
-                                ),
-                                project_roots=self.migration_project_roots(),
-                                clean_native_stores=(
-                                    self.migration_journal.completed() or {}
-                                ).get("clean_native_stores"),
-                                retained_native_ids=(
-                                    self.migration_journal.completed() or {}
-                                ).get("retained_native_ids"),
-                            )
-                            # Native auth stays beside the Hub, but a config
-                            # the CLI cannot parse fails every launch.
-                            if any(item.backend == backend and item.config_blocker for item in available):
+                            if await self._native_config_blocks_launch(previous, backend):
                                 raise ModelHubError("mode_switch_blocked", status=409)
                             config = self._clone_config(previous)
                             self._agent(config, backend).mode = "hub"
