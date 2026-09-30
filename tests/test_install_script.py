@@ -392,8 +392,7 @@ def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
     assert "export PATH=" not in install_result.stdout
     # Uninstall has one owner, so the installer points to it, not to steps.
     uninstall = install_result.stdout.split("Uninstall:", 1)[1].splitlines()[1]
-    assert uninstall.startswith("  curl -fsSL https://avibe.bot/install.sh | ")
-    assert uninstall.endswith(" bash -s -- --uninstall")
+    assert "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'" in uninstall
     assert f"Add --purge to also delete your data in {home_dir / '.avibe'}." in install_result.stdout
     assert version_result.returncode == 0, version_result.stdout + version_result.stderr
     assert "avibe-os 9.9.9" in version_result.stdout

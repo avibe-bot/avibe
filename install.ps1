@@ -772,13 +772,6 @@ function Test-FullyQualifiedPath {
     return $Path -match '^[A-Za-z]:[\\/]' -or $Path -match '^[\\/]{2}[^\\/]'
 }
 
-function Test-PathInGenerationRoot {
-    param([string]$Path, [string]$Root)
-
-    $prefix = [System.IO.Path]::GetFullPath($Root).TrimEnd("\", "/") + "\"
-    return [System.IO.Path]::GetFullPath($Path).StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
-}
-
 # The directory entry itself, even for a link whose target is gone.
 function Get-DirectoryEntry {
     param([string]$Path)
@@ -793,24 +786,49 @@ function Get-DirectoryEntry {
         Select-Object -First 1
 }
 
-function Resolve-LinkChain {
+# The physical form of a path: every symbolic link or junction along it, at any
+# depth and through any chain, replaced by what it names. Every home and
+# launcher comparison goes through this one canonicalizer.
+function Resolve-PhysicalPath {
     param([string]$Path)
 
-    for ($depth = 0; $depth -lt 20; $depth++) {
-        $entry = Get-DirectoryEntry $Path
-        if (-not $entry -or $entry.LinkType -ne "SymbolicLink") {
+    $pending = New-Object System.Collections.Generic.List[string]
+    $full = [System.IO.Path]::GetFullPath($Path)
+    $current = $null
+    $hops = 0
+    while ($true) {
+        if ($null -eq $current) {
+            $current = [System.IO.Path]::GetPathRoot($full)
+            $pending.InsertRange(0, [string[]]$full.Substring($current.Length).Split(
+                [char[]]@('\', '/'), [System.StringSplitOptions]::RemoveEmptyEntries))
+        }
+        if ($pending.Count -eq 0) {
             break
         }
-        $target = @($entry.Target)[0]
-        if (-not $target) {
-            break
+        $next = Join-Path $current $pending[0]
+        $pending.RemoveAt(0)
+        $entry = Get-DirectoryEntry $next
+        $target = if ($entry -and $entry.LinkType -in @("SymbolicLink", "Junction")) { @($entry.Target)[0] } else { $null }
+        if ($target -and $hops -lt 40) {
+            $hops++
+            $target = $target -replace '^\\(\\\?|\?\?)\\', ''
+            if (-not [System.IO.Path]::IsPathRooted($target)) {
+                $target = Join-Path $current $target
+            }
+            $full = [System.IO.Path]::GetFullPath($target)
+            $current = $null
+            continue
         }
-        if (-not [System.IO.Path]::IsPathRooted($target)) {
-            $target = Join-Path (Split-Path -Parent $Path) $target
-        }
-        $Path = [System.IO.Path]::GetFullPath($target)
+        $current = $next
     }
-    return $Path
+    return $current.TrimEnd("\", "/")
+}
+
+function Test-PathInGenerationRoot {
+    param([string]$Path, [string]$Root)
+
+    $prefix = (Resolve-PhysicalPath $Root) + "\"
+    return (Resolve-PhysicalPath $Path).StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 # A file's SHA-256, or $null when it cannot be read. .NET computes it, so no
@@ -838,7 +856,7 @@ function Get-ContentHash {
 function Test-LauncherUsesInstallGenerations {
     param([string]$Launcher, [string]$Root)
 
-    if (Test-PathInGenerationRoot (Resolve-LinkChain $Launcher) $Root) {
+    if (Test-PathInGenerationRoot $Launcher $Root) {
         return $true
     }
     if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) {
@@ -959,7 +977,7 @@ function Test-UvToolOwnsItsLaunchers {
         if (-not (Get-DirectoryEntry $path)) {
             continue
         }
-        if (Test-PathInGenerationRoot (Resolve-LinkChain $path) $Environment) {
+        if (Test-PathInGenerationRoot $path $Environment) {
             continue
         }
         $own = Join-Path $Environment ("Scripts\" + (Split-Path -Leaf $path))
@@ -972,32 +990,83 @@ function Test-UvToolOwnsItsLaunchers {
     return $true
 }
 
-# Each Avibe process this home's pid records still show running.
-function Get-RunningAvibeProcesses {
-    param([string]$RuntimeHome)
+# Each live process that removal must wait for, as "pid command". One runs
+# from, or names on its command line, a path about to be deleted; another is
+# recorded in one of this home's pid files, which also covers a legacy install
+# whose Python lives outside every deleted path. The uninstaller's own process
+# tree never counts.
+function Get-BlockingProcesses {
+    param([string]$RuntimeHome, [string[]]$Paths)
 
-    foreach ($name in @("vibe.pid", "vibe-ui.pid")) {
-        $pidFile = Join-Path $RuntimeHome "runtime\$name"
-        if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) {
+    $needles = New-Object System.Collections.Generic.List[string]
+    foreach ($path in $Paths) {
+        if (-not $path) {
             continue
         }
-        [int]$recorded = 0
-        $text = "$(Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue)".Trim()
-        if (-not [int]::TryParse($text, [ref]$recorded) -or $recorded -le 0) {
+        foreach ($form in @([System.IO.Path]::GetFullPath($path).TrimEnd("\", "/"), (Resolve-PhysicalPath $path))) {
+            if (-not $needles.Contains($form)) {
+                $needles.Add($form)
+            }
+        }
+    }
+    $recorded = @{}
+    foreach ($pidFile in @(Get-ChildItem -LiteralPath (Join-Path $RuntimeHome "runtime") -Filter "*.pid" -File -Force -ErrorAction SilentlyContinue)) {
+        [int]$recordedPid = 0
+        $text = "$(Get-Content -LiteralPath $pidFile.FullName -Raw -ErrorAction SilentlyContinue)".Trim()
+        if ([int]::TryParse($text, [ref]$recordedPid) -and $recordedPid -gt 0) {
+            $recorded[$recordedPid] = $pidFile.FullName
+        }
+    }
+    try {
+        $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
+            [pscustomobject]@{ Id = [int]$_.ProcessId; Parent = [int]$_.ParentProcessId; Text = "$($_.ExecutablePath) $($_.CommandLine)"; Known = [bool]$_.CommandLine }
+        })
+    } catch {
+        # Without WMI only executable paths are readable, so a live recorded
+        # pid counts whatever it runs.
+        $processes = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+            [pscustomobject]@{ Id = [int]$_.Id; Parent = 0; Text = "$($_.Path)"; Known = $false }
+        })
+    }
+    $parents = @{}
+    foreach ($process in $processes) {
+        $parents[$process.Id] = $process.Parent
+    }
+    $own = @{}
+    for ($id = $PID; $id -and -not $own.ContainsKey($id); $id = $parents[$id]) {
+        $own[$id] = $true
+    }
+    $descendants = @{ $PID = $true }
+    do {
+        $grew = $false
+        foreach ($process in $processes) {
+            if (-not $descendants.ContainsKey($process.Id) -and $descendants.ContainsKey($process.Parent)) {
+                $descendants[$process.Id] = $true
+                $grew = $true
+            }
+        }
+    } while ($grew)
+    foreach ($process in $processes) {
+        if ($own.ContainsKey($process.Id) -or $descendants.ContainsKey($process.Id)) {
             continue
         }
-        # A pid file can outlive its process and name a reused pid, so when the
-        # command is readable, only a vibe process counts. Without WMI, a live
-        # pid counts.
-        try {
-            $process = Get-CimInstance Win32_Process -Filter "ProcessId = $recorded" -ErrorAction Stop
-        } catch {
-            $process = Get-Process -Id $recorded -ErrorAction SilentlyContinue
-        }
-        if (-not $process -or ($process.CommandLine -and $process.CommandLine -notmatch "vibe")) {
+        if ($recorded.ContainsKey($process.Id) -and (-not $process.Known -or $process.Text -match "vibe|cloudflared")) {
+            "$($process.Id) $($process.Text.Trim()) (recorded in $($recorded[$process.Id]))"
             continue
         }
-        "$recorded (recorded in $pidFile)"
+        $text = $process.Text + " "
+        foreach ($needle in $needles) {
+            $at = $text.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase)
+            $found = $false
+            while ($at -ge 0 -and -not $found) {
+                $found = $text[$at + $needle.Length] -in @([char]'\', [char]'/', [char]'"', [char]' ')
+                $at = $text.IndexOf($needle, $at + 1, [System.StringComparison]::OrdinalIgnoreCase)
+            }
+            if ($found) {
+                "$($process.Id) $($process.Text.Trim())"
+                break
+            }
+        }
     }
 }
 
@@ -1032,23 +1101,6 @@ function Stop-AvibeService {
     return $false
 }
 
-# The physical directory a home path names: a link's target, or the path itself.
-function Resolve-HomeDirectory {
-    param([string]$Path)
-
-    $entry = Get-DirectoryEntry $Path
-    if ($entry -and $entry.LinkType -in @("SymbolicLink", "Junction")) {
-        $target = @($entry.Target)[0]
-        if ($target) {
-            if (-not [System.IO.Path]::IsPathRooted($target)) {
-                $target = Join-Path (Split-Path -Parent $Path) $target
-            }
-            return [System.IO.Path]::GetFullPath($target).TrimEnd("\", "/")
-        }
-    }
-    return [System.IO.Path]::GetFullPath($Path).TrimEnd("\", "/")
-}
-
 # Whether this uninstall is for the default home. Global uv tool installs and
 # a legacy ~\.vibe_remote directory belong to no chosen AVIBE_HOME, so only the
 # default home's uninstall removes them.
@@ -1056,7 +1108,7 @@ function Test-UninstallingDefaultHome {
     param([string]$RuntimeHome)
 
     return -not $env:AVIBE_HOME -or
-        (Resolve-HomeDirectory $RuntimeHome) -eq (Resolve-HomeDirectory (Join-Path $env:USERPROFILE ".avibe"))
+        (Resolve-PhysicalPath $RuntimeHome) -eq (Resolve-PhysicalPath (Join-Path $env:USERPROFILE ".avibe"))
 }
 
 # This home's data: the runtime home, then each default name linking to it,
@@ -1065,7 +1117,7 @@ function Test-UninstallingDefaultHome {
 function Get-AvibeDataDirectories {
     param([string]$RuntimeHome)
 
-    $runtimeDirectory = Resolve-HomeDirectory $RuntimeHome
+    $runtimeDirectory = Resolve-PhysicalPath $RuntimeHome
     if (Get-DirectoryEntry $RuntimeHome) {
         $RuntimeHome
     }
@@ -1074,7 +1126,7 @@ function Get-AvibeDataDirectories {
         if ($candidate -eq $RuntimeHome -or -not $entry) {
             continue
         }
-        $directory = Resolve-HomeDirectory $candidate
+        $directory = Resolve-PhysicalPath $candidate
         if ($entry.LinkType -in @("SymbolicLink", "Junction")) {
             if ($directory -eq $runtimeDirectory) {
                 $candidate
@@ -1095,7 +1147,7 @@ function Get-PurgeTargets {
         if ((Get-DirectoryEntry $data).LinkType -in @("SymbolicLink", "Junction")) {
             $data
         }
-        $directory = Resolve-HomeDirectory $data
+        $directory = Resolve-PhysicalPath $data
         if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
             continue
         }
@@ -1272,23 +1324,27 @@ function Uninstall-Avibe {
         }
     }
 
-    # Nothing is removed while Avibe could still be using it.
+    # Nothing is removed while Avibe could still be using it: first ask it to
+    # stop, then check that no process runs from or names what goes next.
     $stoppers = @($launchers) + @($uvTools | ForEach-Object { Join-Path $toolDirectory "$_\Scripts\vibe.exe" })
-    if (Stop-AvibeService -Launchers $stoppers -RuntimeHome $runtimeHome) {
+    $doomed = @($launchers) + @($root) + @($uvTools | ForEach-Object { Join-Path $toolDirectory $_ }) + @($doomedData)
+    $stopped = Stop-AvibeService -Launchers $stoppers -RuntimeHome $runtimeHome
+    $running = @(Get-BlockingProcesses -RuntimeHome $runtimeHome -Paths $doomed)
+    if ($running.Count -gt 0) {
+        Write-Warning "These processes still use what the uninstall would delete, so nothing was removed:"
+        foreach ($item in $running) {
+            Write-Host "  pid $($item.Substring(0, [Math]::Min(200, $item.Length)))"
+        }
+        Write-Host "  Stop them, then run the uninstall again. A pid file named above that"
+        Write-Host "  records a process which is not Avibe can be deleted instead."
+        return 1
+    }
+    if ($stopped) {
         Write-Success "Stopped the Avibe service"
+    } elseif ($stoppers.Count -gt 0) {
+        Write-Warning "The installed vibe could not stop the service; no running Avibe process was found"
     } else {
-        $running = @(Get-RunningAvibeProcesses $runtimeHome)
-        if ($running.Count -gt 0) {
-            Write-Warning "Avibe is still running and could not be stopped: pid $($running -join ', ')"
-            Write-Host "  Stop it, then run the uninstall again. Nothing was removed."
-            Write-Host "  If that process is not Avibe, delete the pid file named above."
-            return 1
-        }
-        if ($stoppers.Count -gt 0) {
-            Write-Warning "The installed vibe could not stop the service; no running Avibe service was found"
-        } else {
-            Write-Info "No installed vibe could be asked to stop; no running Avibe service was found"
-        }
+        Write-Info "No installed vibe could be asked to stop; no running Avibe process was found"
     }
 
     foreach ($item in $launchers + $markers) {
@@ -1363,15 +1419,20 @@ function Main {
 }
 
 # Each option means one thing, so a purge is never implied by another.
-if ($Purge -and -not $Uninstall) {
-    Write-Error "-Purge deletes your data during an uninstall; use it with -Uninstall"
+$optionError = if ($Purge -and -not $Uninstall) {
+    "-Purge deletes your data during an uninstall; use it with -Uninstall"
+} elseif ($Yes -and -not $Purge) {
+    "-Yes confirms a purge; use it with -Uninstall -Purge"
 }
-if ($Yes -and -not $Purge) {
-    Write-Error "-Yes confirms a purge; use it with -Uninstall -Purge"
-}
-if ($Uninstall) {
+if ($Uninstall -or $optionError) {
     Write-Banner
-    $uninstallStatus = Uninstall-Avibe | Select-Object -Last 1
+    if ($optionError) {
+        Write-Host "[ERROR] " -ForegroundColor Red -NoNewline
+        Write-Host $optionError
+        $uninstallStatus = 1
+    } else {
+        $uninstallStatus = Uninstall-Avibe | Select-Object -Last 1
+    }
     # A script file reports its status; a script block run at the prompt must
     # not close the user's session, so it leaves the status in LASTEXITCODE.
     if ($MyInvocation.MyCommand.Path) {

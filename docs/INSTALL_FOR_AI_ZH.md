@@ -169,7 +169,7 @@ vibe doctor
 只有用户明确要删除 Avibe 时才运行。卸载由安装脚本负责：它先停止服务，再删除它放置的所有 `vibe` 启动器和安装文件；不是它装的 `vibe` 不会动，用户数据（`~/.avibe` 和旧版的 `~/.vibe_remote`）会保留：
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'
 ```
 
 Windows PowerShell：
@@ -181,7 +181,7 @@ Windows PowerShell：
 只有用户明确要求时，才连同数据一起删除。数据删除后无法恢复，所以先和用户确认。清除时会先列出要删除的全部内容，并在终端上确认；没有终端时（比如 agent 的 shell），不加 `--yes`（PowerShell 为 `-Yes`）就不会执行：
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'
 ```
 
 ```powershell

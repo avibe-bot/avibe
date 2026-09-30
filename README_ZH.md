@@ -321,13 +321,13 @@ bash -o pipefail -c 'curl -fsSL https://opencode.ai/install | bash'
 带上 `--uninstall` 运行安装脚本。它会先停止 Avibe，再删除它在这台机器上装的所有 `vibe` 命令和安装文件；不是它装的 `vibe` 不会动。`~/.avibe` 里的设置、会话和其他数据都会保留：
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'
 ```
 
 如果连数据也要删，加上 `--purge`。它会先列出要删除的全部内容，确认后才删。**删除的数据无法恢复。** 没有终端可以回答确认时，还需要加 `--yes`。
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'
 ```
 
 ---

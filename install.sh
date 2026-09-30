@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Avibe Installation Script
 # Usage: bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
-# Uninstall, keeping your data:     curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall
-# Uninstall and delete your data:   curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge
-#   Without a terminal to confirm on, a purge also needs --yes.
+# Uninstall, keeping your data:
+#   bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'
+# Add --purge to also delete your data; without a terminal to confirm on, a purge also needs --yes.
 #
 # Prerequisites: None! uv will be installed automatically and manages Python for you.
 
@@ -862,14 +862,15 @@ launch_vibe() {
 }
 
 # Print the one-line uninstall command for this runtime home, with any options
-# appended. AVIBE_HOME is repeated when it chose the home.
+# appended. Like the install command, it fails when the download does, and it
+# repeats AVIBE_HOME when that chose the home.
 uninstall_command() {
     local home_prefix=""
     if [ -n "${AVIBE_HOME:-}" ]; then
         home_prefix="AVIBE_HOME=$(printf '%q' "$AVIBE_RUNTIME_HOME") "
     fi
-    printf 'curl -fsSL %s | %sbash -s -- --uninstall%s\n' \
-        "$PUBLIC_INSTALL_SCRIPT_URL" "$home_prefix" "${*:+ $*}"
+    printf "%sbash -o pipefail -c 'curl -fsSL %s | bash -s -- --uninstall%s'\n" \
+        "$home_prefix" "$PUBLIC_INSTALL_SCRIPT_URL" "${*:+ $*}"
 }
 
 print_uninstall_commands() {
@@ -1052,36 +1053,109 @@ uv_tool_owns_its_launchers() {
     return 0
 }
 
-# Print each Avibe process this home's pid records still show running.
-running_avibe_processes() {
+# Print "pid ppid command" for every process, or nothing when neither ps nor
+# /proc can list them.
+process_table() {
+    local dir=""
+    local ppid=""
+
+    if ps -eo pid=,ppid=,args= 2>/dev/null; then
+        return 0
+    fi
+    for dir in /proc/[0-9]*; do
+        [ -r "$dir/cmdline" ] || continue
+        ppid="$(awk '/^PPid:/ { print $2 }' "$dir/status" 2>/dev/null)"
+        printf '%s %s %s\n' "${dir#/proc/}" "${ppid:-0}" "$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null)"
+    done
+}
+
+# Print each live process that removal must wait for, as "pid command". One
+# runs from, or names on its command line, a path about to be deleted (the
+# arguments); another is recorded in one of this home's pid files, which also
+# covers a legacy install whose Python lives outside every deleted path. The
+# uninstaller's own process tree never counts.
+blocking_processes() {
+    local path=""
+    local physical=""
     local pid_file=""
     local pid=""
-    local command=""
+    local paths=""
+    local recorded=""
+    local table=""
 
-    for pid_file in "$AVIBE_RUNTIME_HOME/runtime/vibe.pid" "$AVIBE_RUNTIME_HOME/runtime/vibe-ui.pid"; do
+    for path in "$@"; do
+        paths="$paths$path"$'\n'
+        physical="$(physical_path "$path")"
+        if [ "$physical" != "$path" ]; then
+            paths="$paths$physical"$'\n'
+        fi
+    done
+    for pid_file in "$AVIBE_RUNTIME_HOME"/runtime/*.pid; do
         [ -f "$pid_file" ] || continue
         pid="$(tr -d '[:space:]' < "$pid_file" 2>/dev/null)"
         case "$pid" in
             ''|0|*[!0-9]*) continue ;;
         esac
-        # A pid file can outlive its process and name a reused pid, so when ps
-        # can show the command, only a vibe process counts. Without ps, a live
-        # pid counts, including one another user owns.
-        if command="$(ps -p "$pid" -o command= 2>/dev/null)"; then
-            case "$command" in
-                *vibe*) ;;
-                *) continue ;;
-            esac
-        elif [ -d /proc/self ]; then
-            [ -e "/proc/$pid" ] || continue
-        elif ! kill -0 "$pid" 2>/dev/null; then
-            case "$(LC_ALL=C kill -0 "$pid" 2>&1)" in
-                *"not permitted"*) ;;
-                *) continue ;;
-            esac
-        fi
-        printf '%s (recorded in %s)\n' "$pid" "$pid_file"
+        recorded="$recorded$pid $pid_file"$'\n'
     done
+    table="$(process_table)"
+    if [ -z "$table" ]; then
+        # Nothing can show a command, so a live recorded pid counts, including
+        # one another user owns.
+        printf '%s' "$recorded" | while read -r pid pid_file; do
+            [ -n "$pid" ] || continue
+            if kill -0 "$pid" 2>/dev/null || case "$(LC_ALL=C kill -0 "$pid" 2>&1)" in *"not permitted"*) true ;; *) false ;; esac; then
+                printf '%s (recorded in %s)\n' "$pid" "$pid_file"
+            fi
+        done
+        return 0
+    fi
+    printf '%s\n' "$table" | AVIBE_UNINSTALL_PATHS="$paths" AVIBE_UNINSTALL_RECORDED="$recorded" \
+        AVIBE_UNINSTALL_SELF="$$" awk '
+        BEGIN {
+            count = split(ENVIRON["AVIBE_UNINSTALL_PATHS"], paths, "\n")
+            lines = split(ENVIRON["AVIBE_UNINSTALL_RECORDED"], entries, "\n")
+            for (i = 1; i <= lines; i++) {
+                if (entries[i] == "") continue
+                split(entries[i], fields, " ")
+                recorded[fields[1]] = substr(entries[i], length(fields[1]) + 2)
+            }
+            self = ENVIRON["AVIBE_UNINSTALL_SELF"]
+        }
+        {
+            pid = $1
+            parent[pid] = $2
+            $1 = ""; $2 = ""
+            sub(/^ +/, "")
+            command[pid] = $0
+            order[++processes] = pid
+        }
+        END {
+            for (pid = self; pid != "" && pid != "0" && !(pid in own); pid = parent[pid]) own[pid] = 1
+            descendants[self] = 1
+            do {
+                grew = 0
+                for (i = 1; i <= processes; i++) {
+                    pid = order[i]
+                    if (!(pid in descendants) && (parent[pid] in descendants)) { descendants[pid] = 1; grew = 1 }
+                }
+            } while (grew)
+            for (i = 1; i <= processes; i++) {
+                pid = order[i]
+                if ((pid in own) || (pid in descendants)) continue
+                text = command[pid] " "
+                if (pid in recorded && text ~ /vibe|cloudflared/) {
+                    print pid " " command[pid] " (recorded in " recorded[pid] ")"
+                    continue
+                }
+                for (j = 1; j <= count; j++) {
+                    if (paths[j] != "" && (index(text, paths[j] "/") || index(text, paths[j] " "))) {
+                        print pid " " command[pid]
+                        break
+                    }
+                }
+            }
+        }'
 }
 
 # Ask an installed Avibe to stop its service; the first that succeeds is enough.
@@ -1297,24 +1371,37 @@ uninstall_avibe() {
         confirm_purge || return 1
     fi
 
-    # Nothing is removed while Avibe could still be using it.
+    # Nothing is removed while Avibe could still be using it: first ask it to
+    # stop, then check that no process runs from or names what goes next.
+    local stopped=0
     local -a stoppers=("${launchers[@]}")
-    for package in "${uv_tools[@]}"; do stoppers+=("$tool_dir/$package/bin/vibe"); done
+    local -a doomed=("${launchers[@]}" "$root")
+    for package in "${uv_tools[@]}"; do
+        stoppers+=("$tool_dir/$package/bin/vibe")
+        doomed+=("$tool_dir/$package")
+    done
+    doomed+=("${doomed_data[@]}")
     if stop_avibe_service "${stoppers[@]}"; then
+        stopped=1
+    fi
+    while IFS= read -r item; do
+        if [ -n "$item" ]; then running+=("$item"); fi
+    done < <(blocking_processes "${doomed[@]}")
+    if [ "${#running[@]}" -gt 0 ]; then
+        warn "These processes still use what the uninstall would delete, so nothing was removed:"
+        for item in "${running[@]}"; do
+            echo "  pid ${item:0:200}"
+        done
+        echo "  Stop them, then run the uninstall again. A pid file named above that"
+        echo "  records a process which is not Avibe can be deleted instead."
+        return 1
+    fi
+    if [ "$stopped" = "1" ]; then
         success "Stopped the Avibe service"
+    elif [ "${#stoppers[@]}" -gt 0 ]; then
+        warn "The installed vibe could not stop the service; no running Avibe process was found"
     else
-        while IFS= read -r item; do running+=("$item"); done < <(running_avibe_processes)
-        if [ "${#running[@]}" -gt 0 ]; then
-            warn "Avibe is still running and could not be stopped: pid ${running[*]}"
-            echo "  Stop it, then run the uninstall again. Nothing was removed."
-            echo "  If that process is not Avibe, delete the pid file named above."
-            return 1
-        fi
-        if [ "${#stoppers[@]}" -gt 0 ]; then
-            warn "The installed vibe could not stop the service; no running Avibe service was found"
-        else
-            info "No installed vibe could be asked to stop; no running Avibe service was found"
-        fi
+        info "No installed vibe could be asked to stop; no running Avibe process was found"
     fi
 
     for item in "${launchers[@]}" "${markers[@]}"; do

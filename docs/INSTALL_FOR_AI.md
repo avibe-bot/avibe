@@ -194,7 +194,7 @@ does not need an IM chat to complete this smoke test.
 Only run this if the user asks to remove Avibe. The installer owns uninstall: it stops the service, then removes every `vibe` launcher and install file it placed. It never touches a `vibe` it did not install, and it keeps the user's data (`~/.avibe`, and the legacy `~/.vibe_remote`):
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'
 ```
 
 Windows PowerShell:
@@ -206,7 +206,7 @@ Windows PowerShell:
 Delete the user's data too only when they explicitly ask for it. It cannot be recovered, so confirm with the user first. The purge lists everything it deletes and asks on the terminal; without one, as in an agent shell, it refuses unless `--yes` (PowerShell: `-Yes`) is added:
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'
 ```
 
 ```powershell

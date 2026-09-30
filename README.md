@@ -321,13 +321,13 @@ OpenCode may pause tool calls for approval unless `~/.config/opencode/opencode.j
 Run the installer with `--uninstall`. It stops Avibe, then removes every `vibe` command and install file it put on this machine. A `vibe` it did not install is left alone. Your settings, sessions, and other data in `~/.avibe` are kept:
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'
 ```
 
 To delete your data too, add `--purge`. It lists everything it will delete and asks before deleting. **Deleted data cannot be recovered.** Where no terminal can answer, it also needs `--yes`.
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'
 ```
 
 ---

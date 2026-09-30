@@ -15,6 +15,7 @@ import select
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -362,7 +363,7 @@ def test_uninstall_removes_avibe_and_keeps_user_data(installed):
     assert "Avibe was removed." in result.stdout
     kept = result.stdout.split("Your data was kept in:\n", 1)[1]
     assert kept.startswith(f"  {layout.avibe_home}\n  {legacy_home}\n")
-    assert "  curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge\n" in kept
+    assert "  bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'\n" in kept
 
 
 @posix_only
@@ -375,7 +376,7 @@ def test_a_purge_without_a_terminal_needs_yes_and_deletes_nothing(installed):
     listed = result.stdout.split("This permanently deletes:", 1)[1]
     for path in (first, second, layout.root, layout.avibe_home, legacy_home):
         assert f"  {path}" in listed
-    assert "--uninstall --purge --yes" in result.stdout
+    assert "bash -s -- --uninstall --purge --yes'" in result.stdout
     assert "Nothing was removed." in result.stdout
     assert _calls(layout) == []
     _assert_untouched(layout, first, second, foreign, legacy_home)
@@ -467,12 +468,56 @@ def test_uninstall_removes_nothing_while_a_service_it_cannot_stop_runs(installed
     assert len(_calls(layout)) == 2  # every managed launcher was asked
     if blocks:
         assert result.returncode == 1
-        assert f"could not be stopped: pid {process.pid} (recorded in {pid_file})" in result.stdout
-        assert "Nothing was removed." in result.stdout
+        assert f"  pid {process.pid} vibe-service 60 (recorded in {pid_file})" in result.stdout
+        assert "so nothing was removed" in result.stdout
         _assert_untouched(layout, first, second, foreign, legacy_home)
     else:
         assert result.returncode == 0, result.stdout + result.stderr
-        assert "could not stop the service; no running Avibe service was found" in result.stdout
+        assert "could not stop the service; no running Avibe process was found" in result.stdout
+        assert not layout.root.exists() and not first.is_symlink()
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "shape, options, blocks",
+    [
+        ("connector-in-install-generations", "--uninstall", True),
+        ("mentions-an-unrelated-path", "--uninstall", False),
+        ("connector-in-the-kept-home", "--uninstall", False),
+        ("connector-in-the-purged-home", "--uninstall --purge --yes", True),
+        ("recorded-connector", "--uninstall", True),
+    ],
+)
+def test_uninstall_waits_for_any_process_using_what_it_deletes(installed, shape, options, blocks):
+    """Even after a clean stop, nothing goes while a process runs from, or names, the deletion set."""
+    layout, first, second, foreign, legacy_home, env = installed
+    unrelated = layout.tmp / "unrelated" / "runtime" / "install-generations"
+    command = {
+        "connector-in-install-generations": f"{layout.root}/current/bin/cloudflared tunnel run",
+        "mentions-an-unrelated-path": f"harmless --config={unrelated}/current",
+        "connector-in-the-kept-home": f"{layout.avibe_home}/bin/cloudflared tunnel run",
+        "connector-in-the-purged-home": f"{layout.avibe_home}/bin/cloudflared tunnel run",
+        "recorded-connector": "cloudflared tunnel run",
+    }[shape]
+    process = subprocess.Popen(["bash", "-c", f"exec -a {shlex.quote(command)} sleep 60"])
+    try:
+        if shape == "recorded-connector":
+            (layout.avibe_home / "runtime" / "remote-access-cloudflared.pid").write_text(f"{process.pid}\n")
+
+        result = _installer_shell(layout, f"main {options}", **env)
+    finally:
+        process.kill()
+        process.wait()
+
+    assert len(_calls(layout)) == 1  # the stop itself succeeded
+    if blocks:
+        assert result.returncode == 1
+        assert f"  pid {process.pid} {command} 60" in result.stdout
+        assert "Stop them, then run the uninstall again." in result.stdout
+        _assert_untouched(layout, first, second, foreign, legacy_home)
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "Stopped the Avibe service" in result.stdout
         assert not layout.root.exists() and not first.is_symlink()
 
 
@@ -561,6 +606,64 @@ def test_a_purge_refuses_a_home_that_is_not_safe_to_delete(installed, home, reas
     assert f"Refusing to purge {target}" in result.stdout and reason in result.stdout
     assert target.is_dir() and _calls(layout) == []
     _assert_untouched(layout, first, second, foreign, legacy_home)
+
+
+def _chained_home(layout: Layout, *, junction: bool) -> tuple[Path, Path]:
+    """~/.avibe reaches the data through a link to a link; ~/.vibe_remote links to ~/.avibe."""
+    data = layout.tmp / "data" / "avibe"
+    (data / "runtime").mkdir(parents=True)
+    (data / "state").mkdir()
+    shutil.rmtree(layout.avibe_home)
+    hop = _symlink(layout.tmp / "hop", data)
+    if junction:
+        import _winapi
+
+        _winapi.CreateJunction(str(hop), str(layout.avibe_home))
+    else:
+        _symlink(layout.avibe_home, hop)
+    return data, _symlink(layout.home / ".vibe_remote", layout.avibe_home)
+
+
+@posix_only
+def test_a_purge_follows_a_chain_of_links_to_the_home(layout):
+    data, legacy_home = _chained_home(layout, junction=False)
+
+    result = _installer_shell(layout, "main --uninstall --purge --yes")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not data.exists()
+    assert not layout.avibe_home.is_symlink() and not legacy_home.is_symlink()
+
+
+@pytest.mark.skipif(not WINDOWS, reason="junctions")
+@pytest.mark.parametrize("shell", _rule_implementations())
+def test_powershell_purge_follows_a_junction_to_a_link(layout, shell):
+    data, legacy_home = _chained_home(layout, junction=True)
+
+    targets = _powershell(layout, shell, "Remove-Item Env:AVIBE_HOME -ErrorAction SilentlyContinue; Get-PurgeTargets (Get-RuntimeHome)")
+
+    assert {os.path.normcase(target) for target in targets} == {
+        os.path.normcase(str(path)) for path in (layout.avibe_home, legacy_home, data.resolve())
+    }
+
+
+@pytest.mark.skipif(not WINDOWS, reason="Windows process table")
+@pytest.mark.parametrize("shell", _rule_implementations())
+def test_powershell_waits_for_a_process_using_what_it_deletes(layout, shell):
+    unrelated = layout.tmp / "unrelated" / "runtime" / "install-generations"
+    sleeper = "import time; time.sleep(120)"
+    using = subprocess.Popen([sys.executable, "-c", sleeper, str(layout.root / "current" / "bin" / "cloudflared.exe")])
+    mentioning = subprocess.Popen([sys.executable, "-c", sleeper, f"--config={unrelated}"])
+    try:
+        root = str(layout.root).replace("'", "''")
+        blocking = _powershell(layout, shell, f"Get-BlockingProcesses -RuntimeHome (Get-RuntimeHome) -Paths @('{root}')")
+    finally:
+        for process in (using, mentioning):
+            process.kill()
+            process.wait()
+
+    pids = {int(line.split(" ", 1)[0]) for line in blocking}
+    assert using.pid in pids and mentioning.pid not in pids
 
 
 @posix_only
@@ -655,8 +758,9 @@ def test_a_purge_deletes_only_the_selected_homes_data(installed, shape):
 def test_uninstall_recipes_point_to_the_installer(document, native_windows):
     text = (REPO_ROOT / document).read_text(encoding="utf-8")
 
-    assert "curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall\n" in text
-    assert "curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge\n" in text
+    # Like the install command, a failed download fails the command.
+    assert "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'\n" in text
+    assert "bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge'\n" in text
     powershell = "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall"
     assert (f"{powershell}\n" in text and f"{powershell} -Purge\n" in text) is native_windows
     assert "uv tool uninstall" not in text and "rm -rf" not in text
