@@ -687,6 +687,53 @@ def test_uninstall_removes_nothing_when_no_process_list_is_available(installed):
     _assert_untouched(layout, first, second, foreign, legacy_home)
 
 
+def _linked_runtime(layout: Layout) -> Path:
+    """The home's runtime directory lives elsewhere, reached through a link."""
+    external = layout.tmp / "external-runtime"
+    shutil.move(str(layout.avibe_home / "runtime"), str(external))
+    if WINDOWS:
+        import _winapi
+
+        _winapi.CreateJunction(str(external), str(layout.avibe_home / "runtime"))
+    else:
+        _symlink(layout.avibe_home / "runtime", external)
+    return external / "install-generations"
+
+
+@posix_only
+def test_uninstall_never_deletes_the_generation_root_through_a_link(layout):
+    external_root = _linked_runtime(layout)
+
+    result = _installer_shell(layout, "main --uninstall")
+
+    assert result.returncode == 1
+    assert {path.name for path in external_root.iterdir()} == {"current", "older"}
+    assert f"Left {layout.root} in place: {layout.avibe_home / 'runtime'} is a link to" in result.stdout
+    assert "Avibe was not completely removed." in result.stdout
+
+
+@pytest.mark.skipif(not WINDOWS, reason="junctions")
+@pytest.mark.parametrize("shell", _rule_implementations())
+def test_powershell_never_deletes_the_generation_root_through_a_link(layout, shell):
+    external_root = _linked_runtime(layout)
+
+    output = "\n".join(_powershell(layout, shell, "Uninstall-Avibe | Out-Null"))
+
+    assert {path.name for path in external_root.iterdir()} == {"current", "older"}
+    assert f"Left {layout.root} in place" in output
+
+
+@pytest.mark.skipif(not WINDOWS, reason="Windows process table")
+@pytest.mark.parametrize("shell", _rule_implementations())
+def test_powershell_removes_nothing_without_a_process_list(layout, shell):
+    output = "\n".join(_powershell(
+        layout, shell, "function Get-CimInstance { throw 'WMI is unavailable' }; Uninstall-Avibe | Out-Null"
+    ))
+
+    assert "No process list is available here" in output
+    assert {path.name for path in layout.root.iterdir()} == {"current", "older"}
+
+
 @posix_only
 def test_uninstall_names_the_pip_that_can_remove_an_avibe_it_did_not_install(layout):
     shutil.rmtree(layout.root)

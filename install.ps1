@@ -992,15 +992,13 @@ function Get-BlockingProcesses {
             }
         }
     }
+    # CIM is the one source of command lines; without it nothing is removed.
     try {
         $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
             [pscustomobject]@{ Id = [int]$_.ProcessId; Parent = [int]$_.ParentProcessId; Text = "$($_.ExecutablePath) $($_.CommandLine)" }
         })
     } catch {
-        # Without WMI only executable paths and no parents are readable.
-        $processes = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
-            [pscustomobject]@{ Id = [int]$_.Id; Parent = 0; Text = "$($_.Path)" }
-        })
+        $processes = @()
     }
     if ($processes.Count -eq 0) {
         throw "no process list is available"
@@ -1350,8 +1348,16 @@ function Uninstall-Avibe {
     foreach ($item in $launchers + $markers) {
         if (-not (Remove-ReportedPath $item)) { $failed = $true }
     }
-    if ((Get-DirectoryEntry $root) -and -not (Remove-ReportedPath $root)) {
-        $failed = $true
+    if (Get-DirectoryEntry $root) {
+        # The root goes only through real directories below the home; the
+        # uninstall never deletes through a link.
+        $linkedStep = @((Join-Path $runtimeHome "runtime"), $root) | Where-Object { Test-IsLink $_ } | Select-Object -First 1
+        if ($linkedStep) {
+            Write-Warning "Left $root in place: $(Get-DataPathDescription $linkedStep). Delete it by hand if it is yours."
+            $failed = $true
+        } elseif (-not (Remove-ReportedPath $root)) {
+            $failed = $true
+        }
     }
     foreach ($package in $uvTools) {
         $environment = Join-Path $toolDirectory $package

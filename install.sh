@@ -1398,7 +1398,20 @@ uninstall_avibe() {
         fi
     done
     if [ -e "$root" ] || [ -L "$root" ]; then
-        if rm -rf -- "$root" 2>/dev/null && [ ! -e "$root" ] && [ ! -L "$root" ]; then
+        # The root goes only through real directories below the home; the
+        # uninstall never deletes through a link.
+        local step=""
+        local linked_step=""
+        for step in "${AVIBE_RUNTIME_HOME%/}/runtime" "$root"; do
+            if [ -L "$step" ]; then
+                linked_step="$step"
+                break
+            fi
+        done
+        if [ -n "$linked_step" ]; then
+            warn "Left $root in place: $linked_step is a link to $(readlink "$linked_step" 2>/dev/null). Delete it by hand if it is yours."
+            failed=1
+        elif rm -rf -- "$root" 2>/dev/null && [ ! -e "$root" ] && [ ! -L "$root" ]; then
             success "Removed $root"
         else
             warn "Could not remove $root"
