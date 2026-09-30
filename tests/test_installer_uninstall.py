@@ -703,6 +703,10 @@ def _generations_behind_a_link(layout: Layout, shape: str) -> tuple[Path, dict[s
         shutil.move(str(layout.avibe_home / "runtime"), str(external))
         _link_directory(layout.avibe_home / "runtime", external)
         return external / "install-generations", {}
+    if shape == "non-directory-root":
+        shutil.rmtree(layout.root)
+        layout.root.write_text("not a generation root", encoding="utf-8")
+        return layout.root, {}
     external = layout.tmp / "external-home"
     shutil.move(str(layout.avibe_home), str(external))
     if shape == "linked-home":
@@ -713,12 +717,19 @@ def _generations_behind_a_link(layout: Layout, shape: str) -> tuple[Path, dict[s
     return external / "runtime" / "install-generations", {}
 
 
-GENERATION_LINK_SHAPES = ["linked-runtime", "linked-home", "stale-legacy-alias"]
+GENERATION_GUARD_SHAPES = ["linked-runtime", "linked-home", "stale-legacy-alias", "non-directory-root"]
+
+
+def _assert_generations_kept(root: Path, shape: str) -> None:
+    if shape == "non-directory-root":
+        assert root.read_text(encoding="utf-8") == "not a generation root"
+    else:
+        assert {path.name for path in root.iterdir()} == {"current", "older"}
 
 
 @posix_only
-@pytest.mark.parametrize("shape", GENERATION_LINK_SHAPES)
-def test_uninstall_never_deletes_the_generation_root_through_a_link(layout, shape):
+@pytest.mark.parametrize("shape", GENERATION_GUARD_SHAPES)
+def test_uninstall_deletes_the_generation_root_only_through_real_directories(layout, shape):
     external_root, _ = _generations_behind_a_link(layout, shape)
     # The fixture's generation exports link by the old path, so name the file itself.
     launcher = _symlink(layout.path_dirs[0] / LAUNCHER, external_root / "current" / "uv" / "tools" / "avibe-os" / "bin" / "vibe")
@@ -726,26 +737,77 @@ def test_uninstall_never_deletes_the_generation_root_through_a_link(layout, shap
     result = _installer_shell(layout, "main --uninstall")
 
     assert result.returncode == 1
-    assert {path.name for path in external_root.iterdir()} == {"current", "older"}
+    _assert_generations_kept(external_root, shape)
     # Launchers are links or files themselves, so they still go.
     assert not launcher.is_symlink()
-    assert "and the uninstaller never deletes through a link." in result.stdout
+    if shape == "non-directory-root":
+        assert "is not a directory, and the uninstaller deletes only real directories." in result.stdout
+    else:
+        assert "and the uninstaller never deletes through a link." in result.stdout
     assert f"If it is yours, remove it with: rm -rf -- {shlex.quote(str(external_root.resolve()))}" in result.stdout
     assert "Avibe was not completely removed." in result.stdout
 
 
+@posix_only
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can remove from a read-only directory")
+def test_uninstall_keeps_the_generation_root_while_a_launcher_could_not_be_removed(installed):
+    layout, first, second, foreign, legacy_home, env = installed
+    layout.installer_dir.chmod(0o555)  # as a system directory the user cannot write
+    try:
+        result = _installer_shell(layout, "main --uninstall", **env)
+    finally:
+        layout.installer_dir.chmod(0o755)
+
+    assert result.returncode == 1
+    assert second.is_file() and not first.is_symlink()
+    assert {path.name for path in layout.root.iterdir()} == {"current", "older"}
+    assert f"Left {layout.root} in place: {second} could not be removed" in result.stdout
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/exe"), reason="Linux names each process's executable")
+def test_uninstall_waits_for_a_process_started_by_a_relative_path(installed):
+    layout, first, second, foreign, legacy_home, env = installed
+    binary = layout.root / "current" / "bin" / "cloudflared"
+    shutil.copy2(shutil.which("sleep"), binary)
+    process = subprocess.Popen(["./cloudflared", "60"], cwd=binary.parent)
+    try:
+        result = _installer_shell(layout, "main --uninstall", **env)
+    finally:
+        process.kill()
+        process.wait()
+
+    assert result.returncode == 1
+    assert f"  pid {process.pid} {binary}" in result.stdout
+    _assert_untouched(layout, first, second, foreign, legacy_home)
+
+
 @pytest.mark.skipif(not WINDOWS, reason="junctions")
 @pytest.mark.parametrize("shell", _rule_implementations())
-@pytest.mark.parametrize("shape", GENERATION_LINK_SHAPES)
-def test_powershell_never_deletes_the_generation_root_through_a_link(layout, shell, shape):
+@pytest.mark.parametrize("shape", GENERATION_GUARD_SHAPES)
+def test_powershell_deletes_the_generation_root_only_through_real_directories(layout, shell, shape):
     external_root, _ = _generations_behind_a_link(layout, shape)
-    env = {} if shape == "linked-runtime" else {"AVIBE_HOME": ""}
+    env = {} if shape in ("linked-runtime", "non-directory-root") else {"AVIBE_HOME": ""}
 
     output = "\n".join(_powershell(layout, shell, "Uninstall-Avibe | Out-Null", **env))
 
-    assert {path.name for path in external_root.iterdir()} == {"current", "older"}
-    assert "and the uninstaller never deletes through a link." in output
+    _assert_generations_kept(external_root, shape)
+    if shape == "non-directory-root":
+        assert "is not a directory, and the uninstaller deletes only real directories." in output
+    else:
+        assert "and the uninstaller never deletes through a link." in output
     assert "If it is yours, remove it with:" in output
+
+
+@pytest.mark.skipif(not WINDOWS, reason="an open file cannot be deleted on Windows")
+@pytest.mark.parametrize("shell", _rule_implementations())
+def test_powershell_keeps_the_generation_root_while_a_launcher_could_not_be_removed(layout, shell):
+    launcher = _copy(layout.path_dirs[0] / LAUNCHER, layout.current, marker=True)
+    with launcher.open("rb"):  # held open, so Windows refuses to delete it
+        output = "\n".join(_powershell(layout, shell, "Uninstall-Avibe | Out-Null"))
+
+    assert launcher.is_file()
+    assert {path.name for path in layout.root.iterdir()} == {"current", "older"}
+    assert f"{launcher} could not be removed" in output
 
 
 @pytest.mark.skipif(not WINDOWS, reason="Windows process table")

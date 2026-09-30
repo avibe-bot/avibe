@@ -1058,16 +1058,27 @@ uv_tool_owns_its_launchers() {
 # /proc can list them.
 process_table() {
     local dir=""
+    local key=""
+    local value=""
     local ppid=""
 
-    if ps -eo pid=,ppid=,args= 2>/dev/null; then
+    # Linux also names each executable, which a relative argv[0] hides.
+    if [ -r /proc/self/cmdline ]; then
+        for dir in /proc/[0-9]*; do
+            [ -r "$dir/cmdline" ] || continue
+            ppid=0
+            while IFS=$'\t' read -r key value; do
+                if [ "$key" = "PPid:" ]; then
+                    ppid="$value"
+                    break
+                fi
+            done 2>/dev/null < "$dir/status"
+            printf '%s %s %s %s\n' "${dir#/proc/}" "$ppid" "$(readlink "$dir/exe" 2>/dev/null)" \
+                "$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null)"
+        done
         return 0
     fi
-    for dir in /proc/[0-9]*; do
-        [ -r "$dir/cmdline" ] || continue
-        ppid="$(awk '/^PPid:/ { print $2 }' "$dir/status" 2>/dev/null)"
-        printf '%s %s %s\n' "${dir#/proc/}" "${ppid:-0}" "$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null)"
-    done
+    ps -eo pid=,ppid=,args= 2>/dev/null
 }
 
 # Print each live process that removal must wait for, as "pid command": one
@@ -1399,18 +1410,27 @@ uninstall_avibe() {
         fi
     done
     if [ -e "$root" ] || [ -L "$root" ]; then
-        # The uninstaller never deletes through a link: the root goes only when
-        # the home and every step below it are real directories.
+        # The root goes only when the home and every step below it are real
+        # directories: never through a link, never any other kind of entry.
+        # Nor while a managed launcher it serves is still there to dangle.
         local step=""
-        local linked_step=""
+        local left=""
         for step in "${AVIBE_RUNTIME_HOME%/}" "${AVIBE_RUNTIME_HOME%/}/runtime" "$root"; do
             if [ -L "$step" ]; then
-                linked_step="$step"
+                left="$step is a link to $(readlink "$step" 2>/dev/null), and the uninstaller never deletes through a link"
+                break
+            elif [ ! -d "$step" ]; then
+                left="$step is not a directory, and the uninstaller deletes only real directories"
                 break
             fi
         done
-        if [ -n "$linked_step" ]; then
-            warn "Left $root in place: $linked_step is a link to $(readlink "$linked_step" 2>/dev/null), and the uninstaller never deletes through a link."
+        for step in "${launchers[@]}"; do
+            if [ -z "$left" ] && { [ -e "$step" ] || [ -L "$step" ]; }; then
+                left="$step could not be removed, and removing the root would leave it dangling"
+            fi
+        done
+        if [ -n "$left" ]; then
+            warn "Left $root in place: $left."
             echo "  If it is yours, remove it with: rm -rf -- $(printf '%q' "$(physical_path "$root")")"
             failed=1
         elif rm -rf -- "$root" 2>/dev/null && [ ! -e "$root" ] && [ ! -L "$root" ]; then

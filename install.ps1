@@ -1350,13 +1350,30 @@ function Uninstall-Avibe {
         if (-not (Remove-ReportedPath $item)) { $failed = $true }
     }
     if (Get-DirectoryEntry $root) {
-        # The uninstaller never deletes through a link: the root goes only when
-        # the home and every step below it are real directories.
-        $linkedStep = @($runtimeHome.TrimEnd("\", "/"), (Join-Path $runtimeHome "runtime"), $root) |
-            Where-Object { Test-IsLink $_ } | Select-Object -First 1
-        if ($linkedStep) {
-            Write-Warning "Left $root in place: $(Get-DataPathDescription $linkedStep), and the uninstaller never deletes through a link."
-            $behindLink = (Resolve-LinkChain $linkedStep) + $root.Substring($linkedStep.Length)
+        # The root goes only when the home and every step below it are real
+        # directories: never through a link, never any other kind of entry.
+        # Nor while a managed launcher it serves is still there to dangle.
+        $left = $null
+        $behindLink = $root
+        foreach ($step in @($runtimeHome.TrimEnd("\", "/"), (Join-Path $runtimeHome "runtime"), $root)) {
+            $entry = Get-DirectoryEntry $step
+            if ($entry -and ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                $left = "$(Get-DataPathDescription $step), and the uninstaller never deletes through a link"
+                $behindLink = (Resolve-LinkChain $step) + $root.Substring($step.Length)
+                break
+            }
+            if (-not $entry -or -not $entry.PSIsContainer) {
+                $left = "$step is not a directory, and the uninstaller deletes only real directories"
+                break
+            }
+        }
+        foreach ($launcher in $launchers) {
+            if (-not $left -and (Get-DirectoryEntry $launcher)) {
+                $left = "$launcher could not be removed, and removing the root would leave it dangling"
+            }
+        }
+        if ($left) {
+            Write-Warning "Left $root in place: $left."
             Write-Host "  If it is yours, remove it with: Remove-Item -Recurse -Force -LiteralPath '$($behindLink.Replace("'", "''"))'"
             $failed = $true
         } elseif (-not (Remove-ReportedPath $root)) {
