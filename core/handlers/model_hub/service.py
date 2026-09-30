@@ -7734,7 +7734,7 @@ class ModelHubService:
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
-        turn_hop: tuple[str, str] | None = None,
+        turn_left: frozenset[RouteHop] = frozenset(),
     ) -> InvokeHandle:
         while True:
             await self._mutation_lock.acquire()
@@ -7759,7 +7759,7 @@ class ModelHubService:
                 config = self.store.load()
                 resolution = self._invocation_resolution(config, backend, requested_model_id, supply_channel)
                 candidates = [
-                    hop for hop in turn_ordered_candidate_hops(resolution, turn_hop)
+                    hop for hop in turn_ordered_candidate_hops(resolution, turn_left)
                     if hop.source_id not in excluded_source_ids
                 ]
                 candidate = next(
@@ -7814,7 +7814,7 @@ class ModelHubService:
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
-        turn_hop: tuple[str, str] | None = None,
+        turn_left: frozenset[RouteHop] = frozenset(),
     ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
         acquired_handle: InvokeHandle | None = None
         generation: int | None = None
@@ -7860,7 +7860,7 @@ class ModelHubService:
                     exact_retry=exact_retry,
                     on_admitted=admitted,
                     recovery_request=recovery_request,
-                    turn_hop=turn_hop,
+                    turn_left=turn_left,
                 )
             except InvokeCancelledError as cancelled:
                 await meter_observed(cancelled.observed, None)
@@ -8060,7 +8060,7 @@ class ModelHubService:
         supply_channel: Literal["hub"] | None = None,
         attempt_observer: Optional[AttemptObserver] = None,
         recovery_request: RecoveryRequest | None = None,
-        turn_hop: tuple[str, str] | None = None,
+        turn_left: frozenset[RouteHop] = frozenset(),
     ) -> ResolvedInvocation:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable")
@@ -8120,7 +8120,7 @@ class ModelHubService:
                 )
                 inspection = next(
                     (
-                        hop for hop in turn_ordered_candidate_hops(resolution, turn_hop)
+                        hop for hop in turn_ordered_candidate_hops(resolution, turn_left)
                         if hop.source_id not in globally_blocked_source_ids
                     ),
                     None,
@@ -8187,7 +8187,7 @@ class ModelHubService:
                     supply_channel=supply_channel,
                     on_admitted=admitted,
                     recovery_request=recovery_request,
-                    turn_hop=turn_hop,
+                    turn_left=turn_left,
                 )
             except _InvocationPlanChanged:
                 continue
@@ -8248,7 +8248,7 @@ class ModelHubService:
                         exact_retry=True,
                         on_admitted=admitted,
                         recovery_request=recovery_request,
-                        turn_hop=turn_hop,
+                        turn_left=turn_left,
                     )
                 except _InvocationPlanChanged:
                     if attempt_observer is not None:

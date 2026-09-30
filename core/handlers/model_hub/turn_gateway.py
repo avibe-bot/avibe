@@ -43,7 +43,7 @@ from .provenance import (
 )
 from .request import FORWARDED_CALLER_HEADERS, ModelHubRequest
 from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
-from .resolver import parse_model_hub_timestamp, turn_hop_advances
+from .resolver import RouteHop, hops_passed, parse_model_hub_timestamp
 from .stream_wire import (
     ProtocolSSEState,
     ProtocolUsageReport,
@@ -366,9 +366,10 @@ class ModelHubTurnGateway:
         self._base_url: str | None = None
         self._turn_requests: dict[str, set[_OwnedGatewayRequest]] = {}
         self._turn_completions: dict[str, asyncio.Task[None]] = {}
-        # The exact hop each live turn is on, per requested model. A turn keeps
-        # it until that hop fails, so one turn is one model and one vendor.
-        self._turn_hops: dict[str, dict[str, tuple[str, str]]] = {}
+        # The exact hops each live turn has left, per requested model. The set
+        # only grows until the turn settles, so concurrent requests of one turn
+        # agree whatever order they finish in.
+        self._turn_left: dict[str, dict[str, frozenset[RouteHop]]] = {}
 
     @contextmanager
     def _own_turn_request(self, terminalizer: GatewayTurnTerminalizer, execution: _TurnExecution):
@@ -412,7 +413,7 @@ class ModelHubTurnGateway:
             return existing
         self.correlation.close_turn_admission(turn_id, settled_by=settled_by)
         if not self._turn_requests.get(turn_id):
-            self._turn_hops.pop(turn_id, None)
+            self._turn_left.pop(turn_id, None)
             finish()
             return None
 
@@ -423,8 +424,8 @@ class ModelHubTurnGateway:
                 ))
                 await await_owned_task(drain)
             finally:
-                # After the drain, so no request of this turn can re-pin it.
-                self._turn_hops.pop(turn_id, None)
+                # After the drain, so no request of this turn can record into it.
+                self._turn_left.pop(turn_id, None)
                 try:
                     finish()
                 finally:
@@ -551,7 +552,7 @@ class ModelHubTurnGateway:
             await asyncio.gather(*(
                 await_owned_task(task) for task in tuple(self._turn_completions.values())
             ))
-        self._turn_hops.clear()
+        self._turn_left.clear()
         # After the runner, so the handlers it cancels have queued their last
         # writes first. Bounded like every other owned drain: a ledger that
         # cannot be reached must not hold shutdown open.
@@ -905,6 +906,9 @@ class ModelHubTurnGateway:
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
 
+        turn_id = terminalizer.turn_id
+        turn_left = self._turn_left.get(turn_id, {}).get(resolution_model, frozenset()) if turn_id is not None else frozenset()
+
         def observe_attempt(
             source_id: str,
             resolved_model_id: str,
@@ -929,10 +933,12 @@ class ModelHubTurnGateway:
                 outcome=outcome,
                 decision=decision,
             )
+            if decision.action == "fallback":
+                # The walk moves on from this hop for a Source-level reason; a
+                # request-class failure ends the request and leaves no hop.
+                self._leave_turn_hops(terminalizer, turn_id, resolution_model, ((source_id, resolved_model_id),))
 
         protocol = _REQUEST_PROTOCOLS[endpoint]
-        turn_id = terminalizer.turn_id
-        turn_hop = self._turn_hops.get(turn_id, {}).get(resolution_model) if turn_id is not None else None
         try:
             caller_headers = {
                 name.lower(): value for name, value in request.headers.items() if name.lower() in FORWARDED_CALLER_HEADERS
@@ -954,7 +960,7 @@ class ModelHubTurnGateway:
                     supply_channel="hub",
                     attempt_observer=observe_attempt,
                     recovery_observer=terminalizer.update_recovery,
-                    turn_hop=turn_hop,
+                    turn_left=turn_left,
                 )
                 # Owned before the keepalive stops, so a cancellation while it
                 # stops still closes and meters a Source stream already won.
@@ -962,7 +968,9 @@ class ModelHubTurnGateway:
                 if resolved.handle is not None and resolved.handle.stream is not None:
                     execution.handle = resolved.handle
                     resources.push_async_callback(resolved.handle.close_stream)
-                self._keep_turn_hop(terminalizer, turn_id, resolution_model, turn_hop, resolved)
+                self._leave_turn_hops(terminalizer, turn_id, resolution_model, hops_passed(
+                    resolved.route_hops, turn_left, (resolved.source_id, resolved.model_id),
+                ))
         except ModelHubError as exc:
             turn_outcome = exc.turn_outcome
             if turn_outcome is None and exc.code == "engine_down":
@@ -1022,27 +1030,19 @@ class ModelHubTurnGateway:
             ),
         )
 
-    def _keep_turn_hop(
+    def _leave_turn_hops(
         self,
         terminalizer: GatewayTurnTerminalizer,
         turn_id: str | None,
         model_id: str,
-        resolved_from: tuple[str, str] | None,
-        resolved: ResolvedInvocation,
+        hops: tuple[RouteHop, ...],
     ) -> None:
-        """Move the turn to the hop that just served it, only ever forward.
+        """Record hops this turn has left; only a request the turn owns may."""
 
-        Only a request the turn still owns may move it. Concurrent requests of
-        one turn finish in any order, so each one moves the turn only past a
-        hop its own walk passed, never back behind a peer that got further.
-        """
-
-        if turn_id is None or terminalizer.turn_id != turn_id:
+        if not hops or turn_id is None or terminalizer.turn_id != turn_id:
             return
-        hops = self._turn_hops.setdefault(turn_id, {})
-        served = (resolved.source_id, resolved.model_id)
-        if turn_hop_advances(resolved.route_hops, resolved_from, hops.get(model_id), served):
-            hops[model_id] = served
+        models = self._turn_left.setdefault(turn_id, {})
+        models[model_id] = models.get(model_id, frozenset()) | frozenset(hops)
 
     @asynccontextmanager
     async def _stream_kept_alive(

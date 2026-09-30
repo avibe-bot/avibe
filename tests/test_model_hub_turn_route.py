@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import itertools
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -18,8 +19,8 @@ from config.v2_config import (
 )
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.resolver import (
+    hops_passed,
     resolve_model_hub_turn,
-    turn_hop_advances,
     turn_ordered_candidate_hops,
 )
 from core.handlers.model_hub.retry import RecoveryPolicy
@@ -45,6 +46,8 @@ SUCCESS = ScenarioCallResult(
     body=b'{"id":"resp_fixture","status":"completed","output":[]}',
 )
 RATE_LIMITED = ScenarioCallResult(RawOutcomeKind.HTTP_ERROR, status=429, error_code="rate_limit_exceeded")
+SERVER_ERROR = ScenarioCallResult(RawOutcomeKind.HTTP_ERROR, status=503, error_code="server_error")
+INVALID_REQUEST = ScenarioCallResult(RawOutcomeKind.HTTP_ERROR, status=400, error_code="invalid_request_error")
 
 
 def _route_resolution(statuses: dict[str, str]):
@@ -61,56 +64,46 @@ def _route_resolution(statuses: dict[str, str]):
     return resolve_model_hub_turn(config, "codex", model, now=NOW)
 
 
-@pytest.mark.parametrize(("turn_hop", "cooling", "expected"), [
-    (None, "", "abc"),
-    ("a", "", "abc"),
-    ("b", "", "bca"),
-    ("c", "", "cab"),
-    # A turn hop that cannot run moves the walk forward, not back.
-    ("b", "b", "ca"),
-    # Earlier hops stay reachable, last, so pinning never fails a servable request.
-    ("b", "bc", "a"),
-    # A hop that left the effective route no longer applies.
+def _hop(name):
+    if name == "b-other-model":
+        return ("src_turnrouteb", "another-upstream")
+    return (f"src_turnroute{name}", UPSTREAM)
+
+
+@pytest.mark.parametrize(("left", "cooling", "expected"), [
+    ("", "", "abc"),
+    ("a", "", "bca"),
+    ("ab", "", "cab"),
+    # A hop the turn has not left but cannot run moves the walk forward.
+    ("a", "b", "ca"),
+    # Hops the turn left stay reachable, last, so the order never fails a servable request.
+    ("a", "bc", "a"),
+    # Once the turn has left every hop, the last-resort walk uses route order.
+    ("abc", "", "abc"),
+    ("cb", "", "abc"),
+    # Hops outside the current route play no part.
     ("d", "", "abc"),
     ("b-other-model", "", "abc"),
 ])
-def test_turn_walk_starts_at_the_turn_hop_and_wraps(turn_hop, cooling, expected):
-    """MH-ROUTING-014: the turn hop rotates the walk without changing its membership."""
+def test_turn_walk_tries_hops_the_turn_has_not_left_first(left, cooling, expected):
+    """MH-ROUTING-014: the left set reorders the walk without changing its membership."""
     resolution = _route_resolution({name: "cooldown" for name in cooling})
-    pinned = None
-    if turn_hop == "b-other-model":
-        pinned = ("src_turnrouteb", "another-upstream")
-    elif turn_hop is not None:
-        pinned = (f"src_turnroute{turn_hop}", UPSTREAM)
-    walked = turn_ordered_candidate_hops(resolution, pinned)
+    left_hops = frozenset([_hop(left)] if left in {"d", "b-other-model"} else map(_hop, left))
+    walked = turn_ordered_candidate_hops(resolution, left_hops)
     assert [hop.source_id[-1] for hop in walked] == list(expected)
     assert {hop.source_id for hop in walked} == {hop.source_id for hop in resolution.candidate_hops}
 
 
-def _hop(name):
-    return None if name is None else (f"src_turnroute{name}", UPSTREAM)
-
-
-@pytest.mark.parametrize(("start", "current", "served", "advances"), [
-    # The first request of a turn sets the turn hop.
-    (None, None, "a", True),
-    # Two requests that both started before any turn hop: the one that passed
-    # the peer's hop moves the turn on; the one served before it cannot move it back.
-    (None, "a", "b", True),
-    (None, "b", "a", False),
-    # Requests that started at the turn hop move it only forward, wrapping around.
-    ("b", "b", "c", True),
-    ("b", "b", "a", True),
-    ("b", "a", "c", False),
-    ("b", "c", "a", True),
-    ("b", "b", "b", False),
-    # A turn hop that left the route no longer holds the turn.
-    ("b", "d", "a", True),
+@pytest.mark.parametrize(("left", "served", "passed"), [
+    ("", "a", ""),
+    ("", "c", "ab"),
+    ("a", "b", ""),
+    ("a", "a", "bc"),
+    ("a", "d", ""),
 ])
-def test_turn_hop_moves_only_forward(start, current, served, advances):
-    """MH-ROUTING-014: however concurrent requests finish, the turn hop never moves back."""
+def test_hops_a_request_passed_before_it_was_served(left, served, passed):
     route = tuple(_hop(name) for name in "abc")
-    assert turn_hop_advances(route, _hop(start), _hop(current), _hop(served)) is advances
+    assert hops_passed(route, frozenset(map(_hop, left)), _hop(served)) == tuple(map(_hop, passed))
 
 
 class _Clock:
@@ -126,7 +119,7 @@ async def runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
     sources = [
         source(f"src_turnroute{name}", [UPSTREAM], vendor="openai", protocol="openai_responses")
-        for name in "ab"
+        for name in "abc"
     ]
     config = config_with_sources(sources, backend="codex")
     config.agents["codex"].models = [ModelHubBackendModelConfig(id=model) for model in MODELS]
@@ -204,11 +197,10 @@ async def test_turn_stays_on_its_hop_until_that_hop_fails(runtime):
     assert runtime.adapter.invocations[-1][0] == "src_turnroutea"
 
 
-async def test_concurrent_first_requests_leave_the_turn_on_the_furthest_hop(runtime):
-    """MH-ROUTING-014: a request that fell past a peer's hop moves the turn, whichever finishes first."""
-    runtime.adapter.invoke_results.extend([SUCCESS, RATE_LIMITED, SUCCESS, SUCCESS])
-    turn = await runtime.router.resolve("codex", MODELS[0], process_scope=runtime.cwd, turn_id="turn-concurrent")
-    gates = {1: asyncio.Event(), 3: asyncio.Event()}
+def _gate_invocations(runtime, *counts):
+    """Hold each listed upstream call, by its position in call order, until released."""
+
+    gates = {count: asyncio.Event() for count in counts}
     invoke = runtime.adapter.invoke
 
     async def gated_invoke(*args, **kwargs):
@@ -219,17 +211,31 @@ async def test_concurrent_first_requests_leave_the_turn_on_the_furthest_hop(runt
         return handle
 
     runtime.adapter.invoke = gated_invoke
+    return gates
 
-    async def invoked(count):
+
+async def _invoked(runtime, count):
+    async def reached():
         while len(runtime.adapter.invocations) < count:
             await asyncio.sleep(0.01)
 
-    # Both requests start before either has set the turn hop.
+    await asyncio.wait_for(reached(), timeout=5)
+
+
+def _served_by(runtime):
+    return runtime.adapter.invocations[-1][0][-1]
+
+
+async def test_concurrent_first_requests_never_return_the_turn_to_a_left_hop(runtime):
+    """MH-ROUTING-014: a request served before a peer fell past its hop cannot hold the turn there."""
+    runtime.adapter.invoke_results.extend([SUCCESS, RATE_LIMITED, SUCCESS, SUCCESS, SUCCESS])
+    turn = await runtime.router.resolve("codex", MODELS[0], process_scope=runtime.cwd, turn_id="turn-race-first")
+    gates = _gate_invocations(runtime, 1, 3)
+    # Both requests start before either finishes; the one served by A finishes first.
     first = asyncio.create_task(_post(turn))
-    await asyncio.wait_for(invoked(1), timeout=5)
+    await _invoked(runtime, 1)
     second = asyncio.create_task(_post(turn))
-    await asyncio.wait_for(invoked(3), timeout=5)
-    # The request served on the first hop finishes first, then the one that fell past it.
+    await _invoked(runtime, 3)
     gates[1].set()
     assert (await asyncio.wait_for(first, timeout=10))[0] == 200
     gates[3].set()
@@ -237,5 +243,73 @@ async def test_concurrent_first_requests_leave_the_turn_on_the_furthest_hop(runt
     assert [invocation[0][-1] for invocation in runtime.adapter.invocations] == ["a", "a", "b"]
 
     runtime.clock.elapsed += 3600
+    for _ in range(2):
+        assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+        assert _served_by(runtime) == "b"
+
+
+async def test_slow_completion_after_a_wrap_does_not_move_the_turn(runtime):
+    """MH-ROUTING-014: a request admitted before the turn left its hop changes nothing when it finishes late."""
+    runtime.adapter.invoke_results.extend([
+        SUCCESS,  # 1: the turn starts on A
+        RATE_LIMITED, SUCCESS,  # 2-3: the slow request fails on A and is held on B
+        SUCCESS,  # 4: a peer is served by B
+        SERVER_ERROR, SERVER_ERROR, SUCCESS,  # 5-7: B and C fail, so a request wraps to the recovered A
+        SUCCESS, SUCCESS,
+    ])
+    turn = await runtime.router.resolve("codex", MODELS[0], process_scope=runtime.cwd, turn_id="turn-race-wrap")
     assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
-    assert runtime.adapter.invocations[-1][0] == "src_turnrouteb"
+    gates = _gate_invocations(runtime, 3)
+    slow = asyncio.create_task(_post(turn))
+    await _invoked(runtime, 3)
+    assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+    assert _served_by(runtime) == "b"
+    runtime.clock.elapsed += 120
+    assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+    assert [invocation[0][-1] for invocation in runtime.adapter.invocations[4:]] == ["b", "c", "a"]
+    gates[3].set()
+    assert (await asyncio.wait_for(slow, timeout=10))[0] == 200
+
+    # The turn has left every hop, so it walks in route order, and the late
+    # completion on B does not move it back to B.
+    runtime.clock.elapsed += 3600
+    for _ in range(2):
+        assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+        assert _served_by(runtime) == "a"
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
+async def test_concurrent_requests_converge_in_any_completion_order(runtime, order):
+    """MH-ROUTING-014: the hops a turn has left do not depend on which request finishes first."""
+    runtime.adapter.invoke_results.extend([
+        SUCCESS,  # 1: the first request is served by A
+        RATE_LIMITED, SUCCESS,  # 2-3: the second fails on A and is served by B
+        SERVER_ERROR, SUCCESS,  # 4-5: the third starts after A was left, fails on B, is served by C
+        SUCCESS, SUCCESS,
+    ])
+    turn = await runtime.router.resolve("codex", MODELS[0], process_scope=runtime.cwd, turn_id="turn-permutation")
+    gates = _gate_invocations(runtime, 1, 3, 5)
+    requests = []
+    for reached in (1, 3, 5):
+        requests.append(asyncio.create_task(_post(turn)))
+        await _invoked(runtime, reached)
+    assert [invocation[0][-1] for invocation in runtime.adapter.invocations] == ["a", "a", "b", "b", "c"]
+    for index in order:
+        gates[(1, 3, 5)[index]].set()
+        assert (await asyncio.wait_for(requests[index], timeout=10))[0] == 200
+
+    runtime.clock.elapsed += 3600
+    for _ in range(2):
+        assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+        assert _served_by(runtime) == "c"
+
+
+async def test_a_request_class_failure_does_not_move_the_turn(runtime):
+    """MH-ROUTING-014: only a Source-level failure that makes fallback move on leaves a hop."""
+    runtime.adapter.invoke_results.extend([SUCCESS, INVALID_REQUEST, SUCCESS])
+    turn = await runtime.router.resolve("codex", MODELS[0], process_scope=runtime.cwd, turn_id="turn-bad-request")
+    assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+    status, _body = await asyncio.wait_for(_post(turn), timeout=10)
+    assert status == 400
+    assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+    assert [invocation[0][-1] for invocation in runtime.adapter.invocations] == ["a", "a", "a"]

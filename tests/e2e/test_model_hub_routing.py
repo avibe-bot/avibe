@@ -692,7 +692,7 @@ def test_mh_routing_015_turn_stays_on_its_hop_through_real_cpa(tmp_path, monkeyp
         finally:
             await gateway.close()
         # The failed hop recovered before the first turn ended, and still served
-        # nothing more of it; the fallback order only moves forward within a turn.
+        # nothing more of it: a turn does not return to a hop it has left.
         assert served == ["A", "AB", "B", "B", "A"]
         record = service.get_turn_provenance("turn_hop_first")
         assert record["served"] == {"source_id": sources[1].id, "configured_model_id": model, "channel": "hub"}

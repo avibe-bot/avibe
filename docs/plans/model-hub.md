@@ -567,7 +567,7 @@ if B.mode == "direct":
     return DIRECT
 
 attempted = false
-for hop in C, in effective-plan order rotated to start at the turn hop:
+for hop in C, hops the turn has not left first, each part in effective-plan order:
     live = inspect_exact_hop(hop)
     annotate hop with live.runnable, live.reason, and live.retry_at
     if not live.runnable:
@@ -589,23 +589,34 @@ return NO_CANDIDATE(classify_blockers(C)) if not attempted
 else EXHAUSTED(classify_blockers(C))
 ```
 
-**Turn hop (issue #2226).** One Avibe turn stays on one exact hop per requested menu
-model until that hop fails. The first request of a turn walks `C` from its first hop;
-the hop that serves it becomes the turn hop. Every later request of the same turn and
-menu model walks `C` rotated to start at the turn hop, so hops before it come last: a
-hop that recovers mid-turn serves that turn only when every hop from the turn hop onward
-cannot. The hop that serves moves the turn hop only forward: a request moves it when its
-walk passed the current turn hop on the way to the serving hop, so concurrent requests
-of one turn, finishing in any order, leave the turn on the furthest hop any of them
-reached. The rotation changes neither
-membership nor eligibility, so a request that one walk can serve, the other serves too.
-A turn hop that is no longer in `C`, after a route edit or a Source deletion, no longer
-applies, and the walk starts at `C[0]`. The turn is the FSM turn that TurnProvenance
-attributes the request to, so a request without an exact turn (the shared OpenCode
-server, a late request after the turn settled, an ambiguous scope) walks `C` from its
-first hop as before. A request of the same turn for another menu model has its own turn
-hop. The gateway keeps turn hops in memory and drops a turn's hops when the FSM settles
-it, after its requests drain, and when the gateway closes.
+**Hops a turn has left (issue #2226).** One Avibe turn stays on one exact hop per
+requested menu model until that hop cannot serve. For each turn and menu model the
+gateway keeps the set of hops the turn has left, and the set only grows. A hop joins it
+in exactly two cases:
+- A request's attempt on it ends in a `fallback` decision, the Source-level failure that
+  makes the walk move on.
+- A request's walk passed it before the hop that served, because it could not run when
+  reached or its Source failed during that request.
+
+A request-class failure ends the request without trying another hop, so it leaves no
+hop. A failure after output has started does not move the walk on either; the Source
+health it writes decides whether a later request can run that hop.
+
+Every request of the turn walks `C` in this order: the hops the turn has not left, in
+`C` order, then the hops it has left, in `C` order, as a last resort. So a hop that
+recovers mid-turn serves that turn again only when no hop the turn has not left can
+serve, and a turn that has left every hop walks `C` in order. The ordering changes
+neither membership nor eligibility, so a request that one walk can serve, the other
+serves too.
+
+Set union needs no order, so concurrent requests of one turn converge whatever order
+they finish in. Only hops in the current `C` take part, so a hop that a route edit or a
+Source deletion removes stops affecting the turn at once. The turn is the FSM turn that
+TurnProvenance attributes the request to. A request without an exact turn walks `C` in
+order as before; these are the shared OpenCode server, a late request after the turn
+settled, and an ambiguous scope. A request of the same turn for another menu model has
+its own set. The gateway keeps the sets in memory and drops a turn's sets when the FSM
+settles it, after its requests drain, and when the gateway closes.
 
 `inspect_exact_hop` checks only whether that configured hop can run now. `healthy` and
 an elapsed cooldown are eligible, unless a real request already owns half-open

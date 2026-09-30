@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Callable, Literal, Mapping
+from typing import Literal, Mapping
 
 from config.v2_config import (
     MODEL_HUB_BACKENDS,
@@ -446,56 +446,50 @@ def route_hops(resolution: ModelHubTurnResolution) -> tuple[RouteHop, ...]:
     return tuple((hop.source_id, hop.model_id) for hop in resolution.inspected_hops)
 
 
-def _walk_distance(route: tuple[RouteHop, ...], start: RouteHop | None) -> Callable[[RouteHop], int]:
-    """Position along the walk that starts at ``start``, or at the first hop."""
+def turn_walk(route: tuple[RouteHop, ...], left: frozenset[RouteHop]) -> tuple[RouteHop, ...]:
+    """The order one turn tries its route: hops it has not left, then those it has.
 
-    origin = route.index(start) if start in route else 0
-    return lambda hop: (route.index(hop) - origin) % len(route)
+    Both parts keep route order. A turn stays on the first hop it has not left
+    until that hop cannot serve, and a hop it left serves again only as a last
+    resort, so the order never fails a request the plain route would serve.
+    Only hops in the current route take part, so a hop that a route edit or a
+    Source deletion removed no longer affects the turn.
+    """
+
+    return (
+        *(hop for hop in route if hop not in left),
+        *(hop for hop in route if hop in left),
+    )
 
 
 def turn_ordered_candidate_hops(
     resolution: ModelHubTurnResolution,
-    turn_hop: RouteHop | None,
+    left: frozenset[RouteHop],
 ) -> tuple[ExactHopInspection, ...]:
-    """Walk the runnable hops from the hop the turn is on, then wrap around.
+    """Order the runnable hops by the turn's walk, without changing membership."""
 
-    A turn stays on the hop that served it: hops before it in the route come
-    last, so a hop that recovers mid-turn serves only when every hop from the
-    turn's own onward cannot. Membership never changes, only where the walk
-    starts. A turn hop that has left the effective route no longer applies.
-    """
-
-    route = route_hops(resolution)
-    if turn_hop is None or turn_hop not in route:
+    if not left:
         return resolution.candidate_hops
-    distance = _walk_distance(route, turn_hop)
+    walk = turn_walk(route_hops(resolution), left)
     return tuple(sorted(
         resolution.candidate_hops,
-        key=lambda hop: distance((hop.source_id, hop.model_id)),
+        key=lambda hop: walk.index((hop.source_id, hop.model_id)),
     ))
 
 
-def turn_hop_advances(
+def hops_passed(
     route: tuple[RouteHop, ...],
-    start: RouteHop | None,
-    current: RouteHop | None,
+    left: frozenset[RouteHop],
     served: RouteHop,
-) -> bool:
-    """Whether a request served by ``served`` moves the turn past ``current``.
+) -> tuple[RouteHop, ...]:
+    """The hops a request's walk passed before the one that served it.
 
-    The request walked ``route`` from ``start`` and reached ``served`` only
-    after every hop before it in that walk could not serve. A current turn hop
-    in that stretch was passed, so the turn moves forward to ``served``. One at
-    or beyond ``served`` was set by a peer that got as far or further, and a
-    slower request must not move the turn back to where it was served.
+    The walk tries runnable hops in order, so each hop before ``served`` either
+    could not run when it was reached or its Source failed during this request.
     """
 
-    if served not in route:
-        return False
-    if current is None or current not in route:
-        return True
-    distance = _walk_distance(route, start)
-    return distance(current) < distance(served)
+    walk = turn_walk(route, left)
+    return walk[:walk.index(served)] if served in walk else ()
 
 
 def resolve_model_hub_turn(
