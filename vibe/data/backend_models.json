@@ -10,6 +10,7 @@
         {"id": "claude-opus-4-8", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-opus-4-7", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-opus-4-6", "reasoning_efforts": ["low", "medium", "high", "max"]},
+        {"id": "claude-sonnet-5-5", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-sonnet-5", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-sonnet-4-6", "reasoning_efforts": ["low", "medium", "high", "max"]},
         {"id": "claude-haiku-4-5", "reasoning_efforts": ["low", "medium", "high"]},

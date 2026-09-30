@@ -46,6 +46,7 @@ MODEL_ALIASES: Final[Mapping[str, str]] = {
     # Claude Code ships a model before models.dev lists it; the predecessor's
     # price is the closest published figure, and the override file can correct it.
     "claude-opus-5-5": "claude-opus-5",
+    "claude-sonnet-5-5": "claude-sonnet-5",
     # Codex CLI names.
     "gpt-5-codex": "gpt-5",
     "gpt-5.1-codex": "gpt-5.1",
@@ -53,9 +54,9 @@ MODEL_ALIASES: Final[Mapping[str, str]] = {
     "gpt-5.1-codex-mini": "gpt-5-mini",
     "gpt-5.2-codex": "gpt-5.2",
     "codex-mini-latest": "gpt-5-mini",
-    # Claude Code short names.
-    "opus": "claude-opus-5",
-    "sonnet": "claude-sonnet-5",
+    # Claude Code short names, pointing at the model each one resolves to.
+    "opus": "claude-opus-5-5",
+    "sonnet": "claude-sonnet-5-5",
     "haiku": "claude-haiku-4-5",
 }
 

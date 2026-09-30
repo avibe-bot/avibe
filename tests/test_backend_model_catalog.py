@@ -891,6 +891,16 @@ def test_claude_snapshot_ignores_native_default_models(monkeypatch, tmp_path):
         "xhigh",
         "max",
     ]
+    assert snapshot["models"].index("claude-sonnet-5-5") < snapshot["models"].index("claude-sonnet-5")
+    assert snapshot["model_labels"]["claude-sonnet-5-5"] == "claude-sonnet-5-5 [1M]"
+    assert [option["value"] for option in snapshot["reasoning_options"]["claude-sonnet-5-5"]] == [
+        "__default__",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
     assert snapshot["model_labels"]["claude-opus-5"] == "claude-opus-5 [1M]"
     assert snapshot["model_labels"]["claude-opus-4-6"] == "claude-opus-4-6 [1M]"
 
