@@ -3221,7 +3221,7 @@ def test_metadata_about_another_daemon_neither_reads_nor_writes_the_local_file(
     # land if authority were ignored -- the file is unchanged because of who the
     # accessor is bound to, not because the writes had nothing to match.
     metadata.reserve(target)
-    metadata.complete(target, "seeded")
+    metadata.complete(target, "seeded", incus_regression.SourceIdentity(branch="demo", commit="a" * 40, dirty=False))
     metadata.release(target, "seeded")
     metadata.forget(["demo"])
     metadata.mutate(lambda worktrees: worktrees.clear())
@@ -4241,7 +4241,12 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
     class NewRunner(incus_regression.Runner):
         names = daemon_listing(*inventory)
 
+    host_run = subprocess.run
+
     def run_command(command, **kwargs):
+        if command[0] == "git":
+            # The checkout's revision is read on the host, not through the daemon.
+            return host_run(command, **kwargs)
         script = command[-1]
         service_commands.append(script)
         if "/health" in script:
@@ -4498,9 +4503,13 @@ def test_no_end_of_a_reservation_writes_over_a_row_another_run_took(
     for name in writes:
         method = getattr(mine, name)
         parameters = set(inspect.signature(method).parameters)
-        unknown = parameters - {"runner"}
+        supplied = {
+            "runner": NewRunner(),
+            "identity": incus_regression.SourceIdentity(branch="demo", commit="a" * 40, dirty=False),
+        }
+        unknown = parameters - set(supplied)
         assert not unknown, f"{name} takes {sorted(unknown)}: teach this test how to call it"
-        method(**({"runner": NewRunner()} if "runner" in parameters else {}))
+        method(**{parameter: supplied[parameter] for parameter in parameters})
 
     rows = json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"]
     assert rows["demo"]["claim"] == theirs.claim
@@ -4520,8 +4529,6 @@ def test_a_reserved_row_still_reports_the_environment_that_is_installed(
     operator reads before deciding whether the environment is still wanted.
     """
     monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
-    monkeypatch.setattr(incus_regression, "branch_name", lambda repo_root: "fix/installed")
-    monkeypatch.setattr(incus_regression, "commit_sha", lambda repo_root: "aaaaaaaaaaaa")
     (tmp_path / ".runtime" / "incus-regression").mkdir(parents=True)
     target = incus_regression.RegressionTarget(
         target="worktree",
@@ -4535,9 +4542,12 @@ def test_a_reserved_row_still_reports_the_environment_that_is_installed(
 
     metadata = incus_regression.WorktreeMetadata(tmp_path, None)
     built = metadata.reserve(target)
-    metadata.complete(target, built.claim)
+    metadata.complete(
+        target, built.claim, incus_regression.SourceIdentity(branch="fix/installed", commit="aaaaaaaaaaaa", dirty=False)
+    )
 
     monkeypatch.setattr(incus_regression, "branch_name", lambda repo_root: "fix/arriving")
+    monkeypatch.setattr(incus_regression, "commit_sha", lambda repo_root: "bbbbbbbbbbbb")
     taking_over = metadata.reserve(target)
 
     row = metadata.rows()["demo"]
@@ -4546,6 +4556,148 @@ def test_a_reserved_row_still_reports_the_environment_that_is_installed(
     described = incus_regression.describe_worktree_entry(row)
     assert "fix/installed" in described
     assert "fix/arriving" not in described
+
+
+@pytest.mark.parametrize("moved_during", ["build", "sync"])
+def test_an_update_records_the_revision_its_sync_copied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, moved_during: str
+) -> None:
+    """The revision an environment is recorded as is the one its sync copied.
+
+    The checkout is shared with other sessions, which move it while an update is
+    building. Both records -- the build identity the environment serves and the
+    row the report reads -- were read from the checkout when they were written, so
+    a fast-forward during the build stamped the environment with a revision whose
+    code was never synced. A move after the sync still leaves the synced revision
+    to record; a move during it leaves the synced tree attributable to neither
+    revision, so the update stops before recording anything.
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+    def git(*command: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@example.com", *command],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    git("init", "--initial-branch=fix/synced")
+    (tmp_path / ".gitignore").write_text(".runtime/\n", encoding="utf-8")
+    git("add", ".gitignore")
+    git("commit", "-m", "synced")
+    synced = git("rev-parse", "HEAD")
+
+    def move_checkout(*args, **kwargs):
+        (tmp_path / "moved.txt").write_text("moved\n", encoding="utf-8")
+        git("add", "moved.txt")
+        git("commit", "-m", "moved")
+        return set()
+
+    commands: list[list[str]] = []
+
+    class NewRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        names = daemon_listing()
+
+        def run(self, command, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="{}")
+
+    calls: list[str] = []
+
+    def record(name):
+        def wrapper(*args, **kwargs):
+            calls.append(name)
+            if name == moved_during:
+                return move_checkout()
+            return set()
+
+        return wrapper
+
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "require_source_sync", lambda: None)
+    monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda host, port: None)
+    monkeypatch.setattr(incus_regression, "Runner", NewRunner)
+    monkeypatch.setattr(incus_regression, "should_seed_state", lambda *args, **kwargs: False)
+    monkeypatch.setattr(incus_regression, "compute_fingerprints", lambda repo_root: {})
+    monkeypatch.setattr(incus_regression, "read_existing_fingerprints", lambda *args, **kwargs: {})
+    monkeypatch.setattr(incus_regression, "sync_source", record("sync"))
+    monkeypatch.setattr(incus_regression, "update_dependencies_and_build", record("build"))
+    for name in (
+        "require_runtime_seed_env",
+        "ensure_project_and_instance",
+        "stop_service_for_update",
+        "write_runtime_env",
+        "migrate_legacy_backend_runtimes",
+        "invalidate_fingerprints",
+        "run_prepare_state",
+        "normalize_runtime_config",
+        "prepare_show_runtime",
+        "restart_and_verify",
+        "restart_service_after_failed_update",
+    ):
+        monkeypatch.setattr(incus_regression, name, record(name))
+
+    args = argparse.Namespace(
+        target="worktree",
+        slug="demo",
+        host_port=None,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+        worktree_port_start=15200,
+        worktree_port_end=15399,
+        env_file=None,
+        dry_run=False,
+        image="avibe-regression-base-current",
+        storage_pool="default",
+        network="incusbr0",
+        cpus="2",
+        memory="4GiB",
+        disk="20GiB",
+        processes="4096",
+        remote=None,
+        clean=False,
+        force_deps=False,
+        no_build_ui=True,
+        force_ui=False,
+        reset_mode="none",
+    )
+
+    def served_builds() -> list[dict]:
+        marker = f"cat > {incus_regression.METADATA_PATH} <<'EOF'\n"
+        return [
+            json.loads(part.split(marker, 1)[1].split("\nEOF", 1)[0])
+            for command in commands
+            for part in command
+            if marker in part
+        ]
+
+    mapping_path = tmp_path / ".runtime" / "incus-regression" / "worktrees.json"
+
+    if moved_during == "sync":
+        with pytest.raises(incus_regression.RegressionError, match="while its source was being synced"):
+            incus_regression.cmd_up(args)
+        assert served_builds() == []
+        # The previous fingerprints still describe what the instance holds.
+        assert "invalidate_fingerprints" not in calls
+        assert "restart_service_after_failed_update" in calls
+        assert "commit" not in json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"].get("demo", {})
+        return
+
+    assert incus_regression.cmd_up(args) == 0
+    assert git("rev-parse", "HEAD") != synced
+    assert [(build["branch"], build["commit"], build["dirty"]) for build in served_builds()] == [
+        ("fix/synced", synced, False)
+    ]
+    row = json.loads(mapping_path.read_text(encoding="utf-8"))["worktrees"]["demo"]
+    assert (row["branch"], row["commit"]) == ("fix/synced", synced)
 
 
 def test_an_empty_remote_names_the_local_daemon_for_every_command() -> None:

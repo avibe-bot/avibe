@@ -367,6 +367,9 @@ The Incus runner separates slow-changing dependencies from fast-changing source:
 - **Build identity**: the version badge and `/api/version` report the commit
   recorded by the latest source sync separately from install-time package
   metadata. Source targets do not use that package metadata for update prompts.
+  The recorded branch, commit, and dirty flag are read before the sync and
+  checked again after it; a checkout that moves in between fails the update
+  rather than attributing the synced tree to either revision.
 - **Show Runtime**: every successful update runs `vibe runtime prepare --strict`
   and then verifies `vibe runtime status --json`.
 

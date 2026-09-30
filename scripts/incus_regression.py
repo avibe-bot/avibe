@@ -569,6 +569,39 @@ def is_dirty(repo_root: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+@dataclass(frozen=True)
+class SourceIdentity:
+    """The checkout revision a source sync copied.
+
+    The checkout is a live tree that other sessions may move while an update is
+    building, so the identity recorded for an environment is read around its sync
+    rather than whenever a record is written: a record written from a later read
+    names a revision whose code was never deployed.
+    """
+
+    branch: str
+    commit: str
+    dirty: bool
+
+    @classmethod
+    def read(cls, repo_root: Path) -> SourceIdentity:
+        return cls(branch=branch_name(repo_root), commit=commit_sha(repo_root), dirty=is_dirty(repo_root))
+
+    def describe(self) -> str:
+        return f"{self.branch or 'detached'}@{self.commit[:12] or 'unknown'}{' (dirty)' if self.dirty else ''}"
+
+
+def require_unchanged_source(repo_root: Path, synced: SourceIdentity) -> None:
+    """Fail when the checkout moved while its source was being synced."""
+    current = SourceIdentity.read(repo_root)
+    if current != synced:
+        raise RegressionError(
+            f"The checkout changed from {synced.describe()} to {current.describe()} while its source was being "
+            "synced, so the synced source cannot be attributed to either revision. Rerun the update once the "
+            "checkout is stable."
+        )
+
+
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     slug = re.sub(r"-+", "-", slug)
@@ -817,7 +850,7 @@ class WorktreeMetadata:
 
         self.mutate(guarded)
 
-    def complete(self, target: RegressionTarget, claim: str) -> None:
+    def complete(self, target: RegressionTarget, claim: str, identity: SourceIdentity) -> None:
         """Stamp the environment as built, replacing the row, its claim and its `reserved_at`."""
         self.apply_claimed(
             target,
@@ -828,8 +861,8 @@ class WorktreeMetadata:
                 "instance": target.instance,
                 "host_port": target.host_port,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
-                "branch": branch_name(self.repo_root),
-                "commit": commit_sha(self.repo_root),
+                "branch": identity.branch,
+                "commit": identity.commit,
             },
         )
 
@@ -892,11 +925,11 @@ class WorktreeReservation:
     dry_run: bool = False
     claim: str | None = None
 
-    def complete(self) -> None:
-        """Stamp the environment as built, ending the reservation."""
+    def complete(self, identity: SourceIdentity) -> None:
+        """Stamp the environment as built from `identity`, ending the reservation."""
         if self.claim is None:
             return
-        self.metadata.complete(self.target, self.claim)
+        self.metadata.complete(self.target, self.claim, identity)
 
     def release(self, runner: Runner) -> None:
         """Give the row back if nothing came of it and nobody else has taken it."""
@@ -1968,7 +2001,15 @@ def invalidate_fingerprints(runner: Runner, target: RegressionTarget, *, remote:
     )
 
 
-def write_metadata(runner: Runner, target: RegressionTarget, repo_root: Path, fingerprints: dict, *, remote: str | None) -> None:
+def write_metadata(
+    runner: Runner,
+    target: RegressionTarget,
+    repo_root: Path,
+    identity: SourceIdentity,
+    fingerprints: dict,
+    *,
+    remote: str | None,
+) -> None:
     payload = {
         "schema_version": 1,
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -1977,9 +2018,9 @@ def write_metadata(runner: Runner, target: RegressionTarget, repo_root: Path, fi
         "project": target.project,
         "instance": target.instance,
         "repo_root": str(repo_root),
-        "branch": branch_name(repo_root),
-        "commit": commit_sha(repo_root),
-        "dirty": is_dirty(repo_root),
+        "branch": identity.branch,
+        "commit": identity.commit,
+        "dirty": identity.dirty,
         "fingerprints": fingerprints,
     }
     encoded = json.dumps(payload, indent=2)
@@ -2650,6 +2691,9 @@ def cmd_up(args: argparse.Namespace) -> int:
             # The stop may take effect before an interrupted client returns.
             stopped_service_target = target
             stop_service_for_update(runner, target, remote=args.remote)
+            # Everything from here to the fingerprints reads the checkout, and the
+            # records written at the end name the revision read here.
+            identity = SourceIdentity.read(repo_root)
             if seed_requires_env or loaded_env_file is not None or args.dry_run:
                 write_runtime_env(runner, target, repo_root=repo_root, remote=args.remote)
             else:
@@ -2657,6 +2701,9 @@ def cmd_up(args: argparse.Namespace) -> int:
             migrate_legacy_backend_runtimes(runner, target, remote=args.remote)
             sync_source(runner, target, repo_root, remote=args.remote, clean=args.clean, include_ui_dist=args.no_build_ui)
             fingerprints = compute_fingerprints(repo_root)
+            # Before the previous fingerprints are invalidated, so a moved checkout
+            # leaves the next run's dependency decisions as they were.
+            require_unchanged_source(repo_root, identity)
             previous_fingerprints = read_existing_fingerprints(runner, target, remote=args.remote)
             invalidate_fingerprints(runner, target, remote=args.remote)
             reconciled = update_dependencies_and_build(
@@ -2678,6 +2725,7 @@ def cmd_up(args: argparse.Namespace) -> int:
                 runner,
                 target,
                 repo_root,
+                identity,
                 reconciled_fingerprints(previous_fingerprints, fingerprints, reconciled),
                 remote=args.remote,
             )
@@ -2686,7 +2734,7 @@ def cmd_up(args: argparse.Namespace) -> int:
             prepare_show_runtime(runner, target, remote=args.remote)
             restart_and_verify(runner, target, remote=args.remote)
             stopped_service_target = None
-            reservation.complete()
+            reservation.complete(identity)
         except BaseException:
             # Recovery still owns the update lock: another up must not stop and
             # sync this environment while this failed run is starting it again.
