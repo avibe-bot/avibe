@@ -844,7 +844,7 @@ def test_build_base_uses_publishable_temp_instance() -> None:
 
     joined = "\n".join(" ".join(command) for command in commands)
     assert "--ephemeral" not in joined
-    assert "incus launch images:ubuntu/24.04/cloud avibe-regression-base-build --storage default --network incusbr0" in joined
+    assert "incus --project default launch images:ubuntu/24.04/cloud avibe-regression-base-build --storage default --network incusbr0" in joined
     assert "https://deb.nodesource.com/setup_20.x" in joined
     assert "useradd --create-home --shell /bin/bash --groups sudo avibe" in joined
     backend_install = joined.split("sudo -H -u avibe -- bash -s <<'AVIBE_BACKENDS'\n", 1)[1].split("\nAVIBE_BACKENDS", 1)[0]
@@ -859,8 +859,48 @@ def test_build_base_uses_publishable_temp_instance() -> None:
     # Backends must not be root-global: the non-root avibe user owns them and self-updates.
     assert "/usr/local/bin/opencode" not in joined
     assert "cloud-init clean --logs || true" in joined
-    assert "incus publish avibe-regression-base-build --alias avibe-regression-base-current" in joined
+    assert "incus --project default publish avibe-regression-base-build --alias avibe-regression-base-current" in joined
     subprocess.run(["bash", "-n"], input=next(command[-1] for command in commands if "apt-get update" in command[-1]), text=True, check=True)
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "real"])
+def test_build_base_pins_every_incus_call_to_the_image_store_project(
+    monkeypatch: pytest.MonkeyPatch, dry_run: bool
+) -> None:
+    """#2235: a target project holds one instance and reads images from `default`,
+    so build-base must not inherit whichever project the client has selected."""
+    generated: list[list[str]] = []
+    executed: list[list[str]] = []
+
+    class RecordingRunner(incus_regression.Runner):
+        def run(self, command, **kwargs):
+            generated.append(list(command))
+            return super().run(command, **kwargs)
+
+    def incus_boundary(command, **kwargs):
+        executed.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("INCUS_CMD", "test-incus")
+    monkeypatch.setattr(incus_regression, "Runner", RecordingRunner)
+    monkeypatch.setattr(incus_regression.subprocess, "run", incus_boundary)
+    args = argparse.Namespace(
+        dry_run=dry_run,
+        remote=None,
+        source_image="images:ubuntu/24.04/cloud",
+        temp_instance="test-temp",
+        image="test-image",
+        storage_pool="default",
+        network="incusbr0",
+    )
+
+    assert incus_regression.build_base_image(args) == 0
+
+    assert all(command[:3] == ["test-incus", "--project", "default"] for command in generated)
+    assert [command[3] for command in generated] == [
+        "delete", "launch", "exec", "exec", "stop", "image", "publish", "delete",
+    ]
+    assert executed == ([] if dry_run else generated)
 
 
 def _build_base_script_and_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, fail_stage: str = ""):
@@ -942,7 +982,7 @@ esac
     def run(command, *, check=False, **kwargs):
         assert command[0] == "test-incus", "Only the Incus boundary is stubbed"
         commands.append(command)
-        if command[1] == "exec":
+        if command[3] == "exec":
             # Execute the captured body, never a login shell: profiles may reset
             # PATH/HOME and escape the stubs. Inherit no credentials or BASH_ENV.
             result = real_run(
@@ -996,7 +1036,7 @@ def test_build_base_executes_backend_heredoc_and_post_bootstrap(tmp_path: Path, 
     ]
     assert "askill complete\n" in results[0].stdout
     assert results[0].stderr == ""
-    assert sum(command[1] == "publish" for command in commands) == 1
+    assert sum(command[3] == "publish" for command in commands) == 1
     for name in ("claude", "codex", "opencode"):
         assert (service_home / ".local/bin" / name).is_file()
 
@@ -1013,7 +1053,7 @@ def test_build_base_backend_failure_prevents_publish(
     assert excinfo.value.returncode == exit_code
     events = (tmp_path / "trace").read_text(encoding="utf-8").splitlines()
     assert f"askill|{outer_home}" not in events
-    assert [command[1] for command in commands] == ["delete", "launch", "exec"]
+    assert [command[3] for command in commands] == ["delete", "launch", "exec"]
 
 
 def test_source_exclude_drops_runtime_and_dependency_dirs() -> None:

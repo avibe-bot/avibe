@@ -81,6 +81,8 @@ an SSH daemon or host ownership metadata.
 
    The base image contains slow-changing dependencies such as Python, Node,
    build tools, and agent CLIs. Normal code updates do not rebuild this image.
+   It is built and published in the Incus `default` project, where target
+   projects read images from, whatever project the Incus client has selected.
 
 3. Copy the local env template:
 

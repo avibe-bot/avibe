@@ -62,6 +62,10 @@ SERVICE_NAME = "avibe-regression.service"
 UI_NON_SOURCE_DIRS = ("node_modules", "dist", ".vite")
 INTERNAL_DISPATCH_SOCKET = "/tmp/vibe_remote/dispatch.sock"
 DEFAULT_IMAGE = "avibe-regression-base-current"
+# Target projects are created with `features.images=false`, so they read images
+# from Incus's `default` project. The base image is built and published there,
+# never in whatever project the client happens to have selected.
+IMAGE_STORE_PROJECT = "default"
 DEFAULT_BASE_SOURCE_IMAGE = "images:ubuntu/24.04/cloud"
 DEFAULT_NETWORK = "incusbr0"
 DEFAULT_STORAGE_POOL = "default"
@@ -2547,7 +2551,8 @@ def cmd_build_base(args: argparse.Namespace) -> int:
 
 def build_base_image(args: argparse.Namespace) -> int:
     runner = Runner(dry_run=args.dry_run)
-    runner.run(incus("delete", remote_ref(args.remote, args.temp_instance), "--force"), check=False)
+    project = IMAGE_STORE_PROJECT
+    runner.run(incus("delete", remote_ref(args.remote, args.temp_instance), "--force", project=project), check=False)
     runner.run(
         incus(
             "launch",
@@ -2557,6 +2562,7 @@ def build_base_image(args: argparse.Namespace) -> int:
             args.storage_pool,
             "--network",
             args.network,
+            project=project,
         )
     )
     runner.run(
@@ -2605,6 +2611,7 @@ def build_base_image(args: argparse.Namespace) -> int:
                 npm --version
                 """
             ),
+            project=project,
         )
     )
     runner.run(
@@ -2615,16 +2622,17 @@ def build_base_image(args: argparse.Namespace) -> int:
             "bash",
             "-lc",
             "cloud-init clean --logs || true",
+            project=project,
         )
     )
-    runner.run(incus("stop", remote_ref(args.remote, args.temp_instance), "--force"), check=False)
-    runner.run(incus("image", "delete", remote_ref(args.remote, args.image)), check=False)
-    publish_command = incus("publish", remote_ref(args.remote, args.temp_instance))
+    runner.run(incus("stop", remote_ref(args.remote, args.temp_instance), "--force", project=project), check=False)
+    runner.run(incus("image", "delete", remote_ref(args.remote, args.image), project=project), check=False)
+    publish_command = incus("publish", remote_ref(args.remote, args.temp_instance), project=project)
     if args.remote:
         publish_command.append(remote_ref(args.remote))
     publish_command.extend(["--alias", args.image])
     runner.run(publish_command)
-    runner.run(incus("delete", remote_ref(args.remote, args.temp_instance), "--force"))
+    runner.run(incus("delete", remote_ref(args.remote, args.temp_instance), "--force", project=project))
     return 0
 
 
