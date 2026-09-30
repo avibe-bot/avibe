@@ -1353,6 +1353,11 @@ def regression_service_unit() -> str:
     ).rstrip()
 
 
+def cloud_init_wait_command() -> str:
+    """Wait for first boot, which brings up the network, before provisioning a new instance."""
+    return "if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait || true; fi"
+
+
 def prepare_service_directories_command() -> str:
     """Establish writable roots without visiting existing runtime contents."""
     directories = shlex.join((SERVICE_HOME, "/opt/avibe", SOURCE_DIR, VENV_DIR, METADATA_DIR, AVIBE_HOME))
@@ -1591,7 +1596,7 @@ def ensure_project_and_instance(
         root_exec(
             target,
             (
-                "if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait || true; fi; "
+                f"{cloud_init_wait_command()}; "
                 f"{prepare_service_directories_command()} && "
                 f"ln -sfn {AVIBE_HOME} {LEGACY_HOME} && "
                 "systemctl daemon-reload"
@@ -2573,8 +2578,10 @@ def build_base_image(args: argparse.Namespace) -> int:
             "bash",
             "-lc",
             textwrap.dedent(
-                """\
+                f"""\
                 set -euo pipefail
+                # `incus launch` returns before first boot has brought up the network.
+                {cloud_init_wait_command()}
                 apt-get update
                 apt-get install -y bash ca-certificates curl git build-essential python3 python3-pip python3-venv rsync sudo tmux
                 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -

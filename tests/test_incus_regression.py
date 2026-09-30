@@ -926,8 +926,10 @@ def _build_base_script_and_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
         )
         path.chmod(0o755)
 
-    for name in ("apt-get", "useradd", "cloud-init", "node", "askill"):
+    for name in ("apt-get", "useradd", "node", "askill"):
         write_stub(name, 'printf "%s complete\\n" "${0##*/}"\n')
+    # Both the first-boot wait and the final clean go through cloud-init; record which.
+    write_stub("cloud-init", 'printf "cloud-init %s\\n" "$*" >> "$TEST_TRACE"\n')
     write_stub("id", "exit 1\n")
     write_stub(
         "sudo",
@@ -1028,11 +1030,13 @@ def test_build_base_executes_backend_heredoc_and_post_bootstrap(tmp_path: Path, 
     assert (service_home / ".npmrc").read_bytes() == f"prefix={service_home}/.npm-global\n".encode()
     assert not (outer_home / ".npmrc").exists()
     events = (tmp_path / "trace").read_text(encoding="utf-8").splitlines()
+    # #2235: a freshly launched container has no network until first boot finishes.
+    assert events[:3] == [f"cloud-init|{outer_home}", "cloud-init status --wait", f"apt-get|{outer_home}"]
     assert events[events.index(f"sudo|{outer_home}") + 1:] == [
         f"npm|{service_home}", f"curl|{service_home}",
         f"claude|{service_home}", f"codex|{service_home}", f"opencode|{service_home}",
         f"curl|{outer_home}", f"askill|{outer_home}", f"node|{outer_home}", f"npm|{outer_home}",
-        f"cloud-init|{outer_home}",
+        f"cloud-init|{outer_home}", "cloud-init clean --logs",
     ]
     assert "askill complete\n" in results[0].stdout
     assert results[0].stderr == ""
