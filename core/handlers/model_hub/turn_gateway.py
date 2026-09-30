@@ -43,7 +43,7 @@ from .provenance import (
 )
 from .request import FORWARDED_CALLER_HEADERS, ModelHubRequest
 from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
-from .resolver import parse_model_hub_timestamp
+from .resolver import parse_model_hub_timestamp, turn_hop_advances
 from .stream_wire import (
     ProtocolSSEState,
     ProtocolUsageReport,
@@ -1030,18 +1030,19 @@ class ModelHubTurnGateway:
         resolved_from: tuple[str, str] | None,
         resolved: ResolvedInvocation,
     ) -> None:
-        """Pin the turn to the hop that just served it.
+        """Move the turn to the hop that just served it, only ever forward.
 
-        Only a request the turn still owns may move the pin, and only from the
-        hop it resolved from: a concurrent request of the same turn that
-        already moved it forward is not moved back by a slower peer.
+        Only a request the turn still owns may move it. Concurrent requests of
+        one turn finish in any order, so each one moves the turn only past a
+        hop its own walk passed, never back behind a peer that got further.
         """
 
         if turn_id is None or terminalizer.turn_id != turn_id:
             return
         hops = self._turn_hops.setdefault(turn_id, {})
-        if hops.get(model_id) == resolved_from:
-            hops[model_id] = (resolved.source_id, resolved.model_id)
+        served = (resolved.source_id, resolved.model_id)
+        if turn_hop_advances(resolved.route_hops, resolved_from, hops.get(model_id), served):
+            hops[model_id] = served
 
     @asynccontextmanager
     async def _stream_kept_alive(

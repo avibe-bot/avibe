@@ -155,6 +155,8 @@ from .resolver import (
     source_model_retired,
     source_supports_passthrough,
     source_runnable,
+    RouteHop,
+    route_hops,
     turn_ordered_candidate_hops,
 )
 from .revocations import CredentialRevocationJournal
@@ -614,6 +616,8 @@ class ResolvedInvocation:
     credential_ref: Optional[str] = None
     settlement_generation: Optional[int] = None
     verification_pending: Optional[str] = None
+    # The effective route whose walk selected this hop, in route order.
+    route_hops: tuple[RouteHop, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -8123,6 +8127,7 @@ class ModelHubService:
                 )
             if inspection is None:
                 break
+            selected_route = route_hops(resolution)
             source = inspection.source
             target_model = inspection.model_id
             if source is None or target_model is None:
@@ -8137,6 +8142,7 @@ class ModelHubService:
                     source=source,
                 )
                 return ResolvedInvocation(
+                    route_hops=selected_route,
                     backend=cast(BackendName, backend),
                     requested_model_id=model_id,
                     source_id=source.id,
@@ -8200,6 +8206,7 @@ class ModelHubService:
                     source=source,
                 )
                 return ResolvedInvocation(
+                    route_hops=selected_route,
                     backend=cast(BackendName, backend),
                     requested_model_id=model_id,
                     source_id=source.id,
@@ -8262,6 +8269,7 @@ class ModelHubService:
                         source=source,
                     )
                     return ResolvedInvocation(
+                        route_hops=selected_route,
                         backend=cast(BackendName, backend),
                         requested_model_id=model_id,
                         source_id=source.id,
@@ -8314,6 +8322,7 @@ class ModelHubService:
                     source=source,
                 )
                 return ResolvedInvocation(
+                    route_hops=selected_route,
                     backend=cast(BackendName, backend),
                     requested_model_id=model_id,
                     source_id=source.id,

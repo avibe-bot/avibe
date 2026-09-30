@@ -594,7 +594,10 @@ model until that hop fails. The first request of a turn walks `C` from its first
 the hop that serves it becomes the turn hop. Every later request of the same turn and
 menu model walks `C` rotated to start at the turn hop, so hops before it come last: a
 hop that recovers mid-turn serves that turn only when every hop from the turn hop onward
-cannot. Whichever hop serves becomes the new turn hop. The rotation changes neither
+cannot. The hop that serves moves the turn hop only forward: a request moves it when its
+walk passed the current turn hop on the way to the serving hop, so concurrent requests
+of one turn, finishing in any order, leave the turn on the furthest hop any of them
+reached. The rotation changes neither
 membership nor eligibility, so a request that one walk can serve, the other serves too.
 A turn hop that is no longer in `C`, after a route edit or a Source deletion, no longer
 applies, and the walk starts at `C[0]`. The turn is the FSM turn that TurnProvenance

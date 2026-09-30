@@ -17,7 +17,11 @@ from config.v2_config import (
     ModelHubRouteHopConfig,
 )
 from core.handlers.model_hub.adapter import RawOutcomeKind
-from core.handlers.model_hub.resolver import resolve_model_hub_turn, turn_ordered_candidate_hops
+from core.handlers.model_hub.resolver import (
+    resolve_model_hub_turn,
+    turn_hop_advances,
+    turn_ordered_candidate_hops,
+)
 from core.handlers.model_hub.retry import RecoveryPolicy
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
@@ -83,6 +87,32 @@ def test_turn_walk_starts_at_the_turn_hop_and_wraps(turn_hop, cooling, expected)
     assert {hop.source_id for hop in walked} == {hop.source_id for hop in resolution.candidate_hops}
 
 
+def _hop(name):
+    return None if name is None else (f"src_turnroute{name}", UPSTREAM)
+
+
+@pytest.mark.parametrize(("start", "current", "served", "advances"), [
+    # The first request of a turn sets the turn hop.
+    (None, None, "a", True),
+    # Two requests that both started before any turn hop: the one that passed
+    # the peer's hop moves the turn on; the one served before it cannot move it back.
+    (None, "a", "b", True),
+    (None, "b", "a", False),
+    # Requests that started at the turn hop move it only forward, wrapping around.
+    ("b", "b", "c", True),
+    ("b", "b", "a", True),
+    ("b", "a", "c", False),
+    ("b", "c", "a", True),
+    ("b", "b", "b", False),
+    # A turn hop that left the route no longer holds the turn.
+    ("b", "d", "a", True),
+])
+def test_turn_hop_moves_only_forward(start, current, served, advances):
+    """MH-ROUTING-014: however concurrent requests finish, the turn hop never moves back."""
+    route = tuple(_hop(name) for name in "abc")
+    assert turn_hop_advances(route, _hop(start), _hop(current), _hop(served)) is advances
+
+
 class _Clock:
     def __init__(self) -> None:
         self.elapsed = 0.0
@@ -120,7 +150,7 @@ async def runtime(tmp_path, monkeypatch):
         await gateway.close()
 
 
-async def _post(launch, model=None, *results):
+async def _post(launch, model=None):
     runtime_model = model or launch.runtime_model
     metadata = json.dumps(launch.gateway_request_metadata)
     async with aiohttp.ClientSession(trust_env=False) as client:
@@ -172,3 +202,40 @@ async def test_turn_stays_on_its_hop_until_that_hop_fails(runtime):
     following = await runtime.router.resolve("codex", MODELS[0], process_scope=runtime.cwd, turn_id="turn-two")
     await asyncio.wait_for(_post(following), timeout=10)
     assert runtime.adapter.invocations[-1][0] == "src_turnroutea"
+
+
+async def test_concurrent_first_requests_leave_the_turn_on_the_furthest_hop(runtime):
+    """MH-ROUTING-014: a request that fell past a peer's hop moves the turn, whichever finishes first."""
+    runtime.adapter.invoke_results.extend([SUCCESS, RATE_LIMITED, SUCCESS, SUCCESS])
+    turn = await runtime.router.resolve("codex", MODELS[0], process_scope=runtime.cwd, turn_id="turn-concurrent")
+    gates = {1: asyncio.Event(), 3: asyncio.Event()}
+    invoke = runtime.adapter.invoke
+
+    async def gated_invoke(*args, **kwargs):
+        handle = await invoke(*args, **kwargs)
+        gate = gates.get(len(runtime.adapter.invocations))
+        if gate is not None:
+            await gate.wait()
+        return handle
+
+    runtime.adapter.invoke = gated_invoke
+
+    async def invoked(count):
+        while len(runtime.adapter.invocations) < count:
+            await asyncio.sleep(0.01)
+
+    # Both requests start before either has set the turn hop.
+    first = asyncio.create_task(_post(turn))
+    await asyncio.wait_for(invoked(1), timeout=5)
+    second = asyncio.create_task(_post(turn))
+    await asyncio.wait_for(invoked(3), timeout=5)
+    # The request served on the first hop finishes first, then the one that fell past it.
+    gates[1].set()
+    assert (await asyncio.wait_for(first, timeout=10))[0] == 200
+    gates[3].set()
+    assert (await asyncio.wait_for(second, timeout=10))[0] == 200
+    assert [invocation[0][-1] for invocation in runtime.adapter.invocations] == ["a", "a", "b"]
+
+    runtime.clock.elapsed += 3600
+    assert (await asyncio.wait_for(_post(turn), timeout=10))[0] == 200
+    assert runtime.adapter.invocations[-1][0] == "src_turnrouteb"

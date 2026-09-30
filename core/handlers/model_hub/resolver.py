@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Literal, Mapping
+from typing import Callable, Literal, Mapping
 
 from config.v2_config import (
     MODEL_HUB_BACKENDS,
@@ -439,9 +439,23 @@ def _supply_status(
     return "interrupted"
 
 
+RouteHop = tuple[str | None, str | None]
+
+
+def route_hops(resolution: ModelHubTurnResolution) -> tuple[RouteHop, ...]:
+    return tuple((hop.source_id, hop.model_id) for hop in resolution.inspected_hops)
+
+
+def _walk_distance(route: tuple[RouteHop, ...], start: RouteHop | None) -> Callable[[RouteHop], int]:
+    """Position along the walk that starts at ``start``, or at the first hop."""
+
+    origin = route.index(start) if start in route else 0
+    return lambda hop: (route.index(hop) - origin) % len(route)
+
+
 def turn_ordered_candidate_hops(
     resolution: ModelHubTurnResolution,
-    turn_hop: tuple[str, str] | None,
+    turn_hop: RouteHop | None,
 ) -> tuple[ExactHopInspection, ...]:
     """Walk the runnable hops from the hop the turn is on, then wrap around.
 
@@ -451,14 +465,37 @@ def turn_ordered_candidate_hops(
     starts. A turn hop that has left the effective route no longer applies.
     """
 
-    route = [(hop.source_id, hop.model_id) for hop in resolution.inspected_hops]
+    route = route_hops(resolution)
     if turn_hop is None or turn_hop not in route:
         return resolution.candidate_hops
-    start = route.index(turn_hop)
+    distance = _walk_distance(route, turn_hop)
     return tuple(sorted(
         resolution.candidate_hops,
-        key=lambda hop: (route.index((hop.source_id, hop.model_id)) - start) % len(route),
+        key=lambda hop: distance((hop.source_id, hop.model_id)),
     ))
+
+
+def turn_hop_advances(
+    route: tuple[RouteHop, ...],
+    start: RouteHop | None,
+    current: RouteHop | None,
+    served: RouteHop,
+) -> bool:
+    """Whether a request served by ``served`` moves the turn past ``current``.
+
+    The request walked ``route`` from ``start`` and reached ``served`` only
+    after every hop before it in that walk could not serve. A current turn hop
+    in that stretch was passed, so the turn moves forward to ``served``. One at
+    or beyond ``served`` was set by a peer that got as far or further, and a
+    slower request must not move the turn back to where it was served.
+    """
+
+    if served not in route:
+        return False
+    if current is None or current not in route:
+        return True
+    distance = _walk_distance(route, start)
+    return distance(current) < distance(served)
 
 
 def resolve_model_hub_turn(
