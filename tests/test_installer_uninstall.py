@@ -664,6 +664,21 @@ def test_powershell_waits_for_a_process_using_what_it_deletes(layout, shell):
 
 
 @posix_only
+def test_a_purge_unlinks_an_explicit_home_named_with_trailing_slashes(layout):
+    target = layout.tmp / "instance"
+    (target / "runtime").mkdir(parents=True)
+    (target / "state").mkdir()
+    link = _symlink(layout.tmp / "instance-link", target)
+
+    result = _installer_shell(layout, "main --uninstall --purge --yes", AVIBE_HOME=f"{link}///")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not link.is_symlink()
+    assert (target / "runtime").is_dir() and (target / "state").is_dir()
+    assert f"Kept {target}, which {link} pointed to." in result.stdout
+
+
+@posix_only
 def test_a_purge_leaves_a_file_that_merely_has_a_home_name(layout):
     shutil.rmtree(layout.avibe_home)
     layout.avibe_home.write_text("someone else's file", encoding="utf-8")

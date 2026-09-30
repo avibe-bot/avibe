@@ -55,6 +55,10 @@ elif [ -e "$HOME/.vibe_remote" ] || [ -L "$HOME/.vibe_remote" ]; then
 else
     AVIBE_RUNTIME_HOME="$HOME/.avibe"
 fi
+# A trailing separator makes a link read as the directory it names.
+while [ "${#AVIBE_RUNTIME_HOME}" -gt 1 ] && [ "${AVIBE_RUNTIME_HOME%/}" != "$AVIBE_RUNTIME_HOME" ]; do
+    AVIBE_RUNTIME_HOME="${AVIBE_RUNTIME_HOME%/}"
+done
 REMOTE_ACCESS_PAIRING_KEY=""
 REMOTE_ACCESS_PAIRED=""
 
@@ -1162,7 +1166,7 @@ stop_avibe_service() {
 # a legacy ~/.vibe_remote directory belong to no chosen AVIBE_HOME, so only the
 # default home's uninstall removes them.
 uninstalling_default_home() {
-    [ -z "${AVIBE_HOME:-}" ] || [ "${AVIBE_RUNTIME_HOME%/}" = "$HOME/.avibe" ]
+    [ -z "${AVIBE_HOME:-}" ] || [ "$AVIBE_RUNTIME_HOME" = "$HOME/.avibe" ]
 }
 
 # Print this home's data paths: for the default home both default names, and
@@ -1170,7 +1174,7 @@ uninstalling_default_home() {
 # home; anything else under those names is not Avibe's.
 avibe_data_directories() {
     local path=""
-    local -a paths=("${AVIBE_RUNTIME_HOME%/}")
+    local -a paths=("$AVIBE_RUNTIME_HOME")
 
     if uninstalling_default_home; then
         paths=("$HOME/.avibe" "$HOME/.vibe_remote")
@@ -1423,7 +1427,7 @@ uninstall_avibe() {
         # Nor while a managed launcher it serves is still there to dangle.
         local step=""
         local left=""
-        for step in "${AVIBE_RUNTIME_HOME%/}" "${AVIBE_RUNTIME_HOME%/}/runtime" "$root"; do
+        for step in "$AVIBE_RUNTIME_HOME" "$AVIBE_RUNTIME_HOME/runtime" "$root"; do
             if [ -L "$step" ]; then
                 left="$step is a link to $(readlink "$step" 2>/dev/null), and the uninstaller never deletes through a link"
                 break
