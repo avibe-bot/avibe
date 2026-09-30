@@ -51,6 +51,11 @@ from storage.background import (
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
     SQLiteBackgroundTaskStore,
 )
+from tests.fake_pid_helpers import fake_pid
+
+# Pids no process can hold: a supervisor that never ran, and a recorded watch worker.
+_SUPERVISOR_PID = fake_pid(0)
+_WORKER_PID = fake_pid(1)
 
 TEST_MARKER = "test-watch-worker"
 TEST_FINGERPRINT = fingerprint_process_marker(TEST_MARKER)
@@ -105,10 +110,6 @@ class _BrokenStdin(_FakeStdin):
         raise BrokenPipeError
 
 
-# A supervisor that never ran: every test handing one out marks its pid fake.
-_FAKE_SUPERVISOR_PID = 1234
-
-
 class _FakeProcess:
     def __init__(
         self,
@@ -116,7 +117,7 @@ class _FakeProcess:
         stdin: _FakeStdin | None = None,
         stderr: bytes = b"",
     ) -> None:
-        self.pid = _FAKE_SUPERVISOR_PID
+        self.pid = _SUPERVISOR_PID
         self.returncode = 0
         self.stdin = stdin or _FakeStdin()
         self.stderr = stderr
@@ -210,7 +211,7 @@ def _record_watch_pid(
 
 def _live_identity(
     *,
-    pid: int = 4321,
+    pid: int = _WORKER_PID,
     create_time: float = 123.0,
     worker_fingerprint: str | None = TEST_FINGERPRINT,
 ) -> ProcessIdentity:
@@ -223,7 +224,7 @@ def _live_identity(
 
 def _persisted_identity(
     *,
-    pid: int = 4321,
+    pid: int = _WORKER_PID,
     create_time: float = 123.0,
     worker_fingerprint: str = TEST_FINGERPRINT,
 ) -> PersistedProcessIdentity:
@@ -376,7 +377,6 @@ def test_malformed_remote_context_disables_watch_before_waiter_spawn(tmp_path: P
     assert saved.last_error == "harness_access_forbidden"
 
 
-@pytest.mark.fake_pids(_FAKE_SUPERVISOR_PID)
 def test_managed_watch_exec_uses_stable_supervisor(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     store = ManagedWatchStore(tmp_path / "watches.json")
@@ -433,7 +433,6 @@ def test_managed_watch_exec_uses_stable_supervisor(tmp_path: Path, monkeypatch) 
     }
 
 
-@pytest.mark.fake_pids(_FAKE_SUPERVISOR_PID)
 def test_managed_watch_shell_uses_stable_supervisor(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     store = ManagedWatchStore(tmp_path / "watches.json")
@@ -490,7 +489,6 @@ def test_managed_watch_shell_uses_stable_supervisor(tmp_path: Path, monkeypatch)
     }
 
 
-@pytest.mark.fake_pids(_FAKE_SUPERVISOR_PID)
 def test_managed_watch_clears_supervisor_state_when_startup_pipe_breaks(tmp_path: Path, monkeypatch) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
@@ -530,7 +528,6 @@ def test_managed_watch_clears_supervisor_state_when_startup_pipe_breaks(tmp_path
     assert service._active_process_identities == {}
 
 
-@pytest.mark.fake_pids(_FAKE_SUPERVISOR_PID)
 def test_managed_watch_localizes_supervisor_startup_failure(tmp_path: Path, monkeypatch) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     service = ManagedWatchService(
@@ -758,7 +755,7 @@ def test_sqlite_remove_watch_soft_deletes_watch_but_keeps_runtime(tmp_path: Path
             "watches": {
                 watch.id: {
                     "running": True,
-                    "pid": 1234,
+                    "pid": _WORKER_PID,
                     "started_at": "2026-05-15T00:00:00+00:00",
                     "updated_at": "2026-05-15T00:00:00+00:00",
                 }
@@ -787,7 +784,7 @@ def test_watch_runtime_store_uses_sqlite_when_path_is_default(tmp_path: Path, mo
             "watches": {
                 "watch-1": {
                     "running": True,
-                    "pid": 1234,
+                    "pid": _WORKER_PID,
                     "started_at": "2026-05-15T00:00:00+00:00",
                     "updated_at": "2026-05-15T00:00:01+00:00",
                 }
@@ -796,7 +793,7 @@ def test_watch_runtime_store_uses_sqlite_when_path_is_default(tmp_path: Path, mo
     )
 
     assert not (tmp_path / "runtime" / "watch_runtime.json").exists()
-    assert store.load()["watches"]["watch-1"]["pid"] == 1234
+    assert store.load()["watches"]["watch-1"]["pid"] == _WORKER_PID
 
 
 def test_managed_watch_service_once_success_enqueues_hook_and_disables(tmp_path: Path) -> None:
@@ -2660,8 +2657,8 @@ def test_managed_watch_service_start_reaps_stale_worker_for_deleted_watch(
 ) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
-    identity = _persisted_identity(pid=1234)
-    _record_watch_pid(runtime_store, "stale-watch", 1234, identity=identity)
+    identity = _persisted_identity(pid=_WORKER_PID)
+    _record_watch_pid(runtime_store, "stale-watch", _WORKER_PID, identity=identity)
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
@@ -2669,7 +2666,7 @@ def test_managed_watch_service_start_reaps_stale_worker_for_deleted_watch(
         runtime_store=runtime_store,
     )
     terminated: list[int] = []
-    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 1234)
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == _WORKER_PID)
     monkeypatch.setattr("core.watches.inspect_process_identity", lambda pid: _live_identity(pid=pid))
     monkeypatch.setattr(
         "core.watches.terminate_process_tree_by_pid",
@@ -2684,7 +2681,7 @@ def test_managed_watch_service_start_reaps_stale_worker_for_deleted_watch(
             await service.stop()
 
     asyncio.run(_run())
-    assert terminated == [1234]
+    assert terminated == [_WORKER_PID]
 
 
 @pytest.mark.parametrize(
@@ -2706,7 +2703,7 @@ def test_managed_watch_service_start_reaps_matching_stale_worker_before_reconcil
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     watch = _add_recovery_watch(store, command=command, shell_command=shell_command)
     identity = _persisted_identity()
-    _record_watch_pid(runtime_store, watch.id, 4321, identity=identity)
+    _record_watch_pid(runtime_store, watch.id, _WORKER_PID, identity=identity)
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
@@ -2715,7 +2712,7 @@ def test_managed_watch_service_start_reaps_matching_stale_worker_before_reconcil
     )
     events: list[tuple[str, int | None]] = []
 
-    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == _WORKER_PID)
     monkeypatch.setattr(
         "core.watches.inspect_process_identity",
         lambda pid: _live_identity(pid=pid),
@@ -2739,7 +2736,7 @@ def test_managed_watch_service_start_reaps_matching_stale_worker_before_reconcil
 
     asyncio.run(_run())
 
-    assert events[0] == ("terminate", 4321)
+    assert events[0] == ("terminate", _WORKER_PID)
     assert events[1:] and all(event == ("reconcile", None) for event in events[1:])
 
 
@@ -2752,7 +2749,7 @@ def test_managed_watch_service_start_does_not_reap_reused_pid(
     command = [sys.executable, "wait.py"]
     watch = _add_recovery_watch(store, command=command)
     identity = _persisted_identity()
-    _record_watch_pid(runtime_store, watch.id, 4321, identity=identity)
+    _record_watch_pid(runtime_store, watch.id, _WORKER_PID, identity=identity)
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
@@ -2761,7 +2758,7 @@ def test_managed_watch_service_start_does_not_reap_reused_pid(
     )
     reconciles = 0
 
-    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == _WORKER_PID)
     monkeypatch.setattr(
         "core.watches.inspect_process_identity",
         lambda pid: _live_identity(pid=pid, create_time=456.0, worker_fingerprint=None),
@@ -2808,7 +2805,7 @@ def test_blocked_watch_recheck_decides_by_marker_not_a_shifted_birth_time(
     )
     identity = _persisted_identity()
     entry = {
-        "pid": 4321,
+        "pid": _WORKER_PID,
         "process_identity": {
             "pid": identity.pid,
             "create_time": identity.create_time,
@@ -2833,7 +2830,7 @@ def test_managed_watch_service_start_blocks_respawn_when_worker_marker_changed(
     command = [sys.executable, "wait.py"]
     watch = _add_recovery_watch(store, command=command)
     identity = _persisted_identity()
-    _record_watch_pid(runtime_store, watch.id, 4321, identity=identity)
+    _record_watch_pid(runtime_store, watch.id, _WORKER_PID, identity=identity)
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
@@ -2841,7 +2838,7 @@ def test_managed_watch_service_start_blocks_respawn_when_worker_marker_changed(
         runtime_store=runtime_store,
     )
 
-    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == _WORKER_PID)
     monkeypatch.setattr(
         "core.watches.inspect_process_identity",
         lambda pid: _live_identity(
@@ -2863,7 +2860,7 @@ def test_managed_watch_service_start_blocks_respawn_when_worker_marker_changed(
     asyncio.run(_run())
 
     assert watch.id in service._recovery_blocked_watch_ids
-    assert runtime_store.load()["watches"][watch.id]["pid"] == 4321
+    assert runtime_store.load()["watches"][watch.id]["pid"] == _WORKER_PID
 
 
 def test_managed_watch_service_start_blocks_legacy_live_worker_without_identity(
@@ -2873,7 +2870,7 @@ def test_managed_watch_service_start_blocks_legacy_live_worker_without_identity(
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     watch = _add_recovery_watch(store, command=[sys.executable, "wait.py"])
-    _record_watch_pid(runtime_store, watch.id, 4321)
+    _record_watch_pid(runtime_store, watch.id, _WORKER_PID)
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
@@ -2881,7 +2878,7 @@ def test_managed_watch_service_start_blocks_legacy_live_worker_without_identity(
         runtime_store=runtime_store,
     )
 
-    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == _WORKER_PID)
     monkeypatch.setattr(
         "core.watches.inspect_process_identity",
         lambda _pid: _live_identity(),
@@ -2899,7 +2896,7 @@ def test_managed_watch_service_start_blocks_legacy_live_worker_without_identity(
     asyncio.run(_run())
 
     assert watch.id in service._recovery_blocked_watch_ids
-    assert runtime_store.load()["watches"][watch.id]["pid"] == 4321
+    assert runtime_store.load()["watches"][watch.id]["pid"] == _WORKER_PID
 
 
 def test_managed_watch_service_start_rejects_overflowing_process_identity(
@@ -2914,11 +2911,11 @@ def test_managed_watch_service_start_rejects_overflowing_process_identity(
             "watches": {
                 watch.id: {
                     "running": True,
-                    "pid": 4321,
+                    "pid": _WORKER_PID,
                     "started_at": "2026-05-15T00:00:00+00:00",
                     "updated_at": "2026-05-15T00:00:01+00:00",
                     "process_identity": {
-                        "pid": 4321,
+                        "pid": _WORKER_PID,
                         "create_time": 10**1000,
                         "worker_fingerprint": TEST_FINGERPRINT,
                     },
@@ -2933,7 +2930,7 @@ def test_managed_watch_service_start_rejects_overflowing_process_identity(
         runtime_store=runtime_store,
     )
 
-    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == _WORKER_PID)
     monkeypatch.setattr(
         "core.watches.inspect_process_identity",
         lambda pid: _live_identity(pid=pid),
@@ -2960,7 +2957,7 @@ def test_managed_watch_service_start_ignores_dead_recorded_pid(
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     watch = _add_recovery_watch(store, command=[sys.executable, "wait.py"])
-    _record_watch_pid(runtime_store, watch.id, 4321)
+    _record_watch_pid(runtime_store, watch.id, _WORKER_PID)
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
@@ -3004,7 +3001,7 @@ def test_managed_watch_service_start_reaps_group_after_leader_exit(
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     watch = _add_recovery_watch(store, command=[sys.executable, "wait.py"])
     identity = _persisted_identity()
-    _record_watch_pid(runtime_store, watch.id, 4321, identity=identity)
+    _record_watch_pid(runtime_store, watch.id, _WORKER_PID, identity=identity)
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
@@ -3047,7 +3044,7 @@ def test_managed_watch_service_does_not_reap_unverified_group_after_leader_exit(
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     watch = _add_recovery_watch(store, command=[sys.executable, "wait.py"])
-    _record_watch_pid(runtime_store, watch.id, 4321)
+    _record_watch_pid(runtime_store, watch.id, _WORKER_PID)
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
@@ -3734,7 +3731,6 @@ def test_managed_watch_service_start_retries_malformed_runtime_before_reconcile(
     assert "Unable to read prior watch runtime state" in caplog.text
 
 
-@pytest.mark.fake_pids(4321)
 def test_managed_watch_service_start_retries_unavailable_watch_list_before_reconcile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3743,7 +3739,7 @@ def test_managed_watch_service_start_retries_unavailable_watch_list_before_recon
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     watch = _add_recovery_watch(store, command=[sys.executable, "wait.py"])
-    _record_watch_pid(runtime_store, watch.id, 4321)
+    _record_watch_pid(runtime_store, watch.id, _WORKER_PID)
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
@@ -3802,7 +3798,7 @@ def test_managed_watch_service_start_does_not_reap_with_malformed_watch_store(
     original_store = ManagedWatchStore(watches_path)
     watch = _add_recovery_watch(original_store, command=[sys.executable, "wait.py"])
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
-    _record_watch_pid(runtime_store, watch.id, 4321)
+    _record_watch_pid(runtime_store, watch.id, _WORKER_PID)
     watches_path.write_text("{not-json", encoding="utf-8")
 
     with caplog.at_level("WARNING"):
@@ -3841,27 +3837,27 @@ def test_managed_watch_service_start_preserves_worker_state_when_reap_fails(
     command = [sys.executable, "wait.py"]
     watch = _add_recovery_watch(store, command=command)
     identity = _persisted_identity()
-    _record_watch_pid(runtime_store, watch.id, 4321, identity=identity)
+    _record_watch_pid(runtime_store, watch.id, _WORKER_PID, identity=identity)
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,
         request_store=TaskExecutionStore(tmp_path / "task_requests"),
         runtime_store=runtime_store,
     )
-    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr("core.watches.runtime.pid_alive", lambda pid: pid == _WORKER_PID)
     monkeypatch.setattr("core.watches.inspect_process_identity", lambda pid: _live_identity(pid=pid))
     monkeypatch.setattr("core.watches.terminate_process_tree_by_pid", lambda *_args, **_kwargs: False)
 
     async def _run() -> None:
         await _start_watch_service(service)
         assert service._active_tasks == {}
-        assert runtime_store.load()["watches"][watch.id]["pid"] == 4321
+        assert runtime_store.load()["watches"][watch.id]["pid"] == _WORKER_PID
         await service.stop()
 
     asyncio.run(_run())
 
     assert watch.id in service._recovery_blocked_watch_ids
-    assert runtime_store.load()["watches"][watch.id]["pid"] == 4321
+    assert runtime_store.load()["watches"][watch.id]["pid"] == _WORKER_PID
 
 
 def test_managed_watch_service_periodically_unblocks_after_stale_worker_exits(
@@ -3873,7 +3869,7 @@ def test_managed_watch_service_periodically_unblocks_after_stale_worker_exits(
     command = [sys.executable, "wait.py"]
     watch = _add_recovery_watch(store, command=command)
     identity = _persisted_identity()
-    _record_watch_pid(runtime_store, watch.id, 4321, identity=identity)
+    _record_watch_pid(runtime_store, watch.id, _WORKER_PID, identity=identity)
     service = ManagedWatchService(
         controller=SimpleNamespace(),
         store=store,

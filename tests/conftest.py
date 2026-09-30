@@ -63,6 +63,8 @@ import psutil
 import pytest
 from sqlalchemy.exc import SAWarning
 
+from tests.fake_pid_helpers import PID_LIMIT
+
 REAL_USER_HOME = Path.home()
 _SQLITE_DEFAULT_STATE_MODULES: dict[Path, bool] = {}
 
@@ -383,9 +385,6 @@ _REAL_POPEN_INIT = subprocess.Popen.__init__
 # The packages the wheel ships: a process lookup made from one of them is the
 # product's, and that is where a test's fake pid must not reach the real table.
 _PRODUCT_PACKAGES = frozenset({"vibe", "config", "core", "modules", "storage"})
-# Linux keeps every pid below 2**22 (PID_MAX_LIMIT) and macOS below 99999, so
-# no process can hold a pid at or above this one.
-_PID_LIMIT = 2**22
 
 
 def _describe_pid(pid: int) -> str:
@@ -419,27 +418,25 @@ class _ForeignSignalGuard:
     descendant the test collected may exit before it is signalled. Signal 0 is
     a liveness probe and passes.
 
-    The same record bounds what the product may look up. A ``psutil.Process``
-    or a signal-0 probe made from the product's packages must name this pytest
-    process, a process the test owns, one psutil listed during the test, or a
-    pid no process can hold: for any other pid the answer depends on which
+    The same record bounds what the product may look up. A ``psutil.Process``,
+    or a signal-0 probe of a pid or a group, made from the product's packages
+    must name this pytest process, a process the test owns, one psutil listed
+    during the test, or a pid no process can hold: for any other pid the answer depends on which
     process, if any, holds it on the machine running the test, which is how a
     fake pid such as 1234 turned into a refusal on the one CI runner where a
     real process held it. With nothing holding the pid the lookup fails at
-    once, so such a test fails everywhere instead. A listing makes every pid it saw fair, so a fake pid
-    that collides with one the test listed earlier still slips through; that
-    test has failed on every machine where the pid was free. The pids a test
-    marks ``fake_pids`` name no process at all: psutil raises
-    ``NoSuchProcess`` for them and a signal raises ``ProcessLookupError``,
-    whatever holds them here, unless a child the test started holds one.
+    once, so such a test fails everywhere instead; the pids
+    ``tests.fake_pid_helpers.fake_pid`` hands out are the ones that stand for
+    no process. A listing makes every pid it saw fair, so a fake pid that
+    collides with one the test listed earlier still slips through; that test
+    has failed on every machine where the pid was free.
     """
 
-    def __init__(self, test_temp: Path, fake_pids: frozenset[int] = frozenset()) -> None:
+    def __init__(self, test_temp: Path) -> None:
         self.me = _REAL_OS_GETPID()
         # The whole final component: `test_x1` must not claim `test_x10`.
         self.names_test_temp = re.compile(re.escape(str(test_temp)) + r"(?![\w.-])").search
         self.owned: set[int] = set()
-        self.fake_pids = fake_pids
         # Every pid psutil listed while this test ran: a scan finds real processes by design.
         self.listed: set[int] = set()
         self.violations: list[str] = []
@@ -546,28 +543,19 @@ class _ForeignSignalGuard:
         # cannot swallow it; the teardown check covers anything broader.
         pytest.fail(message)
 
-    def is_fake(self, pid) -> bool:
-        """Whether ``pid`` is one the test marked ``fake_pids`` and no child it started holds.
-
-        Only what the test already owns counts: asking ``_owns`` would read the
-        table through the very lookups this answers.
-        """
-
-        return pid in self.fake_pids and pid != self.me and pid not in self.owned
-
     def refuse_unknown_lookup(self, lookup: str, pid: int, caller) -> None:
         """Fail the test when the product's ``lookup`` of ``pid`` would read whatever the machine holds there."""
 
         __tracebackhide__ = True
-        if pid == self.me or pid >= _PID_LIMIT or pid in self.listed or self._owns(pid):
+        if pid == self.me or pid >= PID_LIMIT or pid in self.listed or self._owns(pid):
             return
         message = (
             f"{caller.f_globals.get('__name__')}.{caller.f_code.co_name} looked up pid "
-            f"{_describe_pid(pid)} through {lookup}, a pid this test neither started nor found by listing "
-            "processes, so what the product reads depends on which process, if any, holds "
-            "that pid on the machine running the test. Mark a pid that stands for no process "
-            f"with @pytest.mark.fake_pids({pid}), or start a real process when the product "
-            "must read its identity."
+            f"{_describe_pid(pid)} through {lookup}, a pid this test neither started nor found "
+            "by listing processes, so what the product reads depends on which process, if any, "
+            "holds that pid on the machine running the test. Use "
+            "tests.fake_pid_helpers.fake_pid() for a pid that stands for no process, or start a "
+            "real process when the product must read its identity."
         )
         self.violations.append(message)
         pytest.fail(message)
@@ -585,8 +573,6 @@ def _guarded_kill(pid, sig):
     __tracebackhide__ = True
     guard = _active_signal_guard
     if guard is not None:
-        if isinstance(pid, int) and guard.is_fake(pid):
-            raise ProcessLookupError(errno.ESRCH, os.strerror(errno.ESRCH))
         caller = sys._getframe(1)
         if sig == 0 and isinstance(pid, int) and pid > 0 and _called_from_product(caller):
             guard.refuse_unknown_lookup("os.kill(pid, 0)", pid, caller)
@@ -598,6 +584,10 @@ def _guarded_killpg(pgid, sig):
     __tracebackhide__ = True
     guard = _active_signal_guard
     if guard is not None:
+        caller = sys._getframe(1)
+        # A group is named by its leader's pid.
+        if sig == 0 and isinstance(pgid, int) and pgid > 0 and _called_from_product(caller):
+            guard.refuse_unknown_lookup("os.killpg(pgid, 0)", pgid, caller)
         # libc's killpg(pgid) is kill(-pgid): on macOS a negative pgid names one pid.
         guard.refuse_foreign("killpg", pgid, sig, -pgid if isinstance(pgid, int) else pgid)
     return _REAL_OS_KILLPG(pgid, sig)
@@ -618,8 +608,6 @@ def _guarded_process_init(process, pid=None):
     caller = sys._getframe(1)
     # The guard reads the real table through this same constructor.
     if guard is not None and caller.f_globals is not globals() and isinstance(pid, int) and pid > 0:
-        if guard.is_fake(pid):
-            raise psutil.NoSuchProcess(pid)
         if caller.f_globals.get("__name__", "").partition(".")[0] == "psutil":
             # What psutil constructs itself it has listed: process_iter, children(), parents().
             guard.listed.add(pid)
@@ -632,10 +620,9 @@ def _guarded_process_init(process, pid=None):
 def _listing_pids():
     pids = _REAL_PSUTIL_PIDS()
     guard = _active_signal_guard
-    if guard is None:
-        return pids
-    guard.listed.update(pids)
-    return [pid for pid in pids if not guard.is_fake(pid)]
+    if guard is not None:
+        guard.listed.update(pids)
+    return pids
 
 
 # Installed once for the whole run rather than per test through `monkeypatch`:
@@ -670,7 +657,7 @@ def _foreign_signal_guard(request, tmp_path):
     A fake pid the product only reads is as machine-dependent: a desktop start
     that asked psutil for pid 1234's environment was refused on the one runner
     where a root process held 1234. So the product's lookups are bounded the
-    same way, and ``fake_pids(*pids)`` names the pids that stand for no process.
+    same way.
     """
 
     global _active_signal_guard
@@ -683,13 +670,7 @@ def _foreign_signal_guard(request, tmp_path):
     if not _SIGNAL_GUARD_SUPPORTED:
         yield None
         return
-    marks = list(request.node.iter_markers("fake_pids"))
-    fake_pids = frozenset(pid for mark in marks for pid in mark.args)
-    if any(not mark.args for mark in marks) or any(
-        isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 for pid in fake_pids
-    ):
-        pytest.fail("@pytest.mark.fake_pids takes the positive pids that stand for no process")
-    guard = _ForeignSignalGuard(tmp_path, fake_pids)
+    guard = _ForeignSignalGuard(tmp_path)
     _active_signal_guard = guard
     try:
         yield guard

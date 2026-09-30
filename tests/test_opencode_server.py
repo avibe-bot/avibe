@@ -11,11 +11,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from storage import message_deliveries as delivery_store
+from tests.fake_pid_helpers import fake_pid
 from vibe.opencode_config import OPENCODE_REASONING_VARIANTS
 
 
@@ -188,10 +187,9 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(OpenCodeRuntimeConfigInvalidError):
                     SERVER_MODULE._managed_runtime_config_content(content)
 
-    @pytest.mark.fake_pids(4321)
     async def test_start_server_reaps_a_live_process_after_cold_start_timeout(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
-        process = types.SimpleNamespace(pid=4321, returncode=None)
+        process = types.SimpleNamespace(pid=fake_pid(), returncode=None)
         manager._is_healthy = AsyncMock(return_value=False)  # type: ignore[method-assign]
         manager._write_pid_file = Mock()  # type: ignore[method-assign]
         manager._clear_pid_file = Mock()  # type: ignore[method-assign]
@@ -597,7 +595,6 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         )
         manager._start_server.assert_not_awaited()
 
-    @pytest.mark.fake_pids(4321)
     async def test_controller_probe_prepares_overlay_before_launch(self):
         from core.resource_governance import mark_controller_resource_governor
 
@@ -623,7 +620,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         async def create_subprocess_exec(*args, **kwargs):
             launched["args"] = args
             launched["env"] = kwargs["env"]
-            return types.SimpleNamespace(pid=4321, returncode=None)
+            return types.SimpleNamespace(pid=fake_pid(), returncode=None)
 
         with (
             patch.object(SERVER_MODULE, "is_model_hub_enabled", return_value=True),
@@ -901,7 +898,6 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._start_server.assert_not_awaited()
         self.assertTrue(manager._caller_context_plugin_refresh_pending)
 
-    @pytest.mark.fake_pids(123)
     async def test_ensure_running_preserves_an_adopted_absolute_caller_context_path(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         adopted_path = "/old-avibe-home/runtime/opencode_caller_context.json"
@@ -910,7 +906,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
         manager._start_server = AsyncMock()  # type: ignore[method-assign]
         manager._read_pid_file = lambda: {  # type: ignore[method-assign]
-            "pid": 123,
+            "pid": fake_pid(),
             "port": 4096,
             "caller_context_path": adopted_path,
             "active_run_sessions": ["ses-active"],
@@ -1094,11 +1090,10 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events, [("retire", True, False), ("start", True)])
 
-    @pytest.mark.fake_pids(111, 222)
     async def test_ensure_running_retires_generation_when_adopted_pid_changes(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         retired = []
-        manager._runtime_generation_token = (111, 1.0)
+        manager._runtime_generation_token = (fake_pid(0), 1.0)
         manager.set_runtime_activation_retire(
             lambda force, native_turns_drained: retired.append(
                 (force, native_turns_drained)
@@ -1108,7 +1103,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
         manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
         manager._read_pid_file = lambda: {  # type: ignore[method-assign]
-            "pid": 222,
+            "pid": fake_pid(1),
             "port": 4096,
             "started_at": 2.0,
             "caller_context_path": manager._caller_context_path(),
@@ -1124,7 +1119,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             await manager.ensure_running()
 
         self.assertEqual(retired, [(True, False)])
-        self.assertEqual(manager._runtime_generation_token, (222, 2.0))
+        self.assertEqual(manager._runtime_generation_token, (fake_pid(1), 2.0))
 
     async def test_prompt_async_percent_encodes_directory_header(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)

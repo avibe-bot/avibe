@@ -13,6 +13,7 @@ root process held 1234, and passed everywhere else.
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
@@ -23,14 +24,15 @@ from contextlib import suppress
 import psutil
 import pytest
 
+from core.process_isolation import process_group_exists
 from tests.conftest import _REAL_OS_KILL
+from tests.fake_pid_helpers import fake_pid
 from vibe import runtime
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="the guard is POSIX-only; see tests/conftest.py")
 
 _SLEEP = [sys.executable, "-c", "import time; time.sleep(60)"]
-# Above every pid_max Linux and macOS allow, so no process can ever hold it.
-_NO_SUCH_PID = 2**22 + 1
+_NO_SUCH_PID = fake_pid()
 
 
 def _spawn_detached(
@@ -271,6 +273,7 @@ def _free_pid() -> int:
     [
         pytest.param(runtime.process_create_time, id="psutil.Process"),
         pytest.param(runtime.pid_alive, id="signal-0-probe"),
+        pytest.param(lambda pid: process_group_exists(pid, logging.getLogger(__name__), "test"), id="group-probe"),
     ],
 )
 @pytest.mark.parametrize("holder", ["a-stranger", "nothing"])
@@ -278,41 +281,20 @@ def test_a_product_lookup_of_a_pid_the_test_did_not_start_fails_whatever_holds_i
     request, lookup, holder, _foreign_signal_guard
 ):
     # Failing while nothing holds the pid is what makes a fake pid fail on every
-    # machine, instead of only where a real process happens to hold it.
+    # machine, instead of only where a real process happens to hold it. The
+    # stranger leads its own session, so its pid names a live group too.
     pid = request.getfixturevalue("stranger") if holder == "a-stranger" else _free_pid()
     with pytest.raises(pytest.fail.Exception, match="neither started nor found by listing"):
         lookup(pid)
     _foreign_signal_guard.violations.clear()
 
 
-@pytest.mark.fake_pids(1234)
-def test_a_fake_pid_names_no_process_on_any_machine():
-    # Pid 1234 was a root process on the runner where the desktop start was refused.
-    assert runtime.process_create_time(1234) is None
-    assert runtime.pid_alive(1234) is False
-    assert 1234 not in psutil.pids()
+def test_a_fake_pid_names_no_process_on_any_machine(_foreign_signal_guard):
+    pid = fake_pid()
 
-
-def test_a_fake_pid_hides_the_process_holding_it_and_receives_no_signal(stranger, _foreign_signal_guard):
-    _foreign_signal_guard.fake_pids = frozenset({stranger})
-
-    assert runtime.process_create_time(stranger) is None
-    assert runtime.pid_alive(stranger) is False
+    assert runtime.process_create_time(pid) is None
+    assert runtime.pid_alive(pid) is False
+    assert process_group_exists(pid, logging.getLogger(__name__), "test") is False
     with pytest.raises(ProcessLookupError):
-        os.kill(stranger, signal.SIGTERM)
+        os.kill(pid, signal.SIGTERM)
     assert _foreign_signal_guard.violations == []
-
-    _foreign_signal_guard.fake_pids = frozenset()
-    time.sleep(0.2)
-    assert _alive(stranger), "a signal to a fake pid reached the process holding it"
-
-
-def test_a_process_the_test_started_keeps_its_pid_when_it_is_marked_fake(_foreign_signal_guard):
-    child = subprocess.Popen(_SLEEP)
-    try:
-        _foreign_signal_guard.fake_pids = frozenset({child.pid})
-        assert runtime.process_create_time(child.pid) is not None
-        assert runtime.pid_alive(child.pid) is True
-    finally:
-        child.kill()
-        child.wait(timeout=10)

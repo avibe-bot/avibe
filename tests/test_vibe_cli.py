@@ -24,6 +24,7 @@ from vibe import internal_client
 from vibe import remote_access
 from vibe import upgrade
 from storage.lock import MigrationLockTimeout
+from tests.fake_pid_helpers import fake_pid
 
 
 def _make_fake_uv_tool(
@@ -868,9 +869,8 @@ def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     assert result["summary"]["warn"] >= 1
 
 
-@pytest.mark.fake_pids(1234)
 def test_status_and_doctor_use_running_checkpoint_service_state(monkeypatch):
-    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_kwargs: 1234)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_kwargs: fake_pid())
     monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: False)
     monkeypatch.setattr("core.git_binary.resolve_git", lambda: object())
 
