@@ -495,8 +495,14 @@ staging directory. Only a complete install with the Python, Node, and npm
 entrypoints and a durable marker is atomically renamed to:
 
 ```text
-<OS application data>/runtime/<avibe-version>/<archive-sha-prefix>/
+<OS application data>/runtime/<avibe-version>/<archive-sha-prefix>/                 (Windows)
+<OS application data>/runtime/trees.noindex/<avibe-version>/<archive-sha-prefix>/   (macOS)
 ```
+
+On macOS the `.noindex` directory keeps Spotlight from importing a freshly
+written tree, which otherwise evicts it from the page cache just before the
+next launch hashes it (#2283). Trees that earlier releases installed directly
+under `runtime/` are pruned like any other superseded tree.
 
 Every later launch recomputes the extracted file-tree digest before executing
 the Runtime, rejects symlinks and extra/missing files, and may install one

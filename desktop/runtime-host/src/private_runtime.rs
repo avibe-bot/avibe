@@ -6,6 +6,7 @@
 //! user-data directory. The application bundle is never mutated, and an update
 //! can install a successor without replacing files used by a running daemon.
 
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -23,6 +24,25 @@ const MAX_UNPACKED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: u64 = 200_000;
 const TREE_HASH_DOMAIN: &[u8] = b"avibe-runtime-tree-v1\0";
 const REPAIR_SLOT_SUFFIX: &str = "-repair";
+/// The directory inside the install root that holds every Runtime tree, and
+/// the staging and discarded copies on their way in and out.
+///
+/// On macOS its name ends in `.noindex`, which keeps Spotlight out of the
+/// whole subtree. Spotlight otherwise imports each of a new tree's ~31k files
+/// for minutes after an install or update, and its importer pushes the tree
+/// out of the page cache as it goes. Every launch hashes the whole tree before
+/// it runs any of it, so a launch in those minutes reads the tree back from
+/// disk instead of memory (#2283). macOS 26 still honours the suffix; a
+/// `.metadata_never_index` file inside the directory is ignored.
+///
+/// Windows keeps its trees directly in the install root. The suffix means
+/// nothing there, and the extra level would cost path length the tree does
+/// not have: its deepest entry is 168 characters, which already brings a
+/// typical profile's absolute path within about ten characters of `MAX_PATH`.
+#[cfg(target_os = "macos")]
+const TREES_DIR_NAME: Option<&str> = Some("trees.noindex");
+#[cfg(not(target_os = "macos"))]
+const TREES_DIR_NAME: Option<&str> = None;
 static INSTALL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,13 +119,18 @@ pub struct InstalledPrivateRuntime {
 pub struct PrivateRuntimeBundle {
     bundle_dir: PathBuf,
     install_root: PathBuf,
+    /// Where trees are installed: `install_root` itself, or its
+    /// [`TREES_DIR_NAME`] directory.
+    trees_root: PathBuf,
 }
 
 impl PrivateRuntimeBundle {
     pub fn new(bundle_dir: PathBuf, install_root: PathBuf) -> Self {
+        let trees_root = TREES_DIR_NAME.map_or_else(|| install_root.clone(), |name| install_root.join(name));
         Self {
             bundle_dir,
             install_root,
+            trees_root,
         }
     }
 
@@ -117,7 +142,7 @@ impl PrivateRuntimeBundle {
             .archive_sha256
             .get(..16)
             .ok_or(PrivateRuntimeError::ManifestInvalid)?;
-        let version_dir = self.install_root.join(&manifest.runtime_version);
+        let version_dir = self.trees_root.join(&manifest.runtime_version);
         let [primary_dir, repair_dir] = install_slots(&version_dir, digest_prefix);
         for candidate in [&primary_dir, &repair_dir] {
             if path_present(candidate) {
@@ -132,7 +157,7 @@ impl PrivateRuntimeBundle {
 
         let archive_path = self.bundle_dir.join(&manifest.archive);
         verify_archive(&archive_path, &manifest)?;
-        fs::create_dir_all(&self.install_root).map_err(PrivateRuntimeError::Install)?;
+        fs::create_dir_all(&self.trees_root).map_err(PrivateRuntimeError::Install)?;
         // Both independently installed copies failing integrity validation is
         // not a dead end: the verified archive is reinstalled over the primary
         // name. A daemon may still be running from that copy, since a tree that
@@ -147,7 +172,7 @@ impl PrivateRuntimeBundle {
 
         let sequence = INSTALL_SEQUENCE.fetch_add(1, Ordering::SeqCst);
         let staging = self
-            .install_root
+            .trees_root
             .join(format!(".install-{}-{sequence}", std::process::id()));
         if staging.exists() {
             fs::remove_dir_all(&staging).map_err(PrivateRuntimeError::Install)?;
@@ -163,7 +188,7 @@ impl PrivateRuntimeBundle {
                 fs::create_dir_all(parent).map_err(PrivateRuntimeError::Install)?;
             }
             if replaces_primary {
-                discard_install_path(&self.install_root, &install_dir)?;
+                discard_install_path(&self.trees_root, &install_dir)?;
             }
             match fs::rename(&staging, &install_dir) {
                 Ok(()) => {}
@@ -200,6 +225,10 @@ impl PrivateRuntimeBundle {
     /// so a daemon started from the primary can still be serving after this
     /// launch resolved the repair slot. Both slots of the served id are
     /// therefore kept; every other version and digest is removed.
+    ///
+    /// Releases before [`TREES_DIR_NAME`] installed trees directly in the
+    /// install root. Those are superseded by the same rule: whatever is not a
+    /// slot of the served id goes.
     pub fn prune_superseded(&self, active_root: &Path) -> Result<(), PrivateRuntimeError> {
         let outside_root = || {
             PrivateRuntimeError::Install(io::Error::new(
@@ -209,32 +238,23 @@ impl PrivateRuntimeBundle {
         };
         let active_version = active_root
             .parent()
-            .filter(|parent| parent.parent() == Some(self.install_root.as_path()))
+            .filter(|parent| parent.parent() == Some(self.trees_root.as_path()))
+            .and_then(Path::file_name)
             .ok_or_else(outside_root)?;
         let active_slot = active_root
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(outside_root)?;
         let digest_prefix = active_slot.strip_suffix(REPAIR_SLOT_SUFFIX).unwrap_or(active_slot);
-        let served_slots = install_slots(active_version, digest_prefix);
 
-        let entries = match fs::read_dir(&self.install_root) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(PrivateRuntimeError::Install(error)),
-        };
-        for entry in entries {
-            let path = entry.map_err(PrivateRuntimeError::Install)?.path();
-            if path == active_version {
-                for candidate in fs::read_dir(&path).map_err(PrivateRuntimeError::Install)? {
-                    let candidate = candidate.map_err(PrivateRuntimeError::Install)?.path();
-                    if !served_slots.contains(&candidate) {
-                        remove_install_path(&candidate)?;
-                    }
-                }
-            } else {
-                remove_install_path(&path)?;
-            }
+        prune_trees(&self.trees_root, active_version, digest_prefix, None)?;
+        if self.trees_root != self.install_root {
+            prune_trees(
+                &self.install_root,
+                active_version,
+                digest_prefix,
+                Some(&self.trees_root),
+            )?;
         }
         Ok(())
     }
@@ -365,13 +385,47 @@ fn install_slots(version_dir: &Path, digest_prefix: &str) -> [PathBuf; 2] {
 /// The discarded copy is then removed on a best-effort basis: it is already
 /// unreachable by name, and `prune_superseded` sweeps whatever is left after
 /// the next successful launch.
-fn discard_install_path(install_root: &Path, path: &Path) -> Result<(), PrivateRuntimeError> {
+fn discard_install_path(trees_root: &Path, path: &Path) -> Result<(), PrivateRuntimeError> {
     let sequence = INSTALL_SEQUENCE.fetch_add(1, Ordering::SeqCst);
-    let discarded = install_root.join(format!(".discard-{}-{sequence}", std::process::id()));
+    let discarded = trees_root.join(format!(".discard-{}-{sequence}", std::process::id()));
     // A machine that cannot even rename the directory reports what it reported
     // before this became recoverable, rather than pretending it installed.
     fs::rename(path, &discarded).map_err(|_| PrivateRuntimeError::ArchiveVerification)?;
     let _ = fs::remove_dir_all(&discarded);
+    Ok(())
+}
+
+/// Removes every entry of `root` except the two slots of the served id and
+/// `keep`.
+fn prune_trees(
+    root: &Path,
+    active_version: &OsStr,
+    digest_prefix: &str,
+    keep: Option<&Path>,
+) -> Result<(), PrivateRuntimeError> {
+    let active_version = root.join(active_version);
+    let served_slots = install_slots(&active_version, digest_prefix);
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(PrivateRuntimeError::Install(error)),
+    };
+    for entry in entries {
+        let path = entry.map_err(PrivateRuntimeError::Install)?.path();
+        if keep == Some(path.as_path()) {
+            continue;
+        }
+        if path == active_version {
+            for candidate in fs::read_dir(&path).map_err(PrivateRuntimeError::Install)? {
+                let candidate = candidate.map_err(PrivateRuntimeError::Install)?.path();
+                if !served_slots.contains(&candidate) {
+                    remove_install_path(&candidate)?;
+                }
+            }
+        } else {
+            remove_install_path(&path)?;
+        }
+    }
     Ok(())
 }
 
@@ -726,12 +780,9 @@ mod tests {
         assert!(first.python.is_file());
         assert!(first.node.is_file());
         assert!(first.npm_cli.is_file());
-        assert_eq!(
-            fs::read_dir(root.join("installs").join(&manifest.runtime_version))
-                .expect("version directory")
-                .count(),
-            1
-        );
+        let version_dir = first.root.parent().expect("version directory");
+        assert!(version_dir.ends_with(&manifest.runtime_version));
+        assert_eq!(fs::read_dir(version_dir).expect("version directory").count(), 1);
         fs::remove_dir_all(root).ok();
     }
 
@@ -845,16 +896,16 @@ mod tests {
     fn superseded_installs_are_pruned_only_after_an_active_runtime_is_selected() {
         let root = scratch("prune");
         write_bundle(&root, None);
-        let install_root = root.join("installs");
-        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
         let active = bundle.prepare().expect("active install");
+        let trees_root = active.root.parent().and_then(Path::parent).expect("trees root");
         let other_digest = active.root.with_file_name("0123456789abcdef");
         fs::create_dir_all(&other_digest).expect("other digest install");
         fs::write(other_digest.join("unused"), b"unused").expect("other digest file");
-        let old = install_root.join("2.9.0").join("old-digest");
+        let old = trees_root.join("2.9.0").join("old-digest");
         fs::create_dir_all(&old).expect("old install");
         fs::write(old.join("unused"), b"unused").expect("old file");
-        let staging = install_root.join(".install-abandoned");
+        let staging = trees_root.join(".install-abandoned");
         fs::create_dir_all(&staging).expect("staging install");
 
         bundle.prune_superseded(&active.root).expect("prune succeeds");
@@ -874,10 +925,15 @@ mod tests {
     fn pruning_keeps_both_slots_of_the_served_runtime() {
         let root = scratch("prune-served-slots");
         write_bundle(&root, None);
-        let install_root = root.join("installs");
-        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
         let primary = bundle.prepare().expect("primary install");
-        let old = install_root.join("2.9.0").join("old-digest");
+        let old = primary
+            .root
+            .parent()
+            .and_then(Path::parent)
+            .expect("trees root")
+            .join("2.9.0")
+            .join("old-digest");
         fs::create_dir_all(&old).expect("old install");
         // What a daemon running from the primary leaves behind: a file written
         // into its own tree, which makes the next launch repair.
@@ -899,6 +955,65 @@ mod tests {
 
         assert!(primary.python.is_file());
         assert!(repair.python.is_file());
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Spotlight skips a directory whose name ends in `.noindex`, subtree
+    /// included. Trees installed anywhere else get imported file by file after
+    /// every install, and the importer evicts them from the page cache that the
+    /// next launch's verification reads them from.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_installs_trees_only_inside_a_noindex_directory() {
+        let root = scratch("noindex");
+        write_bundle(&root, None);
+        let install_root = root.join("installs");
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
+
+        let installed = bundle.prepare().expect("install");
+
+        let entries: Vec<PathBuf> = fs::read_dir(&install_root)
+            .expect("install root")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        assert_eq!(entries.len(), 1, "the install root holds one directory: {entries:?}");
+        assert!(entries[0].extension().is_some_and(|extension| extension == "noindex"));
+        assert!(installed.root.starts_with(&entries[0]));
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Releases before the `.noindex` directory left their trees directly in
+    /// the install root. Once this bundle's id is served they are superseded by
+    /// the same rule as any other tree: both slots of the served id are kept,
+    /// wherever a daemon might have started from them, and nothing else is.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trees_an_earlier_release_left_in_the_install_root_are_pruned() {
+        let root = scratch("prune-install-root");
+        let manifest = write_bundle(&root, None);
+        let install_root = root.join("installs");
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
+        let active = bundle.prepare().expect("active install");
+        let [served_primary, served_repair] = install_slots(
+            &install_root.join(&manifest.runtime_version),
+            &manifest.archive_sha256[..16],
+        );
+        let other_digest = install_root.join(&manifest.runtime_version).join("0123456789abcdef");
+        let old = install_root.join("2.9.0").join("old-digest");
+        let staging = install_root.join(".install-1-0");
+        for tree in [&served_primary, &served_repair, &other_digest, &old, &staging] {
+            fs::create_dir_all(tree).expect("earlier tree");
+            fs::write(tree.join("python3"), b"earlier").expect("earlier file");
+        }
+
+        bundle.prune_superseded(&active.root).expect("prune succeeds");
+
+        assert!(active.python.is_file());
+        assert!(served_primary.join("python3").is_file());
+        assert!(served_repair.join("python3").is_file());
+        assert!(!other_digest.exists());
+        assert!(!old.exists());
+        assert!(!staging.exists());
         fs::remove_dir_all(root).ok();
     }
 
@@ -931,11 +1046,11 @@ mod tests {
     fn two_tampered_install_slots_are_reinstalled_rather_than_stranded() {
         let root = scratch("installed-double-tamper");
         let manifest = write_bundle(&root, None);
-        let install_root = root.join("installs");
-        let version_dir = install_root.join(&manifest.runtime_version);
-        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), install_root.clone());
+        let bundle = PrivateRuntimeBundle::new(root.join("bundle"), root.join("installs"));
 
         let primary = bundle.prepare().expect("primary install");
+        let version_dir = primary.root.parent().expect("version directory").to_owned();
+        let trees_root = version_dir.parent().expect("trees root").to_owned();
         fs::write(&primary.python, b"tampered").expect("tamper primary");
         let repair = bundle.prepare().expect("repair install");
         fs::write(&repair.node, b"tampered").expect("tamper repair");
@@ -975,8 +1090,8 @@ mod tests {
                 "round {round} left more than the two install slots"
             );
             assert_eq!(
-                fs::read_dir(&install_root)
-                    .expect("install root")
+                fs::read_dir(&trees_root)
+                    .expect("trees root")
                     .filter(|entry| {
                         let name = entry.as_ref().expect("entry").file_name();
                         name.to_string_lossy().starts_with(".discard-")
