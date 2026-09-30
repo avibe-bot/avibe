@@ -1345,6 +1345,24 @@ scenarios:
     kind: recovery
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_mid_turn_engine_loss_never_replays_after_output_starts
+  - id: MH-MODALITIES-001
+    name: Engine config declares input modalities only on openai-compatibility models and omits undeclared ones
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_runtime.py::test_engine_config_declares_input_modalities_only_on_openai_compatibility_models
+  - id: MH-MODALITIES-002
+    name: Engine sync reads declared input modalities from the cached models.dev copy without fetching
+    status: covered
+    kind: projection
+    layer: unit
+    test: tests/test_model_hub_api.py::test_engine_sync_carries_the_cached_catalog_input_modalities_without_fetching
+  - id: MH-MODALITIES-003
+    name: Real gateway and pinned CPA send a text-only model the marker instead of a tool-result image after a hot reload
+    status: assert
+    kind: transport
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_modalities_003_claude_tool_result_image_reaches_a_text_only_model_as_the_marker
   - id: MH-CREDENTIAL-001
     name: Credential rejection retries once only for a refreshable credential
     status: covered

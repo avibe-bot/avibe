@@ -375,6 +375,36 @@ def test_exact_models_dev_matches_never_borrow_a_neighbour():
     assert models_dev_catalog.exact_models_dev_matches(["gpt-target"], {}) == {}
 
 
+def test_declared_input_modalities_need_the_closest_copies_to_agree_on_images():
+    """A text-only answer hides images, so copies that disagree declare nothing."""
+
+    catalog = {
+        "deepseek": {"models": {
+            "deepseek-text": {"modalities": {"input": ["text"]}},
+            "deepseek-vision": {"modalities": {"input": ["text", "image"]}},
+            "contested": {"modalities": {"input": ["text"]}},
+            "undeclared": {"name": "Undeclared"},
+        }},
+        "relay": {"models": {
+            "deepseek-text": {"modalities": {"input": ["text", "pdf"]}},
+            "contested": {"modalities": {"input": ["text", "image"]}},
+        }},
+    }
+
+    declared = models_dev_catalog.declared_input_modalities(
+        ["deepseek-text", "deepseek-vision", "contested", "undeclared", "missing", "deepseek/contested"],
+        catalog,
+    )
+
+    assert declared == {
+        # Both copies exclude images; the first-party copy is the one given.
+        "deepseek-text": ["text"],
+        "deepseek-vision": ["text", "image"],
+        # A full identity is closer than any bare-id copy, so it alone decides.
+        "deepseek/contested": ["text"],
+    }
+
+
 def test_first_catalog_read_reports_one_fetch_in_flight_until_it_fails(monkeypatch, tmp_path):
     """MH-PRICE-014: With no cached copy, readers start one fetch and say one is coming; after a failure they do not."""
 

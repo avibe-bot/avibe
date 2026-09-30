@@ -1653,6 +1653,105 @@ def test_config_generation_is_private_and_never_logs_secrets(
         store.prepare_instance("install-1")
 
 
+def test_engine_config_declares_input_modalities_only_on_openai_compatibility_models(
+    tmp_path: Path,
+) -> None:
+    """MH-MODALITIES-001: CPA replaces tool-result images only for a declared text-only openai-compatibility model."""
+
+    store = EngineStateStore(tmp_path / "state")
+    instance_dir, runtime_secrets = store.prepare_instance("install-1")
+    chat_ref = store.store_api_key("chat-secret", base_url="https://api.example.test/v1")
+    responses_ref = store.store_api_key("responses-secret", vendor="openai", protocol="openai_responses")
+    anthropic_ref = store.store_api_key("anthropic-secret", vendor="anthropic", protocol="anthropic")
+    text_only = (("text-model", ("text",)),)
+    store.sync_sources(
+        [
+            _binding(
+                chat_ref,
+                model_ids=("text-model", "vision-model", "unknown-model"),
+                route_model_ids=("routed-text-model",),
+                model_input_modalities=(
+                    *text_only,
+                    ("vision-model", ("text", "image")),
+                    ("routed-text-model", ("text",)),
+                ),
+            ),
+            *(
+                _binding(
+                    credential_ref,
+                    source_id=source_id,
+                    vendor=vendor,
+                    protocol=protocol,
+                    base_url=None,
+                    model_ids=("text-model",),
+                    model_input_modalities=text_only,
+                )
+                for credential_ref, source_id, vendor, protocol in (
+                    (responses_ref, "src_responses1", "openai", "openai_responses"),
+                    (anthropic_ref, "src_anthropic1", "anthropic", "anthropic"),
+                )
+            ),
+        ]
+    )
+    config_path = instance_dir / "config.yaml"
+
+    write_engine_config(
+        config_path,
+        host="127.0.0.1",
+        port=18231,
+        auth_dir=store.auth_dir,
+        runtime_secrets=runtime_secrets,
+        sources=store.list_sources(),
+        state_store=store,
+    )
+
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    # CPA matches a request to an entry by name, then by alias; both are the
+    # routed ID, so either lookup reaches the entry that carries the key.
+    assert payload["openai-compatibility"][0]["models"] == [
+        {"name": "text-model", "alias": "text-model", "display-name": "text-model #0", "input-modalities": ["text"]},
+        {
+            "name": "vision-model",
+            "alias": "vision-model",
+            "display-name": "vision-model #0",
+            "input-modalities": ["text", "image"],
+        },
+        {"name": "unknown-model", "alias": "unknown-model", "display-name": "unknown-model #0"},
+        {
+            "name": "routed-text-model",
+            "alias": "routed-text-model",
+            "display-name": "routed-text-model #0",
+            "input-modalities": ["text"],
+        },
+    ]
+    for key in ("codex-api-key", "claude-api-key"):
+        [entry] = payload[key]
+        assert entry["models"] == [
+            {"name": "text-model", "alias": "text-model", "display-name": "text-model #0"}
+        ]
+
+
+def test_engine_record_reads_an_unreadable_modality_declaration_as_undeclared() -> None:
+    """Undeclared is the engine default, so a shape this release cannot read degrades to it."""
+
+    record = SourceRecord.from_payload(
+        {
+            "source_id": "src_fixture123",
+            "vendor": "custom",
+            "protocol": "openai_chat",
+            "base_url": "https://api.example.test/v1",
+            "credential_ref": "cred_fixture123",
+            "model_ids": ["text-model"],
+            "prefix": "avibe-fixture",
+            "model_reasoning_efforts": [],
+            "model_input_modalities": {"text-model": ["text"]},
+        }
+    )
+
+    assert record.model_ids == ("text-model",)
+    assert record.model_input_modalities == ()
+
+
 def test_mixed_anthropic_credentials_disable_cloak_only_for_api_key_entry(
     tmp_path: Path,
 ) -> None:

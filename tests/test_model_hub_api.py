@@ -4999,6 +4999,50 @@ def test_public_mutations_sync_the_engine_only_when_bindings_change(tmp_path, mu
     assert service._engine_synced is True
 
 
+def test_engine_sync_carries_the_cached_catalog_input_modalities_without_fetching(tmp_path, monkeypatch):
+    """MH-MODALITIES-002: the engine learns which inventory and route-target models models.dev declares."""
+
+    from vibe import models_dev_catalog
+
+    refreshes = []
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_background", lambda: refreshes.append(True))
+    # A day-old copy is still the copy the sync reads; only its own readers refresh it.
+    models_dev_catalog._write_cache({
+        "url": models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+        "fetched_at": 0,
+        "catalog": {"anthropic": {"models": {
+            _PROJECTION_MODEL: {"modalities": {"input": ["text", "image", "pdf"]}},
+            "routed-text-model": {"modalities": {"input": ["text"]}},
+        }}},
+    })
+    service, store, adapter = _service(tmp_path)
+    _set_claude_route_fixture(store, ("src_first0001", "src_second001"), _PROJECTION_MODEL)
+    service._engine_synced = True
+
+    asyncio.run(_confirm_guard(lambda guard: service.set_agent_chain(
+        "claude",
+        _PROJECTION_MODEL,
+        {"hops": [
+            {"source_id": "src_first0001", "model_id": _PROJECTION_MODEL},
+            {"source_id": "src_second001", "model_id": "routed-text-model"},
+            {"source_id": "src_second001", "model_id": "undeclared-model"},
+        ], **guard},
+    )))
+
+    [synced] = adapter.synced
+    by_id = {binding.source_id: binding for binding in synced}
+    assert by_id["src_second001"].model_ids == (_PROJECTION_MODEL,)
+    assert {"routed-text-model", "undeclared-model"} <= set(by_id["src_second001"].route_model_ids)
+    assert by_id["src_first0001"].model_input_modalities == (
+        (_PROJECTION_MODEL, ("text", "image", "pdf")),
+    )
+    assert by_id["src_second001"].model_input_modalities == (
+        (_PROJECTION_MODEL, ("text", "image", "pdf")),
+        ("routed-text-model", ("text",)),
+    )
+    assert refreshes == []
+
+
 def test_source_adoption_projection_is_sorted_by_backend_and_menu_model(tmp_path):
     service, store, _adapter = _service(tmp_path)
     source = ModelHubSourceConfig(

@@ -277,6 +277,19 @@ def load_models_dev_catalog_with_date() -> tuple[dict[str, Any], float | None, b
     return {}, None, _refresh_in_background()
 
 
+def cached_models_dev_catalog() -> dict[str, Any]:
+    """The cached copy as it stands, stale or not, and never a fetch.
+
+    For readers that must not start network I/O, such as an engine sync. The
+    readers above keep the copy fresh.
+    """
+
+    with _CACHE_LOCK:
+        cached = _read_cache()
+    catalog = _catalog_from_cache(cached) if cached.get("url") == _models_dev_url() else None
+    return catalog or {}
+
+
 def _search_tokens(query: str) -> tuple[str, ...]:
     lowered = query.strip().lower()
     tokens = [lowered]
@@ -546,13 +559,69 @@ def exact_models_dev_matches(
     lets a near neighbour silently describe a different model.
     """
 
+    if not catalog:
+        return {}
+    vendor_map = load_model_vendor_map()
+    return {
+        requested: _preferred_copy(
+            # Every closest copy names one catalog model id, so the family that
+            # decides first-party ownership is read off the catalog row.
+            closest[0][2]["model_id"],
+            closest,
+            vendor_map,
+        )
+        for requested, closest in _closest_exact_copies(
+            model_ids, catalog, vendor_map
+        ).items()
+    }
+
+
+def declared_input_modalities(
+    model_ids: Iterable[str],
+    catalog: dict[str, Any],
+) -> dict[str, list[str]]:
+    """The input modalities models.dev declares for each id it names exactly.
+
+    Exact as in ``exact_models_dev_matches``, whose preferred copy supplies
+    the list. A copy describes one provider's deployment, and copies of one id
+    can disagree about images. A text-only answer hides images from the model,
+    so an id whose closest copies disagree about image input has no
+    declaration here, and neither has an id no copy declares.
+    """
+
+    if not catalog:
+        return {}
+    vendor_map = load_model_vendor_map()
+    declared: dict[str, list[str]] = {}
+    for requested, closest in _closest_exact_copies(
+        model_ids, catalog, vendor_map
+    ).items():
+        declarations = [
+            row["input_modalities"]
+            for _rank, _provider, row in closest
+            if row["input_modalities"]
+        ]
+        if len({"image" in modalities for modalities in declarations}) != 1:
+            continue
+        preferred = _preferred_copy(
+            closest[0][2]["model_id"], closest, vendor_map
+        )["input_modalities"]
+        if preferred:
+            declared[requested] = list(preferred)
+    return declared
+
+
+def _closest_exact_copies(
+    model_ids: Iterable[str],
+    catalog: dict[str, Any],
+    vendor_map: dict[str, Any],
+) -> dict[str, list[tuple[int, str, dict[str, Any]]]]:
     wanted: dict[str, list[str]] = {}
     for model_id in dict.fromkeys(model_ids):
         for key in dict.fromkeys((model_id, model_id.rsplit("/", 1)[-1])):
             wanted.setdefault(key, []).append(model_id)
-    if not wanted or not catalog:
+    if not wanted:
         return {}
-    vendor_map = load_model_vendor_map()
     by_request: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
 
     def admit(provider_id: str, model_id: str, _display_name: str):
@@ -565,15 +634,8 @@ def exact_models_dev_matches(
             for requested in dict.fromkeys(requested for _rank, requested in hits):
                 rank = min(rank for rank, other in hits if other == requested)
                 by_request.setdefault(requested, []).append((rank, provider_id, row))
-    matches: dict[str, dict[str, Any]] = {}
+    closest: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
     for requested, copies in by_request.items():
         best = min(rank for rank, _provider, _row in copies)
-        closest = [copy for copy in copies if copy[0] == best]
-        # Every closest copy names one catalog model id, so the family that
-        # decides first-party ownership is read off the catalog row.
-        matches[requested] = _preferred_copy(
-            closest[0][2]["model_id"],
-            closest,
-            vendor_map,
-        )
-    return matches
+        closest[requested] = [copy for copy in copies if copy[0] == best]
+    return closest

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import aiohttp
 import pytest
+import yaml
 
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -531,6 +532,93 @@ def test_mh_routing_010_model_not_found_stays_request_scoped_through_real_gatewa
 
     with MockLLMUpstream() as first, MockLLMUpstream() as second, _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
         asyncio.run(exercise(adapter, first, second))
+
+
+_TOOL_RESULT_IMAGE_MARKER = "[image omitted: unsupported by upstream]"
+# One transparent pixel, the smallest well-formed PNG.
+_PNG_PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
+
+def test_mh_modalities_003_claude_tool_result_image_reaches_a_text_only_model_as_the_marker(tmp_path, monkeypatch):
+    """MH-MODALITIES-003: a hot-reloaded text-only declaration makes the pinned CPA send the marker, not the image."""
+    from vibe import models_dev_catalog
+
+    async def exercise(adapter, upstream):
+        text_only, undeclared = "text-only-model", "undeclared-model"
+        # Unreachable on purpose: the seeded copy is fresh, so nothing fetches it.
+        monkeypatch.setenv(models_dev_catalog.MODELS_DEV_URL_ENV, "http://127.0.0.1:9/models-dev.json")
+        models_dev_catalog._write_cache({
+            "url": models_dev_catalog._models_dev_url(),
+            "fetched_at": time.time(),
+            "catalog": {"mockvendor": {"models": {text_only: {"modalities": {"input": ["text"]}}}}},
+        })
+        upstream.configure(protocol="openai_chat", models=[{"id": undeclared}])
+        item = source("src_modalities1", [undeclared], vendor="custom", protocol="openai_chat")
+        item.base_url = upstream.url
+        item.credential_ref = adapter.state_store.store_api_key(
+            "sk-synthetic-modalities", vendor="custom", protocol="openai_chat", base_url=item.base_url,
+        )
+        menu = fixed_model("claude")
+        service = service_for(
+            tmp_path, MemoryModelHubStore(config_with_sources([item], hops=((item.id, undeclared),))), adapter,
+        )
+        await service.runtime_start()
+        connection = adapter.supervisor.client_if_running().connection
+        config_path = next(adapter.state_store.root.glob("instances/*/config.yaml"))
+        gateway = ModelHubTurnGateway(service)
+
+        async def forward_screenshot(target: str) -> str:
+            base_url, token = await gateway.endpoint(
+                "claude", process_scope=f"{tmp_path}/{target}", turn_id=f"turn_{target}",
+                requested_model_id=menu, resolved_model_id=target, source_id=item.id,
+            )
+            upstream.reset_requests()
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                async with client.post(f"{base_url}/v1/messages", headers={"Authorization": f"Bearer {token}"}, json={
+                    "model": target,
+                    "max_tokens": 32,
+                    "stream": False,
+                    "messages": [
+                        {"role": "user", "content": "Take a screenshot."},
+                        {"role": "assistant", "content": [
+                            {"type": "tool_use", "id": "call_1", "name": "screenshot", "input": {}},
+                        ]},
+                        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": [
+                            {"type": "text", "text": "screenshot taken"},
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _PNG_PIXEL}},
+                        ]}]},
+                    ],
+                }) as response:
+                    raw = await asyncio.wait_for(response.read(), timeout=15)
+                    assert response.status == 200, raw
+            [received] = [row for row in upstream.requests() if row["path"] == "/v1/chat/completions"]
+            assert received["body"]["model"] == target
+            return json.dumps(received["body"])
+
+        def declared_modalities() -> dict[str, object]:
+            [compat] = yaml.safe_load(config_path.read_text(encoding="utf-8"))["openai-compatibility"]
+            return {model["name"]: model.get("input-modalities") for model in compat["models"]}
+
+        try:
+            assert declared_modalities()[undeclared] is None
+            forwarded = await forward_screenshot(undeclared)
+            assert _PNG_PIXEL in forwarded
+            assert _TOOL_RESULT_IMAGE_MARKER not in forwarded
+
+            # The text-only model first reaches the running engine as a route
+            # target, through the same hot reload every Model Hub save uses.
+            await service.set_agent_chain("claude", menu, {"hops": [{"source_id": item.id, "model_id": text_only}]})
+            assert adapter.supervisor.client_if_running().connection == connection
+            assert declared_modalities()[text_only] == ["text"]
+            forwarded = await forward_screenshot(text_only)
+            assert _TOOL_RESULT_IMAGE_MARKER in forwarded
+            assert _PNG_PIXEL not in forwarded
+            assert adapter.supervisor.client_if_running().connection == connection
+        finally:
+            await gateway.close()
+
+    with MockLLMUpstream() as upstream, _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
+        asyncio.run(exercise(adapter, upstream))
 
 
 @pytest.mark.parametrize("settings_scope", ["home", "project", "local"])

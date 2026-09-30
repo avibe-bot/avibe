@@ -114,6 +114,7 @@ class SourceRecord:
     prefix: str
     model_reasoning_efforts: tuple[tuple[str, tuple[str, ...]], ...] = ()
     route_model_ids: tuple[str, ...] = ()
+    model_input_modalities: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> SourceRecord:
@@ -162,7 +163,30 @@ class SourceRecord:
             prefix=str(payload["prefix"]),
             model_reasoning_efforts=tuple(parsed_reasoning_efforts),
             route_model_ids=tuple(route_model_ids),
+            model_input_modalities=_stored_input_modalities(
+                payload.get("model_input_modalities", [])
+            ),
         )
+
+
+def _stored_input_modalities(raw: object) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    # Undeclared modalities are the engine's default, so a declaration this
+    # release cannot read degrades to that rather than failing the source.
+    if not isinstance(raw, list) or not all(
+        isinstance(item, list)
+        and len(item) == 2
+        and isinstance(item[0], str)
+        and item[0]
+        and isinstance(item[1], list)
+        and item[1]
+        and all(isinstance(modality, str) and modality for modality in item[1])
+        for item in raw
+    ):
+        return ()
+    declared: dict[str, tuple[str, ...]] = {}
+    for model_id, modalities in raw:
+        declared.setdefault(model_id, tuple(dict.fromkeys(modalities)))
+    return tuple(declared.items())
 
 
 class EngineStateStore:
@@ -642,6 +666,29 @@ class EngineStateStore:
                         continue
                     spellings[normalized_model_id] = answered
                     reasoning_by_model[normalized_model_id] = normalized_efforts
+                normalized_route_model_ids = tuple(
+                    sorted(
+                        {
+                            model_id_without_credential_address(model, prefix)
+                            for model in route_model_ids
+                        }
+                    )
+                )
+                modalities_by_model: dict[str, tuple[str, ...]] = {}
+                for model_id, modalities in binding.model_input_modalities:
+                    normalized_model_id = model_id_without_credential_address(
+                        str(model_id).strip(), prefix
+                    )
+                    if normalized_model_id not in (*model_ids, *normalized_route_model_ids):
+                        raise EngineStateError("input modality model id is not registered")
+                    normalized_modalities = tuple(
+                        dict.fromkeys(str(modality).strip() for modality in modalities)
+                    )
+                    if not normalized_modalities or any(
+                        not modality for modality in normalized_modalities
+                    ):
+                        raise EngineStateError("input modality cannot be empty")
+                    modalities_by_model.setdefault(normalized_model_id, normalized_modalities)
                 records.append(
                     SourceRecord(
                         source_id=source_id,
@@ -651,16 +698,10 @@ class EngineStateStore:
                         credential_ref=credential_ref,
                         allowed_origins=allowed_origins,
                         model_ids=model_ids,
-                        route_model_ids=tuple(
-                            sorted(
-                                {
-                                    model_id_without_credential_address(model, prefix)
-                                    for model in route_model_ids
-                                }
-                            )
-                        ),
+                        route_model_ids=normalized_route_model_ids,
                         prefix=prefix,
                         model_reasoning_efforts=tuple(reasoning_by_model.items()),
+                        model_input_modalities=tuple(modalities_by_model.items()),
                     )
                 )
             self._write_sources(records)
@@ -694,11 +735,17 @@ class EngineStateStore:
                 for model_id, efforts in current.model_reasoning_efforts
                 if model_id in models
             )
+            retained_modalities = tuple(
+                (model_id, modalities)
+                for model_id, modalities in current.model_input_modalities
+                if model_id in models or model_id in current.route_model_ids
+            )
             updated_record = SourceRecord(
                 **{
                     **asdict(current),
                     "model_ids": models,
                     "model_reasoning_efforts": retained_reasoning,
+                    "model_input_modalities": retained_modalities,
                 }
             )
             self._write_sources([updated_record if source.source_id == source_id else source for source in sources])
@@ -1166,6 +1213,10 @@ class EngineStateStore:
                         "model_reasoning_efforts": [
                             [model_id, list(efforts)]
                             for model_id, efforts in source.model_reasoning_efforts
+                        ],
+                        "model_input_modalities": [
+                            [model_id, list(modalities)]
+                            for model_id, modalities in source.model_input_modalities
                         ],
                     }
                     for source in sources

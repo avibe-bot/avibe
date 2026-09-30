@@ -91,6 +91,11 @@ class SourceBinding:
     route_model_ids: tuple[str, ...] = ()
     # Sorted API-key transport targets derived from effective routes, never
     # inventory or capability evidence. Independent of live health and mode.
+    model_input_modalities: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # Per-model input modalities the models.dev catalog explicitly declares,
+    # over model_ids and route_model_ids; an absent model is undeclared.
+    # CLIProxyAPI replaces tool-result images for a text-only
+    # openai-compatibility model instead of forwarding them.
 
 
 class OriginNotAllowedError(Exception):

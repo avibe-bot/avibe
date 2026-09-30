@@ -117,6 +117,12 @@ def _append_source(
     except ValueError:
         raise EngineStateError("unsupported API key authentication scheme") from None
     reasoning_by_model = dict(source.model_reasoning_efforts)
+    # CLIProxyAPI reads input modalities only on openai-compatibility models,
+    # matching an entry by name, then alias. For one declared text-only it
+    # replaces tool-result images with a marker; undeclared keeps images.
+    modalities_by_model = (
+        dict(source.model_input_modalities) if source.protocol == "openai_chat" else {}
+    )
     models = []
     for model in dict.fromkeys((*source.model_ids, *source.route_model_ids)):
         entry: dict[str, Any] = {
@@ -128,6 +134,9 @@ def _append_source(
         if reasoning_efforts:
             # CLIProxyAPI's measured model-registration shape is strongest-first.
             entry["thinking"] = {"levels": list(reversed(reasoning_efforts))}
+        input_modalities = modalities_by_model.get(model, ())
+        if input_modalities:
+            entry["input-modalities"] = list(input_modalities)
         models.append(entry)
     if source.protocol == "anthropic":
         base_url = source.base_url

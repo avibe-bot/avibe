@@ -209,6 +209,47 @@ def _cached_models_dev_catalog() -> Mapping[str, Any]:
     return load_models_dev_catalog_with_date()[0]
 
 
+def _with_declared_input_modalities(
+    bindings: list[SourceBinding],
+) -> list[SourceBinding]:
+    """Attach the input modalities models.dev declares for each bound model.
+
+    Read at sync rather than in ``_bindings``: the cached copy changes on its
+    own, and a mutation compares the bindings it builds before and after
+    itself. The sync never fetches, and an unreadable copy leaves every model
+    undeclared, which is the engine's default.
+    """
+
+    from vibe.models_dev_catalog import (
+        cached_models_dev_catalog,
+        declared_input_modalities,
+    )
+
+    model_ids = [
+        model
+        for binding in bindings
+        for model in (*binding.model_ids, *binding.route_model_ids)
+    ]
+    if not model_ids:
+        return bindings
+    try:
+        declared = declared_input_modalities(model_ids, cached_models_dev_catalog())
+    except Exception as exc:  # noqa: BLE001 - optional metadata never fails a sync
+        logger.info("Model Hub engine models have no models.dev modalities: %s", type(exc).__name__)
+        return bindings
+    return [
+        replace(
+            binding,
+            model_input_modalities=tuple(
+                (model, tuple(declared[model]))
+                for model in dict.fromkeys((*binding.model_ids, *binding.route_model_ids))
+                if model in declared
+            ),
+        )
+        for binding in bindings
+    ]
+
+
 _MODELS_DEV_CANDIDATE_FIELDS = (
     "models_dev_id",
     "context_window",
@@ -1470,6 +1511,8 @@ class ModelHubService:
         if not bindings and not force_empty and not has_hub_sources:
             self._engine_preparation_failed = False
             return
+        # Reading the catalog copy takes about 100 ms; keep it off the loop.
+        bindings = await asyncio.to_thread(_with_declared_input_modalities, bindings)
         await self._engine_call(self.adapter.sync_sources(bindings))
         self._engine_preparation_failed = False
 
