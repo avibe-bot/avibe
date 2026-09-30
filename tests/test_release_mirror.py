@@ -128,6 +128,25 @@ def test_a_failing_repository_does_not_stop_the_others_but_fails_the_run(monkeyp
     assert "error: avibe-bot/askill: gh api failed: HTTP 403" in capsys.readouterr().err
 
 
+def test_tmux_builds_mirrors_its_full_releases_but_not_its_rebuilt_preview(monkeypatch):
+    repository = "tmux/tmux-builds"
+    items = [
+        github_release("v3.6b", published_at="2026-05-20T11:54:47Z", assets=("tmux-3.6b-linux-x86_64.tar.gz",),
+                       repository=repository),
+        github_release("preview", published_at="2026-09-29T11:17:16Z", prerelease=True,
+                       assets=("LICENSES.tar.gz",), repository=repository),
+    ]
+    bucket = RecordingBucket({}, None)
+    monkeypatch.setattr(mirror, "Bucket", lambda name, endpoint_url: bucket)
+    monkeypatch.setattr(mirror, "github_releases", lambda repository: items)
+    monkeypatch.setattr(mirror, "tag_commits", lambda repository: {"v3.6b": "0" * 40, "preview": "1" * 40})
+    monkeypatch.setattr(mirror, "download", lambda asset, destination: destination.write_bytes(b""))
+
+    arguments = ["--repository", repository, "--bucket", "avibe", "--endpoint-url", "https://r2.invalid"]
+    assert mirror.main(arguments) == 0
+    assert bucket.writes == ["tmux/releases/v3.6b/tmux-3.6b-linux-x86_64.tar.gz", "tmux/index/releases.json"]
+
+
 def test_a_completed_reconcile_is_a_no_op_on_the_next_run():
     selected = releases(
         github_release("v1.0.0", published_at="2026-01-01T00:00:00Z", assets=("a.tgz", "b+local.whl")),

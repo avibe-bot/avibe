@@ -2,9 +2,9 @@
 
 ## Background
 
-Every Avibe download (desktop installers and updates, the managed runtimes, the
-Show Runtime, the askill and avault binaries, and wheels used by install
-scripts) comes from GitHub Release assets. Update discovery uses
+Every Avibe download (desktop installers and updates, the managed runtimes
+including tmux, the Show Runtime, the askill and avault binaries, and wheels
+used by install scripts) comes from GitHub Release assets. Update discovery uses
 `api.github.com`. In mainland China, GitHub downloads are often slow or stall,
 and the 60 requests/hour unauthenticated API limit per IP has already surfaced
 as update-check 403s.
@@ -34,6 +34,11 @@ Each mirrored repository owns one bucket root:
 | `avibe-bot/avibe` | (the bucket root) |
 | `avibe-bot/askill` | `askill/` |
 | `avibe-bot/avault` | `avault/` |
+| `tmux/tmux-builds` | `tmux/` |
+
+`tmux/tmux-builds` is third-party: the ISC-licensed tmux builds the managed
+tmux runtime pins. Its releases are mirrored like Avibe's own, with their
+`LICENSES.tar.gz`.
 
 - `https://dl.avibe.bot/<root>releases/<tag>/<asset>` is byte-identical to
   `https://github.com/<repository>/releases/download/<tag>/<asset>`.
@@ -74,7 +79,7 @@ Each mirrored repository owns one bucket root:
 - `sha256` is GitHub's asset digest, re-verified against the downloaded bytes
   before upload. `commit` is the peeled tag target.
 - Producer: the release mirror workflow. Consumers: the desktop updater reads
-  Avibe's index; askill's and avault's have none yet.
+  Avibe's index; the other repositories' have none yet.
   Planned: the CLI update checker, replacing its `api.github.com` discovery
   call. Runtime downloads use pinned release URLs and need no index.
 - The index is unauthenticated metadata. A hostile index can at most withhold
@@ -88,9 +93,13 @@ Each mirrored repository owns one bucket root:
 - The newest 20 prereleases by `published_at` are kept. Older prereleases leave
   the mirror and the index; their downloads fall back to GitHub.
 - Drafts are never mirrored.
+- tmux-builds keeps no prereleases. Its `preview` prerelease is rebuilt in
+  place, changing bytes under unchanged asset names, which the reconciler must
+  treat as published bytes changing.
 - At the time of writing Avibe is 89 releases and about 19 GB, most of it the
   desktop bundles in recent prereleases (about 0.7 GB each). askill adds 16
-  releases and about 7 GB, avault 5 releases and 0.04 GB.
+  releases and about 7 GB, avault 5 releases and 0.04 GB, tmux-builds 5
+  releases and 0.02 GB.
 
 ## Reconciler
 
@@ -115,7 +124,7 @@ run fails after all of them were tried.
 
 Triggers: completion of the release-publishing workflows (assets are uploaded
 with `GITHUB_TOKEN`, which does not emit release events), an hourly schedule
-as the safety net and the only trigger for askill and avault releases, and
+as the safety net and the only trigger for the other repositories' releases, and
 manual dispatch with an optional dry run. A dry run reports the plan without
 writing and still fails when published bytes changed.
 
@@ -139,13 +148,13 @@ Cloudflare configuration lives outside the repository. The expected state:
 
 ## Client downloads
 
-The managed git runtime, the model hub engine, Show Runtime manifest archives,
-and the askill and avault binaries download through
+The managed git and tmux runtimes, the model hub engine, Show Runtime manifest
+archives, and the askill and avault binaries download through
 `core.dependency_network.fetch_to_path`:
 
 - A mirrored repository's release URL without a query tries the mirror, then
-  GitHub. Any other URL (tmux builds, legacy Show Runtime archives, manifest
-  overrides) keeps its single source.
+  GitHub. Any other URL (legacy Show Runtime archives, manifest overrides)
+  keeps its single source.
 - Sources rotate, each with the download retry budget. A non-retryable failure,
   such as a mirror 404, drops that source.
 - A failed or stalled attempt (the caller's socket timeout) keeps its bytes, and
@@ -169,7 +178,7 @@ and the askill and avault binaries download through
 2. Cache Rule, then real-file tests from the three mainland carriers at the
    evening peak.
 3. Clients, one at a time: desktop updater (done), then runtime and Show
-   Runtime downloads (done), then askill and avault (done). Each tries the
+   Runtime downloads (done), then askill, avault, and tmux (done). Each tries the
    mirror first, then GitHub, with a connect timeout and a stall watchdog,
    resumes with `Range` when switching source, and remembers the last source
    that worked. The references are the desktop shell's

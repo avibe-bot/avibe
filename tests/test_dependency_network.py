@@ -266,7 +266,6 @@ def test_release_assets_of_every_mirrored_repository_try_the_mirror_first(reposi
     "url",
     [
         f"{RELEASE_URL}?token=secret",
-        "https://github.com/tmux/tmux-builds/releases/download/v3.5/tmux.tar.gz",
         "https://github.com/avibe-bot/avibe-docs/releases/download/v1/a.tgz",
     ],
 )

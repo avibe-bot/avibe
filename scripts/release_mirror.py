@@ -31,7 +31,12 @@ REPOSITORIES = {
     "avibe-bot/avibe": "",
     "avibe-bot/askill": "askill/",
     "avibe-bot/avault": "avault/",
+    "tmux/tmux-builds": "tmux/",
 }
+# Repositories mirrored without prereleases. tmux-builds rebuilds its
+# ``preview`` prerelease in place, changing bytes under unchanged asset names,
+# which the mirror must treat as published bytes changing.
+FULL_RELEASES_ONLY = frozenset({"tmux/tmux-builds"})
 RELEASE_PREFIX = "releases/"
 INDEX_KEY = "index/releases.json"
 IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
@@ -357,9 +362,8 @@ def main(argv: list[str] | None = None) -> int:
     # Repositories own disjoint roots, so one failing never blocks the others.
     for repository in arguments.repository or REPOSITORIES:
         try:
-            status |= reconcile(
-                repository, bucket, keep_prereleases=arguments.keep_prereleases, dry_run=arguments.dry_run
-            )
+            keep_prereleases = 0 if repository in FULL_RELEASES_ONLY else arguments.keep_prereleases
+            status |= reconcile(repository, bucket, keep_prereleases=keep_prereleases, dry_run=arguments.dry_run)
         except MirrorError as exc:
             print(f"error: {repository}: {exc}", file=sys.stderr)
             status = 1

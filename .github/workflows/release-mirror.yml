@@ -12,7 +12,7 @@ on:
       - Build local-only Git runtime
     types: [completed]
   # Safety net for missed triggers and renamed workflows, and the trigger for
-  # the sibling repositories' releases (askill, avault).
+  # the other mirrored repositories' releases (askill, avault, tmux-builds).
   schedule:
     - cron: "41 * * * *"
   workflow_dispatch:
