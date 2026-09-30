@@ -166,20 +166,24 @@ vibe doctor
 
 ## 卸载
 
-只有用户明确要删除 Avibe 时才运行。它只删除 `PATH` 上排在最前面的 `vibe`；如果 `which -a vibe` 列出了不止一个 Avibe 启动器，其余的也要一并删掉：
+只有用户明确要删除 Avibe 时才运行。卸载由安装脚本负责：它先停止服务，再删除它放置的所有 `vibe` 启动器和安装文件；不是它装的 `vibe` 不会动，用户数据（`~/.avibe` 和旧版的 `~/.vibe_remote`）会保留：
 
 ```bash
-avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
-avibe_home="${avibe_home/#\~/$HOME}"
-vibe_bin="$(command -v vibe)"   # 卸载前先记下 Avibe 的启动器
-if "$vibe_bin" version 2>/dev/null | grep -Eq '^(avibe-os|vibe-remote) '; then
-  "$vibe_bin" stop
-else
-  echo "跳过 ${vibe_bin}：不是 Avibe 的启动器"; vibe_bin=""
-fi
-uv tool uninstall avibe-os
-uv tool uninstall vibe-remote   # 旧版安装
-[ -n "$vibe_bin" ] && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
-rm -rf "$avibe_home/runtime/install-generations"
-rm -rf "$avibe_home" ~/.vibe_remote
+curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall
+```
+
+Windows PowerShell：
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall
+```
+
+只有用户明确要求时，才连同数据一起删除。数据删除后无法恢复，所以先和用户确认。清除时会先列出要删除的全部内容，并在终端上确认；没有终端时（比如 agent 的 shell），不加 `--yes`（PowerShell 为 `-Yes`）就不会执行：
+
+```bash
+curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall -Purge
 ```

@@ -318,22 +318,16 @@ OpenCode may pause tool calls for approval unless `~/.config/opencode/opencode.j
 
 ## Uninstall
 
-The snippet removes the first `vibe` on your `PATH`. If `which -a vibe` lists more than one Avibe launcher, remove the others too.
+Run the installer with `--uninstall`. It stops Avibe, then removes every `vibe` command and install file it put on this machine. A `vibe` it did not install is left alone. Your settings, sessions, and other data in `~/.avibe` are kept:
 
 ```bash
-avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
-avibe_home="${avibe_home/#\~/$HOME}"
-vibe_bin="$(command -v vibe)"   # capture Avibe's launcher before uninstalling
-if "$vibe_bin" version 2>/dev/null | grep -Eq '^(avibe-os|vibe-remote) '; then
-  "$vibe_bin" stop
-else
-  echo "Skipping ${vibe_bin}: not Avibe's launcher"; vibe_bin=""
-fi
-uv tool uninstall avibe-os
-uv tool uninstall vibe-remote   # legacy install
-[ -n "$vibe_bin" ] && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
-rm -rf "$avibe_home/runtime/install-generations"
-rm -rf "$avibe_home" ~/.vibe_remote
+curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall
+```
+
+To delete your data too, add `--purge`. It lists everything it will delete and asks before deleting. **Deleted data cannot be recovered.** Where no terminal can answer, it also needs `--yes`.
+
+```bash
+curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge
 ```
 
 ---

@@ -191,20 +191,24 @@ does not need an IM chat to complete this smoke test.
 
 ## Uninstall
 
-Only run this if the user asks to remove Avibe. It removes the first `vibe` on `PATH`; if `which -a vibe` lists more than one Avibe launcher, remove the others too:
+Only run this if the user asks to remove Avibe. The installer owns uninstall: it stops the service, then removes every `vibe` launcher and install file it placed. It never touches a `vibe` it did not install, and it keeps the user's data (`~/.avibe`, and the legacy `~/.vibe_remote`):
 
 ```bash
-avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
-avibe_home="${avibe_home/#\~/$HOME}"
-vibe_bin="$(command -v vibe)"   # capture Avibe's launcher before uninstalling
-if "$vibe_bin" version 2>/dev/null | grep -Eq '^(avibe-os|vibe-remote) '; then
-  "$vibe_bin" stop
-else
-  echo "Skipping ${vibe_bin}: not Avibe's launcher"; vibe_bin=""
-fi
-uv tool uninstall avibe-os
-uv tool uninstall vibe-remote   # legacy install
-[ -n "$vibe_bin" ] && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
-rm -rf "$avibe_home/runtime/install-generations"
-rm -rf "$avibe_home" ~/.vibe_remote
+curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall
+```
+
+Windows PowerShell:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall
+```
+
+Delete the user's data too only when they explicitly ask for it. It cannot be recovered, so confirm with the user first. The purge lists everything it deletes and asks on the terminal; without one, as in an agent shell, it refuses unless `--yes` (PowerShell: `-Yes`) is added:
+
+```bash
+curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall -Purge
 ```

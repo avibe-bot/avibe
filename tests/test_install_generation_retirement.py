@@ -39,7 +39,7 @@ def installation(tmp_path, monkeypatch):
 
 def candidate(
     root, name, *, layout="uv/tools", package="avibe-os",
-    export_name="vibe", entry_name="vibe",
+    export_name="vibe", entry_name="vibe", copy_export=False,
 ):
     generation = root / name
     environment = generation / layout / package
@@ -50,7 +50,11 @@ def candidate(
     (environment / "pyvenv.cfg").write_text("include-system-site-packages = false\n")
     exported = generation / "bin" / export_name
     exported.parent.mkdir()
-    exported.symlink_to(target)
+    # uv links a tool's launcher on POSIX and copies it on Windows.
+    if copy_export:
+        shutil.copy2(target, exported)
+    else:
+        exported.symlink_to(target)
     (environment / "uv-receipt.toml").write_text(
         f'[tool]\nrequirements = [{{ name = "{package}" }}]\n'
         f'entrypoints = [{{ name = {json.dumps(entry_name)}, install-path = {json.dumps(str(exported))} }}]\n',

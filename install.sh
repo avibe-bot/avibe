@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Avibe Installation Script
 # Usage: bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
+# Uninstall, keeping your data:     curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall
+# Uninstall and delete your data:   curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall --purge
+#   Without a terminal to confirm on, a purge also needs --yes.
 #
 # Prerequisites: None! uv will be installed automatically and manages Python for you.
 
@@ -22,6 +25,11 @@ VIBE_TOOL_BIN_DIR=""
 # A root install has one supported stable launcher, whatever PATH order the
 # shell happens to have. Upgrades keep every other managed launcher in step.
 ROOT_TOOL_BIN_DIR="/usr/local/bin"
+# The fixed stable-launcher locations this installer chooses from, in order.
+# Launcher discovery checks them beside PATH and uv's configured tool bin.
+# Keep in step with INSTALLER_LAUNCHER_DIRS in vibe/upgrade.py.
+INSTALLER_LAUNCHER_DIRS=("$HOME/.local/bin" "$HOME/bin" "/usr/local/bin" "/opt/homebrew/bin")
+PUBLIC_INSTALL_SCRIPT_URL="https://avibe.bot/install.sh"
 VIBE_CANDIDATE_BIN_PATH=""
 # uv 0.10.8 and later fetch managed Python from Astral's CDN and fall back to
 # GitHub; earlier uv fetches it from GitHub only. uv_python_install_mirror
@@ -29,6 +37,8 @@ VIBE_CANDIDATE_BIN_PATH=""
 ASTRAL_PYTHON_INSTALL_MIRROR="https://releases.astral.sh/github/python-build-standalone/releases/download"
 UV_INSTALL_PYTHON_MIRROR=""
 LAUNCH_AFTER_INSTALL=""
+PURGE_USER_DATA=""
+ASSUME_YES=""
 AVIBE_LAUNCHED=""
 ORIGINAL_PATH="$PATH"
 if [ -n "${AVIBE_HOME:-}" ]; then
@@ -220,14 +230,7 @@ choose_tool_bin_dir() {
     done
     IFS="$old_ifs"
 
-    local preferred_dirs=(
-        "$HOME/.local/bin"
-        "$HOME/bin"
-        "/usr/local/bin"
-        "/opt/homebrew/bin"
-    )
-
-    for dir in "${preferred_dirs[@]}"; do
+    for dir in "${INSTALLER_LAUNCHER_DIRS[@]}"; do
         if is_absolute_dir "$dir" && launcher_destination_is_available "$dir" && ensure_writable_dir "$dir"; then
             echo "$dir"
             return 0
@@ -858,15 +861,463 @@ launch_vibe() {
     success "Avibe launched"
 }
 
+# Print the one-line uninstall command for this runtime home, with any options
+# appended. AVIBE_HOME is repeated when it chose the home.
+uninstall_command() {
+    local home_prefix=""
+    if [ -n "${AVIBE_HOME:-}" ]; then
+        home_prefix="AVIBE_HOME=$(printf '%q' "$AVIBE_RUNTIME_HOME") "
+    fi
+    printf 'curl -fsSL %s | %sbash -s -- --uninstall%s\n' \
+        "$PUBLIC_INSTALL_SCRIPT_URL" "$home_prefix" "${*:+ $*}"
+}
+
 print_uninstall_commands() {
-    echo "  avibe_home=\"\${AVIBE_HOME:-\$HOME/.avibe}\""
-    echo '  avibe_home="${avibe_home/#\~/$HOME}"'
-    echo "  uv tool uninstall avibe-os       # current uv install"
-    echo "  uv tool uninstall vibe-remote    # legacy uv install"
-    echo "  pip uninstall avibe-os vibe-remote"
-    echo "  rm -f \"$VIBE_TOOL_BIN_DIR/vibe\" \"$VIBE_TOOL_BIN_DIR/.vibe.avibe-generation\""
-    echo '  rm -rf "$avibe_home/runtime/install-generations"'
-    echo '  rm -rf "$avibe_home" ~/.vibe_remote   # remove config and data'
+    echo "  $(uninstall_command)"
+    echo "  Add --purge to also delete your data in $AVIBE_RUNTIME_HOME. This cannot be undone."
+}
+
+# The installer owns uninstall. It runs outside Avibe, so nothing it deletes is
+# in use by itself, and it cannot rely on the installed Python, which may come
+# from any earlier release or be broken. It therefore carries its own copy of
+# the launcher rule in vibe.upgrade.managed_stable_launchers; tests pin the
+# two to the same cases.
+
+install_generations_root() {
+    printf '%s\n' "$AVIBE_RUNTIME_HOME/runtime/install-generations"
+}
+
+# Print an absolute path with its deepest existing ancestor made physical, so a
+# path through symlinks or "..", even into something already deleted, compares
+# by prefix.
+physical_path() {
+    local path="$1"
+    local rest=""
+    local dir=""
+
+    while [ -n "$path" ] && [ "$path" != "/" ]; do
+        path="${path%/}"
+        if dir="$(cd -P -- "$path" 2>/dev/null && pwd -P)"; then
+            printf '%s%s\n' "${dir%/}" "$rest"
+            return 0
+        fi
+        rest="/${path##*/}$rest"
+        path="${path%/*}"
+    done
+    printf '%s\n' "${rest:-/}"
+}
+
+path_in_generation_root() {
+    local root=""
+    root="$(physical_path "$(install_generations_root)")"
+    case "$(physical_path "$1")" in
+        "$root"/?*) return 0 ;;
+    esac
+    return 1
+}
+
+# Whether deleting install-generations would break this launcher: it resolves
+# into the root, or it is a hard link or copy of a generation's launcher.
+# vibe.upgrade._launcher_generation recognizes the same shapes, but it moves a
+# launcher only into a recognized installation, and a copy only with its
+# marker. A launcher missing either would still break, so it goes too.
+launcher_uses_install_generations() {
+    local launcher="$1"
+    local exported=""
+
+    if path_in_generation_root "$(resolve_binary_path "$launcher")"; then
+        return 0
+    fi
+    [ -f "$launcher" ] || return 1
+    for exported in "$(install_generations_root)"/*/bin/vibe; do
+        if [ -f "$exported" ] && { [ "$launcher" -ef "$exported" ] || cmp -s "$launcher" "$exported" 2>/dev/null; }; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Print each distinct directory launcher discovery searches: PATH, uv's
+# configured tool bin, then the installer's fixed locations.
+launcher_search_dirs() {
+    local dir=""
+    local key=""
+    local seen=":"
+    local uv_tool_bin="${UV_TOOL_BIN_DIR:-}"
+    local old_ifs="$IFS"
+    local -a dirs=()
+
+    IFS=":"
+    for dir in $ORIGINAL_PATH; do
+        dirs+=("$dir")
+    done
+    IFS="$old_ifs"
+    dirs+=("${uv_tool_bin/#\~/$HOME}" "${INSTALLER_LAUNCHER_DIRS[@]}")
+
+    for dir in "${dirs[@]}"; do
+        dir="${dir%/}"
+        is_absolute_dir "$dir" || continue
+        key="$(physical_path "$dir")"
+        case "$seen" in
+            *":$key:"*) continue ;;
+        esac
+        seen="$seen$key:"
+        printf '%s\n' "$dir"
+    done
+}
+
+# Print each launcher this home's uninstall removes. Like the Python owner, it
+# never counts one inside a uv tool environment or the generation root.
+managed_launchers() {
+    local dir=""
+    local launcher=""
+
+    while IFS= read -r dir; do
+        launcher="$dir/vibe"
+        case "$launcher" in
+            */uv/tools/*) continue ;;
+        esac
+        if { [ -e "$launcher" ] || [ -L "$launcher" ]; } && ! path_in_generation_root "$launcher" &&
+            launcher_uses_install_generations "$launcher"; then
+            printf '%s\n' "$launcher"
+        fi
+    done < <(launcher_search_dirs)
+}
+
+# Print each launcher marker the uninstall leaves without a purpose: one beside
+# a launcher it removes, or one naming a generation in the root it deletes.
+stale_launcher_markers() {
+    local dir=""
+    local marker=""
+    local marked=""
+    local bom=$'\xef\xbb\xbf'
+
+    while IFS= read -r dir; do
+        marker="$dir/.vibe.avibe-generation"
+        [ -f "$marker" ] || continue
+        marked="$(cat "$marker" 2>/dev/null)"
+        marked="${marked#"$bom"}"
+        marked="${marked%$'\r'}"
+        if printf '%s\n' "$@" | grep -Fqx -- "$dir/vibe" ||
+            { is_absolute_dir "$marked" && path_in_generation_root "$marked"; }; then
+            printf '%s\n' "$marker"
+        fi
+    done < <(launcher_search_dirs)
+}
+
+find_uv() {
+    local candidate=""
+
+    for candidate in "$(PATH="$ORIGINAL_PATH" command -v uv 2>/dev/null || true)" "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv"; do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+uv_tool_dir() {
+    local uv="$1"
+    local dir=""
+
+    if [ -n "$uv" ]; then
+        dir="$("$uv" tool dir 2>/dev/null || true)"
+    fi
+    printf '%s\n' "${dir:-${UV_TOOL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools}}"
+}
+
+# Whether uv's own uninstall of a tool removes only that tool's launchers. uv
+# deletes every launcher path its receipt records, even one that another tool,
+# such as a different `vibe`, has replaced since.
+uv_tool_owns_its_launchers() {
+    local environment="$1"
+    local environment_root=""
+    local path=""
+
+    [ -f "$environment/uv-receipt.toml" ] || return 0
+    environment_root="$(physical_path "$environment")"
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        { [ -e "$path" ] || [ -L "$path" ]; } || continue
+        case "$(physical_path "$(resolve_binary_path "$path")")" in
+            "$environment_root"/*) continue ;;
+        esac
+        if cmp -s "$path" "$environment/bin/${path##*/}" 2>/dev/null; then
+            continue
+        fi
+        return 1
+    done < <(grep -oE "install-path = (\"[^\"]*\"|'[^']*')" "$environment/uv-receipt.toml" 2>/dev/null |
+        sed -e "s/^install-path = [\"']//" -e "s/[\"']\$//")
+    return 0
+}
+
+# Print each Avibe process this home's pid records still show running.
+running_avibe_processes() {
+    local pid_file=""
+    local pid=""
+    local command=""
+
+    for pid_file in "$AVIBE_RUNTIME_HOME/runtime/vibe.pid" "$AVIBE_RUNTIME_HOME/runtime/vibe-ui.pid"; do
+        [ -f "$pid_file" ] || continue
+        pid="$(tr -d '[:space:]' < "$pid_file" 2>/dev/null)"
+        case "$pid" in
+            ''|0|*[!0-9]*) continue ;;
+        esac
+        # A pid file can outlive its process and name a reused pid, so when ps
+        # can show the command, only a vibe process counts.
+        if command="$(ps -p "$pid" -o command= 2>/dev/null)"; then
+            case "$command" in
+                *vibe*) ;;
+                *) continue ;;
+            esac
+        elif ! kill -0 "$pid" 2>/dev/null; then
+            continue
+        fi
+        printf '%s (recorded in %s)\n' "$pid" "$pid_file"
+    done
+}
+
+# Ask an installed Avibe to stop its service; the first that succeeds is enough.
+stop_avibe_service() {
+    local launcher=""
+    local output=""
+
+    for launcher in "$@"; do
+        [ -x "$launcher" ] || continue
+        if output="$(
+            cd "$AVIBE_RUNTIME_HOME" 2>/dev/null || cd /
+            env -u PYTHONPATH -u PYTHONHOME AVIBE_HOME="$AVIBE_RUNTIME_HOME" "$launcher" stop 2>&1
+        )"; then
+            return 0
+        fi
+        warn "'$launcher stop' failed${output:+: $(printf '%s\n' "$output" | tail -n 3)}"
+    done
+    return 1
+}
+
+# Print the user-data directories of this runtime home. The default home owns
+# both default names, since ~/.vibe_remote is the legacy home or a link to the
+# current one; an explicit AVIBE_HOME names one instance's home only.
+avibe_data_directories() {
+    local default_home="$HOME/.avibe"
+    local legacy_home="$HOME/.vibe_remote"
+    local runtime_home=""
+    local path=""
+
+    runtime_home="$(physical_path "$AVIBE_RUNTIME_HOME")"
+    if [ -z "${AVIBE_HOME:-}" ] || [ "$runtime_home" = "$(physical_path "$default_home")" ] ||
+        [ "$runtime_home" = "$(physical_path "$legacy_home")" ]; then
+        for path in "$default_home" "$legacy_home"; do
+            if [ -e "$path" ] || [ -L "$path" ]; then
+                printf '%s\n' "$path"
+            fi
+        done
+    elif [ -e "$AVIBE_RUNTIME_HOME" ] || [ -L "$AVIBE_RUNTIME_HOME" ]; then
+        printf '%s\n' "$AVIBE_RUNTIME_HOME"
+    fi
+}
+
+# Print what a purge deletes for the data directories: each link, then each
+# distinct directory, by its physical path so a link's target goes too.
+purge_targets() {
+    local data=""
+    local directory=""
+    local seen=":"
+
+    while IFS= read -r data; do
+        if [ -L "$data" ]; then
+            printf '%s\n' "$data"
+        fi
+        directory="$(physical_path "$data")"
+        if [ -d "$directory" ] && [ ! -L "$directory" ]; then
+            case "$seen" in
+                *":$directory:"*) ;;
+                *)
+                    seen="$seen$directory:"
+                    printf '%s\n' "$directory"
+                    ;;
+            esac
+        fi
+    done < <(avibe_data_directories)
+}
+
+# Whether deleting a directory would delete the user's home or the filesystem.
+path_holds_home() {
+    [ "$1" = "/" ] && return 0
+    case "$(physical_path "$HOME")/" in
+        "$1"/*) return 0 ;;
+    esac
+    return 1
+}
+
+confirm_purge() {
+    local answer=""
+
+    if [ "$ASSUME_YES" = "1" ]; then
+        return 0
+    fi
+    # Read the terminal itself: under curl | bash, standard input is the script.
+    if ! { true < /dev/tty; } 2>/dev/null; then
+        warn "A purge needs confirmation, and no terminal is available. Nothing was removed."
+        echo "  To confirm without a terminal, run:"
+        echo "  $(uninstall_command --purge --yes)"
+        return 1
+    fi
+    printf 'Delete all of this permanently? [y/N] ' > /dev/tty
+    read -r answer < /dev/tty || answer=""
+    case "$answer" in
+        y|Y|yes|YES|Yes) return 0 ;;
+    esac
+    info "Purge cancelled. Nothing was removed."
+    return 1
+}
+
+print_kept_data() {
+    local item=""
+
+    [ "$#" -gt 0 ] || return 0
+    echo ""
+    echo "Your data was kept in:"
+    for item in "$@"; do
+        echo "  $item"
+    done
+    echo "To delete it too (this cannot be undone), run:"
+    echo "  $(uninstall_command --purge)"
+}
+
+uninstall_avibe() {
+    # Every step reports its own failure; one failure must not hide the rest.
+    set +e
+    local root=""
+    local item=""
+    local uv=""
+    local tool_dir=""
+    local package=""
+    local failed=0
+    local -a launchers=()
+    local -a markers=()
+    local -a uv_tools=()
+    local -a data=()
+    local -a doomed_data=()
+    local -a running=()
+
+    root="$(install_generations_root)"
+    while IFS= read -r item; do launchers+=("$item"); done < <(managed_launchers)
+    while IFS= read -r item; do markers+=("$item"); done < <(stale_launcher_markers "${launchers[@]}")
+    uv="$(find_uv || true)"
+    tool_dir="$(uv_tool_dir "$uv")"
+    for package in "$PACKAGE_NAME" vibe-remote; do
+        if [ -d "$tool_dir/$package" ]; then
+            uv_tools+=("$package")
+        fi
+    done
+    while IFS= read -r item; do data+=("$item"); done < <(avibe_data_directories)
+
+    info "Uninstalling Avibe for $AVIBE_RUNTIME_HOME"
+    if [ "${#launchers[@]}" -eq 0 ] && [ "${#markers[@]}" -eq 0 ] && [ "${#uv_tools[@]}" -eq 0 ] &&
+        [ ! -e "$root" ] && [ ! -L "$root" ] && { [ "$PURGE_USER_DATA" != "1" ] || [ "${#data[@]}" -eq 0 ]; }; then
+        info "No Avibe installation was found, so nothing was removed."
+        print_kept_data "${data[@]}"
+        return 0
+    fi
+    if [ "$PURGE_USER_DATA" = "1" ]; then
+        while IFS= read -r item; do
+            if path_holds_home "$item"; then
+                warn "Refusing to purge $item: it holds your home directory. Nothing was removed."
+                return 1
+            fi
+            doomed_data+=("$item")
+        done < <(purge_targets)
+        echo ""
+        echo -e "${YELLOW}This permanently deletes:${NC}"
+        for item in "${launchers[@]}" "${markers[@]}"; do echo "  $item"; done
+        if [ -e "$root" ] || [ -L "$root" ]; then echo "  $root"; fi
+        for item in "${uv_tools[@]}"; do echo "  $tool_dir/$item (uv tool $item)"; done
+        for item in "${doomed_data[@]}"; do echo "  $item    (your Avibe data)"; done
+        echo ""
+        confirm_purge || return 1
+    fi
+
+    # Nothing is removed while Avibe could still be using it.
+    local -a stoppers=("${launchers[@]}")
+    for package in "${uv_tools[@]}"; do stoppers+=("$tool_dir/$package/bin/vibe"); done
+    if stop_avibe_service "${stoppers[@]}"; then
+        success "Stopped the Avibe service"
+    else
+        while IFS= read -r item; do running+=("$item"); done < <(running_avibe_processes)
+        if [ "${#running[@]}" -gt 0 ]; then
+            warn "Avibe is still running and could not be stopped: pid ${running[*]}"
+            echo "  Stop it, then run the uninstall again. Nothing was removed."
+            echo "  If that process is not Avibe, delete the pid file named above."
+            return 1
+        fi
+        if [ "${#stoppers[@]}" -gt 0 ]; then
+            warn "The installed vibe could not stop the service; no running Avibe service was found"
+        else
+            info "No installed vibe could be asked to stop; no running Avibe service was found"
+        fi
+    fi
+
+    for item in "${launchers[@]}" "${markers[@]}"; do
+        if rm -f -- "$item" 2>/dev/null && [ ! -e "$item" ] && [ ! -L "$item" ]; then
+            success "Removed $item"
+        else
+            warn "Could not remove $item"
+            failed=1
+        fi
+    done
+    if [ -e "$root" ] || [ -L "$root" ]; then
+        if rm -rf -- "$root" 2>/dev/null && [ ! -e "$root" ] && [ ! -L "$root" ]; then
+            success "Removed $root"
+        else
+            warn "Could not remove $root"
+            failed=1
+        fi
+    fi
+    for package in "${uv_tools[@]}"; do
+        if [ -z "$uv" ]; then
+            warn "uv was not found, so the uv tool install $package at $tool_dir/$package was left in place"
+            failed=1
+        elif ! uv_tool_owns_its_launchers "$tool_dir/$package"; then
+            warn "Left the uv tool install $package in place: a launcher it records now belongs to another program, which 'uv tool uninstall $package' would delete"
+            failed=1
+        elif "$uv" tool uninstall "$package" >/dev/null 2>&1 || [ ! -d "$tool_dir/$package" ]; then
+            success "Removed the uv tool install $package"
+        else
+            warn "Could not remove the uv tool install $package; run 'uv tool uninstall $package'"
+            failed=1
+        fi
+    done
+
+    if [ "$PURGE_USER_DATA" = "1" ]; then
+        for item in "${doomed_data[@]}"; do
+            if rm -rf -- "$item" 2>/dev/null && [ ! -e "$item" ] && [ ! -L "$item" ]; then
+                success "Deleted $item"
+            else
+                warn "Could not delete $item"
+                failed=1
+            fi
+        done
+    fi
+
+    item="$(PATH="$ORIGINAL_PATH" command -v vibe 2>/dev/null || true)"
+    if [ -n "$item" ] && { [ -e "$item" ] || [ -L "$item" ]; }; then
+        info "Another vibe command remains at $item. This installer did not install it, so it was left in place."
+    fi
+
+    echo ""
+    if [ "$failed" -ne 0 ]; then
+        warn "Avibe was not completely removed. See the warnings above."
+    elif [ "$PURGE_USER_DATA" = "1" ]; then
+        success "Avibe and its data were removed."
+    else
+        success "Avibe was removed."
+    fi
+    if [ "$PURGE_USER_DATA" != "1" ]; then
+        print_kept_data "${data[@]}"
+    fi
+    return "$failed"
 }
 
 # Print next steps
@@ -962,13 +1413,31 @@ main() {
     unset AVIBE_PAIRING_KEY
 
     local arg
+    local uninstall=""
     for arg in "$@"; do
         case "$arg" in
             --launch) LAUNCH_AFTER_INSTALL="1" ;;
+            --uninstall) uninstall="1" ;;
+            --purge) PURGE_USER_DATA="1" ;;
+            --yes) ASSUME_YES="1" ;;
             *) error "Unsupported installer option: $arg" ;;
         esac
     done
-    
+    # Each option means one thing, so a purge is never implied by another.
+    if [ "$uninstall" = "1" ] && [ "$LAUNCH_AFTER_INSTALL" = "1" ]; then
+        error "--launch cannot be combined with --uninstall"
+    fi
+    if [ "$PURGE_USER_DATA" = "1" ] && [ "$uninstall" != "1" ]; then
+        error "--purge deletes your data during an uninstall; use it with --uninstall"
+    fi
+    if [ "$ASSUME_YES" = "1" ] && [ "$PURGE_USER_DATA" != "1" ]; then
+        error "--yes confirms a purge; use it with --uninstall --purge"
+    fi
+    if [ "$uninstall" = "1" ]; then
+        uninstall_avibe
+        exit $?
+    fi
+
     local os
     os=$(detect_os)
     info "Detected OS: $os"

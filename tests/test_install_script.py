@@ -390,6 +390,11 @@ def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
     assert "Run 'vibe' to open the setup wizard" in install_result.stdout
     assert "vibe remote   - Set up remote Web UI access" in install_result.stdout
     assert "export PATH=" not in install_result.stdout
+    # Uninstall has one owner, so the installer points to it, not to steps.
+    uninstall = install_result.stdout.split("Uninstall:", 1)[1].splitlines()[1]
+    assert uninstall.startswith("  curl -fsSL https://avibe.bot/install.sh | ")
+    assert uninstall.endswith(" bash -s -- --uninstall")
+    assert f"Add --purge to also delete your data in {home_dir / '.avibe'}." in install_result.stdout
     assert version_result.returncode == 0, version_result.stdout + version_result.stderr
     assert "avibe-os 9.9.9" in version_result.stdout
     assert uv_log.read_text(encoding="utf-8")
@@ -936,7 +941,9 @@ def test_windows_installer_honors_configured_tool_bin_and_cross_volume_copy_fall
     assert "function Resolve-InstallPath" in powershell
     assert "function Get-LauncherState" in powershell
     assert '$generationTools = Join-Path $generationRoot "uv\\tools"' in powershell
-    assert "Get-Content -LiteralPath $marker" not in powershell
+    # Activation leaves marker interpretation to the Python owner; only the
+    # uninstall below reads a marker, to decide whether the marker itself goes.
+    assert "Get-Content -LiteralPath $marker" not in powershell.split("# The one-line uninstall command", 1)[0]
     assert "function Get-GenerationPath" not in powershell
     assert '$expanded.StartsWith("~\\")' in powershell
     assert "$configured = $env:UV_TOOL_BIN_DIR" in powershell
@@ -975,36 +982,6 @@ def test_install_script_candidate_probes_ignore_python_path_overrides():
     assert "Remove-Item Env:PYTHONHOME" in powershell
     assert "$env:AVIBE_HOME = $runtimeHome" in powershell
     assert "Test-UvCandidate" not in powershell
-
-
-def test_uninstall_instructions_use_the_selected_stable_bin():
-    script = INSTALL_SCRIPT.read_text(encoding="utf-8")
-    assert r'rm -f \"$VIBE_TOOL_BIN_DIR/vibe\"' in script
-    assert "rm -f ~/.local/bin/vibe" not in script
-
-
-def test_uninstall_instructions_expand_user_relative_avibe_home():
-    script = INSTALL_SCRIPT.read_text(encoding="utf-8")
-    assert 'avibe_home=\\"\\${AVIBE_HOME:-\\$HOME/.avibe}\\"' in script
-    assert 'avibe_home="${avibe_home/#\\~/$HOME}"' in script
-    assert 'rm -rf "$avibe_home/runtime/install-generations"' in script
-    assert 'rm -rf "$avibe_home" ~/.vibe_remote' in script
-
-    documents = (
-        (REPO_ROOT / "README.md").read_text(encoding="utf-8"),
-        (REPO_ROOT / "docs" / "INSTALL_FOR_AI.md").read_text(encoding="utf-8"),
-        (REPO_ROOT / "docs" / "INSTALL_FOR_AI_ZH.md").read_text(encoding="utf-8"),
-    )
-
-    for document in documents:
-        assert 'avibe_home="${AVIBE_HOME:-$HOME/.avibe}"' in document
-        assert 'avibe_home="${avibe_home/#\\~/$HOME}"' in document
-        assert 'rm -rf "$avibe_home/runtime/install-generations"' in document
-        assert 'rm -rf "$avibe_home" ~/.vibe_remote' in document
-
-    powershell = INSTALL_POWERSHELL.read_text(encoding="utf-8")
-    assert "-replace ''^~(?=[\\\\/]|$)'', $env:USERPROFILE" in powershell
-    assert "Remove-Item -Recurse $avibeHome, ~\\.vibe_remote" in powershell
 
 
 def test_install_script_continues_when_show_runtime_prepare_fails(tmp_path):

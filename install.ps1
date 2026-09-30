@@ -1,7 +1,19 @@
 # Avibe Installation Script for Windows
 # Usage: irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1 | iex
+# Uninstall, keeping your data:
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall
+# Add -Purge to also delete your data. A session that cannot prompt also needs -Yes.
 #
 # Prerequisites: None! uv will be installed automatically and manages Python for you.
+
+param(
+    # Remove Avibe itself and keep your data.
+    [switch]$Uninstall,
+    # With -Uninstall, also delete your Avibe data. This cannot be undone.
+    [switch]$Purge,
+    # Confirm -Purge without a prompt.
+    [switch]$Yes
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -14,6 +26,11 @@ $NODE_MINIMUM_REQUIREMENT = "20.19+ or 22.12+"
 # GitHub; earlier uv fetches it from GitHub only. Get-UvPythonInstallMirror
 # gives earlier uv the CDN for the install step unless the user chose a source.
 $ASTRAL_PYTHON_INSTALL_MIRROR = "https://releases.astral.sh/github/python-build-standalone/releases/download"
+$PUBLIC_INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/$REPO/master/install.ps1"
+# The fixed stable-launcher locations launcher discovery checks beside PATH and
+# uv's configured tool bin. Keep in step with INSTALLER_LAUNCHER_DIRS in
+# vibe/upgrade.py; entries without a drive do not apply on Windows.
+$INSTALLER_LAUNCHER_DIRS = @("~/.local/bin", "~/bin", "/usr/local/bin", "/opt/homebrew/bin")
 
 function Write-Banner {
     Write-Host @"
@@ -421,9 +438,7 @@ function Activate-LegacyInstallCandidate {
     return @{ Success = $true; ExitCode = 0; Output = "" }
 }
 
-function Invoke-UvToolInstallAttempt {
-    param([string[]]$Arguments, [string]$PythonInstallMirror)
-
+function Get-RuntimeHome {
     $defaultHome = Join-Path $env:USERPROFILE ".avibe"
     $legacyHome = Join-Path $env:USERPROFILE ".vibe_remote"
     $runtimeHome = if ($env:AVIBE_HOME) {
@@ -435,7 +450,13 @@ function Invoke-UvToolInstallAttempt {
     } else {
         $defaultHome
     }
-    $runtimeHome = Resolve-InstallPath $runtimeHome
+    return Resolve-InstallPath $runtimeHome
+}
+
+function Invoke-UvToolInstallAttempt {
+    param([string[]]$Arguments, [string]$PythonInstallMirror)
+
+    $runtimeHome = Get-RuntimeHome
     $generationRoot = Join-Path (Join-Path $runtimeHome "runtime\install-generations") ([Guid]::NewGuid().ToString("N"))
     # 3.0.13 identifies uv-managed installs from the executable's /uv/tools/
     # path. Keep that released contract in every generation so the old binary
@@ -702,7 +723,6 @@ function Prepare-ShowRuntime {
 }
 
 function Write-NextSteps {
-    $stableBin = Get-StableBinDirectory
     Write-Host ""
     Write-Host "Installation complete!" -ForegroundColor Green
     Write-Host ""
@@ -718,18 +738,524 @@ function Write-NextSteps {
     Write-Host "  vibe doctor   - Run diagnostics"
     Write-Host ""
     Write-Host "Uninstall:" -ForegroundColor Blue
-    Write-Host "  uv tool uninstall avibe-os"
-    Write-Host "  uv tool uninstall vibe-remote"
-    Write-Host "  pip uninstall avibe-os vibe-remote"
-    Write-Host ("  Remove-Item -Force `"$(Join-Path $stableBin 'vibe.exe')`"")
-    Write-Host ("  Remove-Item -Force `"$(Join-Path $stableBin '.vibe.exe.avibe-generation')`"")
-    Write-Host '  $avibeHome = if ($env:AVIBE_HOME) { $env:AVIBE_HOME -replace ''^~(?=[\\/]|$)'', $env:USERPROFILE } else { "$env:USERPROFILE\.avibe" }'
-    Write-Host '  Remove-Item -Recurse -Force (Join-Path $avibeHome "runtime\install-generations")'
-    Write-Host '  Remove-Item -Recurse $avibeHome, ~\.vibe_remote  # remove config and data'
+    Write-Host "  $(Get-UninstallCommand)"
+    Write-Host "  Add -Purge to also delete your data in $(Get-RuntimeHome). This cannot be undone."
     Write-Host ""
     Write-Host "Documentation:" -ForegroundColor Blue
     Write-Host "  https://github.com/$REPO#readme"
     Write-Host ""
+}
+
+# The one-line uninstall command for this runtime home, with any options
+# appended. AVIBE_HOME is repeated when it chose the home.
+function Get-UninstallCommand {
+    param([string[]]$Options)
+
+    $command = "& ([scriptblock]::Create((irm $PUBLIC_INSTALL_SCRIPT_URL))) -Uninstall"
+    if ($Options) {
+        $command += " " + ($Options -join " ")
+    }
+    if ($env:AVIBE_HOME) {
+        $command = "`$env:AVIBE_HOME = '$((Get-RuntimeHome).Replace("'", "''"))'; $command"
+    }
+    return $command
+}
+
+# The installer owns uninstall. It runs outside Avibe, so nothing it deletes is
+# in use by itself, and it cannot rely on the installed Python, which may come
+# from any earlier release or be broken. It therefore carries its own copy of
+# the launcher rule in vibe.upgrade.managed_stable_launchers; tests pin the
+# copies to the same cases.
+
+function Test-FullyQualifiedPath {
+    param([string]$Path)
+    return $Path -match '^[A-Za-z]:[\\/]' -or $Path -match '^[\\/]{2}[^\\/]'
+}
+
+function Test-PathInGenerationRoot {
+    param([string]$Path, [string]$Root)
+
+    $prefix = [System.IO.Path]::GetFullPath($Root).TrimEnd("\", "/") + "\"
+    return [System.IO.Path]::GetFullPath($Path).StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# The directory entry itself, even for a link whose target is gone.
+function Get-DirectoryEntry {
+    param([string]$Path)
+
+    $parent = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    if (-not $parent -or -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        return $null
+    }
+    return Get-ChildItem -LiteralPath $parent -Force -Filter $leaf -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq $leaf } |
+        Select-Object -First 1
+}
+
+function Resolve-LinkChain {
+    param([string]$Path)
+
+    for ($depth = 0; $depth -lt 20; $depth++) {
+        $entry = Get-DirectoryEntry $Path
+        if (-not $entry -or $entry.LinkType -ne "SymbolicLink") {
+            break
+        }
+        $target = @($entry.Target)[0]
+        if (-not $target) {
+            break
+        }
+        if (-not [System.IO.Path]::IsPathRooted($target)) {
+            $target = Join-Path (Split-Path -Parent $Path) $target
+        }
+        $Path = [System.IO.Path]::GetFullPath($target)
+    }
+    return $Path
+}
+
+# Whether deleting install-generations would break this launcher: it resolves
+# into the root, or it is a hard link or copy of a generation's launcher.
+# vibe.upgrade._launcher_generation recognizes the same shapes, but it moves a
+# launcher only into a recognized installation, and a copy only with its
+# marker. A launcher missing either would still break, so it goes too.
+function Test-LauncherUsesInstallGenerations {
+    param([string]$Launcher, [string]$Root)
+
+    if (Test-PathInGenerationRoot (Resolve-LinkChain $Launcher) $Root) {
+        return $true
+    }
+    if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) {
+        return $false
+    }
+    $hash = (Get-FileHash -LiteralPath $Launcher -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+    if (-not $hash) {
+        return $false
+    }
+    foreach ($generation in @(Get-ChildItem -LiteralPath $Root -Directory -Force -ErrorAction SilentlyContinue)) {
+        $exported = Join-Path $generation.FullName "bin\vibe.exe"
+        if ((Test-Path -LiteralPath $exported -PathType Leaf) -and
+            (Get-FileHash -LiteralPath $exported -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash -eq $hash) {
+            return $true
+        }
+    }
+    return $false
+}
+
+# Each distinct directory launcher discovery searches: PATH, uv's configured
+# tool bin, then the installer's fixed locations.
+function Get-LauncherSearchDirectories {
+    $seen = @{}
+    foreach ($directory in @($env:Path -split ";") + @($env:UV_TOOL_BIN_DIR) + $INSTALLER_LAUNCHER_DIRS) {
+        if (-not $directory) {
+            continue
+        }
+        if ($directory -eq "~" -or $directory.StartsWith("~\") -or $directory.StartsWith("~/")) {
+            $directory = Resolve-InstallPath $directory
+        }
+        if (-not (Test-FullyQualifiedPath $directory)) {
+            continue
+        }
+        $directory = [System.IO.Path]::GetFullPath($directory).TrimEnd("\", "/")
+        $key = $directory.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            continue
+        }
+        $seen[$key] = $true
+        $directory
+    }
+}
+
+# Each launcher this home's uninstall removes. Like the Python owner, it never
+# counts one inside a uv tool environment or the generation root.
+function Get-ManagedLaunchers {
+    param([string]$Root)
+
+    foreach ($directory in Get-LauncherSearchDirectories) {
+        $launcher = Join-Path $directory "vibe.exe"
+        if ($launcher.Replace("\", "/").ToLowerInvariant().Contains("/uv/tools/") -or
+            (Test-PathInGenerationRoot $launcher $Root) -or -not (Get-DirectoryEntry $launcher)) {
+            continue
+        }
+        if (Test-LauncherUsesInstallGenerations $launcher $Root) {
+            $launcher
+        }
+    }
+}
+
+# Each launcher marker the uninstall leaves without a purpose: one beside a
+# launcher it removes, or one naming a generation in the root it deletes.
+function Get-StaleLauncherMarkers {
+    param([string]$Root, [string[]]$Launchers)
+
+    foreach ($directory in Get-LauncherSearchDirectories) {
+        $marker = Join-Path $directory ".vibe.exe.avibe-generation"
+        if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+            continue
+        }
+        $marked = "$(Get-Content -LiteralPath $marker -Raw -ErrorAction SilentlyContinue)".Trim([char]0xFEFF, " ", "`r", "`n", "`t")
+        if (($Launchers -contains (Join-Path $directory "vibe.exe")) -or
+            ((Test-FullyQualifiedPath $marked) -and (Test-PathInGenerationRoot $marked $Root))) {
+            $marker
+        }
+    }
+}
+
+function Get-UvCommand {
+    $command = Get-Command uv -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) {
+        return $command.Source
+    }
+    $fallback = Join-Path $env:USERPROFILE ".local\bin\uv.exe"
+    if (Test-Path -LiteralPath $fallback -PathType Leaf) {
+        return $fallback
+    }
+    return $null
+}
+
+function Get-UvToolDirectory {
+    param([string]$Uv)
+
+    if ($Uv) {
+        $result = Invoke-NativeCommand -FilePath $Uv -Arguments @("tool", "dir")
+        if ($result.Success -and $result.Stdout) {
+            return $result.Stdout
+        }
+    }
+    if ($env:UV_TOOL_DIR) {
+        return $env:UV_TOOL_DIR
+    }
+    return Join-Path $env:APPDATA "uv\tools"
+}
+
+# Whether uv's own uninstall of a tool removes only that tool's launchers. uv
+# deletes every launcher path its receipt records, even one that another tool,
+# such as a different vibe, has replaced since.
+function Test-UvToolOwnsItsLaunchers {
+    param([string]$Environment)
+
+    $receipt = Join-Path $Environment "uv-receipt.toml"
+    if (-not (Test-Path -LiteralPath $receipt -PathType Leaf)) {
+        return $true
+    }
+    $pattern = 'install-path\s*=\s*(?:"((?:[^"\\]|\\.)*)"|''([^'']*)'')'
+    foreach ($match in [regex]::Matches((Get-Content -LiteralPath $receipt -Raw), $pattern)) {
+        $path = if ($match.Groups[1].Success) { [regex]::Unescape($match.Groups[1].Value) } else { $match.Groups[2].Value }
+        if (-not (Get-DirectoryEntry $path)) {
+            continue
+        }
+        if (Test-PathInGenerationRoot (Resolve-LinkChain $path) $Environment) {
+            continue
+        }
+        $own = Join-Path $Environment ("Scripts\" + (Split-Path -Leaf $path))
+        if ((Test-Path -LiteralPath $path -PathType Leaf) -and (Test-Path -LiteralPath $own -PathType Leaf) -and
+            (Get-FileHash -LiteralPath $path).Hash -eq (Get-FileHash -LiteralPath $own).Hash) {
+            continue
+        }
+        return $false
+    }
+    return $true
+}
+
+# Each Avibe process this home's pid records still show running.
+function Get-RunningAvibeProcesses {
+    param([string]$RuntimeHome)
+
+    foreach ($name in @("vibe.pid", "vibe-ui.pid")) {
+        $pidFile = Join-Path $RuntimeHome "runtime\$name"
+        if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) {
+            continue
+        }
+        [int]$recorded = 0
+        $text = "$(Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue)".Trim()
+        if (-not [int]::TryParse($text, [ref]$recorded) -or $recorded -le 0) {
+            continue
+        }
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $recorded" -ErrorAction SilentlyContinue
+        # A pid file can outlive its process and name a reused pid, so when the
+        # command is readable, only a vibe process counts.
+        if (-not $process -or ($process.CommandLine -and $process.CommandLine -notmatch "vibe")) {
+            continue
+        }
+        "$recorded (recorded in $pidFile)"
+    }
+}
+
+# Ask an installed Avibe to stop its service; the first that succeeds is enough.
+function Stop-AvibeService {
+    param([string[]]$Launchers, [string]$RuntimeHome)
+
+    foreach ($launcher in $Launchers) {
+        if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+            continue
+        }
+        $previousPythonPath = $env:PYTHONPATH
+        $previousPythonHome = $env:PYTHONHOME
+        $previousAvibeHome = $env:AVIBE_HOME
+        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+        Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
+        $env:AVIBE_HOME = $RuntimeHome
+        Push-Location $(if (Test-Path -LiteralPath $RuntimeHome -PathType Container) { $RuntimeHome } else { [System.IO.Path]::GetTempPath() })
+        try {
+            $result = Invoke-NativeCommand -FilePath $launcher -Arguments @("stop")
+        } finally {
+            Pop-Location
+            if ($null -eq $previousPythonPath) { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue } else { $env:PYTHONPATH = $previousPythonPath }
+            if ($null -eq $previousPythonHome) { Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue } else { $env:PYTHONHOME = $previousPythonHome }
+            if ($null -eq $previousAvibeHome) { Remove-Item Env:AVIBE_HOME -ErrorAction SilentlyContinue } else { $env:AVIBE_HOME = $previousAvibeHome }
+        }
+        if ($result.Success) {
+            return $true
+        }
+        Write-Warning "'$launcher stop' failed: $($result.Output)"
+    }
+    return $false
+}
+
+# The user-data directories of this runtime home. The default home owns both
+# default names, since ~\.vibe_remote is the legacy home or a link to the
+# current one; an explicit AVIBE_HOME names one instance's home only.
+function Get-AvibeDataDirectories {
+    param([string]$RuntimeHome)
+
+    $defaultHome = Join-Path $env:USERPROFILE ".avibe"
+    $legacyHome = Join-Path $env:USERPROFILE ".vibe_remote"
+    $candidates = if (-not $env:AVIBE_HOME -or $RuntimeHome -eq $defaultHome -or $RuntimeHome -eq $legacyHome) {
+        @($defaultHome, $legacyHome)
+    } else {
+        @($RuntimeHome)
+    }
+    foreach ($candidate in $candidates) {
+        if (Get-DirectoryEntry $candidate) {
+            $candidate
+        }
+    }
+}
+
+# What a purge deletes for the data directories: each link, then each distinct
+# directory it or a data directory names, so a link's target goes too.
+function Get-PurgeTargets {
+    param([string]$RuntimeHome)
+
+    $seen = @{}
+    foreach ($data in Get-AvibeDataDirectories $RuntimeHome) {
+        $entry = Get-DirectoryEntry $data
+        $directory = $data
+        if ($entry.LinkType -in @("SymbolicLink", "Junction")) {
+            $data
+            $target = @($entry.Target)[0]
+            $directory = if (-not $target) { $null } elseif ([System.IO.Path]::IsPathRooted($target)) { $target } else { Join-Path (Split-Path -Parent $data) $target }
+        }
+        if (-not $directory -or -not (Test-Path -LiteralPath $directory -PathType Container)) {
+            continue
+        }
+        $directory = [System.IO.Path]::GetFullPath($directory).TrimEnd("\", "/")
+        if (-not $seen.ContainsKey($directory.ToLowerInvariant())) {
+            $seen[$directory.ToLowerInvariant()] = $true
+            $directory
+        }
+    }
+}
+
+# Whether deleting a directory would delete the user's profile or a drive.
+function Test-PathHoldsHome {
+    param([string]$Path)
+
+    $full = [System.IO.Path]::GetFullPath($Path).TrimEnd("\", "/")
+    $profile = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd("\", "/")
+    return $full -notmatch '[\\/]' -or $profile.Equals($full, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $profile.StartsWith($full + "\", [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# Delete a file or directory tree. A link is removed itself and never followed:
+# Windows PowerShell's Remove-Item -Recurse deletes what a directory link names.
+function Remove-InstalledPath {
+    param([string]$Path)
+
+    $entry = Get-DirectoryEntry $Path
+    if (-not $entry) {
+        return
+    }
+    if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        if ($entry.PSIsContainer) { [System.IO.Directory]::Delete($entry.FullName, $false) } else { [System.IO.File]::Delete($entry.FullName) }
+        return
+    }
+    if ($entry.PSIsContainer) {
+        try {
+            # This recursion deletes a link it meets and does not follow it.
+            [System.IO.Directory]::Delete($entry.FullName, $true)
+        } catch {
+            # A read-only entry stops it; clear each attribute on the way down.
+            foreach ($child in @(Get-ChildItem -LiteralPath $entry.FullName -Force)) {
+                Remove-InstalledPath $child.FullName
+            }
+            [System.IO.Directory]::Delete($entry.FullName, $false)
+        }
+    } else {
+        $entry.Attributes = [System.IO.FileAttributes]::Normal
+        [System.IO.File]::Delete($entry.FullName)
+    }
+}
+
+function Remove-ReportedPath {
+    param([string]$Path, [string]$Verb = "Removed")
+
+    try {
+        Remove-InstalledPath $Path
+    } catch {
+        # Reported below from what is left on disk.
+    }
+    if (Get-DirectoryEntry $Path) {
+        Write-Warning "Could not remove $Path"
+        return $false
+    }
+    Write-Success "$Verb $Path"
+    return $true
+}
+
+function Confirm-Purge {
+    if ($Yes) {
+        return $true
+    }
+    $answer = $null
+    if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+        try {
+            $answer = Read-Host "Delete all of this permanently? [y/N]"
+        } catch {
+            # A -NonInteractive session refuses to prompt.
+        }
+    }
+    if ($null -eq $answer) {
+        Write-Warning "A purge needs confirmation, and this session cannot prompt. Nothing was removed."
+        Write-Host "  To confirm without a prompt, run:"
+        Write-Host "  $(Get-UninstallCommand -Options @('-Purge', '-Yes'))"
+        return $false
+    }
+    if ($answer -match '^(y|yes)$') {
+        return $true
+    }
+    Write-Info "Purge cancelled. Nothing was removed."
+    return $false
+}
+
+function Write-KeptData {
+    param([string[]]$Data)
+
+    if (-not $Data) {
+        return
+    }
+    Write-Host ""
+    Write-Host "Your data was kept in:"
+    foreach ($item in $Data) { Write-Host "  $item" }
+    Write-Host "To delete it too (this cannot be undone), run:"
+    Write-Host "  $(Get-UninstallCommand -Options @('-Purge'))"
+}
+
+function Uninstall-Avibe {
+    # Every step reports its own failure; one failure must not hide the rest.
+    $ErrorActionPreference = "Continue"
+    $runtimeHome = Get-RuntimeHome
+    $root = Join-Path $runtimeHome "runtime\install-generations"
+    $launchers = @(Get-ManagedLaunchers $root)
+    $markers = @(Get-StaleLauncherMarkers -Root $root -Launchers $launchers)
+    $uv = Get-UvCommand
+    $toolDirectory = Get-UvToolDirectory $uv
+    $uvTools = @($PACKAGE_NAME, "vibe-remote" | Where-Object { Test-Path -LiteralPath (Join-Path $toolDirectory $_) -PathType Container })
+    $data = @(Get-AvibeDataDirectories $runtimeHome)
+    $doomedData = @()
+    $failed = $false
+
+    Write-Info "Uninstalling Avibe for $runtimeHome"
+    if ($launchers.Count -eq 0 -and $markers.Count -eq 0 -and $uvTools.Count -eq 0 -and -not (Get-DirectoryEntry $root) -and
+        (-not $Purge -or $data.Count -eq 0)) {
+        Write-Info "No Avibe installation was found, so nothing was removed."
+        Write-KeptData $data
+        return 0
+    }
+    if ($Purge) {
+        $doomedData = @(Get-PurgeTargets $runtimeHome)
+        foreach ($item in $doomedData) {
+            if (Test-PathHoldsHome $item) {
+                Write-Warning "Refusing to purge ${item}: it holds your user profile. Nothing was removed."
+                return 1
+            }
+        }
+        Write-Host ""
+        Write-Host "This permanently deletes:" -ForegroundColor Yellow
+        foreach ($item in $launchers + $markers) { Write-Host "  $item" }
+        if (Get-DirectoryEntry $root) { Write-Host "  $root" }
+        foreach ($item in $uvTools) { Write-Host "  $(Join-Path $toolDirectory $item) (uv tool $item)" }
+        foreach ($item in $doomedData) { Write-Host "  $item    (your Avibe data)" }
+        Write-Host ""
+        if (-not (Confirm-Purge)) {
+            return 1
+        }
+    }
+
+    # Nothing is removed while Avibe could still be using it.
+    $stoppers = @($launchers) + @($uvTools | ForEach-Object { Join-Path $toolDirectory "$_\Scripts\vibe.exe" })
+    if (Stop-AvibeService -Launchers $stoppers -RuntimeHome $runtimeHome) {
+        Write-Success "Stopped the Avibe service"
+    } else {
+        $running = @(Get-RunningAvibeProcesses $runtimeHome)
+        if ($running.Count -gt 0) {
+            Write-Warning "Avibe is still running and could not be stopped: pid $($running -join ', ')"
+            Write-Host "  Stop it, then run the uninstall again. Nothing was removed."
+            Write-Host "  If that process is not Avibe, delete the pid file named above."
+            return 1
+        }
+        if ($stoppers.Count -gt 0) {
+            Write-Warning "The installed vibe could not stop the service; no running Avibe service was found"
+        } else {
+            Write-Info "No installed vibe could be asked to stop; no running Avibe service was found"
+        }
+    }
+
+    foreach ($item in $launchers + $markers) {
+        if (-not (Remove-ReportedPath $item)) { $failed = $true }
+    }
+    if ((Get-DirectoryEntry $root) -and -not (Remove-ReportedPath $root)) {
+        $failed = $true
+    }
+    foreach ($package in $uvTools) {
+        $environment = Join-Path $toolDirectory $package
+        if (-not $uv) {
+            Write-Warning "uv was not found, so the uv tool install $package at $environment was left in place"
+            $failed = $true
+        } elseif (-not (Test-UvToolOwnsItsLaunchers $environment)) {
+            Write-Warning "Left the uv tool install $package in place: a launcher it records now belongs to another program, which 'uv tool uninstall $package' would delete"
+            $failed = $true
+        } elseif ((Invoke-NativeCommand -FilePath $uv -Arguments @("tool", "uninstall", $package)).Success -or
+            -not (Test-Path -LiteralPath $environment)) {
+            Write-Success "Removed the uv tool install $package"
+        } else {
+            Write-Warning "Could not remove the uv tool install $package; run 'uv tool uninstall $package'"
+            $failed = $true
+        }
+    }
+    if ($Purge) {
+        foreach ($item in $doomedData) {
+            if (-not (Remove-ReportedPath $item -Verb "Deleted")) { $failed = $true }
+        }
+    }
+
+    $remaining = Get-Command vibe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($remaining) {
+        Write-Info "Another vibe command remains at $($remaining.Source). This installer did not install it, so it was left in place."
+    }
+
+    Write-Host ""
+    if ($failed) {
+        Write-Warning "Avibe was not completely removed. See the warnings above."
+    } elseif ($Purge) {
+        Write-Success "Avibe and its data were removed."
+    } else {
+        Write-Success "Avibe was removed."
+    }
+    if (-not $Purge) {
+        Write-KeptData $data
+    }
+    if ($failed) { return 1 }
+    return 0
 }
 
 # Main installation flow
@@ -756,6 +1282,25 @@ function Main {
     
     # Done
     Write-NextSteps
+}
+
+# Each option means one thing, so a purge is never implied by another.
+if ($Purge -and -not $Uninstall) {
+    Write-Error "-Purge deletes your data during an uninstall; use it with -Uninstall"
+}
+if ($Yes -and -not $Purge) {
+    Write-Error "-Yes confirms a purge; use it with -Uninstall -Purge"
+}
+if ($Uninstall) {
+    Write-Banner
+    $uninstallStatus = Uninstall-Avibe | Select-Object -Last 1
+    # A script file reports its status; a script block run at the prompt must
+    # not close the user's session, so it leaves the status in LASTEXITCODE.
+    if ($MyInvocation.MyCommand.Path) {
+        exit $uninstallStatus
+    }
+    $global:LASTEXITCODE = $uninstallStatus
+    return
 }
 
 # Run main

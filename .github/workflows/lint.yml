@@ -434,6 +434,9 @@ jobs:
           if (-not (Select-String -Path install-output.log -Pattern 'avibe-os installed successfully \(from custom package spec\)' -Quiet)) {
             throw "Installer output missing custom package success message"
           }
+          if (-not (Select-String -Path install-output.log -Pattern 'install.ps1))) -Uninstall' -SimpleMatch -Quiet)) {
+            throw "Installer output does not point to the uninstall owner"
+          }
 
           # Exercise retirement through the real hardlink/copy launcher on
           # Windows, not just mocked link fallbacks in the Python unit suite.
@@ -468,6 +471,80 @@ jobs:
           if (-not (Select-String -Path vibe-version.log -Pattern 'avibe-os ' -Quiet)) {
             throw "vibe version output missing expected marker"
           }
+
+      # Windows PowerShell 5.1 is what `irm ... | iex` runs for most users, so
+      # the uninstall owner runs there, in both its file and script-block forms.
+      - name: Uninstall keeps user data and a purge needs confirmation
+        shell: pwsh
+        run: |
+          $avibeHome = Join-Path $env:USERPROFILE ".avibe"
+          $root = Join-Path $avibeHome "runtime\install-generations"
+          $stable = Join-Path $env:USERPROFILE ".local\bin\vibe.exe"
+          $peerBin = Join-Path $env:RUNNER_TEMP "peer-bin"
+          $foreignBin = Join-Path $env:RUNNER_TEMP "foreign-bin"
+          $peer = Join-Path $peerBin "vibe.exe"
+          $foreign = Join-Path $foreignBin "vibe.exe"
+          $markers = @((Join-Path $peerBin ".vibe.exe.avibe-generation"), (Join-Path (Split-Path $stable) ".vibe.exe.avibe-generation"))
+          $userData = Join-Path $avibeHome "user-data.txt"
+
+          function Invoke-Uninstall {
+            param([string]$Log, [string[]]$Options, [switch]$ScriptBlock)
+            if ($ScriptBlock) {
+              # The documented one-line form, with the script read locally instead of downloaded.
+              # It must return to the session rather than exit it.
+              $command = "& ([scriptblock]::Create((Get-Content -Raw .\install.ps1))) -Uninstall $($Options -join ' '); 'session kept'; exit `$LASTEXITCODE"
+              powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $command *> $Log
+            } else {
+              powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall @Options *> $Log
+            }
+            $status = $LASTEXITCODE
+            Get-Content -LiteralPath $Log
+            return $status
+          }
+
+          function Install-WithPeers {
+            & .\install.ps1 *> reinstall.log
+            if ($LASTEXITCODE -ne 0) { Get-Content reinstall.log; throw "Reinstall failed" }
+            $generation = @(Get-ChildItem -LiteralPath $root -Directory)[0].FullName
+            # A second managed launcher: the cross-volume copy and its marker.
+            New-Item -ItemType Directory -Force -Path $peerBin, $foreignBin | Out-Null
+            Copy-Item -LiteralPath (Join-Path $generation "bin\vibe.exe") -Destination $peer -Force
+            Set-Content -LiteralPath $markers[0] -Value $generation -Encoding UTF8
+            # A vibe.exe the installer never placed.
+            Copy-Item -LiteralPath "$env:SystemRoot\System32\where.exe" -Destination $foreign -Force
+            Set-Content -LiteralPath $userData -Value "keep me"
+          }
+
+          $env:Path = "$peerBin;$foreignBin;$env:Path"
+          Install-WithPeers
+          if (-not (Test-Path -LiteralPath $markers[1])) { throw "The installer did not record its launcher marker" }
+
+          $status = Invoke-Uninstall -Log uninstall.log
+          if ($status -ne 0) { throw "Uninstall exited with $status" }
+          foreach ($path in @($stable, $peer) + $markers + @($root)) {
+            if (Test-Path -LiteralPath $path) { throw "Uninstall left $path" }
+          }
+          if (-not (Test-Path -LiteralPath $foreign)) { throw "Uninstall removed a vibe.exe it did not install" }
+          if ((Get-Content -LiteralPath $userData) -ne "keep me") { throw "Uninstall did not keep the user's data" }
+          foreach ($expected in @("Stopped the Avibe service", "Your data was kept in:", "-Uninstall -Purge")) {
+            if (-not (Select-String -Path uninstall.log -Pattern $expected -SimpleMatch -Quiet)) { throw "Uninstall output is missing: $expected" }
+          }
+
+          Install-WithPeers
+          $status = Invoke-Uninstall -Log purge-refused.log -Options @("-Purge")
+          if ($status -ne 1) { throw "A purge that could not prompt exited with $status" }
+          foreach ($path in @($stable, $peer, $root, $userData)) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "An unconfirmed purge removed $path" }
+          }
+          if (-not (Select-String -Path purge-refused.log -Pattern "Nothing was removed." -SimpleMatch -Quiet)) { throw "The refused purge did not say so" }
+
+          $status = Invoke-Uninstall -Log purge.log -Options @("-Purge", "-Yes") -ScriptBlock
+          if ($status -ne 0) { throw "A confirmed purge exited with $status" }
+          foreach ($path in @($stable, $peer, $root, $avibeHome) + $markers) {
+            if (Test-Path -LiteralPath $path) { throw "A confirmed purge left $path" }
+          }
+          if (-not (Test-Path -LiteralPath $foreign)) { throw "A purge removed a vibe.exe it did not install" }
+          if (-not (Select-String -Path purge.log -Pattern "session kept" -SimpleMatch -Quiet)) { throw "The script-block form ended the session" }
 
   windows-control-ipc:
     runs-on: windows-latest
@@ -527,3 +604,9 @@ jobs:
       # shows it, and like the steps above it needs no packaged Runtime.
       - name: Verify Skill discovery keeps real directory identities
         run: python -m pytest tests/test_managed_skills.py -q -k zero_directory_entry_identities
+
+      # install.ps1 carries its own copy of the stable-launcher rule, since its
+      # uninstall cannot rely on the installed Python. Pin it to the Python
+      # owner in both Windows PowerShell and PowerShell 7.
+      - name: Verify the installer's launcher rule matches the Python owner
+        run: python -m pytest tests/test_installer_uninstall.py -q -ra -k "rule_matches or dirs_match"
