@@ -8,6 +8,7 @@ import io
 import json
 import re
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -5036,6 +5037,37 @@ def test_engine_sync_marks_cached_catalog_text_only_models_without_fetching(tmp_
     assert by_id["src_first0001"].text_only_model_ids == ()
     assert by_id["src_second001"].text_only_model_ids == ("routed-text-model",)
     assert refreshes == []
+
+
+def test_runtime_start_recomputes_text_only_marks_from_the_current_catalog_copy(tmp_path):
+    """MH-MODALITIES-002: an explicit start renders marks from today's copy, not the copy of the last sync."""
+
+    from vibe import models_dev_catalog
+
+    def cache(input_modalities: list[str]) -> None:
+        models_dev_catalog._write_cache({
+            "url": models_dev_catalog.DEFAULT_MODELS_DEV_URL,
+            "fetched_at": time.time(),
+            "catalog": {"anthropic": {"models": {_PROJECTION_MODEL: {"modalities": {"input": input_modalities}}}}},
+        })
+
+    service, store, adapter = _service(tmp_path)
+    _set_claude_route_fixture(store, ("src_first0001",), _PROJECTION_MODEL)
+    cache(["text"])
+    asyncio.run(service.runtime_start())
+    assert adapter.synced[-1][0].text_only_model_ids == (_PROJECTION_MODEL,)
+
+    # The copy refreshes while the engine keeps its projection; a stop and a
+    # start later, the model is known to accept images.
+    cache(["text", "image"])
+    for agent in store.config.agents.values():
+        agent.mode = "direct"
+    asyncio.run(service.runtime_stop())
+    asyncio.run(service.runtime_start())
+
+    assert len(adapter.synced) == 2
+    assert adapter.synced[-1][0].text_only_model_ids == ()
+    assert adapter.start_calls == 2
 
 
 def test_source_adoption_projection_is_sorted_by_backend_and_menu_model(tmp_path):

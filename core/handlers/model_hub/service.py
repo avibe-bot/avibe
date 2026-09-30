@@ -7091,6 +7091,10 @@ class ModelHubService:
                 updated.enabled = True
                 updated.runtime_default_applied = True
                 self._save_projection_neutral(previous, updated)
+                # A start renders the persisted projection, whose text-only
+                # marks come from the catalog copy of its last sync. Syncing
+                # here gives an explicit start the current copy's marks.
+                self._engine_synced = False
             await self._prepare_engine_for_demand()
             status = await self._engine_call(self.adapter.start())
             return _runtime_payload(status, enabled=True)
