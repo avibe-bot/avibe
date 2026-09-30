@@ -8,6 +8,7 @@ import { useApi } from '../../context/ApiContext';
 import type { VibeAgentFull } from '../../context/ApiContext';
 import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelPath } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
+import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
 import { Combobox } from '../ui/combobox';
 import type { ComboboxOption } from '../ui/combobox';
@@ -67,6 +68,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   const [editorOpen, setEditorOpen] = useState(false);
   const navigate = useNavigate();
   const addModelPath = useAddModelPath(backend, hubManagedBackend === backend);
+  const surfaceActive = useRouteSurfaceActive();
 
   useEffect(() => {
     if (!open) {
@@ -84,9 +86,10 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
 
   // Reload the model catalog whenever the selected backend changes so
   // the Combobox suggests the right list. allowCustomValue stays on so
-  // freshly-released model IDs can still be typed in.
+  // freshly-released model IDs can still be typed in. The dialog stays open
+  // under Settings, so it reads again once Settings uncovers it.
   useEffect(() => {
-    if (!open) return;
+    if (!open || !surfaceActive) return;
     return loadBackendModelsWithRefresh(
       api,
       backend,
@@ -100,7 +103,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
         setHubManagedBackend(null);
       },
     );
-  }, [backend, open, api]);
+  }, [backend, open, api, surfaceActive]);
 
   const modelComboboxOptions = useMemo(() => modelOptions, [modelOptions]);
   const effortOptions = useMemo(

@@ -167,6 +167,11 @@ export function useAddModelPath(backend: string, hubManaged: boolean | undefined
   return backend && hubManaged && capabilities.can_manage_instance ? modelHubCatalogPath(backend) : null;
 }
 
+/**
+ * Read a backend's model list, then re-read while a remote-catalog refresh is
+ * pending. A caller whose surface stays mounted under Settings also reads again
+ * when `useRouteSurfaceActive()` turns true: the Model Hub there edits the list.
+ */
 export function loadBackendModelsWithRefresh(
   api: ApiContextType,
   backend: string,

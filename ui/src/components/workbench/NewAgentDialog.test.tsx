@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { MemoryRouter, useLocation } from 'react-router-dom';
 
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
+import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { NewAgentDialog } from './NewAgentDialog';
 
@@ -37,10 +38,12 @@ type FakeModelCatalog = {
   hubManaged?: boolean;
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
+let modelCatalogReads = 0;
 
 vi.mock('../../lib/backendModels', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/backendModels')>()),
   loadBackendModelsWithRefresh: (_api: unknown, _backend: string, onLoaded: (payload: FakeModelCatalog) => void) => {
+    modelCatalogReads += 1;
     onLoaded(modelCatalog);
     return () => {};
   },
@@ -69,6 +72,7 @@ afterEach(() => {
   cleanup();
   apiRef.current = null;
   modelCatalog = { models: [] };
+  modelCatalogReads = 0;
 });
 
 describe('NewAgentDialog', () => {
@@ -100,6 +104,25 @@ describe('NewAgentDialog', () => {
     expect(screen.getByTestId('location').textContent).toBe('/settings/models?manage=claude');
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByDisplayValue('router')).toBeTruthy();
+  });
+
+  it('reads the model list again when Settings uncovers the open dialog', () => {
+    // Closing and reopening would refresh it too, but only by clearing the form.
+    apiRef.current = { createVibeAgent: vi.fn() };
+    const dialog = (surfaceActive: boolean) => (
+      <RouteSurfaceActiveContext.Provider value={surfaceActive}>
+        <MemoryRouter>
+          <NewAgentDialog open onClose={vi.fn()} onCreated={vi.fn()} />
+        </MemoryRouter>
+      </RouteSurfaceActiveContext.Provider>
+    );
+    const { rerender } = render(dialog(true));
+    const reads = modelCatalogReads;
+
+    rerender(dialog(false));
+    rerender(dialog(true));
+
+    expect(modelCatalogReads).toBe(reads + 1);
   });
 
   it('creates with no effort when the catalog says the model has none', async () => {
