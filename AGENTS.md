@@ -192,7 +192,7 @@ Source-of-truth rule:
 
 ### PR Delivery
 
-- Codex review is triggered automatically by cyhhao after pushes; never post manual review triggers, and report automation gaps to the orchestrator while retaining the exact-head review gate.
+- Codex review is triggered automatically by cyhhao after pushes; do not add a trigger while that review is running. When the current head's review fails (Codex reports "Something went wrong") or is never picked up, post `@codex review` yourself and verify pickup; the exact-head review gate is unchanged.
 - load and follow the `pr-delivery-loop` skill for every implementation task;
   it owns the detailed procedure, but cannot weaken the baseline below
 - regardless of Skill resolution, use a task branch/worktree, record the change
