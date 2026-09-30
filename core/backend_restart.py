@@ -399,6 +399,7 @@ class BackendRestartCoordinator:
         self._request_locks: dict[str, asyncio.Lock] = {}
         self._outcomes: dict[str, dict[str, str]] = {}
         self._migration_backends: set[str] = set()
+        self._handoffs: set[asyncio.Task[None]] = set()
         self._migration_auth_owners: dict[str, tuple[asyncio.Task, NativeCredentialLease]] = {}
         self._process_inventory = process_inventory
 
@@ -517,6 +518,7 @@ class BackendRestartCoordinator:
         targets = self._migration_targets(backends)
         closed: list[str] = []
         restarts: dict[str, asyncio.Task[None]] = {}
+        unretired: set[str] = set()
         async with AsyncExitStack() as locks:
             for backend in targets:
                 await locks.enter_async_context(self._request_locks.setdefault(backend, asyncio.Lock()))
@@ -525,7 +527,6 @@ class BackendRestartCoordinator:
                     raise NativeMigrationBlockedError("backend_restart_in_progress", (backend,))
             self._assert_no_native_login(targets)
             lease = NativeCredentialLease(targets, state_dir=self._native_state_dir()).acquire(recovery=True)
-            locks.callback(lease.release)
             self._migration_backends.update(targets)
             try:
                 for backend in targets:
@@ -568,6 +569,7 @@ class BackendRestartCoordinator:
                     try:
                         await finish_native_operation(retire())
                     except Exception:
+                        unretired.add(backend)
                         raise NativeMigrationBlockedError("native_retirement_failed", (backend,)) from None
                     # The runtime is retired and relaunches on demand, so a failed
                     # earlier restart no longer describes it.
@@ -595,18 +597,21 @@ class BackendRestartCoordinator:
             finally:
                 for backend in targets:
                     self._migration_auth_owners.pop(backend, None)
-                self._migration_backends.difference_update(targets)
-                for backend in closed:
-                    restart = restarts.get(backend)
-                    if restart is not None and not restart.done():
-                        # Still tearing down: the restart reopens admission itself.
-                        continue
-                    if backend not in self._blocked_backends():
-                        # Like the restart path, deferred turns resume only on
-                        # a runtime that was refreshed.
-                        refreshed = restart is None or (not restart.cancelled() and restart.exception() is None)
-                        self.controller.agent_service.end_backend_drain(backend)
-                        await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)
+                # A teardown still running keeps the guard's exclusions: its
+                # backends stay migrating and closed, and the lease stays held,
+                # until it settles. Retries meanwhile refuse as a restart in
+                # progress instead of waiting for it.
+                pending = {backend: task for backend, task in restarts.items() if not task.done()}
+                try:
+                    self._migration_backends.difference_update(set(targets) - set(pending))
+                    await self._reopen_after_guard(
+                        [backend for backend in closed if backend not in pending], restarts, unretired
+                    )
+                finally:
+                    if pending:
+                        self._hand_off_guard(pending, lease, restarts, unretired)
+                    else:
+                        lease.release()
 
     async def request_restart(self, backend: str) -> str:
         """Begin or join a restart and return without waiting for a long drain."""
@@ -795,6 +800,42 @@ class BackendRestartCoordinator:
             result = await result
         return bool(result)
 
+    async def _reopen_after_guard(
+        self, backends: list[str], restarts: dict[str, asyncio.Task[None]], unretired: set[str]
+    ) -> None:
+        for backend in backends:
+            if backend in self._blocked_backends():
+                continue
+            restart = restarts.get(backend)
+            # Like the restart path, deferred turns resume only on a runtime
+            # that was refreshed and not left half retired.
+            refreshed = backend not in unretired and (
+                restart is None or (not restart.cancelled() and restart.exception() is None)
+            )
+            self.controller.agent_service.end_backend_drain(backend)
+            await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)
+
+    def _hand_off_guard(
+        self,
+        pending: dict[str, asyncio.Task[None]],
+        lease: NativeCredentialLease,
+        restarts: dict[str, asyncio.Task[None]],
+        unretired: set[str],
+    ) -> None:
+        async def release() -> None:
+            try:
+                await asyncio.wait(pending.values())
+            finally:
+                self._migration_backends.difference_update(pending)
+                try:
+                    await self._reopen_after_guard(list(pending), restarts, unretired)
+                finally:
+                    lease.release()
+
+        task = asyncio.create_task(release(), name="migration-guard-handoff")
+        self._handoffs.add(task)
+        task.add_done_callback(self._handoffs.discard)
+
     def _start_restart(self, backend: str, *, drain_timeout: float | None = None) -> asyncio.Task[None]:
         task = asyncio.create_task(self._run(backend, drain_timeout), name=f"backend-restart:{backend}")
         self._tasks[backend] = task
@@ -818,7 +859,7 @@ class BackendRestartCoordinator:
         finally:
             # Runtime admission opens before durable queues are flushed. A flush
             # therefore always enters the refreshed generation. A migration
-            # guard still holding the backend reopens it when it exits.
+            # guard, or the handoff it left, reopens a backend it still holds.
             if backend not in self._blocked_backends() and backend not in self._migration_backends:
                 self.controller.agent_service.end_backend_drain(backend)
                 await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)

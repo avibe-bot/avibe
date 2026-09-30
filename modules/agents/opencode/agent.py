@@ -1226,7 +1226,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         """
         cancelled: list[asyncio.Task] = []
         for base_session_id, task in list(self._active_requests.items()):
-            if task.done():
+            # An earlier forced refresh already interrupted a task still settling;
+            # cancelling it again could abort the retirement in its cleanup.
+            if task.done() or task in self._interrupted_request_tasks:
                 continue
             state = self._steering_states.get(base_session_id)
             if state is not None and state.task is task:

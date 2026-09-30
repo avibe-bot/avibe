@@ -1126,6 +1126,7 @@ def test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll(stall
     active_polls = {"oc-1": poll}
     agent, _, removed, _ = _build_agent(active_polls)
     polling, release = asyncio.Event(), asyncio.Event()
+    recancelled = []
 
     async def run_restored_poll_loop(poll_info):
         if stall == "steering_lock":
@@ -1137,7 +1138,10 @@ def test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll(stall
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            await release.wait()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                recancelled.append(True)
             raise
 
     agent._poll_loop.run_restored_poll_loop = run_restored_poll_loop
@@ -1149,10 +1153,14 @@ def test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll(stall
         await asyncio.wait_for(agent._cancel_active_requests(), timeout=5)
         if stall == "cleanup":
             assert active_polls == {"oc-1": poll}
+            # A second forced refresh, such as a retried switch, must leave the
+            # task's cleanup alone rather than cancel it mid-retirement.
+            await asyncio.wait_for(agent._cancel_active_requests(), timeout=5)
         release.set()
         await asyncio.gather(*tasks, return_exceptions=True)
 
     asyncio.run(run())
+    assert recancelled == []
     assert agent._active_requests == {}
     assert agent._interrupted_request_tasks == set()
     assert agent._test_inactive_runs == ["oc-1"]

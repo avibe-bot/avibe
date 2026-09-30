@@ -234,13 +234,26 @@ async def test_abandoned_switch_keeps_admission_closed_until_teardown_completes(
             with pytest.raises(NativeMigrationBlockedError, match="native_runtime_busy"):
                 task.result()
         assert admissions == turns == {"codex"}
+        # The credential lease stays with the teardown, so no native login or
+        # config writer starts beside it, and a retry refuses at once.
+        with pytest.raises(NativeMigrationBlockedError, match="native_auth_in_progress"):
+            NativeCredentialLease(("codex",)).acquire()
+        with pytest.raises(NativeMigrationBlockedError, match="backend_restart_in_progress"):
+            async with coordinator.migration_guard(("codex",)):
+                pytest.fail("a retry entered beside an unfinished teardown")
     finally:
         released.set()
     await coordinator.wait("codex")
+    for _ in range(50):
+        if not admissions:
+            break
+        await asyncio.sleep(0)
     controller.agent_service.force_cancel_backend_turns.assert_awaited_once_with("codex")
     coordinator._refresh.assert_awaited_once_with("codex", True)
     controller.agent_service.agents["codex"].retire_for_native_migration.assert_not_awaited()
     assert admissions == turns == set()
+    with NativeCredentialLease(("codex",)):
+        pass
 
 
 @pytest.mark.asyncio
@@ -301,6 +314,11 @@ async def test_failed_retirement_or_external_process_never_yields(failure):
         async with coordinator.migration_guard(("codex",)):
             pytest.fail("unsafe migration admission")
     assert not admissions and not turns
+    # MH-MIG-009: a strict retirement that failed part-way leaves no runtime
+    # that deferred turns could safely resume on.
+    controller.session_turns.end_backend_drain.assert_awaited_once_with(
+        "codex", resume_deferred=failure != "retire_failure",
+    )
     with NativeCredentialLease(("codex",)):
         pass
 
