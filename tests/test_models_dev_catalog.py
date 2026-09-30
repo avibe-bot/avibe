@@ -453,12 +453,18 @@ def test_text_only_counts_every_entry_that_could_name_the_id_as_a_copy(requested
     assert models_dev_catalog.text_only_model_ids([requested], vetoed) == set()
 
 
-def test_text_only_declares_nothing_from_a_catalog_it_cannot_read_whole():
+def test_text_only_declares_nothing_from_a_catalog_it_cannot_read_whole(caplog):
     """MH-MODALITIES-004: a provider whose models cannot be read may hold a copy, so it vetoes every id."""
 
     catalog = {"deepseek": {"models": {"target": _copy(["text"])}}, "relay": {"models": [_copy(["text"])]}}
 
-    assert models_dev_catalog.text_only_model_ids(["target", "missing"], catalog) == set()
+    with caplog.at_level("WARNING", logger=models_dev_catalog.__name__):
+        assert models_dev_catalog.text_only_model_ids(["target", "missing"], catalog) == set()
+
+    # The whole feature is off, so the one provider responsible is named once.
+    [record] = [record for record in caplog.records if record.name == models_dev_catalog.__name__]
+    assert record.levelname == "WARNING"
+    assert "relay" in record.getMessage() and "deepseek" not in record.getMessage()
 
 
 def _name_variants(model_id: str) -> list[str]:

@@ -621,15 +621,24 @@ def text_only_model_ids(
         values = {value.strip().lower() for value in declared}
         return "text" in values and "image" not in values
 
+    unreadable = [
+        str(provider_key)[:80]
+        for provider_key, provider in catalog.items()
+        if not isinstance(provider, dict) or not isinstance(provider.get("models"), dict)
+    ]
+    if unreadable:
+        # This vetoes every id and so turns text-only marks off entirely; say why.
+        logger.warning(
+            "models.dev providers without a readable models map: %s; no model is declared text-only",
+            ", ".join(unreadable[:5]) + (f" and {len(unreadable) - 5} more" if len(unreadable) > 5 else ""),
+        )
+        return set()
     wanted: dict[str, list[str]] = {}
     for model_id in dict.fromkeys(model_ids):
         wanted.setdefault(name_key(model_id), []).append(model_id)
     text_only: dict[str, bool] = {}
     for provider in catalog.values():
-        models = provider.get("models") if isinstance(provider, dict) else None
-        if not isinstance(models, dict):
-            return set()
-        for model_key, model in models.items():
+        for model_key, model in provider["models"].items():
             names = {str(model_key)}
             if isinstance(model, dict) and isinstance(model.get("id"), str):
                 names.add(model["id"])
