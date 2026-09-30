@@ -4854,7 +4854,11 @@ class ModelHubService:
                         return self._agent_payload(current, agent)
                     # The guard interrupts running work, so refuse a switch
                     # that would be refused anyway before destroying any.
-                    if await self._native_config_blocks_launch(current, backend):
+                    try:
+                        blocked = await self._native_config_blocks_launch(current, backend)
+                    except (TakeoverStateError, OSError):
+                        raise ModelHubError("mode_switch_blocked", status=409) from None
+                    if blocked:
                         raise ModelHubError("mode_switch_blocked", status=409)
                 try:
                     async with self.migration_guard((backend,), external_processes=False) as verify_idle:

@@ -278,6 +278,45 @@ async def test_guard_fails_closed_when_interruption_does_not_settle(failure, cod
 
 
 @pytest.mark.asyncio
+async def test_handoff_reopens_each_backend_when_its_own_teardown_settles():
+    """MH-MIG-009: after a grouped migration leaves early, a backend whose
+    teardown settled reopens at once rather than waiting on a sibling that is
+    stuck; the shared credential lease stays held until both have settled."""
+    controller, coordinator, admissions, turns = controller_fixture(busy=True)
+    gates = {"claude": asyncio.Event(), "codex": asyncio.Event()}
+
+    async def release(*, backend, **_kw):
+        await gates[backend].wait()
+        return 0
+
+    controller.session_turns.release_for_backend_refresh.side_effect = release
+    with pytest.raises(NativeMigrationBlockedError, match="native_runtime_busy"):
+        async with coordinator.migration_guard(("claude", "codex")):
+            pytest.fail("mutation admitted over unfinished interruptions")
+    assert admissions == turns == {"claude", "codex"}
+    try:
+        gates["claude"].set()
+        await coordinator.wait("claude")
+        for _ in range(50):
+            if "claude" not in admissions:
+                break
+            await asyncio.sleep(0)
+        assert admissions == turns == {"codex"}
+        with pytest.raises(NativeMigrationBlockedError, match="native_auth_in_progress"):
+            NativeCredentialLease(("claude",)).acquire()
+    finally:
+        gates["codex"].set()
+    await coordinator.wait("codex")
+    for _ in range(50):
+        if not admissions:
+            break
+        await asyncio.sleep(0)
+    assert admissions == turns == set()
+    with NativeCredentialLease(("claude", "codex")):
+        pass
+
+
+@pytest.mark.asyncio
 async def test_successful_retry_supersedes_a_failed_forced_restart_receipt():
     """MH-MIG-009: a forced restart that fails after stopping the runtime leaves a
     failed receipt. A retry that finds the backend idle and retires it must clear

@@ -822,13 +822,24 @@ class BackendRestartCoordinator:
         restarts: dict[str, asyncio.Task[None]],
         unretired: set[str],
     ) -> None:
+        async def reopen(backends: list[str]) -> None:
+            self._migration_backends.difference_update(backends)
+            await self._reopen_after_guard(backends, restarts, unretired)
+
         async def release() -> None:
+            waiting = dict(pending)
             try:
-                await asyncio.wait(pending.values())
+                # Each backend reopens when its own teardown settles; only the
+                # shared lease waits for all of them.
+                while waiting:
+                    done, _ = await asyncio.wait(waiting.values(), return_when=asyncio.FIRST_COMPLETED)
+                    settled = [backend for backend, task in waiting.items() if task in done]
+                    for backend in settled:
+                        del waiting[backend]
+                    await reopen(settled)
             finally:
-                self._migration_backends.difference_update(pending)
                 try:
-                    await self._reopen_after_guard(list(pending), restarts, unretired)
+                    await reopen(list(waiting))
                 finally:
                     lease.release()
 
