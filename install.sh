@@ -4,6 +4,7 @@
 # Uninstall, keeping your data:
 #   bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --uninstall'
 # Add --purge to also delete your data; without a terminal to confirm on, a purge also needs --yes.
+# The uninstaller never deletes through a link; anything behind a link is reported for you to remove.
 #
 # Prerequisites: None! uv will be installed automatically and manages Python for you.
 
@@ -1398,18 +1399,19 @@ uninstall_avibe() {
         fi
     done
     if [ -e "$root" ] || [ -L "$root" ]; then
-        # The root goes only through real directories below the home; the
-        # uninstall never deletes through a link.
+        # The uninstaller never deletes through a link: the root goes only when
+        # the home and every step below it are real directories.
         local step=""
         local linked_step=""
-        for step in "${AVIBE_RUNTIME_HOME%/}/runtime" "$root"; do
+        for step in "${AVIBE_RUNTIME_HOME%/}" "${AVIBE_RUNTIME_HOME%/}/runtime" "$root"; do
             if [ -L "$step" ]; then
                 linked_step="$step"
                 break
             fi
         done
         if [ -n "$linked_step" ]; then
-            warn "Left $root in place: $linked_step is a link to $(readlink "$linked_step" 2>/dev/null). Delete it by hand if it is yours."
+            warn "Left $root in place: $linked_step is a link to $(readlink "$linked_step" 2>/dev/null), and the uninstaller never deletes through a link."
+            echo "  If it is yours, remove it with: rm -rf -- $(printf '%q' "$(physical_path "$root")")"
             failed=1
         elif rm -rf -- "$root" 2>/dev/null && [ ! -e "$root" ] && [ ! -L "$root" ]; then
             success "Removed $root"

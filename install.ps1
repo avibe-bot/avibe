@@ -3,6 +3,7 @@
 # Uninstall, keeping your data:
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/avibe-bot/avibe/master/install.ps1))) -Uninstall
 # Add -Purge to also delete your data. A session that cannot prompt also needs -Yes.
+# The uninstaller never deletes through a link; anything behind a link is reported for you to remove.
 #
 # Prerequisites: None! uv will be installed automatically and manages Python for you.
 
@@ -1349,11 +1350,14 @@ function Uninstall-Avibe {
         if (-not (Remove-ReportedPath $item)) { $failed = $true }
     }
     if (Get-DirectoryEntry $root) {
-        # The root goes only through real directories below the home; the
-        # uninstall never deletes through a link.
-        $linkedStep = @((Join-Path $runtimeHome "runtime"), $root) | Where-Object { Test-IsLink $_ } | Select-Object -First 1
+        # The uninstaller never deletes through a link: the root goes only when
+        # the home and every step below it are real directories.
+        $linkedStep = @($runtimeHome.TrimEnd("\", "/"), (Join-Path $runtimeHome "runtime"), $root) |
+            Where-Object { Test-IsLink $_ } | Select-Object -First 1
         if ($linkedStep) {
-            Write-Warning "Left $root in place: $(Get-DataPathDescription $linkedStep). Delete it by hand if it is yours."
+            Write-Warning "Left $root in place: $(Get-DataPathDescription $linkedStep), and the uninstaller never deletes through a link."
+            $behindLink = (Resolve-LinkChain $linkedStep) + $root.Substring($linkedStep.Length)
+            Write-Host "  If it is yours, remove it with: Remove-Item -Recurse -Force -LiteralPath '$($behindLink.Replace("'", "''"))'"
             $failed = $true
         } elseif (-not (Remove-ReportedPath $root)) {
             $failed = $true

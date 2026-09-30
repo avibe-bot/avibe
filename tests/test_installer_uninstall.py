@@ -687,40 +687,65 @@ def test_uninstall_removes_nothing_when_no_process_list_is_available(installed):
     _assert_untouched(layout, first, second, foreign, legacy_home)
 
 
-def _linked_runtime(layout: Layout) -> Path:
-    """The home's runtime directory lives elsewhere, reached through a link."""
-    external = layout.tmp / "external-runtime"
-    shutil.move(str(layout.avibe_home / "runtime"), str(external))
+def _link_directory(link: Path, target: Path) -> None:
     if WINDOWS:
         import _winapi
 
-        _winapi.CreateJunction(str(external), str(layout.avibe_home / "runtime"))
+        _winapi.CreateJunction(str(target), str(link))
     else:
-        _symlink(layout.avibe_home / "runtime", external)
-    return external / "install-generations"
+        _symlink(link, target)
+
+
+def _generations_behind_a_link(layout: Layout, shape: str) -> tuple[Path, dict[str, str]]:
+    """Move part of the home elsewhere and reach it through a link; return the real root."""
+    if shape == "linked-runtime":
+        external = layout.tmp / "external-runtime"
+        shutil.move(str(layout.avibe_home / "runtime"), str(external))
+        _link_directory(layout.avibe_home / "runtime", external)
+        return external / "install-generations", {}
+    external = layout.tmp / "external-home"
+    shutil.move(str(layout.avibe_home), str(external))
+    if shape == "linked-home":
+        _link_directory(layout.avibe_home, external)
+    else:
+        # No ~/.avibe, so the installer selects this legacy alias as the home.
+        _link_directory(layout.home / ".vibe_remote", external)
+    return external / "runtime" / "install-generations", {}
+
+
+GENERATION_LINK_SHAPES = ["linked-runtime", "linked-home", "stale-legacy-alias"]
 
 
 @posix_only
-def test_uninstall_never_deletes_the_generation_root_through_a_link(layout):
-    external_root = _linked_runtime(layout)
+@pytest.mark.parametrize("shape", GENERATION_LINK_SHAPES)
+def test_uninstall_never_deletes_the_generation_root_through_a_link(layout, shape):
+    external_root, _ = _generations_behind_a_link(layout, shape)
+    # The fixture's generation exports link by the old path, so name the file itself.
+    launcher = _symlink(layout.path_dirs[0] / LAUNCHER, external_root / "current" / "uv" / "tools" / "avibe-os" / "bin" / "vibe")
 
     result = _installer_shell(layout, "main --uninstall")
 
     assert result.returncode == 1
     assert {path.name for path in external_root.iterdir()} == {"current", "older"}
-    assert f"Left {layout.root} in place: {layout.avibe_home / 'runtime'} is a link to" in result.stdout
+    # Launchers are links or files themselves, so they still go.
+    assert not launcher.is_symlink()
+    assert "and the uninstaller never deletes through a link." in result.stdout
+    assert f"If it is yours, remove it with: rm -rf -- {shlex.quote(str(external_root.resolve()))}" in result.stdout
     assert "Avibe was not completely removed." in result.stdout
 
 
 @pytest.mark.skipif(not WINDOWS, reason="junctions")
 @pytest.mark.parametrize("shell", _rule_implementations())
-def test_powershell_never_deletes_the_generation_root_through_a_link(layout, shell):
-    external_root = _linked_runtime(layout)
+@pytest.mark.parametrize("shape", GENERATION_LINK_SHAPES)
+def test_powershell_never_deletes_the_generation_root_through_a_link(layout, shell, shape):
+    external_root, _ = _generations_behind_a_link(layout, shape)
+    env = {} if shape == "linked-runtime" else {"AVIBE_HOME": ""}
 
-    output = "\n".join(_powershell(layout, shell, "Uninstall-Avibe | Out-Null"))
+    output = "\n".join(_powershell(layout, shell, "Uninstall-Avibe | Out-Null", **env))
 
     assert {path.name for path in external_root.iterdir()} == {"current", "older"}
-    assert f"Left {layout.root} in place" in output
+    assert "and the uninstaller never deletes through a link." in output
+    assert "If it is yours, remove it with:" in output
 
 
 @pytest.mark.skipif(not WINDOWS, reason="Windows process table")
