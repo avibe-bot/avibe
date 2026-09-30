@@ -4,6 +4,8 @@ import sys
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
@@ -65,14 +67,9 @@ def test_claude_reasoning_options_add_xhigh_and_max_for_fable_5_1() -> None:
     assert [item["value"] for item in options] == ["__default__", "low", "medium", "high", "xhigh", "max"]
 
 
-def test_claude_reasoning_options_add_xhigh_and_max_for_sonnet_5() -> None:
-    options = build_claude_reasoning_options("claude-sonnet-5")
-
-    assert [item["value"] for item in options] == ["__default__", "low", "medium", "high", "xhigh", "max"]
-
-
-def test_claude_reasoning_options_add_xhigh_and_max_for_sonnet_5_5() -> None:
-    options = build_claude_reasoning_options("claude-sonnet-5-5")
+@pytest.mark.parametrize("model", ["claude-sonnet-5", "claude-sonnet-5-5"])
+def test_claude_reasoning_options_add_xhigh_and_max_for_sonnet_5_family(model: str) -> None:
+    options = build_claude_reasoning_options(model)
 
     assert [item["value"] for item in options] == ["__default__", "low", "medium", "high", "xhigh", "max"]
 

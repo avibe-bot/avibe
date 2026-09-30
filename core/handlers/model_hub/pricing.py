@@ -54,9 +54,9 @@ MODEL_ALIASES: Final[Mapping[str, str]] = {
     "gpt-5.1-codex-mini": "gpt-5-mini",
     "gpt-5.2-codex": "gpt-5.2",
     "codex-mini-latest": "gpt-5-mini",
-    # Claude Code short names, pointing at the model each one resolves to.
-    "opus": "claude-opus-5-5",
-    "sonnet": "claude-sonnet-5-5",
+    # Claude Code short names.
+    "opus": "claude-opus-5",
+    "sonnet": "claude-sonnet-5",
     "haiku": "claude-haiku-4-5",
 }
 

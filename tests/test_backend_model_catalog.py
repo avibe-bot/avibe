@@ -905,6 +905,28 @@ def test_claude_snapshot_ignores_native_default_models(monkeypatch, tmp_path):
     assert snapshot["model_labels"]["claude-opus-4-6"] == "claude-opus-4-6 [1M]"
 
 
+def test_remote_claude_rows_label_their_1m_context_for_installs_that_predate_them(monkeypatch):
+    """An install older than a model learns it only from the remote catalog.
+
+    Its packaged catalogs lack the row, so nothing local can add the ``[1M]``
+    label; the remote row has to carry it.
+    """
+    from modules.agents.opencode.utils import format_claude_model_label
+
+    remote = backend_model_catalog.load_bundled_catalog()
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: remote)
+    monkeypatch.setattr(backend_model_catalog, "load_bundled_catalog", lambda: {})
+    monkeypatch.setattr(backend_model_catalog, "load_catalog_models", lambda: [])
+
+    snapshot = backend_model_catalog.backend_model_snapshot("claude", schedule_refresh=False)
+
+    long_context = [model for model in snapshot["models"] if format_claude_model_label(model) != model]
+    assert "claude-sonnet-5-5" in long_context
+    assert {model: snapshot["model_labels"].get(model) for model in long_context} == {
+        model: format_claude_model_label(model) for model in long_context
+    }
+
+
 def test_remote_hidden_tombstone_overrides_stale_local_visible(monkeypatch, tmp_path):
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()

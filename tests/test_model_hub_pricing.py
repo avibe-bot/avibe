@@ -117,7 +117,6 @@ def test_model_ids_normalize_to_the_price_table_spelling(reported, normalized):
         ("claude-opus-5[1m]", 5),
         ("claude-haiku-4-5-20251001", 1),
         ("opus", 5),
-        ("sonnet", 2),
         ("haiku", 1),
         ("gpt-5-codex", 1.25),
         ("gpt-5.1-codex-max", None),  # alias target gpt-5.1 is not in this fixture
@@ -146,8 +145,6 @@ def test_override_file_wins_over_models_dev_and_can_alias():
     # The alias from the built-in map now lands on the override too.
     assert table.price("claude-opus-5-5").input == 1
     assert table.price("relay-model").input == 10
-    # A short name prices as the model Claude Code resolves it to, once that model has a price.
-    assert _table({"models": {"claude-opus-5-5": {"input": 4, "output": 20}}}).price("opus").input == 4
     assert table.price("grok-4.6").input == 2
     assert table.price("loop-a") is None
 

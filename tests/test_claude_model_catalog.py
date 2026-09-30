@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from vibe.claude_model_catalog import (
     FALLBACK_CLAUDE_MODELS,
     RETIRED_CLAUDE_MODELS,
@@ -19,19 +21,10 @@ def test_fable_5_1_is_tracked_in_catalog_and_fallback():
     assert "claude-fable-5-1" in FALLBACK_CLAUDE_MODELS
 
 
-def test_sonnet_5_is_tracked_in_catalog_and_fallback():
-    assert "claude-sonnet-5" in load_catalog_models()
-    assert "claude-sonnet-5" in FALLBACK_CLAUDE_MODELS
-
-
-def test_sonnet_5_5_is_tracked_in_catalog_and_fallback():
-    assert "claude-sonnet-5-5" in load_catalog_models()
-    assert "claude-sonnet-5-5" in FALLBACK_CLAUDE_MODELS
-
-
-def test_sonnet_5_5_sorts_before_sonnet_5_in_every_tracked_listing():
-    for listing in (load_catalog_models(), list(FALLBACK_CLAUDE_MODELS)):
-        assert listing.index("claude-sonnet-5-5") < listing.index("claude-sonnet-5")
+@pytest.mark.parametrize("model", ["claude-sonnet-5", "claude-sonnet-5-5"])
+def test_sonnet_5_family_is_tracked_in_catalog_and_fallback(model):
+    assert model in load_catalog_models()
+    assert model in FALLBACK_CLAUDE_MODELS
 
 
 def test_opus_5_is_tracked_in_catalog_and_fallback():
@@ -44,9 +37,13 @@ def test_opus_5_5_is_tracked_in_catalog_and_fallback():
     assert "claude-opus-5-5" in FALLBACK_CLAUDE_MODELS
 
 
-def test_opus_5_5_sorts_before_opus_5_in_every_tracked_listing():
+@pytest.mark.parametrize(
+    ("newer", "older"),
+    [("claude-opus-5-5", "claude-opus-5"), ("claude-sonnet-5-5", "claude-sonnet-5")],
+)
+def test_point_five_release_sorts_before_its_predecessor_in_every_tracked_listing(newer, older):
     for listing in (load_catalog_models(), list(FALLBACK_CLAUDE_MODELS)):
-        assert listing.index("claude-opus-5-5") < listing.index("claude-opus-5")
+        assert listing.index(newer) < listing.index(older)
 
 
 def test_retired_models_leave_the_tracked_catalog_and_fallback():
