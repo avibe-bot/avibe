@@ -8157,19 +8157,23 @@ def test_deferred_failure_preserves_error_through_later_output(
 
 
 @pytest.mark.parametrize(
-    ("activity_status", "interrupt_reason", "expected_run_status", "expected_error"),
+    ("activity_status", "interrupt_reason", "user_cancel", "expected_run_status", "expected_reason", "expected_error"),
     [
-        ("failed", None, "failed", "Background Activity task-failed failed"),
-        ("stopped", None, "canceled", "Background Activity task-failed stopped"),
-        ("killed", None, "canceled", "Background Activity task-failed killed"),
+        ("failed", None, False, "failed", None, "Background Activity task-failed failed"),
+        ("stopped", None, False, "canceled", None, "Background Activity task-failed stopped"),
+        ("killed", None, False, "canceled", None, "Background Activity task-failed killed"),
         # MH-MIG-012: the service ending the Activity itself is an interruption
         # the user is told about, not a silent kill.
         (
             "killed",
             "backend_refresh",
+            False,
             "failed",
+            "backend_refresh",
             "[Avibe Harness] This run was interrupted because its Agent runtime was refreshed",
         ),
+        # A user's cancellation that wins the race is still the user's stop.
+        ("killed", "backend_refresh", True, "canceled", "stopped", "[Avibe Harness] This run was stopped"),
     ],
 )
 def test_terminal_owned_activity_settles_deferred_run_once(
@@ -8177,7 +8181,9 @@ def test_terminal_owned_activity_settles_deferred_run_once(
     monkeypatch,
     activity_status: str,
     interrupt_reason: str | None,
+    user_cancel: bool,
     expected_run_status: str,
+    expected_reason: str | None,
     expected_error: str,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -8221,6 +8227,8 @@ def test_terminal_owned_activity_settles_deferred_run_once(
     )
     assert activity is not None
 
+    if user_cancel:
+        assert request_store.cancel_run(request.id)
     settle_kwargs = {"interrupt_reason": interrupt_reason} if interrupt_reason else {}
     assert service.settle_activity_runs(activity, **settle_kwargs) == [request.id]
     terminal = request_store.get_run(request.id)
@@ -8229,7 +8237,7 @@ def test_terminal_owned_activity_settles_deferred_run_once(
     assert terminal["status"] == expected_run_status
     assert terminal["error"].startswith(expected_error)
     assert "deferred_terminal_status" not in terminal["result_payload"]
-    assert terminal["metadata"].get("interrupt_reason") == interrupt_reason
+    assert terminal["metadata"].get("interrupt_reason") == expected_reason
     notice = request_store.sqlite_backend.owed_failure_notice(request.id)
     assert (notice is not None) == (expected_run_status == "failed")
 

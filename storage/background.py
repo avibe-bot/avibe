@@ -6660,13 +6660,15 @@ class SQLiteBackgroundTaskStore:
         terminal_status: Optional[str] = None,
         error: Optional[str] = None,
         interrupt_reason: Optional[str] = None,
+        cancellation_error: Optional[str] = None,
         updated_at: Optional[str] = None,
     ) -> bool:
         """Apply one stored terminal intent after owned Activities become terminal.
 
         ``interrupt_reason`` names the infrastructure event that ended the owning
         Activity. It is recorded only when ``error`` is the Run's explanation, so
-        an earlier deferred failure keeps its own cause.
+        an earlier deferred failure keeps its own cause. A cancellation that wins
+        the race settles the Run as the user's stop, with ``cancellation_error``.
         """
 
         now = updated_at or _utc_now_iso()
@@ -6789,6 +6791,14 @@ class SQLiteBackgroundTaskStore:
                     "result_payload_json": _json_dumps(result_payload),
                 }
                 effective_error = deferred_error if deferred_error is not None else error
+                effective_reason = None
+                if interrupt_reason and deferred_error is None:
+                    if status == "canceled":
+                        effective_reason = "stopped"
+                        if cancellation_error is not None:
+                            effective_error = cancellation_error
+                    else:
+                        effective_reason = interrupt_reason
                 if effective_error is not None:
                     values["error"] = str(effective_error)
                 if deferred_result_text is not None:
@@ -6802,8 +6812,8 @@ class SQLiteBackgroundTaskStore:
                     parent_run_id=row["parent_run_id"],
                     row_metadata_json=row["metadata_json"],
                     extra_metadata=(
-                        {**(notice_metadata or {}), "interrupt_reason": interrupt_reason}
-                        if interrupt_reason and deferred_error is None
+                        {**(notice_metadata or {}), "interrupt_reason": effective_reason}
+                        if effective_reason
                         else notice_metadata
                     ),
                     now=now,

@@ -3024,6 +3024,7 @@ class TaskExecutionStore:
         terminal_status: Optional[str] = None,
         error: Optional[str] = None,
         interrupt_reason: Optional[str] = None,
+        cancellation_error: Optional[str] = None,
     ) -> bool:
         if self._sqlite is None:
             return False
@@ -3032,6 +3033,7 @@ class TaskExecutionStore:
             terminal_status=terminal_status,
             error=error,
             interrupt_reason=interrupt_reason,
+            cancellation_error=cancellation_error,
         )
 
     def record_skip_reason(self, run_id: str, *, reason: str) -> bool:
@@ -7535,7 +7537,14 @@ class ScheduledTaskService:
             if self.request_store.settle_deferred_run(
                 run_id,
                 error=error,
-                **({"interrupt_reason": interrupt_reason} if interrupt_reason else {}),
+                **(
+                    {
+                        "interrupt_reason": interrupt_reason,
+                        "cancellation_error": self._t(SETTLEMENT_I18N_KEYS[SETTLED_BY_STOPPED]),
+                    }
+                    if interrupt_reason
+                    else {}
+                ),
             ):
                 settled.append(run_id)
         if settled:
