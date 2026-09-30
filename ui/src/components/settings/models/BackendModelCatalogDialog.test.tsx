@@ -183,20 +183,19 @@ describe('BackendModelCatalogDialog', () => {
     expect(write.mock.calls[0][1].models.map((entry: BackendModel) => entry.id)).toEqual(['alpha']);
   });
 
-  it('forces a confirmed focused removal through the guard without asking again, even when the plan moves', async () => {
+  it('forces a confirmed focused removal through a hops-only guard without asking again, even when the plan moves', async () => {
     const user = userEvent.setup();
     const shown = [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 }];
     const moved = [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_b', model_id: 'beta-max', position: 1 }];
-    const gaps = [{ backend: 'claude' as const, model_id: 'beta', agents: [] }];
-    const refusal = (hops: typeof shown, interrupt: typeof gaps = []) => new ApiCallError(
-      'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, interrupt, [], hops, 409,
+    const refusal = (hops: typeof shown) => new ApiCallError(
+      'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, [], [], hops, 409,
     );
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')], {
       routes: { beta: { hops: [{ source_id: 'src_a', model_id: 'beta-air' }] } },
     }));
     const write = vi.spyOn(modelsApi, 'putAgentModels')
       .mockRejectedValueOnce(refusal(shown))
-      .mockRejectedValueOnce(refusal(moved, gaps))
+      .mockRejectedValueOnce(refusal(moved))
       .mockResolvedValue(agent([model('alpha')]));
     const { onClose } = renderDialog({ focus: { modelId: 'beta', action: 'remove' } });
     const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
@@ -206,7 +205,40 @@ describe('BackendModelCatalogDialog', () => {
     expect(write).toHaveBeenCalledTimes(3);
     expect(write.mock.calls[0][1].force).toBeUndefined();
     expect(write.mock.calls[1][1]).toMatchObject({ force: true, would_remove_hops: shown, would_interrupt: [] });
-    expect(write.mock.calls[2][1]).toMatchObject({ force: true, would_remove_hops: moved, would_interrupt: gaps });
+    expect(write.mock.calls[2][1]).toMatchObject({ force: true, would_remove_hops: moved, would_interrupt: [] });
+  });
+
+  it.each([
+    ['on its first refusal', 0],
+    ['after its plan moves', 1],
+  ])('MH-UNLISTED-002: shows the Agents a focused removal would stop %s before anything commits', async (_, hopsFirst) => {
+    const user = userEvent.setup();
+    const hops = [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 }];
+    const gaps = [{ backend: 'claude' as const, model_id: 'beta', agents: ['pm'] }];
+    const refusal = (interrupt: typeof gaps) => new ApiCallError(
+      'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, interrupt, [], hops, 409,
+    );
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')], {
+      routes: { beta: { hops: [{ source_id: 'src_a', model_id: 'beta-air' }] } },
+    }));
+    const write = vi.spyOn(modelsApi, 'putAgentModels');
+    if (hopsFirst) write.mockRejectedValueOnce(refusal([]));
+    write.mockRejectedValueOnce(refusal(gaps)).mockResolvedValue(agent([model('alpha')]));
+    const { onClose } = renderDialog({ focus: { modelId: 'beta', action: 'remove' } });
+    const confirm = await screen.findByRole('dialog', { name: 'Remove beta?' });
+    await user.click(within(confirm).getByRole('button', { name: 'Remove' }));
+
+    // The focused confirmation showed hops only, so it never agreed to stop pm.
+    const guard = await screen.findByRole('dialog', { name: 'Save the model list?' });
+    expect(within(guard).getByText('Agents pinned to it: pm')).toBeTruthy();
+    expect(write).toHaveBeenCalledTimes(1 + hopsFirst);
+    expect(write.mock.calls.every(([, body]) => body.would_interrupt === undefined || body.would_interrupt.length === 0)).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+
+    await user.click(within(guard).getByRole('button', { name: 'Remove anyway' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith({ removed: true }));
+    expect(write.mock.calls.at(-1)?.[1]).toMatchObject({ force: true, would_remove_hops: hops, would_interrupt: gaps });
+    expect(write.mock.calls.at(-1)?.[1].models.map((entry: BackendModel) => entry.id)).toEqual(['alpha']);
   });
 
   it('keeps a confirmed focused removal on screen until its forced resend lands', async () => {

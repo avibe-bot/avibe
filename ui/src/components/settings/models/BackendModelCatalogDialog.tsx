@@ -527,7 +527,10 @@ export const BackendModelCatalogDialog: React.FC<{
    * this save — the guard dialog's confirm, or the focused removal's own. With
    * it, a guard refusal is resent forced with the server's plan; without it,
    * the refusal opens the one guard dialog. `confirmed` is the plan the forced
-   * write echoes.
+   * write echoes, and the plan the user was shown. An agreement given without
+   * one is the focused confirmation's, which shows only the hops this dialog
+   * can see, so it covers hops alone: a refusal naming an Agent the removal
+   * would stop is asked over the list instead of being forced past the user.
    *
    * Every resend runs inside this one tracked write, so the promise it returns
    * — and the confirmation surface waiting on it — spans the whole sequence.
@@ -553,6 +556,7 @@ export const BackendModelCatalogDialog: React.FC<{
     confirmed: GuardPlan | undefined,
   ): Promise<GuardPlan | null> => {
     let plan = confirmed;
+    const hopsOnly = agreed && confirmed === undefined;
     for (let resends = 0; ;) {
       const requested = draftRef.current;
       const intent = backendCatalogIntent(baselineModels, requested);
@@ -647,13 +651,15 @@ export const BackendModelCatalogDialog: React.FC<{
         // missing. A user who already agreed is not asked again — the write goes
         // again echoing the server's plan, even when that plan differs from the
         // one they saw, because what they agreed to was removing these models.
+        // A focused confirmation never showed the Agents a plan names, so a
+        // plan with any is asked over the list rather than forced past them.
         // A plan that keeps moving past the bound ends as the refusal below,
         // never as a second question. Otherwise the plan opens the one guard
         // dialog, and the draft stays exactly as the user left it behind it.
         const refusal = failure?.code === MODEL_IN_ROUTE ? failure : null;
         if (refusal && (refusal.wouldRemoveHops.length > 0 || refusal.wouldInterrupt.length > 0)) {
           const next: GuardPlan = { hops: refusal.wouldRemoveHops, gaps: refusal.wouldInterrupt };
-          if (!agreed) return next;
+          if (!agreed || (hopsOnly && next.gaps.length > 0)) return next;
           if (resends < FORCED_RESENDS) {
             plan = next;
             resends += 1;

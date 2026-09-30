@@ -1244,6 +1244,8 @@ scenarios:
     test: tests/test_model_hub_api.py::test_mh_unlisted_002_model_list_save_names_the_agents_a_removed_row_stops
     related_tests:
       - "ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::MH-UNLISTED-002: names the Agents a removed row stops when the row has no route, then echoes that plan"
+      - "ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::MH-UNLISTED-002: shows the Agents a focused removal would stop on its first refusal before anything commits"
+      - "ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::MH-UNLISTED-002: shows the Agents a focused removal would stop after its plan moves before anything commits"
   - id: MH-MIG-001
     name: Native migration takes over selected credentials and cleans replaced native auth
     status: covered
