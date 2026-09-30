@@ -190,8 +190,10 @@ export function useAddModelExit(backend: string, enabled = true): (() => void) |
 
 /**
  * Read a backend's model list, then re-read while a remote-catalog refresh is
- * pending. A caller whose surface stays mounted under Settings also reads again
- * when `useRouteSurfaceActive()` turns true: the Model Hub there edits the list.
+ * pending. A caller whose surface stays mounted under Settings treats a Settings
+ * visit as invalidating what it read: it drops those rows when
+ * `useRouteSurfaceActive()` turns false and reads again when it turns true, since
+ * the Model Hub there edits the list and may change which catalog supplies it.
  */
 export function loadBackendModelsWithRefresh(
   api: ApiContextType,

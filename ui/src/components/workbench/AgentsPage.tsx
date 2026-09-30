@@ -2069,10 +2069,11 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   // Load model catalog for the agent's backend so the Combobox can offer
   // suggestions. Keeps `allowCustomValue` so users can type a model the
   // backend doesn't know about yet (e.g. a freshly-released preview). Read
-  // again when Settings uncovers the page: the Model Hub there edits the list.
+  // again when Settings uncovers the page: the Model Hub there edits the list,
+  // so the rows read before the visit go when Settings covers it.
   useEffect(() => {
     if (!surfaceActive) return;
-    return loadBackendModelsWithRefresh(
+    const cancel = loadBackendModelsWithRefresh(
       api,
       agent.backend,
       ({ models, modelLabels, reasoningOptions: opts }) => {
@@ -2091,6 +2092,14 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         }));
       },
     );
+    return () => {
+      cancel();
+      setModelCatalogs((current) => {
+        const next = { ...current };
+        delete next[agent.backend];
+        return next;
+      });
+    };
   }, [agent.backend, api, surfaceActive]);
 
   const lockHint = system

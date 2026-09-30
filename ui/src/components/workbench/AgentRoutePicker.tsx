@@ -191,10 +191,15 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   }, []);
 
   // Settings covers this surface while it is open, and the Model Hub there may
-  // change any backend's list; the next open reads again instead of serving the
-  // list from before the visit.
+  // change any backend's list, even which catalog supplies it. Nothing read
+  // before the visit survives it: the return shows loading until a new read
+  // lands, never a row the backend may no longer offer.
   useEffect(() => {
-    if (!surfaceActive) loadedModelBackendsRef.current.clear();
+    if (surfaceActive) return;
+    loadedModelBackendsRef.current.clear();
+    setModelsByBackend({});
+    setModelLabelsByBackend({});
+    setReasoningByBackend({});
   }, [surfaceActive]);
 
   const grouped = useMemo(() => {

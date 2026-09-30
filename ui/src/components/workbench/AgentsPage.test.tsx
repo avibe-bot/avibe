@@ -52,12 +52,16 @@ type FakeModelCatalog = {
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
+let deferModelReads = false;
+const pendingModelReads: (() => void)[] = [];
 
 vi.mock('../../lib/backendModels', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/backendModels')>()),
   loadBackendModelsWithRefresh: (_api: unknown, _backend: string, onLoaded: (payload: FakeModelCatalog) => void) => {
     modelCatalogReads += 1;
-    onLoaded(modelCatalog);
+    const catalog = modelCatalog;
+    if (deferModelReads) pendingModelReads.push(() => onLoaded(catalog));
+    else onLoaded(catalog);
     return () => {};
   },
 }));
@@ -190,6 +194,8 @@ afterEach(() => {
   showToast.mockReset();
   modelCatalog = { models: [] };
   modelCatalogReads = 0;
+  deferModelReads = false;
+  pendingModelReads.length = 0;
 });
 
 describe('AgentsPage load requests follow the rank that can serve them', () => {
@@ -1519,7 +1525,9 @@ describe('AgentsPage reconnect reconciliation', () => {
     await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
     const reads = modelCatalogReads;
 
-    // Settings covers the page and uncovers it: the Model Hub may have edited the list.
+    // Settings covers the page and uncovers it: the Model Hub may have edited the
+    // list, so the rows read before the visit are not offered meanwhile.
+    deferModelReads = true;
     view.rerender(page(false));
     view.rerender(page(true));
     expect(modelCatalogReads).toBe(reads + 1);
@@ -1527,6 +1535,9 @@ describe('AgentsPage reconnect reconciliation', () => {
     // cmdk scrolls its highlighted row into view; jsdom implements no scrolling.
     Element.prototype.scrollIntoView = vi.fn();
     fireEvent.click(screen.getByRole('combobox'));
+    expect(screen.queryByRole('option', { name: 'gpt-hub' })).toBeNull();
+    act(() => pendingModelReads.shift()!());
+    expect(screen.getByRole('option', { name: 'gpt-hub' })).toBeTruthy();
     fireEvent.click(await screen.findByText('chat.picker.addModel'));
     expect(screen.getByTestId('location').textContent).toBe('/settings/models?manage=codex');
   });

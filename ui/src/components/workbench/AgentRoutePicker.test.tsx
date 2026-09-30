@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 
@@ -34,8 +34,10 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 // model, so a test can say "this model has no efforts" the same way the server
 // does — and an empty default keeps the backend fallback in play.
 let catalogReasoning: Record<string, { value: string; label: string }[]> = {};
-// How many catalog reads were made.
+// How many catalog reads were made, and whether the next ones wait to be answered.
 let catalogReads = 0;
+let deferReads = false;
+const pendingReads: (() => void)[] = [];
 
 // The model column is fetched per backend; serve it synchronously so the test is
 // about the route state, not about the catalog request.
@@ -52,12 +54,14 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
     }) => void,
   ) => {
     catalogReads += 1;
-    onLoaded({
+    const answer = () => onLoaded({
       models: ['sonnet', 'opus'],
       modelLabels: {},
       reasoningOptions: catalogReasoning,
       catalogRefreshPending: false,
     });
+    if (deferReads) pendingReads.push(answer);
+    else answer();
     return () => {};
   },
 }));
@@ -163,6 +167,8 @@ describe('AgentRoutePicker', () => {
     catalogReasoning = {};
     hubMode = 'direct';
     catalogReads = 0;
+    deferReads = false;
+    pendingReads.length = 0;
   });
 
   it("ends a Hub backend's model list with an exit to that backend's catalog in the Model Hub", async () => {
@@ -201,6 +207,24 @@ describe('AgentRoutePicker', () => {
 
     // The Model Hub may have changed the list while it was covered.
     expect(catalogReads).toBe(2);
+  });
+
+  it('offers no row read before a Settings visit while the read after it is in flight', async () => {
+    // The visit may have switched the backend to Direct, where a Hub-only row
+    // is a route that cannot run.
+    const user = userEvent.setup();
+    const { rerender } = render(<HubPicker role="owner" />);
+    await openMenu(user);
+    expect(screen.getByRole('button', { name: 'opus' })).toBeTruthy();
+
+    deferReads = true;
+    rerender(<HubPicker role="owner" surfaceActive={false} />);
+    rerender(<HubPicker role="owner" />);
+
+    expect(screen.queryByRole('button', { name: 'opus' })).toBeNull();
+    expect(screen.getByText('common.loading')).toBeTruthy();
+    act(() => pendingReads.shift()!());
+    expect(screen.getByRole('button', { name: 'opus' })).toBeTruthy();
   });
 
   it('reads the list again for a menu left open while Settings covered it', async () => {

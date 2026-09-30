@@ -82,10 +82,12 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   // Reload the model catalog whenever the selected backend changes so
   // the Combobox suggests the right list. allowCustomValue stays on so
   // freshly-released model IDs can still be typed in. The dialog stays open
-  // under Settings, so it reads again once Settings uncovers it.
+  // under Settings, so it reads again once Settings uncovers it, and offers no
+  // row read before the visit meanwhile. The effort options stay: dropping them
+  // would move the draft's chosen effort before the new read could confirm it.
   useEffect(() => {
     if (!open || !surfaceActive) return;
-    return loadBackendModelsWithRefresh(
+    const cancel = loadBackendModelsWithRefresh(
       api,
       backend,
       ({ models, modelLabels, reasoningOptions: opts }) => {
@@ -94,6 +96,10 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
       },
       () => setModelOptions([]),
     );
+    return () => {
+      cancel();
+      setModelOptions([]);
+    };
   }, [backend, open, api, surfaceActive]);
 
   const modelComboboxOptions = useMemo(() => modelOptions, [modelOptions]);

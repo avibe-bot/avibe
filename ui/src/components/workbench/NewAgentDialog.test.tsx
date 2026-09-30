@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
@@ -43,12 +43,16 @@ type FakeModelCatalog = {
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
+let deferReads = false;
+const pendingReads: (() => void)[] = [];
 
 vi.mock('../../lib/backendModels', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/backendModels')>()),
   loadBackendModelsWithRefresh: (_api: unknown, _backend: string, onLoaded: (payload: FakeModelCatalog) => void) => {
     modelCatalogReads += 1;
-    onLoaded(modelCatalog);
+    const catalog = modelCatalog;
+    if (deferReads) pendingReads.push(() => onLoaded(catalog));
+    else onLoaded(catalog);
     return () => {};
   },
 }));
@@ -77,6 +81,8 @@ afterEach(() => {
   apiRef.current = null;
   modelCatalog = { models: [] };
   modelCatalogReads = 0;
+  deferReads = false;
+  pendingReads.length = 0;
 });
 
 describe('NewAgentDialog', () => {
@@ -130,6 +136,27 @@ describe('NewAgentDialog', () => {
     rerender(dialog(true));
 
     expect(modelCatalogReads).toBe(reads + 1);
+  });
+
+  it('offers no model read before a Settings visit while the read after it is in flight', () => {
+    modelCatalog = { models: ['opus'] };
+    apiRef.current = { createVibeAgent: vi.fn() };
+    const dialog = (surfaceActive: boolean) => (
+      <RouteSurfaceActiveContext.Provider value={surfaceActive}>
+        <MemoryRouter>
+          <NewAgentDialog open onClose={vi.fn()} onCreated={vi.fn()} />
+        </MemoryRouter>
+      </RouteSurfaceActiveContext.Provider>
+    );
+    const { rerender } = render(dialog(true));
+    deferReads = true;
+    rerender(dialog(false));
+    rerender(dialog(true));
+
+    fireEvent.click(screen.getByRole('combobox'));
+    expect(screen.queryByText('opus')).toBeNull();
+    act(() => pendingReads.shift()!());
+    expect(screen.getByText('opus')).toBeTruthy();
   });
 
   it('creates with no effort when the catalog says the model has none', async () => {
