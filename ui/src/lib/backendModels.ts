@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 import { routeableCatalogModelIds } from '../components/settings/models/backendCatalog';
 import { modelHubCatalogPath } from '../components/settings/models/modelHubRoutes';
@@ -6,6 +7,7 @@ import type { AgentSupply } from '../components/settings/models/types';
 import { ApiError, useApi, type ApiContextType } from '../context/ApiContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { useRouteSurfaceActive } from './routeSurfaceActivity';
+import { settingsOverlayOpenState } from './settingsOverlay';
 
 export interface BackendModels {
   /** Selectable model identifiers for the backend. */
@@ -148,18 +150,25 @@ export async function fetchBackendModels(
 }
 
 /**
- * Where a model picker's "Add model" entry leads, or null when it shows none:
- * only a Model Hub backend has a catalog to add to, and the Model Hub is an
- * Instance Owner surface that sends anyone else home.
+ * A model picker's "Add model" exit: opens this backend's catalog in the Model
+ * Hub, or is null when the picker shows none. Only a Model Hub backend has a
+ * catalog to add to, and the Model Hub is an Instance Owner surface that sends
+ * anyone else home.
  *
  * The one owner of that answer. It comes from a read made while the surface is
  * showing and is dropped the moment it may be stale — the surface is covered
  * (Settings may switch the backend to Direct), the backend changes, or `enabled`
  * turns off — so no exit outlives the read that justified it, and a failed read
  * shows none. `enabled` lets a picker read only while its menu is open.
+ *
+ * The exit is a detour to come back from, so it records where it starts. On a
+ * phone, Settings otherwise keeps only the Workbench home mounted behind it, and
+ * a draft in the page the picker sits on would be gone on return.
  */
-export function useAddModelPath(backend: string, enabled = true): string | null {
+export function useAddModelExit(backend: string, enabled = true): (() => void) | null {
   const api = useApi();
+  const navigate = useNavigate();
+  const location = useLocation();
   const { capabilities } = useInstanceAuthorization();
   const surfaceActive = useRouteSurfaceActive();
   const readable = enabled && surfaceActive && Boolean(backend) && capabilities.can_manage_instance;
@@ -175,7 +184,8 @@ export function useAddModelPath(backend: string, enabled = true): string | null 
       setHubBackend(null);
     };
   }, [api, backend, readable]);
-  return readable && hubBackend === backend ? modelHubCatalogPath(backend) : null;
+  if (!readable || hubBackend !== backend) return null;
+  return () => navigate(modelHubCatalogPath(backend), { state: settingsOverlayOpenState(location) });
 }
 
 /**

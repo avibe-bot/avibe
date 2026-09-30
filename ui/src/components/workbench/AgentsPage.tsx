@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import {
   Bot,
   ChevronDown,
@@ -50,7 +50,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { onPageReactivated } from '../../lib/pageActivity';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
-import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelPath } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -2009,8 +2009,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   const activeModelCatalog = modelCatalogs[agent.backend];
   const modelOptions = activeModelCatalog?.modelOptions ?? [];
   const reasoningOptions = activeModelCatalog?.reasoningOptions ?? {};
-  const addModelPath = useAddModelPath(agent.backend, canEdit);
-  const navigate = useNavigate();
+  const openAddModel = useAddModelExit(agent.backend, canEdit);
   const surfaceActive = useRouteSurfaceActive();
 
   useEffect(() => {
@@ -2408,7 +2407,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
             placeholder={t('agents.detail.modelPlaceholder')}
             emptyText={t('agents.detail.modelEmpty')}
             allowCustomValue
-            footerAction={addModelPath ? { label: t('chat.picker.addModel'), onSelect: () => navigate(addModelPath) } : undefined}
+            footerAction={openAddModel ? { label: t('chat.picker.addModel'), onSelect: openAddModel } : undefined}
           />
         )}
       </Field>

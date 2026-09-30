@@ -6,7 +6,7 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentBrief } from '../../context/ApiContext';
-import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelPath } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
 import { isEffortSupported, resolveEffortOptions } from '../../lib/effortOptions';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -244,7 +244,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const models = modelsByBackend[backend] ?? [];
   const modelLabels = modelLabelsByBackend[backend] ?? {};
   const backendReasoning = reasoningByBackend[backend] ?? EMPTY_REASONING_OPTIONS;
-  const addModelPath = useAddModelPath(backend, open);
+  const openAddModel = useAddModelExit(backend, open);
   // Show the search field only when the list is long enough to warrant it, so
   // claude/codex (a handful of models) stay uncluttered.
   const showModelSearch = models.length > 8;
@@ -451,13 +451,13 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             )}
             {/* Pinned like the search above it: a long model list must not scroll
                 the way to add one out of sight. */}
-            {addModelPath && (
+            {openAddModel && (
               <div className="sticky -bottom-1.5 z-10 -mx-1.5 -mb-1.5 border-t border-border bg-panel px-1.5 pb-1.5">
                 <PickerExitButton
                   label={t('chat.picker.addModel')}
                   onClick={() => {
                     setOpen(false);
-                    navigate(addModelPath);
+                    openAddModel();
                   }}
                 />
               </div>

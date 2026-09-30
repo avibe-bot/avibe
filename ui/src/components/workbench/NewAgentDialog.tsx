@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
 import { ArrowRight, Bot, Maximize2, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentFull } from '../../context/ApiContext';
-import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelPath } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
@@ -63,8 +62,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   const [modelOptions, setModelOptions] = useState<ComboboxOption[]>([]);
   const [reasoningOptions, setReasoningOptions] = useState<Record<string, { value: string; label: string }[]>>({});
   const [editorOpen, setEditorOpen] = useState(false);
-  const navigate = useNavigate();
-  const addModelPath = useAddModelPath(backend, open);
+  const openAddModel = useAddModelExit(backend, open);
   const surfaceActive = useRouteSurfaceActive();
 
   useEffect(() => {
@@ -273,7 +271,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
               allowCustomValue
               // The dialog stays open: Settings hides the page it sits in, and
               // the form is here again when the user comes back.
-              footerAction={addModelPath ? { label: t('chat.picker.addModel'), onSelect: () => navigate(addModelPath) } : undefined}
+              footerAction={openAddModel ? { label: t('chat.picker.addModel'), onSelect: openAddModel } : undefined}
             />
           </div>
           {effortOptions.length > 0 && (
