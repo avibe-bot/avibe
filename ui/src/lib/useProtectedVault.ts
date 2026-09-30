@@ -480,6 +480,28 @@ export function useProtectedVault() {
   };
 }
 
+/**
+ * Starts the sandbox client while `enabled` and reports whether it is ready. Its first build
+ * fetches, hashes, and handshakes, and a protected step whose click opens the authorization window
+ * must not do that after the click (protocol v2 §6.6), so the click waits for this. A failed build
+ * also reports ready, so the step itself surfaces the error.
+ */
+export function useVaultSandboxWarm(enabled: boolean): boolean {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    const settle = () => {
+      if (alive) setReady(true);
+    };
+    getVaultSandboxClient().then(settle, settle);
+    return () => {
+      alive = false;
+    };
+  }, [enabled]);
+  return !enabled || ready;
+}
+
 export function useVaultLock(): { unlocked: boolean; remainingMs: number; lockNow: () => void } {
   const [, forceRender] = useReducer((n: number) => n + 1, 0);
   useEffect(() => subscribeVaultLock(forceRender), []);

@@ -23,7 +23,7 @@ const api = vi.hoisted(() => ({
 }));
 const showToast = vi.hoisted(() => vi.fn());
 const revealProtectedValue = vi.hoisted(() => vi.fn());
-const warmVaultSandboxClient = vi.hoisted(() => vi.fn());
+const useVaultSandboxWarm = vi.hoisted(() => vi.fn((_enabled: boolean) => true));
 const remoteOwner = {
   remote: true,
   instanceRole: 'owner' as const,
@@ -49,17 +49,13 @@ vi.mock('../../context/ApiContext', async (loadOriginal) => {
   return { ...original, useApi: () => api };
 });
 
-vi.mock('../../lib/vaultSandboxClient', async (loadOriginal) => ({
-  ...(await loadOriginal<typeof import('../../lib/vaultSandboxClient')>()),
-  warmVaultSandboxClient,
-}));
-
 vi.mock('../../context/ToastContext', () => ({
   useToast: () => ({ showToast }),
 }));
 
 vi.mock('../../lib/useProtectedVault', () => ({
   useProtectedVault: () => ({ revealProtectedValue }),
+  useVaultSandboxWarm,
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
 }));
 
@@ -164,12 +160,13 @@ describe('PERMISSIONS-016 VaultsPage wakes an Editor on the bare vaults.updated 
 // A popup opened after an await has lost the click's user activation and is blocked, which would
 // silently bring back the sandbox's own launcher card and its second approval click. A Home Screen
 // app on iOS is also frozen about two seconds after it opens a window, so nothing that window needs
-// may be fetched after the click: the open row menu keeps a fresh reveal context and starts the
-// sandbox client. A menu fetch that failed is not kept, or the click would replay that failure, and
-// a menu held open past the context's freshness bound refreshes it rather than fetching after the click.
+// may be fetched after the click: the open row menu keeps a fresh reveal context, Show and Copy wait
+// for it and for the sandbox client, and one secret's context never waits on another's. A menu
+// fetch that failed is not kept, or the click would replay that failure, and a menu held open past
+// the context's freshness bound refreshes it rather than fetching after the click.
 describe('VaultsPage protected reveal', () => {
-  const protectedAlpha = {
-    name: 'alpha',
+  const protectedSecret = (name: string) => ({
+    name,
     tags: [],
     kind: 'static',
     protection: 'protected',
@@ -180,13 +177,13 @@ describe('VaultsPage protected reveal', () => {
     use_count: 0,
     created_at: '2026-08-11T00:00:00Z',
     updated_at: '2026-08-11T00:00:00Z',
-  };
+  });
   const envelope = { ciphertext: 'c', nonce: 'n', wrap_meta: 'w' };
 
   beforeEach(() => {
     // Only the menu's refresh interval is faked, so promises and Testing Library keep real timers.
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-    api.listVaultSecrets.mockResolvedValue({ secrets: [protectedAlpha] });
+    api.listVaultSecrets.mockResolvedValue({ secrets: [protectedSecret('alpha')] });
     revealProtectedValue.mockResolvedValue(undefined);
   });
 
@@ -194,18 +191,20 @@ describe('VaultsPage protected reveal', () => {
     vi.useRealTimers();
   });
 
-  const openMenu = async () => {
+  const showValue = () => screen.getByRole('menuitem', { name: 'vaults.reveal.show' }) as HTMLButtonElement;
+
+  const openMenu = async (index = 0) => {
     const user = userEvent.setup();
-    renderPage();
-    await user.click(await screen.findByRole('button', { name: 'vaults.rowActions' }));
-    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalled());
-    expect(warmVaultSandboxClient).toHaveBeenCalled();
+    if (index === 0) renderPage();
+    const [button] = (await screen.findAllByRole('button', { name: 'vaults.rowActions' })).slice(index);
+    await user.click(button);
   };
 
   const clickShowValue = async () => {
     const popup = { closed: false, close: vi.fn() };
     const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'vaults.reveal.show' }));
+    await vi.waitFor(() => expect(showValue().disabled).toBe(false));
+    fireEvent.click(showValue());
     // Asserted synchronously after the click dispatch, before any awaited work can run.
     expect(open).toHaveBeenCalledOnce();
     const opened = new URL(String(open.mock.calls[0][0]));
@@ -231,6 +230,41 @@ describe('VaultsPage protected reveal', () => {
     expect(api.createVaultRevealContext).toHaveBeenCalledTimes(fetches);
   });
 
+  it('keeps Show value waiting while the context or the sandbox client are not ready', async () => {
+    let answer: () => void = () => undefined;
+    api.createVaultRevealContext.mockImplementation(
+      () => new Promise((resolve) => (answer = () => resolve({ ok: true, context: { secret_name: 'alpha' }, envelope }))),
+    );
+    useVaultSandboxWarm.mockImplementation((enabled: boolean) => !enabled);
+
+    await openMenu();
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
+    expect(showValue().disabled).toBe(true);
+    answer();
+    await vi.waitFor(() => expect(useVaultSandboxWarm).toHaveBeenLastCalledWith(true));
+    expect(showValue().disabled).toBe(true);
+
+    useVaultSandboxWarm.mockImplementation(() => true);
+    await clickShowValue();
+    expect(api.createVaultRevealContext).toHaveBeenCalledOnce();
+  });
+
+  it('prepares a second secret without waiting on the first one', async () => {
+    api.listVaultSecrets.mockResolvedValue({ secrets: [protectedSecret('alpha'), protectedSecret('beta')] });
+    api.createVaultRevealContext.mockImplementation((name: string) =>
+      name === 'alpha' ? new Promise(() => undefined) : Promise.resolve({ ok: true, context: { secret_name: name }, envelope }),
+    );
+
+    await openMenu();
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledWith('alpha', expect.anything()));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await openMenu(1);
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledWith('beta', expect.anything()));
+    await clickShowValue();
+
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ secret_name: 'beta' });
+  });
+
   it('refreshes the context while the menu stays open, so the click fetches nothing', async () => {
     let fetched = 0;
     api.createVaultRevealContext.mockImplementation(async () => ({ ok: true, context: { fetch: ++fetched }, envelope }));
@@ -238,6 +272,7 @@ describe('VaultsPage protected reveal', () => {
     const now = vi.spyOn(Date, 'now');
 
     await openMenu();
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
     now.mockReturnValue(opened + 20_000);
     vi.advanceTimersByTime(20_000);
     await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2));

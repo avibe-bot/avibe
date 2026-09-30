@@ -29,7 +29,7 @@ import { vaultRequestSessionDisplay } from '../ui/vault-request-session';
 import { VaultRequestSessionLink } from '../ui/vault-request-session-link';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
 import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
-import { useProtectedVault } from '../../lib/useProtectedVault';
+import { useProtectedVault, useVaultSandboxWarm } from '../../lib/useProtectedVault';
 import {
   openVaultsInBrowser,
   readVaultBrowserStep,
@@ -38,7 +38,7 @@ import {
 } from '../../lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '../../lib/vaultRequestPlacement';
 import { usePreparedRequest } from '../../lib/usePreparedRequest';
-import { openVaultAuthorizationWindow, warmVaultSandboxClient } from '../../lib/vaultSandboxClient';
+import { openVaultAuthorizationWindow } from '../../lib/vaultSandboxClient';
 import { useVaultRequestRefresh } from '../../lib/useVaultRequestRefresh';
 import {
   useInstanceAuthorization,
@@ -48,7 +48,7 @@ const PENDING_REQUEST_EXPIRY_GRACE_MS = 100;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
 // A reveal context stays valid for two minutes; the one an open row menu keeps ready for its click is
 // at most half a minute old.
-const PREPARED_REVEAL = { maxAgeMs: 30_000, refreshMs: 20_000 };
+const PREPARED_REVEAL = { maxAgeMs: 30_000, refreshMs: 20_000, latestOnly: false };
 const revealContextIssued = (reply: VaultRevealContextResult) => Boolean(reply?.ok && reply.context);
 
 const messageFromError = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -66,7 +66,9 @@ const SecretRow: React.FC<{
   canManage: boolean;
   menuOpen: boolean;
   onMenuOpenChange: (open: boolean) => void;
-}> = ({ secret: s, onEdit, onDelete, onReveal, canManage, menuOpen, onMenuOpenChange: setMenuOpen }) => {
+  /** The open menu's reveal context or sandbox client is not ready yet. */
+  revealPreparing: boolean;
+}> = ({ secret: s, onEdit, onDelete, onReveal, canManage, menuOpen, onMenuOpenChange: setMenuOpen, revealPreparing }) => {
   const { t } = useTranslation();
   const isKeypair = s.kind === 'keypair';
   const isProtected = s.protection === 'protected';
@@ -156,25 +158,27 @@ const SecretRow: React.FC<{
                 <button
                   type="button"
                   role="menuitem"
+                  disabled={revealPreparing}
                   onClick={() => {
                     setMenuOpen(false);
                     onReveal(s);
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2"
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
                 >
-                  <Eye className="size-4 text-muted" />
+                  {revealPreparing ? <Loader2 className="size-4 animate-spin text-muted" /> : <Eye className="size-4 text-muted" />}
                   {t('vaults.reveal.show')}
                 </button>
                 <button
                   type="button"
                   role="menuitem"
+                  disabled={revealPreparing}
                   onClick={() => {
                     setMenuOpen(false);
                     onReveal(s);
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2"
+                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-surface-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
                 >
-                  <Copy className="size-4 text-muted" />
+                  {revealPreparing ? <Loader2 className="size-4 animate-spin text-muted" /> : <Copy className="size-4 text-muted" />}
                   {t('vaults.reveal.copy')}
                 </button>
                 <div className="my-1 h-px bg-border" />
@@ -746,15 +750,15 @@ export const VaultsPage: React.FC = () => {
     const secret = secrets.find((s) => s.name === menuSecret);
     return secret?.protection === 'protected' && secret.kind !== 'keypair' && !vaultPasskeyNeedsBrowser() ? secret.name : null;
   }, [secrets, menuSecret]);
-  const claimRevealContext = usePreparedRequest(menuRevealName, requestRevealContext, revealContextIssued, PREPARED_REVEAL);
-  useEffect(() => {
-    if (menuRevealName) warmVaultSandboxClient();
-  }, [menuRevealName]);
+  const revealContext = usePreparedRequest(menuRevealName, requestRevealContext, revealContextIssued, PREPARED_REVEAL);
+  const revealSandboxReady = useVaultSandboxWarm(menuRevealName !== null);
+  // Show and Copy wait for both, so their click never waits on either.
+  const revealPreparing = !revealSandboxReady || revealContext.pending;
   const revealSecret = useCallback(
     async (secret: VaultSecret) => {
       const authorizationWindow = openVaultAuthorizationWindow();
       try {
-        const res = await claimRevealContext(secret.name);
+        const res = await revealContext.claim(secret.name);
         if (!res?.ok || !res.context) throw new Error(res?.message || t('vaults.reveal.errors.contextFailed'));
         // The sandbox needs the sealed record to open it. The daemon returns it alongside the signed
         // reveal context; if it's absent, surface a clear message rather than a cryptic sandbox error.
@@ -772,7 +776,7 @@ export const VaultsPage: React.FC = () => {
         authorizationWindow?.close();
       }
     },
-    [claimRevealContext, vault, showToast, t],
+    [revealContext, vault, showToast, t],
   );
   const confirmDelete = async () => {
     const secret = deleteTarget;
@@ -933,6 +937,7 @@ export const VaultsPage: React.FC = () => {
               onReveal={revealSecret}
               canManage={canManage}
               menuOpen={s.name === menuSecret}
+              revealPreparing={s.name === menuRevealName && revealPreparing}
               onMenuOpenChange={(open) => setMenuSecret(open ? s.name : null)}
             />
           ))}

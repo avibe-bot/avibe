@@ -807,15 +807,6 @@ export async function getVaultSandboxClient(): Promise<VaultSandboxClient> {
 }
 
 /**
- * Start the sandbox client ahead of a protected step whose click opens the authorization window:
- * building it fetches and hashes the sandbox and handshakes, which must not happen after that click
- * (protocol v2 §6.6). A failure here surfaces again when the step itself asks for the client.
- */
-export function warmVaultSandboxClient(): void {
-  void getVaultSandboxClient().catch(() => undefined);
-}
-
-/**
  * Discard the current sandbox client so the next {@link getVaultSandboxClient} builds a fresh one
  * and re-handshakes. The sandbox pins its enforced session policy at the first handshake, so this
  * is how a policy tightening (enabling Strict) takes effect immediately on *every* path — including

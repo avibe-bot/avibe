@@ -29,7 +29,7 @@ const api = vi.hoisted(() => ({
   listVaultSecrets: vi.fn(),
   signVaultDigest: vi.fn(),
 }));
-const warmVaultSandboxClient = vi.hoisted(() => vi.fn());
+const useVaultSandboxWarm = vi.hoisted(() => vi.fn((_enabled: boolean) => true));
 const vault = vi.hoisted(() => ({
   status: 'needs-setup',
   error: null,
@@ -54,10 +54,7 @@ vi.mock('@/lib/useProtectedVault', () => ({
   useProtectedVault: () => vault,
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
   webauthnAvailable: () => true,
-}));
-vi.mock('@/lib/vaultSandboxClient', async (loadOriginal) => ({
-  ...(await loadOriginal<typeof import('@/lib/vaultSandboxClient')>()),
-  warmVaultSandboxClient,
+  useVaultSandboxWarm,
 }));
 // Workbench navigation, not part of the Vaults step (and it scrolls, which jsdom lacks).
 vi.mock('@/components/workbench/CapabilityTabs', () => ({ CapabilityTabs: () => null }));
@@ -284,7 +281,7 @@ describe('desktop shell protected-vault browser handoff', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(api.createVaultAgentBindingsBatch).not.toHaveBeenCalled();
     expect(api.createVaultRevealContext).not.toHaveBeenCalled();
-    expect(warmVaultSandboxClient).not.toHaveBeenCalled();
+    expect(useVaultSandboxWarm).not.toHaveBeenCalledWith(true);
 
     cleanup();
     delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;

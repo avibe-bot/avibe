@@ -13,11 +13,11 @@ import {
 } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { partitionTags } from '@/lib/vaultTags';
-import { useProtectedVault, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
+import { useProtectedVault, useVaultSandboxWarm, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
 import { usePreparedRequest } from '@/lib/usePreparedRequest';
-import { openVaultAuthorizationWindow, warmVaultSandboxClient } from '@/lib/vaultSandboxClient';
+import { openVaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
 import { SigningAddressList } from './signing-address-list';
 import { type BlindBox, type SignatureResult, type SignatureScheme } from '@/lib/vaultCrypto';
 import { cn, copyTextToClipboard } from '@/lib/utils';
@@ -95,10 +95,11 @@ function addressesForScheme(scheme: string | undefined, addresses: SigningAddres
 
 // The approval click opens the sandbox authorization window, which gets its request in time only if
 // nothing it needs waits on the daemon after the click (`usePreparedRequest`): the signed
-// agent-delivery contexts are issued while the card is open, and the click claims them. The batch
-// endpoint keeps just its latest issue for a request, which the one-at-a-time requests preserve.
+// agent-delivery contexts are issued while the card is open, the approve button waits for them and
+// for the sandbox client, and the click claims them. The batch endpoint keeps just its latest issue
+// for a request.
 type BindingsKey = { requestId: string; duration: VaultGrantDuration };
-const PREPARED_BINDINGS = { maxAgeMs: 20_000, refreshMs: 15_000 };
+const PREPARED_BINDINGS = { maxAgeMs: 20_000, refreshMs: 15_000, latestOnly: true };
 const bindingsIssued = (reply: VaultAgentBindingsBatchResult) => reply.ok;
 
 // design.pen `SKBld` / `pRtHq`: a borderless detail list (no inner card) with sentence-case
@@ -181,13 +182,9 @@ export const VaultApprovalCard: React.FC<{
   // Once the approver has picked a duration, the async settings seed must not clobber it if the GET
   // happens to resolve after the click.
   const grantTouchedRef = useRef(false);
-  // The duration is settled once the seed has answered or the approver has picked one; binding
-  // contexts are issued only then, so opening the card issues once for the duration it shows.
-  const [grantSettled, setGrantSettled] = useState(false);
   const pickGrantDuration = useCallback((next: GrantDurationChoice) => {
     grantTouchedRef.current = true;
     setGrantDuration(next);
-    setGrantSettled(true);
   }, []);
   // A one-shot grant is always one-time regardless of the picker; everything downstream (submit,
   // persistence, the rendered control) reads this rather than the raw picker state.
@@ -207,10 +204,7 @@ export const VaultApprovalCard: React.FC<{
       .then((res) => {
         if (alive && !grantTouchedRef.current && res?.ok) setGrantDuration(grantChoiceFromLastTtl(res.settings?.last_grant_ttl));
       })
-      .catch(() => undefined)
-      .finally(() => {
-        if (alive) setGrantSettled(true);
-      });
+      .catch(() => undefined);
     return () => {
       alive = false;
     };
@@ -250,20 +244,17 @@ export const VaultApprovalCard: React.FC<{
     ({ requestId, duration }: BindingsKey) => api.createVaultAgentBindingsBatch({ request_id: requestId, grant_duration: duration }),
     [api],
   );
-  const claimBindings = usePreparedRequest(
-    canApprove && !isSign && !approveInBrowser && materials.length > 0 && option?.grant_id && (isOneShot || grantSettled) && !busy && !resolved
+  const bindings = usePreparedRequest(
+    canApprove && !isSign && !approveInBrowser && materials.length > 0 && option?.grant_id && !busy && !resolved
       ? { requestId: request.id, duration: grantDurationApiValue(effectiveGrantDuration) }
       : null,
     sendBindings,
     bindingsIssued,
     PREPARED_BINDINGS,
   );
-
-  useEffect(() => {
-    // The authorization window's request also needs the sandbox frame; start it now rather than
-    // after the click.
-    if (needsProtectedApproval && !approveInBrowser) warmVaultSandboxClient();
-  }, [needsProtectedApproval, approveInBrowser]);
+  const sandboxReady = useVaultSandboxWarm(needsProtectedApproval && !approveInBrowser);
+  // Until both are ready the approve button waits, so its click never waits on either.
+  const preparing = !busy && (!sandboxReady || bindings.pending);
 
   useEffect(() => {
     if (needsProtectedApproval) void vault.refresh();
@@ -324,7 +315,7 @@ export const VaultApprovalCard: React.FC<{
           // whole selector, issued while the card was open; the sandbox then releases every DEK
           // behind ONE confirm (protocol v2 §7.1) as opaque HPKE blind boxes for the pinned
           // resident agent.
-          const issued = await claimBindings({ requestId: request.id, duration: durationValue });
+          const issued = await bindings.claim({ requestId: request.id, duration: durationValue });
           failIfNotOk(issued);
           const materialByName = new Map(materials.map((m) => [m.name, m]));
           const approveItems = issued.items.map((item) => {
@@ -419,7 +410,7 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  const approveDisabled = busy || !canApprove || (!isSign && !option);
+  const approveDisabled = busy || preparing || !canApprove || (!isSign && !option);
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -645,7 +636,7 @@ export const VaultApprovalCard: React.FC<{
             </Button>
           ) : (
             <Button type="button" onClick={isSign ? approveSign : approveAccess} disabled={approveDisabled}>
-              {busy ? (
+              {busy || preparing ? (
                 <Loader2 className="size-4 animate-spin" />
               ) : isSign ? (
                 <PenTool className="size-4" />
