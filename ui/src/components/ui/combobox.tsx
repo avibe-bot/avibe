@@ -57,7 +57,14 @@ interface ComboboxProps {
   /** When set, the create affordance renders as a bordered input + this-labelled button
    *  (design.pen `e3rPI`) instead of an inline command item. */
   createButtonLabel?: string
+  /** A "+ label" row pinned under the options, visible however far the list
+   *  scrolls, that leads somewhere else rather than choosing a value; the menu
+   *  closes before `onSelect` runs. */
+  footerAction?: { label: string; onSelect: () => void }
 }
+
+// cmdk keys rows by value; a reserved one keeps the action apart from options.
+const FOOTER_ACTION_VALUE = "__combobox_footer_action__"
 
 export function Combobox({
   options,
@@ -76,6 +83,7 @@ export function Combobox({
   createHeading,
   withFolderIcon = false,
   createButtonLabel,
+  footerAction,
 }: ComboboxProps) {
   const [open, setOpen] = React.useState(false)
   const [inputValue, setInputValue] = React.useState("")
@@ -253,6 +261,25 @@ export function Combobox({
                   </CommandItem>
                 </CommandGroup>
               )
+            )}
+            {/* Pinned to the bottom edge so a long list does not scroll it out of sight. */}
+            {footerAction && (
+              <div className="sticky bottom-0 border-t border-border bg-panel">
+                <CommandGroup>
+                  <CommandItem
+                    value={FOOTER_ACTION_VALUE}
+                    onSelect={() => {
+                      setOpen(false)
+                      setInputValue("")
+                      footerAction.onSelect()
+                    }}
+                    className="text-mint-ink data-[selected=true]:text-mint-ink"
+                  >
+                    <Plus className="mr-2 h-4 w-4" />
+                    {footerAction.label}
+                  </CommandItem>
+                </CommandGroup>
+              </div>
             )}
           </CommandList>
         </Command>

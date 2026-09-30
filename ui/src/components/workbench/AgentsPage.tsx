@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Bot,
   ChevronDown,
@@ -48,8 +48,9 @@ import { Textarea } from '../ui/textarea';
 import { EditorDialog } from '../ui/editor-dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { onPageReactivated } from '../../lib/pageActivity';
+import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
-import { loadBackendModelsWithRefresh, modelOptionLabel } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelPath } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -1984,6 +1985,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
       {
         modelOptions: ComboboxOption[];
         reasoningOptions: Record<string, { value: string; label: string }[]>;
+        hubManaged?: boolean;
       }
     >
   >({});
@@ -2008,6 +2010,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   const activeModelCatalog = modelCatalogs[agent.backend];
   const modelOptions = activeModelCatalog?.modelOptions ?? [];
   const reasoningOptions = activeModelCatalog?.reasoningOptions ?? {};
+  const addModelPath = useAddModelPath(agent.backend, activeModelCatalog?.hubManaged);
+  const navigate = useNavigate();
+  const surfaceActive = useRouteSurfaceActive();
 
   useEffect(() => {
     const previous = serverSnapshotRef.current;
@@ -2065,17 +2070,20 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
 
   // Load model catalog for the agent's backend so the Combobox can offer
   // suggestions. Keeps `allowCustomValue` so users can type a model the
-  // backend doesn't know about yet (e.g. a freshly-released preview).
+  // backend doesn't know about yet (e.g. a freshly-released preview). Read
+  // again when Settings uncovers the page: the Model Hub there edits the list.
   useEffect(() => {
+    if (!surfaceActive) return;
     return loadBackendModelsWithRefresh(
       api,
       agent.backend,
-      ({ models, modelLabels, reasoningOptions: opts }) => {
+      ({ models, modelLabels, reasoningOptions: opts, hubManaged }) => {
         setModelCatalogs((current) => ({
           ...current,
           [agent.backend]: {
             modelOptions: models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })),
             reasoningOptions: opts ?? {},
+            hubManaged,
           },
         }));
       },
@@ -2086,7 +2094,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         }));
       },
     );
-  }, [agent.backend, api]);
+  }, [agent.backend, api, surfaceActive]);
 
   const lockHint = system
     ? t('agents.detail.systemLocked')
@@ -2402,6 +2410,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
             placeholder={t('agents.detail.modelPlaceholder')}
             emptyText={t('agents.detail.modelEmpty')}
             allowCustomValue
+            footerAction={addModelPath ? { label: t('chat.picker.addModel'), onSelect: () => navigate(addModelPath) } : undefined}
           />
         )}
       </Field>

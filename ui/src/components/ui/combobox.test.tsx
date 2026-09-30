@@ -120,6 +120,23 @@ describe('Combobox', () => {
     expect(screen.getByRole('combobox').getAttribute('aria-label')).toBeNull();
   });
 
+  it('pins a footer action under the options, and leaves through it without choosing', async () => {
+    // A model picker ends with 「Add model」, which goes where the list is edited;
+    // it must stay reachable while a typed query hides every option, and taking
+    // it must not write the query or a row as the field's value.
+    const onSelect = vi.fn();
+    const onValueChange = vi.fn();
+    const { user } = await open(plain, { onValueChange, footerAction: { label: 'Add model', onSelect } });
+
+    expect(screen.getAllByRole('option').map((row) => row.textContent).at(-1)).toBe('Add model');
+    await user.keyboard('zzz');
+    await user.click(screen.getByRole('option', { name: 'Add model' }));
+
+    expect(onSelect).toHaveBeenCalledOnce();
+    expect(onValueChange).not.toHaveBeenCalled();
+    expect(screen.queryAllByRole('option')).toEqual([]);
+  });
+
   it('does not open while the field is disabled', async () => {
     await open(marked, { disabled: true });
     expect(screen.queryAllByRole('option')).toEqual([]);

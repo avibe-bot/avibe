@@ -4574,6 +4574,7 @@
       "model": "模型",
       "effort": "思考强度",
       "newAgent": "新建 Agent",
+      "addModel": "添加模型",
       "noModels": "未找到模型",
       "searchModels": "搜索模型",
       "noModelMatch": "无匹配模型",

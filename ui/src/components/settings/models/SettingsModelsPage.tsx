@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { ArrowDownToLine, Activity, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -26,6 +26,7 @@ import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
 import { modelsSurfaceKindFromReads } from './modelHubSurfaceState';
 import { focusDialogReturn, focusModelHubProjection } from './modelHubFocus';
+import { MODEL_HUB_MANAGE_PARAM } from './modelHubRoutes';
 import { buildSupplyRelations } from './supplyRelations';
 import {
   emptySuspendedRouteAttempts,
@@ -549,6 +550,26 @@ export const SettingsModelsPage: React.FC = () => {
     unread: () => [],
     degraded: (staleData) => staleData,
   });
+  // `?manage=<backend>` is a model picker's 「Add model」 exit. Once the supply
+  // read can say whether that backend is on the Hub, open its catalog (or
+  // nothing, if it is not) and drop the parameter so a reload or Back does not
+  // open it again. The replace keeps the Settings overlay's origin in state.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
+  const requestedCatalogBackend = searchParams.get(MODEL_HUB_MANAGE_PARAM);
+  const supplyKnown = supplyRead.kind === 'ready' || supplyRead.kind === 'degraded';
+  React.useEffect(() => {
+    if (requestedCatalogBackend === null || !supplyKnown) return;
+    const requested = agents.find((agent) => agent.backend === requestedCatalogBackend && agent.mode === 'hub');
+    if (requested) {
+      catalogOriginRef.current = null;
+      setCatalogFocus(null);
+      setMenuBackend(requested.backend);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete(MODEL_HUB_MANAGE_PARAM);
+    setSearchParams(next, { replace: true, state: location.state });
+  }, [agents, location.state, requestedCatalogBackend, searchParams, setSearchParams, supplyKnown]);
   const chains = foldRegionRead<ModelChainIndex, ModelChainIndex>(chainsRead, {
     loading: () => ({}),
     ready: (data) => data,

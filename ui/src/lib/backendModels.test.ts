@@ -172,6 +172,7 @@ describe('fetchBackendModels in gateway mode', () => {
         // the catalog never wrote may fall back to the generic ladder.
         beta: [],
       },
+      hubManaged: true,
     });
   });
 
@@ -298,6 +299,7 @@ describe('fetchBackendModels in gateway mode', () => {
       models: [],
       modelLabels: {},
       reasoningOptions: {},
+      hubManaged: true,
     });
     expect(codexModels).not.toHaveBeenCalled();
   });
@@ -337,10 +339,13 @@ describe('fetchBackendModels outside gateway mode', () => {
       claudeModels,
     } as unknown as ApiContextType;
 
-    await expect(fetchBackendModels(api, 'claude')).resolves.toMatchObject({
+    const result = await fetchBackendModels(api, 'claude');
+    expect(result).toMatchObject({
       models: ['native-a'],
       modelLabels: { 'native-a': 'Native A' },
     });
+    // Nothing in the Hub edits a direct backend's list, so no picker sends the user there.
+    expect(result.hubManaged).toBeFalsy();
     expect(claudeModels).toHaveBeenCalledOnce();
   });
 
@@ -353,7 +358,8 @@ describe('fetchBackendModels outside gateway mode', () => {
       claudeModels,
     } as unknown as ApiContextType;
 
-    await expect(fetchBackendModels(api, 'claude')).resolves.toMatchObject({ models: ['native-a'] });
+    // The list is native until a catalog is written, but writing one is the Hub's job.
+    await expect(fetchBackendModels(api, 'claude')).resolves.toMatchObject({ models: ['native-a'], hubManaged: true });
     expect(claudeModels).toHaveBeenCalledOnce();
   });
 

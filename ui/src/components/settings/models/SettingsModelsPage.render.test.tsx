@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
@@ -468,6 +468,40 @@ describe('SettingsModelsPage surface branches', () => {
       }
     });
     if (origin === 'passthrough') expect(view.container.querySelector('.model-hub-legend-swatch--passthrough')).not.toBeNull();
+  });
+
+  it.each([
+    ['opens the catalog of a Hub backend a model picker sent the user to', 'codex', true],
+    ['opens nothing for a backend that is not on the Hub', 'claude', false],
+  ])('%s, and drops the request from the address', async (_case, backend, opens) => {
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent, directAgent('claude')]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(takeoverAgent);
+    const LocationProbe = () => {
+      const location = useLocation();
+      return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
+    };
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <MemoryRouter initialEntries={[`/settings/models?manage=${backend}`]}>
+            <SettingsModelsRoute />
+            <LocationProbe />
+          </MemoryRouter>
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    // A reload or Back must not open it again, so the request is consumed.
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/models'));
+    if (opens) {
+      expect(await screen.findByRole('dialog', { name: /^Codex models$|^Codex 模型$/i })).toBeTruthy();
+    } else {
+      expect(screen.queryByRole('dialog')).toBeNull();
+    }
   });
 
   it('acknowledges a catalog save and reveals a new model beyond the collapsed limit', async () => {

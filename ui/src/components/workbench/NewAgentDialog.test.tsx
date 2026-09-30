@@ -2,7 +2,10 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 
+import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
+import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { NewAgentDialog } from './NewAgentDialog';
 
 const apiRef = vi.hoisted(() => ({ current: null as { createVibeAgent: ReturnType<typeof vi.fn> } | null }));
@@ -12,6 +15,8 @@ vi.stubGlobal('ResizeObserver', class {
   unobserve() {}
   disconnect() {}
 });
+// cmdk scrolls its highlighted row into view; jsdom implements no scrolling.
+Element.prototype.scrollIntoView = vi.fn();
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -29,6 +34,7 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 type FakeModelCatalog = {
   models: string[];
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
+  hubManaged?: boolean;
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 
@@ -43,7 +49,11 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
 const renderDialog = () => {
   const createVibeAgent = vi.fn().mockResolvedValue({ ok: true, agent: { id: 'agt-new' } });
   apiRef.current = { createVibeAgent };
-  render(<NewAgentDialog open onClose={vi.fn()} onCreated={vi.fn()} />);
+  render(
+    <MemoryRouter>
+      <NewAgentDialog open onClose={vi.fn()} onCreated={vi.fn()} />
+    </MemoryRouter>,
+  );
   return { createVibeAgent };
 };
 
@@ -62,6 +72,33 @@ afterEach(() => {
 });
 
 describe('NewAgentDialog', () => {
+  it("closes before leaving for the Model Hub catalog of a Hub backend's models", () => {
+    // Left open, the dialog would sit over the page it sent the user to.
+    modelCatalog = { models: ['opus'], hubManaged: true };
+    apiRef.current = { createVibeAgent: vi.fn() };
+    const events: string[] = [];
+    const LocationProbe = () => {
+      const location = useLocation();
+      if (location.search) events.push(`navigate ${location.pathname}${location.search}`);
+      return null;
+    };
+    render(
+      <InstanceAuthorizationContext.Provider
+        value={{ remote: false, instanceKind: null, instanceRole: 'owner', capabilities: OWNER_INSTANCE_CAPABILITIES }}
+      >
+        <MemoryRouter>
+          <NewAgentDialog open onClose={() => events.push('close')} onCreated={vi.fn()} />
+          <LocationProbe />
+        </MemoryRouter>
+      </InstanceAuthorizationContext.Provider>,
+    );
+
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.click(screen.getByText('chat.picker.addModel'));
+
+    expect(events).toEqual(['close', 'navigate /settings/models?manage=claude']);
+  });
+
   it('creates with no effort when the catalog says the model has none', async () => {
     // `medium` is only a starting suggestion. Sending it for a model whose
     // catalog row states no efforts would create an Agent whose very first

@@ -1,6 +1,8 @@
 import { routeableCatalogModelIds } from '../components/settings/models/backendCatalog';
+import { modelHubCatalogPath } from '../components/settings/models/modelHubRoutes';
 import type { AgentSupply } from '../components/settings/models/types';
 import { ApiError, type ApiContextType } from '../context/ApiContext';
+import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 
 export interface BackendModels {
   /** Selectable model identifiers for the backend. */
@@ -11,6 +13,8 @@ export interface BackendModels {
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
   /** True while a background remote-catalog refresh may produce a newer snapshot. */
   catalogRefreshPending?: boolean;
+  /** True when the Model Hub supplies this backend, so its list is edited there. */
+  hubManaged?: boolean;
 }
 
 const CATALOG_REFRESH_RETRY_DELAY_MS = 3_500;
@@ -26,8 +30,11 @@ export function modelOptionLabel(model: string, labels?: Record<string, string>)
 // the native fallback; an explicitly empty catalog remains an empty menu.
 type PickerAgentCatalog = Pick<AgentSupply, 'backend' | 'mode' | 'catalog_models'>;
 
+const isHubAgent = (agent: PickerAgentCatalog | null, backend: string): agent is PickerAgentCatalog =>
+  agent !== null && agent.backend === backend && agent.mode === 'hub';
+
 const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): BackendModels | null => {
-  if (!agent || agent.backend !== backend || agent.mode !== 'hub') return null;
+  if (!isHubAgent(agent, backend)) return null;
   const catalog = agent.catalog_models ?? null;
   if (!catalog) return null;
   // A backend-owned selector such as Claude Code's Default is not routeable.
@@ -48,7 +55,7 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
       ? []
       : row.reasoning_efforts.map((effort) => ({ value: effort, label: effort }));
   }
-  return { models, modelLabels, reasoningOptions };
+  return { models, modelLabels, reasoningOptions, hubManaged: true };
 };
 
 // Single source of truth for "list the selectable models for a backend",
@@ -68,8 +75,19 @@ export async function fetchBackendModels(
   api: ApiContextType,
   backend: string,
 ): Promise<BackendModels> {
-  const hub = hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend);
+  const agent = await api.readModelHubAgentCatalogForModelPicker(backend);
+  const hub = hubCatalogModels(agent, backend);
   if (hub) return hub;
+  const native = await fetchNativeBackendModels(api, backend);
+  // A Hub backend whose catalog has not been written yet still lists natively,
+  // but its list is already the Hub's to edit.
+  return isHubAgent(agent, backend) ? { ...native, hubManaged: true } : native;
+}
+
+async function fetchNativeBackendModels(
+  api: ApiContextType,
+  backend: string,
+): Promise<BackendModels> {
   if (backend === 'claude') {
     const res = await api.claudeModels();
     return {
@@ -137,6 +155,16 @@ export async function fetchBackendModels(
     };
   }
   return { models: [] };
+}
+
+/**
+ * Where a model picker's "Add model" entry leads, or null when it shows none.
+ * Only a Model Hub backend has a catalog to add to, and the Model Hub is an
+ * Instance Owner surface that sends anyone else back home.
+ */
+export function useAddModelPath(backend: string, hubManaged: boolean | undefined): string | null {
+  const { capabilities } = useInstanceAuthorization();
+  return backend && hubManaged && capabilities.can_manage_instance ? modelHubCatalogPath(backend) : null;
 }
 
 export function loadBackendModelsWithRefresh(
