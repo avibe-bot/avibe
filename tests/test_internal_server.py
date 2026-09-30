@@ -120,7 +120,7 @@ def _build_controller_double(handler=None):
         or ""
     ) or None
 
-    def _mark_turn_complete(ctx):
+    def _mark_turn_complete(ctx, *, settled_by=None):
         manager = getattr(controller, "session_turns", None)
         if manager is not None:
             spec = getattr(ctx, "platform_specific", None) or {}
@@ -135,6 +135,8 @@ def _build_controller_double(handler=None):
                     runtime_turn_id=f"runtime-turn:{logical_turn_id}",
                 )
         sink = sinks.get(resolve_turn_sink_key(controller, ctx))
+        if sink and settled_by:
+            sink.setdefault("settled_by", settled_by)
         if sink and sink.get("done_event") is not None:
             sink["done_event"].set()
 
@@ -3141,6 +3143,60 @@ def test_release_for_backend_refresh_cancels_matching_turn_and_sets_idle():
     assert cancelled is True
     assert statuses == [("ses_codex", "idle")]
     assert manager._deferred_restart_sessions == {"codex": {"ses_codex"}}
+
+
+@pytest.mark.parametrize("harness", [False, True], ids=["conversation", "harness-run"])
+def test_release_for_backend_refresh_names_the_interruption(harness):
+    """MH-MIG-012: a forced runtime refresh settles the turn it interrupts as a
+    backend refresh even when the backend swallows the cancellation and reports
+    a result-less turn, and a conversation turn tells the user why it stopped.
+    A Harness run reports its own interruption, so it gets no second notice."""
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    controller.set_agent_status = lambda *_args: None
+    notices = []
+
+    async def _emit(context, kind, text, **_kwargs):
+        notices.append((context.channel_id, kind, text))
+        return "notice-1"
+
+    controller.emit_agent_message = _emit
+
+    async def _go():
+        ctx = MessageContext(user_id="U", channel_id="ses_opencode", platform="avibe")
+        ctx.platform_specific = {
+            "agent_session_id": "ses_opencode",
+            "agent_session_target": {"agent_backend": "opencode"},
+            **({"task_execution_id": "run-1"} if harness else {}),
+        }
+        sink_key = resolve_turn_sink_key(controller, ctx)
+        controller.register_turn_sink(sink_key, on_chunk=None, done_event=asyncio.Event())
+
+        async def _swallows_cancellation():
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                # Like the OpenCode adapter: release the waiter as result-less.
+                controller.mark_turn_complete(ctx, settled_by="no_terminal_result")
+
+        task = asyncio.create_task(_swallows_cancellation())
+        await asyncio.sleep(0)
+        manager.in_flight["ses_opencode"] = session_turns.Turn(task=task, context=ctx, logical_turn_id="turn-1")
+        await manager.release_for_backend_refresh(backend="opencode", base_session_ids={"ses_opencode"})
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return controller.get_turn_sink(sink_key)
+
+    sink = asyncio.run(_go())
+
+    assert sink["settled_by"] == "backend_refresh"
+    if harness:
+        assert notices == []
+    else:
+        assert len(notices) == 1
+        channel, kind, text = notices[0]
+        assert (channel, kind) == ("ses_opencode", "notify")
+        assert text.startswith("⚠️ This turn was interrupted — its Agent runtime was restarted")
 
 
 def test_release_for_backend_refresh_leaves_other_backend_turn_running():

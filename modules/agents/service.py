@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
+from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
 from core.session_activities import SessionActivityRegistry
 from core.message_output import (
     HARNESS_PROMPT_ECHO_SPEC_KEY,
@@ -191,9 +192,10 @@ class AgentService:
             return True
 
     def force_end_backend_activities(self, backend: str) -> list[Any]:
+        """End every Activity of a runtime the service is tearing down itself."""
         completed = self.activities.end_backend(backend, status="killed")
         for activity in completed:
-            self.on_activity_terminal(activity)
+            self.on_activity_terminal(activity, interrupt_reason=SETTLED_BY_BACKEND_REFRESH)
         return completed
 
     def register(self, agent: BaseAgent):
@@ -206,7 +208,7 @@ class AgentService:
         if callable(notify):
             notify(str(getattr(activity, "runtime_key", "") or ""))
 
-    def on_activity_terminal(self, activity: Any) -> bool:
+    def on_activity_terminal(self, activity: Any, *, interrupt_reason: str | None = None) -> bool:
         """Let the Run owner acknowledge one terminal Activity."""
 
         if (getattr(activity, "metadata", None) or {}).get("provenance_pending"):
@@ -218,7 +220,10 @@ class AgentService:
         if not callable(settle):
             return False
         try:
-            settle(activity)
+            if interrupt_reason:
+                settle(activity, interrupt_reason=interrupt_reason)
+            else:
+                settle(activity)
             # ``ack_recovered_terminal`` is a no-op for ordinary active or
             # output-queue entries.  Calling it for every classified terminal
             # also retires a completed foreground Activity that had to remain a

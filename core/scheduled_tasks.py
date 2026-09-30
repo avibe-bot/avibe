@@ -3023,6 +3023,7 @@ class TaskExecutionStore:
         *,
         terminal_status: Optional[str] = None,
         error: Optional[str] = None,
+        interrupt_reason: Optional[str] = None,
     ) -> bool:
         if self._sqlite is None:
             return False
@@ -3030,6 +3031,7 @@ class TaskExecutionStore:
             run_id,
             terminal_status=terminal_status,
             error=error,
+            interrupt_reason=interrupt_reason,
         )
 
     def record_skip_reason(self, run_id: str, *, reason: str) -> bool:
@@ -7483,15 +7485,23 @@ class ScheduledTaskService:
                 lines.extend(self._deleted_definition_lines(run_id))
         return "\n".join(lines)
 
-    def settle_activity_runs(self, activity: Any) -> list[str]:
-        """Settle deferred Runs when a failed/stopped owned Activity is last."""
+    def settle_activity_runs(self, activity: Any, *, interrupt_reason: Optional[str] = None) -> list[str]:
+        """Settle deferred Runs when a failed/stopped owned Activity is last.
+
+        ``interrupt_reason`` means the service ended the Activity itself, as a
+        forced runtime refresh does. Its Runs then settle as that interruption,
+        which owes the user a notice, instead of a silent ``canceled``.
+        """
 
         activity_status = str(getattr(activity, "status", "") or "").strip().lower()
         if activity_status == "completed":
             # A completed Claude task may still produce a user-visible follow-up;
             # that Message owns Run settlement so output and callback stay aligned.
             return []
-        terminal_status = "failed" if activity_status == "failed" else "canceled"
+        if interrupt_reason:
+            terminal_status = SETTLEMENT_TERMINAL_STATUS.get(interrupt_reason, "failed")
+        else:
+            terminal_status = "failed" if activity_status == "failed" else "canceled"
         metadata = getattr(activity, "metadata", None) or {}
         run_ids: list[str] = []
         primary = str(getattr(activity, "run_id", "") or "").strip()
@@ -7517,10 +7527,15 @@ class ScheduledTaskService:
                 continue
             if callable(has_pending_output) and has_pending_output(run_id):
                 continue
-            error = f"Background Activity {getattr(activity, 'id', '')} {activity_status}"
+            error = (
+                self._t(SETTLEMENT_I18N_KEYS.get(interrupt_reason, SETTLEMENT_I18N_KEYS[SETTLED_BY_NO_TERMINAL_RESULT]))
+                if interrupt_reason
+                else f"Background Activity {getattr(activity, 'id', '')} {activity_status}"
+            )
             if self.request_store.settle_deferred_run(
                 run_id,
                 error=error,
+                **({"interrupt_reason": interrupt_reason} if interrupt_reason else {}),
             ):
                 settled.append(run_id)
         if settled:

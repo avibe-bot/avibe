@@ -1033,6 +1033,7 @@
   },
   "turn": {
     "interrupted": {
+      "backendRefresh": "⚠️ This turn was interrupted — its Agent runtime was restarted while it was still running, for example after switching between the Model Hub and direct mode or saving Agent settings. Send the request again if the work still needs doing.",
       "serviceRestart": "⚠️ This turn was interrupted — the Avibe service restarted while it was still running. Send the request again if the work still needs doing."
     }
   },

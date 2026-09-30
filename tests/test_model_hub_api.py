@@ -4714,12 +4714,52 @@ def test_hub_to_direct_fallback_does_not_require_engine_sync(tmp_path):
         "claude-opus-4-6",
     )
     adapter.fail_sync = True
+    service.migration_guard = _idle_mode_guard
 
     switched = asyncio.run(service.set_agent_mode("claude", "direct"))
 
     assert switched["mode"] == "direct"
     assert store.config.agents["claude"].mode == "direct"
     assert adapter.synced == []
+
+
+@pytest.mark.parametrize(("start", "target"), [("direct", "hub"), ("hub", "direct")])
+def test_mode_switch_commits_only_inside_the_interrupting_guard(tmp_path, start, target):
+    """MH-MIG-011: either direction retires the managed runtime under the
+    migration guard, which interrupts running work. Switching back to direct
+    outside it left a running gateway turn to fail later on the Hub's refusal."""
+    service, store, _adapter = _service(tmp_path)
+    service.migration_home = tmp_path / "native-home"
+    store.config.agents["claude"].mode = start
+    observed = []
+
+    @asynccontextmanager
+    async def guard(backends, *, external_processes=True):
+        observed.append(("enter", backends, external_processes, store.config.agents["claude"].mode))
+
+        async def verify_idle():
+            pass
+
+        yield verify_idle
+        observed.append(("exit", store.config.agents["claude"].mode))
+
+    service.migration_guard = guard
+    switched = asyncio.run(service.set_agent_mode("claude", target))
+
+    assert switched["mode"] == target
+    assert observed == [("enter", ("claude",), False, start), ("exit", target)]
+
+    @asynccontextmanager
+    async def refusing(backends, *, external_processes=True):
+        raise NativeMigrationBlockedError("native_runtime_busy", backends)
+        yield  # pragma: no cover - required async context-manager shape
+
+    service.migration_guard = refusing
+    with pytest.raises(ModelHubError) as refusal:
+        asyncio.run(service.set_agent_mode("claude", start))
+
+    assert refusal.value.code == "mode_switch_blocked"
+    assert store.config.agents["claude"].mode == target
 
 
 async def _confirm_guard(call):
@@ -4943,6 +4983,8 @@ _PROJECTION_MUTATIONS = {
 @pytest.mark.parametrize("mutation", _PROJECTION_MUTATIONS)
 def test_public_mutations_sync_the_engine_only_when_bindings_change(tmp_path, mutation):
     service, store, adapter = _service(tmp_path)
+    # A mode switch retires the runtime under the guard; nothing runs here.
+    service.migration_guard = _idle_mode_guard
     _set_claude_route_fixture(store, ("src_first0001", "src_second001"), _PROJECTION_MODEL)
     service._engine_synced = True
     call, synced_projection = _PROJECTION_MUTATIONS[mutation]

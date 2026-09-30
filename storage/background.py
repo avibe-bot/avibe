@@ -6659,9 +6659,15 @@ class SQLiteBackgroundTaskStore:
         *,
         terminal_status: Optional[str] = None,
         error: Optional[str] = None,
+        interrupt_reason: Optional[str] = None,
         updated_at: Optional[str] = None,
     ) -> bool:
-        """Apply one stored terminal intent after owned Activities become terminal."""
+        """Apply one stored terminal intent after owned Activities become terminal.
+
+        ``interrupt_reason`` names the infrastructure event that ended the owning
+        Activity. It is recorded only when ``error`` is the Run's explanation, so
+        an earlier deferred failure keeps its own cause.
+        """
 
         now = updated_at or _utc_now_iso()
         row_to_publish = None
@@ -6796,7 +6802,9 @@ class SQLiteBackgroundTaskStore:
                     parent_run_id=row["parent_run_id"],
                     row_metadata_json=row["metadata_json"],
                     extra_metadata=(
-                        notice_metadata
+                        {**(notice_metadata or {}), "interrupt_reason": interrupt_reason}
+                        if interrupt_reason and deferred_error is None
+                        else notice_metadata
                     ),
                     now=now,
                 )

@@ -4839,53 +4839,47 @@ class ModelHubService:
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"}:
             raise ModelHubError("mode_switch_blocked")
-        if mode == "hub":
-            from core.backend_restart import NativeMigrationBlockedError
+        from core.backend_restart import NativeMigrationBlockedError
 
-            # Serialize with takeover and retire the managed runtime so the
-            # next launch goes through the Hub. Mode-only consent never imports
-            # a login: native auth stays native beside the Hub, where the
-            # migration dialog can still take it over later.
-            async with self._migration_lock:
-                async with self._mutation_lock:
-                    current = self.store.load()
-                    agent = self._agent(current, backend)
-                    if agent.mode == "hub":
-                        return self._agent_payload(current, agent)
-                    # The guard interrupts running work, so refuse a switch
-                    # that would be refused anyway before destroying any.
+        # Either direction serializes with takeover and retires the managed
+        # runtime under the shared guard, which interrupts running work: a
+        # turn left running would keep using the mode it started in, and the
+        # Hub refuses a backend that has left it. Mode-only consent never
+        # imports a login: native auth stays native beside the Hub, where the
+        # migration dialog can still take it over later.
+        async with self._migration_lock:
+            async with self._mutation_lock:
+                current = self.store.load()
+                agent = self._agent(current, backend)
+                if agent.mode == mode:
+                    return self._agent_payload(current, agent)
+                if mode == "hub":
+                    # Refuse a switch that would be refused anyway before the
+                    # guard destroys any work.
                     try:
                         blocked = await self._native_config_blocks_launch(current, backend)
                     except (TakeoverStateError, OSError):
                         raise ModelHubError("mode_switch_blocked", status=409) from None
                     if blocked:
                         raise ModelHubError("mode_switch_blocked", status=409)
-                try:
-                    async with self.migration_guard((backend,), external_processes=False) as verify_idle:
-                        async with self._mutation_lock:
-                            # Recheck idleness after the last asynchronous drain.
-                            await verify_idle()
-                            previous = self.store.load()
-                            if await self._native_config_blocks_launch(previous, backend):
-                                raise ModelHubError("mode_switch_blocked", status=409)
-                            config = self._clone_config(previous)
-                            self._agent(config, backend).mode = "hub"
-                            await self._commit_synced(previous, config)
-                            committed = self.store.load()
-                            return self._agent_payload(committed, self._agent(committed, backend))
-                except NativeMigrationBlockedError as error:
-                    _log_native_refusal("Model Hub mode switch", error)
-                    raise ModelHubError("mode_switch_blocked", status=409) from None
-                except (TakeoverStateError, OSError):
-                    raise ModelHubError("mode_switch_blocked", status=409) from None
-        async with self._mutation_lock:
-            previous = self.store.load()
-            config = self._clone_config(previous)
-            agent = self._agent(config, backend)
-            agent.mode = mode
-            await self._commit_synced(previous, config)
-            committed = self.store.load()
-            return self._agent_payload(committed, self._agent(committed, backend))
+            try:
+                async with self.migration_guard((backend,), external_processes=False) as verify_idle:
+                    async with self._mutation_lock:
+                        # Recheck idleness after the last asynchronous drain.
+                        await verify_idle()
+                        previous = self.store.load()
+                        if mode == "hub" and await self._native_config_blocks_launch(previous, backend):
+                            raise ModelHubError("mode_switch_blocked", status=409)
+                        config = self._clone_config(previous)
+                        self._agent(config, backend).mode = mode
+                        await self._commit_synced(previous, config)
+                        committed = self.store.load()
+                        return self._agent_payload(committed, self._agent(committed, backend))
+            except NativeMigrationBlockedError as error:
+                _log_native_refusal("Model Hub mode switch", error)
+                raise ModelHubError("mode_switch_blocked", status=409) from None
+            except (TakeoverStateError, OSError):
+                raise ModelHubError("mode_switch_blocked", status=409) from None
 
     async def reorder_agent_chains(
         self,

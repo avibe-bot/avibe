@@ -159,7 +159,11 @@ explicitly authorized acceptance check.
   terminated. The interruption runs as a forced backend restart, which keeps
   admission closed until its teardown completes. The switch waits for it only
   for a short settle window and refuses as busy after that. Leaving early, by
-  timeout or cancellation, never cuts the teardown short. It is acquired before
+  timeout or cancellation, never cuts the teardown short. A mode switch in
+  either direction enters it, since a turn left running keeps the mode it
+  started in. Every interrupted conversation turn gets one visible notice, and
+  a Harness Run, including one owned by a background Activity, settles as a
+  backend-refresh interruption that owes its own notice. It is acquired before
   `_mutation_lock`.
   Production installs wire it from the Controller; no production no-op.
   Configured CLI identity is independent of backend enablement: the existing

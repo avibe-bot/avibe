@@ -39,7 +39,7 @@ def _terminal_output(request: Any, output: MessageOutput | None) -> MessageOutpu
     return terminal_turn_output()
 
 
-def _harness_run_identity(context: Any, request: Any) -> str:
+def harness_run_identity(context: Any, request: Any) -> str:
     """The Run id proving that this Turn was entered through Harness, if any."""
 
     for source in (getattr(request, "context", None), context):
@@ -90,7 +90,7 @@ def _failure_identity(
     #
     # Non-harness contexts have no run to align to, so a backend's explicit id
     # still wins there and that path is unchanged.
-    harness_identity = _harness_run_identity(context, request)
+    harness_identity = harness_run_identity(context, request)
     if harness_identity:
         return _turn_failure_identity(context, request) or harness_identity
 
@@ -236,7 +236,7 @@ def terminal_backend_failure_output(
     """
 
     terminal = _terminal_output(request, output)
-    if not (_turn_failure_identity(context, request) or _harness_run_identity(context, request)):
+    if not (_turn_failure_identity(context, request) or harness_run_identity(context, request)):
         return terminal
 
     metadata = dict(terminal.metadata)
@@ -395,7 +395,7 @@ async def emit_backend_failure(
         terminal = replace(
             terminal, metadata={**terminal.metadata, "local_error_detail": hub_failure[1]},
         )
-    harness_run_id = _harness_run_identity(context, request)
+    harness_run_id = harness_run_identity(context, request)
     owns_failure_contract = bool(
         _turn_failure_identity(context, request) or harness_run_id
     )

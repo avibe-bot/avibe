@@ -56,6 +56,7 @@ capability:
     - tests/test_model_hub_persisted_migration.py
     - tests/test_native_process_inventory.py
     - tests/test_native_takeover_lifecycle.py
+    - tests/test_internal_server.py
     - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_valuation_scenarios.py
     - tests/e2e/test_model_hub_guards.py
@@ -1289,6 +1290,21 @@ scenarios:
     test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-MIG-010 reports a refused switch to the gateway on the direct-only screen
     related_tests:
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+  - id: MH-MIG-011
+    name: Switching back to direct interrupts running gateway work instead of leaving it to fail on the Hub's refusal
+    status: covered
+    kind: migration
+    layer: unit
+    test: tests/test_model_hub_api.py::test_mode_switch_commits_only_inside_the_interrupting_guard
+  - id: MH-MIG-012
+    name: Work interrupted by a runtime refresh is reported to the user as that interruption on every backend
+    status: covered
+    kind: migration
+    layer: unit
+    test: tests/test_internal_server.py::test_release_for_backend_refresh_names_the_interruption
+    related_tests:
+      - tests/test_scheduled_tasks.py::test_terminal_owned_activity_settles_deferred_run_once
+      - tests/test_agent_service.py::test_force_end_backend_activities_settles_pending_runs
   - id: MH-TAKEOVER-001
     name: Recoverable failures walk the configured route and exhaust only at its end
     status: covered

@@ -1113,7 +1113,11 @@ def test_classification_run_ack_does_not_remove_output_receipt_across_restart(ac
 def test_force_end_service_ack_removes_durable_terminal_once(activity_store):
     settled = []
     service = AgentService(
-        SimpleNamespace(scheduled_task_service=SimpleNamespace(settle_activity_runs=settled.append)),
+        SimpleNamespace(
+            scheduled_task_service=SimpleNamespace(
+                settle_activity_runs=lambda activity, **_kwargs: settled.append(activity),
+            ),
+        ),
         activities=SessionActivityRegistry(activity_store),
     )
     for runtime in ("first", "second"):

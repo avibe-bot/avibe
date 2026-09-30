@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 from collections import deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -324,6 +325,15 @@ def _config(sources: list[ModelHubSourceConfig], *, model: str = "claude-opus-4-
         hops=tuple(ModelHubRouteHopConfig(source.id, model) for source in sources)
     )
     return ModelHubConfig(sources=sources, agents=agents)
+
+
+@asynccontextmanager
+async def _idle_mode_guard(backends, *, external_processes=True):
+    # A mode switch retires the runtime under the migration guard; these
+    # fixtures have no running work for it to interrupt.
+    async def verify_idle():
+        pass
+    yield verify_idle
 
 
 def _service(tmp_path: Path, config: ModelHubConfig, adapter: FakeAdapter | None = None) -> tuple[ModelHubService, MemoryStore, FakeAdapter]:
@@ -1242,6 +1252,7 @@ def test_direct_mode_rejects_chain_write_before_config_mutation(tmp_path):
     source = _source("src_direct01", (menu_model,))
     config = _config([source], model=menu_model)
     service, store, _ = _service(tmp_path, config)
+    service.migration_guard = _idle_mode_guard
     asyncio.run(service.set_agent_mode("claude", "direct"))
     before = store.load().to_payload()
 
@@ -2328,6 +2339,7 @@ def test_guards_ignore_a_preexisting_unrelated_interruption(tmp_path, mutation):
 def test_direct_mode_refuses_chain_and_probe(tmp_path):
     config = ModelHubConfig()
     service, _, _ = _service(tmp_path, config)
+    service.migration_guard = _idle_mode_guard
     asyncio.run(service.set_agent_mode("claude", "direct"))
     with pytest.raises(ModelHubError) as chain_error:
         service.agent_chain("claude", "claude-opus-4-6")
