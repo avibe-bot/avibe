@@ -98,14 +98,20 @@ function addressesForScheme(scheme: string | undefined, addresses: SigningAddres
 // therefore gets its request only if everything the request needs is already here: the signed
 // agent-delivery contexts are issued while the card is open, and the click only claims them. The
 // batch endpoint keeps just its latest issue for a request, so issues run one at a time, a claim
-// stops the refresh, and a claim never takes contexts older than the latest issue.
+// stops the refresh, and a claim takes only the latest issue.
 const PREPARED_BINDINGS_MAX_AGE_MS = 20_000;
 const PREPARED_BINDINGS_REFRESH_MS = 15_000;
 
 type PreparedBindings = {
   duration: VaultGrantDuration;
   result: Promise<VaultAgentBindingsBatchResult>;
-  issuedAt: number | null;
+  // When the request left, which bounds the contexts' age from above: the daemon signs them later.
+  sentAt: number | null;
+  settled: boolean;
+  failed: boolean;
+  // A prepared issue nobody claimed is dropped before it is sent once the card stops preparing.
+  claimed: boolean;
+  cancelled: boolean;
 };
 
 /** Keeps fresh binding contexts for `requestId` (null while nothing should be issued) and returns the click's claim. */
@@ -118,13 +124,29 @@ function usePreparedAgentBindings(api: ApiContextType, requestId: string | null,
     (id: string, grantDuration: VaultGrantDuration): PreparedBindings => {
       const entry: PreparedBindings = {
         duration: grantDuration,
-        issuedAt: null,
+        sentAt: null,
+        settled: false,
+        failed: false,
+        claimed: false,
+        cancelled: false,
         result: queue.current
-          .then(() => api.createVaultAgentBindingsBatch({ request_id: id, grant_duration: grantDuration }))
-          .then((res) => {
-            entry.issuedAt = Date.now();
-            return res;
-          }),
+          .then(() => {
+            if (entry.cancelled) throw new Error('binding issue cancelled');
+            entry.sentAt = Date.now();
+            return api.createVaultAgentBindingsBatch({ request_id: id, grant_duration: grantDuration });
+          })
+          .then(
+            (res) => {
+              entry.settled = true;
+              entry.failed = !res.ok;
+              return res;
+            },
+            (error: unknown) => {
+              entry.settled = true;
+              entry.failed = true;
+              throw error;
+            },
+          ),
       };
       queue.current = entry.result.catch(() => undefined);
       return entry;
@@ -134,19 +156,15 @@ function usePreparedAgentBindings(api: ApiContextType, requestId: string | null,
 
   useEffect(() => {
     if (!requestId) return;
-    const isStale = (entry: PreparedBindings | null) =>
-      !entry || (entry.issuedAt !== null && Date.now() - entry.issuedAt > PREPARED_BINDINGS_REFRESH_MS);
     const prepare = () => {
-      if (document.visibilityState !== 'visible') return;
-      const entry = issue(requestId, duration);
-      prepared.current = entry;
-      const drop = () => {
-        if (prepared.current === entry) prepared.current = null;
-      };
-      entry.result.then((res) => (res.ok ? undefined : drop()), drop);
+      const current = prepared.current;
+      // An issue still on its way stays the latest; a second one would only queue behind it.
+      if (document.visibilityState !== 'visible' || (current && !current.settled)) return;
+      prepared.current = issue(requestId, duration);
     };
     const onVisibilityChange = () => {
-      if (isStale(prepared.current)) prepare();
+      const current = prepared.current;
+      if (!current || (current.settled && (current.failed || Date.now() - (current.sentAt ?? 0) > PREPARED_BINDINGS_REFRESH_MS))) prepare();
     };
     prepare();
     const timer = window.setInterval(prepare, PREPARED_BINDINGS_REFRESH_MS);
@@ -158,18 +176,24 @@ function usePreparedAgentBindings(api: ApiContextType, requestId: string | null,
     stopRefresh.current = stop;
     return () => {
       stop();
+      if (prepared.current && !prepared.current.claimed) prepared.current.cancelled = true;
       prepared.current = null;
     };
   }, [issue, requestId, duration]);
 
+  // An issue still queued behind an earlier one is claimed too: any other issue for this duration
+  // would queue behind it, so it is the soonest these contexts can exist.
   return useCallback(
     (id: string, grantDuration: VaultGrantDuration): Promise<VaultAgentBindingsBatchResult> => {
       stopRefresh.current();
       const entry = prepared.current;
       prepared.current = null;
-      const fresh =
-        entry?.duration === grantDuration && (entry.issuedAt === null || Date.now() - entry.issuedAt <= PREPARED_BINDINGS_MAX_AGE_MS);
-      return fresh ? entry.result : issue(id, grantDuration).result;
+      if (entry) entry.claimed = true;
+      const usable =
+        entry?.duration === grantDuration &&
+        !entry.failed &&
+        (entry.sentAt === null || Date.now() - entry.sentAt <= PREPARED_BINDINGS_MAX_AGE_MS);
+      return usable ? entry.result : issue(id, grantDuration).result;
     },
     [issue],
   );
@@ -255,9 +279,13 @@ export const VaultApprovalCard: React.FC<{
   // Once the approver has picked a duration, the async settings seed must not clobber it if the GET
   // happens to resolve after the click.
   const grantTouchedRef = useRef(false);
+  // The duration is settled once the seed has answered or the approver has picked one; binding
+  // contexts are issued only then, so opening the card issues once for the duration it shows.
+  const [grantSettled, setGrantSettled] = useState(false);
   const pickGrantDuration = useCallback((next: GrantDurationChoice) => {
     grantTouchedRef.current = true;
     setGrantDuration(next);
+    setGrantSettled(true);
   }, []);
   // A one-shot grant is always one-time regardless of the picker; everything downstream (submit,
   // persistence, the rendered control) reads this rather than the raw picker state.
@@ -277,7 +305,10 @@ export const VaultApprovalCard: React.FC<{
       .then((res) => {
         if (alive && !grantTouchedRef.current && res?.ok) setGrantDuration(grantChoiceFromLastTtl(res.settings?.last_grant_ttl));
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        if (alive) setGrantSettled(true);
+      });
     return () => {
       alive = false;
     };
@@ -315,7 +346,7 @@ export const VaultApprovalCard: React.FC<{
   const [resolved, setResolved] = useState(false);
   const claimBindings = usePreparedAgentBindings(
     api,
-    canApprove && !isSign && !approveInBrowser && materials.length > 0 && option?.grant_id && !busy && !resolved
+    canApprove && !isSign && !approveInBrowser && materials.length > 0 && option?.grant_id && (isOneShot || grantSettled) && !busy && !resolved
       ? request.id
       : null,
     grantDurationApiValue(effectiveGrantDuration),

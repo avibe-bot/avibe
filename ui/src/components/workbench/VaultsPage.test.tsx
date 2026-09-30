@@ -158,9 +158,13 @@ describe('PERMISSIONS-016 VaultsPage wakes an Editor on the bare vaults.updated 
 // A popup opened after an await has lost the click's user activation and is blocked, which would
 // silently bring back the sandbox's own launcher card and its second approval click. A Home Screen
 // app on iOS is also frozen about two seconds after it opens a window, so a reveal context fetched
-// after the click often never reaches that window: the context comes from the open row menu.
+// after the click often never reaches that window: the context comes from the open row menu. A
+// menu fetch that failed is not kept, or the click would replay that failure instead of retrying.
 describe('VaultsPage protected reveal', () => {
-  it('opens the sandbox authorization window inside the click and hands it a context fetched before it', async () => {
+  it.each([
+    { menuFetch: 'succeeded', menuReply: { ok: true, context: { secret_name: 'alpha' } }, fetches: 1 },
+    { menuFetch: 'failed', menuReply: { ok: false, code: 'vault_error', message: 'transient' }, fetches: 2 },
+  ])('opens the sandbox authorization window inside the click and hands it a good context when the menu fetch $menuFetch', async ({ menuReply, fetches }) => {
     const user = userEvent.setup();
     api.listVaultSecrets.mockResolvedValue({
       secrets: [
@@ -179,11 +183,10 @@ describe('VaultsPage protected reveal', () => {
         },
       ],
     });
-    api.createVaultRevealContext.mockResolvedValue({
-      ok: true,
-      context: { secret_name: 'alpha' },
-      envelope: { ciphertext: 'c', nonce: 'n', wrap_meta: 'w' },
-    });
+    const envelope = { ciphertext: 'c', nonce: 'n', wrap_meta: 'w' };
+    api.createVaultRevealContext
+      .mockResolvedValueOnce({ ...menuReply, envelope })
+      .mockResolvedValue({ ok: true, context: { secret_name: 'alpha' }, envelope });
     revealProtectedValue.mockResolvedValue(undefined);
     const popup = { closed: false, close: vi.fn() };
     const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
@@ -200,7 +203,7 @@ describe('VaultsPage protected reveal', () => {
     await waitFor(() => expect(revealProtectedValue).toHaveBeenCalledOnce());
     expect(revealProtectedValue.mock.calls[0][1]).toEqual({ secret_name: 'alpha' });
     expect(revealProtectedValue.mock.calls[0][2]).toBe(opened.searchParams.get('id'));
-    expect(api.createVaultRevealContext).toHaveBeenCalledOnce();
+    expect(api.createVaultRevealContext).toHaveBeenCalledTimes(fetches);
     await waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
   });
 });

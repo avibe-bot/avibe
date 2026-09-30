@@ -94,33 +94,44 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const renderCard = () =>
+  render(
+    <I18nextProvider i18n={i18n}>
+      <VaultApprovalCard request={protectedAccess} onResolved={vi.fn()} onCancel={vi.fn()} />
+    </I18nextProvider>,
+  );
+
+const openWindow = () => {
+  const popup = { closed: false, close: vi.fn() };
+  const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+  return { popup, open };
+};
+
 // Contract: the approval click of a protected access request opens the sandbox authorization
 // window and hands the sandbox binding contexts issued while the card was open, for the duration
-// being approved, without a daemon request after the window opens; the card stops issuing while
-// the sandbox releases them. A Home Screen app on iOS is frozen about two seconds after it opens
-// a window, so a daemon round trip after the click (the regression) often leaves that window on
-// its placeholder, and a refresh during the release supersedes the contexts it is releasing. The
-// VaultsPage reveal test covers only the reveal context, not these binding contexts.
+// being approved, without a daemon request after the window opens; opening the card issues once,
+// for the duration it shows, and the card stops issuing while the sandbox releases the contexts.
+// A Home Screen app on iOS is frozen about two seconds after it opens a window, so a daemon round
+// trip after the click (the regression) often leaves that window on its placeholder, and a
+// refresh during the release supersedes the contexts it is releasing. The VaultsPage reveal test
+// covers only the reveal context, not these binding contexts.
 describe('VaultApprovalCard protected access approval', () => {
   it.each([
-    { approving: 'the remembered duration', pick: null, duration: 300 },
-    { approving: 'a duration picked on the card', pick: /^15 min$/, duration: 900 },
-  ])('claims the contexts issued before the click for $approving', async ({ pick, duration }) => {
+    { approving: 'the remembered duration', remembered: 900, pick: null, duration: 900, issuesBeforeClick: [900] },
+    { approving: 'a duration picked on the card', remembered: 300, pick: /^15 min$/, duration: 900, issuesBeforeClick: [300, 900] },
+  ])('claims the contexts issued before the click for $approving', async ({ remembered, pick, duration, issuesBeforeClick }) => {
+    api.getVaultSettings.mockResolvedValue({ ok: true, settings: { last_grant_ttl: remembered } });
     let release: (boxes: BlindBox[]) => void = () => undefined;
     vault.approveProtectedRelease.mockImplementation(() => new Promise<BlindBox[]>((resolve) => (release = resolve)));
-    const popup = { closed: false, close: vi.fn() };
-    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    const { popup, open } = openWindow();
 
-    render(
-      <I18nextProvider i18n={i18n}>
-        <VaultApprovalCard request={protectedAccess} onResolved={vi.fn()} onCancel={vi.fn()} />
-      </I18nextProvider>,
-    );
+    renderCard();
+    await vi.waitFor(() => expect(api.createVaultAgentBindingsBatch).toHaveBeenCalled());
     if (pick) fireEvent.click(await screen.findByRole('radio', { name: pick }));
     await vi.waitFor(() =>
       expect(api.createVaultAgentBindingsBatch).toHaveBeenLastCalledWith({ request_id: 'vrq_access', grant_duration: duration }),
     );
-    const issuesBeforeClick = api.createVaultAgentBindingsBatch.mock.calls.length;
+    expect(api.createVaultAgentBindingsBatch.mock.calls.map(([payload]) => payload.grant_duration)).toEqual(issuesBeforeClick);
 
     fireEvent.click(screen.getByRole('button', { name: /^approve$/i }));
 
@@ -131,7 +142,7 @@ describe('VaultApprovalCard protected access approval', () => {
     expect(items.map((item: { context: unknown }) => item.context)).toEqual([{ issuedFor: duration }]);
 
     vi.advanceTimersByTime(60_000);
-    expect(api.createVaultAgentBindingsBatch).toHaveBeenCalledTimes(issuesBeforeClick);
+    expect(api.createVaultAgentBindingsBatch).toHaveBeenCalledTimes(issuesBeforeClick.length);
 
     release([blindBox]);
     await vi.waitFor(() => expect(api.fulfillVaultAccessRequest).toHaveBeenCalledOnce());
@@ -140,5 +151,30 @@ describe('VaultApprovalCard protected access approval', () => {
       deks: [{ name: 'PROTON_BRIDGE_SMTP_PASSWORD', approval: { nonce: `nonce-${duration}` } }],
     });
     expect(popup.close).toHaveBeenCalledOnce();
+  });
+
+  // Contract: a claim judges the contexts' age from when their request left, not from when the
+  // reply arrived. A page frozen while the request was out (iOS backgrounding) receives the reply
+  // late; timing it from arrival (the regression) hands the sandbox contexts that are already too
+  // old, or expired for a one-time grant. The case above never delays a reply, so it cannot see this.
+  it('issues fresh contexts when the prepared request left too long ago', async () => {
+    let answerFirst: () => void = () => undefined;
+    const stale = { ...issuedFor(300), items: [{ ...issuedFor(300).items[0], context: { stale: true } }] };
+    api.createVaultAgentBindingsBatch.mockImplementationOnce(() => new Promise((resolve) => (answerFirst = () => resolve(stale))));
+    vault.approveProtectedRelease.mockResolvedValue([blindBox]);
+    openWindow();
+    const sent = Date.now();
+    const now = vi.spyOn(Date, 'now');
+
+    renderCard();
+    await vi.waitFor(() => expect(api.createVaultAgentBindingsBatch).toHaveBeenCalledOnce());
+    now.mockReturnValue(sent + 25_000);
+    answerFirst();
+
+    fireEvent.click(screen.getByRole('button', { name: /^approve$/i }));
+
+    await vi.waitFor(() => expect(vault.approveProtectedRelease).toHaveBeenCalledOnce());
+    expect(api.createVaultAgentBindingsBatch).toHaveBeenCalledTimes(2);
+    expect(vault.approveProtectedRelease.mock.calls[0][0].map((item: { context: unknown }) => item.context)).toEqual([{ issuedFor: 300 }]);
   });
 });

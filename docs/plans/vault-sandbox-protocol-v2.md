@@ -389,11 +389,15 @@ is the browser-rendered top-level sandbox page, not the embedder's DOM.
 Parent: while the request card is open it keeps **one** batch of signed
 contexts (`POST /vault/agent-bindings:batch` with the request id and the chosen
 duration; daemon returns per-secret bindings sharing one display block). The
-daemon keeps only the latest issue for a request, so the card issues one batch
-at a time, re-issues when the duration changes and every 15 s while visible,
-and stops re-issuing once the approval starts. One click (Approve) opens the
-top-level sandbox authorization window (§6.6), claims the latest batch (issuing
-one only if none is at most 20 s old), and sends one `approveRelease`. Sandbox: one card — title, session label, command, egress,
+card issues once the duration it shows is settled (the remembered choice has
+loaded or the approver picked one). The daemon keeps only the latest issue for
+a request, so the card issues one batch at a time, re-issues when the duration
+changes and every 15 s while visible, and stops re-issuing once the approval
+starts. One click (Approve) opens the top-level sandbox authorization window
+(§6.6), claims the latest batch, and sends one `approveRelease`. It issues a
+new batch instead only if the latest failed, is for another duration, or was
+requested more than 20 s ago; the age counts from the request, not the reply,
+so a page frozen mid-request cannot mistake old contexts for fresh ones. Sandbox: one card — title, session label, command, egress,
 agent grant duration, and the full member list — one confirm (plus one passkey
 iff locked or Strict). Parent then submits blind boxes via the existing
 fulfill endpoint.
@@ -460,7 +464,8 @@ Secret detail (protected static) gains "Show value / Copy value" actions
 calling `reveal`. R2: opening the secret's action menu fetches the signed
 reveal context, which the daemon does not store; the action click opens the
 top-level sandbox authorization window and claims that context (fetching one
-only if none is at most 30 s old), and the user confirms in the window; after approval, plaintext is rendered inside the sandbox iframe only. This
+instead if that fetch failed or was requested more than 30 s ago), and the user
+confirms in the window; after approval, plaintext is rendered inside the sandbox iframe only. This
 closes the orphaned-`unseal` gap without moving plaintext into the parent.
 
 **Copy-mode caveat**: the system clipboard is a shared resource — once the

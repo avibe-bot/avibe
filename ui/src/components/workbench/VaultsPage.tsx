@@ -735,27 +735,23 @@ export const VaultsPage: React.FC = () => {
   // locked/Strict), which this click opens before any await. A Home Screen app on iOS is frozen
   // about two seconds after it opens a window, so the context is fetched when the secret's row menu
   // opens and the click only claims it. The daemon keeps no state for a reveal context, which stays
-  // valid for two minutes; a claim takes one at most half a minute old.
+  // valid for two minutes; a claim takes one requested at most half a minute ago that did not fail.
   const requestRevealContext = useCallback(
     (name: string) => api.createVaultRevealContext(name, { session_label: t('vaults.title') }),
     [api, t],
   );
-  const preparedReveal = useRef<{ name: string; result: Promise<VaultRevealContextResult>; fetchedAt: number | null } | null>(null);
+  const preparedReveal = useRef<{ name: string; result: Promise<VaultRevealContextResult>; sentAt: number } | null>(null);
   const menuRevealName = useMemo(() => {
     const secret = secrets.find((s) => s.name === menuSecret);
     return secret?.protection === 'protected' && secret.kind !== 'keypair' && !vaultPasskeyNeedsBrowser() ? secret.name : null;
   }, [secrets, menuSecret]);
   useEffect(() => {
     if (!menuRevealName) return;
-    const entry = { name: menuRevealName, result: requestRevealContext(menuRevealName), fetchedAt: null as number | null };
-    entry.result.then(
-      () => {
-        entry.fetchedAt = Date.now();
-      },
-      () => {
-        if (preparedReveal.current === entry) preparedReveal.current = null;
-      },
-    );
+    const entry = { name: menuRevealName, sentAt: Date.now(), result: requestRevealContext(menuRevealName) };
+    const drop = () => {
+      if (preparedReveal.current === entry) preparedReveal.current = null;
+    };
+    entry.result.then((res) => (res?.ok && res.context ? undefined : drop()), drop);
     preparedReveal.current = entry;
   }, [menuRevealName, requestRevealContext]);
   const revealSecret = useCallback(
@@ -764,9 +760,8 @@ export const VaultsPage: React.FC = () => {
       try {
         const prepared = preparedReveal.current;
         preparedReveal.current = null;
-        const fresh =
-          prepared?.name === secret.name && (prepared.fetchedAt === null || Date.now() - prepared.fetchedAt <= PREPARED_REVEAL_MAX_AGE_MS);
-        const res = await (fresh ? prepared.result : requestRevealContext(secret.name));
+        const usable = prepared?.name === secret.name && Date.now() - prepared.sentAt <= PREPARED_REVEAL_MAX_AGE_MS;
+        const res = await (usable ? prepared.result : requestRevealContext(secret.name));
         if (!res?.ok || !res.context) throw new Error(res?.message || t('vaults.reveal.errors.contextFailed'));
         // The sandbox needs the sealed record to open it. The daemon returns it alongside the signed
         // reveal context; if it's absent, surface a clear message rather than a cryptic sandbox error.
