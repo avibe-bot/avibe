@@ -112,6 +112,7 @@ const DEFAULT_SCOPE = () => true;
 
 const MIGRATION_ERROR_KEYS: Record<string, TranslationKey> = {
   migration_native_busy: 'settings.models.migration.errors.nativeBusy',
+  migration_runtime_stopping: 'settings.models.migration.errors.runtimeStopping',
   migration_permission_needed: 'settings.models.migration.errors.permissionNeeded',
   migration_recovery_pending: 'settings.models.migration.errors.recoveryPending',
   migration_item_conflict: 'settings.models.migration.errors.itemConflict',
@@ -280,6 +281,8 @@ export const MigrationDialog: React.FC<{
   const [ownLoading, setOwnLoading] = React.useState(true);
   const [applying, setApplying] = React.useState(false);
   const [phase, setPhase] = React.useState<SetupPhase>({ kind: 'select' });
+  /** Why the last batch was refused, shown beside the selection it is retried from. */
+  const [applyError, setApplyError] = React.useState<TranslationKey | null>(null);
   /** Consent to also delete the copied API keys natively. Subscription logins
    *  always move: a rotating refresh token cannot have two owners. */
   const [cleanApiKeys, setCleanApiKeys] = React.useState(false);
@@ -298,6 +301,7 @@ export const MigrationDialog: React.FC<{
     setPhase({ kind: 'select' });
     setCompleted(0);
     setCleanApiKeys(false);
+    setApplyError(null);
   }, [open]);
 
   React.useEffect(() => {
@@ -378,6 +382,7 @@ export const MigrationDialog: React.FC<{
     // raced the render, or a caller invoking the confirm path some other way.
     if (!writable || applying || selectedCount === 0) return;
     setApplying(true);
+    setApplyError(null);
     if (scope === 'setup') setPhase({ kind: 'applying', count: selectedCount });
     try {
       const ids = appliable.map((i) => i.id);
@@ -399,10 +404,13 @@ export const MigrationDialog: React.FC<{
         const key =
           MIGRATION_ERROR_KEYS[code ?? ''] ??
           'settings.models.migration.applyFailed';
-        showToast(t(key) as string, 'error');
         if (code === 'migration_credentials_invalid') {
+          // The dialog closes, so the reason outlives it as a toast.
+          showToast(t(key) as string, 'error');
           onApplied?.(0);
           onClose();
+        } else {
+          setApplyError(key);
         }
       }
     } finally {
@@ -503,6 +511,9 @@ export const MigrationDialog: React.FC<{
               </div>
             )}
             <p className="px-1 text-[12px] leading-relaxed text-muted">{t('settings.models.migration.interruptNotice')}</p>
+            {applyError && (
+              <p role="alert" className="px-1 text-[12px] font-semibold leading-relaxed text-destructive-ink">{t(applyError)}</p>
+            )}
           </div>
         )}
 

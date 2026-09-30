@@ -207,6 +207,39 @@ async def test_busy_guard_interrupts_running_work_then_retires_and_yields(drain_
 
 
 @pytest.mark.asyncio
+async def test_switch_waits_out_a_teardown_that_takes_its_bounded_worst_case(monkeypatch):
+    """MH-MIG-013: by the time the switch waits, the user's work is already
+    interrupted. Refusing beside the teardown loses the work and the switch
+    together, so a teardown that takes its own bounded worst case (owner
+    cancellation and tidy-up, then a SIGTERM-to-SIGKILL runtime stop) must
+    complete the switch under the production settle bound."""
+    controller, _, admissions, turns = controller_fixture(busy=True)
+    service = controller.agent_service
+    coordinator = BackendRestartCoordinator(
+        controller, AsyncMock(), process_inventory=Mock(return_value=()), drain_timeout=0.01, poll_interval=0.001,
+    )
+    controller.backend_restart_coordinator = coordinator
+    loop = asyncio.get_running_loop()
+    elapsed = 0.0
+    real_time = loop.time
+    monkeypatch.setattr(loop, "time", lambda: real_time() + elapsed)
+
+    async def slow_teardown(backend, forced):
+        nonlocal elapsed
+        # 2 s + 2 s owner cancellation, 10 s runtime stop, 1 s slow storage.
+        elapsed += 15.0
+        await asyncio.sleep(0.01)
+        service.backend_runtime_active.return_value = False
+
+    coordinator._refresh.side_effect = slow_teardown
+    async with coordinator.migration_guard(("codex",)):
+        assert admissions == turns == {"codex"}
+    coordinator._refresh.assert_awaited_once_with("codex", True)
+    service.agents["codex"].retire_for_native_migration.assert_awaited_once()
+    assert admissions == turns == set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("leaves", ["cancelled", "settle_window"])
 async def test_abandoned_switch_keeps_admission_closed_until_teardown_completes(leaves):
     """MH-MIG-009: an interruption that hangs, such as a turn owner stuck in its

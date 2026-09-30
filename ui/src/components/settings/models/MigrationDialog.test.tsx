@@ -290,7 +290,7 @@ describe('MigrationDialog — the settings default', () => {
     const start = within(dialog).getByRole('button', { name: 'Start migration' });
     await user.click(start);
 
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith('Migration failed, please retry', 'error'));
+    expect((await within(dialog).findByRole('alert')).textContent).toBe('Migration failed, please retry');
     expect(onClose).not.toHaveBeenCalled();
     expect((start as HTMLButtonElement).disabled).toBe(false);
 
@@ -314,12 +314,13 @@ describe('MigrationDialog — the settings default', () => {
 
   it.each([
     ['migration_native_busy', 'Something is still using these assistants. Retry in a moment; if it keeps failing, quit any CLI running outside Avibe, including terminal sessions, IDE extensions and desktop apps.'],
+    ['migration_runtime_stopping', 'The task these assistants were running in Avibe is still stopping. Try again in a moment.'],
     ['migration_permission_needed', 'Allow credential access, then retry.'],
     ['migration_recovery_pending', 'Migration is unfinished. Retry to continue.'],
     ['migration_item_conflict', 'Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.'],
     ['migration_configuration_blocked', 'Adjust the native configuration, then scan again.'],
     ['migration_reauthorization_required', 'This backend was already migrated, and the changed native login cannot be verified as a new authorization. The original files are unchanged. Sign in again for the existing source in Model Hub instead of importing this login.'],
-  ] as const)('maps %s to concise localized copy', async (code, message) => {
+  ] as const)('explains a batch refused as %s inside the dialog', async (code, message) => {
     vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [{ ...CODEX_KEY }] });
     vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(new ApiCallError(code));
     renderDialog();
@@ -329,7 +330,10 @@ describe('MigrationDialog — the settings default', () => {
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith(message, 'error'));
+    // The dialog stays open on the same selection, so the reason stays beside
+    // the retry instead of fading out of a toast at the edge of the screen.
+    expect((await within(dialog).findByRole('alert')).textContent).toBe(message);
+    expect(showToast).not.toHaveBeenCalledWith(message, 'error');
   });
 
   it('keeps selection and explains configuration or credential verification failure in Chinese', async () => {
@@ -344,10 +348,9 @@ describe('MigrationDialog — the settings default', () => {
     await within(dialog).findByText('OpenAI');
     await user.click(within(dialog).getByRole('button', { name: '开始迁移' }));
 
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
+    expect((await within(dialog).findByRole('alert')).textContent).toBe(
       '无法验证已保存的配置或凭据。请检查配置文件和认证是否有效后重试，或在模型网关中手动添加供应商。',
-      'error',
-    ));
+    );
     expect(onClose).not.toHaveBeenCalled();
     expect(rowCheckboxes(dialog)[0].getAttribute('aria-checked')).toBe('true');
     expect((within(dialog).getByRole('button', { name: '开始迁移' }) as HTMLButtonElement).disabled).toBe(false);
@@ -403,10 +406,7 @@ describe('MigrationDialog — the settings default', () => {
     await waitFor(() => expect(within(dialog).getByText('OpenAI')).toBeTruthy());
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
-      'Migration is unfinished. Retry to continue.',
-      'error',
-    ));
+    expect((await within(dialog).findByRole('alert')).textContent).toBe('Migration is unfinished. Retry to continue.');
     expect(screen.getByRole('dialog')).toBeTruthy();
     expect(onApplied).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
@@ -954,7 +954,7 @@ describe('MigrationDialog — the setup scope', () => {
     await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
-    await waitFor(() => expect(showToast).toHaveBeenCalled());
+    await within(dialog).findByRole('alert');
     const confirm = await within(dialog).findByRole('button', { name: 'Start migration' });
     expect((confirm as HTMLButtonElement).disabled).toBe(false);
     expect(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }).getAttribute('aria-checked')).toBe('true');

@@ -2048,6 +2048,7 @@
         "interruptNotice": "Migrating interrupts any task the selected assistants are running in Avibe.",
         "errors": {
           "nativeBusy": "Something is still using these assistants. Retry in a moment; if it keeps failing, quit any CLI running outside Avibe, including terminal sessions, IDE extensions and desktop apps.",
+          "runtimeStopping": "The task these assistants were running in Avibe is still stopping. Try again in a moment.",
           "permissionNeeded": "Allow credential access, then retry.",
           "recoveryPending": "Migration is unfinished. Retry to continue.",
           "itemConflict": "Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.",

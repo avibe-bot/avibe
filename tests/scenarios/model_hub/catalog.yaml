@@ -57,6 +57,7 @@ capability:
     - tests/test_model_hub_persisted_migration.py
     - tests/test_native_process_inventory.py
     - tests/test_native_takeover_lifecycle.py
+    - tests/test_model_hub_native_takeover.py
     - tests/test_internal_server.py
     - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_valuation_scenarios.py
@@ -1322,6 +1323,20 @@ scenarios:
       - tests/test_scheduled_tasks.py::test_refresh_ending_the_last_activity_keeps_the_runs_first_cause
       - tests/test_session_delivery_fsm.py::test_forced_refresh_tells_a_restored_conversation_turn_why_it_stopped
       - tests/test_agent_service.py::test_force_end_backend_activities_settles_pending_runs
+  - id: MH-MIG-013
+    name: A switch waits out the teardown of the work it interrupted instead of refusing beside it
+    status: covered
+    kind: migration
+    layer: unit
+    test: tests/test_native_takeover_lifecycle.py::test_switch_waits_out_a_teardown_that_takes_its_bounded_worst_case
+  - id: MH-MIG-014
+    name: A migration refused while Avibe's own interrupted work is still stopping says so in the dialog, not that an outside CLI holds the backend
+    status: covered
+    kind: migration
+    layer: unit
+    test: tests/test_model_hub_native_takeover.py::test_refused_migration_says_whether_avibe_or_an_outside_cli_holds_the_backend
+    related_tests:
+      - ui/src/components/settings/models/MigrationDialog.test.tsx
   - id: MH-TAKEOVER-001
     name: Recoverable failures walk the configured route and exhaust only at its end
     status: covered

@@ -1615,7 +1615,8 @@ Minimum v5 set:
 `candidate_suppliers_changed`, `mode_switch_blocked`, `engine_down`,
 `runtime_platform_unsupported`, `reauth_confirmation_required`,
 `native_source_already_exists`, `native_login_in_progress`,
-`migration_item_conflict`, `migration_native_busy`, `migration_permission_needed`,
+`migration_item_conflict`, `migration_native_busy`, `migration_runtime_stopping`,
+`migration_permission_needed`,
 `migration_configuration_blocked`, `migration_recovery_pending`,
 `migration_credentials_invalid`, `source_model_tiers_managed`, `turn_not_found`,
 `provenance_unavailable`, `probe_no_candidate`, `direct_mode`.
@@ -1633,8 +1634,12 @@ native channel and the response does not assert that a native Source already exi
 
 Migration action errors are closed, redacted boundary codes:
 
-- `migration_native_busy`: a managed native process could not be drained or an
-  external CLI still owns the credential.
+- `migration_native_busy`: an external CLI still owns the credential, or a managed
+  native process could not be retired.
+- `migration_runtime_stopping`: work Avibe itself interrupted on the selected
+  backends did not finish stopping within the guard's settle bound, or an earlier
+  teardown still holds them. Nothing was migrated and a retry shortly afterwards
+  proceeds; no external CLI is involved.
 - `migration_permission_needed`: the selected native store or file operation requires
   permission that was not granted.
 - `migration_configuration_blocked`: a malformed, unsupported, conflicting, or

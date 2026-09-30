@@ -54,6 +54,7 @@ capabilities:
       - tests/test_model_hub_persisted_migration.py
       - tests/test_native_process_inventory.py
       - tests/test_native_takeover_lifecycle.py
+      - tests/test_model_hub_native_takeover.py
       - tests/test_internal_server.py
       - tests/test_member_management_parity.py
       - tests/test_model_hub_provenance.py

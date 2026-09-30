@@ -671,3 +671,37 @@ def test_mode_only_adoption_refuses_a_native_config_the_cli_cannot_parse(
     # MH-MIG-009: the guard interrupts running work, so a switch that is
     # refused anyway must be refused before it is entered.
     assert entered == []
+
+
+@pytest.mark.parametrize("reason,code", [
+    ("native_runtime_busy", "migration_runtime_stopping"),
+    ("backend_restart_in_progress", "migration_runtime_stopping"),
+    ("external_native_processes", "migration_native_busy"),
+])
+def test_refused_migration_says_whether_avibe_or_an_outside_cli_holds_the_backend(
+    monkeypatch, tmp_path, reason, code,
+):
+    """MH-MIG-014: work Avibe itself interrupted and is still stopping is not a CLI
+    running outside Avibe; telling the user to quit external CLIs sends them the
+    wrong way while a retry in a moment would succeed."""
+    from core.backend_restart import NativeMigrationBlockedError
+
+    home = tmp_path / "native"
+    _write_codex_oauth(home)
+    _isolate_native_home(monkeypatch, home)
+    service, store, _ = _service(tmp_path, migration_home=home)
+    store.config.agents["codex"].mode = "direct"
+    item_ids = [item["id"] for item in service.migration_scan()["items"]]
+
+    @asynccontextmanager
+    async def refusing(backends, *, external_processes=True):
+        raise NativeMigrationBlockedError(reason, backends)
+        yield  # pragma: no cover - required async context-manager shape
+
+    service.migration_guard = refusing
+    with pytest.raises(ModelHubError) as refusal:
+        asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))
+
+    assert (refusal.value.status, refusal.value.code) == (409, code)
+    assert store.config.agents["codex"].mode == "direct"
+    assert service.migration_journal.load() is None

@@ -19,8 +19,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_DRAIN_TIMEOUT_SECONDS = 300.0
 _POLL_INTERVAL_SECONDS = 0.1
 # After an interruption only teardown remains: native processes exiting and
-# requests to a stopped runtime failing. Work still live past this is a fault.
-_INTERRUPT_SETTLE_SECONDS = 10.0
+# requests to a stopped runtime failing. By then the user's work is already
+# interrupted, so the switch waits for that teardown rather than refusing
+# beside it. The teardown's own steps are bounded: owner cancellation and
+# tidy-up (2 s each), then a runtime stop that escalates from SIGTERM to
+# SIGKILL (up to 10 s). This bound covers them with room for slow storage.
+# Work still live past it is a fault.
+_INTERRUPT_SETTLE_SECONDS = 60.0
 _NATIVE_BACKENDS = frozenset({"claude", "codex", "opencode"})
 _T = TypeVar("_T")
 
@@ -541,8 +546,8 @@ class BackendRestartCoordinator:
                     await self.controller.agent_service.prepare_backend_restart(backend)
                 # A forced restart owns the interruption and teardown, and it
                 # reopens admission only after the teardown. The switch waits
-                # for it at most the settle window, and leaving early, by
-                # timeout or cancellation, never cuts the teardown short.
+                # for it up to the settle bound, and leaving early, by timeout
+                # or cancellation, never cuts the teardown short.
                 for backend in targets:
                     if await self._has_active_turns(backend):
                         restarts[backend] = self._start_restart(backend, drain_timeout=0)

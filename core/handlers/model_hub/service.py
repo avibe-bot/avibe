@@ -828,8 +828,14 @@ async def _rollback_replacement_before_settling(
         raise cancelled
 
 
+# Guard refusals that mean Avibe's own interrupted work on the selected
+# backends is still stopping. Every other refusal, such as a CLI running outside
+# Avibe, stays the generic busy code.
+_RUNTIME_STOPPING_REASONS = frozenset({"native_runtime_busy", "backend_restart_in_progress"})
+
+
 def _log_native_refusal(operation: str, error: Any) -> None:
-    # The client sees only a generic busy/blocked code. Keep the credential-free
+    # The client sees only a closed busy/blocked code. Keep the credential-free
     # NativeMigrationBlockedError reason, backends and pids in the log instead.
     logger.warning(
         "%s refused: %s (backends=%s, pids=%s)",
@@ -7198,7 +7204,12 @@ class ModelHubService:
             raise ModelHubError("migration_reauthorization_required", status=409) from None
         except NativeMigrationBlockedError as error:
             _log_native_refusal("Model Hub migration", error)
-            raise ModelHubError("migration_native_busy", status=409) from None
+            code = (
+                "migration_runtime_stopping"
+                if error.reason in _RUNTIME_STOPPING_REASONS
+                else "migration_native_busy"
+            )
+            raise ModelHubError(code, status=409) from None
         except (NativeOAuthPermissionError, PermissionError):
             raise ModelHubError("migration_permission_needed", status=409) from None
         except (TakeoverStateError, NativeOAuthError):

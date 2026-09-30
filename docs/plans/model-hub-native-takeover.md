@@ -157,9 +157,13 @@ explicitly authorized acceptance check.
   down instead of being awaited), strictly retires credential-bearing processes
   that are then idle, and checks for external CLI users, which are never
   terminated. The interruption runs as a forced backend restart, which keeps
-  admission closed until its teardown completes. The switch waits for it only
-  for a short settle window and refuses as busy after that. Leaving early, by
-  timeout or cancellation, never cuts the teardown short. A mode switch in
+  admission closed until its teardown completes. Because the user's work is
+  already interrupted by then, the switch waits for that teardown, bounded by a
+  settle limit that covers the teardown's own bounded steps (owner cancellation,
+  then a runtime stop escalating from SIGTERM to SIGKILL); only a teardown still
+  running past it refuses, and migration reports that refusal as
+  `migration_runtime_stopping`. Leaving early, by timeout or cancellation, never
+  cuts the teardown short. A mode switch in
   either direction enters it, since a turn left running keeps the mode it
   started in. Every interrupted conversation turn gets one visible notice, and
   a Harness Run, including one owned by a background Activity, settles as a
