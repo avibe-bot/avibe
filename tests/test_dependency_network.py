@@ -10,6 +10,7 @@ import urllib.request
 import pytest
 
 from core import dependency_network
+from scripts import release_mirror
 
 
 RELEASE_URL = "https://github.com/avibe-bot/avibe/releases/download/git-runtime-v2.55.0-1/git-runtime.tar.gz"
@@ -251,25 +252,26 @@ def test_dependency_error_message_reports_exhausted_attempts() -> None:
     assert message == "Runtime download failed after 3 attempts: Connection timed out (https://example.test/archive.tgz)"
 
 
+@pytest.mark.parametrize(("repository", "root"), sorted(release_mirror.REPOSITORIES.items()))
+def test_release_assets_of_every_mirrored_repository_try_the_mirror_first(repository, root) -> None:
+    url = f"https://github.com/{repository}/releases/download/v1.0.0/tool_1.0.0%2Bbuild.tar.gz"
+
+    assert dependency_network.download_sources(url) == [
+        f"https://dl.avibe.bot/{root}releases/v1.0.0/tool_1.0.0%2Bbuild.tar.gz",
+        url,
+    ]
+
+
 @pytest.mark.parametrize(
-    ("url", "sources"),
+    "url",
     [
-        (
-            "https://github.com/avibe-bot/avibe/releases/download/v1.0.0/avibe_1.0.0%2Bbuild.tar.gz",
-            [
-                "https://dl.avibe.bot/releases/v1.0.0/avibe_1.0.0%2Bbuild.tar.gz",
-                "https://github.com/avibe-bot/avibe/releases/download/v1.0.0/avibe_1.0.0%2Bbuild.tar.gz",
-            ],
-        ),
-        (f"{RELEASE_URL}?token=secret", [f"{RELEASE_URL}?token=secret"]),
-        (
-            "https://github.com/tmux/tmux-builds/releases/download/v3.5/tmux.tar.gz",
-            ["https://github.com/tmux/tmux-builds/releases/download/v3.5/tmux.tar.gz"],
-        ),
+        f"{RELEASE_URL}?token=secret",
+        "https://github.com/tmux/tmux-builds/releases/download/v3.5/tmux.tar.gz",
+        "https://github.com/avibe-bot/avibe-docs/releases/download/v1/a.tgz",
     ],
 )
-def test_only_avibe_release_assets_have_a_mirror_source(url, sources) -> None:
-    assert dependency_network.download_sources(url) == sources
+def test_other_urls_keep_their_single_source(url) -> None:
+    assert dependency_network.download_sources(url) == [url]
 
 
 def test_mirror_miss_falls_back_to_github_and_later_downloads_start_there(monkeypatch, tmp_path) -> None:

@@ -377,7 +377,7 @@ def test_runtime_prepare_tmux_runs_when_terminal_enabled(monkeypatch):
 def test_runtime_prepare_downloads_nothing_when_managed_deps_are_current(monkeypatch):
     # Prepare is the chokepoint that keeps managed local deps current, which is
     # not the same as reinstalling them: every install here is a network download
-    # (askill ~30s, avault ~20s), so a prepare with nothing to change must reach
+    # (askill ~100 MB, avault ~3 MB), so a prepare with nothing to change must reach
     # none of them. Stubbing the installers rather than the decision keeps this
     # honest whichever way the wrappers ask the question.
     monkeypatch.delenv("VIBE_INSTALL_SKIP_ASKILL", raising=False)
@@ -387,9 +387,8 @@ def test_runtime_prepare_downloads_nothing_when_managed_deps_are_current(monkeyp
     monkeypatch.setattr(
         api,
         "askill_status",
-        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready", "path": "/x/askill"},
+        lambda: {"id": "askill", "installed": True, "version": api.ASKILL_VERSION, "status": "ready", "path": "/x/askill"},
     )
-    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault")
     monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_VERSION)
@@ -402,44 +401,15 @@ def test_runtime_prepare_downloads_nothing_when_managed_deps_are_current(monkeyp
         "installed": True,
         "changed": False,
         "path": "/x/askill",
-        "version": "0.1.14",
+        "version": api.ASKILL_VERSION,
     }
     assert avault["ok"] is True
     assert avault["changed"] is False
     assert avault["version"] == api.AVAULT_VERSION
 
 
-@pytest.mark.parametrize("reason", ["latest_unavailable", "a_reason_invented_after_this_test"])
-def test_runtime_prepare_installs_when_currency_was_not_established(monkeypatch, reason):
-    # "I did not install" and "it is current" are different facts, and prepare
-    # may only report ready for the second. `up_to_date` is the one verdict that
-    # states it; every other non-install verdict — the upstream probe failing
-    # today, whatever is added later — means unknown, so prepare installs rather
-    # than printing `askill ready.` off a check that never happened. Keyed on the
-    # verdict rather than on a list of reasons, so a reason added later inherits
-    # the safe branch instead of a false pass.
-    monkeypatch.delenv("VIBE_INSTALL_SKIP_ASKILL", raising=False)
-    monkeypatch.setattr(
-        api,
-        "refresh_askill_if_stale",
-        lambda: {"ok": True, "skipped": True, "reason": reason, "status": {"path": "/x/askill", "version": "0.1.14"}},
-    )
-    forced = []
-    monkeypatch.setattr(
-        api,
-        "ensure_askill_installed",
-        lambda force=False: forced.append(force) or {"ok": True, "installed": True, "changed": True},
-    )
-
-    out = cli._ensure_askill_during_prepare()
-
-    assert forced == [True], "an unestablished currency must reach the installer"
-    assert out["changed"] is True
-    assert out["action"] == "refresh_currency_unknown"
-
-
 def test_runtime_prepare_force_still_reinstalls_current_managed_deps(monkeypatch):
-    # The mirror of the test above, and the boundary of the change: making the
+    # The mirror of the current-deps test, and the boundary of the change: making the
     # ordinary prepare cheap must not take the repair away. A corrupted binary
     # can still report the current version, so `--force` has to reach the
     # installer for exactly the states the currency check skips.

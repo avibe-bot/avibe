@@ -504,11 +504,11 @@ def test_doctor_localizes_nested_repair_details_and_missing_payload_values(
             "askill",
             {
                 "ok": False,
-                "reason": "askill_auto_install_unsupported",
-                "required_tools": ["curl", "bash"],
-                "message": "askill auto-install needs curl + bash",
+                "reason": "askill_platform_unsupported",
+                "platform": "Windows ARM64",
+                "message": "no askill build for Windows ARM64",
             },
-            "自动安装需要",
+            "没有为当前平台发布",
         ),
         (
             "avault",

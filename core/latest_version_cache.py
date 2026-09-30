@@ -1,18 +1,12 @@
 """One owner for "what is the newest published version of X", cached on disk.
 
 The answer used to live only in a module-level dict, which is right for the
-long-running service and useless for the CLI: ``vibe runtime prepare`` is a
-fresh process that asks GitHub for askill's newest release, exits, and throws
-the answer away. Install, upgrade, every regression sync, and every tenant
-update pay that probe again — and they pay it against the unauthenticated
-GitHub budget of 60 requests per hour per IP, shared with the opencode probe
-that reads the same cache.
-
-Exhausting that budget is not a slow path, it is a wrong one: a 403 makes the
-latest lookup fail, prepare cannot establish currency, and it falls back to
-reinstalling askill — about 30 seconds of network to land the version already on
-disk. So persisting the answer across processes matters more for the failures it
-prevents than for the round trip it skips.
+long-running service and useless for the CLI: every fresh process asked the
+registry again, exited, and threw the answer away — and GitHub-hosted probes such
+as opencode's pay against the unauthenticated budget of 60 requests per hour per
+IP. Exhausting that budget is not a slow path, it is a wrong one: a 403 makes the
+latest lookup fail, so persisting the answer across processes matters more for
+the failures it prevents than for the round trip it skips.
 
 The cache is two tiers holding different things. The file tier holds *answers*,
 so a cold process inherits what a previous one paid GitHub for. A failed probe
@@ -30,10 +24,10 @@ probe.
 
 Inheriting a failure was never worth that window anyway: it does not avoid the
 fallback it looks like it avoids. A process reading a cached ``None`` reports
-``latest_unavailable`` and reinstalls askill; a process that re-probes might find
-the blip over instead. Persisting the failure turns "maybe" into "certainly
-reinstall" to save one HTTP request against a budget that, in the only case this
-arises, is already exhausted.
+the latest version unavailable; a process that re-probes might find the blip
+over instead. Persisting the failure turns "maybe" into "certainly unavailable"
+to save one HTTP request against a budget that, in the only case this arises, is
+already exhausted.
 
 Nothing here is authoritative. Every entry is a best-effort answer with an
 expiry, and a caller that reads a stale or absent one gets the same behaviour it
@@ -111,7 +105,7 @@ def _entry_from(raw: Any) -> _Entry | None:
     round trip, compare false against every TTL, and would then be written back
     out as the non-standard ``Infinity``/``NaN`` tokens. And a null value is not
     something this version writes, so it is not something it trusts — corruption
-    must not pin ``latest_unavailable`` on every cold process.
+    must not pin an unavailable answer on every cold process.
     """
 
     try:

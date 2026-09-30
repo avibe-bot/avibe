@@ -30,11 +30,15 @@ class RetryPolicy:
 DOWNLOAD_RETRY_POLICY = RetryPolicy(max_attempts=3, initial_delay=1.0, max_delay=4.0)
 PROBE_RETRY_POLICY = RetryPolicy(max_attempts=2, initial_delay=0.5, max_delay=0.5)
 
-# Byte-identical copies of published Avibe release assets
-# (docs/plans/release-download-mirror.md). Trusted for availability only:
-# callers verify what they download, whichever source served it.
-RELEASE_DOWNLOAD_ROOT = "https://github.com/avibe-bot/avibe/releases/download/"
-RELEASE_MIRROR_ROOT = "https://dl.avibe.bot/releases/"
+# Byte-identical copies of published release assets of Avibe and its managed
+# tools (docs/plans/release-download-mirror.md), by GitHub download root.
+# Trusted for availability only: callers verify what they download, whichever
+# source served it.
+RELEASE_MIRRORS = {
+    "https://github.com/avibe-bot/avibe/releases/download/": "https://dl.avibe.bot/releases/",
+    "https://github.com/avibe-bot/askill/releases/download/": "https://dl.avibe.bot/askill/releases/",
+    "https://github.com/avibe-bot/avault/releases/download/": "https://dl.avibe.bot/avault/releases/",
+}
 # Index into download_sources() of the source that last completed a download.
 _preferred_source = 0
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
@@ -155,14 +159,16 @@ def fetch_bytes(
 
 
 def download_sources(url: str) -> list[str]:
-    """Download order for a URL: the mirror, then GitHub, for Avibe release assets.
+    """Download order for a URL: the mirror, then GitHub, for mirrored release assets.
 
     The mirror holds ``<tag>/<asset>`` only, so a URL with a query stays on its
     own host. The mirror URL substitutes the prefix alone, which keeps
     percent-encoding identical.
     """
-    if url.startswith(RELEASE_DOWNLOAD_ROOT) and "?" not in url:
-        return [RELEASE_MIRROR_ROOT + url.removeprefix(RELEASE_DOWNLOAD_ROOT), url]
+    if "?" not in url:
+        for github_root, mirror_root in RELEASE_MIRRORS.items():
+            if url.startswith(github_root):
+                return [mirror_root + url.removeprefix(github_root), url]
     return [url]
 
 

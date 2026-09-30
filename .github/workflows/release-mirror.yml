@@ -11,7 +11,8 @@ on:
       - Guard Git Runtime release
       - Build local-only Git runtime
     types: [completed]
-  # Safety net for missed triggers and renamed workflows.
+  # Safety net for missed triggers and renamed workflows, and the trigger for
+  # the sibling repositories' releases (askill, avault).
   schedule:
     - cron: "41 * * * *"
   workflow_dispatch:
@@ -58,7 +59,6 @@ jobs:
             args+=(--dry-run)
           fi
           python3 scripts/release_mirror.py \
-            --repository "$GITHUB_REPOSITORY" \
             --bucket avibe \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             ${args[@]+"${args[@]}"}

@@ -206,11 +206,7 @@ DOCTOR_DISPLAY_PROJECTIONS = {
         "io": "doctor.repair.dependencyDownloadIo",
     },
     "repair_reason": {
-        "askill_auto_install_unsupported": "doctor.repair.askillAutoInstallUnsupported",
         "askill_install_path_missing": "doctor.repair.askillInstallPathMissing",
-        "askill_install_timeout": "doctor.repair.installTimeout",
-        "askill_install_failed": "doctor.repair.installCommandFailed",
-        "askill_install_error": "doctor.repair.installError",
         "avault_platform_unsupported": "doctor.repair.avaultPlatformUnsupported",
         "avault_checksum_mismatch": "doctor.repair.avaultChecksumMismatch",
         "avault_install_path_missing": "doctor.repair.avaultInstallPathMissing",
@@ -11662,12 +11658,12 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         if not deep:
             continue
 
-        if dependency_id == "askill":
-            probe = probe_url("https://askill.sh", user_agent="avibe-askill-doctor")
-        elif dependency_id == "avault":
-            probe = probe_url(
-                api.avault_manifest_url(),
-                user_agent="avibe-avault-doctor",
+        if dependency_id in {"askill", "avault"}:
+            url = api.askill_download_url() if dependency_id == "askill" else api.avault_download_url()
+            probe = (
+                probe_url(url, user_agent=f"avibe-{dependency_id}-doctor")
+                if url
+                else {"ok": False, "checked": False, "reason": f"{dependency_id}_platform_unsupported"}
             )
         elif dependency_id == "tmux" and probe is None:
             from core.tmux_runtime import TmuxRuntimeManager
@@ -12957,17 +12953,11 @@ def _doctor_managed_failure_detail(target: str, result: dict, language: str) -> 
     key = _doctor_managed_reason_key(reason)
     error = result.get("error") or i18n_t("doctor.value.unknownError", language)
     kwargs = {"target": target, "error": error}
-    if reason == "askill_auto_install_unsupported":
-        kwargs["tools"] = "+".join(str(tool) for tool in result.get("required_tools") or ("curl", "bash"))
-    elif reason == "avault_platform_unsupported":
+    if reason == "avault_platform_unsupported":
         kwargs["platform"] = result.get("platform") or i18n_t("doctor.value.unknown", language)
     elif reason == "avault_checksum_mismatch":
         kwargs["expected_sha256"] = result.get("expected_sha256") or i18n_t("doctor.value.unknown", language)
         kwargs["actual_sha256"] = result.get("actual_sha256") or i18n_t("doctor.value.unknown", language)
-    elif reason in {"askill_install_timeout"}:
-        kwargs["timeout_seconds"] = result.get("timeout_seconds") or 300
-    elif reason == "askill_install_failed" or reason.endswith("_install_failed"):
-        kwargs["exit_code"] = result.get("exit_code") or i18n_t("doctor.value.unknown", language)
     if key:
         return i18n_t(key, language, **kwargs)
     return i18n_t("doctor.repair.dependencyFailedDefault", language)
@@ -16250,23 +16240,17 @@ def _ensure_askill_during_prepare(offline: bool = False, force: bool = False) ->
     Folded into ``vibe runtime prepare`` so askill auto-installs at exactly the
     same lifecycle points as the Show Page runtime (post install / upgrade),
     with a ``VIBE_INSTALL_SKIP_ASKILL`` escape hatch mirroring the Show Runtime
-    one. Skipped under ``--offline`` (the askill installer needs the network).
-    Refreshes askill to latest so prepare stays the chokepoint that keeps
-    required local deps current on upgrade, but asks whether that refresh would
-    change anything before running the installer: askill.sh re-downloads the CLI
-    on every run, so an unconditional refresh charged every prepare ~30s to
-    install the version already on disk. An askill hiccup never fails the
-    prepare; the Dependencies page offers a manual retry.
+    one. Skipped under ``--offline`` (the askill download needs the network).
+    Refreshes askill to the managed pin so prepare stays the chokepoint that
+    keeps required local deps current on upgrade, but asks whether that refresh
+    would change anything before downloading the ~100 MB binary again. An askill
+    hiccup never fails the prepare; the Dependencies page offers a manual retry.
 
     ``force`` is prepare's ``--force``, and it means repair, not currency: a
     corrupted binary can still report the current version, so an explicit
     ``vibe runtime prepare --force`` must reinstall rather than ask. Currency is
     the default; repair stays available on request, exactly as it is for the
     Show Runtime, tmux, and git phases.
-
-    Only an explicit ``up_to_date`` verdict may report ready. Any other verdict
-    that installed nothing means currency was not established, not that it holds,
-    so prepare installs instead of claiming a fact it never checked.
     """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
@@ -16278,20 +16262,6 @@ def _ensure_askill_during_prepare(offline: bool = False, force: bool = False) ->
         result = api.refresh_askill_if_stale()
         if not (result.get("ok") and result.get("action") is None):
             return result
-        if result.get("reason") != "up_to_date":
-            # The owner skipped without establishing currency — today that is
-            # ``latest_unavailable``, when the upstream version probe failed.
-            # Prepare is the chokepoint that must *make* the dependency current,
-            # so with no evidence either way it does what it did before this fast
-            # path existed and installs. The probe and the askill.sh installer
-            # are independent paths: a rate-limited or blipped version lookup
-            # says nothing about whether the install would succeed, and reporting
-            # ready off the back of it would claim currency we never checked.
-            # Only ``up_to_date`` may report ready, so a skip reason added later
-            # takes this branch rather than inheriting a false pass.
-            refreshed = api.ensure_askill_installed(force=True)
-            refreshed["action"] = "refresh_currency_unknown"
-            return refreshed
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
     # Already current, and the owner said so: report ready rather than skipped so

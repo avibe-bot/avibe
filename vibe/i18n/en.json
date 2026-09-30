@@ -262,6 +262,12 @@
     "submitted": "Submitted"
   },
   "dependencies": {
+    "askill": {
+      "installed": "askill {version} installed.",
+      "noBuild": "no askill build for {platform}",
+      "checksumMismatch": "askill download checksum verification failed.",
+      "installFailed": "askill install failed: {error}"
+    },
     "avault": {
       "ready": "avault ready.",
       "missing": "avault is not installed. Build avault locally and put it on PATH, or set agents.avault.cli_path.",
@@ -1414,10 +1420,7 @@
       "dependencyDownloadDisk": "There is not enough disk space to store the dependency.",
       "dependencyDownloadIo": "Dependency file access failed.",
       "dependencyDownloadUnknown": "Dependency download failed.",
-      "askillAutoInstallUnsupported": "askill auto-install requires {tools}. Install it manually.",
-      "askillInstallPathMissing": "askill installer completed, but askill was not found on PATH.",
-      "installTimeout": "The {target} installer timed out after {timeout_seconds} seconds.",
-      "installCommandFailed": "The {target} installer exited with code {exit_code}.",
+      "askillInstallPathMissing": "askill was installed, but was not found on PATH.",
       "installError": "The {target} installer failed: {error}.",
       "avaultPlatformUnsupported": "No avault build is published for {platform}.",
       "avaultChecksumMismatch": "avault archive checksum verification failed (expected {expected_sha256}, got {actual_sha256}).",
@@ -1463,8 +1466,8 @@
       "dryDuplicateProcesses": "Would stop extra Avibe service processes outside the service lock.",
       "dryStaleRestart": "Would remove stale restart metadata and refresh runtime status.",
       "dryStableLaunchers": "Would point every stable vibe launcher at the newest installed version.",
-      "dryAskill": "Would install or refresh askill with the official installer.",
-      "dryAvault": "Would install or refresh the manifest-pinned avault release.",
+      "dryAskill": "Would install or refresh the pinned askill release.",
+      "dryAvault": "Would install or refresh the pinned avault release.",
       "dryModelHubEngine": "Would install or refresh the Avibe-pinned Model Hub engine (CPA).",
       "dryGitRuntime": "Would install or refresh the manifest-pinned Git Runtime.",
       "dryShowRuntime": "Would prepare the manifest-pinned Show Runtime archive when it is missing or invalid.",

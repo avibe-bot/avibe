@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Mirror published GitHub Release assets into the dl.avibe.bot R2 bucket.
 
-GitHub stays the source of truth. The mirror holds byte-identical copies under
-``releases/<tag>/<asset>`` and a release index at ``index/releases.json``; see
+GitHub stays the source of truth. For each mirrored repository the bucket holds
+byte-identical copies under ``<root>releases/<tag>/<asset>`` and a release
+index at ``<root>index/releases.json``; see
 ``docs/plans/release-download-mirror.md`` for the contract.
 """
 
@@ -24,6 +25,13 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import quote
 
 
+# Bucket root of each mirrored repository. Avibe's own releases keep the bucket
+# root, where their mirror URLs were first published.
+REPOSITORIES = {
+    "avibe-bot/avibe": "",
+    "avibe-bot/askill": "askill/",
+    "avibe-bot/avault": "avault/",
+}
 RELEASE_PREFIX = "releases/"
 INDEX_KEY = "index/releases.json"
 IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
@@ -40,6 +48,14 @@ class MirrorError(RuntimeError):
     """Raised when the mirror cannot be proven to match GitHub."""
 
 
+def release_prefix(repository: str) -> str:
+    return f"{REPOSITORIES[repository]}{RELEASE_PREFIX}"
+
+
+def index_key(repository: str) -> str:
+    return f"{REPOSITORIES[repository]}{INDEX_KEY}"
+
+
 @dataclass(frozen=True)
 class Asset:
     name: str
@@ -51,6 +67,7 @@ class Asset:
 
 @dataclass(frozen=True)
 class Release:
+    repository: str
     tag: str
     prerelease: bool
     published_at: str
@@ -58,7 +75,7 @@ class Release:
     assets: tuple[Asset, ...]
 
     def key(self, asset: Asset) -> str:
-        return f"{RELEASE_PREFIX}{self.tag}/{asset.name}"
+        return f"{release_prefix(self.repository)}{self.tag}/{asset.name}"
 
 
 @dataclass(frozen=True)
@@ -108,6 +125,7 @@ def parse_releases(
             )
         releases.append(
             Release(
+                repository=repository,
                 tag=tag,
                 prerelease=bool(item["prerelease"]),
                 published_at=item["published_at"],
@@ -146,13 +164,13 @@ def render_index(repository: str, releases: Sequence[Release]) -> bytes:
     return (json.dumps(document, separators=(",", ":")) + "\n").encode()
 
 
-def _indexed_digests(index: bytes | None) -> dict[str, str]:
+def _indexed_digests(repository: str, index: bytes | None) -> dict[str, str]:
     if index is None:
         return {}
     try:
         document = json.loads(index)
         return {
-            f"{RELEASE_PREFIX}{release['tag']}/{asset['name']}": asset["sha256"]
+            f"{release_prefix(repository)}{release['tag']}/{asset['name']}": asset["sha256"]
             for release in document["releases"]
             for asset in release["assets"]
         }
@@ -168,10 +186,11 @@ def plan(
     objects: Mapping[str, int],
     previous_index: bytes | None,
 ) -> Plan:
-    """Compare the selected releases with the bucket's ``releases/`` objects."""
+    """Compare the selected releases with the repository's ``releases/`` objects."""
     if not releases:
-        raise MirrorError("GitHub returned no published releases; refusing to reconcile")
-    indexed = _indexed_digests(previous_index)
+        raise MirrorError(f"GitHub returned no published releases for {repository}; refusing to reconcile")
+    prefix = release_prefix(repository)
+    indexed = _indexed_digests(repository, previous_index)
     uploads, changed, expected = [], [], set()
     for release in releases:
         for asset in release.assets:
@@ -184,7 +203,7 @@ def plan(
             elif prior is None or objects.get(key) != asset.size:
                 # Only an object this job verified and indexed is trusted.
                 uploads.append((key, asset))
-    deletions = sorted(key for key in objects if key.startswith(RELEASE_PREFIX) and key not in expected)
+    deletions = sorted(key for key in objects if key.startswith(prefix) and key not in expected)
     return Plan(
         uploads=tuple(uploads),
         deletions=tuple(deletions),
@@ -279,41 +298,43 @@ class Bucket:
 def reconcile(repository: str, bucket: Bucket, *, keep_prereleases: int, dry_run: bool) -> int:
     releases = select(parse_releases(repository, github_releases(repository), tag_commits(repository)), keep_prereleases)
     objects = bucket.objects()
-    previous_index = bucket.read(INDEX_KEY) if INDEX_KEY in objects else None
+    key = index_key(repository)
+    previous_index = bucket.read(key) if key in objects else None
     result = plan(repository, releases, objects, previous_index)
     size = sum(asset.size for _, asset in result.uploads)
     print(
-        f"{len(releases)} releases mirrored; {len(result.uploads)} uploads ({size / 1e9:.2f} GB), "
+        f"{repository}: {len(releases)} releases mirrored; "
+        f"{len(result.uploads)} uploads ({size / 1e9:.2f} GB), "
         f"{len(result.deletions)} deletions, index {'unchanged' if result.index == previous_index else 'changed'}"
     )
-    for key in result.changed:
-        print(f"error: published bytes changed upstream: {key}", file=sys.stderr)
+    for changed in result.changed:
+        print(f"error: published bytes changed upstream: {changed}", file=sys.stderr)
     if dry_run:
-        for key, _ in result.uploads:
-            print(f"would upload {key}")
-        for key in result.deletions:
-            print(f"would delete {key}")
+        for upload, _ in result.uploads:
+            print(f"would upload {upload}")
+        for deletion in result.deletions:
+            print(f"would delete {deletion}")
     else:
         with tempfile.TemporaryDirectory(prefix="avibe-release-mirror-") as temporary:
             path = Path(temporary) / "asset"
-            for key, asset in result.uploads:
+            for upload, asset in result.uploads:
                 download(asset, path)
                 bucket.put(
-                    key, path, content_type=asset.content_type,
+                    upload, path, content_type=asset.content_type,
                     cache_control=IMMUTABLE_CACHE_CONTROL, sha256=asset.sha256,
                 )
-                print(f"uploaded {key}")
+                print(f"uploaded {upload}")
             if result.index != previous_index:
                 path.write_bytes(result.index)
                 bucket.put(
-                    INDEX_KEY, path, content_type="application/json",
+                    key, path, content_type="application/json",
                     cache_control=INDEX_CACHE_CONTROL, sha256=hashlib.sha256(result.index).hexdigest(),
                 )
-                print(f"wrote {INDEX_KEY}")
+                print(f"wrote {key}")
         # Delete only after the index stops listing these objects.
-        for key in result.deletions:
-            bucket.delete(key)
-            print(f"deleted {key}")
+        for deletion in result.deletions:
+            bucket.delete(deletion)
+            print(f"deleted {deletion}")
     if result.changed:
         print("error: purge the changed URLs from the dl.avibe.bot cache", file=sys.stderr)
         return 1
@@ -322,22 +343,27 @@ def reconcile(repository: str, bucket: Bucket, *, keep_prereleases: int, dry_run
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repository", required=True)
+    parser.add_argument(
+        "--repository", action="append", choices=sorted(REPOSITORIES),
+        help="repository to reconcile (repeatable; default: every mirrored repository)",
+    )
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--endpoint-url", required=True)
     parser.add_argument("--keep-prereleases", type=int, default=DEFAULT_KEEP_PRERELEASES)
     parser.add_argument("--dry-run", action="store_true")
     arguments = parser.parse_args(argv)
-    try:
-        return reconcile(
-            arguments.repository,
-            Bucket(arguments.bucket, arguments.endpoint_url),
-            keep_prereleases=arguments.keep_prereleases,
-            dry_run=arguments.dry_run,
-        )
-    except MirrorError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    bucket = Bucket(arguments.bucket, arguments.endpoint_url)
+    status = 0
+    # Repositories own disjoint roots, so one failing never blocks the others.
+    for repository in arguments.repository or REPOSITORIES:
+        try:
+            status |= reconcile(
+                repository, bucket, keep_prereleases=arguments.keep_prereleases, dry_run=arguments.dry_run
+            )
+        except MirrorError as exc:
+            print(f"error: {repository}: {exc}", file=sys.stderr)
+            status = 1
+    return status
 
 
 if __name__ == "__main__":

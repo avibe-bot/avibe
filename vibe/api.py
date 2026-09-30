@@ -127,7 +127,7 @@ from core.vibe_agents import (
 )
 from core.process_isolation import isolated_subprocess_kwargs, signal_process_tree, KILL_SIGNAL
 from storage.lock import MigrationFileLock, MigrationLockTimeout
-from core.dependency_network import DependencyNetworkError, dependency_error_message, fetch_bytes
+from core.dependency_network import DependencyNetworkError, dependency_error_message, fetch_to_path
 
 
 logger = logging.getLogger(__name__)
@@ -7592,9 +7592,8 @@ def _run_install_command(
 
             # Persist real Agent backend CLI paths to V2Config so the next
             # ``get_backend_runtime`` reads them directly instead of relying
-            # on the resolver's stale-path fallback. Local dependencies such
-            # as askill reuse this runner but do not have ``agents.<name>``
-            # config entries, so they must not touch V2Config bookkeeping.
+            # on the resolver's stale-path fallback. Only Agent backends have
+            # ``agents.<name>`` config entries to persist into.
             if installed_path and is_agent_backend(name):
                 _persist_agent_cli_path(name, installed_path)
 
@@ -7632,6 +7631,18 @@ def _run_install_command(
 
 
 _ASKILL_INSTALL_LOCK = threading.Lock()
+# The managed askill release. Avibe installs it and upgrades an older askill to
+# it; only an explicit repair replaces a newer one.
+ASKILL_VERSION = "0.1.15"
+# (sha256, size) of each ASKILL_VERSION binary by askill's platform name, from
+# the release's GitHub asset digests.
+_ASKILL_BINARIES = {
+    "darwin-arm64": ("09d333828577bca89c4c842f3a30fb5459f22a78a59db8287512b3653762acb1", 63759842),
+    "darwin-x64": ("0f81766bcaf18c05148c403ebe561a3b7f2c0699cadca86fc498b5f812fc97a9", 69484624),
+    "linux-arm64": ("e06830ba2170f70e8dc9c5efbe83568f615735c75cca8f6961e45f2fbaf2bc91", 93956240),
+    "linux-x64": ("a5ac72faafc0f3f14c36a34c1a2e2beff777a483ad6ce71ee945297f0fa0aa24", 94894208),
+    "win32-x64": ("00e1bd471f531bded8504f1c6d79edf900ff9cee7e313bf6528be927e508dfe1", 98781696),
+}
 _AVAULT_INSTALL_LOCK = threading.Lock()
 _AVAULT_AGENT_MANAGER_LOCK = threading.Lock()
 _AVAULT_AGENT_MANAGER = None
@@ -7645,14 +7656,42 @@ AVAULT_GRANT_DELIVERY_MIN_VERSION = "0.1.4"
 # Older binaries cannot open browser-sealed protected values and fail with
 # "open failed for <name>", so protected Vaults must not treat them as ready.
 AVAULT_PROTECTED_RECORD_MIN_VERSION = "0.1.6"
-# Installer pin must reference a published manifest-pinned release. v0.1.6 adds the
+# Installer pin must reference a published release. v0.1.6 adds the
 # protected-record v2 AAD fix so agent delivery can open browser-sealed protected values.
 AVAULT_VERSION = "0.1.6"
-_AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
+# (sha256, size) of each AVAULT_VERSION archive by target, copied from that
+# release's manifest.json so the download is verified whichever source served it.
+_AVAULT_ARCHIVES = {
+    "linux-arm64": ("3405d740ac91c5490a0c16839bb878a2c574ee21053a7a4362d7bbeb7ce3f110", 3251581),
+    "linux-x64": ("42d5bd3bed5ccdd4748a99cfd64f2e32ab1649e4cd2dd13fcc060806c39109f2", 3574160),
+    "macos-arm64": ("2bf9ace2e055c9988ca3b24aa483676e1123b7a588b5082f57cc18d7d856f7c9", 1458126),
+    "macos-x64": ("558b4559b0bcdaeb713758183530d6944c2eacd68fcbfb35cd43ebd017fde163", 1597445),
+    "windows-arm64": ("0b1a2a91ad0a24c392172164e4040fb3c50bec81fd3a14d58e6e13d04053d864", 1316664),
+    "windows-x64": ("c0b9404d30980531f2a6df5e2b4f8bf6e5a34b31a916f7971b522a3a6cad71ad", 1394102),
+}
 
 
-def avault_manifest_url() -> str:
-    return urllib.parse.urljoin(_AVAULT_RELEASE_BASE_URL, "manifest.json")
+def _avault_archive_url(target: str) -> str:
+    return (
+        f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
+        f"avault-{AVAULT_VERSION}-{target}.tar.gz"
+    )
+
+
+def avault_download_url() -> str | None:
+    """The pinned avault archive for this platform, or None without a build."""
+    target = _avault_target()[0]
+    return _avault_archive_url(target) if target else None
+
+
+def _download_pinned_release_file(url: str, path: Path, size: int) -> str:
+    """Download a pinned release asset (mirror first) to ``path``; return its sha256."""
+    fetch_to_path(url, path, timeout=30, size=size)
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _truncate_install_output(output: str, limit: int = 8192) -> str:
@@ -7720,40 +7759,102 @@ def _reset_avault_agent_after_binary_change(*, reason: str) -> None:
         logger.warning("%s: failed to quarantine resident avault agent socket after binary change", reason, exc_info=True)
 
 
-def askill_auto_install_supported() -> bool:
-    """Return whether this host can run askill's official installer."""
-    import platform
+def _askill_platform() -> str | None:
+    """askill's release platform name for this host when a build is pinned.
 
+    askill names platforms as Node does (``darwin-arm64``, ``win32-x64``) where
+    avault says ``macos-arm64`` and ``windows-x64`` for the same hosts.
+    """
+    target = _avault_target()[0]
+    if target is None:
+        return None
+    system, _, arch = target.partition("-")
+    system = {"macos": "darwin", "windows": "win32"}.get(system, system)
+    name = f"{system}-{arch}"
+    return name if name in _ASKILL_BINARIES else None
+
+
+def _askill_binary_url(platform_name: str) -> str:
+    suffix = ".exe" if platform_name.startswith("win32-") else ""
     return (
-        platform.system().lower() != "windows"
-        and resolve_cli_path("curl") is not None
-        and resolve_cli_path("bash") is not None
+        f"https://github.com/avibe-bot/askill/releases/download/v{ASKILL_VERSION}/"
+        f"askill-{platform_name}{suffix}"
     )
+
+
+def askill_download_url() -> str | None:
+    """The pinned askill binary for this platform, or None without a build."""
+    platform_name = _askill_platform()
+    return _askill_binary_url(platform_name) if platform_name else None
+
+
+def askill_auto_install_supported() -> bool:
+    """Return whether Avibe pins an askill build for this host."""
+    return _askill_platform() is not None
 
 
 def install_askill() -> dict:
     """Install (or refresh) the askill CLI — a required local dependency for Skills.
 
-    Uses the official one-line installer (same shape as the OpenCode bootstrap
-    in ``install_agent``). Runs through ``_run_install_command``, whose
-    V2Config cli_path bookkeeping is limited to real Agent backends, so it is
-    safe for a standalone local dependency.
+    Downloads this platform's pinned ``ASKILL_VERSION`` binary, verifies its
+    pinned sha256, and atomically installs it where askill's own installer puts
+    it: ``~/.local/bin``, the first place ``resolve_cli_path`` looks.
     """
-    if askill_auto_install_supported():
-        cmd = _curl_installer_command("https://askill.sh", "sh")
-        return _run_install_command("askill", cmd, _truncate_install_output, mode="install")
-    # No npm fallback: askill is distributed via the askill.sh installer, not a
-    # public npm package, so a curl/bash-less host (e.g. Windows) must install
-    # it manually rather than hit a guaranteed-failing `npm i -g`.
-    import platform
+    import tempfile
 
+    platform_name = _askill_platform()
+    if platform_name is None:
+        platform_label = _avault_target()[1]
+        return {
+            "ok": False,
+            "message": backend_t("dependencies.askill.noBuild", platform=platform_label),
+            "reason": "askill_platform_unsupported",
+            "platform": platform_label,
+            "output": None,
+        }
+    url = _askill_binary_url(platform_name)
+    expected_sha256, size = _ASKILL_BINARIES[platform_name]
+    windows = platform_name.startswith("win32-")
+    install_path = Path.home() / ".local" / "bin" / ("askill.exe" if windows else "askill")
+    try:
+        install_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="askill-install-", dir=install_path.parent) as tmp_dir:
+            tmp_path = Path(tmp_dir) / install_path.name
+            actual_sha256 = _download_pinned_release_file(url, tmp_path, size)
+            if actual_sha256 != expected_sha256:
+                return {
+                    "ok": False,
+                    "message": backend_t("dependencies.askill.checksumMismatch"),
+                    "reason": "askill_binary_checksum_mismatch",
+                    "expected_sha256": expected_sha256,
+                    "actual_sha256": actual_sha256,
+                    "platform": platform_name,
+                    "url": url,
+                    "output": f"expected {expected_sha256}, got {actual_sha256}",
+                }
+            if not windows:
+                tmp_path.chmod(0o755)
+            os.replace(tmp_path, install_path)
+        _clear_macos_quarantine(install_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("askill install failed: %s", exc, exc_info=True)
+        result = {
+            "ok": False,
+            "message": backend_t("dependencies.askill.installFailed", error=str(exc)),
+            "reason": "askill_install_failed",
+            "error": str(exc),
+            "platform": platform_name,
+            "output": None,
+        }
+        if isinstance(exc, DependencyNetworkError):
+            result["reason"] = "askill_download_failed"
+            result["download_error"] = dict(exc.details)
+            result["message"] = dependency_error_message(exc.details, label="askill download")
+        return result
     return {
-        "ok": False,
-        "message": "askill auto-install needs curl + bash (macOS/Linux). Install it manually from https://askill.sh.",
-        "reason": "askill_auto_install_unsupported",
-        "required_tools": ["curl", "bash"],
-        "platform": platform.system() or "unknown",
-        "output": None,
+        "ok": True,
+        "message": backend_t("dependencies.askill.installed", version=ASKILL_VERSION),
+        "output": f"Installed askill {ASKILL_VERSION} for {platform_name}",
     }
 
 
@@ -7894,21 +7995,6 @@ def _persist_avault_cli_path(path: str) -> None:
         raise
 
 
-def _download_avault_release_file(url: str) -> bytes:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/octet-stream",
-            "User-Agent": "avibe/avault-installer",
-        },
-    )
-    return fetch_bytes(
-        request,
-        timeout=30,
-        opener=urllib.request.urlopen,
-    )
-
-
 def _extract_avault_binary(archive_bytes: bytes, output_path: Path, member_name: str = "avault") -> None:
     import io
     import tarfile
@@ -7940,9 +8026,9 @@ def _clear_macos_quarantine(path: Path) -> None:
 def install_avault(force: bool = False) -> dict:
     """Install (or refresh) avault, the required local custody-core dependency.
 
-    Downloads the Avibe-pinned public avault release manifest and tarball,
-    verifies the manifest sha256, safely extracts the single ``avault`` member,
-    and atomically installs it into Avibe's managed CLI location.
+    Downloads the Avibe-pinned avault release archive, verifies its pinned
+    sha256, safely extracts the single ``avault`` member, and atomically
+    installs it into Avibe's managed CLI location.
     """
     path = _resolve_avault_cli_path()
     if path and not force:
@@ -7955,7 +8041,6 @@ def install_avault(force: bool = False) -> dict:
             "version": existing_version,
         }
 
-    import hashlib
     import tempfile
 
     target, platform_label = _avault_target()
@@ -7980,38 +8065,28 @@ def install_avault(force: bool = False) -> dict:
         }
 
     try:
-        manifest_url = avault_manifest_url()
-        manifest = json.loads(_download_avault_release_file(manifest_url).decode("utf-8"))
-        entry = manifest["versions"][AVAULT_VERSION][target]
-        asset = entry["asset"]
-        expected_sha256 = str(entry["sha256"]).strip().lower()
-        if not isinstance(asset, str) or not asset.endswith(".tar.gz") or "/" in asset:
-            raise ValueError("manifest contains an invalid avault asset name")
-        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
-            raise ValueError("manifest contains an invalid avault sha256")
-
-        archive_url = urllib.parse.urljoin(_AVAULT_RELEASE_BASE_URL, asset)
-        archive_bytes = _download_avault_release_file(archive_url)
-        actual_sha256 = hashlib.sha256(archive_bytes).hexdigest()
-        if actual_sha256 != expected_sha256:
-            return {
-                "ok": False,
-                "message": backend_t("dependencies.avault.checksumMismatch"),
-                "reason": "avault_checksum_mismatch",
-                "expected_sha256": expected_sha256,
-                "actual_sha256": actual_sha256,
-                "platform": target,
-                "url": archive_url,
-                "output": f"expected {expected_sha256}, got {actual_sha256}",
-                "path": None,
-            }
-
+        expected_sha256, size = _AVAULT_ARCHIVES[target]
+        archive_url = _avault_archive_url(target)
         member_name = _avault_binary_name_for_target(target)
         install_path = _avault_managed_bin_path(target)
         install_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="avault-install-", dir=install_path.parent) as tmp_dir:
+            archive_path = Path(tmp_dir) / "avault.tar.gz"
+            actual_sha256 = _download_pinned_release_file(archive_url, archive_path, size)
+            if actual_sha256 != expected_sha256:
+                return {
+                    "ok": False,
+                    "message": backend_t("dependencies.avault.checksumMismatch"),
+                    "reason": "avault_checksum_mismatch",
+                    "expected_sha256": expected_sha256,
+                    "actual_sha256": actual_sha256,
+                    "platform": target,
+                    "url": archive_url,
+                    "output": f"expected {expected_sha256}, got {actual_sha256}",
+                    "path": None,
+                }
             tmp_path = Path(tmp_dir) / member_name
-            _extract_avault_binary(archive_bytes, tmp_path, member_name)
+            _extract_avault_binary(archive_path.read_bytes(), tmp_path, member_name)
             if not target.startswith("windows-"):
                 tmp_path.chmod(0o755)
             os.replace(tmp_path, install_path)
@@ -8794,26 +8869,14 @@ def _askill_auto_update_disabled() -> bool:
     return value in _FALSY_ENV_VALUES
 
 
-def _fetch_latest_askill_version() -> str | None:
-    return _fetch_github_latest_release_version(_ASKILL_RELEASE_REPOSITORY, user_agent="avibe/askill-dependency")
-
-
-def _cached_latest_askill() -> str | None:
-    # Share the managed-dependency cache so every local tool latest probe obeys
-    # the same TTLs — and, more to the point here, so ``vibe runtime prepare``
-    # inherits the answer a previous process already paid GitHub for.
-    return latest_version_cache.cached_latest(_ASKILL_CACHE_KEY, _fetch_latest_askill_version)
-
-
-def askill_update_status(*, include_latest: bool = True) -> dict:
-    """Return local askill version plus best-effort upstream update state."""
+def askill_update_status() -> dict:
+    """Return the local askill version and whether it is older than the pin."""
     current = askill_status()
-    latest = _cached_latest_askill() if include_latest else None
     current_version = current.get("version") if current.get("installed") else None
-    has_update = bool(include_latest and current.get("installed") and _compare_versions(current_version, latest))
+    has_update = bool(current.get("installed") and _compare_versions(current_version, ASKILL_VERSION))
     out = {
         **current,
-        "latest_version": latest,
+        "latest_version": ASKILL_VERSION,
         "has_update": has_update,
         "auto_update": not _askill_auto_update_disabled(),
     }
@@ -8827,22 +8890,18 @@ def askill_update_status(*, include_latest: bool = True) -> dict:
 
 
 def refresh_askill_if_stale() -> dict:
-    """Bring askill to the published version, installing only when that changes it.
+    """Bring askill to the managed pin, installing only when that changes it.
 
     The single owner of "is the managed askill current, and make it so". Every
-    caller that wants currency asks this instead of forcing an install, because
-    the askill.sh installer re-downloads the CLI on every run: answering the
-    question costs one cached version probe, answering it by reinstalling costs
-    ~30s of network even when the local binary is already the published version.
-    ``refresh_avault_if_stale`` is the same rule for the version-pinned sibling.
+    caller that wants currency asks this instead of forcing an install, which
+    re-downloads the ~100 MB binary: the wanted version is ``ASKILL_VERSION``,
+    so the question is answered locally with no download at all.
+    ``refresh_avault_if_stale`` is the same rule for the other pinned sibling.
 
     Callers own their own policy gate; this function only decides staleness. An
     install attempt is reported by ``action``, so its absence means the
-    dependency was already current.
-
-    ``up_to_date`` is an affirmative verdict, never a fallthrough: it requires
-    two versions that could actually be ordered. Anything else is unknown, and
-    unknown is answered by the repair the forced path would have done.
+    dependency was already current. An askill newer than the pin is current:
+    Avibe never downgrades it.
     """
     status = askill_update_status()
     if not status.get("installed"):
@@ -8850,46 +8909,25 @@ def refresh_askill_if_stale() -> dict:
         result["action"] = "install"
         return result
 
-    latest = status.get("latest_version")
     if status.get("status") == "unknown":
         # A binary whose version cannot be ordered is not current, it is broken —
         # whether it reported nothing or reported ``dev``. The status field owns
         # that judgement (see ``askill_update_status``) so this path and the
-        # Dependencies page cannot disagree. Deciding it before the
-        # ``latest_unavailable`` exit keeps the repair from being gated on
-        # network reachability: callers that used to force this install
-        # unconditionally would otherwise be told a broken askill is ready
-        # whenever the latest lookup failed too.
+        # Dependencies page cannot disagree.
         logger.info("askill local version is unknown; refreshing managed dependency")
         result = ensure_askill_installed(force=True)
         result["action"] = "refresh_unknown_version"
-        result["latest_version"] = latest
+        result["latest_version"] = ASKILL_VERSION
         return result
 
-    if not _is_comparable_version(latest):
-        # No usable upstream version to compare against — missing, or a string
-        # that cannot be ordered. Either way staleness is undecided, which is a
-        # different fact from being current; each caller owns what to do with it
-        # (prepare installs, the update cadence skips).
-        return {"ok": True, "skipped": True, "reason": "latest_unavailable", "status": status}
-
     if not status.get("has_update"):
-        # Two comparable versions, compared: this is the one state that may claim
-        # currency, and it is reached only by having established it.
         return {"ok": True, "skipped": True, "reason": "up_to_date", "status": status}
 
-    logger.info("askill update available: %s -> %s", status.get("version"), latest)
+    logger.info("askill update available: %s -> %s", status.get("version"), ASKILL_VERSION)
     result = ensure_askill_installed(force=True)
     result["action"] = "update"
     result["from_version"] = status.get("version")
-    result["latest_version"] = latest
-    # Deliberately no cache invalidation here, unlike the in-memory cache this
-    # replaced. The entry says which version askill *publishes*, and installing
-    # that version does not change the answer — it makes it the one a later
-    # ``askill_update_status`` needs, to compare a freshly measured local version
-    # against and conclude ``up_to_date``. Dropping it would send the next
-    # ``runtime prepare`` back to GitHub for a string we still hold, in the one
-    # window (right after an update) where prepare runs most often.
+    result["latest_version"] = ASKILL_VERSION
     return result
 
 
@@ -9208,7 +9246,7 @@ def dependencies_status(*, offline: bool = False, dependency_ids: list[str] | No
         raise ValueError(f"Unknown dependencies: {', '.join(sorted(unknown))}")
     deps: dict[str, dict] = {}
     if "askill" in requested:
-        a = askill_update_status(include_latest=False)
+        a = askill_update_status()
         deps["askill"] = {
             "id": "askill",
             "kind": "tool",
@@ -9615,10 +9653,6 @@ _BACKEND_CACHE_LOCK = __import__("threading").Lock()
 _BACKEND_VERSION_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
 _BACKEND_VERSION_TTL_SECONDS = 30.0
 _BACKEND_RUNTIME_USER_AGENT = "avibe/backend-runtime"
-_ASKILL_RELEASE_REPOSITORY = "avibe-bot/askill"
-#: askill is a managed dependency, not an agent backend, so it needs a name of
-#: its own in the shared latest-version cache.
-_ASKILL_CACHE_KEY = "askill"
 _ASKILL_AUTO_UPDATE_ENV = "VIBE_ASKILL_AUTO_UPDATE"
 _ASKILL_SKIP_ENV = "VIBE_INSTALL_SKIP_ASKILL"
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}

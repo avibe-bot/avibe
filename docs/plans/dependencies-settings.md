@@ -40,6 +40,10 @@ Non-goal (Phase 2): unify backends + askill + show runtime into one declarative
 
 ## Install mechanism (verified)
 
+> Superseded: Avibe now downloads a pinned askill binary mirror-first and
+> verifies its sha256; see `release-download-mirror.md`. The original mechanism
+> follows.
+
 - Official one-liner: `curl -fsSL https://askill.sh | sh` (same shape as the
   OpenCode installer already in `install_agent`).
 - No npm fallback: askill ships via the askill.sh installer, not a public npm

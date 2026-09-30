@@ -13,7 +13,9 @@ from tests.test_desktop_release import ROOT, workflow
 REPOSITORY = "avibe-bot/avibe"
 
 
-def github_release(tag, *, published_at, prerelease=False, draft=False, assets=("a.tgz",)):
+def github_release(
+    tag, *, published_at, prerelease=False, draft=False, assets=("a.tgz",), repository=REPOSITORY
+):
     return {
         "tag_name": tag,
         "draft": draft,
@@ -26,7 +28,7 @@ def github_release(tag, *, published_at, prerelease=False, draft=False, assets=(
                 "digest": f"sha256:{hashlib.sha256(name.encode()).hexdigest()}",
                 "content_type": "application/x-gtar",
                 "browser_download_url": (
-                    f"https://github.com/{REPOSITORY}/releases/download/{tag}/{name.replace('+', '%2B')}"
+                    f"https://github.com/{repository}/releases/download/{tag}/{name.replace('+', '%2B')}"
                 ),
             }
             for name in assets
@@ -34,8 +36,8 @@ def github_release(tag, *, published_at, prerelease=False, draft=False, assets=(
     }
 
 
-def releases(*items):
-    return mirror.parse_releases(REPOSITORY, items, {item["tag_name"]: "0" * 40 for item in items})
+def releases(*items, repository=REPOSITORY):
+    return mirror.parse_releases(repository, items, {item["tag_name"]: "0" * 40 for item in items})
 
 
 def test_selection_keeps_every_full_release_and_only_the_newest_prereleases():
@@ -66,8 +68,9 @@ def test_reconcile_plan_trusts_only_objects_the_prior_index_verified():
     objects = {release.key(asset): asset.size for asset in release.assets if asset.name != "absent.tgz"}
     objects["releases/v1.0.0/truncated.tgz"] -= 1
     objects["releases/gh-v0.9.0rc1/old.tgz"] = 1
-    objects[mirror.INDEX_KEY] = len(prior)
+    objects[mirror.index_key(REPOSITORY)] = len(prior)
     objects["thirdparty/uv/uv.tar.gz"] = 1
+    objects["askill/releases/v0.1.0/askill-linux-x64"] = 1
     current = replace(
         release,
         assets=tuple(
@@ -86,6 +89,43 @@ def test_reconcile_plan_trusts_only_objects_the_prior_index_verified():
     ]
     assert result.changed == ("releases/v1.0.0/replaced.tgz",)
     assert result.deletions == ("releases/gh-v0.9.0rc1/old.tgz",)
+
+
+def test_sibling_repositories_reconcile_only_their_own_root():
+    repository = "avibe-bot/askill"
+    (release,) = releases(
+        github_release("v0.1.15", published_at="2026-01-01T00:00:00Z", assets=("askill-linux-x64",),
+                       repository=repository),
+        repository=repository,
+    )
+    objects = {
+        "askill/releases/v0.1.14/askill-linux-x64": 1,
+        "avault/releases/v0.1.6/manifest.json": 1,
+        "releases/v1.0.0/a.tgz": 1,
+        "index/releases.json": 1,
+    }
+
+    result = mirror.plan(repository, [release], objects, None)
+
+    assert [key for key, _ in result.uploads] == ["askill/releases/v0.1.15/askill-linux-x64"]
+    assert result.deletions == ("askill/releases/v0.1.14/askill-linux-x64",)
+    assert mirror.index_key(repository) == "askill/index/releases.json"
+
+
+def test_a_failing_repository_does_not_stop_the_others_but_fails_the_run(monkeypatch, capsys):
+    reconciled = []
+
+    def reconcile(repository, bucket, *, keep_prereleases, dry_run):
+        reconciled.append(repository)
+        if repository == "avibe-bot/askill":
+            raise mirror.MirrorError("gh api failed: HTTP 403")
+        return 0
+
+    monkeypatch.setattr(mirror, "reconcile", reconcile)
+
+    assert mirror.main(["--bucket", "avibe", "--endpoint-url", "https://r2.invalid"]) == 1
+    assert reconciled == list(mirror.REPOSITORIES)
+    assert "error: avibe-bot/askill: gh api failed: HTTP 403" in capsys.readouterr().err
 
 
 def test_a_completed_reconcile_is_a_no_op_on_the_next_run():
@@ -125,13 +165,13 @@ def test_published_bytes_changing_upstream_fails_the_run_even_as_a_dry_run(monke
     (release,) = releases(item)
     (asset,) = release.assets
     prior = mirror.render_index(REPOSITORY, [replace(release, assets=(replace(asset, sha256="f" * 64),))])
-    bucket = RecordingBucket({release.key(asset): asset.size, mirror.INDEX_KEY: len(prior)}, prior)
+    bucket = RecordingBucket({release.key(asset): asset.size, "index/releases.json": len(prior)}, prior)
     monkeypatch.setattr(mirror, "github_releases", lambda repository: [item])
     monkeypatch.setattr(mirror, "tag_commits", lambda repository: {"v1.0.0": "0" * 40})
     monkeypatch.setattr(mirror, "download", lambda asset, destination: destination.write_bytes(b""))
 
     assert mirror.reconcile(REPOSITORY, bucket, keep_prereleases=20, dry_run=dry_run) == 1
-    assert bucket.writes == ([] if dry_run else ["releases/v1.0.0/a.tgz", mirror.INDEX_KEY])
+    assert bucket.writes == ([] if dry_run else ["releases/v1.0.0/a.tgz", "index/releases.json"])
 
 
 def test_an_empty_release_listing_never_plans_deleting_the_mirror():

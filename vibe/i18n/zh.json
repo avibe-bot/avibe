@@ -262,6 +262,12 @@
     "submitted": "已提交"
   },
   "dependencies": {
+    "askill": {
+      "installed": "askill {version} 已安装。",
+      "noBuild": "没有适用于 {platform} 的 askill 构建。",
+      "checksumMismatch": "askill 下载校验失败。",
+      "installFailed": "askill 安装失败：{error}"
+    },
     "avault": {
       "ready": "avault 已就绪。",
       "missing": "尚未安装 avault。请先在本地构建 avault 并放到 PATH 上，或设置 agents.avault.cli_path。",
@@ -1414,10 +1420,7 @@
       "dependencyDownloadDisk": "磁盘空间不足，无法保存依赖。",
       "dependencyDownloadIo": "访问依赖文件失败。",
       "dependencyDownloadUnknown": "依赖下载失败。",
-      "askillAutoInstallUnsupported": "askill 自动安装需要 {tools}，请手动安装。",
-      "askillInstallPathMissing": "askill 安装器已完成，但在 PATH 中找不到 askill。",
-      "installTimeout": "{target} 安装器在 {timeout_seconds} 秒后超时。",
-      "installCommandFailed": "{target} 安装器以退出码 {exit_code} 结束。",
+      "askillInstallPathMissing": "askill 已安装，但在 PATH 中找不到 askill。",
       "installError": "{target} 安装器失败：{error}。",
       "avaultPlatformUnsupported": "没有为 {platform} 发布 avault 构建版本。",
       "avaultChecksumMismatch": "avault 归档校验和验证失败（期望 {expected_sha256}，实际 {actual_sha256}）。",
@@ -1463,8 +1466,8 @@
       "dryDuplicateProcesses": "将停止服务锁外的额外 Avibe 服务进程。",
       "dryStaleRestart": "将移除过期重启元数据并刷新运行时状态。",
       "dryStableLaunchers": "将让所有稳定 vibe 启动器都指向最新的已安装版本。",
-      "dryAskill": "将使用官方安装器安装或刷新 askill。",
-      "dryAvault": "将安装或刷新清单固定的 avault 版本。",
+      "dryAskill": "将安装或刷新固定版本的 askill。",
+      "dryAvault": "将安装或刷新固定版本的 avault。",
       "dryModelHubEngine": "将安装或刷新 Avibe 固定的 Model Hub 引擎（CPA）版本。",
       "dryGitRuntime": "将安装或刷新清单固定的 Git Runtime。",
       "dryShowRuntime": "当清单固定的 Show Runtime 归档缺失或无效时准备它。",

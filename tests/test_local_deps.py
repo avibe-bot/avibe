@@ -1,9 +1,8 @@
-"""Hermetic tests for the askill local-dependency helpers in vibe/api.py.
+"""Hermetic tests for the local-dependency helpers in vibe/api.py.
 
-The subprocess / path-resolution boundary is monkeypatched, so these run
-without askill, npm, or the network — they pin the install command
-construction, the idempotency of ``ensure_askill_installed``, and the status
-shape.
+The download / subprocess / path-resolution boundary is monkeypatched, so these
+run without askill, avault, or the network — they pin the verified pinned-release
+downloads, the idempotency of the ``ensure_*`` helpers, and the status shape.
 """
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -48,13 +48,16 @@ def _stub_dependency_status_neighbors(monkeypatch) -> None:
         lambda: {"installed": False, "version": None, "status": "missing"},
     )
 
-from core import latest_version_cache
+from core import dependency_network
 from vibe import api
 
 
 class _FakeHTTPResponse:
+    status = 200
+
     def __init__(self, body: bytes):
-        self._body = body
+        self._body = io.BytesIO(body)
+        self.headers = {"Content-Length": str(len(body))}
 
     def __enter__(self):
         return self
@@ -62,8 +65,32 @@ class _FakeHTTPResponse:
     def __exit__(self, *args):
         return None
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, size: int = -1) -> bytes:
+        return self._body.read(size)
+
+
+def _serve_release_asset(monkeypatch, suffix: str, body: bytes) -> list[str]:
+    """Serve ``body`` for any URL ending in ``suffix``; return the requested URLs."""
+    calls: list[str] = []
+
+    def fake_urlopen(request, timeout=30):
+        url = request.full_url
+        calls.append(url)
+        if url.endswith(suffix):
+            return _FakeHTTPResponse(body)
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", fake_urlopen)
+    # Another test's download may have left GitHub as the preferred source.
+    monkeypatch.setattr(dependency_network, "_preferred_source", 0)
+    return calls
+
+
+def _installable_askill_release(monkeypatch, *, platform_name: str = "darwin-arm64", sha256: str | None = None):
+    binary = f"#!/bin/sh\necho askill {api.ASKILL_VERSION}\n".encode()
+    monkeypatch.setattr(api, "_ASKILL_BINARIES", {platform_name: (sha256 or hashlib.sha256(binary).hexdigest(), len(binary))})
+    suffix = ".exe" if platform_name.startswith("win32-") else ""
+    return _serve_release_asset(monkeypatch, f"/askill-{platform_name}{suffix}", binary), binary
 
 
 def _fake_avault_archive(
@@ -93,30 +120,8 @@ def _installable_avault_release(
         content = f"#!/bin/sh\necho avault {api.AVAULT_VERSION}\n".encode()
     member_name = api._avault_binary_name_for_target(target)
     archive = _fake_avault_archive(content=content, member_name=member_name)
-    digest = sha256 or hashlib.sha256(archive).hexdigest()
-    manifest = {
-        "schema_version": 1,
-        "versions": {
-            api.AVAULT_VERSION: {
-                target: {
-                    "asset": f"avault-{api.AVAULT_VERSION}-{target}.tar.gz",
-                    "sha256": digest,
-                }
-            }
-        },
-    }
-    calls: list[str] = []
-
-    def fake_urlopen(request, timeout=30):
-        url = request.full_url
-        calls.append(url)
-        if url.endswith("/manifest.json"):
-            return _FakeHTTPResponse(json.dumps(manifest).encode("utf-8"))
-        if url.endswith(f"/avault-{api.AVAULT_VERSION}-{target}.tar.gz"):
-            return _FakeHTTPResponse(archive)
-        raise AssertionError(f"unexpected url: {url}")
-
-    monkeypatch.setattr(api.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(api, "_AVAULT_ARCHIVES", {target: (sha256 or hashlib.sha256(archive).hexdigest(), len(archive))})
+    calls = _serve_release_asset(monkeypatch, f"/avault-{api.AVAULT_VERSION}-{target}.tar.gz", archive)
     def fake_candidate_cli_paths(binary: str, *, include_npm_global: bool = True):
         expanded = api.Path(api.os.path.expanduser(binary))
         has_path_separator = api.os.sep in binary or (api.os.altsep is not None and api.os.altsep in binary)
@@ -131,22 +136,103 @@ def _installable_avault_release(
     return calls, member_name
 
 
-def test_install_askill_uses_official_curl_installer(monkeypatch):
-    captured: dict = {}
-    monkeypatch.setattr(api, "resolve_cli_path", lambda b: f"/usr/bin/{b}" if b in {"curl", "bash"} else None)
+@pytest.mark.parametrize(
+    ("system", "machine", "platform_name", "binary_name"),
+    [
+        ("Darwin", "arm64", "darwin-arm64", "askill"),
+        ("Darwin", "x86_64", "darwin-x64", "askill"),
+        ("Linux", "x86_64", "linux-x64", "askill"),
+        ("Linux", "aarch64", "linux-arm64", "askill"),
+        ("Windows", "AMD64", "win32-x64", "askill.exe"),
+    ],
+)
+def test_install_askill_downloads_the_pinned_binary_mirror_first(monkeypatch, system, machine, platform_name, binary_name):
+    monkeypatch.setattr("platform.system", lambda: system)
+    monkeypatch.setattr("platform.machine", lambda: machine)
+    calls, binary = _installable_askill_release(monkeypatch, platform_name=platform_name)
 
-    def fake_run(name, cmd, _trunc, *, mode="install", env=None):
-        captured.update(name=name, cmd=cmd, mode=mode)
-        return {"ok": True, "path": "/usr/local/bin/askill", "output": ""}
-
-    monkeypatch.setattr(api, "_run_install_command", fake_run)
     out = api.install_askill()
-    assert out["ok"]
-    assert captured["name"] == "askill"
-    assert captured["cmd"][:2] == ["bash", "-c"]
-    assert "https://askill.sh | sh" in captured["cmd"][2]
-    assert "--retry 2" in captured["cmd"][2]
-    assert "--retry-all-errors" not in captured["cmd"][2]
+
+    installed = api.Path.home() / ".local" / "bin" / binary_name
+    assert out["ok"] is True
+    assert installed.read_bytes() == binary
+    if system != "Windows":
+        assert installed.stat().st_mode & 0o777 == 0o755
+        # askill's own installer location, which discovery checks first.
+        assert api.resolve_cli_path("askill") == str(installed)
+    suffix = ".exe" if system == "Windows" else ""
+    assert calls == [f"https://dl.avibe.bot/askill/releases/v{api.ASKILL_VERSION}/askill-{platform_name}{suffix}"]
+
+
+def test_install_askill_checksum_mismatch_installs_nothing(monkeypatch):
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    _installable_askill_release(monkeypatch, sha256="0" * 64)
+
+    out = api.install_askill()
+
+    assert out["ok"] is False
+    assert out["reason"] == "askill_binary_checksum_mismatch"
+    assert out["expected_sha256"] == "0" * 64
+    assert len(out["actual_sha256"]) == 64
+    assert not (api.Path.home() / ".local" / "bin" / "askill").exists()
+
+
+def test_install_askill_download_failure_keeps_the_network_evidence(monkeypatch):
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr("platform.machine", lambda: "x86_64")
+
+    def not_found(request, timeout=30):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", not_found)
+
+    out = api.install_askill()
+
+    assert out["ok"] is False
+    assert out["reason"] == "askill_download_failed"
+    assert out["download_error"]["http_status"] == 404
+    assert not (api.Path.home() / ".local" / "bin" / "askill").exists()
+
+
+def test_install_askill_without_a_pinned_build_downloads_nothing(monkeypatch):
+    # askill publishes no Windows arm64 build.
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+    monkeypatch.setattr("platform.machine", lambda: "ARM64")
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: pytest.fail("should not download"))
+
+    out = api.install_askill()
+
+    assert out["ok"] is False
+    assert out["reason"] == "askill_platform_unsupported"
+    assert out["platform"] == "Windows-ARM64"
+    assert api.askill_auto_install_supported() is False
+    assert api.askill_download_url() is None
+
+
+@pytest.mark.parametrize(
+    ("system", "machine"),
+    [
+        ("Darwin", "arm64"),
+        ("Darwin", "x86_64"),
+        ("Linux", "x86_64"),
+        ("Linux", "aarch64"),
+        ("Windows", "AMD64"),
+        ("Windows", "ARM64"),
+    ],
+)
+def test_every_supported_platform_has_well_formed_download_pins(monkeypatch, system, machine):
+    # A version bump that drops or misnames a target would otherwise surface
+    # only as a failed install on that platform: the install tests pin their own.
+    monkeypatch.setattr("platform.system", lambda: system)
+    monkeypatch.setattr("platform.machine", lambda: machine)
+    pins = [api._AVAULT_ARCHIVES[api._avault_target()[0]]]
+    if (system, machine) != ("Windows", "ARM64"):
+        pins.append(api._ASKILL_BINARIES[api._askill_platform()])
+
+    for sha256, size in pins:
+        assert re.fullmatch(r"[0-9a-f]{64}", sha256)
+        assert size > 0
 
 
 def test_curl_installer_command_uses_pipe_safe_retry_flags(tmp_path):
@@ -179,26 +265,7 @@ def test_curl_installer_command_uses_pipe_safe_retry_flags(tmp_path):
     assert "--retry-all-errors" not in calls[0]
 
 
-def test_avault_download_retries_transient_network_failure(monkeypatch):
-    attempts = 0
-
-    def opener(_request, timeout):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise urllib.error.URLError(ConnectionResetError("reset"))
-        return _FakeHTTPResponse(b"manifest")
-
-    monkeypatch.setattr(api.urllib.request, "urlopen", opener)
-    monkeypatch.setattr("core.dependency_network.time.sleep", lambda _delay: None)
-
-    result = api._download_avault_release_file("https://example.test/manifest.json")
-
-    assert result == b"manifest"
-    assert attempts == 2
-
-
-def test_askill_install_command_does_not_persist_agent_cli_path(monkeypatch):
+def test_install_runner_does_not_persist_a_non_agent_cli_path(monkeypatch):
     config_loads = []
 
     class FakePopen:
@@ -211,13 +278,13 @@ def test_askill_install_command_does_not_persist_agent_cli_path(monkeypatch):
             return "installed", ""
 
     monkeypatch.setattr(api.subprocess, "Popen", FakePopen)
-    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/askill" if b == "askill" else None)
-    monkeypatch.setattr(api, "load_config", lambda: config_loads.append(True) or pytest.fail("askill should not load V2Config"))
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/tool" if b == "tool" else None)
+    monkeypatch.setattr(api, "load_config", lambda: config_loads.append(True) or pytest.fail("tool should not load V2Config"))
 
-    out = api._run_install_command("askill", ["bash", "-c", "true"], lambda value: value, mode="install")
+    out = api._run_install_command("tool", ["bash", "-c", "true"], lambda value: value, mode="install")
 
     assert out["ok"] is True
-    assert out["path"] == "/usr/local/bin/askill"
+    assert out["path"] == "/usr/local/bin/tool"
     assert config_loads == []
 
 
@@ -232,8 +299,8 @@ def test_shared_install_runner_failures_have_structured_identity(monkeypatch):
             return "", "installer stderr"
 
     monkeypatch.setattr(api.subprocess, "Popen", FailedPopen)
-    failed = api._run_install_command("askill", ["bash"], lambda value: value)
-    assert failed["reason"] == "askill_install_failed"
+    failed = api._run_install_command("opencode", ["bash"], lambda value: value)
+    assert failed["reason"] == "opencode_install_failed"
     assert failed["exit_code"] == 17
 
     class ErrorPopen:
@@ -241,8 +308,8 @@ def test_shared_install_runner_failures_have_structured_identity(monkeypatch):
             raise OSError("runner unavailable")
 
     monkeypatch.setattr(api.subprocess, "Popen", ErrorPopen)
-    errored = api._run_install_command("askill", ["bash"], lambda value: value)
-    assert errored["reason"] == "askill_install_error"
+    errored = api._run_install_command("opencode", ["bash"], lambda value: value)
+    assert errored["reason"] == "opencode_install_error"
     assert errored["error"] == "runner unavailable"
 
     class TimedOutPopen:
@@ -259,33 +326,9 @@ def test_shared_install_runner_failures_have_structured_identity(monkeypatch):
 
     monkeypatch.setattr(api.subprocess, "Popen", TimedOutPopen)
     monkeypatch.setattr(api, "signal_process_tree", lambda *args, **kwargs: None)
-    timed_out = api._run_install_command("askill", ["bash"], lambda value: value)
-    assert timed_out["reason"] == "askill_install_timeout"
+    timed_out = api._run_install_command("opencode", ["bash"], lambda value: value)
+    assert timed_out["reason"] == "opencode_install_timeout"
     assert timed_out["timeout_seconds"] == 300
-
-
-def test_install_askill_unsupported_without_curl(monkeypatch):
-    # No curl/bash (e.g. Windows): no broken npm fallback — a clear manual
-    # message pointing at askill.sh, and _run_install_command is never invoked.
-    monkeypatch.setattr(api, "resolve_cli_path", lambda b: None)
-    monkeypatch.setattr(api, "_run_install_command", lambda *a, **k: pytest.fail("should not install"))
-    out = api.install_askill()
-    assert out["ok"] is False
-    assert "askill.sh" in out["message"]
-    assert out["reason"] == "askill_auto_install_unsupported"
-    assert out["required_tools"] == ["curl", "bash"]
-
-
-def test_install_askill_unsupported_on_windows_even_with_tools(monkeypatch):
-    monkeypatch.setattr("platform.system", lambda: "Windows")
-    monkeypatch.setattr(api, "resolve_cli_path", lambda binary: f"C:/{binary}.exe")
-    monkeypatch.setattr(api, "_run_install_command", lambda *a, **k: pytest.fail("should not install"))
-
-    out = api.install_askill()
-
-    assert out["ok"] is False
-    assert "askill.sh" in out["message"]
-    assert out["reason"] == "askill_auto_install_unsupported"
 
 
 def test_ensure_askill_idempotent_when_present(monkeypatch):
@@ -472,7 +515,7 @@ def test_windows_candidate_paths_include_managed_exe(monkeypatch):
         ("Windows", "ARM64", "windows-arm64"),
     ],
 )
-def test_install_avault_downloads_manifest_verifies_and_installs(monkeypatch, system, machine, target):
+def test_install_avault_downloads_the_pinned_archive_verifies_and_installs(monkeypatch, system, machine, target):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
     monkeypatch.setattr("platform.system", lambda: system)
@@ -491,10 +534,7 @@ def test_install_avault_downloads_manifest_verifies_and_installs(monkeypatch, sy
         assert api.V2Config.load().agents.avault.cli_path == str(installed)
     else:
         assert api.resolve_cli_path("avault") == str(installed)
-    assert calls == [
-        f"https://github.com/avibe-bot/avault/releases/download/v{api.AVAULT_VERSION}/manifest.json",
-        f"https://github.com/avibe-bot/avault/releases/download/v{api.AVAULT_VERSION}/avault-{api.AVAULT_VERSION}-{target}.tar.gz",
-    ]
+    assert calls == [f"https://dl.avibe.bot/avault/releases/v{api.AVAULT_VERSION}/avault-{api.AVAULT_VERSION}-{target}.tar.gz"]
 
 
 def test_install_avault_checksum_mismatch_installs_nothing(monkeypatch):
@@ -522,15 +562,15 @@ def test_install_avault_generic_failure_has_structured_identity(monkeypatch):
     monkeypatch.setattr("platform.machine", lambda: "arm64")
     monkeypatch.setattr(
         api,
-        "_download_avault_release_file",
-        lambda _url: (_ for _ in ()).throw(ValueError("invalid manifest")),
+        "_download_pinned_release_file",
+        lambda _url, _path, _size: (_ for _ in ()).throw(ValueError("invalid archive")),
     )
 
     out = api.install_avault()
 
     assert out["ok"] is False
     assert out["reason"] == "avault_install_failed"
-    assert out["error"] == "invalid manifest"
+    assert out["error"] == "invalid archive"
 
 
 def test_install_avault_is_idempotent_when_present(monkeypatch):
@@ -563,7 +603,7 @@ def test_install_avault_force_redownloads_when_present(monkeypatch):
     out = api.install_avault(force=True)
 
     assert out["ok"] is True
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert installed.read_text(encoding="utf-8").startswith("#!/bin/sh")
 
 
@@ -820,18 +860,19 @@ def test_avault_status_marks_old_version_upgrade_required(monkeypatch):
     assert s["status"] == "upgrade_required"
 
 
-def test_askill_update_status_compares_latest(monkeypatch):
+@pytest.mark.parametrize(("version", "has_update"), [("0.1.13", True), (api.ASKILL_VERSION, False), ("99.0.0", False)])
+def test_askill_update_status_compares_against_the_pin(monkeypatch, version, has_update):
+    # Avibe upgrades an askill older than its pin and never downgrades a newer one.
     monkeypatch.setattr(
         api,
         "askill_status",
-        lambda: {"id": "askill", "installed": True, "version": "0.1.13", "status": "ready", "path": "/x"},
+        lambda: {"id": "askill", "installed": True, "version": version, "status": "ready", "path": "/x"},
     )
-    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
 
     s = api.askill_update_status()
 
-    assert s["latest_version"] == "0.1.14"
-    assert s["has_update"] is True
+    assert s["latest_version"] == api.ASKILL_VERSION
+    assert s["has_update"] is has_update
     assert s["auto_update"] is True
 
 
@@ -855,18 +896,11 @@ def test_reconcile_askill_auto_update_installs_when_missing(monkeypatch):
     assert out["ok"] is True and out["action"] == "install"
 
 
-def test_reconcile_askill_auto_update_refreshes_when_newer(monkeypatch):
+def test_reconcile_askill_auto_update_refreshes_when_older_than_the_pin(monkeypatch):
     monkeypatch.setattr(
         api,
-        "askill_update_status",
-        lambda **_: {
-            "id": "askill",
-            "installed": True,
-            "version": "0.1.13",
-            "status": "ready",
-            "latest_version": "0.1.14",
-            "has_update": True,
-        },
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.13", "status": "ready", "path": "/x/askill"},
     )
     calls = []
 
@@ -882,21 +916,14 @@ def test_reconcile_askill_auto_update_refreshes_when_newer(monkeypatch):
     assert out["ok"] is True
     assert out["action"] == "update"
     assert out["from_version"] == "0.1.13"
-    assert out["latest_version"] == "0.1.14"
+    assert out["latest_version"] == api.ASKILL_VERSION
 
 
 def test_reconcile_askill_auto_update_refreshes_when_current_version_unknown(monkeypatch):
     monkeypatch.setattr(
         api,
-        "askill_update_status",
-        lambda **_: {
-            "id": "askill",
-            "installed": True,
-            "version": None,
-            "status": "unknown",
-            "latest_version": "0.1.14",
-            "has_update": False,
-        },
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": None, "status": "ready", "path": "/x/askill"},
     )
     calls = []
 
@@ -911,7 +938,7 @@ def test_reconcile_askill_auto_update_refreshes_when_current_version_unknown(mon
     assert calls == [True]
     assert out["ok"] is True
     assert out["action"] == "refresh_unknown_version"
-    assert out["latest_version"] == "0.1.14"
+    assert out["latest_version"] == api.ASKILL_VERSION
 
 
 def test_reconcile_askill_auto_update_skips_when_disabled(monkeypatch):
@@ -923,21 +950,14 @@ def test_reconcile_askill_auto_update_skips_when_disabled(monkeypatch):
     assert out == {"ok": True, "skipped": True, "reason": "askill_auto_update_disabled"}
 
 
-def test_refresh_askill_if_stale_does_not_run_the_installer_when_current(monkeypatch):
-    # The askill.sh installer re-downloads the CLI whenever it runs, so the
-    # shared currency owner must answer "already current" without invoking it.
+@pytest.mark.parametrize("version", [api.ASKILL_VERSION, "99.0.0"])
+def test_refresh_askill_if_stale_does_not_download_when_current(monkeypatch, version):
+    # Installing re-downloads the ~100 MB binary, so the shared currency owner
+    # must answer "already current" without it, and a newer askill is current.
     monkeypatch.setattr(
         api,
-        "askill_update_status",
-        lambda **_: {
-            "id": "askill",
-            "installed": True,
-            "version": "0.1.14",
-            "status": "ready",
-            "path": "/x/askill",
-            "latest_version": "0.1.14",
-            "has_update": False,
-        },
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": version, "status": "ready", "path": "/x/askill"},
     )
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not install"))
 
@@ -946,32 +966,6 @@ def test_refresh_askill_if_stale_does_not_run_the_installer_when_current(monkeyp
     assert out["ok"] is True
     assert out["reason"] == "up_to_date"
     assert "action" not in out
-
-
-def test_a_second_prepare_process_reuses_the_persisted_askill_latest(monkeypatch):
-    # The waste this closes: ``vibe runtime prepare`` is a fresh process on every
-    # install, upgrade, regression sync, and tenant update, and each one used to
-    # spend a GitHub request re-learning askill's newest release. That request
-    # comes out of the unauthenticated 60/hour/IP budget, and exhausting it makes
-    # the latest lookup fail, which makes prepare reinstall askill outright.
-    monkeypatch.setattr(
-        api,
-        "askill_status",
-        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready"},
-    )
-    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not install"))
-    probes = []
-    monkeypatch.setattr(
-        api,
-        "_fetch_latest_askill_version",
-        lambda: probes.append(1) or "0.1.14",
-    )
-
-    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
-    latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
-    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
-
-    assert len(probes) == 1
 
 
 def test_refresh_askill_if_stale_ignores_the_auto_update_gate(monkeypatch):
@@ -1116,30 +1110,6 @@ def test_refresh_avault_if_stale_never_answers_healthier_than_forcing(monkeypatc
     assert stale_state["installs"] <= forced_state["installs"]
 
 
-def test_refresh_askill_if_stale_repairs_an_unreadable_binary_without_the_latest_probe(monkeypatch):
-    # A binary that cannot report its version is broken, not current, and that
-    # verdict must not depend on the upstream probe answering: prepare used to
-    # force this install unconditionally, so gating the repair on a reachable
-    # latest would report a broken askill as ready during a network blip.
-    monkeypatch.setattr(
-        api,
-        "askill_status",
-        lambda: {"id": "askill", "installed": True, "version": None, "status": "unknown", "path": "/x/askill"},
-    )
-    monkeypatch.setattr(api, "_cached_latest_askill", lambda: None)
-    calls = []
-    monkeypatch.setattr(
-        api,
-        "ensure_askill_installed",
-        lambda force=False: calls.append(force) or {"ok": True, "installed": True, "changed": True, "path": "/x/askill"},
-    )
-
-    out = api.refresh_askill_if_stale()
-
-    assert calls == [True]
-    assert out["action"] == "refresh_unknown_version"
-
-
 # Strings a version probe can produce that no comparison can order: absent,
 # empty, a development build, a git description, a partial number. The point is
 # not the list — it is that each one makes `_compare_versions` answer False, the
@@ -1157,7 +1127,6 @@ def test_askill_status_calls_an_unorderable_version_unknown(monkeypatch, version
         "askill_status",
         lambda: {"id": "askill", "installed": True, "version": version, "status": "ready", "path": "/x/askill"},
     )
-    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
 
     assert api.askill_update_status()["status"] == "unknown"
 
@@ -1166,7 +1135,7 @@ def test_askill_status_calls_an_unorderable_version_unknown(monkeypatch, version
 def test_refresh_askill_if_stale_repairs_an_unorderable_local_version(monkeypatch, version):
     # `up_to_date` must be an affirmative verdict, never the branch everything
     # unrecognised falls into. A version that cannot be ordered against the
-    # published one means unknown, and unknown gets the repair the forced path
+    # pin means unknown, and unknown gets the repair the forced path
     # would have performed — asserted over the shapes a probe can produce rather
     # than over the one the review happened to name.
     monkeypatch.setattr(
@@ -1174,7 +1143,6 @@ def test_refresh_askill_if_stale_repairs_an_unorderable_local_version(monkeypatc
         "askill_status",
         lambda: {"id": "askill", "installed": True, "version": version, "status": "ready", "path": "/x/askill"},
     )
-    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
     calls = []
     monkeypatch.setattr(
         api,
@@ -1186,24 +1154,6 @@ def test_refresh_askill_if_stale_repairs_an_unorderable_local_version(monkeypatc
 
     assert calls == [True], f"{version!r} is not a version we can trust as current"
     assert out["action"] == "refresh_unknown_version"
-
-
-@pytest.mark.parametrize("latest", UNORDERABLE_VERSIONS)
-def test_refresh_askill_if_stale_needs_an_orderable_latest_to_claim_currency(monkeypatch, latest):
-    # The same rule on the upstream side: with nothing orderable to compare
-    # against, staleness is undecided. The owner reports that instead of
-    # currency, and each caller decides (prepare installs, the cadence skips).
-    monkeypatch.setattr(
-        api,
-        "askill_status",
-        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready", "path": "/x/askill"},
-    )
-    monkeypatch.setattr(api, "_cached_latest_askill", lambda: latest)
-    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("the owner decides, it does not install here"))
-
-    out = api.refresh_askill_if_stale()
-
-    assert out["reason"] == "latest_unavailable"
 
 
 @pytest.mark.parametrize(
@@ -2050,43 +2000,6 @@ def test_start_dependency_install_job_runs_model_hub_engine(monkeypatch):
     assert calls == [True]
     assert cur["status"] == "succeeded"
     assert cur["version"] == "v7.2.149"
-
-
-def test_installing_askill_keeps_the_persisted_latest_for_the_next_process(monkeypatch):
-    """An install is the one moment prepare runs most, and must not cost a probe.
-
-    Installing 0.1.14 does not change the fact that 0.1.14 is what askill
-    publishes, so the entry that justified the install is exactly what the next
-    process needs: it compares a freshly measured local version against it and
-    concludes ``up_to_date``. Retiring it here — the reflex the in-memory cache
-    this replaced had — would send every post-update ``runtime prepare`` back to
-    GitHub for a string already on disk.
-    """
-
-    installed = {"version": "0.1.13"}
-    monkeypatch.setattr(
-        api,
-        "askill_status",
-        lambda: {"id": "askill", "installed": True, "version": installed["version"], "status": "ready"},
-    )
-
-    def _install(force=False):
-        installed["version"] = "0.1.14"
-        return {"ok": True, "installed": True, "changed": True, "path": "/x/askill"}
-
-    monkeypatch.setattr(api, "ensure_askill_installed", _install)
-    probes = []
-    monkeypatch.setattr(
-        api,
-        "_fetch_latest_askill_version",
-        lambda: probes.append(1) or "0.1.14",
-    )
-
-    assert api.refresh_askill_if_stale()["action"] == "update"
-    latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
-
-    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
-    assert len(probes) == 1
 
 
 def test_dependencies_status_shape(monkeypatch):
