@@ -610,4 +610,4 @@ jobs:
       # uninstall cannot rely on the installed Python. Pin it to the Python
       # owner in both Windows PowerShell and PowerShell 7.
       - name: Verify the installer's launcher rule matches the Python owner
-        run: python -m pytest tests/test_installer_uninstall.py -q -ra -k "rule_matches or dirs_match"
+        run: python -m pytest tests/test_installer_uninstall.py -q -ra -k "rule_matches or dirs_match or powershell"

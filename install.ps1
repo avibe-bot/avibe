@@ -813,6 +813,23 @@ function Resolve-LinkChain {
     return $Path
 }
 
+# A file's SHA-256, or $null when it cannot be read. .NET computes it, so no
+# module has to load in a session whose module path came from another shell.
+function Get-ContentHash {
+    param([string]$Path)
+
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return [System.BitConverter]::ToString($sha256.ComputeHash([System.IO.File]::ReadAllBytes($Path)))
+        } finally {
+            $sha256.Dispose()
+        }
+    } catch {
+        return $null
+    }
+}
+
 # Whether deleting install-generations would break this launcher: it resolves
 # into the root, or it is a hard link or copy of a generation's launcher.
 # vibe.upgrade._launcher_generation recognizes the same shapes, but it moves a
@@ -827,14 +844,13 @@ function Test-LauncherUsesInstallGenerations {
     if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) {
         return $false
     }
-    $hash = (Get-FileHash -LiteralPath $Launcher -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+    $hash = Get-ContentHash $Launcher
     if (-not $hash) {
         return $false
     }
     foreach ($generation in @(Get-ChildItem -LiteralPath $Root -Directory -Force -ErrorAction SilentlyContinue)) {
         $exported = Join-Path $generation.FullName "bin\vibe.exe"
-        if ((Test-Path -LiteralPath $exported -PathType Leaf) -and
-            (Get-FileHash -LiteralPath $exported -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash -eq $hash) {
+        if ((Test-Path -LiteralPath $exported -PathType Leaf) -and (Get-ContentHash $exported) -eq $hash) {
             return $true
         }
     }
@@ -947,8 +963,8 @@ function Test-UvToolOwnsItsLaunchers {
             continue
         }
         $own = Join-Path $Environment ("Scripts\" + (Split-Path -Leaf $path))
-        if ((Test-Path -LiteralPath $path -PathType Leaf) -and (Test-Path -LiteralPath $own -PathType Leaf) -and
-            (Get-FileHash -LiteralPath $path).Hash -eq (Get-FileHash -LiteralPath $own).Hash) {
+        $hash = Get-ContentHash $path
+        if ($hash -and (Test-Path -LiteralPath $own -PathType Leaf) -and $hash -eq (Get-ContentHash $own)) {
             continue
         }
         return $false

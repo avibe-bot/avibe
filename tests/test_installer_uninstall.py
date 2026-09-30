@@ -213,7 +213,12 @@ def _powershell(layout: Layout, shell: str, command: str) -> list[str]:
     )
     result = subprocess.run(
         [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-        env={**os.environ, **layout.env(USERPROFILE=str(layout.home), AVIBE_HOME=str(layout.avibe_home))},
+        # A shell started from Python keeps PowerShell 7's module path, which
+        # Windows PowerShell cannot load; a user's own session has its default.
+        env={
+            **{name: value for name, value in os.environ.items() if name.upper() != "PSMODULEPATH"},
+            **layout.env(USERPROFILE=str(layout.home), AVIBE_HOME=str(layout.avibe_home)),
+        },
         capture_output=True,
         text=True,
         timeout=120,
