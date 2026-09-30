@@ -653,7 +653,7 @@ def test_powershell_waits_for_a_process_using_what_it_deletes(layout, shell):
     mentioning = subprocess.Popen([sys.executable, "-c", sleeper, f"--config={unrelated}"])
     try:
         root = str(layout.root).replace("'", "''")
-        blocking = _powershell(layout, shell, f"Get-BlockingProcesses -RuntimeHome (Get-RuntimeHome) -Paths @('{root}')")
+        blocking = _powershell(layout, shell, f"Get-BlockingProcesses -Paths @('{root}')")
     finally:
         for process in (using, mentioning):
             process.kill()
