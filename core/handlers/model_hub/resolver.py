@@ -439,6 +439,28 @@ def _supply_status(
     return "interrupted"
 
 
+def turn_ordered_candidate_hops(
+    resolution: ModelHubTurnResolution,
+    turn_hop: tuple[str, str] | None,
+) -> tuple[ExactHopInspection, ...]:
+    """Walk the runnable hops from the hop the turn is on, then wrap around.
+
+    A turn stays on the hop that served it: hops before it in the route come
+    last, so a hop that recovers mid-turn serves only when every hop from the
+    turn's own onward cannot. Membership never changes, only where the walk
+    starts. A turn hop that has left the effective route no longer applies.
+    """
+
+    route = [(hop.source_id, hop.model_id) for hop in resolution.inspected_hops]
+    if turn_hop is None or turn_hop not in route:
+        return resolution.candidate_hops
+    start = route.index(turn_hop)
+    return tuple(sorted(
+        resolution.candidate_hops,
+        key=lambda hop: (route.index((hop.source_id, hop.model_id)) - start) % len(route),
+    ))
+
+
 def resolve_model_hub_turn(
     config: ModelHubConfig,
     backend: BackendName,

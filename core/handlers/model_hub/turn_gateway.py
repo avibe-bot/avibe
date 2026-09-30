@@ -366,6 +366,9 @@ class ModelHubTurnGateway:
         self._base_url: str | None = None
         self._turn_requests: dict[str, set[_OwnedGatewayRequest]] = {}
         self._turn_completions: dict[str, asyncio.Task[None]] = {}
+        # The exact hop each live turn is on, per requested model. A turn keeps
+        # it until that hop fails, so one turn is one model and one vendor.
+        self._turn_hops: dict[str, dict[str, tuple[str, str]]] = {}
 
     @contextmanager
     def _own_turn_request(self, terminalizer: GatewayTurnTerminalizer, execution: _TurnExecution):
@@ -409,6 +412,7 @@ class ModelHubTurnGateway:
             return existing
         self.correlation.close_turn_admission(turn_id, settled_by=settled_by)
         if not self._turn_requests.get(turn_id):
+            self._turn_hops.pop(turn_id, None)
             finish()
             return None
 
@@ -419,6 +423,8 @@ class ModelHubTurnGateway:
                 ))
                 await await_owned_task(drain)
             finally:
+                # After the drain, so no request of this turn can re-pin it.
+                self._turn_hops.pop(turn_id, None)
                 try:
                     finish()
                 finally:
@@ -545,6 +551,7 @@ class ModelHubTurnGateway:
             await asyncio.gather(*(
                 await_owned_task(task) for task in tuple(self._turn_completions.values())
             ))
+        self._turn_hops.clear()
         # After the runner, so the handlers it cancels have queued their last
         # writes first. Bounded like every other owned drain: a ledger that
         # cannot be reached must not hold shutdown open.
@@ -924,6 +931,8 @@ class ModelHubTurnGateway:
             )
 
         protocol = _REQUEST_PROTOCOLS[endpoint]
+        turn_id = terminalizer.turn_id
+        turn_hop = self._turn_hops.get(turn_id, {}).get(resolution_model) if turn_id is not None else None
         try:
             caller_headers = {
                 name.lower(): value for name, value in request.headers.items() if name.lower() in FORWARDED_CALLER_HEADERS
@@ -945,6 +954,7 @@ class ModelHubTurnGateway:
                     supply_channel="hub",
                     attempt_observer=observe_attempt,
                     recovery_observer=terminalizer.update_recovery,
+                    turn_hop=turn_hop,
                 )
                 # Owned before the keepalive stops, so a cancellation while it
                 # stops still closes and meters a Source stream already won.
@@ -952,6 +962,7 @@ class ModelHubTurnGateway:
                 if resolved.handle is not None and resolved.handle.stream is not None:
                     execution.handle = resolved.handle
                     resources.push_async_callback(resolved.handle.close_stream)
+                self._keep_turn_hop(terminalizer, turn_id, resolution_model, turn_hop, resolved)
         except ModelHubError as exc:
             turn_outcome = exc.turn_outcome
             if turn_outcome is None and exc.code == "engine_down":
@@ -1010,6 +1021,27 @@ class ModelHubTurnGateway:
                 execution=execution,
             ),
         )
+
+    def _keep_turn_hop(
+        self,
+        terminalizer: GatewayTurnTerminalizer,
+        turn_id: str | None,
+        model_id: str,
+        resolved_from: tuple[str, str] | None,
+        resolved: ResolvedInvocation,
+    ) -> None:
+        """Pin the turn to the hop that just served it.
+
+        Only a request the turn still owns may move the pin, and only from the
+        hop it resolved from: a concurrent request of the same turn that
+        already moved it forward is not moved back by a slower peer.
+        """
+
+        if turn_id is None or terminalizer.turn_id != turn_id:
+            return
+        hops = self._turn_hops.setdefault(turn_id, {})
+        if hops.get(model_id) == resolved_from:
+            hops[model_id] = (resolved.source_id, resolved.model_id)
 
     @asynccontextmanager
     async def _stream_kept_alive(

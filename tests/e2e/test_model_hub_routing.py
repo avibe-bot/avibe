@@ -13,8 +13,10 @@ import pytest
 import yaml
 
 from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.retry import RecoveryPolicy
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from modules.agents.model_hub import ModelHubRuntimeRouter
 from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
 from tests.e2e.test_model_hub_migration import _write
 from tests.e2e.test_model_hub_runtime import (
@@ -627,6 +629,78 @@ def test_mh_modalities_003_claude_tool_result_image_reaches_a_text_only_model_as
 
     with MockLLMUpstream() as upstream, _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
         asyncio.run(exercise(adapter, upstream))
+
+
+def test_mh_routing_015_turn_stays_on_its_hop_through_real_cpa(tmp_path, monkeypatch):
+    """MH-ROUTING-015: a turn keeps the hop that serves it through pinned CPA; the next turn starts over."""
+    async def exercise(adapter, first, second):
+        backend, model = "claude", fixed_model("claude")
+        sources = []
+        for index, mock in enumerate((first, second)):
+            mock.configure(protocol="anthropic", models=[{"id": model}])
+            item = source(f"src_turnhop{index:03d}", [model], vendor="custom", protocol="anthropic")
+            item.base_url = mock.url
+            item.credential_ref = adapter.state_store.store_api_key(
+                f"sk-synthetic-turn-hop-{index}", vendor="custom", protocol="anthropic", base_url=item.base_url,
+            )
+            sources.append(item)
+        # Retry-After advice is read against the wall clock, so this clock starts there.
+        started, elapsed = datetime.now(timezone.utc), [0.0]
+
+        def now():
+            return started + timedelta(seconds=elapsed[0])
+
+        service = service_for(tmp_path, MemoryModelHubStore(config_with_sources(sources, backend=backend)), adapter, now=now)
+        service.recovery = RecoveryPolicy(now=now, monotonic=lambda: elapsed[0], jitter=lambda low, high: low)
+        await service.runtime_start()
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+        payload = {"model": model, "stream": False, "max_tokens": 32, "messages": [{"role": "user", "content": "继续"}]}
+        served = []
+
+        async def call(client, launch):
+            first.reset_requests()
+            second.reset_requests()
+            async with client.post(f"{launch.gateway_base_url}/v1/messages", json=payload,
+                                   headers={"Authorization": f"Bearer {launch.gateway_token}"}) as response:
+                raw = await asyncio.wait_for(response.read(), timeout=15)
+                assert response.status == 200, raw
+            served.append("".join(
+                name for name, mock in (("A", first), ("B", second))
+                for row in mock.requests() if row["path"] == "/v1/messages"
+            ))
+
+        async def settle(turn_id):
+            completion = router.settle_turn(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT, ts=now().isoformat())
+            if completion is not None:
+                await completion
+
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                turn = await router.resolve(backend, model, process_scope=str(tmp_path), turn_id="turn_hop_first")
+                await call(client, turn)
+                first.configure(auth="429")
+                await call(client, turn)
+                await call(client, turn)
+                first.configure(auth="ok")
+                elapsed[0] += 600
+                await call(client, turn)
+                await settle("turn_hop_first")
+                following = await router.resolve(backend, model, process_scope=str(tmp_path), turn_id="turn_hop_next")
+                await call(client, following)
+                await settle("turn_hop_next")
+        finally:
+            await gateway.close()
+        # The failed hop recovered before the first turn ended, and still served
+        # nothing more of it; the fallback order only moves forward within a turn.
+        assert served == ["A", "AB", "B", "B", "A"]
+        record = service.get_turn_provenance("turn_hop_first")
+        assert record["served"] == {"source_id": sources[1].id, "configured_model_id": model, "channel": "hub"}
+        assert [attempt["source_id"] for attempt in record["failed_attempts"]] == [sources[0].id]
+        assert service.get_turn_provenance("turn_hop_next")["served"]["source_id"] == sources[0].id
+
+    with MockLLMUpstream() as first, MockLLMUpstream() as second, _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
+        asyncio.run(exercise(adapter, first, second))
 
 
 @pytest.mark.parametrize("settings_scope", ["home", "project", "local"])

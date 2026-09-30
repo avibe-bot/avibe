@@ -567,7 +567,7 @@ if B.mode == "direct":
     return DIRECT
 
 attempted = false
-for hop in C, in effective-plan order:
+for hop in C, in effective-plan order rotated to start at the turn hop:
     live = inspect_exact_hop(hop)
     annotate hop with live.runnable, live.reason, and live.retry_at
     if not live.runnable:
@@ -588,6 +588,21 @@ for hop in C, in effective-plan order:
 return NO_CANDIDATE(classify_blockers(C)) if not attempted
 else EXHAUSTED(classify_blockers(C))
 ```
+
+**Turn hop (issue #2226).** One Avibe turn stays on one exact hop per requested menu
+model until that hop fails. The first request of a turn walks `C` from its first hop;
+the hop that serves it becomes the turn hop. Every later request of the same turn and
+menu model walks `C` rotated to start at the turn hop, so hops before it come last: a
+hop that recovers mid-turn serves that turn only when every hop from the turn hop onward
+cannot. Whichever hop serves becomes the new turn hop. The rotation changes neither
+membership nor eligibility, so a request that one walk can serve, the other serves too.
+A turn hop that is no longer in `C`, after a route edit or a Source deletion, no longer
+applies, and the walk starts at `C[0]`. The turn is the FSM turn that TurnProvenance
+attributes the request to, so a request without an exact turn (the shared OpenCode
+server, a late request after the turn settled, an ambiguous scope) walks `C` from its
+first hop as before. A request of the same turn for another menu model has its own turn
+hop. The gateway keeps turn hops in memory and drops a turn's hops when the FSM settles
+it, after its requests drain, and when the gateway closes.
 
 `inspect_exact_hop` checks only whether that configured hop can run now. `healthy` and
 an elapsed cooldown are eligible, unless a real request already owns half-open

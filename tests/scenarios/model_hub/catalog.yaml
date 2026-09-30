@@ -15,6 +15,7 @@ capability:
     - tests/test_model_hub_retry_advice.py
     - tests/test_model_hub_retry_policy.py
     - tests/test_model_hub_retry_lifecycle.py
+    - tests/test_model_hub_turn_route.py
     - tests/test_model_hub_recovery_evidence.py
     - tests/test_model_hub_progress.py
     - tests/test_model_hub_failure_presentation.py
@@ -400,6 +401,18 @@ scenarios:
     kind: compatibility
     layer: e2e
     test: tests/e2e/test_model_hub_routing.py::test_mh_routing_013_legacy_empty_inherits_matching_and_exact_passthrough_through_real_cpa
+  - id: MH-ROUTING-014
+    name: One turn stays on the hop that serves it until that hop fails, per requested model, and the next turn starts from the first hop
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_turn_route.py::test_turn_stays_on_its_hop_until_that_hop_fails
+  - id: MH-ROUTING-015
+    name: Real gateway and pinned CPA keep a turn on its fallback hop after the failed hop recovers
+    status: assert
+    kind: recovery
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_015_turn_stays_on_its_hop_through_real_cpa
   - id: MH-REQUEST-BUDGET-001
     name: Large multi-image requests retain exact model input through authenticated HTTP ingress
     status: covered

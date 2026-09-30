@@ -155,6 +155,7 @@ from .resolver import (
     source_model_retired,
     source_supports_passthrough,
     source_runnable,
+    turn_ordered_candidate_hops,
 )
 from .revocations import CredentialRevocationJournal
 from .retry import RECOVERY_EXHAUSTED_CODE, RecoveryPolicy, RecoveryRequest, RETRY_DELAYS, source_identity
@@ -7729,6 +7730,7 @@ class ModelHubService:
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
+        turn_hop: tuple[str, str] | None = None,
     ) -> InvokeHandle:
         while True:
             await self._mutation_lock.acquire()
@@ -7753,7 +7755,7 @@ class ModelHubService:
                 config = self.store.load()
                 resolution = self._invocation_resolution(config, backend, requested_model_id, supply_channel)
                 candidates = [
-                    hop for hop in resolution.candidate_hops
+                    hop for hop in turn_ordered_candidate_hops(resolution, turn_hop)
                     if hop.source_id not in excluded_source_ids
                 ]
                 candidate = next(
@@ -7808,6 +7810,7 @@ class ModelHubService:
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
         recovery_request: RecoveryRequest | None = None,
+        turn_hop: tuple[str, str] | None = None,
     ) -> tuple[InvokeHandle, Optional[RawCallOutcome], asyncio.CancelledError | None]:
         acquired_handle: InvokeHandle | None = None
         generation: int | None = None
@@ -7853,6 +7856,7 @@ class ModelHubService:
                     exact_retry=exact_retry,
                     on_admitted=admitted,
                     recovery_request=recovery_request,
+                    turn_hop=turn_hop,
                 )
             except InvokeCancelledError as cancelled:
                 await meter_observed(cancelled.observed, None)
@@ -8052,6 +8056,7 @@ class ModelHubService:
         supply_channel: Literal["hub"] | None = None,
         attempt_observer: Optional[AttemptObserver] = None,
         recovery_request: RecoveryRequest | None = None,
+        turn_hop: tuple[str, str] | None = None,
     ) -> ResolvedInvocation:
         if backend not in {"claude", "codex", "opencode"}:
             raise ModelHubError("mapping_target_unavailable")
@@ -8110,7 +8115,10 @@ class ModelHubService:
                     config, cast(BackendName, backend), model_id, supply_channel,
                 )
                 inspection = next(
-                    (hop for hop in resolution.candidate_hops if hop.source_id not in globally_blocked_source_ids),
+                    (
+                        hop for hop in turn_ordered_candidate_hops(resolution, turn_hop)
+                        if hop.source_id not in globally_blocked_source_ids
+                    ),
                     None,
                 )
             if inspection is None:
@@ -8173,6 +8181,7 @@ class ModelHubService:
                     supply_channel=supply_channel,
                     on_admitted=admitted,
                     recovery_request=recovery_request,
+                    turn_hop=turn_hop,
                 )
             except _InvocationPlanChanged:
                 continue
@@ -8232,6 +8241,7 @@ class ModelHubService:
                         exact_retry=True,
                         on_admitted=admitted,
                         recovery_request=recovery_request,
+                        turn_hop=turn_hop,
                     )
                 except _InvocationPlanChanged:
                     if attempt_observer is not None:
