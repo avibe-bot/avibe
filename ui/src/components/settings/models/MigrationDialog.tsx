@@ -346,6 +346,9 @@ export const MigrationDialog: React.FC<{
       .map((group) => group.backend),
   );
   const toggle = (backend: AgentBackend) => {
+    // A batch in flight owns its selection, like every other control here: its
+    // outcome, success or refusal, then always describes the rows on screen.
+    if (applying) return;
     const group = grouped.find((item) => item.backend === backend);
     if (!group || !groupSelectable(group)) return;
     // The reason explained the batch that was refused, not the one now selected.
@@ -491,7 +494,7 @@ export const MigrationDialog: React.FC<{
                     key={item.id}
                     item={item}
                     checked={!group.blocked && selectedBackends.has(group.backend)}
-                    selectable={!group.blocked && isImportable(item)}
+                    selectable={!applying && !group.blocked && isImportable(item)}
                     onToggle={() => toggle(group.backend)}
                   />
                 ))}

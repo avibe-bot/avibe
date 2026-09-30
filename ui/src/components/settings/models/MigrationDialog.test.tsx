@@ -943,6 +943,28 @@ describe('MigrationDialog — the setup scope', () => {
     expect(applied).toEqual([[CODEX_KEY.id], [LEGACY.id]]);
   });
 
+  it('freezes the selection while a batch is in flight so its refusal describes the rows shown', async () => {
+    let refuse: (error: unknown) => void = () => {};
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [{ ...CODEX_KEY }] });
+    vi.spyOn(modelsApi, 'applyMigration').mockImplementation(
+      () => new Promise((_resolve, reject) => { refuse = reject; }),
+    );
+    renderDialog();
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('OpenAI');
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+    await within(dialog).findByRole('button', { name: 'Migrating…' });
+
+    await user.click(rowCheckboxes(dialog)[0]);
+    expect(rowCheckboxes(dialog)[0].getAttribute('aria-checked')).toBe('true');
+
+    refuse(new ApiCallError('migration_runtime_stopping'));
+    await within(dialog).findByRole('alert');
+    expect(rowCheckboxes(dialog)[0].getAttribute('aria-checked')).toBe('true');
+  });
+
   it('drops the refusal once the selection it explained changes', async () => {
     vi.spyOn(modelsApi, 'applyMigration').mockRejectedValue(new ApiCallError('migration_runtime_stopping'));
     renderSetup({ scan: [CODEX_KEY, LEGACY] });
