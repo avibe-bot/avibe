@@ -8157,6 +8157,91 @@ def test_deferred_failure_preserves_error_through_later_output(
 
 
 @pytest.mark.parametrize(
+    ("prior", "expected_run_status", "expected_reason", "expected_error"),
+    [
+        ("failed_sibling", "failed", None, "Background Activity task-first failed"),
+        ("deferred_failure_then_cancel", "canceled", "stopped", "[Avibe Harness] This run was stopped"),
+    ],
+)
+def test_refresh_ending_the_last_activity_keeps_the_runs_first_cause(
+    tmp_path: Path,
+    monkeypatch,
+    prior: str,
+    expected_run_status: str,
+    expected_reason: str | None,
+    expected_error: str,
+) -> None:
+    """MH-MIG-012: the refresh that ends a Run's last Activity replaces neither an
+    Activity that already failed while its sibling blocked settlement, nor a
+    user cancellation that won over an earlier recorded failure."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="claude",
+    )
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+        handle_scheduled_message=lambda *_args, **_kwargs: None,
+    )
+    registry = SessionActivityRegistry()
+    controller.agent_service = SimpleNamespace(activities=registry)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    assert request_store.claim(request.id) is not None
+    for activity_id in ("task-first", "task-last"):
+        registry.start(
+            backend="claude",
+            runtime_key="runtime-1",
+            session_id="target-session",
+            activity_id=activity_id,
+            kind="background_task",
+            run_id=request.id,
+        )
+    if prior == "failed_sibling":
+        first = registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id="task-first",
+            status="failed",
+        )
+        assert first is not None
+        # The sibling still runs, so the Run cannot settle yet.
+        assert service.settle_activity_runs(first) == []
+    else:
+        assert request_store._sqlite.defer_run_terminal(
+            request.id,
+            terminal_status="failed",
+            error="provider unavailable",
+        ) is True
+        registry.complete(
+            backend="claude",
+            runtime_key="runtime-1",
+            activity_id="task-first",
+            status="completed",
+        )
+        assert request_store.cancel_run(request.id)
+    last = registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-last",
+        status="killed",
+    )
+    assert last is not None
+
+    assert service.settle_activity_runs(last, interrupt_reason="backend_refresh") == [request.id]
+    terminal = request_store.get_run(request.id)
+    assert terminal is not None
+    assert terminal["status"] == expected_run_status
+    assert terminal["error"].startswith(expected_error)
+    assert terminal["metadata"].get("interrupt_reason") == expected_reason
+
+
+@pytest.mark.parametrize(
     ("activity_status", "interrupt_reason", "user_cancel", "expected_run_status", "expected_reason", "expected_error"),
     [
         ("failed", None, False, "failed", None, "Background Activity task-failed failed"),

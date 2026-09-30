@@ -1465,7 +1465,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         settled = []
 
         class _RequestStore:
-            def defer_run_terminal(self, run_id, *, terminal_status):
+            def defer_run_terminal(self, run_id, *, terminal_status, error=None):
                 deferred.append((run_id, terminal_status))
 
             def settle_deferred_run(self, run_id):
@@ -2459,7 +2459,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         terminal_runs = set()
 
         class _RequestStore:
-            def defer_run_terminal(self, run_id, *, terminal_status):
+            def defer_run_terminal(self, run_id, *, terminal_status, error=None):
                 events.append(("defer", run_id, terminal_status))
 
             def settle_deferred_run(self, run_id, *, error):

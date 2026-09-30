@@ -3145,12 +3145,17 @@ def test_release_for_backend_refresh_cancels_matching_turn_and_sets_idle():
     assert manager._deferred_restart_sessions == {"codex": {"ses_codex"}}
 
 
-@pytest.mark.parametrize("harness", [False, True], ids=["conversation", "harness-run"])
-def test_release_for_backend_refresh_names_the_interruption(harness):
+@pytest.mark.parametrize(
+    ("harness", "stop_in_flight"),
+    [(False, False), (True, False), (False, True)],
+    ids=["conversation", "harness-run", "stop-in-flight"],
+)
+def test_release_for_backend_refresh_names_the_interruption(harness, stop_in_flight):
     """MH-MIG-012: a forced runtime refresh settles the turn it interrupts as a
     backend refresh even when the backend swallows the cancellation and reports
     a result-less turn, and a conversation turn tells the user why it stopped.
-    A Harness run reports its own interruption, so it gets no second notice."""
+    A Harness run reports its own interruption, so it gets no second notice, and
+    a Stop already in flight keeps its own cause and gets none either."""
     controller = _build_controller_double()
     manager = session_turns.SessionTurnManager(controller)
     controller.set_agent_status = lambda *_args: None
@@ -3181,14 +3186,22 @@ def test_release_for_backend_refresh_names_the_interruption(harness):
 
         task = asyncio.create_task(_swallows_cancellation())
         await asyncio.sleep(0)
-        manager.in_flight["ses_opencode"] = session_turns.Turn(task=task, context=ctx, logical_turn_id="turn-1")
+        turn = session_turns.Turn(task=task, context=ctx, logical_turn_id="turn-1")
+        if stop_in_flight:
+            turn.cancel_settled_by = "stopped"
+        manager.in_flight["ses_opencode"] = turn
         await manager.release_for_backend_refresh(backend="opencode", base_session_ids={"ses_opencode"})
         for _ in range(5):
             await asyncio.sleep(0)
-        return controller.get_turn_sink(sink_key)
+        return controller.get_turn_sink(sink_key), turn
 
-    sink = asyncio.run(_go())
+    sink, turn = asyncio.run(_go())
 
+    if stop_in_flight:
+        assert turn.cancel_settled_by == "stopped"
+        assert sink["settled_by"] != "backend_refresh"
+        assert notices == []
+        return
     assert sink["settled_by"] == "backend_refresh"
     if harness:
         assert notices == []

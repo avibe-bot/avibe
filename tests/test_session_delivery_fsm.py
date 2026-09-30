@@ -5396,6 +5396,58 @@ def test_definite_handler_prewrite_exception_requeues_through_terminal_boundary(
     assert turn["start_receipt_outcome"] == "not_written"
 
 
+def test_forced_refresh_tells_a_restored_conversation_turn_why_it_stopped(managers) -> None:
+    """MH-MIG-012: a Turn restored across a service restart has no in-flight task,
+    yet a forced refresh still terminalizes it. Its conversation gets the same
+    notice as a live Turn, on the message that started it; without one the
+    thread simply stops."""
+    first, restarted, engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="restored turn interrupted by a switch",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted.begin_backend_drain("codex")
+
+    async def _go() -> int:
+        released = await restarted.release_for_backend_refresh(
+            backend="codex",
+            base_session_ids={"ses_fsm"},
+        )
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return released
+
+    assert asyncio.run(_go()) == 1
+    with engine.connect() as conn:
+        settled = delivery_store.get_turn(conn, turn_id)
+    assert settled is not None and settled["terminal_evidence_kind"] == "backend_refresh"
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert emitted[0][1].startswith("⚠️ This turn was interrupted — its Agent runtime was restarted")
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+
+
 def test_forced_backend_refresh_fails_unresolved_start_instead_of_blocking(
     managers,
 ) -> None:

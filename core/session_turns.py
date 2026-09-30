@@ -8114,14 +8114,17 @@ class SessionTurnManager:
             # Record the cause BEFORE cancelling: this is a runtime refresh, not a
             # user Stop, so a scheduled run this turn owns must not settle as
             # ``canceled`` with the user-stop explanation (Codex P1). ``_run`` reads
-            # it off the Turn when it pops it.
-            turn.cancel_settled_by = SETTLED_BY_BACKEND_REFRESH
+            # it off the Turn when it pops it. A Stop already in flight keeps its
+            # own cause: the user asked for it and needs no refresh notice.
+            refresh_owns_outcome = turn.cancel_settled_by is None
+            if refresh_owns_outcome:
+                turn.cancel_settled_by = SETTLED_BY_BACKEND_REFRESH
             turn.cancel_defers_queue_resume = True
             # The same cause for the Run this Turn's dispatch waits on: a backend
             # whose cancellation cleanup releases the waiter itself would
             # otherwise report it as a Turn that produced no result.
             mark_complete = getattr(self.controller, "mark_turn_complete", None)
-            if callable(mark_complete) and not turn.task.done():
+            if refresh_owns_outcome and callable(mark_complete) and not turn.task.done():
                 mark_complete(turn.context, settled_by=SETTLED_BY_BACKEND_REFRESH)
             if turn.task.done():
                 self.in_flight.pop(session_id, None)
@@ -8134,7 +8137,7 @@ class SessionTurnManager:
             else:
                 turn.task.cancel()
                 tasks_to_settle.append(turn.task)
-                if not harness_run_identity(turn.context, None):
+                if refresh_owns_outcome and not harness_run_identity(turn.context, None):
                     interrupted_turns.append((session_id, turn))
             if backend in self._draining_backends:
                 self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
@@ -8147,22 +8150,15 @@ class SessionTurnManager:
             for session_id in legacy_projection_sessions:
                 self.controller.set_agent_status(session_id, "idle")
             for session_id, turn in interrupted_turns:
-                # Off the teardown's path: a slow platform send must not hold
-                # the runtime refresh that is waiting on this release.
-                asyncio.create_task(
-                    self._emit_turn_interruption_notice(
-                        turn.context,
-                        session_id,
-                        "",
-                        turn.logical_turn_id or "",
-                        backend,
-                        message_key="turn.interrupted.backendRefresh",
-                    ),
-                    name=f"backend-refresh-notice:{session_id}",
-                )
+                self._notify_backend_refresh(turn.context, session_id, "", turn.logical_turn_id or "", backend)
         released_restored: set[str] = set()
         for owner in restored_owners:
             owner_id = str(owner["id"])
+            # A restored owner has no live context, so read what the notice needs
+            # before terminalizing retires the deliveries it is derived from, as
+            # the service-restart report does.
+            owned_by_run = bool(self.accepted_agent_run_ids_for_turn(owner_id))
+            origin_message_id = self._turn_origin_native_message_id(owner_id)
             if owner["state"] == "starting":
                 terminal = self._terminalize_durable_turn(
                     owner_id,
@@ -8188,6 +8184,18 @@ class SessionTurnManager:
                     settled_by=SETTLED_BY_BACKEND_REFRESH,
                     evidence_kind="backend_refresh",
                 )
+                if terminal.get("changed") and not owned_by_run and self.controller is not None:
+                    owner_session = str(owner["session_id"])
+                    try:
+                        context = self._delivery_context(owner_session)
+                    except Exception:
+                        logger.debug(
+                            "backend refresh notice: no delivery context for session=%s",
+                            owner_session,
+                            exc_info=True,
+                        )
+                    else:
+                        self._notify_backend_refresh(context, owner_session, origin_message_id, owner_id, backend)
             if terminal.get("changed"):
                 released_restored.add(str(owner["session_id"]))
         for session_id in released_restored:
@@ -8202,6 +8210,28 @@ class SessionTurnManager:
                 backend,
             )
         return released
+
+    def _notify_backend_refresh(
+        self,
+        context: "MessageContext",
+        session_id: str,
+        origin_native_message_id: str,
+        turn_id: str,
+        backend: str,
+    ) -> None:
+        # Off the teardown's path: a slow platform send must not hold the
+        # runtime refresh that is waiting on this release.
+        asyncio.create_task(
+            self._emit_turn_interruption_notice(
+                context,
+                session_id,
+                origin_native_message_id,
+                turn_id,
+                backend,
+                message_key="turn.interrupted.backendRefresh",
+            ),
+            name=f"backend-refresh-notice:{session_id}",
+        )
 
     def fail_restored_backend_turn(
         self,

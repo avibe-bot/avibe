@@ -6668,7 +6668,8 @@ class SQLiteBackgroundTaskStore:
         ``interrupt_reason`` names the infrastructure event that ended the owning
         Activity. It is recorded only when ``error`` is the Run's explanation, so
         an earlier deferred failure keeps its own cause. A cancellation that wins
-        the race settles the Run as the user's stop, with ``cancellation_error``.
+        the race settles the Run as the user's stop, with ``cancellation_error``,
+        whatever was recorded before it.
         """
 
         now = updated_at or _utc_now_iso()
@@ -6792,12 +6793,14 @@ class SQLiteBackgroundTaskStore:
                 }
                 effective_error = deferred_error if deferred_error is not None else error
                 effective_reason = None
-                if interrupt_reason and deferred_error is None:
+                if interrupt_reason:
                     if status == "canceled":
+                        # The user's cancellation won: it is the Run's outcome
+                        # whatever failure was recorded before it.
                         effective_reason = "stopped"
                         if cancellation_error is not None:
                             effective_error = cancellation_error
-                    else:
+                    elif deferred_error is None:
                         effective_reason = interrupt_reason
                 if effective_error is not None:
                     values["error"] = str(effective_error)

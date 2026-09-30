@@ -7520,10 +7520,19 @@ class ScheduledTaskService:
         has_blocker = getattr(registry, "has_blocking_run_activity", None)
         has_pending_output = getattr(registry, "has_pending_run_output", None)
         settled: list[str] = []
+        # An Activity that failed on its own is the Run's cause even when a
+        # sibling still blocks settlement; a later interruption must not
+        # replace it.
+        own_failure = (
+            f"Background Activity {getattr(activity, 'id', '')} failed"
+            if activity_status == "failed" and not interrupt_reason
+            else None
+        )
         for run_id in run_ids:
             self.request_store.defer_run_terminal(
                 run_id,
                 terminal_status=terminal_status,
+                **({"error": own_failure} if own_failure else {}),
             )
             if callable(has_blocker) and has_blocker(run_id):
                 continue
