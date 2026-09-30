@@ -313,7 +313,7 @@ describe('MigrationDialog — the settings default', () => {
   });
 
   it.each([
-    ['migration_native_busy', 'Quit the running CLI, including terminal sessions, IDE extensions and desktop apps, or let its tasks finish, then retry.'],
+    ['migration_native_busy', 'Quit any CLI running outside Avibe, including terminal sessions, IDE extensions and desktop apps, then retry.'],
     ['migration_permission_needed', 'Allow credential access, then retry.'],
     ['migration_recovery_pending', 'Migration is unfinished. Retry to continue.'],
     ['migration_item_conflict', 'Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.'],
@@ -777,6 +777,7 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
       'sk-…9f21 · Codex configuration',
       'Also remove the API keys from the native CLI configuration',
       'Includes shell startup files and each CLI’s config files. Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.',
+      'Migrating interrupts any task the selected assistants are running in Avibe.',
       'Later',
       'Start migration',
       'Close',

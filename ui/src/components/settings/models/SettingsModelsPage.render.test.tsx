@@ -349,6 +349,27 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  // A refused switch to the gateway used to leave the Direct row exactly as it
+  // was: the failure was recorded, then pruned by the next read because the
+  // backend was still Direct, and no Direct surface rendered it anyway.
+  it.each([
+    ['the direct-only screen', []],
+    ['a gateway card', [retainedSource]],
+  ] as const)('MH-MIG-010 reports a refused switch to the gateway on %s and retries in place', async (_, sources) => {
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [] });
+    const setMode = vi.spyOn(modelsApi, 'setAgentMode')
+      .mockRejectedValueOnce(new ApiCallError('mode_switch_blocked'))
+      .mockResolvedValueOnce({ ...directAgent('claude'), mode: 'hub' });
+    renderPage([...sources], [directAgent('claude')]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
+
+    expect(await screen.findByText(/^The switch to gateway did not go through$|^没能切换到模型网关$/)).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/ }));
+    await waitFor(() => expect(setMode).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText(/^The switch to gateway did not go through$|^没能切换到模型网关$/)).toBeNull());
+  });
+
   it('opens the same migration dialog from an existing Hub user entry', async () => {
     vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [migrationCandidate] });

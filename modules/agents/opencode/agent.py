@@ -1168,6 +1168,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         Settings writes take effect without terminating active serve
         processes; fall back to restart for older OpenCode versions.
         """
+        if force:
+            await self._cancel_active_requests()
         previous_server = await self._client_manager.reset_config(opencode_config)
         if previous_server is None:
             previous_server = await OpenCodeServerManager.get_instance_if_managed_server_exists(
@@ -1211,6 +1213,29 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     port=opencode_config.port,
                     request_timeout_seconds=opencode_config.request_timeout_seconds,
                 )
+
+    async def _cancel_active_requests(self) -> None:
+        """Cancel every request task before a forced server teardown.
+
+        Turn owners cancel foreground requests first; restored polls have no
+        owner, so without this they would poll the stopped server until their
+        failure limit and report a transport error for an intended interrupt.
+        """
+        cancelled: dict[asyncio.Task, str] = {}
+        for base_session_id, task in list(self._active_requests.items()):
+            request_session = self._session_manager.get_request_session(base_session_id)
+            # No native abort: the teardown that follows ends the native run.
+            if await self._abort_active_request(base_session_id, task, None, cancel_before_abort=True):
+                cancelled[task] = request_session[0] if request_session else ""
+        if not cancelled:
+            return
+        await asyncio.wait(cancelled, timeout=2.0)
+        server = self._client_manager._server_manager
+        if server is None:
+            return
+        for task, native_session_id in cancelled.items():
+            if task.done() and native_session_id and self._active_poll_is_persisted(native_session_id):
+                await self._retire_active_poll(server, native_session_id)
 
     async def handle_message(self, request: AgentRequest) -> None:
         lock = self._session_manager.get_session_lock(request.base_session_id)

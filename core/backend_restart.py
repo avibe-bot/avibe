@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DRAIN_TIMEOUT_SECONDS = 300.0
 _POLL_INTERVAL_SECONDS = 0.1
+# After an interruption only teardown remains: native processes exiting and
+# requests to a stopped runtime failing. Work still live past this is a fault.
+_INTERRUPT_SETTLE_SECONDS = 10.0
 _NATIVE_BACKENDS = frozenset({"claude", "codex", "opencode"})
 _T = TypeVar("_T")
 
@@ -499,6 +502,9 @@ class BackendRestartCoordinator:
     ) -> AsyncIterator[Callable[[], Awaitable[None]]]:
         """Yield an idle recheck under the same lease and closed admissions.
 
+        Every caller applies an explicit user decision, so running work on a
+        target backend is interrupted rather than awaited: its turns settle and
+        its runtime is torn down before the strict retirement below.
         Call the recheck immediately before native withdrawal and CPA activation:
         external CLIs do not participate in Avibe's advisory ownership protocol.
         No external process is ever terminated by the check. Authentication
@@ -527,10 +533,20 @@ class BackendRestartCoordinator:
                     closed.append(backend)
                 for backend in targets:
                     await self.controller.agent_service.prepare_backend_restart(backend)
-                deadline = asyncio.get_running_loop().time() + self._drain_timeout
+                for backend in targets:
+                    if not await self._has_active_turns(backend):
+                        continue
+                    await self._interrupt(backend)
+                    try:
+                        await finish_native_operation(self._refresh(backend, True))
+                    except Exception:
+                        logger.warning("Forced runtime teardown failed for %s", backend, exc_info=True)
+                        raise NativeMigrationBlockedError("native_retirement_failed", (backend,)) from None
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + min(self._drain_timeout, _INTERRUPT_SETTLE_SECONDS)
                 for backend in targets:
                     while await self._has_active_turns(backend):
-                        if asyncio.get_running_loop().time() >= deadline:
+                        if loop.time() >= deadline:
                             raise NativeMigrationBlockedError("native_runtime_busy", (backend,))
                         await asyncio.sleep(self._poll_interval)
                 self._assert_no_native_login(targets)
@@ -742,6 +758,16 @@ class BackendRestartCoordinator:
             return {"state": "unavailable"}
         return {"state": "applied"}
 
+    async def _interrupt(self, backend: str) -> None:
+        """Settle every turn running on ``backend`` ahead of a forced refresh."""
+        session_ids = self.controller.session_turns.active_runtime_session_ids_for_backend(backend)
+        await self.controller.session_turns.release_for_backend_refresh(
+            backend=backend,
+            base_session_ids=session_ids,
+        )
+        await self.controller.agent_service.force_cancel_backend_turns(backend)
+        self.controller.agent_service.force_end_backend_activities(backend)
+
     async def _has_active_turns(self, backend: str) -> bool:
         service = self.controller.agent_service
         if service.runtime_turn_tokens_for_backend(backend):
@@ -763,13 +789,7 @@ class BackendRestartCoordinator:
             while await self._has_active_turns(backend):
                 if loop.time() >= deadline:
                     forced = True
-                    session_ids = self.controller.session_turns.active_runtime_session_ids_for_backend(backend)
-                    await self.controller.session_turns.release_for_backend_refresh(
-                        backend=backend,
-                        base_session_ids=session_ids,
-                    )
-                    await self.controller.agent_service.force_cancel_backend_turns(backend)
-                    self.controller.agent_service.force_end_backend_activities(backend)
+                    await self._interrupt(backend)
                     break
                 await asyncio.sleep(self._poll_interval)
             await self._refresh(backend, forced)

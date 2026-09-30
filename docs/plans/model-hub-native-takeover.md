@@ -151,9 +151,13 @@ explicitly authorized acceptance check.
   access-token acceptance, not inference entitlement or future refresh success.
 - `ModelHubService.migration_guard` is a callable taking
   `tuple[BackendName, ...]` and returning an asynchronous context manager.
-  Entering it closes managed native admission, waits for active work (without
-  a forced cancellation), strictly retires credential-bearing idle processes,
-  and checks for external CLI users. It is acquired before `_mutation_lock`.
+  Entering it closes managed native admission, interrupts active work on the
+  target backends (every caller applies an explicit user switch or migration,
+  so running turns settle as a backend refresh and the managed runtime is torn
+  down instead of being awaited), strictly retires credential-bearing processes
+  that are then idle, and checks for external CLI users, which are never
+  terminated. Work that survives the interruption for a short settle window
+  refuses as busy. It is acquired before `_mutation_lock`.
   Production installs wire it from the Controller; no production no-op.
   Configured CLI identity is independent of backend enablement: the existing
   auth-service binary resolver supplies raw/compatibility paths and persisted

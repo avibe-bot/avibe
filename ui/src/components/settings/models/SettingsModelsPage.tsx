@@ -72,7 +72,7 @@ import { groupMigrationCandidates } from './migrationGrouping';
 import { SUBSCRIPTION_MENU_ROWS } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { backendVisual } from './vendorMeta';
-import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
+import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentMode, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
@@ -344,7 +344,12 @@ const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ t
   );
 };
 
-const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSupply) => void }> = ({ agents, onSwitch }) => {
+const DirectHome: React.FC<{
+  agents: AgentSupply[];
+  switchFailures: ReadonlySet<string>;
+  connectingBackend: string | null;
+  onSwitch: (agent: AgentSupply) => void;
+}> = ({ agents, switchFailures, connectingBackend, onSwitch }) => {
   const { t } = useModelsTranslation();
   if (agents.length === 0) {
     return <section className="model-hub-direct-empty"><h2>{t('settings.models.direct.empty.title')}</h2><p>{t('settings.models.direct.empty.body')}</p><span>{t('settings.models.direct.empty.install')}</span></section>;
@@ -359,6 +364,7 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
           <div className="model-hub-direct-content flex flex-col">
             {agents.map((agent) => {
               const { Icon } = backendVisual(agent.backend);
+              const switchFailed = switchFailures.has(agent.backend);
               return (
                 <div key={agent.backend} className="model-hub-direct-row model-hub-direct-row--backend flex flex-wrap items-center gap-2.5 bg-background px-3 sm:flex-nowrap">
                   <span className="model-hub-direct-tile flex size-[34px] shrink-0 items-center justify-center rounded-[9px]"><Icon className="size-[17px]" /></span>
@@ -367,9 +373,11 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
                       <span className="model-hub-direct-backend-name truncate text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</span>
                       <span className="model-hub-pill model-hub-direct-kind-pill border">{t('settings.models.direct.pill.direct')}</span>
                     </span>
-                    <span className="model-hub-direct-backend-detail truncate" title={t(`settings.models.direct.backend.${agent.backend}.detail`) as string}>{t(`settings.models.direct.backend.${agent.backend}.detail`)}</span>
+                    {switchFailed
+                      ? <span role="status" className="truncate text-[11px] font-semibold leading-normal text-destructive-ink">{t('settings.models.gateway.fail.switchToGateway')}</span>
+                      : <span className="model-hub-direct-backend-detail truncate" title={t(`settings.models.direct.backend.${agent.backend}.detail`) as string}>{t(`settings.models.direct.backend.${agent.backend}.detail`)}</span>}
                   </span>
-                  <Button variant="secondary" size="sm" className="model-hub-direct-switch h-auto rounded-lg px-3 py-[9px] text-[11.5px] font-bold" onClick={() => onSwitch(agent)}>{t('settings.models.direct.action.switchToGateway')}</Button>
+                  <Button variant="secondary" size="sm" className="model-hub-direct-switch h-auto rounded-lg px-3 py-[9px] text-[11.5px] font-bold" onClick={() => onSwitch(agent)} disabled={connectingBackend === agent.backend}>{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.direct.action.switchToGateway')}</Button>
                 </div>
               );
             })}
@@ -494,7 +502,21 @@ export const SettingsModelsPage: React.FC = () => {
   );
   const [selectedSourceId, setSelectedSourceId] = React.useState<string | null>(null);
   const [agentWrites, setAgentWrites] = React.useState<ReadonlySet<string>>(() => new Set());
-  const [switchFailures, setSwitchFailures] = React.useState<ReadonlySet<string>>(() => new Set());
+  // A failed switch is kept with the mode it failed to leave: it stays visible
+  // while that mode holds and clears once the backend has moved on.
+  const [switchFailureModes, setSwitchFailureModes] = React.useState<ReadonlyMap<string, AgentMode>>(() => new Map());
+  const switchFailures = React.useMemo<ReadonlySet<string>>(() => new Set(switchFailureModes.keys()), [switchFailureModes]);
+  const markSwitchFailed = (backend: string, mode: AgentMode) => {
+    setSwitchFailureModes((previous) => new Map(previous).set(backend, mode));
+  };
+  const clearSwitchFailure = (backend: string) => {
+    setSwitchFailureModes((previous) => {
+      if (!previous.has(backend)) return previous;
+      const next = new Map(previous);
+      next.delete(backend);
+      return next;
+    });
+  };
   const [agentWriteRegistry] = React.useState(() => createPendingWrites(setAgentWrites));
   const [sourceIntentAuthority] = React.useState(createIntentAuthority);
   const [sourceCollectionReads] = React.useState(() => createSourceCollectionReadAuthority(modelsApi));
@@ -660,8 +682,8 @@ export const SettingsModelsPage: React.FC = () => {
     });
     if (freshSupply) {
       refreshAllAgentChains(freshSupply);
-      setSwitchFailures((previous) => new Set(
-        [...previous].filter((backend) => freshSupply.some((agent) => agent.backend === backend && agent.mode === 'hub')),
+      setSwitchFailureModes((previous) => new Map(
+        [...previous].filter(([backend, mode]) => freshSupply.some((agent) => agent.backend === backend && agent.mode === mode)),
       ));
     }
   }, [refreshAllAgentChains, supplyRead]);
@@ -973,19 +995,11 @@ export const SettingsModelsPage: React.FC = () => {
     if (aliveRef.current) showToast(t('settings.models.gateway.catalog.saved') as string, 'success');
   }, [agentSaved, showToast, t]);
   const switchToDirect = (agent: AgentSupply) => {
-    setSwitchFailures((previous) => {
-      const next = new Set(previous);
-      next.delete(agent.backend);
-      return next;
-    });
+    clearSwitchFailure(agent.backend);
     void agentWriteRegistry.track(agent.backend, async () => {
       try {
         const echoed = await modelsApi.setAgentMode(agent.backend, 'direct');
-        setSwitchFailures((previous) => {
-          const next = new Set(previous);
-          next.delete(agent.backend);
-          return next;
-        });
+        clearSwitchFailure(agent.backend);
         setAdoptAgent(null);
         await agentSaved(echoed);
       } catch {
@@ -995,25 +1009,17 @@ export const SettingsModelsPage: React.FC = () => {
           const authoritative = result.value;
           setSupplyRead(readyRegion(authoritative));
           const committed = authoritative.some((row) => row.backend === agent.backend && row.mode === 'direct');
-          setSwitchFailures((previous) => {
-            const next = new Set(previous);
-            if (committed) next.delete(agent.backend);
-            else next.add(agent.backend);
-            return next;
-          });
+          if (committed) clearSwitchFailure(agent.backend);
+          else markSwitchFailed(agent.backend, 'hub');
         } catch {
-          setSwitchFailures((previous) => new Set(previous).add(agent.backend));
+          markSwitchFailed(agent.backend, 'hub');
         }
       }
     });
   };
   const enterGateway = async (backend: AgentBackend) => {
     const echoed = await modelsApi.setAgentMode(backend, 'hub');
-    setSwitchFailures((previous) => {
-      const next = new Set(previous);
-      next.delete(backend);
-      return next;
-    });
+    clearSwitchFailure(backend);
     await agentSaved(echoed);
   };
   // Migration is optional: declining it still switches the backend it was
@@ -1023,24 +1029,20 @@ export const SettingsModelsPage: React.FC = () => {
       try {
         await enterGateway(backend);
       } catch {
-        setSwitchFailures((previous) => new Set(previous).add(backend));
+        markSwitchFailed(backend, 'direct');
       }
     });
   };
   const switchToGateway = (agent: AgentSupply) => {
     if (agentWrites.has(agent.backend)) return;
     setAdoptAgent(agent);
-    setSwitchFailures((previous) => {
-      const next = new Set(previous);
-      next.delete(agent.backend);
-      return next;
-    });
+    clearSwitchFailure(agent.backend);
     void agentWriteRegistry.track(agent.backend, async () => {
       try {
         const result = await resumeGatewayAdoption(modelsApi, agentCollectionReads, agent.backend);
         if (result.runtime) setRuntimeRead(readyRegion(result.runtime));
         if (!result.ok) {
-          setSwitchFailures((previous) => new Set(previous).add(agent.backend));
+          markSwitchFailed(agent.backend, 'direct');
           return;
         }
         if (result.candidates.length > 0) {
@@ -1050,7 +1052,7 @@ export const SettingsModelsPage: React.FC = () => {
         }
         await enterGateway(agent.backend);
       } catch {
-        setSwitchFailures((previous) => new Set(previous).add(agent.backend));
+        markSwitchFailed(agent.backend, 'direct');
       } finally {
         if (aliveRef.current) setAdoptAgent(null);
       }
@@ -1590,7 +1592,7 @@ export const SettingsModelsPage: React.FC = () => {
                     />
                     : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
-                    : directEmpty ? <DirectHome agents={installedAgents} onSwitch={switchToGateway} />
+                    : directEmpty ? <DirectHome agents={installedAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} />
                     : <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">

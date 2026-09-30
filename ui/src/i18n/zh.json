@@ -988,7 +988,8 @@
           "directDescription": "改用 {{backend}} 自带的模型与凭据，路由与优先级不再生效"
         },
         "fail": {
-          "switchToDirect": "没能切回直连"
+          "switchToDirect": "没能切回直连",
+          "switchToGateway": "没能切换到模型网关"
         },
         "modelCount_one": "{{count}} 个模型",
         "modelCount_other": "{{count}} 个模型",
@@ -2044,8 +2045,9 @@
           "fallback": "暂不支持迁移，请手动添加。"
         },
         "applying": "迁移中…",
+        "interruptNotice": "迁移会中断所选助手在 Avibe 中正在运行的任务。",
         "errors": {
-          "nativeBusy": "请先退出正在运行的 CLI（包括终端、IDE 插件和桌面应用），或等待任务完成，再重试。",
+          "nativeBusy": "请先退出在 Avibe 之外运行的 CLI（包括终端、IDE 插件和桌面应用），再重试。",
           "permissionNeeded": "请允许访问凭据，再重试。",
           "recoveryPending": "迁移尚未完成，请重试以继续。",
           "itemConflict": "无法验证已保存的配置或凭据。请检查配置文件和认证是否有效后重试，或在模型网关中手动添加供应商。",

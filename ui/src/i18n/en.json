@@ -988,7 +988,8 @@
           "directDescription": "Use {{backend}}'s own models and credentials; gateway routes and priority no longer apply"
         },
         "fail": {
-          "switchToDirect": "The switch back to direct did not go through"
+          "switchToDirect": "The switch back to direct did not go through",
+          "switchToGateway": "The switch to gateway did not go through"
         },
         "modelCount_one": "{{count}} model",
         "modelCount_other": "{{count}} models",
@@ -2044,8 +2045,9 @@
           "fallback": "Can't be migrated. Add it manually."
         },
         "applying": "Migrating…",
+        "interruptNotice": "Migrating interrupts any task the selected assistants are running in Avibe.",
         "errors": {
-          "nativeBusy": "Quit the running CLI, including terminal sessions, IDE extensions and desktop apps, or let its tasks finish, then retry.",
+          "nativeBusy": "Quit any CLI running outside Avibe, including terminal sessions, IDE extensions and desktop apps, then retry.",
           "permissionNeeded": "Allow credential access, then retry.",
           "recoveryPending": "Migration is unfinished. Retry to continue.",
           "itemConflict": "Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.",

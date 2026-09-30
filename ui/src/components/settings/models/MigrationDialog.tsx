@@ -502,6 +502,7 @@ export const MigrationDialog: React.FC<{
                 </div>
               </div>
             )}
+            <p className="px-1 text-[12px] leading-relaxed text-muted">{t('settings.models.migration.interruptNotice')}</p>
           </div>
         )}
 
