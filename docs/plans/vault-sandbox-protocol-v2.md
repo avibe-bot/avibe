@@ -369,8 +369,10 @@ user reviews and approves the operation in one sandbox surface:
    Screen app on iOS is frozen about two seconds after it opens a window, and
    WebKit blocks a window opened after an await, so a daemon round trip between
    opening the window and sending the request often leaves the window on its
-   placeholder. The parent obtains the daemon-signed contexts before the click
-   (§7.1, §7.4); the click only opens the window and sends the request.
+   placeholder. Before the click, the parent obtains the daemon-signed
+   contexts (§7.1, §7.4) and starts the sandbox client, whose first build
+   fetches, hashes, and handshakes. The click only opens the window and sends
+   the request.
 
 Without an id (the browser blocked the parent's window, or an older parent),
 the embedded sandbox renders a visible launcher card whose click opens the
@@ -461,11 +463,12 @@ triggered from the create form (`setup` immediately continues into the pending
 ### 7.4 Reveal
 
 Secret detail (protected static) gains "Show value / Copy value" actions
-calling `reveal`. R2: opening the secret's action menu fetches the signed
-reveal context, which the daemon does not store; the action click opens the
-top-level sandbox authorization window and claims that context (fetching one
-instead if that fetch failed or was requested more than 30 s ago), and the user
-confirms in the window; after approval, plaintext is rendered inside the sandbox iframe only. This
+calling `reveal`. R2: while the secret's action menu is open it keeps a signed
+reveal context ready (the daemon stores none; each is valid for 120 s),
+refreshing it every 20 s while visible. The action click opens the top-level
+sandbox authorization window and claims that context, fetching one instead
+only if it failed or was requested more than 30 s ago. The user then confirms
+in the window; after approval, plaintext is rendered inside the sandbox iframe only. This
 closes the orphaned-`unseal` gap without moving plaintext into the parent.
 
 **Copy-mode caveat**: the system clipboard is a shared resource — once the

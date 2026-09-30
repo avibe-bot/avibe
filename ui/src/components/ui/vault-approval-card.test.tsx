@@ -16,6 +16,7 @@ const api = vi.hoisted(() => ({
   getVaultSettings: vi.fn(),
   saveVaultSettings: vi.fn(),
 }));
+const warmVaultSandboxClient = vi.hoisted(() => vi.fn());
 const vault = vi.hoisted(() => ({
   status: 'locked',
   refresh: vi.fn(),
@@ -27,6 +28,10 @@ vi.mock('@/context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({ capabilities: { can_use_vault_secrets: true } }),
 }));
 vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault }));
+vi.mock('@/lib/vaultSandboxClient', async (loadOriginal) => ({
+  ...(await loadOriginal<typeof import('@/lib/vaultSandboxClient')>()),
+  warmVaultSandboxClient,
+}));
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -109,8 +114,9 @@ const openWindow = () => {
 
 // Contract: the approval click of a protected access request opens the sandbox authorization
 // window and hands the sandbox binding contexts issued while the card was open, for the duration
-// being approved, without a daemon request after the window opens; opening the card issues once,
-// for the duration it shows, and the card stops issuing while the sandbox releases the contexts.
+// being approved, without a daemon request after the window opens; the card starts the sandbox
+// client and issues once, for the duration it shows, and stops issuing while the sandbox releases
+// the contexts.
 // A Home Screen app on iOS is frozen about two seconds after it opens a window, so a daemon round
 // trip after the click (the regression) often leaves that window on its placeholder, and a
 // refresh during the release supersedes the contexts it is releasing. The VaultsPage reveal test
@@ -136,6 +142,7 @@ describe('VaultApprovalCard protected access approval', () => {
     fireEvent.click(screen.getByRole('button', { name: /^approve$/i }));
 
     expect(open).toHaveBeenCalledOnce();
+    expect(warmVaultSandboxClient.mock.invocationCallOrder[0]).toBeLessThan(open.mock.invocationCallOrder[0]);
     await vi.waitFor(() => expect(vault.approveProtectedRelease).toHaveBeenCalledOnce());
     const [items, authorizationWindow] = vault.approveProtectedRelease.mock.calls[0];
     expect(authorizationWindow).toBe(new URL(String(open.mock.calls[0][0])).searchParams.get('id'));

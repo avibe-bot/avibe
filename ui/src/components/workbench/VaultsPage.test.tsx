@@ -23,6 +23,7 @@ const api = vi.hoisted(() => ({
 }));
 const showToast = vi.hoisted(() => vi.fn());
 const revealProtectedValue = vi.hoisted(() => vi.fn());
+const warmVaultSandboxClient = vi.hoisted(() => vi.fn());
 const remoteOwner = {
   remote: true,
   instanceRole: 'owner' as const,
@@ -47,6 +48,11 @@ vi.mock('../../context/ApiContext', async (loadOriginal) => {
   const original = await loadOriginal<typeof import('../../context/ApiContext')>();
   return { ...original, useApi: () => api };
 });
+
+vi.mock('../../lib/vaultSandboxClient', async (loadOriginal) => ({
+  ...(await loadOriginal<typeof import('../../lib/vaultSandboxClient')>()),
+  warmVaultSandboxClient,
+}));
 
 vi.mock('../../context/ToastContext', () => ({
   useToast: () => ({ showToast }),
@@ -157,53 +163,91 @@ describe('PERMISSIONS-016 VaultsPage wakes an Editor on the bare vaults.updated 
 
 // A popup opened after an await has lost the click's user activation and is blocked, which would
 // silently bring back the sandbox's own launcher card and its second approval click. A Home Screen
-// app on iOS is also frozen about two seconds after it opens a window, so a reveal context fetched
-// after the click often never reaches that window: the context comes from the open row menu. A
-// menu fetch that failed is not kept, or the click would replay that failure instead of retrying.
+// app on iOS is also frozen about two seconds after it opens a window, so nothing that window needs
+// may be fetched after the click: the open row menu keeps a fresh reveal context and starts the
+// sandbox client. A menu fetch that failed is not kept, or the click would replay that failure, and
+// a menu held open past the context's freshness bound refreshes it rather than fetching after the click.
 describe('VaultsPage protected reveal', () => {
-  it.each([
-    { menuFetch: 'succeeded', menuReply: { ok: true, context: { secret_name: 'alpha' } }, fetches: 1 },
-    { menuFetch: 'failed', menuReply: { ok: false, code: 'vault_error', message: 'transient' }, fetches: 2 },
-  ])('opens the sandbox authorization window inside the click and hands it a good context when the menu fetch $menuFetch', async ({ menuReply, fetches }) => {
-    const user = userEvent.setup();
-    api.listVaultSecrets.mockResolvedValue({
-      secrets: [
-        {
-          name: 'alpha',
-          tags: [],
-          kind: 'static',
-          protection: 'protected',
-          signer_kind: null,
-          source: 'user',
-          policy: {},
-          last_used_at: null,
-          use_count: 0,
-          created_at: '2026-08-11T00:00:00Z',
-          updated_at: '2026-08-11T00:00:00Z',
-        },
-      ],
-    });
-    const envelope = { ciphertext: 'c', nonce: 'n', wrap_meta: 'w' };
-    api.createVaultRevealContext
-      .mockResolvedValueOnce({ ...menuReply, envelope })
-      .mockResolvedValue({ ok: true, context: { secret_name: 'alpha' }, envelope });
-    revealProtectedValue.mockResolvedValue(undefined);
-    const popup = { closed: false, close: vi.fn() };
-    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+  const protectedAlpha = {
+    name: 'alpha',
+    tags: [],
+    kind: 'static',
+    protection: 'protected',
+    signer_kind: null,
+    source: 'user',
+    policy: {},
+    last_used_at: null,
+    use_count: 0,
+    created_at: '2026-08-11T00:00:00Z',
+    updated_at: '2026-08-11T00:00:00Z',
+  };
+  const envelope = { ciphertext: 'c', nonce: 'n', wrap_meta: 'w' };
 
+  beforeEach(() => {
+    // Only the menu's refresh interval is faked, so promises and Testing Library keep real timers.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    api.listVaultSecrets.mockResolvedValue({ secrets: [protectedAlpha] });
+    revealProtectedValue.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const openMenu = async () => {
+    const user = userEvent.setup();
     renderPage();
     await user.click(await screen.findByRole('button', { name: 'vaults.rowActions' }));
-    await waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'vaults.reveal.show' }));
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalled());
+    expect(warmVaultSandboxClient).toHaveBeenCalled();
+  };
 
+  const clickShowValue = async () => {
+    const popup = { closed: false, close: vi.fn() };
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'vaults.reveal.show' }));
     // Asserted synchronously after the click dispatch, before any awaited work can run.
     expect(open).toHaveBeenCalledOnce();
     const opened = new URL(String(open.mock.calls[0][0]));
     expect(opened.searchParams.get('mode')).toBe('authorize');
-    await waitFor(() => expect(revealProtectedValue).toHaveBeenCalledOnce());
-    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ secret_name: 'alpha' });
+    await vi.waitFor(() => expect(revealProtectedValue).toHaveBeenCalledOnce());
     expect(revealProtectedValue.mock.calls[0][2]).toBe(opened.searchParams.get('id'));
+    await vi.waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
+    return { open };
+  };
+
+  it.each([
+    { menuFetch: 'succeeded', menuReply: { ok: true, context: { secret_name: 'alpha', menu: true } }, fetches: 1, revealed: { secret_name: 'alpha', menu: true } },
+    { menuFetch: 'failed', menuReply: { ok: false, code: 'vault_error', message: 'transient' }, fetches: 2, revealed: { secret_name: 'alpha' } },
+  ])('opens the sandbox authorization window inside the click and hands it a good context when the menu fetch $menuFetch', async ({ menuReply, fetches, revealed }) => {
+    api.createVaultRevealContext
+      .mockResolvedValueOnce({ ...menuReply, envelope })
+      .mockResolvedValue({ ok: true, context: { secret_name: 'alpha' }, envelope });
+
+    await openMenu();
+    await clickShowValue();
+
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual(revealed);
     expect(api.createVaultRevealContext).toHaveBeenCalledTimes(fetches);
-    await waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
+  });
+
+  it('refreshes the context while the menu stays open, so the click fetches nothing', async () => {
+    let fetched = 0;
+    api.createVaultRevealContext.mockImplementation(async () => ({ ok: true, context: { fetch: ++fetched }, envelope }));
+    const opened = Date.now();
+    const now = vi.spyOn(Date, 'now');
+
+    await openMenu();
+    now.mockReturnValue(opened + 20_000);
+    vi.advanceTimersByTime(20_000);
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2));
+    now.mockReturnValue(opened + 35_000);
+    const { open } = await clickShowValue();
+
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ fetch: 2 });
+    expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2);
+    for (const order of api.createVaultRevealContext.mock.invocationCallOrder) {
+      expect(order).toBeLessThan(open.mock.invocationCallOrder[0]);
+    }
   });
 });

@@ -4,7 +4,6 @@ import { useTranslation } from 'react-i18next';
 
 import {
   useApi,
-  type ApiContextType,
   type SigningAddresses,
   type VaultAgentBindingsBatchResult,
   type VaultGrantDuration,
@@ -17,7 +16,8 @@ import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
-import { openVaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
+import { usePreparedRequest } from '@/lib/usePreparedRequest';
+import { openVaultAuthorizationWindow, warmVaultSandboxClient } from '@/lib/vaultSandboxClient';
 import { SigningAddressList } from './signing-address-list';
 import { type BlindBox, type SignatureResult, type SignatureScheme } from '@/lib/vaultCrypto';
 import { cn, copyTextToClipboard } from '@/lib/utils';
@@ -93,111 +93,13 @@ function addressesForScheme(scheme: string | undefined, addresses: SigningAddres
   return { eth: addresses.eth };
 }
 
-// A Home Screen app on iOS is frozen about two seconds after it opens a window, and WebKit blocks a
-// window opened after an await. The sandbox authorization window opened by the approval click
-// therefore gets its request only if everything the request needs is already here: the signed
-// agent-delivery contexts are issued while the card is open, and the click only claims them. The
-// batch endpoint keeps just its latest issue for a request, so issues run one at a time, a claim
-// stops the refresh, and a claim takes only the latest issue.
-const PREPARED_BINDINGS_MAX_AGE_MS = 20_000;
-const PREPARED_BINDINGS_REFRESH_MS = 15_000;
-
-type PreparedBindings = {
-  duration: VaultGrantDuration;
-  result: Promise<VaultAgentBindingsBatchResult>;
-  // When the request left, which bounds the contexts' age from above: the daemon signs them later.
-  sentAt: number | null;
-  settled: boolean;
-  failed: boolean;
-  // A prepared issue nobody claimed is dropped before it is sent once the card stops preparing.
-  claimed: boolean;
-  cancelled: boolean;
-};
-
-/** Keeps fresh binding contexts for `requestId` (null while nothing should be issued) and returns the click's claim. */
-function usePreparedAgentBindings(api: ApiContextType, requestId: string | null, duration: VaultGrantDuration) {
-  const queue = useRef<Promise<unknown>>(Promise.resolve());
-  const prepared = useRef<PreparedBindings | null>(null);
-  const stopRefresh = useRef<() => void>(() => undefined);
-
-  const issue = useCallback(
-    (id: string, grantDuration: VaultGrantDuration): PreparedBindings => {
-      const entry: PreparedBindings = {
-        duration: grantDuration,
-        sentAt: null,
-        settled: false,
-        failed: false,
-        claimed: false,
-        cancelled: false,
-        result: queue.current
-          .then(() => {
-            if (entry.cancelled) throw new Error('binding issue cancelled');
-            entry.sentAt = Date.now();
-            return api.createVaultAgentBindingsBatch({ request_id: id, grant_duration: grantDuration });
-          })
-          .then(
-            (res) => {
-              entry.settled = true;
-              entry.failed = !res.ok;
-              return res;
-            },
-            (error: unknown) => {
-              entry.settled = true;
-              entry.failed = true;
-              throw error;
-            },
-          ),
-      };
-      queue.current = entry.result.catch(() => undefined);
-      return entry;
-    },
-    [api],
-  );
-
-  useEffect(() => {
-    if (!requestId) return;
-    const prepare = () => {
-      const current = prepared.current;
-      // An issue still on its way stays the latest; a second one would only queue behind it.
-      if (document.visibilityState !== 'visible' || (current && !current.settled)) return;
-      prepared.current = issue(requestId, duration);
-    };
-    const onVisibilityChange = () => {
-      const current = prepared.current;
-      if (!current || (current.settled && (current.failed || Date.now() - (current.sentAt ?? 0) > PREPARED_BINDINGS_REFRESH_MS))) prepare();
-    };
-    prepare();
-    const timer = window.setInterval(prepare, PREPARED_BINDINGS_REFRESH_MS);
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    const stop = () => {
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-    stopRefresh.current = stop;
-    return () => {
-      stop();
-      if (prepared.current && !prepared.current.claimed) prepared.current.cancelled = true;
-      prepared.current = null;
-    };
-  }, [issue, requestId, duration]);
-
-  // An issue still queued behind an earlier one is claimed too: any other issue for this duration
-  // would queue behind it, so it is the soonest these contexts can exist.
-  return useCallback(
-    (id: string, grantDuration: VaultGrantDuration): Promise<VaultAgentBindingsBatchResult> => {
-      stopRefresh.current();
-      const entry = prepared.current;
-      prepared.current = null;
-      if (entry) entry.claimed = true;
-      const usable =
-        entry?.duration === grantDuration &&
-        !entry.failed &&
-        (entry.sentAt === null || Date.now() - entry.sentAt <= PREPARED_BINDINGS_MAX_AGE_MS);
-      return usable ? entry.result : issue(id, grantDuration).result;
-    },
-    [issue],
-  );
-}
+// The approval click opens the sandbox authorization window, which gets its request in time only if
+// nothing it needs waits on the daemon after the click (`usePreparedRequest`): the signed
+// agent-delivery contexts are issued while the card is open, and the click claims them. The batch
+// endpoint keeps just its latest issue for a request, which the one-at-a-time requests preserve.
+type BindingsKey = { requestId: string; duration: VaultGrantDuration };
+const PREPARED_BINDINGS = { maxAgeMs: 20_000, refreshMs: 15_000 };
+const bindingsIssued = (reply: VaultAgentBindingsBatchResult) => reply.ok;
 
 // design.pen `SKBld` / `pRtHq`: a borderless detail list (no inner card) with sentence-case
 // muted row labels at a fixed width and the value flowing to fill.
@@ -344,13 +246,24 @@ export const VaultApprovalCard: React.FC<{
   const canApprove = capabilities.can_use_vault_secrets;
   // Set once this card has approved or denied its request, which is then no longer pending.
   const [resolved, setResolved] = useState(false);
-  const claimBindings = usePreparedAgentBindings(
-    api,
-    canApprove && !isSign && !approveInBrowser && materials.length > 0 && option?.grant_id && (isOneShot || grantSettled) && !busy && !resolved
-      ? request.id
-      : null,
-    grantDurationApiValue(effectiveGrantDuration),
+  const sendBindings = useCallback(
+    ({ requestId, duration }: BindingsKey) => api.createVaultAgentBindingsBatch({ request_id: requestId, grant_duration: duration }),
+    [api],
   );
+  const claimBindings = usePreparedRequest(
+    canApprove && !isSign && !approveInBrowser && materials.length > 0 && option?.grant_id && (isOneShot || grantSettled) && !busy && !resolved
+      ? { requestId: request.id, duration: grantDurationApiValue(effectiveGrantDuration) }
+      : null,
+    sendBindings,
+    bindingsIssued,
+    PREPARED_BINDINGS,
+  );
+
+  useEffect(() => {
+    // The authorization window's request also needs the sandbox frame; start it now rather than
+    // after the click.
+    if (needsProtectedApproval && !approveInBrowser) warmVaultSandboxClient();
+  }, [needsProtectedApproval, approveInBrowser]);
 
   useEffect(() => {
     if (needsProtectedApproval) void vault.refresh();
@@ -411,7 +324,7 @@ export const VaultApprovalCard: React.FC<{
           // whole selector, issued while the card was open; the sandbox then releases every DEK
           // behind ONE confirm (protocol v2 §7.1) as opaque HPKE blind boxes for the pinned
           // resident agent.
-          const issued = await claimBindings(request.id, durationValue);
+          const issued = await claimBindings({ requestId: request.id, duration: durationValue });
           failIfNotOk(issued);
           const materialByName = new Map(materials.map((m) => [m.name, m]));
           const approveItems = issued.items.map((item) => {
