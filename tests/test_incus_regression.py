@@ -507,6 +507,30 @@ def test_runner_reports_command_timeout(monkeypatch: pytest.MonkeyPatch, capsys:
     assert "Command timed out after 300 seconds" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(("interactive", "expected"), [(False, ""), (True, "typed by the user\n")])
+def test_only_an_interactive_command_reads_the_callers_stdin(interactive: bool, expected: str) -> None:
+    # A background caller holds stdin open as a pipe it never closes. A batch
+    # command that inherited it (`incus init` reads YAML from it) would wait
+    # for an EOF that never comes.
+    read_end, write_end = os.pipe()
+    saved_stdin = os.dup(0)
+    try:
+        os.dup2(read_end, 0)
+        os.write(write_end, b"typed by the user\n")
+        if interactive:
+            os.close(write_end)
+            write_end = -1
+        result = incus_regression.Runner().run(["cat"], capture=True, timeout=10, interactive=interactive)
+    finally:
+        os.dup2(saved_stdin, 0)
+        os.close(saved_stdin)
+        os.close(read_end)
+        if write_end >= 0:
+            os.close(write_end)
+
+    assert result.stdout == expected
+
+
 def test_existence_comes_from_the_names_the_daemon_listed(monkeypatch: pytest.MonkeyPatch) -> None:
     listing = json.dumps([{"name": "avr-master"}, {"name": "avr-wt-demo-branch"}])
     monkeypatch.setattr(incus_regression.subprocess, "run", stub_incus_result(0, stdout=listing))

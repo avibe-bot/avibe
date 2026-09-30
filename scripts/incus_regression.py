@@ -115,6 +115,7 @@ class Runner:
         check: bool = True,
         capture: bool = False,
         timeout: float | None = None,
+        interactive: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         print("+ " + shlex.join(command))
         if self.dry_run:
@@ -128,6 +129,11 @@ class Runner:
             kwargs["input"] = input_bytes
         elif input_text is not None:
             kwargs["input"] = input_text
+        elif not interactive:
+            # A batch command never reads the caller's stdin. `incus init` and
+            # `incus launch` read instance YAML from a non-terminal stdin, so an
+            # inherited pipe that is never closed would keep them waiting forever.
+            kwargs["stdin"] = subprocess.DEVNULL
         if timeout is not None:
             kwargs["timeout"] = timeout
         try:
@@ -2818,7 +2824,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
     target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False)
     if not args.dry_run:
         require_incus()
-    Runner(dry_run=args.dry_run).run(tenant_exec(target, "exec bash -l", remote=args.remote))
+    Runner(dry_run=args.dry_run).run(tenant_exec(target, "exec bash -l", remote=args.remote), interactive=True)
     return 0
 
 
