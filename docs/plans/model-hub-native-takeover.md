@@ -156,8 +156,11 @@ explicitly authorized acceptance check.
   so running turns settle as a backend refresh and the managed runtime is torn
   down instead of being awaited), strictly retires credential-bearing processes
   that are then idle, and checks for external CLI users, which are never
-  terminated. Work that survives the interruption for a short settle window
-  refuses as busy. It is acquired before `_mutation_lock`.
+  terminated. The interruption runs as a forced backend restart, which keeps
+  admission closed until its teardown completes. The switch waits for it only
+  for a short settle window and refuses as busy after that. Leaving early, by
+  timeout or cancellation, never cuts the teardown short. It is acquired before
+  `_mutation_lock`.
   Production installs wire it from the Controller; no production no-op.
   Configured CLI identity is independent of backend enablement: the existing
   auth-service binary resolver supplies raw/compatibility paths and persisted

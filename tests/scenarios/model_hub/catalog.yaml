@@ -1274,7 +1274,7 @@ scenarios:
     test: tests/test_native_takeover_lifecycle.py::test_busy_guard_interrupts_running_work_then_retires_and_yields
     related_tests:
       - tests/test_native_takeover_lifecycle.py::test_guard_fails_closed_when_interruption_does_not_settle
-      - tests/test_native_takeover_lifecycle.py::test_cancelled_switch_finishes_interruption_before_reopening_admission
+      - tests/test_native_takeover_lifecycle.py::test_abandoned_switch_keeps_admission_closed_until_teardown_completes
       - tests/test_opencode_restore_polls.py::test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll
       - tests/test_agent_auth_service.py::AgentAuthServiceTests::test_opencode_agent_force_refresh_restarts_after_global_config_change
   - id: MH-MIG-010

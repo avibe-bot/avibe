@@ -533,20 +533,25 @@ class BackendRestartCoordinator:
                     closed.append(backend)
                 for backend in targets:
                     await self.controller.agent_service.prepare_backend_restart(backend)
-                for backend in targets:
-                    if not await self._has_active_turns(backend):
-                        continue
-                    try:
-                        # One unit even when the caller is cancelled: reopening
-                        # admission between releasing owners and tearing down
-                        # their runtime would admit turns beside orphaned work.
-                        await finish_native_operation(self._interrupt_and_refresh(backend))
-                    except Exception:
-                        logger.warning("Forced runtime teardown failed for %s", backend, exc_info=True)
-                        raise NativeMigrationBlockedError("native_retirement_failed", (backend,)) from None
+                # A forced restart owns the interruption and teardown, and it
+                # reopens admission only after the teardown. The switch waits
+                # for it at most the settle window, and leaving early, by
+                # timeout or cancellation, never cuts the teardown short.
+                restarts = {
+                    backend: self._start_restart(backend, drain_timeout=0)
+                    for backend in targets
+                    if await self._has_active_turns(backend)
+                }
                 loop = asyncio.get_running_loop()
                 deadline = loop.time() + min(self._drain_timeout, _INTERRUPT_SETTLE_SECONDS)
                 for backend in targets:
+                    restart = restarts.get(backend)
+                    if restart is not None:
+                        await asyncio.wait({restart}, timeout=max(0.0, deadline - loop.time()))
+                        if not restart.done():
+                            raise NativeMigrationBlockedError("native_runtime_busy", (backend,))
+                        if restart.cancelled() or restart.exception() is not None:
+                            raise NativeMigrationBlockedError("native_retirement_failed", (backend,))
                     while await self._has_active_turns(backend):
                         if loop.time() >= deadline:
                             raise NativeMigrationBlockedError("native_runtime_busy", (backend,))
@@ -589,7 +594,8 @@ class BackendRestartCoordinator:
                     self._migration_auth_owners.pop(backend, None)
                 self._migration_backends.difference_update(targets)
                 for backend in closed:
-                    if backend not in self._blocked_backends():
+                    # A restart still tearing down reopens admission itself.
+                    if backend not in self._blocked_backends() and not self._restarting(backend):
                         self.controller.agent_service.end_backend_drain(backend)
                         await self.controller.session_turns.end_backend_drain(backend)
 
@@ -618,9 +624,7 @@ class BackendRestartCoordinator:
                     agent_service.end_backend_drain(backend)
                     await session_turns.end_backend_drain(backend, resume_deferred=False)
                 raise
-            task = asyncio.create_task(self._run(backend), name=f"backend-restart:{backend}")
-            self._tasks[backend] = task
-            task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
+            task = self._start_restart(backend)
 
         # Idle refreshes remain synchronous so setup/config errors reach the
         # runtime-command requester. Only genuinely active work makes the
@@ -770,10 +774,6 @@ class BackendRestartCoordinator:
         await self.controller.agent_service.force_cancel_backend_turns(backend)
         self.controller.agent_service.force_end_backend_activities(backend)
 
-    async def _interrupt_and_refresh(self, backend: str) -> None:
-        await self._interrupt(backend)
-        await self._refresh(backend, True)
-
     async def _has_active_turns(self, backend: str) -> bool:
         service = self.controller.agent_service
         if service.runtime_turn_tokens_for_backend(backend):
@@ -786,11 +786,21 @@ class BackendRestartCoordinator:
             result = await result
         return bool(result)
 
-    async def _run(self, backend: str) -> None:
+    def _start_restart(self, backend: str, *, drain_timeout: float | None = None) -> asyncio.Task[None]:
+        task = asyncio.create_task(self._run(backend, drain_timeout), name=f"backend-restart:{backend}")
+        self._tasks[backend] = task
+        task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
+        return task
+
+    def _restarting(self, backend: str) -> bool:
+        task = self._tasks.get(backend)
+        return task is not None and not task.done()
+
+    async def _run(self, backend: str, drain_timeout: float | None = None) -> None:
         forced = False
         refreshed = False
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._drain_timeout
+        deadline = loop.time() + (self._drain_timeout if drain_timeout is None else drain_timeout)
         try:
             while await self._has_active_turns(backend):
                 if loop.time() >= deadline:
@@ -802,8 +812,9 @@ class BackendRestartCoordinator:
             refreshed = True
         finally:
             # Runtime admission opens before durable queues are flushed. A flush
-            # therefore always enters the refreshed generation.
-            if backend not in self._blocked_backends():
+            # therefore always enters the refreshed generation. A migration
+            # guard still holding the backend reopens it when it exits.
+            if backend not in self._blocked_backends() and backend not in self._migration_backends:
                 self.controller.agent_service.end_backend_drain(backend)
                 await self.controller.session_turns.end_backend_drain(backend, resume_deferred=refreshed)
 

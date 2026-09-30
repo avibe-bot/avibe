@@ -201,9 +201,12 @@ async def test_busy_guard_interrupts_running_work_then_retires_and_yields():
 
 
 @pytest.mark.asyncio
-async def test_cancelled_switch_finishes_interruption_before_reopening_admission():
-    """MH-MIG-009: a client disconnect mid-interruption must not reopen admission
-    between releasing turn owners and tearing down the runtime they ran on."""
+@pytest.mark.parametrize("leaves", ["cancelled", "settle_window"])
+async def test_abandoned_switch_keeps_admission_closed_until_teardown_completes(leaves):
+    """MH-MIG-009: an interruption that hangs, such as a turn owner stuck in its
+    cancellation cleanup, must not hold the switch past the settle window, and
+    a switch that leaves early must not reopen admission between releasing turn
+    owners and tearing down the runtime they ran on."""
     controller, coordinator, admissions, turns = controller_fixture(busy=True)
     releasing, released = asyncio.Event(), asyncio.Event()
 
@@ -216,17 +219,24 @@ async def test_cancelled_switch_finishes_interruption_before_reopening_admission
 
     async def switch():
         async with coordinator.migration_guard(("codex",)):
-            pytest.fail("mutation admitted after cancellation")
+            pytest.fail("mutation admitted over an unfinished interruption")
 
     task = asyncio.create_task(switch())
-    await releasing.wait()
-    task.cancel()
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert admissions == turns == {"codex"}
-    released.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await releasing.wait()
+        if leaves == "cancelled":
+            task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=2)
+        assert done, "the switch is still waiting on the interruption"
+        if leaves == "cancelled":
+            assert task.cancelled()
+        else:
+            with pytest.raises(NativeMigrationBlockedError, match="native_runtime_busy"):
+                task.result()
+        assert admissions == turns == {"codex"}
+    finally:
+        released.set()
+    await coordinator.wait("codex")
     controller.agent_service.force_cancel_backend_turns.assert_awaited_once_with("codex")
     coordinator._refresh.assert_awaited_once_with("codex", True)
     controller.agent_service.agents["codex"].retire_for_native_migration.assert_not_awaited()
