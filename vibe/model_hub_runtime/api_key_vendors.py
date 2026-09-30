@@ -213,9 +213,14 @@ def openai_compatible_endpoint(base_url: str) -> str:
     return endpoint
 
 
-def _endpoint_identity(base_url: str) -> tuple[str, str, int | None, str, str]:
+def _endpoint_identity(base_url: str) -> tuple[str, str, int | None, str, str] | None:
     parts = urlsplit(openai_compatible_endpoint(base_url))
-    port = parts.port or {"http": 80, "https": 443}.get(parts.scheme)
+    try:
+        port = parts.port or {"http": 80, "https": 443}.get(parts.scheme)
+    except ValueError:
+        # A stored URL may carry a port no connection can use; it names no
+        # official endpoint.
+        return None
     return parts.scheme, parts.hostname or "", port, parts.path, parts.query
 
 
@@ -230,7 +235,10 @@ def official_models_dev_provider(vendor: str, base_url: str | None) -> str | Non
     entry = api_key_vendor_entry(vendor)
     if entry is None or entry.models_dev_provider is None:
         return None
-    if base_url is not None and _endpoint_identity(base_url) != _endpoint_identity(entry.official_base_url):
+    if base_url is not None and (
+        _endpoint_identity(base_url) is None
+        or _endpoint_identity(base_url) != _endpoint_identity(entry.official_base_url)
+    ):
         return None
     return entry.models_dev_provider
 

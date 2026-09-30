@@ -225,19 +225,19 @@ def _with_text_only_models(
     from vibe.model_hub_runtime.api_key_vendors import official_models_dev_provider
     from vibe.models_dev_catalog import cached_models_dev_catalog, text_only_model_ids
 
-    providers = {
-        binding.source_id: official_models_dev_provider(binding.vendor, binding.base_url)
-        for binding in bindings
-        if binding.protocol == "openai_chat"
-    }
-    model_ids: dict[str, list[str]] = {}
-    for binding in bindings:
-        provider = providers.get(binding.source_id)
-        if provider is not None:
-            model_ids.setdefault(provider, []).extend((*binding.model_ids, *binding.route_model_ids))
-    if not model_ids:
-        return bindings
     try:
+        providers = {
+            binding.source_id: official_models_dev_provider(binding.vendor, binding.base_url)
+            for binding in bindings
+            if binding.protocol == "openai_chat"
+        }
+        model_ids: dict[str, list[str]] = {}
+        for binding in bindings:
+            provider = providers.get(binding.source_id)
+            if provider is not None:
+                model_ids.setdefault(provider, []).extend((*binding.model_ids, *binding.route_model_ids))
+        if not model_ids:
+            return bindings
         catalog = cached_models_dev_catalog()
         text_only = {
             provider: text_only_model_ids(provider, ids, catalog) for provider, ids in model_ids.items()

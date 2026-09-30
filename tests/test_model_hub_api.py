@@ -5063,6 +5063,21 @@ def test_engine_sync_marks_models_their_official_upstream_declares_text_only(tmp
     assert refreshes == []
 
 
+def test_engine_sync_survives_a_source_whose_stored_port_cannot_be_read(tmp_path):
+    """MH-MODALITIES-002: optional modality metadata never fails a sync, even for a URL an older release stored."""
+
+    service, store, adapter = _service(tmp_path)
+    _vendor_route_fixture(store, _PROJECTION_MODEL)
+    store.config.sources[1].base_url = "https://api.deepseek.com:bad/v1"
+    _cache_models_dev({"deepseek": {_PROJECTION_MODEL: {"modalities": {"input": ["text"]}}}})
+
+    asyncio.run(service.runtime_start())
+
+    by_id = {binding.source_id: binding for binding in adapter.synced[-1]}
+    assert by_id["src_official01"].text_only_model_ids == (_PROJECTION_MODEL,)
+    assert by_id["src_relayurl01"].text_only_model_ids == ()
+
+
 def test_runtime_start_recomputes_text_only_marks_from_the_current_catalog_copy(tmp_path):
     """MH-MODALITIES-002: an explicit start renders marks from today's copy, not the copy of the last sync."""
 

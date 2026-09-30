@@ -2248,6 +2248,9 @@ def test_catalog_official_base_url_composes_one_probe_endpoint(
         ("deepseek", "https://api.deepseek.com/beta", None),
         ("deepseek", "http://api.deepseek.com", None),
         ("deepseek", "https://api.deepseek.com:8443", None),
+        # A stored port no connection can use names no official endpoint.
+        ("deepseek", "https://api.deepseek.com:bad/v1", None),
+        ("deepseek", "https://api.deepseek.com:99999/v1", None),
         ("deepseek", "https://relay.example/v1", None),
         ("qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", None),
         ("custom", None, None),
