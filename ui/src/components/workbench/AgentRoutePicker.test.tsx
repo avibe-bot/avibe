@@ -33,6 +33,7 @@ let catalogReasoning: Record<string, { value: string; label: string }[]> = {};
 // Whether that answer came from the Model Hub, and how many reads were made.
 let catalogHubManaged = false;
 let catalogReads = 0;
+let catalogFails = false;
 
 // The model column is fetched per backend; serve it synchronously so the test is
 // about the route state, not about the catalog request.
@@ -48,8 +49,13 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       catalogRefreshPending: boolean;
       hubManaged: boolean;
     }) => void,
+    onInitialError?: () => void,
   ) => {
     catalogReads += 1;
+    if (catalogFails) {
+      onInitialError?.();
+      return () => {};
+    }
     onLoaded({
       models: ['sonnet', 'opus'],
       modelLabels: {},
@@ -162,6 +168,7 @@ describe('AgentRoutePicker', () => {
     catalogReasoning = {};
     catalogHubManaged = false;
     catalogReads = 0;
+    catalogFails = false;
   });
 
   it("ends a Hub backend's model list with an exit to that backend's catalog in the Model Hub", async () => {
@@ -213,6 +220,23 @@ describe('AgentRoutePicker', () => {
 
     // The Model Hub may have changed the list while it was covered.
     expect(catalogReads).toBe(2);
+  });
+
+  it('drops the exit when the read after a Settings visit fails', async () => {
+    // The visit may have switched the backend to Direct; a failed read cannot
+    // confirm the Hub still owns the list, so the earlier answer must not stand.
+    catalogHubManaged = true;
+    const user = userEvent.setup();
+    const { rerender } = render(<HubPicker role="owner" />);
+    await openMenu(user);
+    expect(screen.getByRole('button', { name: 'chat.picker.addModel' })).toBeTruthy();
+
+    catalogFails = true;
+    rerender(<HubPicker role="owner" surfaceActive={false} />);
+    rerender(<HubPicker role="owner" />);
+
+    expect(catalogReads).toBe(2);
+    expect(screen.queryByRole('button', { name: 'chat.picker.addModel' })).toBeNull();
   });
 
   it('reads the list again for a menu left open while Settings covered it', async () => {

@@ -229,6 +229,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       () => {
         loadedBackends.delete(backend);
         setModelsByBackend((prev) => ({ ...prev, [backend]: [] }));
+        // A failed read says nothing about the Hub; an earlier answer may be stale.
+        setHubManagedByBackend((prev) => ({ ...prev, [backend]: false }));
         setLoadingModels(false);
       },
     );
