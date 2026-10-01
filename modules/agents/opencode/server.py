@@ -1748,6 +1748,12 @@ class OpenCodeServerManager:
                     groups[process] = os.getpgid(process.pid)
                 except OSError:
                     continue
+            # The caller's own group is the one carrying out this stop: ``vibe
+            # stop`` run from an OpenCode tool sits inside the tree. It is never
+            # signalled, nor waited for, so the stop can finish its own work.
+            tree = [process for process in tree if groups.get(process) != own_group]
+            if not tree:
+                return True
             # A group is the tree's when a process of the tree founded it. It is
             # signalled only while a live process of the tree is still in it,
             # proof that its id was not recycled, and the group signal also

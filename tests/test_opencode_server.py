@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 from contextlib import suppress
@@ -3290,6 +3291,59 @@ def test_stopping_the_server_stops_tool_commands_in_their_own_session(tmp_path):
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=5)
+        server.stdout.close()
+
+
+# A server whose tools run in their own sessions, as OpenCode's do: one keeps
+# working, the other stops the server from inside the tree, as `vibe stop` run
+# from an OpenCode shell tool does.
+_SERVER_WITH_STOPPING_TOOL = """
+import os, subprocess, sys
+marker, done = sys.argv[1], sys.argv[2]
+worker = subprocess.Popen(["/bin/sh", "-c", "while :; do sleep 1; done", "tool", marker], start_new_session=True)
+print(worker.pid, flush=True)
+stopper = (
+    "import sys\\n"
+    "from modules.agents.opencode.server import OpenCodeServerManager\\n"
+    "stopped = OpenCodeServerManager._terminate_pid_tree_sync(int(sys.argv[1]), timeout=2.0)\\n"
+    "open(sys.argv[2], 'w').write(str(stopped))\\n"
+)
+subprocess.Popen([sys.executable, "-c", stopper, str(os.getpid()), done, marker], start_new_session=True)
+worker.wait()
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sessions and process groups")
+def test_a_stop_run_from_inside_the_tree_survives_to_finish_it(tmp_path):
+    # Every tree member outside the caller's group was signalled one by one, so
+    # a stop running inside the tree killed itself before it finished.
+    done = tmp_path / "stop-finished"
+    server = subprocess.Popen(
+        [sys.executable, "-c", _SERVER_WITH_STOPPING_TOOL, str(tmp_path / "marker"), str(done)],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+    worker_pid = None
+    try:
+        worker_pid = int(server.stdout.readline())
+        worker = psutil.Process(worker_pid)
+        threading.Thread(target=server.wait, daemon=True).start()
+        deadline = time.monotonic() + 20
+        while not done.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+
+        assert done.read_text() == "True"
+        assert _exited(worker)
+        assert server.wait(timeout=5) == -signal.SIGTERM
+    finally:
+        if worker_pid is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(worker_pid, signal.SIGKILL)
+        if server.poll() is None:
+            server.kill()
+        server.wait(timeout=5)
         server.stdout.close()
 
 
