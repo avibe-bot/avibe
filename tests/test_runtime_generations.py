@@ -142,6 +142,29 @@ def test_adopted_and_restored_work_keep_their_generation_alive():
     asyncio.run(run())
 
 
+def test_a_retired_generation_stops_once_unbound_and_admits_no_new_turn():
+    runtimes = _Runtimes()
+    generations = runtimes.generation_set()
+
+    async def run():
+        bound = await generations.acquire(_Spec("a"))
+        await generations.retire(bound.generation)
+        assert generations.current is None and bound.generation.runtime in runtimes.live
+
+        fresh = await generations.acquire(_Spec("a"))
+        assert fresh.generation is not bound.generation
+        await bound.release()
+        assert runtimes.stopped == [(bound.generation.runtime, False)]
+
+        await fresh.release()
+        await generations.retire(fresh.generation)
+        assert runtimes.stopped[-1] == (fresh.generation.runtime, False)
+        await generations.retire(fresh.generation)
+        assert len(runtimes.stopped) == 2
+
+    asyncio.run(run())
+
+
 def test_a_failed_start_leaves_the_current_generation_serving():
     runtimes = _Runtimes()
     generations = runtimes.generation_set()

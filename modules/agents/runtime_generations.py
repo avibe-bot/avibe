@@ -43,6 +43,8 @@ class RuntimeGeneration(Generic[_S, _R]):
     retiring: bool = False
     stopped: bool = False
     bindings: int = 0
+    # Set by ``retire``: never promoted back to current.
+    closed: bool = False
 
 
 @dataclass(eq=False)
@@ -97,7 +99,10 @@ class RuntimeGenerationSet(Generic[_S, _R]):
                 return self._bind_locked(current)
             await self._reap_locked()
             replace_idle = current is not None and await self._is_idle(current)
-            match = next((item for item in reversed(self._retiring) if item.spec.digest == spec.digest), None)
+            match = next(
+                (item for item in reversed(self._retiring) if item.spec.digest == spec.digest and not item.closed),
+                None,
+            )
             if match is not None:
                 # A live generation already serves this spec, for example when
                 # sessions alternate between two launch channels.
@@ -149,6 +154,24 @@ class RuntimeGenerationSet(Generic[_S, _R]):
                 generation.retiring = True
                 self._retiring.append(generation)
             return generation
+
+    async def retire(self, generation: RuntimeGeneration[_S, _R]) -> None:
+        """Stop admitting to a generation; it stops as soon as it is unbound and idle.
+
+        The check and the stop are atomic with ``acquire``, so a turn binding
+        concurrently either keeps the generation alive or binds elsewhere.
+        """
+        async with self._lock:
+            if generation.stopped:
+                return
+            generation.closed = True
+            if self._current is generation:
+                self._current = None
+            if generation not in self._retiring:
+                generation.retiring = True
+                self._retiring.append(generation)
+            if await self._is_idle(generation):
+                await self._stop_locked(generation, force=False)
 
     async def discard(self, generation: RuntimeGeneration[_S, _R]) -> None:
         """Forget a generation whose process already ended or was retired elsewhere."""
