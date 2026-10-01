@@ -198,15 +198,19 @@ def test_provider_probe_lists_models_after_directory_bootstrap_longer_than_reque
                 request_timeout_seconds=REQUEST_TIMEOUT_SECONDS,
             )
             service = AgentAuthService(SimpleNamespace(config=SimpleNamespace(language="en")))
-            monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(server))
+            lease = lease_returning(server)
+            monkeypatch.setattr(service, "_lease_opencode_server", lease)
             try:
-                result = await service.test_opencode_provider("openai")
+                result = await service.test_opencode_provider("openai", timeout=30.0)
             finally:
                 await server.close_http_session()
-        return result, opencode.prompts
+        return result, opencode.prompts, lease.ttls
 
-    result, prompts = asyncio.run(scenario())
+    result, prompts, lease_ttls = asyncio.run(scenario())
 
     assert result["ok"] is True, result
+    # A renewal retiring the generation cannot stop it while the probe still
+    # waits for the bootstrap or for its reply.
+    assert lease_ttls and lease_ttls[0] > server_module.DIRECTORY_BOOTSTRAP_TIMEOUT + 30.0
     assert result["model"] == "gpt-cold"
     assert [prompt["model"] for prompt in prompts] == [{"providerID": "openai", "modelID": "gpt-cold"}]

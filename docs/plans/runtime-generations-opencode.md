@@ -11,7 +11,12 @@ are the Phase 1 design. Their line references are to
   stop while the process still has requests in flight or native run markers.
   The set then retries it on the next release or sweep.
 - Leases are core bindings plus an adapter timer. Their expiry is persisted
-  in the generation record.
+  in the generation record. A release is routed by lease id to the runtime
+  holding the lease, even after a disabled backend's agent was unregistered
+  while that lease drains. Only a lease that no runtime has adopted yet goes
+  to the registered agent, which adopts it first. Each lease's TTL covers the
+  longest its holder may legitimately need. For the provider probe, that is
+  the directory-bootstrap ceiling plus the probe's own timeout.
 - Adoption keeps the newest adopted generation whose recorded digest equals
   the current spec as current. Every other adopted generation retires and
   stops once its restored work drains.

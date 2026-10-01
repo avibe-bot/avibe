@@ -54,6 +54,9 @@ _VERSION_RE = re.compile(r"\d+\.\d+\.\d+[0-9A-Za-z.+-]*")
 _binary_versions: dict[tuple[Any, ...], Optional[str]] = {}
 # A lease outlives no caller: the UI process renews nothing and releases on exit.
 MAX_LEASE_SECONDS = 1800.0
+# The runtime holding each live lease. A release reaches it there even after
+# its backend was disabled and its agent unregistered while the lease drains.
+_LEASE_HOLDERS: dict[str, "OpenCodeRuntime"] = {}
 
 
 def _digest(value: object) -> str:
@@ -427,6 +430,7 @@ class OpenCodeRuntime:
     ) -> None:
         timer = asyncio.get_running_loop().call_later(ttl, self._expire_lease, lease_id)
         self._leases[lease_id] = (binding, timer)
+        _LEASE_HOLDERS[lease_id] = self
 
     def _expire_lease(self, lease_id: str) -> None:
         task = asyncio.get_running_loop().create_task(self.release_lease(lease_id))
@@ -437,6 +441,7 @@ class OpenCodeRuntime:
         held = self._leases.pop(lease_id, None)
         if held is None:
             return False
+        _LEASE_HOLDERS.pop(lease_id, None)
         binding, timer = held
         if timer is not None:
             timer.cancel()
@@ -623,6 +628,24 @@ async def lease_opencode_server(
             await internal_client.release_opencode_generation_lease(lease_id)
 
     return OpenCodeServerLease(server=server, lease_id=lease_id, _release=_release_remote)
+
+
+async def release_opencode_lease(lease_id: str, *, controller: Any) -> Optional[bool]:
+    """Release a lease in the runtime holding it, wherever its agent went.
+
+    A lease no runtime holds yet, recorded before a controller restart, goes
+    to the registered agent, which adopts it first. ``None`` means OpenCode is
+    disabled and holds no such lease.
+    """
+
+    holder = _LEASE_HOLDERS.get(lease_id)
+    if holder is not None:
+        return await holder.release_lease(lease_id)
+    agent = getattr(getattr(controller, "agent_service", None), "agents", {}).get("opencode")
+    release = getattr(agent, "release_generation_lease", None)
+    if not callable(release):
+        return None
+    return bool(await release(lease_id))
 
 
 @asynccontextmanager

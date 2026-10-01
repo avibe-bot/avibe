@@ -3217,8 +3217,14 @@ class AgentAuthService:
         if not provider_id:
             return {"ok": False, "error": "missing_provider"}
 
-        # The lease keeps the probe's generation alive until the probe ends.
-        opencode_lease = await self._lease_opencode_server("provider probe", ttl_seconds=timeout + 60.0)
+        from modules.agents.opencode.server import DIRECTORY_BOOTSTRAP_TIMEOUT
+
+        # The lease keeps the probe's generation alive until the probe ends:
+        # through a cold directory's bootstrap, then the probe's own window.
+        opencode_lease = await self._lease_opencode_server(
+            "provider probe",
+            ttl_seconds=DIRECTORY_BOOTSTRAP_TIMEOUT + timeout + 60.0,
+        )
         if opencode_lease is None:
             return {"ok": False, "error": "opencode_server_unavailable"}
         try:

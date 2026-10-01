@@ -1058,11 +1058,12 @@ def create_app(
 
     @app.post("/internal/opencode/generation-leases/{lease_id}/release")
     async def _release_opencode_generation_lease(lease_id: str) -> Any:
-        agent = getattr(getattr(controller, "agent_service", None), "agents", {}).get("opencode")
-        release = getattr(agent, "release_generation_lease", None)
-        if not callable(release):
+        from modules.agents.opencode.client_manager import release_opencode_lease
+
+        released = await release_opencode_lease(lease_id, controller=controller)
+        if released is None:
             return JSONResponse(status_code=404, content={"ok": False, "error": "opencode_disabled"})
-        return {"ok": True, "released": bool(await release(lease_id))}
+        return {"ok": True, "released": released}
 
     @app.post("/internal/backend-auth/test")
     async def _test_backend_auth(request: Request) -> Any:

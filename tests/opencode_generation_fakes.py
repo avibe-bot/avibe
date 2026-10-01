@@ -93,13 +93,15 @@ class FakeServerLease:
 def lease_returning(server: Any):
     """An ``AgentAuthService._lease_opencode_server`` stand-in that leases ``server``.
 
-    Its ``leases`` list holds every lease it handed out.
+    Its ``leases`` list holds every lease it handed out, and ``ttls`` the
+    lifetime each one asked for.
     """
 
     leases: list[FakeServerLease] = []
+    ttls: list[float] = []
 
     async def _lease(_purpose: str, *, ttl_seconds: float) -> FakeServerLease | None:
-        del ttl_seconds
+        ttls.append(ttl_seconds)
         if server is None:
             return None
         lease = FakeServerLease(server)
@@ -107,6 +109,7 @@ def lease_returning(server: Any):
         return lease
 
     _lease.leases = leases  # type: ignore[attr-defined]
+    _lease.ttls = ttls  # type: ignore[attr-defined]
     return _lease
 
 

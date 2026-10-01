@@ -659,6 +659,50 @@ def test_runtime_gen_023_the_ui_process_leases_the_controllers_generation_over_c
     assert invalid.status_code == 400
 
 
+def test_a_ui_lease_release_reaches_its_runtime_after_the_backend_is_disabled(fake_processes):
+    import httpx
+
+    from core.internal_server import create_app
+
+    runtime = _runtime()
+
+    async def lease_generation(purpose, *, ttl_seconds):
+        lease_id, generation = await runtime.lease(OpenCodeLaunchSpec(digest="v1", binary="opencode"), ttl_seconds)
+        return {"lease_id": lease_id, "server": generation}
+
+    async def release_generation_lease(lease_id):
+        return await runtime.release_lease(lease_id)
+
+    agents = {
+        "opencode": SimpleNamespace(
+            lease_generation=lease_generation,
+            release_generation_lease=release_generation_lease,
+        )
+    }
+    app = create_app(SimpleNamespace(agent_service=SimpleNamespace(agents=agents)))
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
+            created = await client.post(
+                "/internal/opencode/generation-leases",
+                json={"purpose": "web OAuth", "ttl_seconds": 960},
+            )
+            # Disabling OpenCode unregisters its agent, then closes its
+            # runtime; the leased generation drains for the UI's flow.
+            agents.pop("opencode")
+            await runtime.close()
+            drained_early = list(fake_processes.stopped)
+            release = await client.post(f"/internal/opencode/generation-leases/{created.json()['lease_id']}/release")
+            await runtime._generations.settled()
+        return drained_early, release
+
+    drained_early, release = asyncio.run(scenario())
+
+    assert drained_early == []
+    assert release.json() == {"ok": True, "released": True}
+    assert len(fake_processes.stopped) == 1
+
+
 def test_a_ui_lease_client_carries_the_generations_private_providers(monkeypatch):
     from vibe import internal_client
 
