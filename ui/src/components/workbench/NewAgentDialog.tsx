@@ -61,6 +61,10 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   const [error, setError] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ComboboxOption[]>([]);
   const [reasoningOptions, setReasoningOptions] = useState<Record<string, { value: string; label: string }[]>>({});
+  // Whether this backend's catalog has answered since it was last invalidated
+  // (a backend switch, or a Settings visit). Until it has, nothing the dialog
+  // offers is confirmed against it.
+  const [catalogAnswered, setCatalogAnswered] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const openAddModel = useAddModelExit(backend, open);
   const surfaceActive = useRouteSurfaceActive();
@@ -83,8 +87,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   // the Combobox suggests the right list. allowCustomValue stays on so
   // freshly-released model IDs can still be typed in. The dialog stays open
   // under Settings, so it reads again once Settings uncovers it, and offers no
-  // row read before the visit meanwhile. The effort options stay: dropping them
-  // would move the draft's chosen effort before the new read could confirm it.
+  // row read before the visit meanwhile. The effort options stay so the draft's
+  // chosen effort does not move, but neither an effort nor Create can be
+  // chosen until the new read answers and the effort is checked against it.
   useEffect(() => {
     if (!open || !surfaceActive) return;
     const cancel = loadBackendModelsWithRefresh(
@@ -93,12 +98,17 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
       ({ models, modelLabels, reasoningOptions: opts }) => {
         setModelOptions(models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })));
         setReasoningOptions(opts ?? {});
+        setCatalogAnswered(true);
       },
-      () => setModelOptions([]),
+      () => {
+        setModelOptions([]);
+        setCatalogAnswered(true);
+      },
     );
     return () => {
       cancel();
       setModelOptions([]);
+      setCatalogAnswered(false);
     };
   }, [backend, open, api, surfaceActive]);
 
@@ -130,7 +140,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
 
   if (!open) return null;
 
-  const canSubmit = name.trim().length > 0 && !submitting;
+  const canSubmit = name.trim().length > 0 && !submitting && catalogAnswered;
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
@@ -294,8 +304,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
                     key={opt}
                     type="button"
                     onClick={() => setEffort(opt)}
+                    disabled={!catalogAnswered}
                     className={clsx(
-                      'truncate rounded px-0.5 py-1.5 text-[11px] capitalize transition',
+                      'truncate rounded px-0.5 py-1.5 text-[11px] capitalize transition disabled:opacity-60',
                       effort === opt ? 'bg-mint-soft font-bold text-mint-ink' : 'font-medium text-muted hover:text-foreground',
                     )}
                   >

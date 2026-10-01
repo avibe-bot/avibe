@@ -149,14 +149,25 @@ describe('NewAgentDialog', () => {
       </RouteSurfaceActiveContext.Provider>
     );
     const { rerender } = render(dialog(true));
+    fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'router' } });
+    const create = () => screen.getByRole('button', { name: /agents\.create\.submit/, hidden: true }) as HTMLButtonElement;
+    const medium = () => screen.getByRole('button', { name: 'medium', exact: true, hidden: true }) as HTMLButtonElement;
+    expect(create().disabled).toBe(false);
     deferReads = true;
     rerender(dialog(false));
     rerender(dialog(true));
 
+    // The draft keeps its effort, but neither it nor Create can be chosen until
+    // the new read can say whether the model still takes it.
+    expect(screen.getByDisplayValue('router')).toBeTruthy();
+    expect(medium().disabled).toBe(true);
+    expect(create().disabled).toBe(true);
     fireEvent.click(screen.getByRole('combobox'));
     expect(screen.queryByText('opus')).toBeNull();
     act(() => pendingReads.shift()!());
     expect(screen.getByText('opus')).toBeTruthy();
+    expect(medium().disabled).toBe(false);
+    expect(create().disabled).toBe(false);
   });
 
   it('creates with no effort when the catalog says the model has none', async () => {
