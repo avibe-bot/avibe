@@ -164,12 +164,17 @@ The table is the contract. Its rules:
 - A trigger counts only if it is published after the state it signals is
   persisted. Each row below was checked against the publishing code for that
   ordering.
+- A server-derived projection is not filtered by session on the client. When
+  an event's payload cannot say whether it touches `S`, the pet re-reads on
+  every event of that family, coalesced to one in-flight read plus one
+  trailing read. `AgentsPage` and `AgentGraphTab` already refresh this way on
+  `runs.updated`.
 
 | Input | Initial read | Live trigger | Gap fallback |
 |---|---|---|---|
 | Message tail (latest exchange, `quick_replies`) | `listSessionMessages(S, {tail: true, cache: false})` | `message.new` for `S` (merged, deduped by id) | `onConnected`; window becomes visible |
 | `quick_reply_chosen` | in the tail rows | `message.updated` for `S`, replacing the row by id, as the chat page already does. The Runtime starts publishing it for this field (see note) | as above |
-| Turn state (`foreground`, `in_flight`, `background_activities`) | `GET /api/sessions/S/turn-state` | `turn.start`, `turn.end`, `queue.updated` for `S`; `runs.updated` for `S` or with no `session_id` | `onConnected`; visible; the chat page's interval reconcile while work is present and the window is visible |
+| Turn state (`foreground`, `in_flight`, `background_activities`) | `GET /api/sessions/S/turn-state` | `turn.start`, `turn.end`, `queue.updated` for `S`; every `runs.updated` and every `definitions.updated`, unfiltered and coalesced | `onConnected`; visible; the chat page's interval reconcile while work is present and the window is visible |
 | Pending vault requests | `usePendingVaultRequests` | `vaults.updated` (`useVaultRequestRefresh`) | expiry timer; `onConnected` |
 | `agent_status` | `getSession(S, {cache: false})` | `session.status` for `S`, applied to the pet's own copy | `onConnected`; visible: re-read `getSession(S)` |
 | Unread count | Inbox provider `unread_by_session`, which its bootstrap reads for every session | `inbox.unread.changed` | provider's own `onConnected` |
@@ -193,9 +198,14 @@ Two notes on the table:
   background work is present) that recovers a dropped `turn.end` without ever
   clearing a live turn on a timer. That logic is extracted from `ChatPage.tsx`
   into a shared `useSessionTurnState(S)` hook used by both, rather than
-  re-implemented. The pet adds the `runs.updated` trigger, so a delegated run
-  that starts or finishes while the pet is visible updates the activity strip
-  at once. The interval runs only while work is present and the window is
+  re-implemented. The pet adds two unfiltered triggers. `background_activities`
+  is a projection built from two sources: watch and task definitions bound to
+  `S`, and delegated runs whose `callback_session_id` is `S`. Neither event
+  names that ownership. `definitions.updated` is instance-scoped, and
+  `runs.updated` carries the executor's `session_id`, which for a delegated
+  run is by design not `S`. So the pet re-reads turn-state on every event of
+  both families, and a first delegated run, watch, or task appears in the
+  strip at once. The interval runs only while work is present and the window is
   visible, so an idle pet does no network work.
 
 **Session binding.** The route reads the bound session id from `localStorage`
@@ -376,8 +386,9 @@ The microphone usage string and audio-input entitlement already ship (#2293).
   - a `message.updated` row carrying `quick_reply_chosen` clears Needs input;
   - a freshly bound session that is already failed derives Blocked from
     `getSession(S)`, with no provider row present;
-  - `runs.updated` for `S`, or without `session_id`, refreshes the activity
-    strip;
+  - any `runs.updated`, including one whose `session_id` is the executor and
+    not `S`, and any `definitions.updated` re-read turn-state, and a burst
+    coalesces to at most one in-flight and one trailing read;
   - the extracted `useSessionTurnState` keeps the chat page's existing
     turn-state tests passing;
   - a voice claim from another realm (simulated `BroadcastChannel` message)
