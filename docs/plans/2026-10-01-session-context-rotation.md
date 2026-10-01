@@ -87,9 +87,13 @@ because steering and interrupts target the live native turn.
 1. **Due** (`metadata_json.context_rotation_due`). Triggers only set this
    marker, so a request made while a turn is running takes effect on the next
    turn and cannot race it.
-   - At the chokepoint, a due session that is not already pending runs the
-     storage supersede. The same transaction clears `due` and sets
-     `context_handoff.pending`.
+   - At the chokepoint, a due session that is not already pending first asks
+     the backend whether its native runtime is settled
+     (`native_runtime_settled`, below). If the runtime is not settled, rotation
+     is deferred: `due` stays set and this turn runs on the current native as
+     usual. The check is repeated at every later turn start.
+   - Once the runtime is settled, the storage supersede runs. The same
+     transaction clears `due` and sets `context_handoff.pending`.
    - A due session with no bound native has nothing to rotate; `due` is simply
      cleared.
 2. **Pending** (`metadata_json.context_handoff.pending`). On every turn start
@@ -98,6 +102,10 @@ because steering and interrupts target the live native turn.
       If release fails, the turn fails before dispatch and `pending` stays set,
       so the next turn retries the release. A handoff is never sent through the
       old cached runtime.
+
+      The supersede only ran after the runtime was settled. A pending turn
+      never dispatches before release succeeds. So no backend work can start on
+      the old runtime between the settled check and the release.
    2. Build the handoff from fresh durable state and prepend it to this turn's
       input. The native id is either empty (the normal case) or already bound
       to a new native that never accepted input. The second case happens when
@@ -121,8 +129,28 @@ Clearing the row is not enough, because backends cache live runtimes:
 - Codex checks the in-memory `_threads[base]` before the database;
 - Claude reuses a cached SDK client per composite key.
 
-Add one backend-neutral hook, `BaseAgent.release_native_runtime(session)`.
-Its default is a no-op:
+An idle turn boundary also does not mean the runtime is idle. Claude admits a
+new human turn while a detached background Activity is still running on the
+same SDK client (`docs/plans/claude-result-provenance.md`). Releasing that
+client would orphan the Activity and lose its output. The handoff cannot carry
+that output either, because it lists only durable Harness items.
+
+Two backend-neutral hooks cover this.
+
+`BaseAgent.native_runtime_settled(session) -> bool` is the rotation
+precondition. Its default is `True`:
+
+- Claude: `False` while the backend-neutral `SessionActivityRegistry` has an
+  active Activity or completed, unclaimed Activity output for the session's
+  runtime key (`has_active`, `has_completed_output`), or the agent still holds
+  an Activity output record. This is the same evidence that
+  `_activity_output_pending` already reads.
+- Codex and OpenCode: `True`. Neither registers detached Activities today, and
+  the chokepoint already guarantees no live native turn. A backend that later
+  registers Activities must implement the hook.
+
+`BaseAgent.release_native_runtime(session)` drops the cached runtime. Its
+default is a no-op:
 
 - Claude: `_cleanup_runtime_session(...)`;
 - Codex: `invalidate_thread(...)` plus clearing cached developer instructions;
@@ -307,6 +335,10 @@ continuity but does not fail dispatch.
   startup all succeed, and each key behaves as absent.
 - Interleaving: set `due` between the turn-end writer's read and its write.
   Both `due` and `context_usage` survive, and the next turn rotates.
+- A Claude session with an active detached Activity, or with completed Activity
+  output not yet delivered, is not rotated. `due` stays set, the turn runs on
+  the old native, and the Activity output is delivered. The next turn start
+  after it settles rotates.
 - No rotation happens while a turn is live. A request made mid-turn takes effect
   at the next turn start.
 - Per backend: after release, a turn does not reuse the cached runtime or thread
@@ -331,6 +363,10 @@ continuity but does not fail dispatch.
   through the chokepoint.
 - Backend runtime markers in `metadata_json` are keyed to the old native. Codex
   re-checks `marker.thread_id`; audit the rest.
+- Audit every other kind of process-local, per-session state that release
+  drops, such as steering state, pending reactions, and queued requests. Each
+  kind must either be settled under `native_runtime_settled` or be safe to
+  drop at a turn boundary.
 - Snapshot rows must stay invisible to sidebar and archive listings, native
   session listing, and the Claude process reaper, as they are for the existing
   OpenCode repair.
@@ -340,7 +376,8 @@ continuity but does not fail dispatch.
 - [ ] Storage: supersede-to-empty plus handoff and due markers.
 - [ ] Turn-start chokepoint: consume the due marker, rotate, release the
       runtime, inject the handoff.
-- [ ] `BaseAgent.release_native_runtime`, implemented for Claude and Codex.
+- [ ] `BaseAgent.native_runtime_settled` (Claude Activity gate) and
+      `BaseAgent.release_native_runtime`, implemented for Claude and Codex.
 - [ ] Handoff prompt template and builder.
 - [ ] Persist per-turn peak usage and window at turn end (Claude, Codex) and
       observe backend compaction (all three backends). Evaluate the ratio and
