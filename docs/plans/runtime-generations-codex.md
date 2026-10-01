@@ -238,6 +238,7 @@ retired only when the directory's last Hub process ends.
 | --- | --- |
 | `renew_runtime(config, config_save=False)` | Adopts the config. A plain `agents.*` save (`config_save=True`) needs nothing more, because the binary and extra arguments are already spec inputs. Every other caller bumps the renewal epoch. Nothing stops or waits. |
 | `adopt_model_hub_catalog()` | Drops the prepared catalogs; the next Hub turn prepares from its own snapshot. |
+| Hub/Direct mode switch | The core commits the mode and calls `adopt_model_hub_catalog()`. The mode decides the turn's launch, so it is a spec change: the next turn starts on a process for the new mode, while a running Hub turn finishes on its own process and keeps the gateway credential until it ends (RUNTIME-GEN-016). |
 | `refresh_runtime_config` / `refresh_auth_state` | Kept only for the exclusive `migration_guard` cutover: stop every generation. |
 | `retire_for_native_migration` | Refuses while any generation is bound or not drained; otherwise ends every process and requires it to exit. |
 | `prepare_resume_binding` | Releases only the resumed Session's thread; the process keeps serving others. |

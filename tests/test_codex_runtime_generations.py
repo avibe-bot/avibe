@@ -436,8 +436,14 @@ async def test_runtime_gen_015_direct_and_native_cli_launches_share_one_process(
 
 
 @pytest.mark.asyncio
-async def test_runtime_gen_016_hub_scope_is_revoked_only_with_the_last_hub_generation(tmp_path):
-    """RUNTIME-GEN-016: retiring one Hub process keeps the credential its successor uses."""
+@pytest.mark.parametrize("successor", ["hub", "direct"], ids=["hub-renewal", "switch-to-direct"])
+async def test_runtime_gen_016_hub_scope_is_revoked_only_with_the_last_hub_generation(tmp_path, successor):
+    """RUNTIME-GEN-016: retiring one Hub process keeps the credential its running turn or successor uses.
+
+    A switch to Direct is a spec change: the next turn starts at once on a
+    Direct process while the Hub turn finishes on its own process and keeps the
+    gateway credential until it ends.
+    """
     router = _Router()
     router.launches["model-a"] = _launch("model-a", "hub", token="shared-token")
     agent, cwd = _agent(tmp_path, router=router)
@@ -446,14 +452,26 @@ async def test_runtime_gen_016_hub_scope_is_revoked_only_with_the_last_hub_gener
     )
     await agent.handle_message(_request(cwd, "s1"))
     old = _server_for(agent, "s1")
-    await agent.renew_runtime(agent.codex_config)
-    await agent.handle_message(_request(cwd, "s2"))
+    if successor == "hub":
+        await agent.renew_runtime(agent.codex_config)
+    else:
+        # The mode switch commits, then the catalog hook adopts it.
+        router.launches["model-a"] = _launch("model-a")
+        await agent.adopt_model_hub_catalog()
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s2")), 1)
+
+    new = _server_for(agent, "s2")
+    assert new is not old and agent._turn_registry.get_active_turn("s2")
+    assert ("AVIBE_MODEL_HUB_TOKEN" in new.runtime_env) is (successor == "hub")
+    assert old.alive and agent._turn_registry.get_active_turn("s1")
+    assert router.retired == []
 
     await old.complete(agent._session_mgr.get_thread_id("s1"))
     await _until(lambda: not old.alive)
-    assert router.retired == []
-
-    await agent.shutdown_runtime()
+    agent.controller.agent_service.force_end_runtime_work.assert_not_awaited()
+    if successor == "hub":
+        assert router.retired == []
+        await agent.shutdown_runtime()
     assert router.retired == [("codex", cwd)]
 
 

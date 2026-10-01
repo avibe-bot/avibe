@@ -93,7 +93,7 @@ scenarios:
     backend: codex
     test: tests/test_codex_runtime_generations.py::test_runtime_gen_015_direct_and_native_cli_launches_share_one_process
   - id: RUNTIME-GEN-016
-    name: Retiring one Codex Hub app-server keeps the directory's gateway credential until the last Hub app-server stops
+    name: Retiring a Codex Hub app-server, by renewal or a switch to Direct, keeps the directory's gateway credential until the last Hub app-server stops, and a switch to Direct never holds a new turn behind a running Hub turn
     status: covered
     kind: lifecycle
     layer: unit
