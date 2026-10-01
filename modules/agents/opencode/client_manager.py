@@ -354,18 +354,12 @@ class OpenCodeRuntime:
         }
         if retained == generation.active_run_sessions:
             return
-        previous = generation.active_run_sessions
-        generation.active_run_sessions = retained
-        try:
-            generation.write_record()
-        except Exception:
-            generation.active_run_sessions = previous
-            logger.warning("Could not persist reconciled OpenCode run markers", exc_info=True)
-            return
         logger.info(
             "Removed %s orphaned OpenCode run marker(s) without durable polls",
-            len(previous - retained),
+            len(generation.active_run_sessions - retained),
         )
+        generation.active_run_sessions = retained
+        generation.write_record_or_defer("its reconciled run markers")
 
     async def acquire(self, spec: OpenCodeLaunchSpec) -> RuntimeBinding[Any, OpenCodeGeneration]:
         """Bind new work to the generation that serves ``spec``."""
@@ -452,6 +446,8 @@ class OpenCodeRuntime:
 
     async def reap(self) -> None:
         if self._adopted:
+            for generation in self.generations():
+                generation.flush_record()
             await self._generations.reap()
 
     async def retire_confirmed(
@@ -532,8 +528,8 @@ class OpenCodeRuntime:
         generation = wrapper.runtime
         if not force and generation.process_alive() and not generation.is_drained():
             # A run marker that no durable poll backs, left by an adoption
-            # whose record rewrite failed, keeps the process only until a
-            # later sweep's retry of that reconciliation succeeds.
+            # that could not read the durable polls, keeps the process only
+            # until a later sweep's retry of that reconciliation succeeds.
             self._reconcile_run_markers(generation, self._durable_polls())
             if not generation.is_drained():
                 return False

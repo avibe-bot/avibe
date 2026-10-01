@@ -26,6 +26,8 @@ from modules.agents.opencode.client_manager import OpenCodeRuntime, compute_laun
 from modules.agents.opencode.server import OpenCodeGeneration, OpenCodeLaunchSpec
 from tests.fake_pid_helpers import fake_pid
 
+_WRITE_RECORD = OpenCodeGeneration.write_record
+
 
 @pytest.fixture
 def opencode_home(tmp_path, monkeypatch):
@@ -152,6 +154,7 @@ def isolated_launch(tmp_path, monkeypatch):
     """Spawn fake ``opencode serve`` processes instead of real ones."""
 
     monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: tmp_path / "generations")
+    monkeypatch.setattr(opencode_server, "_OWNED_HERE", set())
     monkeypatch.setattr(opencode_server, "ensure_plugin_installed", lambda: None)
     monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda pid: 100.0 + pid)
     monkeypatch.setattr(opencode_server.OpenCodeGeneration, "is_healthy", AsyncMock(return_value=True))
@@ -746,24 +749,25 @@ def test_a_launcher_whose_child_serves_counts_as_listening():
 
 def test_adoption_leaves_another_runtime_of_this_controller_its_generations(isolated_launch, monkeypatch):
     records = isolated_launch.records
-    sibling = _record(records, "ocg_sibling", fake_pid(20), 50020, owner_pid=os.getpid())
-    crashed = _record(records, "ocg_crashed", fake_pid(21), 50021, owner_pid=fake_pid(99))
+    _record(records, "ocg_crashed", fake_pid(21), 50021)
     monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: records / "absent.json")
-    ports = {fake_pid(20): 50020, fake_pid(21): 50021}
-    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid in ports)
-    monkeypatch.setattr(
-        opencode_server.runtime,
-        "get_process_command",
-        lambda pid: f"/bin/opencode serve --port={ports[pid]}",
-    )
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid == fake_pid(21))
+    monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=50021")
+    isolated_launch.processes.append(_Process(fake_pid(20)))
 
-    adopted = asyncio.run(opencode_server.adopt_recorded_generations())
+    async def scenario():
+        started = await opencode_server.start_generation(OpenCodeLaunchSpec(digest="v1", binary="/bin/opencode"))
+        first = await opencode_server.adopt_recorded_generations()
+        # The OpenCode backend is disabled and enabled again while the old
+        # runtime's turn still runs: that runtime keeps and later stops both.
+        second = await opencode_server.adopt_recorded_generations()
+        return started, first, second
 
-    # The OpenCode backend was disabled and enabled again while its old
-    # runtime's turn still runs: that runtime keeps and later stops its process.
-    assert [generation.generation_id for generation in adopted] == ["ocg_crashed"]
-    assert json.loads(sibling.read_text())["owner_pid"] == os.getpid()
-    assert json.loads(crashed.read_text())["owner_pid"] == os.getpid()
+    started, first, second = asyncio.run(scenario())
+
+    assert started.record_path.exists()
+    assert [generation.generation_id for generation in first] == ["ocg_crashed"]
+    assert second == []
 
 
 def test_strict_retirement_retries_a_stop_that_declined_while_a_request_ran(fake_processes):
@@ -990,19 +994,19 @@ def test_an_orphaned_run_marker_is_reconciled_again_by_a_later_sweep(fake_proces
     generation.active_run_sessions = {"ses_without_poll"}
     fake_processes.alive.add(generation.generation_id)
     monkeypatch.setattr(client_manager, "adopt_recorded_generations", AsyncMock(return_value=[generation]))
-    writes = {"count": 0}
+    reads = {"count": 0}
 
-    def write_record(self):
-        writes["count"] += 1
-        if writes["count"] == 1:
-            raise OSError("state dir briefly unwritable")
+    def durable_polls():
+        reads["count"] += 1
+        if reads["count"] == 1:
+            raise OSError("session store briefly unreadable")
+        return {}
 
-    monkeypatch.setattr(OpenCodeGeneration, "write_record", write_record)
     runtime = _runtime()
-    runtime.durable_poll_generations = lambda: {}
+    runtime.durable_poll_generations = durable_polls
 
     async def scenario():
-        # Adoption cannot persist the dropped marker, so it keeps it for now.
+        # Adoption cannot tell the marker is orphaned, so it keeps it for now.
         await runtime.ensure_adopted(OpenCodeLaunchSpec(digest="spec-new", binary="opencode"))
         pinned = generation in runtime.generations()
         await runtime.reap()
@@ -1011,3 +1015,70 @@ def test_an_orphaned_run_marker_is_reconciled_again_by_a_later_sweep(fake_proces
     assert asyncio.run(scenario())
     assert fake_processes.stopped == [generation]
     assert generation.active_run_sessions == set()
+
+
+# ------------------------------------------------- review round 3 regressions
+
+
+def test_a_lease_release_whose_write_fails_reaches_the_record_at_the_next_sweep(fake_processes, monkeypatch):
+    monkeypatch.setattr(OpenCodeGeneration, "write_record", _WRITE_RECORD)
+    real_write = opencode_server.write_atomic
+    unwritable = {"now": False}
+
+    def write_atomic(path, content):
+        if unwritable["now"]:
+            raise OSError("state dir briefly unwritable")
+        real_write(path, content)
+
+    monkeypatch.setattr(opencode_server, "write_atomic", write_atomic)
+
+    async def scenario():
+        runtime = _runtime()
+        lease_id, leased = await runtime.lease(OpenCodeLaunchSpec(digest="v1", binary="opencode"), ttl_seconds=600)
+        unwritable["now"] = True
+        released = await runtime.release_lease(lease_id)
+        bindings = runtime._wrappers[leased.generation_id].bindings
+        stale = json.loads(leased.record_path.read_text())["leases"]
+        unwritable["now"] = False
+        await runtime.reap()
+        return lease_id, released, bindings, stale, json.loads(leased.record_path.read_text())["leases"]
+
+    lease_id, released, bindings, stale, swept = asyncio.run(scenario())
+
+    # The release holds the process no longer, though its record still shows it.
+    assert released is True and bindings == 0
+    assert lease_id in stale
+    # A controller adopting the record after the sweep honors no stale lease.
+    assert swept == {}
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["generation-record", "legacy-record"])
+def test_adoption_tracks_a_serving_process_whose_record_cannot_be_rewritten(
+    isolated_launch, tmp_path, monkeypatch, legacy
+):
+    legacy_path = tmp_path / "opencode_server.json"
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: legacy_path)
+    if legacy:
+        legacy_path.write_text(json.dumps({"pid": fake_pid(43), "port": 50043}), encoding="utf-8")
+        recorded = legacy_path
+    else:
+        recorded = _record(isolated_launch.records, "ocg_crashed", fake_pid(43), 50043)
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid == fake_pid(43))
+    monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=50043")
+    real_write = opencode_server.write_atomic
+
+    def unwritable(*_args, **_kwargs):
+        raise OSError("state dir briefly unwritable")
+
+    monkeypatch.setattr(opencode_server, "write_atomic", unwritable)
+
+    adopted = asyncio.run(opencode_server.adopt_recorded_generations())
+
+    # Tracked, so it counts against the cap and stops once it drains.
+    assert [generation.pid for generation in adopted] == [fake_pid(43)]
+    # The record that finds it after another crash stays until one replaces it.
+    assert recorded.exists()
+    monkeypatch.setattr(opencode_server, "write_atomic", real_write)
+    adopted[0].flush_record()
+    assert adopted[0].record_path.exists()
+    assert not legacy_path.exists()

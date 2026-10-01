@@ -13875,8 +13875,16 @@ def _stop_opencode_server(runtime_ids: frozenset[str] = frozenset()):
 
     A server of another Runtime is left running, as the scoped stop leaves it.
     """
-    from modules.agents.opencode.server import StopOutcome, recorded_servers, stop_recorded_server_sync
+    from modules.agents.opencode.server import (
+        StopOutcome,
+        forget_dead_records,
+        recorded_servers,
+        stop_recorded_server_sync,
+    )
 
+    # A record whose process already ended, with the credential-bearing
+    # overlay beside it, is forgotten; it stopped nothing.
+    forget_dead_records()
     outcomes = []
     for pid, record_path, info in recorded_servers():
         try:

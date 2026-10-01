@@ -5043,3 +5043,26 @@ def test_cli_stop_reports_a_surviving_generation_and_drops_stopped_overlays(tmp_
 
     assert cli._stop_opencode_server() is False
     assert sorted(path.name for path in records.iterdir()) == ["ocg_b.json", "ocg_b.overlay.json"]
+
+
+def test_cli_stop_forgets_the_record_of_an_opencode_server_that_already_exited(tmp_path, monkeypatch):
+    from modules.agents.opencode import server as opencode_server
+
+    records = tmp_path / "generations"
+    records.mkdir()
+    monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: records)
+    monkeypatch.setattr(paths, "get_logs_dir", lambda: tmp_path)
+    (records / "ocg_exited.json").write_text(
+        json.dumps({"generation_id": "ocg_exited", "pid": 341, "port": 50041}), encoding="utf-8"
+    )
+    # A Hub generation's overlay carries the gateway credential.
+    (records / "ocg_exited.overlay.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: False)
+    def nothing_to_signal(pid, timeout=5):
+        raise AssertionError(f"signalled pid {pid}")
+
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", nothing_to_signal)
+
+    # Nothing was running, so the stop reports no OpenCode stop.
+    assert cli._stop_opencode_server() is False
+    assert list(records.iterdir()) == []

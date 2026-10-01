@@ -21,10 +21,21 @@ are the Phase 1 design. Their line references are to
   Restart, and installs bump the renewal epoch.
 - A forced refresh cancels running work and retires every generation. This is
   the coordinator's interrupt path, kept until it is deleted.
-- Adoption skips records owned by this controller process. Those belong to the
-  runtime of an OpenCode backend that was disabled and enabled again, and that
-  runtime stops them itself. An adopted record is rewritten with this
-  controller as its owner.
+- Adoption skips generations that a runtime of this controller process
+  started or adopted. Those belong to the runtime of an OpenCode backend that
+  was disabled and enabled again, and that runtime stops them itself. The
+  process keeps this ownership in memory, so the record has no `owner_pid` and
+  adoption writes nothing except the conversion of a legacy record.
+- A failed record write never leaves a record protecting less than its process
+  runs. A run marker or lease is persisted before its work starts. A turn
+  clears its run marker together with its durable poll, so when the write
+  fails both stay and a later restore retries. Any other change that only
+  releases protection takes effect at once. If its write fails, the record
+  stays stale until the next sweep rewrites it. A crash before that sweep only
+  keeps the process until the stale lease expires, or until adoption drops a
+  marker that no durable poll backs.
+- `vibe stop` forgets every record whose process already ended, with its
+  overlay copy, as shutdown and adoption do.
 - The renewal epoch is persisted under `runtime/opencode/renew_epoch`. A
   generation retired by a renewal therefore never serves again after a crash.
 - Readiness and adoption accept a listener that is the spawned process or one
@@ -150,7 +161,6 @@ and is written with `write_atomic` (mode 0600).
   "generation_id": "ocg_<16 hex>",
   "pid": 123,
   "process_created_at": 1790000000.12,
-  "owner_pid": 456,
   "host": "127.0.0.1",
   "port": 52123,
   "started_at": 1790000000.0,
