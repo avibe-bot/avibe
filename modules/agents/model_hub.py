@@ -305,7 +305,7 @@ async def resolve_opencode_overlay_launch(
             _hold_unrunnable_input(context, failure)
             raise failure from None
     return await resolve_model_hub_launch(
-        controller, "opencode", requested_model, context=context,
+        controller, "opencode", requested_model, context=context, config=config,
     )
 
 

@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Generic, Protocol, TypeVar
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_GENERATION_CAP = 3
 
@@ -78,6 +81,7 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         self._idle = idle
         self._cap = cap
         self._lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
         self._serials = itertools.count(1)
         self._current: RuntimeGeneration[_S, _R] | None = None
         self._retiring: list[RuntimeGeneration[_S, _R]] = []
@@ -93,46 +97,37 @@ class RuntimeGenerationSet(Generic[_S, _R]):
 
     async def acquire(self, spec: _S) -> RuntimeBinding[_S, _R]:
         """Bind a new turn that needs ``spec`` to the generation that serves it."""
-        async with self._lock:
-            current = self._current
-            if current is not None and current.spec.digest == spec.digest:
-                return self._bind_locked(current)
-            await self._reap_locked()
-            replace_idle = current is not None and await self._is_idle(current)
-            match = next(
-                (item for item in reversed(self._retiring) if item.spec.digest == spec.digest and not item.closed),
-                None,
-            )
-            if match is not None:
-                # A live generation already serves this spec, for example when
-                # sessions alternate between two launch channels.
-                self._retiring.remove(match)
-                match.retiring = False
-                self._current = match
-                if current is not None:
-                    if replace_idle:
-                        await self._stop_locked(current, force=False)
-                    else:
-                        current.retiring = True
-                        self._retiring.append(current)
-                return self._bind_locked(match)
-            occupied = len(self._retiring) + (current is not None and not replace_idle)
-            while self._retiring and occupied + 1 > self._cap:
-                # Never make the new turn wait: the oldest work gives way.
-                await self._stop_locked(self._retiring[0], force=True)
-                occupied -= 1
-            # A failed start leaves the current generation serving.
-            generation = RuntimeGeneration(spec, await self._start(spec), next(self._serials))
-            self._current = generation
-            if current is not None:
-                if replace_idle:
-                    # The new generation is already serving, so nothing waits on
-                    # a gap between the old process and the new one.
-                    await self._stop_locked(current, force=False)
-                else:
-                    current.retiring = True
-                    self._retiring.append(current)
-            return self._bind_locked(generation)
+        victims: list[tuple[RuntimeGeneration[_S, _R], bool]] = []
+        try:
+            async with self._lock:
+                binding = await self._bind_serving_locked(spec, victims)
+                if binding is not None:
+                    return binding
+            # Starts are serialized, but turns a live generation already serves
+            # never queue behind one.
+            async with self._start_lock:
+                async with self._lock:
+                    binding = await self._bind_serving_locked(spec, victims)
+                    if binding is not None:
+                        return binding
+                # A failed start leaves the current generation serving.
+                runtime = await self._start(spec)
+                async with self._lock:
+                    generation = RuntimeGeneration(spec, runtime, next(self._serials))
+                    previous = self._current
+                    self._current = generation
+                    if previous is not None:
+                        previous.retiring = True
+                        self._retiring.append(previous)
+                    # The new generation already serves, so an idle predecessor
+                    # stops without a gap.
+                    await self._collect_idle_locked(victims)
+                    while self._retiring and len(self._retiring) + 1 > self._cap:
+                        # Never make the new turn wait: the oldest work gives way.
+                        victims.append((self._detach_locked(self._retiring[0]), True))
+                    return self._bind_locked(generation)
+        finally:
+            await self._teardown(victims)
 
     async def bind(self, generation: RuntimeGeneration[_S, _R]) -> RuntimeBinding[_S, _R]:
         """Bind recovered work, such as a restored poll, to its known generation."""
@@ -158,40 +153,71 @@ class RuntimeGenerationSet(Generic[_S, _R]):
     async def retire(self, generation: RuntimeGeneration[_S, _R]) -> None:
         """Stop admitting to a generation; it stops as soon as it is unbound and idle.
 
-        The check and the stop are atomic with ``acquire``, so a turn binding
-        concurrently either keeps the generation alive or binds elsewhere.
+        The decision is atomic with ``acquire``, so a turn binding concurrently
+        either keeps the generation alive or binds elsewhere.
         """
+        victims: list[tuple[RuntimeGeneration[_S, _R], bool]] = []
         async with self._lock:
-            await self._retire_locked(generation)
+            await self._retire_locked(generation, victims)
+        await self._teardown(victims)
 
     async def retire_current(self) -> None:
         """Retire whichever generation is current, for example when a backend is disabled."""
+        victims: list[tuple[RuntimeGeneration[_S, _R], bool]] = []
         async with self._lock:
             if self._current is not None:
-                await self._retire_locked(self._current)
+                await self._retire_locked(self._current, victims)
+        await self._teardown(victims)
 
     async def discard(self, generation: RuntimeGeneration[_S, _R]) -> None:
         """Forget a generation whose process already ended or was retired elsewhere."""
         async with self._lock:
-            if generation in self._retiring:
-                self._retiring.remove(generation)
-            if self._current is generation:
-                self._current = None
-            generation.retiring = False
-            generation.stopped = True
+            self._detach_locked(generation)
 
     async def reap(self) -> None:
         """Stop every retiring generation whose bound work has drained."""
+        victims: list[tuple[RuntimeGeneration[_S, _R], bool]] = []
         async with self._lock:
-            await self._reap_locked()
+            await self._collect_idle_locked(victims)
+        await self._teardown(victims)
 
     async def stop_all(self, *, force: bool) -> None:
         """Stop every generation, for example at shutdown."""
         async with self._lock:
-            for generation in self.generations:
-                await self._stop_locked(generation, force=force)
+            victims = [(self._detach_locked(generation), force) for generation in self.generations]
+        await self._teardown(victims)
 
-    async def _retire_locked(self, generation: RuntimeGeneration[_S, _R]) -> None:
+    async def _bind_serving_locked(
+        self,
+        spec: _S,
+        victims: list[tuple[RuntimeGeneration[_S, _R], bool]],
+    ) -> RuntimeBinding[_S, _R] | None:
+        current = self._current
+        if current is not None and current.spec.digest == spec.digest:
+            return self._bind_locked(current)
+        match = next(
+            (item for item in reversed(self._retiring) if item.spec.digest == spec.digest and not item.closed),
+            None,
+        )
+        if match is None:
+            return None
+        # A live generation already serves this spec, for example when sessions
+        # alternate between two launch channels.
+        self._retiring.remove(match)
+        match.retiring = False
+        self._current = match
+        if current is not None:
+            current.retiring = True
+            self._retiring.append(current)
+        binding = self._bind_locked(match)
+        await self._collect_idle_locked(victims)
+        return binding
+
+    async def _retire_locked(
+        self,
+        generation: RuntimeGeneration[_S, _R],
+        victims: list[tuple[RuntimeGeneration[_S, _R], bool]],
+    ) -> None:
         if generation.stopped:
             return
         generation.closed = True
@@ -201,13 +227,14 @@ class RuntimeGenerationSet(Generic[_S, _R]):
             generation.retiring = True
             self._retiring.append(generation)
         if await self._is_idle(generation):
-            await self._stop_locked(generation, force=False)
+            victims.append((self._detach_locked(generation), False))
 
     def _bind_locked(self, generation: RuntimeGeneration[_S, _R]) -> RuntimeBinding[_S, _R]:
         generation.bindings += 1
         return RuntimeBinding(generation, self)
 
     async def _release(self, binding: RuntimeBinding[_S, _R]) -> None:
+        victims: list[tuple[RuntimeGeneration[_S, _R], bool]] = []
         async with self._lock:
             if binding.released:
                 return
@@ -215,21 +242,39 @@ class RuntimeGenerationSet(Generic[_S, _R]):
             generation = binding.generation
             generation.bindings -= 1
             if generation.retiring and not generation.stopped and await self._is_idle(generation):
-                await self._stop_locked(generation, force=False)
+                victims.append((self._detach_locked(generation), False))
+        await self._teardown(victims)
 
     async def _is_idle(self, generation: RuntimeGeneration[_S, _R]) -> bool:
         return generation.bindings == 0 and await self._idle(generation)
 
-    async def _reap_locked(self) -> None:
+    async def _collect_idle_locked(self, victims: list[tuple[RuntimeGeneration[_S, _R], bool]]) -> None:
         for generation in list(self._retiring):
             if await self._is_idle(generation):
-                await self._stop_locked(generation, force=False)
+                victims.append((self._detach_locked(generation), False))
 
-    async def _stop_locked(self, generation: RuntimeGeneration[_S, _R], *, force: bool) -> None:
+    def _detach_locked(self, generation: RuntimeGeneration[_S, _R]) -> RuntimeGeneration[_S, _R]:
         if generation in self._retiring:
             self._retiring.remove(generation)
         if self._current is generation:
             self._current = None
         generation.retiring = False
         generation.stopped = True
-        await self._stop(generation, force)
+        return generation
+
+    async def _teardown(self, victims: list[tuple[RuntimeGeneration[_S, _R], bool]]) -> None:
+        # Teardown runs outside the lock: a forced stop settles its work, and
+        # that work releases its bindings through this set.
+        for generation, force in victims:
+            try:
+                await self._stop(generation, force)
+            except Exception:
+                logger.warning(
+                    "Runtime generation %s failed to stop; keeping it for the next sweep",
+                    generation.serial,
+                    exc_info=True,
+                )
+                async with self._lock:
+                    generation.stopped = False
+                    generation.retiring = True
+                    self._retiring.append(generation)

@@ -23,6 +23,8 @@ class _Runtimes:
         self.live: list[str] = []
         self.stopped: list[tuple[str, bool]] = []
         self.fail_start = False
+        self.fail_stops = 0
+        self.before_stop = None
         self.peak = 0
 
     async def start(self, spec: _Spec) -> str:
@@ -34,6 +36,11 @@ class _Runtimes:
         return runtime
 
     async def stop(self, generation, force: bool) -> None:
+        if self.before_stop is not None:
+            await self.before_stop(generation)
+        if self.fail_stops:
+            self.fail_stops -= 1
+            raise RuntimeError("teardown failed")
         self.live.remove(generation.runtime)
         self.stopped.append((generation.runtime, force))
 
@@ -84,8 +91,9 @@ def test_runtime_gen_002_a_busy_generation_finishes_while_new_turns_use_a_new_on
 def test_runtime_gen_003_at_the_cap_the_oldest_retiring_generation_gives_way():
     """RUNTIME-GEN-003: at the cap a new turn still starts at once.
 
-    The oldest retiring generation is force-stopped instead, and the unit never
-    runs more generations than the cap.
+    The oldest retiring generation is force-stopped instead, once the new one
+    serves, and the unit is back at the cap. A forced stop that settles its work
+    releases that work's bindings without deadlocking admission.
     """
     runtimes = _Runtimes()
     generations = runtimes.generation_set(cap=3)
@@ -96,14 +104,17 @@ def test_runtime_gen_003_at_the_cap_the_oldest_retiring_generation_gives_way():
         current = await generations.acquire(_Spec("3"))
         assert runtimes.stopped == []
 
+        async def settle_bound_work(generation):
+            if generation is oldest.generation:
+                await oldest.release()
+
+        runtimes.before_stop = settle_bound_work
+
         newest = await asyncio.wait_for(generations.acquire(_Spec("4")), timeout=1)
 
         assert runtimes.stopped == [(oldest.generation.runtime, True)]
         assert generations.generations == (middle.generation, current.generation, newest.generation)
-        assert runtimes.peak == 3
-        # Work bound to the force-stopped generation releases harmlessly.
-        await oldest.release()
-        assert len(runtimes.stopped) == 1
+        assert len(runtimes.live) == 3
 
     asyncio.run(run())
 
@@ -162,6 +173,24 @@ def test_a_retired_generation_stops_once_unbound_and_admits_no_new_turn():
         await generations.retire(fresh.generation)
         await generations.retire_current()
         assert len(runtimes.stopped) == 2
+
+    asyncio.run(run())
+
+
+def test_a_generation_whose_stop_fails_stays_tracked_for_the_next_sweep():
+    runtimes = _Runtimes()
+    generations = runtimes.generation_set()
+
+    async def run():
+        old = await generations.acquire(_Spec("a"))
+        await generations.acquire(_Spec("b"))
+        runtimes.fail_stops = 1
+        await old.release()
+        assert old.generation in generations.generations and not old.generation.stopped
+
+        await generations.reap()
+        assert runtimes.stopped == [(old.generation.runtime, False)]
+        assert old.generation not in generations.generations
 
     asyncio.run(run())
 

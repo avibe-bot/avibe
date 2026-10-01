@@ -138,8 +138,12 @@ first app-server, which then stops. `S1`'s next turn runs on the second one.
   bound to it. Durable ownership snapshots already enumerate these.
 - Starting a generation is serialized per backend.
 - A unit runs at most three generations. When another one is needed at the
-  cap, the oldest retiring generation is force-stopped. Its sessions get the
+  cap, the new one starts first and the oldest retiring generation is then
+  force-stopped, so a failed start costs no running work. Its sessions get the
   runtime-update interruption notice and continue on the current generation.
+- Teardown never runs under the generation lock, because a forced stop settles
+  work that releases its bindings. A failed teardown keeps the generation
+  tracked so the next sweep retries it.
 
 ## Per-backend design
 

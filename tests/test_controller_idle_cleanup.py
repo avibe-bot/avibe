@@ -49,13 +49,14 @@ def test_a_saved_idle_timeout_applies_without_a_backend_restart(monkeypatch) -> 
     """RUNTIME-GEN-005: the idle sweep reads timeouts live and always sweeps generations.
 
     Saving an idle timeout renews the backend in place rather than restarting
-    it, so the sweep must not keep the value it started with.
+    it, so the sweep must not keep the value, or an interval derived from the
+    value, it started with.
     """
     import asyncio
     from unittest.mock import AsyncMock
 
     controller = object.__new__(Controller)
-    controller.config = SimpleNamespace(claude=SimpleNamespace(idle_timeout_seconds=0), codex=None)
+    controller.config = SimpleNamespace(claude=SimpleNamespace(idle_timeout_seconds=86400), codex=None)
     controller.session_handler = SimpleNamespace(
         evict_idle_sessions=AsyncMock(),
         reap_orphaned_claude_sessions=AsyncMock(),
@@ -76,5 +77,10 @@ def test_a_saved_idle_timeout_applies_without_a_backend_restart(monkeypatch) -> 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(Controller.periodic_cleanup(controller))
 
-    controller.session_handler.evict_idle_sessions.assert_awaited_once_with(600)
+    assert [call.args for call in controller.session_handler.evict_idle_sessions.await_args_list] == [
+        (86400,),
+        (600,),
+    ]
     assert reap.await_count == 2
+    # A one-day timeout must not stretch the interval before the new value is read.
+    assert sweeps == [60, 60, 60]

@@ -196,6 +196,9 @@ def _refresh_status_bubble_config(controller: Any) -> None:
         refresh()
 
 
+# Idle eviction and the runtime generation sweep run on this cadence.
+_IDLE_SWEEP_INTERVAL_SECONDS = 60
+
 class Controller:
     """Main controller that coordinates all bot operations"""
 
@@ -2180,14 +2183,13 @@ class Controller:
     async def periodic_cleanup(self):
         """Sweep idle backend runtime state without interrupting active work.
 
-        Timeouts are read on every sweep, so a saved change applies without a
+        Timeouts are read on every sweep, and the sweep interval does not depend
+        on them, so a saved change applies within one interval without a
         backend restart.
         """
         try:
             while True:
-                claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
-                enabled_timeouts = [timeout for timeout in (claude_timeout, codex_timeout) if timeout > 0]
-                await asyncio.sleep(max(min(enabled_timeouts) // 6, 60) if enabled_timeouts else 60)
+                await asyncio.sleep(_IDLE_SWEEP_INTERVAL_SECONDS)
                 claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
 
                 # Retiring runtime generations stop once drained, whatever the
