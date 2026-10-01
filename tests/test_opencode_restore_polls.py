@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.v2_sessions import ActivePollInfo  # noqa: E402
 from core.services.agent_steering import SteerOutcome, SteerRequest, active_steer_identity, steer_active_turn  # noqa: E402
 from modules.agents.opencode.agent import OpenCodeAgent  # noqa: E402
-from tests.opencode_generation_fakes import serve_opencode_agent  # noqa: E402
+from tests.opencode_generation_fakes import FakeBinding, serve_opencode_agent  # noqa: E402
 
 
 ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
@@ -1390,3 +1390,32 @@ def test_a_cancel_during_restored_cleanup_still_releases_its_generation(monkeypa
     assert [binding.released for binding in agent._runtime.bindings] == [True]
     assert agent._session_generations == {}
     assert agent._active_requests == {}
+
+
+def test_restore_releases_a_poll_binding_its_task_never_took(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+
+    def unreadable_skills(*_args, **_kwargs):
+        raise RuntimeError("skills root unreadable")
+
+    monkeypatch.setattr("modules.agents.opencode.agent.managed_skill_environment", unreadable_skills)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(agent.restore_active_polls())
+
+    # A held binding would keep the generation from ever stopping.
+    assert agent._runtime.bindings and all(binding.released for binding in agent._runtime.bindings)
+
+
+def test_a_restored_poll_whose_generation_was_force_stopped_rebinds_before_registering() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    # The cap force-stopped the generation restore bound, before the poll task registered.
+    stopped = FakeBinding(agent._test_server)
+    stopped.generation.stopped = True
+
+    asyncio.run(agent._run_restored_poll_loop_with_tracking(poll, generation_binding=stopped))
+
+    assert stopped.released
+    assert len(agent._runtime.bindings) == 1 and agent._runtime.bindings[0].released

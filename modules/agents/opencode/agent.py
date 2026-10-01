@@ -839,11 +839,36 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         return await self._runtime.acquire(spec)
 
     @asynccontextmanager
+    async def _outside_turn_admission(self) -> AsyncIterator[None]:
+        """Admit work outside a turn the way a turn is admitted.
+
+        A native migration drains the backend, and work outside a turn waits
+        for it to end. Admitted work counts as active until it is bound, so
+        the migration never overlaps the start of an OpenCode process.
+        """
+
+        agent_service = getattr(self.controller, "agent_service", None)
+        is_ready = getattr(agent_service, "is_backend_ready", None)
+        while True:
+            # Counted before the check, in one step with it, so a drain that
+            # begins later sees this work.
+            self._runtime.outside_turn_acquisitions += 1
+            if not callable(is_ready) or is_ready(self.name):
+                break
+            self._runtime.outside_turn_acquisitions -= 1
+            await agent_service.wait_backend_ready(self.name)
+        try:
+            yield
+        finally:
+            self._runtime.outside_turn_acquisitions -= 1
+
+    @asynccontextmanager
     async def current_server(self) -> AsyncIterator[OpenCodeGeneration]:
         """Pin the current generation for one controller-side request sequence."""
 
-        _config, overlay = await self._prepare_launch()
-        binding = await self._acquire_generation(overlay)
+        async with self._outside_turn_admission():
+            _config, overlay = await self._prepare_launch()
+            binding = await self._acquire_generation(overlay)
         try:
             yield binding.generation.runtime
         finally:
@@ -852,9 +877,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     async def lease_generation(self, purpose: str, *, ttl_seconds: float) -> Dict[str, Any]:
         """Pin the current generation for a caller outside the controller."""
 
-        _config, overlay = await self._prepare_launch()
-        spec = await self._runtime.launch_spec(overlay)
-        lease_id, generation = await self._runtime.lease(spec, ttl_seconds)
+        async with self._outside_turn_admission():
+            _config, overlay = await self._prepare_launch()
+            spec = await self._runtime.launch_spec(overlay)
+            lease_id, generation = await self._runtime.lease(spec, ttl_seconds)
         logger.info(
             "Leased OpenCode generation %s for %s (%s)",
             generation.generation_id,
@@ -1147,6 +1173,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         await self._runtime.retire_all_strict()
 
     def runtime_has_active_turns(self) -> bool:
+        if self._runtime.outside_turn_acquisitions:
+            return True
         if any(not task.done() for task in self._active_requests.values()):
             return True
         return any(not generation.is_drained() for generation in self._runtime.generations())
@@ -2757,122 +2785,127 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 stale_poll_ids.append(session_id)
                 continue
 
-            logger.info(
-                f"Restoring poll loop for OpenCode session {session_id} "
-                f"(thread={poll_info.base_session_id}, cwd={poll_info.working_path})"
-            )
+            try:
+                logger.info(
+                    f"Restoring poll loop for OpenCode session {session_id} "
+                    f"(thread={poll_info.base_session_id}, cwd={poll_info.working_path})"
+                )
 
-            restored_binding_token = secrets.token_hex(16)
-            restored_binding_path = (
-                _caller_context_path_for_server(server) if server is not None else None
-            )
-            restored_caller_env = validated_caller_env_snapshot(
-                processing_snapshot.get(_CALLER_CONTEXT_ENV_SNAPSHOT_KEY)
-            )
-            restored_context = restored_context_from_poll_info(poll_info)
-            if (
-                poll_platform == "avibe"
-                and str(restored_context.user_id or "").startswith("remote:")
-            ):
-                # Legacy persisted polls do not carry the authorization snapshot.
-                # Keep them remote-but-unprivileged instead of silently treating an
-                # absent snapshot as a local caller.
-                restored_caller_env.setdefault(AVIBE_SESSION_ID_ENV, poll_info.base_session_id)
-                restored_caller_env.setdefault(AVIBE_CALLER_PLATFORM_ENV, "avibe")
-                restored_caller_env.setdefault(
-                    AVIBE_CALLER_USER_ID_ENV,
-                    str(restored_context.user_id),
+                restored_binding_token = secrets.token_hex(16)
+                restored_binding_path = (
+                    _caller_context_path_for_server(server) if server is not None else None
                 )
-                restored_caller_env.setdefault(AVIBE_CALLER_REMOTE_ENV, "1")
-            restored_project_base = processing_snapshot.get(
-                _MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY
-            )
-            restored_project_base = (
-                restored_project_base
-                if isinstance(restored_project_base, str) and restored_project_base
-                else None
-            )
-            restored_snapshot_kwargs: dict[str, str] = {}
-            if _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY in processing_snapshot:
-                restored_snapshot = processing_snapshot.get(
-                    _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY
+                restored_caller_env = validated_caller_env_snapshot(
+                    processing_snapshot.get(_CALLER_CONTEXT_ENV_SNAPSHOT_KEY)
                 )
-                restored_snapshot_kwargs = {
-                    "builtin_snapshot_id": (
-                        restored_snapshot.get("id", "")
-                        if isinstance(restored_snapshot, dict)
-                        and isinstance(restored_snapshot.get("id"), str)
-                        else ""
+                restored_context = restored_context_from_poll_info(poll_info)
+                if (
+                    poll_platform == "avibe"
+                    and str(restored_context.user_id or "").startswith("remote:")
+                ):
+                    # Legacy persisted polls do not carry the authorization snapshot.
+                    # Keep them remote-but-unprivileged instead of silently treating an
+                    # absent snapshot as a local caller.
+                    restored_caller_env.setdefault(AVIBE_SESSION_ID_ENV, poll_info.base_session_id)
+                    restored_caller_env.setdefault(AVIBE_CALLER_PLATFORM_ENV, "avibe")
+                    restored_caller_env.setdefault(
+                        AVIBE_CALLER_USER_ID_ENV,
+                        str(restored_context.user_id),
+                    )
+                    restored_caller_env.setdefault(AVIBE_CALLER_REMOTE_ENV, "1")
+                restored_project_base = processing_snapshot.get(
+                    _MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY
+                )
+                restored_project_base = (
+                    restored_project_base
+                    if isinstance(restored_project_base, str) and restored_project_base
+                    else None
+                )
+                restored_snapshot_kwargs: dict[str, str] = {}
+                if _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY in processing_snapshot:
+                    restored_snapshot = processing_snapshot.get(
+                        _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY
+                    )
+                    restored_snapshot_kwargs = {
+                        "builtin_snapshot_id": (
+                            restored_snapshot.get("id", "")
+                            if isinstance(restored_snapshot, dict)
+                            and isinstance(restored_snapshot.get("id"), str)
+                            else ""
+                        ),
+                        "builtin_snapshot_root": (
+                            restored_snapshot.get("root", "")
+                            if isinstance(restored_snapshot, dict)
+                            and isinstance(restored_snapshot.get("root"), str)
+                            else ""
+                        ),
+                    }
+                restored_managed_skills_env = managed_skill_environment(
+                    poll_info.working_path,
+                    project_base=restored_project_base,
+                    claude_cli_path=managed_skill_claude_cli_path(
+                        getattr(getattr(self, "controller", None), "config", None)
                     ),
-                    "builtin_snapshot_root": (
-                        restored_snapshot.get("root", "")
-                        if isinstance(restored_snapshot, dict)
-                        and isinstance(restored_snapshot.get("root"), str)
-                        else ""
-                    ),
-                }
-            restored_managed_skills_env = managed_skill_environment(
-                poll_info.working_path,
-                project_base=restored_project_base,
-                claude_cli_path=managed_skill_claude_cli_path(
-                    getattr(getattr(self, "controller", None), "config", None)
-                ),
-                **restored_snapshot_kwargs,
-            )
-            restored_bound = False
-            for attempt in range(3):
-                try:
-                    restored_bound = await asyncio.to_thread(
-                        bind_caller_context_session,
+                    **restored_snapshot_kwargs,
+                )
+                restored_bound = False
+                for attempt in range(3):
+                    try:
+                        restored_bound = await asyncio.to_thread(
+                            bind_caller_context_session,
+                            poll_info.opencode_session_id,
+                            None,
+                            base_env=os.environ,
+                            working_dir=poll_info.working_path,
+                            extra_env={
+                                **restored_caller_env,
+                                **restored_managed_skills_env,
+                            },
+                            binding_token=restored_binding_token,
+                            **_binding_path_kwargs(restored_binding_path),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to restore OpenCode caller context for session=%s (attempt %s/3)",
+                            poll_info.opencode_session_id,
+                            attempt + 1,
+                            exc_info=True,
+                        )
+                    if restored_bound:
+                        break
+                    if attempt < 2:
+                        await asyncio.sleep(0)
+                if not restored_bound:
+                    logger.error(
+                        "Restoring OpenCode poll without caller context for session=%s",
                         poll_info.opencode_session_id,
-                        None,
-                        base_env=os.environ,
-                        working_dir=poll_info.working_path,
-                        extra_env={
+                    )
+
+                restoration_ready = asyncio.get_running_loop().create_future()
+                restoration_published = asyncio.Event()
+                task = asyncio.create_task(
+                    self._run_restored_poll_loop_with_tracking(
+                        poll_info,
+                        generation_binding=binding,
+                        reconcile_initial_status=status_unknown,
+                        reconcile_after_message_ids=reconcile_after_message_ids,
+                        restoration_ready=restoration_ready,
+                        restoration_published=restoration_published,
+                        caller_context_binding_token=(
+                            restored_binding_token
+                        ),
+                        caller_context_binding_path=restored_binding_path,
+                        caller_context_binding_extra_env={
                             **restored_caller_env,
                             **restored_managed_skills_env,
                         },
-                        binding_token=restored_binding_token,
-                        **_binding_path_kwargs(restored_binding_path),
+                        caller_context_binding_initially_bound=restored_bound,
                     )
-                except Exception:
-                    logger.warning(
-                        "Failed to restore OpenCode caller context for session=%s (attempt %s/3)",
-                        poll_info.opencode_session_id,
-                        attempt + 1,
-                        exc_info=True,
-                    )
-                if restored_bound:
-                    break
-                if attempt < 2:
-                    await asyncio.sleep(0)
-            if not restored_bound:
-                logger.error(
-                    "Restoring OpenCode poll without caller context for session=%s",
-                    poll_info.opencode_session_id,
                 )
-
-            restoration_ready = asyncio.get_running_loop().create_future()
-            restoration_published = asyncio.Event()
-            task = asyncio.create_task(
-                self._run_restored_poll_loop_with_tracking(
-                    poll_info,
-                    generation_binding=binding,
-                    reconcile_initial_status=status_unknown,
-                    reconcile_after_message_ids=reconcile_after_message_ids,
-                    restoration_ready=restoration_ready,
-                    restoration_published=restoration_published,
-                    caller_context_binding_token=(
-                        restored_binding_token
-                    ),
-                    caller_context_binding_path=restored_binding_path,
-                    caller_context_binding_extra_env={
-                        **restored_caller_env,
-                        **restored_managed_skills_env,
-                    },
-                    caller_context_binding_initially_bound=restored_bound,
-                )
-            )
+            except BaseException:
+                # Until the poll task owns the binding, nothing else releases it.
+                await self._release_binding(binding)
+                raise
             restoration_results.append(
                 (restoration_ready, restoration_published, poll_info)
             )
@@ -2960,6 +2993,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             registration_attempts = 2 if poll_platform in _RESTORED_IM_PLATFORMS else 1
             for attempt in range(registration_attempts):
                 try:
+                    if generation_binding is not None and generation_binding.generation.stopped:
+                        # A forced stop took the process before this poll
+                        # registered on it; a live generation settles the run.
+                        await self._release_binding(generation_binding)
+                        generation_binding = None
                     if generation_binding is None:
                         generation_binding = await self._bind_restored_poll(poll_info)
                     server = generation_binding.generation.runtime
@@ -3170,11 +3208,30 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 None,
             )
         if generation is not None:
-            return await self._runtime.bind(generation)
-        # No live process owns this run any more. Its messages are in the
-        # shared database, so the current generation reads and settles it.
-        _config, overlay = await self._prepare_launch()
-        return await self._acquire_generation(overlay)
+            binding = await self._runtime.bind(generation)
+        else:
+            # No live process owns this run any more. Its messages are in the
+            # shared database, so the current generation reads and settles it.
+            _config, overlay = await self._prepare_launch()
+            binding = await self._acquire_generation(overlay)
+        bound_id = binding.generation.runtime.generation_id
+        if bound_id != generation_id:
+            # The poll names the process that now runs its native turn, so a
+            # later restart adopts that process for it and binds it there.
+            indicator = poll_info.processing_indicator if isinstance(poll_info.processing_indicator, dict) else {}
+            try:
+                self.sessions.update_active_poll_state(
+                    poll_info.opencode_session_id,
+                    processing_indicator={**indicator, _GENERATION_SNAPSHOT_KEY: bound_id},
+                )
+            except Exception:
+                logger.warning(
+                    "Could not record OpenCode generation %s for restored poll %s",
+                    bound_id,
+                    poll_info.opencode_session_id,
+                    exc_info=True,
+                )
+        return binding
 
     def _prepare_message_with_files(self, request: AgentRequest) -> str:
         return message_with_files(request.message, request.files)

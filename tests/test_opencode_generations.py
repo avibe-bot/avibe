@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import stat
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -154,7 +155,8 @@ def isolated_launch(tmp_path, monkeypatch):
     """Spawn fake ``opencode serve`` processes instead of real ones."""
 
     monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: tmp_path / "generations")
-    monkeypatch.setattr(opencode_server, "_OWNED_HERE", set())
+    monkeypatch.setattr(opencode_server, "_OWNED_HERE", {})
+    monkeypatch.setattr(opencode_server, "_ADOPTION_PROBE_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(opencode_server, "ensure_plugin_installed", lambda: None)
     monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda pid: 100.0 + pid)
     monkeypatch.setattr(opencode_server.OpenCodeGeneration, "is_healthy", AsyncMock(return_value=True))
@@ -343,7 +345,7 @@ def fake_processes(tmp_path, monkeypatch):
     """Generations that start and stop without any process."""
 
     monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: tmp_path / "generations")
-    monkeypatch.setattr(opencode_server, "_OWNED_HERE", set())
+    monkeypatch.setattr(opencode_server, "_OWNED_HERE", {})
     started: list[OpenCodeGeneration] = []
     stopped: list[OpenCodeGeneration] = []
     alive: set[str] = set()
@@ -550,7 +552,8 @@ def test_runtime_gen_022_a_restored_poll_resumes_on_the_generation_that_runs_it(
     """RUNTIME-GEN-022: after a controller restart, a durable poll binds to the
     adopted generation it names. A poll from before generations binds to the
     adopted server that recorded its run; one whose process is gone reads its
-    result through the current generation."""
+    result through the current generation. A poll bound elsewhere than it
+    names is rewritten to name that generation, so another restart finds it."""
 
     named, legacy, current = _Generation("ocg_named"), _Generation("ocg_legacy"), _Generation("ocg_current")
     legacy.active_run_sessions = {"native-legacy"}
@@ -564,8 +567,14 @@ def test_runtime_gen_022_a_restored_poll_resumes_on_the_generation_that_runs_it(
         bound.append("acquired")
         return SimpleNamespace(generation=SimpleNamespace(runtime=current))
 
+    renamed: dict[str, str] = {}
     agent = object.__new__(OpenCodeAgent)
     agent.controller = SimpleNamespace(model_hub_runtime=None)
+    agent.sessions = SimpleNamespace(
+        update_active_poll_state=lambda session_id, *, processing_indicator: renamed.update(
+            {session_id: processing_indicator["opencode_generation_id"]}
+        )
+    )
     agent._runtime = SimpleNamespace(
         adopted=True,
         generation=lambda generation_id: {"ocg_named": named, "ocg_legacy": legacy}.get(generation_id),
@@ -588,6 +597,7 @@ def test_runtime_gen_022_a_restored_poll_resumes_on_the_generation_that_runs_it(
 
     assert asyncio.run(scenario()) == [named, legacy, current]
     assert bound == [named, legacy, "acquired"]
+    assert renamed == {"native-legacy": "ocg_legacy", "native-gone": "ocg_current"}
 
 
 @pytest.mark.parametrize(("config_save", "renews"), [(True, False), (False, True)])
@@ -1225,3 +1235,180 @@ def test_an_adoption_cut_short_leaves_every_record_to_its_retry(isolated_launch,
         return {generation.generation_id for generation in runtime.generations()}
 
     assert asyncio.run(scenario()) == {"ocg_a", "ocg_b"}
+
+
+# ---------------------------------------------- lifecycle audit regressions
+
+
+def test_a_disabled_runtime_retries_a_stop_its_last_release_could_not_run(fake_processes, monkeypatch):
+    monkeypatch.setattr(client_manager, "CLOSED_RUNTIME_SWEEP_SECONDS", 0.05)
+    runtime = _runtime()
+
+    async def scenario():
+        turn = await runtime.acquire(OpenCodeLaunchSpec(digest="v1", binary="opencode"))
+        running = turn.generation.runtime
+        await runtime.close()
+        # A request still in flight when the last binding releases declines
+        # the stop, and no controller sweep reaches a disabled backend.
+        running._active_requests = 1
+        await turn.release()
+        await runtime._generations.settled()
+        declined = list(fake_processes.stopped)
+        running._active_requests = 0
+        await asyncio.sleep(0.3)
+        return running, declined
+
+    running, declined = asyncio.run(scenario())
+
+    assert declined == []
+    assert fake_processes.stopped == [running]
+
+
+def test_disabling_the_backend_stops_a_previous_controllers_generations(fake_processes, monkeypatch):
+    leftover = _generation("ocg_leftover", 47, "spec-old")
+    fake_processes.alive.add(leftover.generation_id)
+    monkeypatch.setattr(client_manager, "adopt_recorded_generations", AsyncMock(return_value=[leftover]))
+
+    # The backend is disabled before anything used OpenCode since a crash.
+    asyncio.run(_runtime().close())
+
+    assert fake_processes.stopped == [leftover]
+
+
+def test_adoption_takes_a_converted_legacy_server_once(isolated_launch, tmp_path, monkeypatch):
+    converted = _record(isolated_launch.records, "ocg_converted", fake_pid(48), 4096)
+    # The crash came after the converted record was written and before the
+    # legacy file it replaces was removed.
+    legacy = tmp_path / "opencode_server.json"
+    legacy.write_text(json.dumps({"pid": fake_pid(48), "port": 4096}), encoding="utf-8")
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: legacy)
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid == fake_pid(48))
+    monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=4096")
+
+    adopted = asyncio.run(opencode_server.adopt_recorded_generations())
+
+    assert [generation.generation_id for generation in adopted] == ["ocg_converted"]
+    assert converted.exists() and not legacy.exists()
+
+
+def test_a_native_migration_never_overlaps_an_opencode_start_outside_a_turn(fake_processes, monkeypatch):
+    ready = asyncio.Event()
+    starting = asyncio.Event()
+    finish_start = asyncio.Event()
+    start = client_manager.start_generation
+
+    async def slow_start(spec, **kwargs):
+        starting.set()
+        await finish_start.wait()
+        return await start(spec, **kwargs)
+
+    monkeypatch.setattr(client_manager, "start_generation", slow_start)
+    agent = object.__new__(OpenCodeAgent)
+    agent.controller = SimpleNamespace(
+        model_hub_runtime=None,
+        agent_service=SimpleNamespace(
+            is_backend_ready=lambda _backend: ready.is_set(),
+            wait_backend_ready=lambda _backend: ready.wait(),
+        ),
+    )
+    agent._active_requests = {}
+    agent._runtime = _runtime()
+    agent._runtime.launch_spec = AsyncMock(return_value=OpenCodeLaunchSpec(digest="v1", binary="opencode"))
+
+    async def settings_request():
+        async with agent.current_server():
+            pass
+
+    async def scenario():
+        ready.set()
+        # A settings request is starting a process when the migration checks.
+        request = asyncio.get_running_loop().create_task(settings_request())
+        await starting.wait()
+        busy_while_starting = agent.runtime_has_active_turns()
+        # The migration drains the backend; a UI lease now waits for it.
+        ready.clear()
+        lease = asyncio.get_running_loop().create_task(agent.lease_generation("catalog", ttl_seconds=60))
+        finish_start.set()
+        await request
+        await asyncio.sleep(0)
+        held = not lease.done() and len(fake_processes.started) == 1
+        ready.set()
+        await lease
+        return busy_while_starting, held
+
+    busy_while_starting, held = asyncio.run(scenario())
+
+    assert busy_while_starting
+    assert held
+
+
+def test_a_reenabled_backend_leaves_a_legacy_server_another_runtime_here_owns(isolated_launch, tmp_path, monkeypatch):
+    legacy = tmp_path / "opencode_server.json"
+    legacy.write_text(
+        json.dumps({"pid": fake_pid(49), "port": 4096, "active_run_sessions": ["ses_restored"]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: legacy)
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid == fake_pid(49))
+    monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=4096")
+
+    def unwritable(*_args, **_kwargs):
+        raise OSError("state dir briefly unwritable")
+
+    # The conversion is deferred, so the legacy file is still the only record.
+    monkeypatch.setattr(opencode_server, "write_atomic", unwritable)
+    spec = OpenCodeLaunchSpec(digest="current", binary="/bin/opencode")
+
+    async def scenario():
+        old = _runtime()
+        old.durable_poll_generations = lambda: {"ses_restored": None}
+        await old.ensure_adopted(spec)
+        # The backend is disabled and enabled again while the restored run continues.
+        new = _runtime()
+        new.durable_poll_generations = lambda: {"ses_restored": None}
+        await new.ensure_adopted(spec)
+        return old.generations(), new.generations()
+
+    old, new = asyncio.run(scenario())
+
+    assert [generation.pid for generation in old] == [fake_pid(49)]
+    assert new == ()
+    assert legacy.exists()
+
+
+def test_adoption_gives_a_busy_server_more_than_one_health_probe(isolated_launch, monkeypatch):
+    _record(isolated_launch.records, "ocg_busy", fake_pid(50), 50050, active_run_sessions=["ses_busy"])
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid == fake_pid(50))
+    monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=50050")
+    probes: list[str] = []
+
+    async def is_healthy(generation):
+        # A long tool output stalls the first answer after the crash.
+        probes.append(generation.generation_id)
+        return len(probes) > 1
+
+    monkeypatch.setattr(opencode_server.OpenCodeGeneration, "is_healthy", is_healthy)
+    stopped: list[int] = []
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: stopped.append(pid) or True)
+
+    adopted = asyncio.run(opencode_server.adopt_recorded_generations())
+
+    assert [generation.generation_id for generation in adopted] == ["ocg_busy"]
+    assert stopped == []
+
+
+def test_adoption_never_holds_a_recorded_lease_longer_than_any_lease_is_granted(fake_processes, monkeypatch):
+    generation = _generation("ocg_leased", 51, "spec")
+    # Written before the clock stepped back across a controller crash.
+    generation.leases = {"ocl_far": time.time() + 10 * 86400}
+    fake_processes.alive.add(generation.generation_id)
+    monkeypatch.setattr(client_manager, "adopt_recorded_generations", AsyncMock(return_value=[generation]))
+    runtime = _runtime()
+
+    async def scenario():
+        await runtime.ensure_adopted(OpenCodeLaunchSpec(digest="spec", binary="opencode"))
+        _binding, timer = runtime._leases["ocl_far"]
+        return timer.when() - asyncio.get_running_loop().time()
+
+    assert asyncio.run(scenario()) <= client_manager.MAX_LEASE_SECONDS

@@ -64,11 +64,15 @@ GENERATION_RECORD_SCHEMA = 1
 # The spec of a server adopted from the single-server record of a release
 # before generations. No new turn's spec ever equals it.
 LEGACY_SPEC_DIGEST = "legacy"
-# Generations a runtime of this process is starting or has attached. Adoption
-# leaves them to that runtime, for example the one of an OpenCode backend
-# disabled and enabled again while its turn still runs; it stops them once
-# their work drains.
-_OWNED_HERE: set[str] = set()
+# Generations a runtime of this process is starting or has attached, with the
+# process each one runs. Adoption leaves them to that runtime, for example the
+# one of an OpenCode backend disabled and enabled again while its turn still
+# runs; it stops them once their work drains.
+_OWNED_HERE: dict[str, tuple[int, Optional[float]]] = {}
+# A busy server after a controller crash can miss one health probe; adoption
+# gives it this many before stopping it.
+_ADOPTION_PROBES = 3
+_ADOPTION_PROBE_INTERVAL_SECONDS = 2.0
 _DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
 # Bump whenever the process-level Avibe policy applied at launch changes. It is
 # a launch spec input, so the next turn starts a generation under the new policy.
@@ -1603,7 +1607,9 @@ class OpenCodeGeneration(OpenCodeServerClient):
         self.record_stale = False
         if self._supersedes is not None:
             _remove_quietly(self._supersedes)
-            self._supersedes = None
+            # A removal that failed is retried by the next flush.
+            if not self._supersedes.exists():
+                self._supersedes = None
 
     def write_record_or_defer(self, change: str) -> None:
         """Persist a change that has already taken effect, or leave it to a sweep."""
@@ -1620,7 +1626,7 @@ class OpenCodeGeneration(OpenCodeServerClient):
             )
 
     def flush_record(self) -> None:
-        if self.record_stale:
+        if self.record_stale or self._supersedes is not None:
             self.write_record_or_defer("an earlier change")
 
     def _change_run_marker(self, session_id: str, *, active: bool) -> None:
@@ -1810,7 +1816,7 @@ async def start_generation(
                 # Written before readiness, so a controller that dies during
                 # the start leaves a record its successor cleans up.
                 generation.write_record()
-                _OWNED_HERE.add(generation_id)
+                _OWNED_HERE[generation_id] = (process.pid, generation.process_created_at)
                 apply_resource_governance(resource_governor, process.pid)
                 outcome = await _wait_until_ready(generation, process)
             except BaseException:
@@ -1844,7 +1850,7 @@ async def start_generation(
         )
     except BaseException:
         # A process that survived is no runtime's; a later adoption may stop it.
-        _OWNED_HERE.discard(generation_id)
+        _OWNED_HERE.pop(generation_id, None)
         if overlay_path is not None and not survivor:
             _remove_quietly(overlay_path)
         raise
@@ -1872,7 +1878,7 @@ async def stop_generation(generation: OpenCodeGeneration) -> None:
                 f"OpenCode generation {generation.generation_id} pid={generation.pid} did not exit"
             )
     generation._record_removed = True
-    _OWNED_HERE.discard(generation.generation_id)
+    _OWNED_HERE.pop(generation.generation_id, None)
     _remove_quietly(generation.record_path)
     _remove_quietly(generation.overlay_path)
     if generation._supersedes is not None:
@@ -1985,6 +1991,15 @@ def _recorded_processes() -> list[tuple[Path, Dict[str, Any]]]:
     return found
 
 
+async def _serves_after_restart(generation: OpenCodeGeneration) -> bool:
+    for attempt in range(_ADOPTION_PROBES):
+        if await generation.is_healthy() and _pid_listens_on(generation.pid, generation.port):
+            return True
+        if attempt + 1 < _ADOPTION_PROBES:
+            await asyncio.sleep(_ADOPTION_PROBE_INTERVAL_SECONDS)
+    return False
+
+
 async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> list[OpenCodeGeneration]:
     """Adopt every recorded generation still serving after a controller restart.
 
@@ -1994,6 +2009,7 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
     """
 
     adopted: list[OpenCodeGeneration] = []
+    adopted_processes: set[tuple[int, Optional[float]]] = set()
     legacy_path = legacy_pid_file()
     for path, info in _recorded_processes():
         is_legacy = path == legacy_path
@@ -2004,6 +2020,17 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
             if not is_legacy and isinstance(info.get("generation_id"), str):
                 _remove_quietly(generation_records_dir() / f"{info['generation_id']}.overlay.json")
             continue
+        if is_legacy:
+            identity = (int(info["pid"]), runtime.process_create_time(int(info["pid"])))
+            if identity in _OWNED_HERE.values():
+                # A runtime here runs it under the converted record that
+                # replaces this file once it is written.
+                continue
+            if identity in adopted_processes:
+                # This pass adopted it from its converted record; a crash or a
+                # failed removal after the conversion left this file behind.
+                _remove_quietly(path)
+                continue
         recorded_id = info.get("generation_id")
         generation = _generation_from_record(
             info,
@@ -2019,7 +2046,7 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
             ),
             request_timeout_seconds=request_timeout_seconds,
         )
-        if not (await generation.is_healthy() and _pid_listens_on(generation.pid, generation.port)):
+        if not await _serves_after_restart(generation):
             logger.info("Stopping recorded OpenCode server pid=%s that no longer serves", generation.pid)
             await generation.close_http_session()
             await asyncio.to_thread(stop_recorded_server_sync, path, info)
@@ -2030,6 +2057,7 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
             generation.write_record_or_defer("the record of an adopted pre-generations server")
         logger.info("Adopted OpenCode generation %s pid=%s", generation.generation_id, generation.pid)
         adopted.append(generation)
+        adopted_processes.add((generation.pid, generation.process_created_at))
     records_dir = generation_records_dir()
     if records_dir.is_dir():
         live = {generation.generation_id for generation in adopted}
@@ -2041,9 +2069,9 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
     return adopted
 
 
-def own_generation(generation_id: str) -> None:
+def own_generation(generation: OpenCodeGeneration) -> None:
     """Mark an adopted generation as attached to a runtime of this process."""
-    _OWNED_HERE.add(generation_id)
+    _OWNED_HERE[generation.generation_id] = (generation.pid, generation.process_created_at)
 
 
 def forget_record(path: Path) -> None:

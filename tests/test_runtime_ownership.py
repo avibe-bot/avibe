@@ -347,6 +347,7 @@ def test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership() -> N
     opencode._runtime = SimpleNamespace(
         generations=lambda: (retiring, current),
         current=lambda: current,
+        outside_turn_acquisitions=0,
     )
     # base-a still runs on the retiring generation; base-b is between turns.
     opencode._session_generations = {"base-a": retiring}

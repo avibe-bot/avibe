@@ -14,7 +14,7 @@ from typing import Any
 
 class FakeBinding:
     def __init__(self, server: Any) -> None:
-        self.generation = SimpleNamespace(runtime=server)
+        self.generation = SimpleNamespace(runtime=server, stopped=False)
         self.released = False
 
     async def release(self) -> None:
@@ -29,6 +29,7 @@ class FakeOpenCodeRuntime:
         self.last_start_failure_pid = None
         self.start_failures = 0
         self.adopted = True
+        self.outside_turn_acquisitions = 0
 
     async def launch_spec(self, overlay: Any) -> Any:
         spec = SimpleNamespace(digest="spec", overlay=overlay)
