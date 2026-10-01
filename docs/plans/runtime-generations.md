@@ -148,15 +148,16 @@ first app-server, which then stops. `S1`'s next turn runs on the second one.
 - **Unit:** one session client.
 - **Side by side:** not within one session. Two processes must never resume
   the same session transcript concurrently.
-- **Launch spec:** the existing fingerprint (Hub channel, gateway, token,
-  process settings) plus the inputs reuse ignores today:
-  - direct-mode credential environment (`build_claude_subprocess_env`);
-  - CLI path identity;
+- **Launch spec:** compared on every reuse:
+  - the Model Hub launch fingerprint (channel, gateway, token, process
+    settings);
+  - reasoning effort;
   - system prompt;
   - caller identity, Skill bindings, git PATH;
-  - reasoning effort.
+  - the renewal epoch. Direct-mode credentials and the CLI path change only
+    through flows that renew, so the epoch covers them.
 - **Spec change while the session's own background Activity runs:** the turn
-  stays on the session's current client, resolved from that client's snapshot,
+  stays on the session's current client, keeping that client's process inputs,
   and the session switches at its next idle point. Only when that client
   cannot serve the turn is it force-stopped and replaced. That happens when the
   turn's Hub launch needs a different gateway route, token, or process settings.
@@ -267,29 +268,42 @@ move to it through generations.
 
 ## Core contract
 
-The shared core owns the admission algorithm. Adapters supply the
-backend-specific parts.
+Implemented in the first PR; the Codex and OpenCode adapters build on it.
 
-- **`modules/agents/runtime_generations.py`** holds one generation set per
-  unit. `acquire(spec)` runs turn admission step 3:
-  - the cap of three, force-stopping the oldest retiring generation;
-  - generation starts serialized per backend;
-  - eager replacement of an idle stale current generation;
-  - reaping retiring generations once their bound work is drained.
-- **Adapter hooks:**
-  - `launch_spec(snapshot) -> str`;
-  - `start_generation(spec)`;
-  - `stop_generation(generation, force)`;
-  - `generation_idle(generation)`, answered from the existing turn and
-    ownership evidence;
-  - `can_coexist`.
-- **Snapshot discipline:** a turn loads its configuration once. Its launch
-  resolution and its launch spec both derive from that load. No adapter re-reads
-  the store between resolution and launch.
-- **`AgentService.apply_runtime_config_change(backend)`** replaces
-  `request_restart` for routine triggers. It invalidates adapter caches and
-  returns without draining. `AgentService.renew_runtime(backend)` serves manual
-  Restart.
+- **Renewal instead of restart.**
+  - `BackendRestartCoordinator.request_restart(backend)` first asks
+    `AgentAuthService.renew_backend_runtime(backend)`. When the backend's agent
+    implements `renew_runtime(runtime_config)`, the coordinator adopts the
+    config and returns `"restarted"` without a drain.
+  - Every routine trigger reaches the coordinator, so implementing the hook
+    moves all of them at once: `agents.*` saves, credential flows, provider
+    edits, manual Restart, and the install job.
+  - Disabled backends, and backends without the hook, keep the drain path.
+- **Renewal epoch.**
+  - `renew_runtime` bumps the backend's renewal epoch, which is part of every
+    launch spec. Each unit therefore moves at its next turn even when the
+    change is invisible to the spec, such as a credential written to the
+    CLI's own store.
+  - `idle_timeout_seconds` is read on every idle sweep, so it needs no
+    renewal at all.
+- **Catalog changes.** The Model Hub catalog callback calls the agent's
+  `adopt_model_hub_catalog()` when present. Claude's is a no-op because each
+  turn resolves its launch. Without the hook, the legacy path runs.
+- **`modules/agents/runtime_generations.py`.** `RuntimeGenerationSet` holds
+  one unit's generations.
+  - `acquire(spec)` runs admission step 3: reuse, replace in place when idle,
+    or start a new current generation while the busy one retires. At the cap
+    of three, the oldest retiring generation is force-stopped. A failed start
+    leaves the current generation serving.
+  - `reap()` stops drained retiring generations, and `stop_all(force)` serves
+    shutdown.
+  - Adapters provide `start(spec)`, `stop(runtime, force)` and
+    `idle(runtime)`, and own the routing of bound work.
+- **Forced stops.** `AgentService.force_end_runtime_activities(backend,
+  runtime_key)` settles one runtime's Activities as interrupted by a runtime
+  update, using the existing backend-refresh notice.
+- **Snapshot discipline.** A turn loads its configuration once. Its launch
+  resolution and its launch spec both derive from that load.
 
 ## Verification
 
@@ -324,7 +338,7 @@ Three PRs; the second and third run in parallel lanes:
 1. **Core and Claude** (orchestrator):
    - the core contract above;
    - Claude on the complete launch spec and the Claude rule;
-   - every routine trigger routed through `apply_runtime_config_change`. Codex
+   - every routine trigger renewed in place through the coordinator. Codex
      and OpenCode keep their current path until their own PR lands;
    - the Model Hub catalog callback;
    - this document and `AGENTS.md`.

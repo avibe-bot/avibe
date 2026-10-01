@@ -246,6 +246,7 @@ async def resolve_model_hub_launch(
     *,
     process_scope: Optional[str] = None,
     context: Any = None,
+    config: Any = None,
 ) -> ModelHubLaunch:
     router = getattr(controller, "model_hub_runtime", None)
     resolver = getattr(router, "resolve", None)
@@ -253,12 +254,14 @@ async def resolve_model_hub_launch(
         manager = getattr(controller, "session_turns", None)
         turn_lookup = getattr(manager, "model_hub_turn_id_for_task", None)
         turn_id = turn_lookup() if callable(turn_lookup) else None
+        snapshot = {"config": config} if config is not None else {}
         try:
             return await resolver(
                 backend,
                 requested_model,
                 process_scope=process_scope,
                 turn_id=turn_id,
+                **snapshot,
             )
         except ModelHubError as exc:
             failure = _localized_launch_error(
@@ -284,12 +287,14 @@ async def resolve_opencode_overlay_launch(
     overlay: OpenCodeOverlay | None,
     *,
     context: Any = None,
+    config: Any = None,
 ) -> ModelHubLaunch:
     router = getattr(controller, "model_hub_runtime", None)
     resolver = getattr(router, "resolve_opencode_overlay_launch", None)
     if overlay is not None and callable(resolver):
+        snapshot = {"config": config} if config is not None else {}
         try:
-            return await resolver(overlay, requested_model)
+            return await resolver(overlay, requested_model, **snapshot)
         except ModelHubError as exc:
             failure = _localized_launch_error(
                 controller,
@@ -928,8 +933,18 @@ class ModelHubRuntimeRouter:
                 terminal_turn_id=terminal_turn_id,
             )
 
-    def turn_mode(self, backend: BackendName) -> TurnMode:
-        return cast(TurnMode, self.service.store.load().agents[backend].mode)
+    def snapshot(self) -> ModelHubConfig:
+        """Load the configuration one turn resolves and launches against.
+
+        A turn that passes this snapshot to every call below derives its launch
+        and its runtime's launch inputs from one load, so a concurrent catalog
+        change cannot split them.
+        """
+        return self.service.store.load()
+
+    def turn_mode(self, backend: BackendName, *, config: ModelHubConfig | None = None) -> TurnMode:
+        config = config if config is not None else self.service.store.load()
+        return cast(TurnMode, config.agents[backend].mode)
 
     async def resolve(
         self,
@@ -938,9 +953,10 @@ class ModelHubRuntimeRouter:
         *,
         process_scope: Optional[str] = None,
         turn_id: Optional[str] = None,
+        config: ModelHubConfig | None = None,
     ) -> ModelHubLaunch:
         requested_model = str(requested_model or "").strip()
-        config = self.service.store.load()
+        config = config if config is not None else self.service.store.load()
         config, resolution = await self._resolve_turn(
             config,
             backend,
@@ -1074,15 +1090,18 @@ class ModelHubRuntimeRouter:
         self,
         overlay: OpenCodeOverlay,
         requested_model: str,
+        *,
+        config: ModelHubConfig | None = None,
     ) -> ModelHubLaunch:
         """Activate the exact source snapshot used to build an overlay."""
 
+        snapshot = config
         launch = next(
             (item for item in overlay.launches if item.requested_model == requested_model),
             None,
         )
         if launch is None:
-            config = self.service.store.load()
+            config = snapshot if snapshot is not None else self.service.store.load()
             if all(model.id != requested_model for model in config.agents["opencode"].models):
                 # The overlay holds launches only for listed rows.
                 raise self._no_candidate_error(
@@ -1106,7 +1125,7 @@ class ModelHubRuntimeRouter:
                     turn_id=None,
                 )
             raise ModelHubError("mapping_target_unavailable", status=409)
-        config = self.service.store.load()
+        config = snapshot if snapshot is not None else self.service.store.load()
         self._emit_transition(launch, config)
         return launch
 
@@ -1174,8 +1193,12 @@ class ModelHubRuntimeRouter:
         setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
         return persisted
 
-    async def prepare_opencode_overlay(self) -> OpenCodeOverlay | None:
-        config = self.service.store.load()
+    async def prepare_opencode_overlay(
+        self,
+        *,
+        config: ModelHubConfig | None = None,
+    ) -> OpenCodeOverlay | None:
+        config = config if config is not None else self.service.store.load()
         agent = config.agents["opencode"]
         if agent.mode == "direct":
             return None

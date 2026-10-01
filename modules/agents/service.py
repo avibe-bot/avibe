@@ -204,6 +204,19 @@ class AgentService:
             self.on_activity_terminal(activity)
         return completed
 
+    def force_end_runtime_activities(self, backend: str, runtime_key: str) -> list[Any]:
+        """End the Activities of one runtime the service replaces itself."""
+        completed = self.activities.end_runtime(
+            backend,
+            runtime_key,
+            status="killed",
+            force=True,
+            metadata={"interrupt_reason": SETTLED_BY_BACKEND_REFRESH},
+        )
+        for activity in completed:
+            self.on_activity_terminal(activity)
+        return completed
+
     def register(self, agent: BaseAgent):
         self.agents[agent.name] = agent
         logger.info(f"Registered agent backend: {agent.name}")
@@ -1099,10 +1112,37 @@ class AgentService:
 
     async def force_cancel_backend_turns(self, backend: str) -> None:
         """Cancel every foreground owner and emit a terminal outcome before cutover."""
+        await self._force_cancel_turns(lambda gate: gate.backend == backend)
+
+    async def force_end_runtime_work(
+        self,
+        backend: str,
+        *,
+        base_session_ids: set[str],
+        activity_runtime_keys: set[str],
+    ) -> None:
+        """Interrupt the work of a runtime the service stops itself.
+
+        The scoped form of a forced backend refresh: the named sessions' turns
+        and the named runtimes' Activities settle with the runtime-update
+        notice, and every other session keeps running.
+        """
+        manager = getattr(self.controller, "session_turns", None)
+        release = getattr(manager, "release_for_backend_refresh", None)
+        if callable(release) and base_session_ids:
+            await release(backend=backend, base_session_ids=set(base_session_ids))
+        await self._force_cancel_turns(
+            lambda gate: gate.backend == backend
+            and getattr(gate.request, "base_session_id", None) in base_session_ids
+        )
+        for runtime_key in activity_runtime_keys:
+            self.force_end_runtime_activities(backend, runtime_key)
+
+    async def _force_cancel_turns(self, owns: Callable[["_RuntimeTurnGate"], bool]) -> None:
         owned = [
             (runtime_key, gate, gate.token)
             for runtime_key, gate in self._turn_gates.items()
-            if gate.backend == backend and gate.token
+            if gate.token and owns(gate)
         ]
         tasks = {
             gate.task

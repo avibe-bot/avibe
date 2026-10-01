@@ -79,6 +79,43 @@ def test_restart_drains_active_turn_before_refresh() -> None:
     asyncio.run(run())
 
 
+def test_runtime_gen_004_a_backend_that_renews_in_place_never_drains() -> None:
+    """RUNTIME-GEN-004: a routine restart request interrupts nothing and holds no turn.
+
+    A backend that renews in place adopts the change at once; one that cannot
+    keeps the drain-then-refresh path.
+    """
+
+    async def run() -> None:
+        for renews in (True, False):
+            service = _AgentService()
+            service.active = True
+            controller = _controller(service)
+            refresh = AsyncMock()
+            renew = AsyncMock(return_value=renews)
+            coordinator = BackendRestartCoordinator(
+                controller, refresh, renew=renew, drain_timeout=1, poll_interval=0.001
+            )
+
+            state = await coordinator.request_restart("opencode")
+
+            renew.assert_awaited_once_with("opencode")
+            if renews:
+                assert state == "restarted"
+                assert service.draining is False
+                refresh.assert_not_awaited()
+                controller.session_turns.begin_backend_drain.assert_not_called()
+                controller.session_turns.release_for_backend_refresh.assert_not_awaited()
+            else:
+                assert state == "draining"
+                assert service.draining is True
+                service.active = False
+                await coordinator.wait("opencode")
+                refresh.assert_awaited_once_with("opencode", False)
+
+    asyncio.run(run())
+
+
 def test_restart_timeout_forces_cutover_and_releases_workbench_turns() -> None:
     async def run() -> None:
         service = _AgentService()

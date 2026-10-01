@@ -8,7 +8,7 @@ import sys
 import threading
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -597,8 +597,19 @@ def test_cached_claude_rechecks_effective_reasoning_and_preserves_resume(
     asyncio.run(run())
 
 
-def test_claude_reasoning_change_waits_for_idle_before_recreation(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("change", ["reasoning_effort", "runtime_renewal", "model_hub_launch"])
+def test_claude_launch_change_keeps_a_busy_client_until_its_session_is_idle(monkeypatch, tmp_path, change) -> None:
+    """RUNTIME-GEN-001: a launch change never makes a session's turn wait.
+
+    While background work the session started still runs, its next turn stays
+    on the current client, and the first turn after the session is idle gets a
+    new client built from the changed inputs. Only a turn whose Model Hub launch
+    the current client cannot carry replaces it at once, interrupting that work.
+    """
+    from modules.agents.model_hub import ModelHubLaunch
+
     clients = []
+    tokens = ["first-launch-token"]
 
     class Client:
         def __init__(self, options):
@@ -613,6 +624,15 @@ def test_claude_reasoning_change_waits_for_idle_before_recreation(monkeypatch, t
             assert self._vibe_runtime_session_key not in handler.active_sessions
             self.disconnected = True
 
+    class Runtime:
+        async def resolve(self, backend, requested_model, **_kwargs):
+            return ModelHubLaunch(
+                backend=backend, channel="hub", requested_model=requested_model,
+                target_model=requested_model, runtime_model=requested_model,
+                source_id="src_launchfixture", gateway_base_url="http://127.0.0.1:18443/claude",
+                gateway_token=tokens[0], reasoning_efforts=("none", "medium"),
+            )
+
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
     monkeypatch.setattr(
@@ -620,6 +640,8 @@ def test_claude_reasoning_change_waits_for_idle_before_recreation(monkeypatch, t
         lambda *_args: ["none", "medium"],
     )
     controller = _Controller(tmp_path)
+    controller.model_hub_runtime = Runtime()
+    controller.agent_service = SimpleNamespace(force_end_runtime_activities=Mock())
     routing = RoutingSettings(model="claude-opus-4-6", reasoning_effort="none")
     controller.settings_manager.get_channel_routing = lambda _key: routing
     handler = SessionHandler(controller)
@@ -629,24 +651,28 @@ def test_claude_reasoning_change_waits_for_idle_before_recreation(monkeypatch, t
         first = await handler.get_or_create_claude_session(context)
         key = first._vibe_runtime_session_key
         handler.active_sessions.add(key)
-        routing.reasoning_effort = "medium"
-        entered_wait = asyncio.Event()
-        wait_for_idle = handler._wait_for_claude_session_idle
+        if change == "reasoning_effort":
+            routing.reasoning_effort = "medium"
+        elif change == "runtime_renewal":
+            handler.renew_runtime()
+        else:
+            tokens[0] = "second-launch-token"
 
-        async def observe_wait(composite_key):
-            entered_wait.set()
-            await wait_for_idle(composite_key)
+        during = await asyncio.wait_for(handler.get_or_create_claude_session(context), timeout=1)
+        if change == "model_hub_launch":
+            assert during is not first and first.disconnected
+            controller.agent_service.force_end_runtime_activities.assert_called_once_with("claude", key)
+            return
+        assert during is first and not first.disconnected
+        controller.agent_service.force_end_runtime_activities.assert_not_called()
 
-        monkeypatch.setattr(handler, "_wait_for_claude_session_idle", observe_wait)
-        pending = asyncio.create_task(handler.get_or_create_claude_session(context))
-        await asyncio.wait_for(entered_wait.wait(), timeout=1)
-        assert not pending.done()
-        assert not first.disconnected
         handler.active_sessions.remove(key)
-        second = await asyncio.wait_for(pending, timeout=1)
-        assert first.disconnected
-        assert second.options.effort == "medium"
+        after = await asyncio.wait_for(handler.get_or_create_claude_session(context), timeout=1)
+        assert first.disconnected and after is not first
+        if change == "reasoning_effort":
+            assert after.options.effort == "medium"
         assert len(clients) == 2
+        assert await handler.get_or_create_claude_session(context) is after
 
     asyncio.run(run())
 

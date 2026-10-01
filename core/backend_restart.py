@@ -393,6 +393,7 @@ class BackendRestartCoordinator:
         controller: Any,
         refresh: Callable[[str, bool], Awaitable[None]],
         *,
+        renew: Callable[[str], Awaitable[bool]] | None = None,
         drain_timeout: float | None = None,
         settle_timeout: float = _INTERRUPT_SETTLE_SECONDS,
         poll_interval: float = _POLL_INTERVAL_SECONDS,
@@ -400,6 +401,7 @@ class BackendRestartCoordinator:
     ) -> None:
         self.controller = controller
         self._refresh = refresh
+        self._renew = renew
         self._drain_timeout = _configured_drain_timeout() if drain_timeout is None else max(0.0, drain_timeout)
         # Independent of the drain timeout, which only decides when a restart
         # stops waiting and interrupts; an interrupting switch never drains.
@@ -643,6 +645,13 @@ class BackendRestartCoordinator:
                 if not existing.done():
                     return "draining"
                 self._on_done(backend, existing)
+
+            # A backend whose runtime units renew in place needs no drain: new
+            # turns start on a new generation, and running work finishes on the
+            # one it started on.
+            if self._renew is not None and await self._renew(backend):
+                self._outcomes[backend] = {"state": "applied"}
+                return "restarted"
 
             agent_service = self.controller.agent_service
             session_turns = self.controller.session_turns

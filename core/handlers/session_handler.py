@@ -467,6 +467,77 @@ class SessionHandler(BaseHandler):
         )
         return True
 
+    def renew_runtime(self) -> None:
+        """Move every session to a new client at its next turn, interrupting nothing."""
+        self.controller.claude_runtime_epoch = getattr(self.controller, "claude_runtime_epoch", 0) + 1
+
+    async def _replace_stale_cached_claude_client(
+        self,
+        composite_key: str,
+        client: ClaudeSDKClient,
+        *,
+        context: MessageContext,
+        working_path: str,
+        effective_effort: Optional[str],
+        system_prompt: Any,
+        model_hub_launch: "ModelHubLaunch",
+    ) -> bool:
+        """Retire a cached client whose launch inputs changed; True once it is gone.
+
+        An idle session moves to a new client at once. While the session's own
+        background work still runs, the turn stays on the current client, and the
+        session moves at its next idle turn. The exception is a turn that needs a
+        Model Hub launch this client cannot carry: then the client is replaced
+        and that work interrupted.
+        """
+        launch_changed = getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint
+        changes = (
+            ("model_hub_channel_changed", launch_changed),
+            ("reasoning_effort_changed", getattr(client, "_vibe_reasoning_effort", None) != effective_effort),
+            (
+                "runtime_renewed",
+                getattr(client, "_vibe_runtime_epoch", 0) != getattr(self.controller, "claude_runtime_epoch", 0),
+            ),
+            ("system_prompt_changed", self.claude_system_prompts.get(composite_key) != system_prompt),
+            ("caller_env_changed", getattr(client, "_vibe_caller_env", {}) != self._caller_env_for_context(context)),
+            (
+                "managed_skills_changed",
+                getattr(client, "_vibe_managed_skills_env", {})
+                != managed_skill_environment(
+                    working_path,
+                    project_base=managed_skill_project_base(context),
+                    claude_cli_path=managed_skill_claude_cli_path(self.config),
+                ),
+            ),
+            ("git_path_changed", getattr(client, "_vibe_git_path_state", None) != self._claude_git_path_state(working_path)),
+        )
+        reason = next((name for name, changed in changes if changed), None)
+        if reason is None:
+            return False
+        if composite_key in self.active_sessions:
+            if not launch_changed:
+                logger.info(
+                    "Keeping the busy Claude SDK client for %s until its session is idle: %s",
+                    composite_key,
+                    reason,
+                )
+                return False
+            self._interrupt_claude_session_work(composite_key)
+        logger.info("Recreating cached Claude SDK client for %s: %s", composite_key, reason)
+        await self._cleanup_session_locked(
+            composite_key,
+            retire_model_hub_scope=model_hub_launch.channel == "direct",
+            reason=reason,
+        )
+        return True
+
+    def _interrupt_claude_session_work(self, composite_key: str) -> None:
+        """Settle a replaced client's background work as interrupted by a runtime update."""
+        service = getattr(self.controller, "agent_service", None)
+        end_runtime = getattr(service, "force_end_runtime_activities", None)
+        if callable(end_runtime):
+            end_runtime("claude", composite_key)
+
     async def _reuse_cached_claude_session_if_available(
         self,
         *,
@@ -489,21 +560,6 @@ class SessionHandler(BaseHandler):
             client,
         ):
             return None
-        reasoning_changed = getattr(client, "_vibe_reasoning_effort", None) != effective_effort
-        if (
-            reasoning_changed
-            or getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint
-        ):
-            reason = "reasoning_effort_changed" if reasoning_changed else "model_hub_channel_changed"
-            logger.info("Recreating cached Claude SDK client: %s", reason)
-            await self._wait_for_claude_session_idle(composite_key)
-            await self._cleanup_session_locked(
-                composite_key,
-                retire_model_hub_scope=model_hub_launch.channel == "direct",
-                reason=reason,
-            )
-            return None
-
         next_system_prompt = await self._build_claude_system_prompt(
             context=context,
             session_key=session_key,
@@ -512,57 +568,15 @@ class SessionHandler(BaseHandler):
             agent_system_prompt=agent_system_prompt,
             working_path=working_path,
         )
-        cached_system_prompt = self.claude_system_prompts.get(composite_key)
-        if cached_system_prompt != next_system_prompt:
-            logger.info(
-                "Recreating cached Claude SDK client for %s because avibe system prompt changed",
-                composite_key,
-            )
-            await self._cleanup_session_locked(
-                composite_key,
-                retire_model_hub_scope=model_hub_launch.channel == "direct",
-                reason="system_prompt_changed",
-            )
-            return None
-
-        caller_env = self._caller_env_for_context(context)
-        if getattr(client, "_vibe_caller_env", {}) != caller_env:
-            logger.info(
-                "Recreating cached Claude SDK client for %s because caller context env changed",
-                composite_key,
-            )
-            await self._cleanup_session_locked(
-                composite_key,
-                retire_model_hub_scope=model_hub_launch.channel == "direct",
-                reason="caller_env_changed",
-            )
-            return None
-        managed_skills_env = managed_skill_environment(
-            working_path,
-            project_base=managed_skill_project_base(context),
-            claude_cli_path=managed_skill_claude_cli_path(self.config),
-        )
-        if getattr(client, "_vibe_managed_skills_env", {}) != managed_skills_env:
-            logger.info(
-                "Recreating cached Claude SDK client for %s because managed Skill bindings changed",
-                composite_key,
-            )
-            await self._cleanup_session_locked(
-                composite_key,
-                retire_model_hub_scope=model_hub_launch.channel == "direct",
-            )
-            return None
-        git_path_state = self._claude_git_path_state(working_path)
-        if getattr(client, "_vibe_git_path_state", None) != git_path_state:
-            logger.info(
-                "Recreating cached Claude SDK client for %s because Git PATH changed",
-                composite_key,
-            )
-            await self._cleanup_session_locked(
-                composite_key,
-                retire_model_hub_scope=model_hub_launch.channel == "direct",
-                reason="git_path_changed",
-            )
+        if await self._replace_stale_cached_claude_client(
+            composite_key,
+            client,
+            context=context,
+            working_path=working_path,
+            effective_effort=effective_effort,
+            system_prompt=next_system_prompt,
+            model_hub_launch=model_hub_launch,
+        ):
             return None
 
         try:
@@ -612,20 +626,6 @@ class SessionHandler(BaseHandler):
             client,
         ):
             return None
-        reasoning_changed = getattr(client, "_vibe_reasoning_effort", None) != effective_effort
-        if (
-            reasoning_changed
-            or getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint
-        ):
-            reason = "reasoning_effort_changed" if reasoning_changed else "subagent_model_hub_channel_changed"
-            logger.info("Recreating cached Claude subagent SDK client: %s", reason)
-            await self._wait_for_claude_session_idle(composite_key)
-            await self._cleanup_session_locked(
-                composite_key,
-                retire_model_hub_scope=model_hub_launch.channel == "direct",
-                reason=reason,
-            )
-            return None
         self.ensure_agent_session_id(
             context,
             session_key=session_key,
@@ -644,55 +644,15 @@ class SessionHandler(BaseHandler):
             agent_system_prompt=next_agent_system_prompt,
             working_path=working_path,
         )
-        if self.claude_system_prompts.get(composite_key) != next_system_prompt:
-            logger.info(
-                "Recreating cached Claude subagent SDK client for %s because avibe system prompt changed",
-                composite_key,
-            )
-            await self._cleanup_session_locked(
-                composite_key,
-                retire_model_hub_scope=model_hub_launch.channel == "direct",
-                reason="subagent_system_prompt_changed",
-            )
-            return None
-        caller_env = self._caller_env_for_context(context)
-        if getattr(client, "_vibe_caller_env", {}) != caller_env:
-            logger.info(
-                "Recreating cached Claude subagent SDK client for %s because caller context env changed",
-                composite_key,
-            )
-            await self._cleanup_session_locked(
-                composite_key,
-                retire_model_hub_scope=model_hub_launch.channel == "direct",
-                reason="subagent_caller_env_changed",
-            )
-            return None
-        managed_skills_env = managed_skill_environment(
-            working_path,
-            project_base=managed_skill_project_base(context),
-            claude_cli_path=managed_skill_claude_cli_path(self.config),
-        )
-        if getattr(client, "_vibe_managed_skills_env", {}) != managed_skills_env:
-            logger.info(
-                "Recreating cached Claude subagent SDK client for %s because managed Skill bindings changed",
-                composite_key,
-            )
-            await self._cleanup_session_locked(
-                composite_key,
-                retire_model_hub_scope=model_hub_launch.channel == "direct",
-            )
-            return None
-        git_path_state = self._claude_git_path_state(working_path)
-        if getattr(client, "_vibe_git_path_state", None) != git_path_state:
-            logger.info(
-                "Recreating cached Claude subagent SDK client for %s because Git PATH changed",
-                composite_key,
-            )
-            await self._cleanup_session_locked(
-                composite_key,
-                retire_model_hub_scope=model_hub_launch.channel == "direct",
-                reason="subagent_git_path_changed",
-            )
+        if await self._replace_stale_cached_claude_client(
+            composite_key,
+            client,
+            context=context,
+            working_path=working_path,
+            effective_effort=effective_effort,
+            system_prompt=next_system_prompt,
+            model_hub_launch=model_hub_launch,
+        ):
             return None
         if desired_model:
             try:
@@ -1482,6 +1442,8 @@ class SessionHandler(BaseHandler):
         agent_system_prompt: Optional[str],
         fork_session: bool = False,
     ) -> ClaudeSDKClient:
+        # A renewal while this client is created must still apply to it.
+        runtime_epoch = getattr(self.controller, "claude_runtime_epoch", 0)
 
         # Ensure working directory exists
         if not os.path.exists(working_path):
@@ -1673,6 +1635,7 @@ class SessionHandler(BaseHandler):
         )
         setattr(client, "_vibe_git_path_state", git_path_state)
         setattr(client, "_vibe_reasoning_effort", effective_effort)
+        setattr(client, "_vibe_runtime_epoch", runtime_epoch)
         setattr(
             client,
             "_vibe_model_hub_fingerprint",

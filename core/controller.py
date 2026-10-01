@@ -286,6 +286,7 @@ class Controller:
         self.backend_restart_coordinator = BackendRestartCoordinator(
             self,
             self.agent_auth_service._apply_backend_runtime_refresh,
+            renew=self.agent_auth_service.renew_backend_runtime,
         )
         if self.model_hub_service is not None:
             self.model_hub_service.migration_guard = self.backend_restart_coordinator.migration_guard
@@ -1116,10 +1117,7 @@ class Controller:
             )
 
         try:
-            claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
-            if (claude_timeout > 0 or codex_timeout > 0) and (
-                self.cleanup_task is None or self.cleanup_task.done()
-            ):
+            if self.cleanup_task is None or self.cleanup_task.done():
                 self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
         except Exception as e:
             logger.error("Failed to start idle session cleanup: %s", e, exc_info=True)
@@ -2180,24 +2178,27 @@ class Controller:
                     self._trace_retention_future = None
 
     async def periodic_cleanup(self):
-        """Sweep idle backend runtime state without interrupting active work."""
-        claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
-        enabled_timeouts = [timeout for timeout in (claude_timeout, codex_timeout) if timeout > 0]
-        if not enabled_timeouts:
-            logger.info("Idle cleanup disabled for Claude and Codex.")
-            return
+        """Sweep idle backend runtime state without interrupting active work.
 
-        sweep_interval = max(min(enabled_timeouts) // 6, 60)
-        logger.info(
-            "Starting idle cleanup loop (interval=%ss, claude_timeout=%ss, codex_timeout=%ss)",
-            sweep_interval,
-            claude_timeout,
-            codex_timeout,
-        )
-
+        Timeouts are read on every sweep, so a saved change applies without a
+        backend restart.
+        """
         try:
             while True:
-                await asyncio.sleep(sweep_interval)
+                claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
+                enabled_timeouts = [timeout for timeout in (claude_timeout, codex_timeout) if timeout > 0]
+                await asyncio.sleep(max(min(enabled_timeouts) // 6, 60) if enabled_timeouts else 60)
+                claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
+
+                # Retiring runtime generations stop once drained, whatever the
+                # idle timeouts say.
+                for agent in list(getattr(self.agent_service, "agents", {}).values()):
+                    reap = getattr(agent, "reap_runtime_generations", None)
+                    if callable(reap):
+                        try:
+                            await reap()
+                        except Exception as e:
+                            logger.error("Runtime generation sweep failed for %s: %s", agent.name, e, exc_info=True)
 
                 if claude_timeout > 0:
                     try:
@@ -2651,6 +2652,13 @@ class Controller:
             except FileNotFoundError:
                 return
             self.config.model_hub = latest.model_hub
+            agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)
+            adopt_catalog = getattr(agent, "adopt_model_hub_catalog", None)
+            if callable(adopt_catalog):
+                # The backend moves each runtime to the committed catalog at
+                # that runtime's next turn; nothing restarts or drains.
+                await adopt_catalog()
+                return
             if latest.model_hub.agents[backend].mode != "hub":
                 if backend == "codex":
                     agent_service = getattr(self, "agent_service", None)

@@ -1052,6 +1052,27 @@ class ClaudeAgent(BaseAgent):
 
         logger.info("Refreshed Claude auth state across %d runtime session(s)", len(session_ids))
 
+    async def adopt_model_hub_catalog(self) -> None:
+        """Nothing to apply: each turn resolves its model, limits, and efforts.
+
+        A session whose resolved launch changed moves to a new client at that
+        turn, by the same rule as any other launch-input change.
+        """
+
+    async def renew_runtime(self, claude_config) -> None:
+        """Adopt persisted runtime config; each session moves to it at its next turn.
+
+        Every session owns its own process, so nothing drains or reconnects
+        here: a session's next turn starts a new client, unless background work
+        it started is still running.
+        """
+        self.config.claude = claude_config
+        self.controller.config.claude = claude_config
+        session_handler = getattr(self, "session_handler", None)
+        if session_handler is not None:
+            session_handler.config = self.controller.config
+            session_handler.renew_runtime()
+
     async def refresh_runtime_config(self, claude_config) -> None:
         """Reload persisted runtime config before reconnecting Claude sessions."""
         self.config.claude = claude_config

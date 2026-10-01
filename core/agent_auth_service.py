@@ -2310,6 +2310,24 @@ class AgentAuthService:
         logger.info("Registered %s backend after runtime config refresh", backend)
         return True
 
+    async def renew_backend_runtime(self, backend: str) -> bool:
+        """Adopt persisted config without a drain when the backend renews in place.
+
+        Returns False for a backend without that ability, and for a disabled
+        backend, both of which keep the drain path.
+        """
+        agent_service = getattr(self.controller, "agent_service", None)
+        agent = getattr(agent_service, "agents", {}).get(backend) if agent_service else None
+        renew = getattr(agent, "renew_runtime", None)
+        if not callable(renew):
+            return False
+        runtime_config = self._load_backend_runtime_config(backend)
+        if runtime_config is None:
+            return False
+        await renew(runtime_config)
+        self._sync_builtin_default_agents()
+        return True
+
     async def _refresh_backend_runtime(self, backend: str) -> None:
         coordinator = getattr(self.controller, "backend_restart_coordinator", None)
         if coordinator is not None:
