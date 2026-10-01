@@ -162,16 +162,13 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         concurrently either keeps the generation alive or binds elsewhere.
         """
         async with self._lock:
-            if generation.stopped:
-                return
-            generation.closed = True
-            if self._current is generation:
-                self._current = None
-            if generation not in self._retiring:
-                generation.retiring = True
-                self._retiring.append(generation)
-            if await self._is_idle(generation):
-                await self._stop_locked(generation, force=False)
+            await self._retire_locked(generation)
+
+    async def retire_current(self) -> None:
+        """Retire whichever generation is current, for example when a backend is disabled."""
+        async with self._lock:
+            if self._current is not None:
+                await self._retire_locked(self._current)
 
     async def discard(self, generation: RuntimeGeneration[_S, _R]) -> None:
         """Forget a generation whose process already ended or was retired elsewhere."""
@@ -193,6 +190,18 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         async with self._lock:
             for generation in self.generations:
                 await self._stop_locked(generation, force=force)
+
+    async def _retire_locked(self, generation: RuntimeGeneration[_S, _R]) -> None:
+        if generation.stopped:
+            return
+        generation.closed = True
+        if self._current is generation:
+            self._current = None
+        if generation not in self._retiring:
+            generation.retiring = True
+            self._retiring.append(generation)
+        if await self._is_idle(generation):
+            await self._stop_locked(generation, force=False)
 
     def _bind_locked(self, generation: RuntimeGeneration[_S, _R]) -> RuntimeBinding[_S, _R]:
         generation.bindings += 1

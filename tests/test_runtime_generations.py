@@ -157,9 +157,10 @@ def test_a_retired_generation_stops_once_unbound_and_admits_no_new_turn():
         assert runtimes.stopped == [(bound.generation.runtime, False)]
 
         await fresh.release()
-        await generations.retire(fresh.generation)
+        await generations.retire_current()
         assert runtimes.stopped[-1] == (fresh.generation.runtime, False)
         await generations.retire(fresh.generation)
+        await generations.retire_current()
         assert len(runtimes.stopped) == 2
 
     asyncio.run(run())

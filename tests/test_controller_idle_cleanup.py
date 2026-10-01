@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from config.v2_config import DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
 from core.controller import Controller
 
@@ -41,3 +43,38 @@ def test_idle_cleanup_timeouts_fall_back_to_shared_default_when_backend_config_o
 
     assert claude_timeout == DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
     assert codex_timeout == DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
+
+
+def test_a_saved_idle_timeout_applies_without_a_backend_restart(monkeypatch) -> None:
+    """RUNTIME-GEN-005: the idle sweep reads timeouts live and always sweeps generations.
+
+    Saving an idle timeout renews the backend in place rather than restarting
+    it, so the sweep must not keep the value it started with.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(claude=SimpleNamespace(idle_timeout_seconds=0), codex=None)
+    controller.session_handler = SimpleNamespace(
+        evict_idle_sessions=AsyncMock(),
+        reap_orphaned_claude_sessions=AsyncMock(),
+    )
+    reap = AsyncMock()
+    controller.agent_service = SimpleNamespace(agents={"codex": SimpleNamespace(name="codex", reap_runtime_generations=reap)})
+    sweeps = []
+
+    async def sleep(_seconds):
+        sweeps.append(_seconds)
+        if len(sweeps) == 2:
+            controller.config.claude.idle_timeout_seconds = 600
+        if len(sweeps) == 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr("core.controller.asyncio.sleep", sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(Controller.periodic_cleanup(controller))
+
+    controller.session_handler.evict_idle_sessions.assert_awaited_once_with(600)
+    assert reap.await_count == 2

@@ -7,6 +7,7 @@ capability:
     - tests/test_runtime_generations.py
     - tests/test_claude_cli_path.py
     - tests/test_backend_restart.py
+    - tests/test_controller_idle_cleanup.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -40,3 +41,10 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_backend_restart.py::test_runtime_gen_004_a_backend_that_renews_in_place_never_drains
+  - id: RUNTIME-GEN-005
+    name: A saved idle timeout applies without a backend restart, and retiring generations are swept regardless of idle timeouts
+    status: covered
+    kind: lifecycle
+    layer: unit
+    backend: shared
+    test: tests/test_controller_idle_cleanup.py::test_a_saved_idle_timeout_applies_without_a_backend_restart
