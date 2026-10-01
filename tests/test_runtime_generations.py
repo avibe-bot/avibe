@@ -153,6 +153,29 @@ def test_the_cap_holds_when_graceful_stops_decline_or_are_still_running():
     asyncio.run(run())
 
 
+def test_the_cap_still_reclaims_a_generation_whose_forced_stop_failed():
+    runtimes = _Runtimes()
+    generations = runtimes.generation_set(cap=3)
+
+    async def run():
+        for digest in ("1", "2", "3"):
+            await generations.acquire(_Spec(digest))
+        runtimes.fail_stops = 1
+        await generations.acquire(_Spec("4"))
+        await generations.settled()
+        # The oldest could not be stopped, so the next one gives way instead.
+        assert runtimes.live == ["1#0", "3#2", "4#3"]
+        assert runtimes.stopped == [("2#1", True)]
+
+        # The failed generation stays eligible: the next pass reclaims it first.
+        await generations.acquire(_Spec("5"))
+        await generations.settled()
+        assert runtimes.live == ["3#2", "4#3", "5#4"]
+        assert runtimes.stopped == [("2#1", True), ("1#0", True)]
+
+    asyncio.run(run())
+
+
 def test_admission_never_waits_for_a_teardown():
     runtimes = _Runtimes()
     generations = runtimes.generation_set()
@@ -290,13 +313,17 @@ def test_stop_all_closes_admission_and_keeps_bound_work_on_a_graceful_stop(force
         starting = asyncio.create_task(generations.acquire(_Spec("b")))
         await asyncio.sleep(0)
 
-        await generations.stop_all(force=force)
+        stopping = asyncio.create_task(generations.stop_all(force=force))
+        await asyncio.sleep(0.05)
         with pytest.raises(RuntimeUnitStopping):
             await generations.acquire(_Spec("a"))
+        # Stop-all covers the start that was already in flight.
+        assert not stopping.done()
         runtimes.start_gate.set()
+        await stopping
         with pytest.raises(RuntimeUnitStopping):
             await starting
-        await generations.settled()
+        assert "b#1" not in runtimes.live
 
         if force:
             assert runtimes.live == []

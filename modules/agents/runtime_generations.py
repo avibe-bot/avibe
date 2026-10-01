@@ -191,6 +191,11 @@ class RuntimeGenerationSet(Generic[_S, _R]):
                 self._current = None
                 self._add_retiring(generation)
         self._kick()
+        # A start already in flight attaches its runtime for teardown once it
+        # returns; wait for it so every process started before admission closed
+        # is covered.
+        async with self._start_lock:
+            pass
         await self.settled()
 
     async def settled(self) -> None:
@@ -272,23 +277,31 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         if self._reconciler is None or self._reconciler.done():
             self._reconciler = asyncio.get_running_loop().create_task(self._reconcile())
 
-    def _next_victim(self) -> tuple[RuntimeGeneration[_S, _R], bool] | None:
-        stoppable = [generation for generation in self._retiring if not generation.failed]
-        if self._force_all and stoppable:
-            return stoppable[0], True
-        if len(self._retiring) + (self._current is not None) > self._cap and stoppable:
-            # Never make a new turn wait: the oldest work gives way, whether or
-            # not its adapter still reports work.
-            return stoppable[0], True
+    def _next_victim(self, attempted: set[int]) -> tuple[RuntimeGeneration[_S, _R], bool] | None:
+        # Each pass tries a generation at most once, so a stop that keeps failing
+        # is retried by the next pass rather than in a tight loop.
+        pending = [generation for generation in self._retiring if generation.serial not in attempted]
+        if self._force_all and pending:
+            return pending[0], True
+        if len(self._retiring) + (self._current is not None) > self._cap and pending:
+            # Never make a new turn wait: the oldest work gives way, whether its
+            # adapter still reports work or an earlier stop failed.
+            return pending[0], True
         drained = next(
-            (generation for generation in stoppable if generation.bindings == 0 and not generation.deferred),
+            (
+                generation
+                for generation in pending
+                if generation.bindings == 0 and not generation.deferred and not generation.failed
+            ),
             None,
         )
         return (drained, False) if drained is not None else None
 
     async def _reconcile(self) -> None:
-        while (choice := self._next_victim()) is not None:
+        attempted: set[int] = set()
+        while (choice := self._next_victim(attempted)) is not None:
             generation, force = choice
+            attempted.add(generation.serial)
             self._detach(generation)
             try:
                 stopped = await self._stop(generation, force)
