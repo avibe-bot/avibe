@@ -1457,6 +1457,22 @@ def test_backend_builtin_models_merge_backend_snapshots_but_exclude_user_config(
     ]
 
 
+def test_claude_builtin_rows_carry_no_native_1m_suffix_as_their_name(monkeypatch):
+    """The ` [1M]` suffix is the native picker's presentation, not a model name.
+
+    Stored as a Model Hub name it marked only the rows added after an adoption,
+    while the rows the adoption imported kept their bare ids.
+    """
+    monkeypatch.setattr(backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: {})
+    snapshot = backend_model_catalog.backend_builtin_snapshot("claude", schedule_refresh=False)
+    names = {item["id"]: item["display_name"] for item in snapshot["models"]}
+
+    assert "claude-sonnet-5-5" in names and "opus" in names
+    assert {model: name for model, name in names.items() if name is not None} == {}
+    # A Claude label that is a real name is still a name.
+    assert backend_model_catalog.builtin_display_name("claude", "claude-x", "Claude X") == "Claude X"
+
+
 def test_builtin_snapshot_requires_each_catalog_once_when_cli_is_installed(
     monkeypatch,
 ):

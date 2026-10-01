@@ -911,12 +911,7 @@ def backend_builtin_snapshot(
         models=[
             {
                 "id": entry["id"],
-                "display_name": (
-                    entry.get("label")
-                    if isinstance(entry.get("label"), str)
-                    and entry["label"] != entry["id"]
-                    else None
-                ),
+                "display_name": builtin_display_name(backend_key, entry["id"], entry.get("label")),
                 "reasoning_efforts": list(
                     entry.get("reasoning_efforts")
                     or _DEFAULT_REASONING_EFFORTS[backend_key]
@@ -926,6 +921,24 @@ def backend_builtin_snapshot(
             if not (backend_key == "claude" and entry["id"] == "default")
         ],
     )
+
+
+def builtin_display_name(backend: str, model_id: str, label: object) -> str | None:
+    """The name a built-in row stores in the Model Hub, or None for its id.
+
+    A Claude label is presentation, not a name: `format_claude_model_label`
+    appends ` [1M]` for the native picker. Stored as a name it would freeze
+    that suffix onto the rows added after a Hub adoption, while the rows the
+    adoption imported keep their bare ids.
+    """
+    if not isinstance(label, str) or label == model_id:
+        return None
+    if backend == "claude":
+        from modules.agents.opencode.utils import format_claude_model_label
+
+        if label == format_claude_model_label(model_id):
+            return None
+    return label
 
 
 def _versioned_builtin_snapshot(

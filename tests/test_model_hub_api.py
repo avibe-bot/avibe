@@ -3077,6 +3077,46 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
     assert refreshed == ["codex"]
 
 
+def test_builtin_reconcile_gives_claude_rows_back_the_names_a_native_suffix_replaced(
+    monkeypatch,
+    tmp_path,
+):
+    """Earlier releases stored a Claude row's native ` [1M]` suffix as its name.
+
+    Only rows added after an adoption got it, so one model in a picker read
+    `claude-sonnet-5-5 [1M]` beside bare ids. A reconcile repairs exactly
+    those built-in names and leaves every real name alone.
+    """
+    service, store, _adapter = _service(tmp_path)
+    agent = store.config.agents["claude"]
+    agent.models = [
+        ModelHubBackendModelConfig(id="claude-opus-5-5", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-sonnet-5-5", origin="builtin", display_name="claude-sonnet-5-5 [1M]"),
+        ModelHubBackendModelConfig(id="opus", origin="builtin", display_name="opus [1M]"),
+        ModelHubBackendModelConfig(id="claude-haiku-4-5", origin="builtin", display_name="Haiku"),
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="manual", display_name="claude-opus-5 [1M]"),
+    ]
+    agent.routes = {model.id: ModelHubRouteConfig() for model in agent.models}
+    monkeypatch.setattr(
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {"claude": {"complete": True, "models": [{"id": model.id} for model in agent.models]}},
+    )
+
+    changed = asyncio.run(service.reconcile_builtin_models(("claude",)))
+
+    names = {model.id: model.display_name for model in store.config.agents["claude"].models}
+    assert changed == ["claude"]
+    assert names == {
+        "claude-opus-5-5": None,
+        "claude-sonnet-5-5": None,
+        "opus": None,
+        "claude-haiku-4-5": "Haiku",
+        # A name the user gave a row is theirs, whatever it says.
+        "claude-opus-5": "claude-opus-5 [1M]",
+    }
+
+
 def test_retired_builtins_leave_the_picker_but_stay_routeable(monkeypatch, tmp_path):
     service, store, _adapter = _service(tmp_path)
     source = ModelHubSourceConfig(

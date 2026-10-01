@@ -47,6 +47,7 @@ from storage.db import get_cached_sqlite_engine
 from storage.models import agent_sessions, messages
 from vibe.backend_model_catalog import (
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
+    builtin_display_name,
     bundled_catalog_reasoning_efforts_by_model,
 )
 from vibe.model_hub_runtime.api_key_vendors import (
@@ -5247,7 +5248,18 @@ class ModelHubService:
             builtin_order = tuple(model.id for model in snapshot)
             present = {model.id for model in agent.models}
             removed = set(agent.removed_model_ids)
-            added = False
+            touched = False
+            # Earlier releases stored a Claude row's native ` [1M]` suffix as its
+            # name (see `builtin_display_name`); give those rows back their id.
+            if backend in snapshots:
+                for model in agent.models:
+                    if (
+                        model.origin == "builtin"
+                        and model.display_name is not None
+                        and builtin_display_name(backend, model.id, model.display_name) is None
+                    ):
+                        model.display_name = None
+                        touched = True
             for model in snapshot:
                 model_id = model.id
                 if model_id in present or model_id in removed:
@@ -5258,8 +5270,8 @@ class ModelHubService:
                     builtin_order,
                 )
                 present.add(model_id)
-                added = True
-            if added:
+                touched = True
+            if touched:
                 changed.append(cast(BackendName, backend))
         return changed
 
