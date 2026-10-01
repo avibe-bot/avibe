@@ -124,18 +124,26 @@ def test_opencode_resource_failure_preserves_zero_pid_count() -> None:
     assert "unknown" not in suffix
 
 
-def test_mh_runtime_014_opencode_turn_names_its_model_when_selecting_the_overlay(
+def test_mh_runtime_014_opencode_turn_runs_its_model_row_from_the_served_overlay(
+    tmp_path,
     monkeypatch,
 ) -> None:
-    """MH-RUNTIME-014: overlay selection learns the model this turn will run,
-    so a busy server keeps serving it on the running overlay."""
-    required_models: list[str | None] = []
+    """MH-RUNTIME-014: overlay selection learns the model this turn runs, and a
+    turn kept on a busy server's running overlay reads its model row from that
+    overlay rather than from the newly prepared one."""
+    selected: list[str | None] = []
+    resolved_contents: list[object] = []
+    reservation = object()
+    running_content = (
+        '{"enabled_providers":["avibe-openai"],"provider":'
+        '{"avibe-openai":{"models":{"kept":{"id":"kept","variants":{"low":{}}}}}}}'
+    )
     overlay = OpenCodeOverlay(
-        path=Path("/tmp/opencode-overlay.json"),
-        content_hash="overlay-hash",
+        path=tmp_path / "overlay.json",
+        content_hash="committed-overlay-hash",
         content=(
             b'{"enabled_providers":["avibe-openai"],"provider":'
-            b'{"avibe-openai":{"models":{"kept":{"id":"kept"}}}}}\n'
+            b'{"avibe-openai":{"models":{"kept":{"id":"kept","variants":{"low":{},"high":{}}}}}}}\n'
         ),
         provider_ids=("avibe-openai",),
         model_provider_ids=(("kept", "avibe-openai"),),
@@ -156,10 +164,31 @@ def test_mh_runtime_014_opencode_turn_names_its_model_when_selecting_the_overlay
     class _Server:
         async def configure_model_hub_overlay(self, value, *, required_model=None):
             assert value is overlay
-            required_models.append(required_model)
-            raise RuntimeError("test boundary after overlay selection")
+            selected.append(required_model)
+            return reservation
 
-    server = _Server()
+        def model_hub_overlay_content_for(self, value):
+            assert value is reservation
+            return running_content
+
+        async def release_model_hub_overlay_reservation(self, _value):
+            return None
+
+        async def ensure_running(self):
+            return None
+
+        async def ensure_directory_ready(self, _path):
+            return None
+
+        def get_default_agent_from_config(self):
+            return None
+
+        async def abort_session(self, _session_id, _path):
+            return None
+
+    async def resolve_launch(_controller, _model, value, **_kwargs):
+        resolved_contents.append(value.content)
+        raise RuntimeError("test boundary after launch resolution")
 
     async def _get_server():
         return server
@@ -167,40 +196,52 @@ def test_mh_runtime_014_opencode_turn_names_its_model_when_selecting_the_overlay
     async def _noop(*_args, **_kwargs):
         return None
 
+    async def _session_id(*_args):
+        return "ses_kept"
+
+    monkeypatch.setattr("modules.agents.opencode.agent.resolve_opencode_overlay_launch", resolve_launch)
     monkeypatch.setattr("modules.agents.opencode.agent.emit_backend_failure", _noop)
-    controller = type(
-        "Controller",
-        (),
-        {
-            "config": type("Config", (), {"language": "en"})(),
-            "model_hub_runtime": _Runtime(),
-            # The channel's model override, not the Agent default, runs.
-            "get_opencode_overrides": lambda _self, _context: (None, "kept", None),
-        },
-    )()
+    server = _Server()
+    controller = SimpleNamespace(
+        config=SimpleNamespace(language="en"),
+        model_hub_runtime=_Runtime(),
+        # The channel's model override, not the Agent default, runs.
+        get_opencode_overrides=lambda _context: (None, "kept", None),
+        emit_agent_message=AsyncMock(),
+    )
     agent = OpenCodeAgent.__new__(OpenCodeAgent)
     agent.controller = controller
     agent.config = controller.config
     agent._get_server = _get_server
+    agent._attach_server_activation = lambda _server: None
+    agent._delete_ack = _noop
     agent._remove_ack_reaction = _noop
+    agent._steering_states = {}
+    agent.sessions = type("Sessions", (), {"remove_active_poll": staticmethod(lambda _session_id: None)})()
+    agent._session_manager = type(
+        "SessionManager",
+        (),
+        {
+            "ensure_working_dir": staticmethod(_noop),
+            "get_or_create_session_id": staticmethod(_session_id),
+            "set_request_session": staticmethod(lambda *_args: None),
+            "set_agent_session_id": staticmethod(lambda *_args: None),
+        },
+    )()
     request = AgentRequest(
-        context=MessageContext(
-            user_id="user",
-            channel_id="channel",
-            platform="slack",
-            platform_specific={},
-        ),
+        context=MessageContext(user_id="user", channel_id="channel", platform="slack", platform_specific={}),
         message="hello",
         user_message="hello",
-        working_path="/tmp/work",
+        working_path=str(tmp_path),
         base_session_id="base",
-        composite_session_id="base:/tmp/work",
+        composite_session_id=f"base:{tmp_path}",
         session_key="slack::channel",
     )
 
     asyncio.run(agent._process_message(request))
 
-    assert required_models == ["avibe-openai/kept"]
+    assert selected == ["avibe-openai/kept"]
+    assert resolved_contents == [running_content]
 
 
 def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running(

@@ -509,11 +509,11 @@ scenarios:
     layer: unit
     test: tests/test_opencode_server.py::test_mh_runtime_002_matching_overlay_does_not_wait_for_an_unrelated_active_run
   - id: MH-RUNTIME-003
-    name: A pending OpenCode overlay transition cannot be starved by new Turns on the old overlay
+    name: A queued OpenCode overlay switch never holds a Turn the running overlay serves, and lands once the server is idle
     status: covered
     kind: concurrency
     layer: unit
-    test: tests/test_opencode_server.py::test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_overlay
+    test: tests/test_opencode_server.py::test_mh_runtime_003_a_queued_overlay_switch_never_holds_turns_the_running_overlay_serves
   - id: MH-RUNTIME-004
     name: An OpenCode overlay selection remains reserved until its initiating Turn becomes active
     status: covered
@@ -583,7 +583,8 @@ scenarios:
     layer: unit
     test: tests/test_opencode_server.py::test_mh_runtime_014_a_busy_server_keeps_serving_turns_its_overlay_still_serves
     related_tests:
-      - tests/test_multi_platform_runtime.py::test_mh_runtime_014_opencode_turn_names_its_model_when_selecting_the_overlay
+      - tests/test_multi_platform_runtime.py::test_mh_runtime_014_opencode_turn_runs_its_model_row_from_the_served_overlay
+      - tests/test_opencode_server.py::test_an_overlay_switch_treats_an_adopted_run_its_durable_poll_owns_as_live
   - id: MH-USAGE-001
     name: Tokens an upstream reported before the turn ended are still metered
     status: covered

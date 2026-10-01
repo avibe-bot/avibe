@@ -1327,44 +1327,43 @@ class CodexAgent(BaseAgent):
         from vibe import backend_model_catalog
 
         async with self._model_hub_catalog_lock:
-            if self._model_hub_catalog is not None:
-                return self._model_hub_catalog
-            generation = self._model_hub_catalog_generation
-            binary = self.codex_config.binary
-            configured_models = None
-            model_hub_service = getattr(self.controller, "model_hub_service", None)
-            store = getattr(model_hub_service, "store", None)
-            if store is not None:
-                configured_models = [
-                    model.to_payload()
-                    for model in store.load().agents["codex"].models
-                ]
-            preparation = asyncio.create_task(
-                asyncio.to_thread(
-                    backend_model_catalog.prepare_codex_hub_catalog,
-                    binary,
-                    None,
-                    configured_models,
+            while self._model_hub_catalog is None:
+                generation = self._model_hub_catalog_generation
+                binary = self.codex_config.binary
+                configured_models = None
+                model_hub_service = getattr(self.controller, "model_hub_service", None)
+                store = getattr(model_hub_service, "store", None)
+                if store is not None:
+                    configured_models = [
+                        model.to_payload()
+                        for model in store.load().agents["codex"].models
+                    ]
+                preparation = asyncio.create_task(
+                    asyncio.to_thread(
+                        backend_model_catalog.prepare_codex_hub_catalog,
+                        binary,
+                        None,
+                        configured_models,
+                    )
                 )
-            )
-            try:
-                catalog = await asyncio.shield(preparation)
-            except asyncio.CancelledError:
-                # The export runs in a thread and cannot be cancelled. Its
-                # result must still release its pin after the caller leaves.
-                preparation.add_done_callback(self._discard_model_hub_catalog)
-                raise
-            except Exception as exc:
-                raise CodexModelHubCatalogUnavailableError(
-                    "Codex Model Hub catalog preparation failed"
-                ) from exc
-            if self._model_hub_catalog_generation != generation:
-                catalog.close()
-                raise CodexModelHubCatalogUnavailableError(
-                    "Codex Model Hub catalog generation changed during preparation"
-                )
-            self._model_hub_catalog = catalog
-            return catalog
+                try:
+                    catalog = await asyncio.shield(preparation)
+                except asyncio.CancelledError:
+                    # The export runs in a thread and cannot be cancelled. Its
+                    # result must still release its pin after the caller leaves.
+                    preparation.add_done_callback(self._discard_model_hub_catalog)
+                    raise
+                except Exception as exc:
+                    raise CodexModelHubCatalogUnavailableError(
+                        "Codex Model Hub catalog preparation failed"
+                    ) from exc
+                if self._model_hub_catalog_generation != generation:
+                    # A catalog or runtime change landed during the export;
+                    # this launch prepares the committed generation instead.
+                    catalog.close()
+                    continue
+                self._model_hub_catalog = catalog
+            return self._model_hub_catalog
 
     @staticmethod
     def _discard_model_hub_catalog(preparation: asyncio.Task) -> None:

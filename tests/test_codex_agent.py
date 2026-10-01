@@ -6658,8 +6658,8 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(agent.codex_config, next_config)
             self.assertIsNone(agent._model_hub_catalog)
             release_previous.set()
-            with self.assertRaises(_MODULE.CodexModelHubCatalogUnavailableError):
-                await startup
+            # The startup launch prepares the new runtime's catalog instead.
+            started = await startup
             recovered = await agent.prepare_model_hub_runtime()
 
         self.assertEqual(
@@ -6671,7 +6671,9 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(agent.codex_config, next_config)
         self.assertEqual(agent._model_hub_catalog, next_catalog)
+        self.assertEqual(started, next_catalog)
         self.assertEqual(recovered, next_catalog)
+        previous_catalog.close.assert_called()
 
     async def test_model_hub_catalog_preparation_retries_after_transient_failure(self):
         agent = self._agent()

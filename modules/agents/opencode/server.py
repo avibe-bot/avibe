@@ -930,61 +930,65 @@ class OpenCodeServerManager:
                 should_wait = False
                 blocked_by_live_runs = False
                 async with self._get_lock():
-                    transition = self._model_hub_overlay_transition
-                    if transition is not None and transition[2] is not transition_owner:
-                        # Once a real configuration change is queued, new turns on
-                        # the old overlay must wait. Otherwise they can continuously
-                        # replenish the active set and starve the transition.
-                        should_wait = True
-                    else:
-                        info = self._read_pid_file() or {}
-                        current_server = self._pid_file_references_current_server(info)
-                        effective_path = (
-                            info.get("model_hub_overlay_path") if current_server else None
-                        )
-                        effective_hash = (
-                            info.get("model_hub_overlay_hash") if current_server else None
-                        )
-                        if effective_path is None and effective_hash is None:
-                            effective_path = self._model_hub_overlay_path
-                            effective_hash = self._model_hub_overlay_hash
+                    info = self._read_pid_file() or {}
+                    current_server = self._pid_file_references_current_server(info)
+                    if current_server:
+                        # A run that an adopted server's durable poll still
+                        # owns is live work, not a stale marker.
+                        info = self._reconcile_adopted_active_run_sessions(info) or info
+                    effective_path = (
+                        info.get("model_hub_overlay_path") if current_server else None
+                    )
+                    effective_hash = (
+                        info.get("model_hub_overlay_hash") if current_server else None
+                    )
+                    if effective_path is None and effective_hash is None:
+                        effective_path = self._model_hub_overlay_path
+                        effective_hash = self._model_hub_overlay_hash
 
-                        # Most turns reuse the running server's overlay. They must
-                        # not wait behind unrelated active work when no transition
-                        # has claimed the runtime.
-                        if (effective_path, effective_hash) == (
+                    # A turn the running overlay serves never waits, neither
+                    # behind unrelated active work nor behind another turn's
+                    # queued switch.
+                    if (effective_path, effective_hash) == (
+                        desired_path,
+                        desired_hash,
+                    ):
+                        self._model_hub_overlay_path = desired_path
+                        self._model_hub_overlay_hash = desired_hash
+                        self._model_hub_overlay_content = desired_content
+                        self._model_hub_overlay_provider_ids = desired_provider_ids
+                        self._model_hub_overlay_reservations[transition_owner] = (
                             desired_path,
                             desired_hash,
-                        ):
-                            self._model_hub_overlay_path = desired_path
-                            self._model_hub_overlay_hash = desired_hash
-                            self._model_hub_overlay_content = desired_content
-                            self._model_hub_overlay_provider_ids = desired_provider_ids
-                            self._model_hub_overlay_reservations[transition_owner] = (
-                                desired_path,
-                                desired_hash,
-                            )
-                            return transition_owner
-
-                        live_runs = bool(
-                            self._active_requests > 0
-                            or self._has_active_run_sessions()
-                            or self._model_hub_overlay_reservations
                         )
-                        if live_runs and self._running_overlay_serves(
-                            effective_hash,
-                            desired_content,
-                            required_model,
-                        ):
-                            # Only model rows changed and this turn's model is
-                            # still served: keep the running overlay rather than
-                            # wait. A turn that finds the server idle switches.
-                            self._model_hub_overlay_reservations[transition_owner] = (
-                                effective_path,
-                                effective_hash,
-                            )
-                            return transition_owner
+                        return transition_owner
 
+                    live_runs = bool(
+                        self._active_requests > 0
+                        or self._has_active_run_sessions()
+                        or self._model_hub_overlay_reservations
+                    )
+                    if live_runs and self._running_overlay_serves(
+                        effective_hash,
+                        desired_content,
+                        required_model,
+                    ):
+                        # Only model rows changed and this turn's model is still
+                        # served. The turn reads its model row from the running
+                        # overlay; a turn that finds the server idle switches.
+                        self._model_hub_overlay_reservations[transition_owner] = (
+                            effective_path,
+                            effective_hash,
+                        )
+                        return transition_owner
+
+                    transition = self._model_hub_overlay_transition
+                    if transition is not None and transition[2] is not transition_owner:
+                        # Another turn's switch is queued: wait for it to land
+                        # rather than race it to a second restart.
+                        should_wait = True
+                        blocked_by_live_runs = live_runs
+                    else:
                         if not owns_transition:
                             self._model_hub_overlay_transition = (
                                 desired_path,
@@ -1089,6 +1093,14 @@ class OpenCodeServerManager:
             }
 
         return without_model_rows(running) == without_model_rows(desired)
+
+    def model_hub_overlay_content_for(self, reservation: object) -> str | None:
+        """Return the overlay document the server runs for a reserved turn."""
+
+        reserved = self._model_hub_overlay_reservations.get(reservation)
+        if reserved is None or reserved[1] != self._model_hub_overlay_hash:
+            return None
+        return self._model_hub_overlay_content
 
     async def release_model_hub_overlay_reservation(
         self,

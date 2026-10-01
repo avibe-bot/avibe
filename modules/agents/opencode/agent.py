@@ -13,7 +13,7 @@ import logging
 import os
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -1387,6 +1387,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     model_hub_overlay,
                     required_model=required_model,
                 )
+                running_overlay_content = getattr(server, "model_hub_overlay_content_for", None)
+                if model_hub_overlay is not None and callable(running_overlay_content):
+                    content = running_overlay_content(model_hub_overlay_reservation)
+                    if content is not None:
+                        # A busy server may still run the previous overlay; the
+                        # turn reads model rows from the document it runs on.
+                        model_hub_overlay = replace(model_hub_overlay, content=content)
             await server.ensure_running()
             caller_context_binding_path = _caller_context_path_for_server(server)
             activation_identity = self._attach_server_activation(server)

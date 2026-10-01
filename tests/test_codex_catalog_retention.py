@@ -224,27 +224,33 @@ async def test_cache_invalidation_during_pending_launch_keeps_local_reference(mo
 
 
 @pytest.mark.asyncio
-async def test_invalidated_export_releases_unpublished_pin(monkeypatch):
+async def test_invalidated_export_releases_its_pin_and_prepares_the_committed_generation(monkeypatch):
     value = agent()
     entered = threading.Event()
     released = threading.Event()
+    exports = []
 
     def export(*_):
-        entered.set()
-        assert released.wait(timeout=5)
-        return b'{"models":[{"slug":"raced"}]}'
+        exports.append(None)
+        if len(exports) == 1:
+            entered.set()
+            assert released.wait(timeout=5)
+            return b'{"models":[{"slug":"raced"}]}'
+        return b'{"models":[{"slug":"committed"}]}'
 
     monkeypatch.setattr(catalogs, "_export_codex_bundled_catalog", export)
     preparation = asyncio.create_task(value.prepare_model_hub_runtime())
     assert await asyncio.to_thread(entered.wait, 2)
     await value.invalidate_model_hub_runtime()
     released.set()
-    with pytest.raises(CodexModelHubCatalogUnavailableError, match="generation changed"):
-        await preparation
-    assert value._model_hub_catalog is None
+    # A catalog change during the export never fails the launch waiting on it.
+    catalog = await preparation
+    assert len(exports) == 2
+    assert value._model_hub_catalog is catalog
+    assert b"committed" in catalog.path.read_bytes()
     del preparation
     churn()
-    assert len(retained()) <= 1
+    assert not [path for path in retained() if b"raced" in path.read_bytes()]
 
 
 @pytest.mark.asyncio
