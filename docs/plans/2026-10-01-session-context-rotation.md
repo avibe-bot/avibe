@@ -189,12 +189,18 @@ Occupancy, in tokens:
 Window, in priority order:
 
 1. The backend's own report:
-   - Claude: `ResultMessage.model_usage[<model>].contextWindow`, present in
-     `claude-agent-sdk` 0.2.159, the lowest version pinned. This also covers
+   - Claude: `ResultMessage.model_usage[<model>].contextWindow`. The field is
+     present at both pinned floors, `claude-agent-sdk` 0.2.158 (Windows,
+     `>=0.2.158,<0.2.160`) and 0.2.162 (other platforms). This also covers
      direct, non-Hub launches, whose `ModelHubLaunch` carries no
-     `context_window`.
+     `context_window`. A unit test that parses a result message pins the field
+     at the Windows floor.
    - Codex: `tokenUsage.modelContextWindow`.
 2. The configured Model Hub `context_window`.
+
+Each source is optional at runtime. If a source reports no window, the next
+one is used; if none does, the window is unknown and only the compaction
+signal applies.
 
 Backend compaction observed during the turn sets `compacted`:
 
@@ -278,6 +284,8 @@ continuity but does not fail dispatch.
   handoff, whatever its run status.
 - A turn whose occupancy peaks at or above the ratio, or that observes a backend
   compaction, marks the session due even if its last snapshot is lower.
+- The window comes from the first source that reports one. With none, ratio
+  rotation is skipped and compaction still marks the session due.
 - Load fixtures: rows with no rotation keys (every released shape), and rows
   with each key malformed or in an unknown shape. Turn start, turn end, and
   startup all succeed, and each key behaves as absent.
