@@ -2322,7 +2322,7 @@ class AgentAuthService:
         if not callable(renew):
             return False
         runtime_config = self._load_backend_runtime_config(backend)
-        if runtime_config is None:
+        if runtime_config is None or getattr(runtime_config, "enabled", True) is False:
             return False
         await renew(runtime_config)
         self._sync_builtin_default_agents()

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple
 from uuid import uuid4
 from modules.im import MessageContext
@@ -1030,10 +1031,12 @@ class SessionHandler(BaseHandler):
             )
         return disallowed
 
-    def _get_claude_cli_path_override(self) -> Optional[str]:
+    def _get_claude_cli_path_override(self, claude_config: Any = None) -> Optional[str]:
         from vibe.claude_config import normalize_claude_cli_path
 
-        return normalize_claude_cli_path(getattr(getattr(self.config, "claude", None), "cli_path", None))
+        if claude_config is None:
+            claude_config = getattr(self.config, "claude", None)
+        return normalize_claude_cli_path(getattr(claude_config, "cli_path", None))
 
     def _load_agent_file(self, agent_name: str, working_path: str) -> Optional[Dict[str, Any]]:
         """Load an agent file and return its parsed content.
@@ -1442,8 +1445,12 @@ class SessionHandler(BaseHandler):
         agent_system_prompt: Optional[str],
         fork_session: bool = False,
     ) -> ClaudeSDKClient:
-        # A renewal while this client is created must still apply to it.
+        # One coherent config for the whole launch: a renewal while this client
+        # is created leaves it on the epoch and config it started with, and its
+        # next turn moves it.
         runtime_epoch = getattr(self.controller, "claude_runtime_epoch", 0)
+        claude_config = getattr(self.config, "claude", None)
+        launch_config = SimpleNamespace(claude=claude_config)
 
         # Ensure working directory exists
         if not os.path.exists(working_path):
@@ -1507,6 +1514,7 @@ class SessionHandler(BaseHandler):
             agent_system_prompt=agent_system_prompt,
             skill_catalog_sink=skill_catalog_sink,
             working_path=working_path,
+            claude_config=claude_config,
         )
 
         # Echo native input frames so the long-lived receiver can correlate
@@ -1536,7 +1544,7 @@ class SessionHandler(BaseHandler):
         )
         from core.git_runtime import prepend_vendored_git_to_path
 
-        claude_env = build_claude_subprocess_env(getattr(self.config, "claude", None))
+        claude_env = build_claude_subprocess_env(claude_config)
         if model_hub_launch is not None:
             claude_env = build_claude_hub_env(claude_env, model_hub_launch)
         claude_env.update(self._caller_env_for_context(context))
@@ -1544,7 +1552,7 @@ class SessionHandler(BaseHandler):
             managed_skill_environment(
                 working_path,
                 project_base=managed_skill_project_base(context),
-                claude_cli_path=managed_skill_claude_cli_path(self.config),
+                claude_cli_path=managed_skill_claude_cli_path(launch_config),
             )
         )
         prepend_vendored_git_to_path(
@@ -1582,7 +1590,7 @@ class SessionHandler(BaseHandler):
         }
         if tool_policy_hooks:
             option_kwargs["hooks"] = tool_policy_hooks
-        cli_path_override = self._get_claude_cli_path_override()
+        cli_path_override = self._get_claude_cli_path_override(claude_config)
         if cli_path_override:
             option_kwargs["cli_path"] = cli_path_override
         if effective_effort == NO_REASONING_EFFORT:
@@ -1630,7 +1638,7 @@ class SessionHandler(BaseHandler):
             managed_skill_environment(
                 working_path,
                 project_base=managed_skill_project_base(context),
-                claude_cli_path=managed_skill_claude_cli_path(self.config),
+                claude_cli_path=managed_skill_claude_cli_path(launch_config),
             ),
         )
         setattr(client, "_vibe_git_path_state", git_path_state)
@@ -1733,8 +1741,11 @@ class SessionHandler(BaseHandler):
         agent_system_prompt: Optional[str],
         working_path: Optional[str] = None,
         skill_catalog_sink: list[dict] | None = None,
+        claude_config: Any = None,
     ) -> str | Dict[str, str]:
-        base_prompt = agent_system_prompt or self.config.claude.system_prompt
+        if claude_config is None:
+            claude_config = self.config.claude
+        base_prompt = agent_system_prompt or claude_config.system_prompt
         quick_replies_on = getattr(self.config, "reply_enhancements", True)
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
 
@@ -1754,7 +1765,7 @@ class SessionHandler(BaseHandler):
             enabled_agents=get_enabled_agents_for_prompt(self.controller),
             skills_cwd=working_path,
             skills_project_base=managed_skill_project_base(context),
-            skills_claude_cli_path=managed_skill_claude_cli_path(self.config),
+            skills_claude_cli_path=managed_skill_claude_cli_path(SimpleNamespace(claude=claude_config)),
             skill_catalog_sink=skill_catalog_sink,
         )
 

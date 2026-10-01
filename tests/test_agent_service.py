@@ -719,6 +719,31 @@ def test_force_end_backend_activities_waits_for_run_settlement_before_ack() -> N
     service.activities.ack_recovered_terminal.assert_not_called()
 
 
+def test_a_runtime_force_end_keeps_the_activity_until_its_run_settles() -> None:
+    """A replaced runtime's killed Activity survives a failed Run settlement for a retry."""
+    controller = SimpleNamespace(
+        scheduled_task_service=SimpleNamespace(
+            settle_activity_runs=Mock(side_effect=RuntimeError("store unavailable")),
+        ),
+    )
+    service = AgentService(controller=controller)
+    service.activities.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-active",
+        kind="background_task",
+        run_id="run-active",
+    )
+
+    completed = service.force_end_runtime_activities("claude", "runtime-1")
+
+    assert [(item.id, item.status) for item in completed] == [("task-active", "killed")]
+    assert [item.id for item in service.activities.terminal_snapshots_for_runtime("claude", "runtime-1")] == [
+        "task-active"
+    ]
+
+
 def test_force_cancel_backend_turns_emits_terminal_before_release() -> None:
     async def _run():
         controller = _Controller()

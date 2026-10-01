@@ -206,10 +206,13 @@ class AgentService:
 
     def force_end_runtime_activities(self, backend: str, runtime_key: str) -> list[Any]:
         """End the Activities of one runtime the service replaces itself."""
+        # Retained until the Run owner settles them, like a whole-backend stop,
+        # so a transient settlement failure leaves something to retry.
         completed = self.activities.end_runtime(
             backend,
             runtime_key,
             status="killed",
+            retain_terminal_snapshots=True,
             force=True,
             metadata={"interrupt_reason": SETTLED_BY_BACKEND_REFRESH},
         )

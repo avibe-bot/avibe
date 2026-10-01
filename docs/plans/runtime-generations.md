@@ -142,8 +142,8 @@ first app-server, which then stops. `S1`'s next turn runs on the second one.
   force-stopped, so a failed start costs no running work. Its sessions get the
   runtime-update interruption notice and continue on the current generation.
 - Teardown never runs under the generation lock, because a forced stop settles
-  work that releases its bindings. A failed teardown keeps the generation
-  tracked so the next sweep retries it.
+  work that releases its bindings. A teardown that fails or is cancelled keeps
+  the generation tracked, closed to admission, so the next sweep retries it.
 
 ## Per-backend design
 
@@ -301,8 +301,14 @@ Implemented in the first PR; the Codex and OpenCode adapters build on it.
     leaves the current generation serving.
   - `reap()` stops drained retiring generations, and `stop_all(force)` serves
     shutdown.
-  - Adapters provide `start(spec)`, `stop(runtime, force)` and
-    `idle(runtime)`, and own the routing of bound work.
+  - Adapters provide `start(spec)` and `stop(generation, force) -> bool`, and
+    own the routing of bound work. The core decides "drained" from its own
+    binding count alone. A graceful stop may decline with `False` while the
+    adapter's own evidence still shows work. Every bookkeeping section is
+    synchronous, so no adapter call runs under the set's lock.
+  - A declined, failed, or cancelled teardown re-attaches the generation for
+    the next sweep. A failed or cancelled one is also `closed`, so it never
+    serves a turn again. `stop_all` closes admission before it stops anything.
 - **Forced stops.** `AgentService.force_end_runtime_activities(backend,
   runtime_key)` settles one runtime's Activities as interrupted by a runtime
   update, using the existing backend-refresh notice.

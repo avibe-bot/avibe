@@ -132,6 +132,25 @@ class _StubController:
 
 
 class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyncioTestCase):
+    async def test_renewal_in_place_declines_a_disabled_backend(self):
+        """RUNTIME-GEN-004: disabling a backend keeps the retirement path; enabling renews."""
+        for enabled in (True, False):
+            controller = _StubController()
+            renew = AsyncMock()
+            controller.agent_service = SimpleNamespace(agents={"claude": SimpleNamespace(renew_runtime=renew)})
+            service = AgentAuthService(controller)
+            runtime_config = SimpleNamespace(enabled=enabled)
+            service._load_backend_runtime_config = lambda _backend, config=runtime_config: config
+            service._sync_builtin_default_agents = lambda: None
+
+            renewed = await service.renew_backend_runtime("claude")
+
+            assert renewed is enabled
+            if enabled:
+                renew.assert_awaited_once_with(runtime_config)
+            else:
+                renew.assert_not_awaited()
+
     async def test_handle_setup_command_submits_code(self):
         controller = _StubController()
         service = AgentAuthService(controller)

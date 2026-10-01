@@ -677,6 +677,40 @@ def test_claude_launch_change_keeps_a_busy_client_until_its_session_is_idle(monk
     asyncio.run(run())
 
 
+def test_a_renewal_during_client_creation_leaves_one_coherent_launch_config(monkeypatch, tmp_path) -> None:
+    """RUNTIME-GEN-001: a client is launched from the config it started with.
+
+    A save that lands while the client is being created changes neither its
+    CLI path nor its epoch midway; the session's next turn moves it.
+    """
+    captured = {}
+
+    class Client:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self):
+            pass
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    build_prompt = handler._build_claude_system_prompt
+
+    async def renew_while_building(*args, **kwargs):
+        controller.config.claude = _ClaudeRuntimeConfig(cli_path="/opt/renewed/claude")
+        handler.renew_runtime()
+        return await build_prompt(*args, **kwargs)
+
+    monkeypatch.setattr(handler, "_build_claude_system_prompt", renew_while_building)
+
+    client = _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+
+    assert captured["options"].cli_path == "/usr/local/bin/claude-proxy"
+    assert client._vibe_runtime_epoch == 0
+
+
 @pytest.mark.parametrize("channel", ["hub", "native_cli"])
 @pytest.mark.parametrize("explicit", [None, "", "333333"])
 @pytest.mark.parametrize("has_metadata", [False, True])
