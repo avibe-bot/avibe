@@ -6,6 +6,8 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -224,15 +226,9 @@ def test_opencode_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(
     language,
 ) -> None:
     """MH-UNLISTED-001: an OpenCode Agent whose default model left the list
-    shows the shared refusal, not a wrapped exception or raw key, and keeps
-    the input for an explicit retry."""
-
-    failures: list[str] = []
-
-    async def _emit_failure(_controller, _context, _backend, _diagnostic, *, display_text, request):
-        failures.append(display_text)
-
-    monkeypatch.setattr("modules.agents.opencode.agent.emit_backend_failure", _emit_failure)
+    shows the shared refusal, not a wrapped exception, raw key, or a login
+    prompt matched from words in the model id, and keeps the input for an
+    explicit retry."""
 
     class _Server:
         async def configure_model_hub_overlay(self, overlay):
@@ -262,6 +258,10 @@ def test_opencode_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(
     server = _Server()
     controller = unlisted_model_runtime(tmp_path, language)
     controller.get_opencode_overrides = lambda _context: (None, None, None)
+    controller.emit_agent_message = AsyncMock()
+    controller.agent_auth_service = SimpleNamespace(
+        maybe_emit_auth_recovery_message=AsyncMock(return_value=True),
+    )
     agent = OpenCodeAgent.__new__(OpenCodeAgent)
     agent.controller = controller
     agent.config = controller.config
@@ -297,7 +297,9 @@ def test_opencode_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(
 
     asyncio.run(agent._process_message(request))
 
-    assert failures == [f"❌ {unlisted_model_copy('opencode', language)}"]
+    controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_not_awaited()
+    notices = [call.args[2] for call in controller.emit_agent_message.await_args_list if call.args[1] == "notify"]
+    assert notices == [f"❌ {unlisted_model_copy('opencode', language)}"]
     assert prewrite_failure_evidence(context) == {
         "reason": "model_hub_model_unlisted", "requires_explicit_retry": True,
     }

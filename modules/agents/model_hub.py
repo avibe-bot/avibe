@@ -29,6 +29,7 @@ from core.handlers.model_hub.provenance import (
     PreparedGatewayRoute,
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
+    is_unlisted_model_outcome,
     render_turn_outcome_copy,
     supply_interruption_reason,
 )
@@ -45,6 +46,7 @@ from core.handlers.model_hub.service import (
     ModelHubService,
     create_default_service,
     project_opencode_public_model,
+    turn_refusal,
 )
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -310,9 +312,10 @@ def launch_refusal_copy(controller: Any, error: BaseException) -> str | None:
     label around it.
     """
 
-    if not isinstance(error, ModelHubError) or error.turn_outcome is None:
+    outcome = turn_refusal(error)
+    if outcome is None:
         return None
-    return render_turn_outcome_copy(error.turn_outcome, _language(controller))
+    return render_turn_outcome_copy(outcome, _language(controller))
 
 
 def _hold_unrunnable_input(context: Any, error: ModelHubError) -> None:
@@ -322,12 +325,7 @@ def _hold_unrunnable_input(context: Any, error: ModelHubError) -> None:
     automatic startup retries a transient failure gets.
     """
 
-    outcome = error.turn_outcome
-    if (
-        context is not None
-        and outcome is not None
-        and outcome.discriminator == "model_unlisted"
-    ):
+    if context is not None and is_unlisted_model_outcome(error.turn_outcome):
         mark_prewrite_recovery_required(context, UNLISTED_MODEL_RETRY_REASON)
 
 
@@ -828,10 +826,18 @@ class ModelHubRuntimeRouter:
         requested_model: str,
         process_scope: Optional[str],
         turn_id: Optional[str],
+        listed_only: bool = False,
     ) -> ModelHubError:
+        view = None
+        if listed_only:
+            # A backend that addresses only listed rows cannot take a manual
+            # Route retained for an id its list does not hold.
+            view = self.service._clone_config(self.service.store.load())
+            view.agents[backend].routes.pop(requested_model, None)
         projection_config, projection_resolution = self.service._inspect_terminal_chain(
             backend=backend,
             model_id=requested_model,
+            config=view,
         )
         turn_outcome = self.service._produce_no_candidate_terminal_outcome(
             config=projection_config,
@@ -854,7 +860,9 @@ class ModelHubRuntimeRouter:
                 supply_state=supply_state,
                 blockers=exact_hop_blockers(projection_resolution),
             )
-        if (
+        # An unlisted id is not a model of this backend, so it has no supply to
+        # interrupt: the turn's own refusal is the whole report.
+        if not is_unlisted_model_outcome(turn_outcome) and (
             not projection_resolution.matching_sources
             or projection_resolution.structural_blocker_reason is not None
         ):
@@ -1075,6 +1083,15 @@ class ModelHubRuntimeRouter:
         )
         if launch is None:
             config = self.service.store.load()
+            if all(model.id != requested_model for model in config.agents["opencode"].models):
+                # The overlay holds launches only for listed rows.
+                raise self._no_candidate_error(
+                    backend="opencode",
+                    requested_model=requested_model,
+                    process_scope="opencode:shared-server",
+                    turn_id=None,
+                    listed_only=True,
+                )
             config, resolution = await self._resolve_turn(
                 config,
                 "opencode",

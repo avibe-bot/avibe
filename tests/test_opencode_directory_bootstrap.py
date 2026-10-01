@@ -106,7 +106,7 @@ async def _first_turn(tmp_path, port: int, monkeypatch):
     reached_prompt: list[tuple[str, str, str] | None] = []
     failures: list[str] = []
 
-    async def emit_backend_failure(_controller, _context, _backend, _error, *, display_text, request):
+    async def emit_backend_failure(_controller, _context, _backend, _error, *, display_text, request, **_kwargs):
         failures.append(display_text)
 
     monkeypatch.setattr("modules.agents.opencode.agent.emit_backend_failure", emit_backend_failure)

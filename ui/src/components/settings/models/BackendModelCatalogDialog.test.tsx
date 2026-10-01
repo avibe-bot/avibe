@@ -633,6 +633,37 @@ describe('BackendModelCatalogDialog', () => {
     expect(JSON.stringify(confirmed.would_interrupt)).toBe(JSON.stringify(gaps));
   });
 
+  it('MH-UNLISTED-002: asks again before a confirmed save stops an Agent the guard did not show', async () => {
+    const user = userEvent.setup();
+    const shown = [{ backend: 'claude' as const, model_id: 'beta', agents: ['pm'] }];
+    const grown = [{ backend: 'claude' as const, model_id: 'beta', agents: ['ops', 'pm'] }];
+    const refusal = (gaps: typeof shown) => new ApiCallError(
+      'backend_model_in_route', 'modelHub.errors.backend_model_in_route', true, gaps, [], [], 409,
+    );
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));
+    const write = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(refusal(shown))
+      .mockRejectedValueOnce(refusal(grown))
+      .mockResolvedValue(agent([model('alpha')]));
+    const { onClose } = renderDialog();
+
+    await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    const first = await screen.findByRole('dialog', { name: 'Save the model list?' });
+    expect(within(first).getByText('Agents pinned to it: pm')).toBeTruthy();
+    await user.click(within(first).getByRole('button', { name: 'Remove anyway' }));
+
+    // pm was agreed to; ops was never shown, so the grown plan is asked, not forced.
+    await screen.findByText('Agents pinned to it: ops, pm');
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(onClose).not.toHaveBeenCalled();
+
+    await user.click(within(screen.getByRole('dialog', { name: 'Save the model list?' })).getByRole('button', { name: 'Remove anyway' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith(undefined));
+    expect(write).toHaveBeenCalledTimes(3);
+    expect(write.mock.calls[2][1]).toMatchObject({ force: true, would_remove_hops: [], would_interrupt: grown });
+  });
+
   it('keeps the confirmed guard mounted and busy until the forced save lands', async () => {
     const user = userEvent.setup();
     const hops = [{ backend: 'claude' as const, menu_model: 'beta', source_id: 'src_a', model_id: 'beta-air', position: 1 }];

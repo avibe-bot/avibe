@@ -2023,6 +2023,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 error_text,
                 display_text=display_text,
                 request=request,
+                cause=e,
             )
         finally:
             await self._stop_caller_context_binding_renewal(

@@ -25,7 +25,7 @@ import { classifyModelHubFailure, type ModelHubFailureClass } from './asyncLifet
 import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { GuardDialog } from './GuardDialog';
 import { GuardImpact, type GuardPlan } from './GuardImpact';
-import { confirmGuardPlan, guardedFailure, sendAgreed } from './guardedWrite';
+import { confirmGuardPlan, sendAgreed, unansweredRefusal } from './guardedWrite';
 import { apiFailure, modelsApi, type SourceCreated } from './modelsApi';
 import {
   createContinuationSettlement,
@@ -187,8 +187,9 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
       } catch (error) {
         const failure = apiFailure(error);
         // Only an unconfirmed attempt asks: a confirmed one already resent the
-        // moving plan within its bound, and ends as the failure below.
-        const refusal = plan === null ? guardedFailure(error) : null;
+        // moving plan within its bound, and ends as the failure below — unless
+        // the plan now stops an Agent the confirmation did not show.
+        const refusal = unansweredRefusal(error, plan !== null, plan);
         if (refusal) {
           settlement.release();
           continuation.settle(seq, () => {

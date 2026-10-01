@@ -376,6 +376,16 @@ class ModelHubError(Exception):
         self.local_error_detail = local_error_detail
 
 
+def turn_refusal(error: BaseException | None) -> TurnOutcomeProjectionInput | None:
+    """The turn outcome a Model Hub error refuses its turn with, if it is one.
+
+    Such an error states its own cause, so text matching on its message can
+    only misread it, for example a model id that happens to say ``oauth``.
+    """
+
+    return error.turn_outcome if isinstance(error, ModelHubError) else None
+
+
 class CredentialCleanupUnsettledError(ModelHubError):
     def __init__(self):
         super().__init__("engine_down", status=503)
@@ -5629,7 +5639,7 @@ class ModelHubService:
                     self._agent(committed, backend),
                 )
             }
-            if removed_hops:
+            if removed_hops or interrupted:
                 result["removed_hops"] = removed_hops
                 result["interrupted"] = interrupted
             return result
@@ -7445,10 +7455,15 @@ class ModelHubService:
         *,
         backend: BackendName,
         model_id: str,
+        config: ModelHubConfig | None = None,
     ) -> tuple[ModelHubConfig, ModelHubTurnResolution]:
-        """Inspect the complete effective chain used by the next turn."""
+        """Inspect the complete effective chain used by the next turn.
 
-        config = self.store.load()
+        ``config`` is a view of the stored config, for a backend that can take
+        only part of what is stored; by default the stored config is inspected.
+        """
+
+        config = config if config is not None else self.store.load()
         resolution = resolve_model_hub_turn(
             config,
             backend,

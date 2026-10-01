@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/lib/useIsMobile";
 import { GuardDialog } from "./GuardDialog";
 import { GuardImpact, type GuardPlan } from "./GuardImpact";
-import { confirmGuardPlan, guardedFailure, sendAgreed } from "./guardedWrite";
+import { confirmGuardPlan, sendAgreed, unansweredRefusal } from "./guardedWrite";
 import { RouteCandidatePopover } from "./RouteCandidatePopover";
 import { RecordedTurnBadge, RecordedTurnDetails, RouteRecordedTurn } from './RouteRecordedTurn';
 import { recordedOn, useRecordedTurn } from './recordedTurn';
@@ -556,11 +556,11 @@ export const RouteChainDialog: React.FC<{
         return;
       }
       const refusal = failure?.code === "source_last_supplier" || failure?.code === "source_in_route_chain"
-        ? guardedFailure(error)
+        ? unansweredRefusal(error, confirmation !== undefined, confirmation ?? null)
         : null;
-      // Only an initial save reaches here with a plan: a confirmed one resends
-      // the recomputed plan itself, so the question is asked once per save.
-      if (refusal && !confirmation) {
+      // A confirmed save resends the recomputed plan itself, so the question is
+      // asked once per save — unless that plan stops an Agent it did not show.
+      if (refusal) {
         setGuard(refusal);
         setPhase("ready");
         return;

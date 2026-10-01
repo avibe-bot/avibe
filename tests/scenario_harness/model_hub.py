@@ -345,8 +345,9 @@ def round_trip(config: ModelHubConfig) -> ModelHubConfig:
     return ModelHubConfig.from_payload(config.to_payload())
 
 
-#: A model no backend's Model Hub list holds, as a removed row leaves it.
-UNLISTED_MODEL = "retired-模型-9"
+#: A model no backend's Model Hub list holds, as a removed row leaves it. Its id
+#: carries words the native auth heuristics match, which a refusal must not trip.
+UNLISTED_MODEL = "oauth-authentication-retired-模型-9"
 
 
 def unlisted_model_runtime(tmp_path: Path, language: str = "en"):

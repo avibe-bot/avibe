@@ -15,7 +15,7 @@ import { classifyModelHubFailure } from './asyncLifetime';
 import { Field } from './dialogFields';
 import { GuardDialog } from './GuardDialog';
 import { GuardImpact } from './GuardImpact';
-import { confirmGuardPlan, guardedFailure, sendAgreed } from './guardedWrite';
+import { confirmGuardPlan, sendAgreed, unansweredRefusal } from './guardedWrite';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { SourcePrivateValue, SourcePrivacyToggle } from './SourcePrivacy';
 import { useSourceDetailsHidden } from './sourcePrivacyPreference';
@@ -225,8 +225,9 @@ export const SourceDetailPanel: React.FC<{
         if (apiFailure(error)?.code === 'source_not_found') await settlement.gone(latest.id);
         else {
           // A confirmed refetch was already answered: a plan that kept moving
-          // past the resend bound ends as a failure, never a second question.
-          const refusal = plan === null ? guardedFailure(error) : null;
+          // past the resend bound ends as a failure, never a second question —
+          // unless it now stops an Agent the confirmation did not show.
+          const refusal = unansweredRefusal(error, plan !== null, plan);
           if (refusal) {
             setGuard({ kind: 'refetch', plan: refusal });
             settlement.release();
@@ -364,7 +365,7 @@ export const SourceDetailPanel: React.FC<{
       } catch (error) {
         if (apiFailure(error)?.code === 'source_not_found') await settlement.gone(latest.id);
         else {
-          const refusal = plan === null ? guardedFailure(error) : null;
+          const refusal = unansweredRefusal(error, plan !== null, plan);
           if (refusal) {
             setGuard({ kind: 'removeModel', model, plan: refusal });
             settlement.release();
@@ -504,7 +505,7 @@ export const SourceDetailPanel: React.FC<{
         } else if (classifyModelHubFailure(failure) === 'inconclusive') {
           await reconcileEditWrite(latest, draft, patch, sent, settlement);
         } else {
-          const refusal = forced ? null : guardedFailure(error);
+          const refusal = unansweredRefusal(error, forced, plan);
           if (refusal) {
             dispatchManageStage({ type: 'guard_edit', draft, patch, plan: refusal });
             settlement.release();
@@ -530,8 +531,9 @@ export const SourceDetailPanel: React.FC<{
     setPendingAction('other');
     return trackMutation(async (latest, settlement) => {
       // Deleting is confirmed before the first attempt, and that confirmation
-      // says it removes the source from every route that uses it — so whatever
-      // plan the guard names is already agreed to.
+      // says it removes the source from every route that uses it — so the hops
+      // the guard names are already agreed to. An Agent it would stop is not:
+      // that plan is asked in the same dialog before anything is removed.
       let sent = plan;
       try {
         const answer = await sendAgreed(true, plan, (next) => {
@@ -559,7 +561,9 @@ export const SourceDetailPanel: React.FC<{
         } else if (classifyModelHubFailure(failure) === 'inconclusive') {
           await reconcileDeleteWrite(latest, sent, settlement);
         } else {
-          dispatchManageStage({ type: 'fail_delete', plan: sent, forced: sent !== null, retryRead: false, before: latest });
+          const refusal = unansweredRefusal(error, true, plan);
+          if (refusal) dispatchManageStage({ type: 'guard_delete', plan: refusal });
+          else dispatchManageStage({ type: 'fail_delete', plan: sent, forced: sent !== null, retryRead: false, before: latest });
           settlement.release();
         }
       }
@@ -621,7 +625,7 @@ export const SourceDetailPanel: React.FC<{
     if (manageStage.kind === 'confirming_edit') {
       void submitEdit(manageStage.draft, manageStage.patch, manageStage.plan);
     }
-    if (manageStage.kind === 'confirming_delete') void submitDelete(null);
+    if (manageStage.kind === 'confirming_delete') void submitDelete(manageStage.plan);
   };
   const confirmGuard = () => {
     if (!guard) return;

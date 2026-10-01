@@ -368,6 +368,7 @@ async def emit_backend_failure(
     output: MessageOutput | None = None,
     failure_id: str | None = None,
     delivery: DeliveryEvidence | None = None,
+    cause: BaseException | None = None,
 ) -> bool:
     """Notify and settle one terminal backend failure.
 
@@ -378,6 +379,10 @@ async def emit_backend_failure(
     only as one Turn-scoped fallback when this notification cannot be acknowledged.
     Non-Harness callers retain immediate auth recovery. The return value is true when
     auth recovery supplied that immediate notification.
+
+    ``cause`` is the exception the failure reports, when the adapter has one. A
+    Model Hub turn refusal names its own cause, so it never reaches the text
+    auth heuristic, which would misread a model id that says ``oauth``.
 
     ``delivery``, when supplied, is filled in with what the notify attempt actually
     proved. A durable Turn or legacy Harness Run supplies an evidence object
@@ -439,9 +444,11 @@ async def emit_backend_failure(
     # function at all; see ``emit_replayed_backend_failure``. A bypass argument here
     # was the previous shape, and it left the replay inside this lifecycle with its
     # live behaviours switched off one at a time.
+    from core.handlers.model_hub.service import turn_refusal
+
     auth_service = getattr(controller, "agent_auth_service", None)
     maybe_recover = getattr(auth_service, "maybe_emit_auth_recovery_message", None)
-    if not harness_run_id and callable(maybe_recover):
+    if not harness_run_id and callable(maybe_recover) and turn_refusal(cause) is None:
         try:
             handled_auth = await maybe_recover(
                 context,

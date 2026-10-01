@@ -390,6 +390,16 @@ def no_candidate_decision(
     return "turn.no_candidate.unconfigured"
 
 
+def is_unlisted_model_outcome(projection: TurnOutcomeProjectionInput | None) -> bool:
+    """Whether a turn was refused because its backend's list does not hold its model."""
+
+    rule = TURN_OUTCOME_RENDERING_AUTHORITY["turn.no_candidate.unlisted"]
+    return projection is not None and (projection.outcome, projection.discriminator) == (
+        rule.outcome,
+        rule.discriminator,
+    )
+
+
 REQUEST_NONFALLBACK_TURN_OUTCOME = produce_turn_outcome(
     "turn.request_nonfallback"
 )

@@ -3883,6 +3883,15 @@ def test_mh_unlisted_002_model_list_save_names_the_agents_a_removed_row_stops(
     )
 
     assert committed.status_code == 200
+    result = committed.get_json()
+    Draft7Validator(
+        {"$ref": "model-hub/api-response.schema.json#/definitions/AgentModelsResponse"},
+        registry=_api_response_registry(),
+        format_checker=FormatChecker(),
+    ).validate(result)
+    # The success reports the Agents it stopped even when no route went with them.
+    assert result["removed_hops"] == refusal["would_remove_hops"]
+    assert result["interrupted"] == refusal["would_interrupt"]
     assert model_id not in {model.id for model in store.config.agents[backend].models}
 
 

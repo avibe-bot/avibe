@@ -8877,6 +8877,10 @@ def test_supply_interruption_preserves_exact_structural_reason(
 ) -> None:
     source = _source("src_present01", "Present")
     service = _service(tmp_path, sources=[source])
+    # A listed row with no Source behind it; an unlisted id is no model of this
+    # backend and records no event at all.
+    service.store.config.agents["claude"].models.append(ModelHubBackendModelConfig(id="shared-model"))
+    service.store.config.agents["claude"].sources.order = []
     service.store.config.agents["claude"].routes["shared-model"] = route
     router = ModelHubRuntimeRouter(
         service=service,

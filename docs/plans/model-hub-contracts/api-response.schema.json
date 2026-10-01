@@ -250,11 +250,15 @@
           "type": "object",
           "required": ["ok", "contract_version", "agent", "removed_hops", "interrupted"],
           "additionalProperties": false,
+          "anyOf": [
+            {"properties": {"removed_hops": {"minItems": 1}}},
+            {"properties": {"interrupted": {"minItems": 1}}}
+          ],
           "properties": {
             "ok": {"const": true},
             "contract_version": {"const": 10},
             "agent": {"$ref": "#/definitions/AgentSupplyApi"},
-            "removed_hops": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/RouteHopRef"}, "uniqueItems": true},
+            "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}, "uniqueItems": true},
             "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}, "uniqueItems": true}
           }
         },

@@ -336,9 +336,13 @@ async def test_codex_adapter_keeps_request_metadata_on_compatibility_retry(runti
 
 @pytest.mark.parametrize("language", ("en", "zh"))
 async def test_codex_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(tmp_path, language):
-    """MH-UNLISTED-001: Codex shows the shared refusal and holds the input."""
+    """MH-UNLISTED-001: Codex shows the shared refusal, never a login prompt
+    matched from words in the model id, and holds the input."""
     controller = unlisted_model_runtime(tmp_path, language)
     controller.emit_agent_message = AsyncMock()
+    controller.agent_auth_service = SimpleNamespace(
+        maybe_emit_auth_recovery_message=AsyncMock(return_value=True),
+    )
     context = SimpleNamespace(platform_specific={})
     set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
     request = SimpleNamespace(
@@ -359,6 +363,7 @@ async def test_codex_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(t
     await agent.handle_message(request)
 
     agent._get_or_create_transport.assert_not_awaited()
+    controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_not_awaited()
     notify = controller.emit_agent_message.await_args_list[0]
     assert notify.args[1:3] == ("notify", f"❌ {unlisted_model_copy('codex', language)}")
     assert prewrite_failure_evidence(context) == {

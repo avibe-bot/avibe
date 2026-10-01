@@ -88,10 +88,18 @@ const submitManagementWrite = async (action: UnknownWriteAction, forced: boolean
     return;
   }
 
-  // A deletion is confirmed before its first attempt, so a guard refusal is
-  // forced through with no second click.
+  // A deletion is confirmed before its first attempt, which agrees to the hops
+  // it takes but shows no Agent: the one the guard names is confirmed first.
   await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
   await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+  if (forced) await confirmShownAgents();
+};
+
+/** Confirm the guard once it names the Agent the held plan would stop. */
+const confirmShownAgents = async () => {
+  const guard = await screen.findByRole('dialog');
+  await within(guard).findByText(/Release bot/);
+  await userEvent.click(within(guard).getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
 };
 
 const noReauth = () => {
@@ -432,9 +440,11 @@ describe('SourceDetailPanel', () => {
     expect(commits[0].impact).toEqual({ hops, gaps });
   });
 
-  it('forces a guarded source deletion with the server plan, byte for byte, without asking twice', async () => {
+  it.each([
+    ['takes only hops, without asking twice', []],
+    ['would stop an Agent, once that Agent is shown', [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }]],
+  ])('forces a guarded source deletion that %s, echoing the server plan byte for byte', async (_, gaps) => {
     const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 2, source_id: source.id, model_id: 'model-a' }];
-    const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
     const requests: { url: string; init?: RequestInit }[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -453,6 +463,12 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
     await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+    if (gaps.length > 0) {
+      // The first confirmation showed no Agent, so nothing is removed until it does.
+      await screen.findByText(/Release bot/);
+      expect(requests).toHaveLength(1);
+      await confirmShownAgents();
+    }
 
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(requests[0].url).not.toContain('force=true');
@@ -597,6 +613,7 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(screen.getByRole('button', { name: /Manage Production key|管理 Production key/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove source$|^移除供应商$/i }));
     await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
+    await confirmShownAgents();
     await userEvent.click(await screen.findByRole('button', { name: /^Try again$|^重试$/i }));
 
     await waitFor(() => expect(requests).toHaveLength(3));

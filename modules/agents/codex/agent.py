@@ -566,6 +566,7 @@ class CodexAgent(BaseAgent):
                     str(e),
                     display_text=display_text,
                     request=request,
+                    cause=e,
                 )
                 await self._remove_ack_reaction(request)
                 self._event_handler._release_stream_turn(request.context)

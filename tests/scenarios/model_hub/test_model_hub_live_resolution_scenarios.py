@@ -1432,11 +1432,11 @@ def test_mh_unlisted_001_removed_model_fails_its_next_turn_with_one_clear_reason
 
 
 @pytest.mark.parametrize(
-    ("case", "discriminator", "held"),
+    ("case", "discriminator", "held", "event_reason"),
     (
-        ("listed_without_route", "route_unconfigured", False),
-        ("unlisted", "model_unlisted", True),
-        ("unlisted_with_manual_route", "blocked_supply_state", False),
+        ("listed_without_route", "route_unconfigured", False, "route_unconfigured"),
+        ("unlisted", "model_unlisted", True, None),
+        ("unlisted_with_manual_route", "blocked_supply_state", False, "source_missing"),
     ),
 )
 def test_only_an_unlisted_model_holds_its_input_for_an_explicit_retry(
@@ -1444,10 +1444,12 @@ def test_only_an_unlisted_model_holds_its_input_for_an_explicit_retry(
     case: str,
     discriminator: str,
     held: bool,
+    event_reason: str | None,
 ) -> None:
     """MH-UNLISTED-001: an empty chain is the list's answer only for an id the
     list does not hold; a listed row still asks for a Route, and a retained
-    manual Route still reports its own blocker. Only the unlisted id is final."""
+    manual Route still reports its own blocker. Only the unlisted id is final,
+    and, being no model of this backend, it interrupts no supply in the feed."""
 
     config = _config()
     model_id = _requested_model("claude") if case == "listed_without_route" else "claude-gone-9"
@@ -1480,3 +1482,49 @@ def test_only_an_unlisted_model_holds_its_input_for_an_explicit_retry(
         if held
         else {}
     )
+    assert [
+        event["reason"]
+        for event in service.events.list(limit=10)
+        if event["kind"] == "supply_interrupted" and event["model_id"] == model_id
+    ] == ([event_reason] if event_reason else [])
+
+
+def test_opencode_refuses_an_unlisted_model_its_retained_route_cannot_address(
+    tmp_path: Path,
+) -> None:
+    """MH-UNLISTED-001: OpenCode addresses only listed rows, so a runnable manual
+    Route retained for an unlisted id is not one its turn can take: the turn
+    gets the same one refusal and hold as any other unlisted model."""
+
+    async def exercise() -> None:
+        store = MemoryStore(_config(_source("src_retained1")))
+        agent = store.config.agents["opencode"]
+        model_id = "model-retained"
+        agent.routes[model_id] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig("src_retained1", _source_model_id("opencode")),)
+        )
+        service = _service(
+            tmp_path, store, AdapterBoundaryFake([]),
+            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        router = ModelHubRuntimeRouter(service=service, overlay_path=tmp_path / "overlay.json")
+        controller = SimpleNamespace(config=SimpleNamespace(language="en"), model_hub_runtime=router)
+        context = SimpleNamespace(platform_specific={})
+        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+
+        overlay = await router.prepare_opencode_overlay()
+        requested = opencode_requested_model_for_overlay(model_id, overlay)
+        with pytest.raises(ModelHubError) as refused:
+            await resolve_opencode_overlay_launch(controller, requested, overlay, context=context)
+
+        assert str(refused.value) == i18n_t(
+            "modelHub.launch.model_unlisted",
+            "en",
+            model=model_id,
+            backend=i18n_t("modelHub.backends.opencode", "en"),
+        )
+        assert prewrite_failure_evidence(context) == {
+            "reason": "model_hub_model_unlisted", "requires_explicit_retry": True,
+        }
+
+    asyncio.run(exercise())
