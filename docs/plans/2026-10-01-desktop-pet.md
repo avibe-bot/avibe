@@ -75,7 +75,7 @@ window kind; see "G8 lifecycle" below.
     Mac App Store, which Avibe does not ship to.
 - It loads `<runtime-origin>/pet` directly. That is the same loopback origin
   and auth model as `main`, which treats loopback requests as local.
-- **Two sizes.** Collapsed, the window is only as big as the pet sprite, so
+- **Two sizes.** Collapsed, the window is only as big as the pet image, so
   transparent areas around it do not swallow clicks. Expanded, the window
   grows to fit the panel, anchored at the pet. The panel flips to the side with
   room near screen edges. The shell performs the resize.
@@ -140,7 +140,7 @@ as it does for the Workbench.
   Off destroys the window and unregisters the shortcut, so nothing can wake it.
 - **Preferences.** `pet.json` in `app_local_data_dir`, the same pattern as
   `notifications.json`: `{enabled, shortcut}`. Pet visibility defaults to off
-  until the art ships, then on.
+  until voice ships, then on.
 
 ### Pet route (web UI)
 
@@ -314,14 +314,31 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 
 ### Rendering and idle cost
 
-- **v1 art.** One built-in sprite sheet with one animation row per state,
-  animated with CSS `steps()`. No canvas, WebGL, or JS animation loop.
+- **v1 art is the existing mascot, Vibey (云团子).** `assets/mascot/` already
+  holds one pose per state, each a 1024 px PNG with a transparent background,
+  so no new art is drawn:
+
+  | Pet state | Pose |
+  |---|---|
+  | Idle | `cloud-tuanzi.png`; `cloud-tuanzi-sleep.png` after a few idle minutes |
+  | Listening | `cloud-tuanzi-focus.png` |
+  | Running | `cloud-tuanzi-thinking.png` |
+  | Ready | `cloud-tuanzi-celebrate.png`, with the unread badge |
+  | Needs input | `cloud-tuanzi-message.png` |
+  | Blocked | `cloud-tuanzi-error.png` |
+
+  The UI bundles downscaled copies (2x the collapsed display size) under
+  `ui/src/assets/pet/`; the 1024 px sources stay the masters.
+- **Motion.** One pose per state, brought to life with CSS only: a slow
+  breathing float, and a short cross-fade with a small squash on a state
+  change. No sprite sheet, canvas, WebGL, or JS animation loop. A frame-based
+  sprite sheet is a later upgrade if the stills feel flat.
 - **Pausing.** Animation pauses when the window is hidden or the document is
-  not visible. Idle plays a slow loop that stops after a short time.
-  `prefers-reduced-motion` shows still frames.
-- **Design.** The art and the panel frames are designed in
-  `../avibe-docs/design.pen` before the UI implementation. All copy goes
-  through `ui/src/i18n/en.json` and `zh.json`.
+  not visible. Idle breathing stops after a short time.
+  `prefers-reduced-motion` shows the still pose and swaps it without motion.
+- **Design.** The collapsed pet and the panel frames are designed in
+  `../avibe-docs/design.pen` with the existing tokens before the UI
+  implementation. All copy goes through `ui/src/i18n/en.json` and `zh.json`.
 
 ## Delivery
 
@@ -332,11 +349,11 @@ The microphone usage string and audio-input entitlement already ship (#2293).
    - global shortcut, tray toggle and presets, `pet.json`;
    - `/pet` route with binding, `derivePetState`, collapsed and expanded panel;
    - text send, latest exchange, activity strip;
-   - "Show in pet".
+   - "Show in pet";
+   - Vibey poses and CSS motion, and panel frames in `design.pen`, so the
+     first PR already looks finished.
 2. **Voice.** Shared dictation hook extracted from the composer; listening
-   flow in the pet.
-3. **Art.** Final sprite and design-matched panel. The pet is enabled by
-   default.
+   flow in the pet. The pet is enabled by default from this PR on.
 
 ## Tests
 
@@ -395,7 +412,8 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 
 - Bind to the main-agent session when the session type lands, and remove the
   picker.
-- Custom pets: a sprite format and an importer.
+- Custom pets: an image or sprite format and an importer.
+- Frame-based sprite animation for Vibey.
 - A hotkey recorder in Settings.
 - Hold-to-talk using shortcut press and release states.
 - Streaming agent replies, once the Runtime has a reply-delta transport.
@@ -411,6 +429,6 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 - [ ] Panel: latest exchange, activity strip, needs input, text send.
 - [ ] Input-freshness table for the pet route; extract `useSessionTurnState` from the chat page.
 - [ ] Shared dictation hook; cross-window voice claim; pet listening flow.
-- [ ] Sprite and panel design in `design.pen`; i18n strings.
+- [ ] Vibey pose assets, CSS motion, and panel design in `design.pen`; i18n strings.
 - [ ] Rust boundary tests; manual checks on macOS and Windows.
 - [ ] User docs: `desktop/README.md` pet section.
