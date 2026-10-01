@@ -33,7 +33,7 @@ session type lands, the pet binds to it and the picker goes away.
    anything unresolved." The words stream into the panel as they speak.
 4. They press `⌃⌥Space` again. The text is sent to the bound session `S`
    through the normal message API. The pet switches to **Running**, and the
-   panel streams the agent's reply.
+   panel shows the running indicator until the agent's reply lands.
 5. The agent starts a delegated run. The panel's activity strip shows "1 run".
 6. The user clicks back into the browser. The panel collapses; the pet keeps
    its running animation.
@@ -152,6 +152,28 @@ as it does for the Workbench.
   connection per window. The server has no per-session filter, so the route
   filters on `session_id` on the client.
 
+**Durable load and reconciliation.** The SSE broker is an in-memory fan-out
+with no replay, so the stream alone cannot be the pet's source of truth. A pet
+created after the reply landed, or one hidden through a reconnect, would
+otherwise show stale or empty state. The route follows the chat page's model
+(`ChatPage.tsx` mount load and `reconcile`):
+
+- **Read on bind.** When the route mounts or the bound session changes, it
+  reads every input `derivePetState` and the panel need:
+  - the message tail, `listSessionMessages(S, {limit, tail: true, cache: false})`;
+  - `GET /api/sessions/S/turn-state`;
+  - pending vault requests for `S`;
+  - the session row (`agent_status`);
+  - the unread count for `S`, from the Inbox provider's `unread_by_session`,
+    which the provider refreshes on its own reconnect.
+- **Re-read on gaps.** The same read runs again on the provider's
+  `onConnected`, which is the one catch-up signal for every stream gap, and
+  when the window becomes visible after being hidden.
+- **Merge.** Live `message.new` rows are merged into the fetched tail,
+  deduped by id, as the chat page does.
+
+The read is idempotent and small, so the pet never polls on a timer.
+
 **Session binding.** The route reads the bound session id from `localStorage`
 key `avibe.pet.sessionId` on the Runtime origin.
 
@@ -196,9 +218,13 @@ Expanded, top to bottom:
 
 1. **Live transcript** while listening, then an editable input that is always
    available for typing.
-2. **Latest exchange.** The last user message and the streaming agent reply,
-   from `message.new`/`message.updated` for `S`, rendered with the existing
-   message renderer in a compact variant.
+2. **Latest exchange.** The last user message and the last agent result, from
+   the durable tail plus `message.new` for `S`, rendered with the existing
+   message renderer in a compact variant. Replies are not streamed: the
+   Runtime persists an agent reply atomically as one result row, and there is
+   no reply-delta event. While the turn runs, the panel shows the running
+   indicator and the activity strip; the reply appears when its row lands.
+   Token streaming would be a new Runtime transport and is a follow-up.
 3. **Activity strip** for `turn_state.background_activities`, reusing the chat
    page's strip in a compact variant.
 4. **Needs input.** Pending vault requests and quick-reply buttons. Quick
@@ -227,7 +253,7 @@ Workbench. The pet shows "Queued" and offers no steering control in v1.
 Reuse the composer's pipeline unchanged:
 
 - `getUserMedia` feeding `VoiceRecordingPipeline`, with `claimVoiceCapture`
-  for single ownership;
+  for single ownership (extended across windows, below);
 - `VoiceRealtimeSession` for the live preview (`preview.text + preview.stash`)
   and final text;
 - the existing HTTP transcription fallback.
@@ -240,6 +266,25 @@ Voice is available only when `GET /api/asr/status` reports `available`, which
 needs Avibe Cloud. Otherwise the hotkey opens text input and the panel shows
 a short hint that voice needs Avibe Cloud. That is a new i18n string; the
 composer just hides its mic button.
+
+**Cross-window mic ownership.** `claimVoiceCapture` keeps its owner in a
+module variable, so it arbitrates only inside one JavaScript realm. `main` and
+`pet` are separate realms: a hotkey summon while the composer is dictating
+would start a second recorder. The claim is extended across same-origin realms
+with a `BroadcastChannel` (`avibe.voice-capture`):
+
+- Claiming posts a message with a per-realm id and token.
+- A realm that receives a claim from another realm finishes its local owner
+  through the same `finish()` callback a local replacement uses. Captured
+  speech is preserved, exactly as today.
+- Local semantics (`isCurrent`, `release`) are unchanged, and a realm without
+  `BroadcastChannel` falls back to local-only ownership.
+
+This lives in `claimVoiceCapture` itself, so every caller (composer, Show Page
+dictation, pet) inherits it, and two Workbench browser tabs gain the same
+guarantee. The shell is not involved, so the pet capability file stays as
+listed. Delivery between the two webviews depends on the same shared data
+store as the `localStorage` binding and is verified with it (see Risks).
 
 The microphone usage string and audio-input entitlement already ship (#2293).
 
@@ -280,18 +325,27 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 - **Vitest:**
   - `derivePetState` covers every row and the priority order;
   - session binding through `localStorage` and the `storage` event;
+  - the route re-reads tail, turn-state, vault requests, and the session row
+    on bind, on `onConnected`, and on becoming visible, and merges live rows
+    without duplicates;
+  - a voice claim from another realm (simulated `BroadcastChannel` message)
+    finishes the local owner, and a realm's own claim does not;
   - hotkey summon starts voice only when ASR is available.
 - **Manual sanity on a signed macOS build and on Windows:**
   - transparency;
   - always on top over full-screen apps;
   - drag and position restore;
   - first-use mic prompt in the pet window;
+  - starting dictation in the pet while the composer dictates stops the
+    composer's recorder;
   - shortcut conflict reporting.
 
 ## Risks to verify during implementation
 
-- **`localStorage` sharing.** Confirm that `main` and `pet` share it on both
-  WKWebView and WebView2. If not, move the binding to the Runtime.
+- **Shared origin storage.** Confirm that `main` and `pet` share
+  `localStorage` and `BroadcastChannel` delivery on both WKWebView and
+  WebView2. If not, move the binding to the Runtime, and relay voice claims
+  through a shell event to every window.
 - **Mic prompts.** WKWebView may prompt for the mic separately in the second
   webview. Confirm that the prompt appears once and is remembered.
 - **Full-screen Spaces.** On macOS, appearing over full-screen apps may need
@@ -309,6 +363,7 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 - Custom pets: a sprite format and an importer.
 - A hotkey recorder in Settings.
 - Hold-to-talk using shortcut press and release states.
+- Streaming agent replies, once the Runtime has a reply-delta transport.
 - Approvals inside the pet.
 
 ## Todo
@@ -319,7 +374,8 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 - [ ] `/pet` route, session binding, "Show in pet".
 - [ ] `derivePetState` with Vitest coverage.
 - [ ] Panel: latest exchange, activity strip, needs input, text send.
-- [ ] Shared dictation hook; pet listening flow.
+- [ ] Durable load and gap reconciliation for the pet route.
+- [ ] Shared dictation hook; cross-window voice claim; pet listening flow.
 - [ ] Sprite and panel design in `design.pen`; i18n strings.
 - [ ] Rust boundary tests; manual checks on macOS and Windows.
 - [ ] User docs: `desktop/README.md` pet section.
