@@ -70,8 +70,15 @@ locked-row changes, and removal of a model with a non-empty Route are rejected.
 persist anything.
 
 After a successful catalog mutation, the controller invalidates the affected backend's
-runtime projection. The next turn observes the committed catalog; an already running
-OpenCode server is refreshed before the mutation reports success.
+runtime projection without restarting the backend, so a catalog change never interrupts
+running work. The same rule covers unattended built-in snapshot refreshes:
+
+- Claude Code resolves the committed catalog on its next turn.
+- OpenCode's next turn moves the shared server to the new overlay once runs on the old
+  overlay finish; turns that arrive meanwhile wait for that switch.
+- Codex replaces a directory's app-server when a turn finds that directory idle and its
+  catalog changed. A turn in a directory with other live work keeps the app-server's
+  earlier metadata until a later turn finds the directory idle.
 
 Catalog storage is mode-independent so a Direct to Gateway switch preserves prior work.
 The product editor is Gateway-only: Direct mode continues to use each CLI's native model

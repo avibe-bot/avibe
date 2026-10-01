@@ -220,41 +220,70 @@ def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
     asyncio.run(drain_refresh())
     assert service.reconcile_builtin_models.await_count == 2
 
-    runtime_config = object()
-    latest = SimpleNamespace(
-        model_hub=SimpleNamespace(
-            agents={"codex": SimpleNamespace(mode="hub")},
-        ),
-        agents=SimpleNamespace(codex=runtime_config),
+
+def test_mh_runtime_012_a_catalog_change_never_restarts_a_backend(monkeypatch):
+    """MH-RUNTIME-012: neither a catalog edit nor a snapshot refresh restarts a backend.
+
+    A restart drains and then interrupts running work. Each runtime instead
+    moves to the committed catalog at a later turn.
+    """
+    import core.handlers.model_hub as model_hub
+    import core.handlers.model_hub.turn_gateway as turn_gateway
+    import modules.agents.model_hub as agent_model_hub
+    import vibe.model_hub_runtime as model_hub_runtime
+    from vibe import api, backend_model_catalog
+
+    captured = {}
+
+    def create_service(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(reconcile_builtin_models=AsyncMock(return_value=[]))
+
+    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    monkeypatch.setattr(model_hub, "create_default_service", create_service)
+    monkeypatch.setattr(model_hub_runtime, "get_model_hub_engine_adapter", object)
+    monkeypatch.setattr(
+        turn_gateway,
+        "ModelHubTurnGateway",
+        lambda service, **_kwargs: SimpleNamespace(service=service, correlation=SimpleNamespace()),
     )
+    monkeypatch.setattr(agent_model_hub, "ModelHubRuntimeRouter", lambda **kwargs: SimpleNamespace(**kwargs))
+    monkeypatch.setattr(backend_model_catalog, "set_remote_catalog_refresh_completed", lambda _callback: None)
+    monkeypatch.setattr(api, "resolve_cli_paths", lambda binaries, **_kwargs: dict.fromkeys(binaries))
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(language="en")
+    controller._loop = None
+    controller._shutdown_requested = False
+    controller.vibe_agent_store = SimpleNamespace(get_default_agent=lambda: None)
+    controller._init_model_hub()
     controller.backend_restart_coordinator = SimpleNamespace(
         request_restart=AsyncMock(return_value="restarted"),
+        run_when_idle=AsyncMock(),
     )
-    controller.agent_service = SimpleNamespace(
-        invalidate_model_hub_runtime=AsyncMock(),
-        refresh_runtime_config=AsyncMock(),
-    )
-    monkeypatch.setattr(V2Config, "load", classmethod(lambda _cls: latest))
 
-    asyncio.run(captured["backend_catalog_changed"]("codex"))
+    for backend in ("claude", "codex", "opencode"):
+        for mode in ("hub", "direct"):
+            latest = SimpleNamespace(
+                model_hub=SimpleNamespace(agents={backend: SimpleNamespace(mode=mode)}),
+                agents=SimpleNamespace(**{backend: object()}),
+            )
+            controller.agent_service = SimpleNamespace(
+                invalidate_model_hub_runtime=AsyncMock(),
+                refresh_runtime_config=AsyncMock(),
+            )
+            monkeypatch.setattr(V2Config, "load", classmethod(lambda _cls, latest=latest: latest))
 
-    assert controller.config.model_hub is latest.model_hub
-    controller.backend_restart_coordinator.request_restart.assert_awaited_once_with(
-        "codex"
-    )
-    controller.agent_service.invalidate_model_hub_runtime.assert_not_awaited()
-    controller.agent_service.refresh_runtime_config.assert_not_awaited()
+            asyncio.run(captured["backend_catalog_changed"](backend))
 
-    latest.model_hub.agents["codex"].mode = "direct"
-    controller.backend_restart_coordinator.request_restart.reset_mock()
-
-    asyncio.run(captured["backend_catalog_changed"]("codex"))
-
-    controller.agent_service.invalidate_model_hub_runtime.assert_awaited_once_with(
-        "codex"
-    )
-    controller.backend_restart_coordinator.request_restart.assert_not_awaited()
-    controller.agent_service.refresh_runtime_config.assert_not_awaited()
+            assert controller.config.model_hub is latest.model_hub
+            controller.backend_restart_coordinator.request_restart.assert_not_awaited()
+            controller.backend_restart_coordinator.run_when_idle.assert_not_awaited()
+            controller.agent_service.refresh_runtime_config.assert_not_awaited()
+            if backend == "codex":
+                # The next launch builds the committed catalog.
+                controller.agent_service.invalidate_model_hub_runtime.assert_awaited_once_with("codex")
+            else:
+                controller.agent_service.invalidate_model_hub_runtime.assert_not_awaited()
 
 
 @pytest.mark.anyio

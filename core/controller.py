@@ -2646,25 +2646,21 @@ class Controller:
         refresh_cli_presence(False, None)
 
         async def backend_catalog_changed(backend: str) -> None:
+            # A catalog change never restarts a backend, which would interrupt
+            # running work. Each runtime moves to it at a later turn: Claude
+            # Code resolves models per turn, OpenCode switches overlays once
+            # runs on the old one finish, and Codex replaces an app-server
+            # when a turn finds its directory idle.
             try:
                 latest = V2Config.load()
             except FileNotFoundError:
                 return
             self.config.model_hub = latest.model_hub
-            if latest.model_hub.agents[backend].mode != "hub":
-                if backend == "codex":
-                    agent_service = getattr(self, "agent_service", None)
-                    if agent_service is None:
-                        raise RuntimeError("Agent service is unavailable")
-                    await agent_service.invalidate_model_hub_runtime(backend)
-                return
-            runtime_config = getattr(latest.agents, backend, None)
-            if runtime_config is None:
-                return
-            coordinator = getattr(self, "backend_restart_coordinator", None)
-            if coordinator is None:
-                raise RuntimeError("Backend restart coordinator is unavailable")
-            await coordinator.request_restart(backend)
+            if backend == "codex":
+                agent_service = getattr(self, "agent_service", None)
+                if agent_service is None:
+                    raise RuntimeError("Agent service is unavailable")
+                await agent_service.invalidate_model_hub_runtime(backend)
 
         async def repair_model_selections(addresses: frozenset[str]) -> int:
             # A Vibe Agent's model, a channel's routing override, and a

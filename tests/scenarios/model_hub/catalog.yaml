@@ -33,6 +33,8 @@ capability:
     - tests/test_local_deps.py
     - tests/test_opencode_server.py
     - tests/test_runtime_activation.py
+    - tests/test_controller_model_hub_gate.py
+    - tests/test_codex_catalog_retention.py
     # The user-visible half of metering. A vitest case is the only place these
     # properties can be observed, so the catalog checker resolves both shapes.
     - ui/src/components/settings/models/UsageTab.test.tsx
@@ -562,6 +564,18 @@ scenarios:
     kind: lifecycle
     layer: unit
     test: tests/test_model_hub_api.py::test_runtime_recovery_does_not_wait_for_the_engine_download
+  - id: MH-RUNTIME-012
+    name: A Model Hub catalog change never restarts a backend, so running work is never interrupted
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_controller_model_hub_gate.py::test_mh_runtime_012_a_catalog_change_never_restarts_a_backend
+  - id: MH-RUNTIME-013
+    name: A changed Codex catalog replaces only an idle directory's app-server and never waits for live work
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_codex_catalog_retention.py::test_mh_runtime_013_catalog_change_replaces_only_an_idle_hub_transport
   - id: MH-USAGE-001
     name: Tokens an upstream reported before the turn ended are still metered
     status: covered

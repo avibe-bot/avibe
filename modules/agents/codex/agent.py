@@ -2134,6 +2134,35 @@ class CodexAgent(BaseAgent):
             and (dead or not self._has_active_turns_for_cwd(cwd))
         )
 
+    async def _idle_transport_catalog_changed(
+        self,
+        cwd: str,
+        transport: CodexTransport,
+        launch: "ModelHubLaunch | None",
+    ) -> bool:
+        """Whether an idle Hub app-server serves an outdated catalog.
+
+        A catalog is metadata within the same runtime, so it never waits for or
+        interrupts work: a directory with live work keeps its app-server until
+        a later turn finds it idle.
+        """
+        if launch is None or launch.channel != "hub":
+            return False
+        launched = getattr(transport, "model_hub_catalog_path", None)
+        if launched is None:
+            return False
+        try:
+            # Cached until invalidated; the path is the catalog's digest.
+            current = await self.prepare_model_hub_runtime()
+        except CodexModelHubCatalogUnavailableError:
+            logger.warning(
+                "Keeping the Codex transport for cwd=%s: the committed Model Hub catalog is unavailable",
+                cwd,
+                exc_info=True,
+            )
+            return False
+        return current.path != launched and await self._transport_replacement_is_safe(cwd, transport)
+
     async def _drop_transport_after_failure(
         self,
         cwd: str,
@@ -2233,6 +2262,7 @@ class CodexAgent(BaseAgent):
         wait_deadline: float | None = None
         while True:
             wait_for_active_turns = False
+            catalog_changed = False
             async with self._transport_locks[cwd], AsyncExitStack() as catalog_pins:
                 # Double-check after acquiring lock
                 existing = self._transports.get(cwd)
@@ -2251,10 +2281,15 @@ class CodexAgent(BaseAgent):
                     spawned_ino = self._cwd_inodes().get(cwd)
                     stale_cwd = spawned_ino is not None and self._cwd_inode(cwd) != spawned_ino
                     if not stale_cwd and not runtime_changed:
-                        self._attach_transport_activation(cwd, existing)
-                        self._touch_transport_activity(cwd)
-                        return existing
-                    if runtime_changed and self._has_active_turns_for_cwd(cwd):
+                        catalog_changed = allow_runtime_replacement and await self._idle_transport_catalog_changed(
+                            cwd, existing, launch
+                        )
+                        if not catalog_changed:
+                            self._attach_transport_activation(cwd, existing)
+                            self._touch_transport_activity(cwd)
+                            return existing
+                        logger.info("Restarting idle Codex transport after Model Hub catalog change for cwd=%s", cwd)
+                    elif runtime_changed and self._has_active_turns_for_cwd(cwd):
                         wait_for_active_turns = True
                     elif stale_cwd:
                         logger.warning(
@@ -2315,6 +2350,12 @@ class CodexAgent(BaseAgent):
                             final_predicate=lambda: self._transport_replacement_is_safe(cwd, existing),
                         )
                         if not detached:
+                            if catalog_changed:
+                                # Work claimed the directory after the idle check;
+                                # it keeps serving, and a later idle turn retries.
+                                self._attach_transport_activation(cwd, existing)
+                                self._touch_transport_activity(cwd)
+                                return existing
                             raise RuntimeError(
                                 "Codex transport replacement blocked by a durable owner "
                                 "or changed generation"

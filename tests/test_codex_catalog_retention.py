@@ -336,12 +336,76 @@ async def test_agent_launch_keeps_pin_across_invalidation_and_reuses_transport(m
         assert path in retained()
         await transport.stop()
         await transport._catalog_exit_task
+        # Reuse confirmed the catalog was unchanged by caching it again.
+        await value.invalidate_model_hub_runtime()
         churn()
         assert len(retained()) <= 1
     finally:
         finish.set()
         transport = await starting
         await transport.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["idle", "busy", "unchanged"])
+async def test_mh_runtime_013_catalog_change_replaces_only_an_idle_hub_transport(monkeypatch, tmp_path, case):
+    """MH-RUNTIME-013: a changed catalog never waits for or interrupts a directory's work.
+
+    An idle directory's next Hub turn gets an app-server serving the committed
+    catalog. A directory with live work keeps its app-server, as does an
+    unchanged catalog.
+    """
+    value = agent()
+    value._transports = {}
+    value._transport_locks = {}
+    value._transport_cwd_inodes = {}
+    active = {}
+    value._session_mgr = SimpleNamespace(
+        sessions_for_cwd=lambda _cwd: ["long-job"],
+        invalidate_thread=lambda _session_id: None,
+    )
+    value._turn_registry = SimpleNamespace(
+        get_active_turn=active.get,
+        has_pending_turn_start=lambda _session_id: False,
+        clear_session=lambda _session_id: None,
+    )
+    value._clear_thread_developer_instructions = lambda _session_id: None
+    value._runtime_ownership_snapshot_for_cwd = lambda _cwd: SimpleNamespace(blocks_transport_replacement=False)
+    exported = [b'{"models":[{"slug":"launched"}]}']
+    monkeypatch.setattr(catalogs, "_export_codex_bundled_catalog", lambda *_: exported[0])
+    spawn = asyncio.create_subprocess_exec
+
+    async def fixture_spawn(*_args, **kwargs):
+        return await spawn(sys.executable, "-u", "-c", _STDIO_CONSUMER, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fixture_spawn)
+    launch = SimpleNamespace(
+        channel="hub", fingerprint="hub:test",
+        gateway_base_url="http://127.0.0.1:1", gateway_token="fixture-only",
+    )
+    cwd = str(tmp_path)
+    launched = await value._get_or_create_transport(cwd, launch)
+    current = launched
+    try:
+        if case != "unchanged":
+            exported[0] = b'{"models":[{"slug":"committed"}]}'
+        await value.invalidate_model_hub_runtime()
+        if case == "busy":
+            active["long-job"] = "turn-running"
+
+        current = await asyncio.wait_for(value._get_or_create_transport(cwd, launch), 5)
+
+        if case == "idle":
+            assert current is not launched
+            assert current.model_hub_catalog_path == value._model_hub_catalog.path
+            assert current.model_hub_catalog_path != launched.model_hub_catalog_path
+            assert launched._process.returncode is not None
+        else:
+            assert current is launched
+            assert launched._process.returncode is None
+    finally:
+        await launched.stop()
+        await current.stop()
 
 
 @pytest.mark.asyncio
