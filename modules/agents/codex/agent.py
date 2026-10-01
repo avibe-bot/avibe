@@ -106,6 +106,8 @@ _MAX_STEER_RECONCILIATION_TARGETS = 128
 # How long a Session waits for the app-server generation it leaves to release
 # its thread. Codex bounds its own thread shutdown at 10 s.
 _THREAD_RELEASE_TIMEOUT_SECONDS = 15.0
+# Numbers each agent instance, so its Hub processes own their gateway scope.
+_AGENT_INSTANCE_SERIALS = itertools.count(1)
 # Hub catalogs kept prepared for future launches; running generations hold
 # their own pins.
 _CACHED_HUB_CATALOGS = 2
@@ -270,6 +272,7 @@ class CodexAgent(BaseAgent):
         # Set once the backend is disabled: nothing is admitted any more, and
         # each process stops once its work drains.
         self._retired = False
+        self._instance_serial = next(_AGENT_INSTANCE_SERIALS)
         # Part of every launch spec: renewing moves each cwd to a new process
         # at its next turn.
         self._runtime_epoch = 0
@@ -651,7 +654,7 @@ class CodexAgent(BaseAgent):
                     self.controller,
                     "codex",
                     requested_model or "",
-                    process_scope=request.working_path,
+                    process_scope=self._hub_process_scope(request.working_path),
                     context=request.context,
                     config=config,
                 )
@@ -2871,6 +2874,16 @@ class CodexAgent(BaseAgent):
 
         return evicted
 
+    def _hub_process_scope(self, cwd: str) -> str:
+        """The gateway credential scope of this agent's Hub processes in ``cwd``.
+
+        Re-enabling the backend registers a new agent while the retired one
+        drains, possibly in the same directory. Each agent owns its scope, so
+        the retired one revoking it at its last Hub process never revokes the
+        credential the new one's processes use.
+        """
+        return f"{cwd}#{self._instance_serial}"
+
     def _retire_model_hub_process_scope(self, cwd: str) -> None:
         if not getattr(self, "_registered_runtime", True):
             return
@@ -2878,7 +2891,7 @@ class CodexAgent(BaseAgent):
         router = getattr(controller, "model_hub_runtime", None)
         retire = getattr(router, "retire_process_scope", None)
         if callable(retire):
-            retire("codex", cwd)
+            retire("codex", self._hub_process_scope(cwd))
 
     async def _settle_stuck_active_request(self, base_session_id: str) -> None:
         """Settle a turn we are about to force-reap.

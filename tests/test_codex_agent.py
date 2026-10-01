@@ -887,8 +887,8 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             retire_scope.call_args_list,
             [
-                call("codex", "/tmp/a"),
-                call("codex", "/tmp/b"),
+                call("codex", agent._hub_process_scope("/tmp/a")),
+                call("codex", agent._hub_process_scope("/tmp/b")),
             ],
         )
 
@@ -1419,7 +1419,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             self.identity,
         )
         self.assertNotIn("session-1", agent._session_locks)
-        self.retire_scope.assert_called_once_with("codex", "/tmp/work")
+        self.retire_scope.assert_called_once_with("codex", agent._hub_process_scope("/tmp/work"))
 
     async def test_evict_idle_transports_keeps_active_codex_runtime(self):
         transport = SimpleNamespace(stop=AsyncMock(side_effect=AssertionError("active transport should not be stopped")))

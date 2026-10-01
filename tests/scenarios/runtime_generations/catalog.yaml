@@ -8,6 +8,8 @@ capability:
     - tests/test_claude_cli_path.py
     - tests/test_backend_restart.py
     - tests/test_controller_idle_cleanup.py
+    - tests/test_codex_runtime_generations.py
+    - tests/test_opencode_generations.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -68,6 +70,8 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_backend_restart.py::test_runtime_gen_007_re_enabling_starts_a_new_agent_beside_the_retired_one
+    related_tests:
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_retired_agent_never_revokes_the_hub_credential_of_its_successor
   - id: RUNTIME-GEN-008
     name: An unattended CLI update closes admission only for its install, then renews in place instead of tearing the runtime down
     status: covered

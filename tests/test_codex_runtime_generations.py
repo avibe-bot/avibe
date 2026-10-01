@@ -232,12 +232,14 @@ class _Router:
 
     def __init__(self):
         self.launches = {}
+        self.scopes = []
         self.retired = []
 
     def snapshot(self):
         return SimpleNamespace(agents={"codex": SimpleNamespace(models=[])})
 
     async def resolve(self, backend, requested_model, *, process_scope=None, turn_id=None, config=None):
+        self.scopes.append((backend, process_scope))
         return self.launches[requested_model]
 
     def retire_process_scope(self, backend, process_scope, **_kwargs):
@@ -429,6 +431,29 @@ async def test_runtime_gen_006_the_sweep_ends_a_retired_agents_process_whose_sto
 
     assert server.stopped and agent.runtime_retired()
     assert agent._generation_for_session("s1") is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_006_a_retired_agent_never_revokes_the_hub_credential_of_its_successor(tmp_path):
+    """RUNTIME-GEN-006: re-enabled while the retired agent drains, the new agent keeps its own Hub credential."""
+    router = _Router()
+    router.launches["model-a"] = _launch("model-a", "hub", token="hub-token")
+    catalog = SimpleNamespace(retain=lambda: SimpleNamespace(path=tmp_path / "catalog.json", close=Mock()))
+    retired, cwd = _agent(tmp_path, router=router)
+    successor, _ = _agent(tmp_path, router=router)
+    for agent in (retired, successor):
+        agent.prepare_model_hub_runtime = AsyncMock(return_value=catalog)
+    await retired.handle_message(_request(cwd, "s1"))
+    draining = _server_for(retired, "s1")
+    await retired.retire_runtime()
+    await successor.handle_message(_request(cwd, "s2"))
+
+    await draining.complete(retired._session_mgr.get_thread_id("s1"))
+    await retired.reap_runtime_generations()
+
+    assert retired.runtime_retired()
+    retired_scope, successor_scope = router.scopes
+    assert router.retired == [retired_scope] and successor_scope != retired_scope
 
 
 @pytest.mark.asyncio
@@ -802,7 +827,7 @@ async def test_runtime_gen_016_a_failed_hub_start_is_cleaned_up(tmp_path, monkey
         await agent.reap_runtime_generations()
         assert server.stopped
 
-    assert router.retired == [("codex", cwd)]
+    assert router.retired == [router.scopes[0]]
 
 
 @pytest.mark.asyncio
@@ -842,7 +867,7 @@ async def test_runtime_gen_016_hub_scope_is_revoked_only_with_the_last_hub_gener
     if successor == "hub":
         assert router.retired == []
         await agent.shutdown_runtime()
-    assert router.retired == [("codex", cwd)]
+    assert router.retired == [router.scopes[0]]
 
 
 @pytest.mark.asyncio
