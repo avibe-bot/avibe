@@ -79,10 +79,22 @@ window kind; see "G8 lifecycle" below.
   transparent areas around it do not swallow clicks. Expanded, the window
   grows to fit the panel, anchored at the pet. The panel flips to the side with
   room near screen edges. The shell performs the resize.
-- The user moves it by dragging the pet (`start-dragging`). Its position
-  persists through the existing window-state plugin, extended to the `pet`
-  label with `POSITION` only. This is the path `desktop-window-state.md`
-  reserves for new windows; no second persistence path is added.
+- The user moves it by dragging the pet (`start-dragging`).
+- **Position is the pet anchor, not the window frame.** The window's origin
+  moves whenever the panel opens to the left or above the pet. A raw window
+  position saved while expanded would restore the collapsed pet displaced by
+  the panel's size. So the persisted value is the pet anchor: the pet image's
+  top-left in logical screen coordinates, plus its monitor.
+  - The shell owns it, because the shell lays out both sizes and knows the
+    pet's offset inside the window. It is recomputed from the window origin
+    and that offset when a drag ends, whether collapsed or expanded.
+  - It is stored as `anchor` in `pet.json`. On restore it is clamped into a
+    connected monitor's work area.
+  - The window-state plugin stays filtered to `main`. Its per-label frame
+    (`desktop-window-state.md`) fits windows whose frame is the user's
+    choice; the pet's frame is derived from the anchor, so the anchor is what
+    is persisted. `pet.json` already exists for pet preferences, so this adds
+    no new store.
 
 ### G8 lifecycle invariants
 
@@ -139,7 +151,7 @@ as it does for the Workbench.
 - **Off switch.** A tray `CheckMenuItem` "Show pet", next to "Notifications".
   Off destroys the window and unregisters the shortcut, so nothing can wake it.
 - **Preferences.** `pet.json` in `app_local_data_dir`, the same pattern as
-  `notifications.json`: `{enabled, shortcut}`. Pet visibility defaults to off
+  `notifications.json`: `{enabled, shortcut, anchor}`. Pet visibility defaults to off
   until voice ships, then on.
 
 ### Pet route (web UI)
@@ -238,8 +250,11 @@ comes from an API the Workbench already uses:
   shows them as an activity strip, and the collapsed pet shows a count. The pet
   is "Running" only when the agent itself is working.
 - **Reading.** Viewing a reply in the expanded panel calls the existing
-  `POST /api/sessions/S/mark-read`, so Ready clears in the pet and in the
-  Workbench together.
+  `POST /api/sessions/S/mark-read` with `until_message_id` set to the id of
+  the agent row the panel is showing (`markSessionRead(S, untilMessageId)`).
+  Ready clears in the pet and in the Workbench together, but only up to
+  what the pet actually showed. A later result that lands meanwhile, for
+  example from a queued turn, stays unread and keeps the badge.
 
 Tool approvals and `AskUserQuestion`-style waits do not exist today. Claude
 runs with permissions bypassed and Codex auto-approves, so vault requests and
@@ -377,9 +392,13 @@ The microphone usage string and audio-input entitlement already ship (#2293).
   - destroying `pet` leaves the Runtime running and `main` intact;
   - disabling unregisters the shortcut, and every wake path is a no-op while
     disabled.
+  - the saved anchor is the pet image position whichever side the panel
+    opened on, and a restore onto a missing monitor is clamped on screen.
 - **Vitest:**
   - `derivePetState` covers every row and the priority order;
   - session binding through `localStorage` and the `storage` event;
+  - mark-read passes the displayed row as `until_message_id`, and a result
+    that arrives after rendering stays unread;
   - each row of the input-freshness table: the initial read on bind, each
     live trigger, and each gap fallback re-read the authoritative API, and
     live rows merge without duplicates;
@@ -397,7 +416,8 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 - **Manual sanity on a signed macOS build and on Windows:**
   - transparency;
   - always on top over full-screen apps;
-  - drag and position restore;
+  - drag and position restore: drag while expanded with the panel flipped
+    left or up, quit, relaunch, and the collapsed pet is where it was seen;
   - first-use mic prompt in the pet window;
   - starting dictation in the pet while the composer dictates stops the
     composer's recorder;
