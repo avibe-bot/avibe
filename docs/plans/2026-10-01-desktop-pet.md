@@ -142,9 +142,12 @@ loopback origin only, through a new capability file:
   chose, `{panel_side: left | right, panel_edge: top | bottom, pet_offset}`,
   and the route renders the pet and panel from that value. The native frame
   and the DOM therefore share one placement decision;
-- command `pet_bind(session_id | null)` and event `pet:bound`, which set and
-  carry the session binding (see Session binding). The pet uses `pet_bind`
-  for its switcher and to clear an invalid binding;
+- command `pet_bind(session_id)` and event `pet:bound`, which set and carry
+  the session binding (see Session binding). The pet uses `pet_bind` for its
+  switcher;
+- command `pet_unbind(session_id)`, a compare-and-clear: it clears the binding
+  only if it is still `session_id`, so a late result about an old session can
+  never clear a newer one;
 - command `pet_open(link)`, which takes any link the existing deep-link
   parser (`desktop-deep-links.md`) accepts: session, Show Page, settings, and
   vault request. It focuses `main` through the same path a clicked deep link
@@ -188,10 +191,17 @@ as it does for the Workbench.
   - The default is off in the shell-and-state build and on from the voice
     build. A user who never touched the switch therefore gets the pet when
     voice ships, and a user who turned it off stays off.
-  - Unknown versions and unreadable files load as defaults with a warning; the
-    app never fails to start because of `pet.json`. Load fixtures cover an
-    absent file, a file without `enabled`, an explicit `false`, and an
-    unreadable file.
+  - Only an absent file gets the build default. A file that is present but
+    unreadable, or has an unknown `version` (for example after a downgrade),
+    fails closed: the pet is disabled for this run with a warning, and the
+    shell does not rewrite the file, so a newer build's state and a user's
+    opt-out both survive. Toggling the tray switch is the explicit recovery: it
+    writes a fresh version-1 file. The app never fails to start because of
+    `pet.json`.
+  - Load fixtures cover an absent file (build default), a file without
+    `enabled` (build default), an explicit `false`, an unreadable file
+    (disabled, file untouched), and an unknown version (disabled, file
+    untouched).
 
 ### Pet route (web UI)
 
@@ -276,10 +286,17 @@ when the user changes the UI port, so it cannot own anything durable.
 - **A binding is valid only while `S` is an active session.** Every read of
   `getSession(S)` checks this, on bind, on gaps, and on any `session.activity`
   for `S` (archive, move, and the rest are all published there). When the
-  read returns an archived session or `404`, the route calls `pet_bind(null)` and
+  read returns an archived session or `404`, the route calls `pet_unbind(S)` and
   shows the empty state with the switcher, so the pet never accepts input it
   cannot send. The rule is checked on the read, not tied to a particular
   event kind.
+- **Every asynchronous read is tied to the binding it was issued for.** Each
+  read (session, tail, turn state, vault requests) carries the session id it
+  was started for. When it resolves, the route applies it only if that id is
+  still the current binding; otherwise it is dropped. A switch from `A` to `B`
+  therefore never shows `A`'s state, and a late `404` for `A` cannot clear `B`:
+  the route drops it, and `pet_unbind(A)` would be a no-op in the shell
+  anyway.
 - When the main-agent session type lands, the route resolves the main-agent
   session instead, and the switcher is removed.
 
@@ -290,7 +307,7 @@ comes from an API the Workbench already uses:
 
 | State | Condition | Source |
 |---|---|---|
-| Needs input | pending vault request for `S`, or the latest agent result has unanswered `quick_replies` | `GET /api/vault/requests?status=pending&session=S` (`usePendingVaultRequests`, refreshed on `vaults.updated` and expiry); message `content.quick_replies` and `quick_reply_chosen` |
+| Needs input | pending vault request for `S`, or the latest agent result has unanswered `quick_replies` (see note below) | `GET /api/vault/requests?status=pending&session=S` (`usePendingVaultRequests`, refreshed on `vaults.updated` and expiry); message `content.quick_replies` and `quick_reply_chosen` |
 | Blocked | `agent_status = failed` | `getSession(S)` and `session.status` (see Input freshness) |
 | Ready | foreground idle and `unread_count > 0` | `inbox.unread.changed` (`unread_by_session`) |
 | Running | `turn_state.foreground = running` or `in_flight` | `turn.start`/`turn.end` with `GET /api/sessions/S/turn-state`, as the chat page does |
@@ -313,6 +330,18 @@ comes from an API the Workbench already uses:
   - If the unread rows reach past the loaded tail, the panel does not mark
     read at all. It shows "More in Avibe" (`pet_open` with the session link)
     and leaves reading to the Workbench.
+
+**Only the latest agent result's quick replies mean Needs input.** This is a
+deliberate difference from the Workbench, which keeps every unanswered group
+clickable regardless of age (`workbench-quick-replies.md`). Clickability is
+about not blocking a user who wants an earlier option; the pet's state is
+about what the agent is waiting for now. Once a newer agent result exists, the
+agent has moved on, often because the user answered in free text without
+pressing a button. An older unanswered group is therefore not an open
+question, and treating it as one would hold the pet in Needs input
+indefinitely with no action that clears it. Older groups stay clickable in the
+Workbench, reached with "Open in Avibe". This also keeps the state computable
+from the bounded tail, with no history scan.
 
 Tool approvals and `AskUserQuestion`-style waits do not exist today. Claude
 runs with permissions bypassed and Codex auto-approves, so vault requests and
@@ -467,8 +496,8 @@ The microphone usage string and audio-input entitlement already ship (#2293).
   - `pet_bind` persists to `pet.json` and emits `pet:bound`, and the binding
     survives a Runtime origin change;
   - `main` gains only `pet_bind`, and `pet` is granted exactly `pet_ready`,
-    `pet_set_expanded`, `pet_bind`, `pet_open`, the two events, and
-    `start-dragging`; `pet_bind` from `pet` sets and clears the binding;
+    `pet_set_expanded`, `pet_bind`, `pet_unbind`, `pet_open`, the two events,
+    and `start-dragging`; `pet_unbind(A)` is a no-op when the binding is `B`;
   - a wake that recreates the window delivers the summon through
     `pet_ready()`, and a summon to a ready page is emitted once;
   - `pet.json` load fixtures: absent file, no `enabled`, explicit `false`,
@@ -476,8 +505,13 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     explicit `false` survives the default change.
 - **Vitest:**
   - `derivePetState` covers every row and the priority order;
-  - session binding through `pet_ready()` and `pet:bound`; the switcher and
-    an invalid binding both go through `pet_bind`; the hotkey with
+  - session binding through `pet_ready()` and `pet:bound`; the switcher goes
+    through `pet_bind` and an invalid binding through `pet_unbind`; switching
+    from `A` to `B` while `A`'s reads are in flight, with `A`'s results
+    (including a `404`) arriving after the switch, leaves `B` bound and shows
+    only `B`'s state;
+  - an older unanswered quick-reply group under a newer agent result does not
+    derive Needs input; the hotkey with
     no valid binding opens the switcher and never starts capture;
   - before setup is complete, `/pet` renders its setup-pending state and is
     not redirected to `/setup`;
