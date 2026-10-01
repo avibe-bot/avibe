@@ -134,12 +134,12 @@ class RuntimeGenerationSet(Generic[_S, _R]):
                         victims.append((generation, True))
                         raise RuntimeUnitStopping("runtime unit is stopping")
                     self._install_current_locked(generation, victims)
-                    while self._retiring and len(self._retiring) + 1 > self._cap:
-                        # Never make the new turn wait: the oldest work gives way.
-                        victims.append((self._detach_locked(self._retiring[0]), True))
                     return self._bind_locked(generation)
         finally:
             await self._teardown(victims)
+            # The cap counts what is still attached once graceful stops have
+            # answered: a declined stop keeps its generation alive.
+            await self._enforce_cap()
 
     async def bind(self, generation: RuntimeGeneration[_S, _R]) -> RuntimeBinding[_S, _R]:
         """Bind recovered work, such as a restored poll, to its known generation."""
@@ -156,12 +156,10 @@ class RuntimeGenerationSet(Generic[_S, _R]):
             generation = RuntimeGeneration(spec, runtime, next(self._serials))
             if current:
                 if self._current is not None:
-                    self._current.retiring = True
-                    self._retiring.append(self._current)
+                    self._add_retiring_locked(self._current)
                 self._current = generation
             else:
-                generation.retiring = True
-                self._retiring.append(generation)
+                self._add_retiring_locked(generation)
             return generation
 
     async def retire(self, generation: RuntimeGeneration[_S, _R]) -> None:
@@ -228,8 +226,7 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         previous = self._current
         self._current = generation
         if previous is not None and previous is not generation:
-            previous.retiring = True
-            self._retiring.append(previous)
+            self._add_retiring_locked(previous)
         # The new generation already serves, so an unbound predecessor stops
         # without a gap.
         self._collect_unbound_locked(victims)
@@ -241,8 +238,7 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         if self._current is generation:
             self._current = None
         if generation not in self._retiring:
-            generation.retiring = True
-            self._retiring.append(generation)
+            self._add_retiring_locked(generation)
         if generation.bindings == 0:
             victims.append((self._detach_locked(generation), False))
 
@@ -303,7 +299,20 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         # Synchronous, so it is atomic with every other bookkeeping section and
         # safe inside a cancellation handler.
         generation.stopped = False
-        generation.retiring = True
         generation.closed = generation.closed or closed
         if generation not in self._retiring:
-            self._retiring.append(generation)
+            self._add_retiring_locked(generation)
+
+    def _add_retiring_locked(self, generation: RuntimeGeneration[_S, _R]) -> None:
+        # Oldest first, so the cap always gives way from the oldest work.
+        generation.retiring = True
+        self._retiring.append(generation)
+        self._retiring.sort(key=lambda item: item.serial)
+
+    async def _enforce_cap(self) -> None:
+        async with self._lock:
+            victims: _Victims = []
+            while self._retiring and len(self._retiring) + (self._current is not None) > self._cap:
+                # Never make the new turn wait: the oldest work gives way.
+                victims.append((self._detach_locked(self._retiring[0]), True))
+        await self._teardown(victims)

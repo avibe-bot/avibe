@@ -120,6 +120,29 @@ def test_runtime_gen_003_at_the_cap_the_oldest_retiring_generation_gives_way():
     asyncio.run(run())
 
 
+def test_the_cap_holds_when_graceful_stops_decline():
+    """Generations whose adapters still report work count toward the cap."""
+    runtimes = _Runtimes()
+    generations = runtimes.generation_set(cap=3)
+
+    async def run():
+        # Bindings are released while each adapter still reports live work,
+        # so every graceful stop declines.
+        runtimes.decline_stops = 10
+        bindings = []
+        for digest in ("1", "2", "3", "4", "5"):
+            binding = await generations.acquire(_Spec(digest))
+            bindings.append(binding)
+            await binding.release()
+            assert len(runtimes.live) <= 3
+
+        assert [runtime for runtime, force in runtimes.stopped] == ["1#0", "2#1"]
+        assert all(force for _runtime, force in runtimes.stopped)
+        assert [generation.spec.digest for generation in generations.generations] == ["3", "4", "5"]
+
+    asyncio.run(run())
+
+
 def test_a_live_generation_with_the_needed_spec_serves_again():
     """Sessions alternating between two launch specs keep two processes, not more."""
     runtimes = _Runtimes()
