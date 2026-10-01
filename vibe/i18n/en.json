@@ -440,6 +440,7 @@
     "codexRuntimeChangeBlocked": "Another Codex turn in this working directory is still running on a different model runtime, so the selected model cannot start yet. Retry this input after that turn finishes, or use a different working directory.",
     "codexResponseTooLarge": "Codex returned a response larger than {limitMiB} MiB, so this connection cannot continue. Check or update Codex before retrying.",
     "opencodeModelHubOverlayRequired": "OpenCode is still preparing for Gateway mode. Retry in a moment.",
+    "opencodeModelHubOverlaySwitchBlocked": "OpenCode is still running other tasks on its previous model configuration, so this turn cannot start yet. Those tasks are not interrupted. Retry this input after they finish.",
     "opencodePolicyRefreshPending": "OpenCode is still finishing an existing turn and cannot restart with Avibe's current Skill policy yet. Retry after that turn finishes.",
     "opencodeRuntimeConfigInvalid": "OpenCode could not start because OPENCODE_CONFIG_CONTENT is invalid. Fix the runtime configuration and retry.",
     "opencodeDirectoryBootstrapTimeout": "OpenCode is still finishing its first-time setup. Send your message again shortly.",

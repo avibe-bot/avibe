@@ -36,8 +36,10 @@ from core.managed_skills import (
     managed_skill_project_base,
 )
 from core.processing_indicator import STOPPED_REACTION_EMOJI
+from core.handlers.model_hub.service import ModelHubError
 from core.native_dispatch_phase import (
     mark_backend_dispatch_attempted,
+    mark_prewrite_recovery_required,
     prewrite_user_stop_requested,
 )
 from core.resource_governance import (
@@ -96,6 +98,7 @@ from .server import (
     OpenCodeDirectoryBootstrapTimeoutError,
     OpenCodeManagedPolicyRefreshPendingError,
     OpenCodeModelHubOverlayRequiredError,
+    OpenCodeModelHubOverlaySwitchBlockedError,
     OpenCodePromptRejectedError,
     OpenCodeRuntimeConfigInvalidError,
     OpenCodeServerManager,
@@ -1063,6 +1066,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         localized_key = None
         if isinstance(error, OpenCodeModelHubOverlayRequiredError):
             localized_key = "error.opencodeModelHubOverlayRequired"
+        elif isinstance(error, OpenCodeModelHubOverlaySwitchBlockedError):
+            localized_key = "error.opencodeModelHubOverlaySwitchBlocked"
         elif isinstance(error, OpenCodeManagedPolicyRefreshPendingError):
             localized_key = "error.opencodePolicyRefreshPending"
         elif isinstance(error, OpenCodeRuntimeConfigInvalidError):
@@ -1078,6 +1083,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         else:
             message = f"Failed to start OpenCode server: {error}"
         return f"❌ {message}{self._resource_failure_suffix(resource_failure)}"
+
+    @staticmethod
+    def _turn_model(request: AgentRequest, configured_model: Any) -> Any:
+        model = request.vibe_agent_model or configured_model
+        if request.subagent_name:
+            model = request.subagent_model or model
+        return model
 
     async def prepare_runtime_restart(self) -> None:
         """Adopt persisted server state before the shared drain snapshot."""
@@ -1359,8 +1371,21 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             server = await self._get_server()
             configure_overlay = getattr(server, "configure_model_hub_overlay", None)
             if callable(configure_overlay):
+                required_model = None
+                if model_hub_overlay is not None:
+                    _, configured_model, _ = self.controller.get_opencode_overrides(request.context)
+                    try:
+                        required_model = opencode_model_for_overlay(
+                            self._turn_model(request, configured_model),
+                            model_hub_overlay,
+                        )
+                    except ModelHubError:
+                        # The launch resolution below refuses it with the
+                        # copy that says why.
+                        required_model = None
                 model_hub_overlay_reservation = await configure_overlay(
-                    model_hub_overlay
+                    model_hub_overlay,
+                    required_model=required_model,
                 )
             await server.ensure_running()
             caller_context_binding_path = _caller_context_path_for_server(server)
@@ -1385,6 +1410,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             model_hub_overlay_reservation = None
             resource_failure = self._resource_failure_for_server(server)
+            if isinstance(e, OpenCodeModelHubOverlaySwitchBlockedError):
+                # Not a source failure. Hold the unwritten input for an
+                # explicit retry once the runs holding the server finish.
+                mark_prewrite_recovery_required(request.context, e.reason)
             logger.error(f"Failed to start OpenCode server: {e}", exc_info=True)
             await emit_backend_failure(
                 self.controller,
@@ -1515,12 +1544,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
         try:
             override_agent, override_model, override_reasoning = self.controller.get_opencode_overrides(request.context)
-            override_model = request.vibe_agent_model or override_model
+            override_model = self._turn_model(request, override_model)
             override_reasoning = request.vibe_agent_reasoning_effort or override_reasoning
 
             override_agent = request.subagent_name or override_agent
             if request.subagent_name:
-                override_model = request.subagent_model or override_model
                 override_reasoning = request.subagent_reasoning_effort
 
             if request.subagent_name and not override_reasoning:

@@ -74,8 +74,12 @@ runtime projection without restarting the backend, so a catalog change never int
 running work. The same rule covers unattended built-in snapshot refreshes:
 
 - Claude Code resolves the committed catalog on its next turn.
-- OpenCode's next turn moves the shared server to the new overlay once runs on the old
-  overlay finish; turns that arrive meanwhile wait for that switch.
+- OpenCode runs one shared server, and a new overlay replaces it. While runs hold that
+  server, a turn whose model the running overlay still serves, with only model rows
+  changed, starts on it at once. A turn that needs the new overlay, such as one on a
+  newly added model, waits up to 30 seconds for those runs and is then refused with a
+  retry message; the runs are never interrupted. The first turn that finds the server
+  idle switches it.
 - Codex replaces a directory's app-server when a turn finds that directory idle and its
   catalog changed. A turn in a directory with other live work keeps the app-server's
   earlier metadata until a later turn finds the directory idle.
