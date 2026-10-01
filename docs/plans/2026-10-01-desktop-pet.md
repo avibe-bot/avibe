@@ -142,9 +142,9 @@ loopback origin only, through a new capability file:
   chose, `{panel_side: left | right, panel_edge: top | bottom, pet_offset}`,
   and the route renders the pet and panel from that value. The native frame
   and the DOM therefore share one placement decision;
-- command `pet_bind(session_id)` and event `pet:bound`, which set and carry
-  the session binding (see Session binding). The pet uses `pet_bind` for its
-  switcher;
+- command `pet_bind(session_id) -> {shown}` and event `pet:bound`, which set
+  and carry the session binding (see Session binding). The pet uses
+  `pet_bind` for its switcher; a call from `main` also wakes the pet;
 - command `pet_unbind(session_id)`, a compare-and-clear: it clears the binding
   only if it is still `session_id`, so a late result about an old session can
   never clear a newer one;
@@ -282,6 +282,12 @@ when the user changes the UI port, so it cannot own anything durable.
 - The Workbench chat page's "Show in pet" action calls `pet_bind(S)`. It is
   offered only where the chat page's composer is: it is hidden whenever
   `isSessionReadOnly(session)` (`sessionArchived.ts`) is true.
+- A bind from `main` also shows the pet: after persisting, the shell runs
+  `pet_wake()`, the same single wake path as the hotkey, so a pet hidden by
+  an OS close reappears. `pet_bind` returns `{shown}`; when the pet is off,
+  the binding is still saved and `main` shows a toast pointing to the tray's
+  "Show pet" switch. A bind from the pet's own switcher does not wake, since
+  the pet is already visible.
 - The panel's compact recent-session switcher calls `pet_bind` the same way.
   Its rows come from the global `listSessions({status: 'active', limit: 20})`
   (`GET /api/sessions` with no project, newest first), filtered by the same
@@ -302,7 +308,8 @@ when the user changes the UI port, so it cannot own anything durable.
   cannot send. The rule is checked on the read, not tied to a particular
   event kind.
 - **Every asynchronous read is fenced by binding and by order.** Each source
-  (session, tail, turn state, vault requests) keeps a generation counter.
+  (session, tail, turn state, vault requests, and the switcher's session
+  list) keeps a generation counter.
   Starting a read, and merging a live event into that source, both bump it. A
   read carries the session id and the generation it started at, and its
   result is applied only if the session is still the binding and no newer
@@ -314,6 +321,9 @@ when the user changes the UI port, so it cannot own anything durable.
     `pet_unbind(A)` would be a no-op in the shell anyway.
   - Within one binding, a tail read started before a quick-reply
     `message.updated` cannot land after it and restore Needs input.
+  - The switcher list is not tied to a binding, so it is fenced by
+    generation only: an older `listSessions` response cannot overwrite a
+    newer refresh that already lists a new session.
 - When the main-agent session type lands, the route resolves the main-agent
   session instead, and the switcher is removed.
 
@@ -534,6 +544,10 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     only `B`'s state;
   - a tail read started before a `message.updated` and resolved after it is
     dropped, the chosen row stays, and one trailing read follows;
+  - "Show in pet" on a hidden, enabled pet binds and shows it, and on a
+    disabled pet saves the binding and shows the tray toast;
+  - an older switcher `listSessions` response that resolves after a newer
+    refresh is dropped;
   - "Show in pet" is hidden for archived and system sessions, a persisted
     binding to the workspace-notices session is cleared on load, and the
     switcher lists a new active session that has no reply yet and omits
