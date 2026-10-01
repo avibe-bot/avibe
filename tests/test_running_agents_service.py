@@ -1136,7 +1136,7 @@ def test_end_idle_opencode_retires_the_current_generation_after_its_last_session
     }
     if has_other_session:
         sessions["b2"] = ("oc-2", "/work", "channel-2")
-    retired = _AsyncFlag()
+    retired = _AsyncFlag(ret="stopped")
     manager = types.SimpleNamespace(
         get_request_session=lambda base: sessions.get(base),
         pop_request_session=lambda base: sessions.pop(base, None),
@@ -1161,6 +1161,37 @@ def test_end_idle_opencode_retires_the_current_generation_after_its_last_session
     assert retired.called is not has_other_session
     assert "b1" not in sessions
     assert ("b2" in sessions) is has_other_session
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        # A lease still binds the process; it stops once the lease drains.
+        ("draining", {"ok": True, "process_killed": False}),
+        ("failed", {"ok": False, "error": "runtime_retirement_failed"}),
+    ],
+)
+def test_end_idle_opencode_reports_only_a_confirmed_stop_as_killed(outcome, expected):
+    manager = types.SimpleNamespace(
+        get_request_session=lambda base: ("oc-1", "/work", "channel-1") if base == "b1" else None,
+        pop_request_session=lambda base: None,
+        list_all=lambda: {},
+    )
+    agent = types.SimpleNamespace(
+        _active_requests={},
+        _session_manager=manager,
+        retire_current_generation=_AsyncFlag(ret=outcome),
+    )
+
+    result = asyncio.run(
+        running_agents.end_running_agent(
+            _make_controller(opencode=agent),
+            backend="opencode",
+            base_session_id="b1",
+        )
+    )
+
+    assert {key: result.get(key) for key in expected} == expected
 
 
 def test_end_idle_opencode_clears_disposable_session_caches():

@@ -15,7 +15,7 @@ import secrets
 import shutil
 import subprocess
 import time
-from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Mapping, Optional
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -38,6 +38,7 @@ from .server import (
     OpenCodeGenerationStartError,
     OpenCodeLaunchSpec,
     OpenCodeServerClient,
+    StopOutcome,
     adopt_recorded_generations,
     start_generation,
     stop_generation,
@@ -207,6 +208,14 @@ def _read_renew_epoch() -> int:
         return int(_renew_epoch_path().read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return 0
+
+
+def _stop_outcome(wrapper: RuntimeGeneration[Any, OpenCodeGeneration]) -> StopOutcome:
+    if wrapper.stopped:
+        return StopOutcome.STOPPED
+    if wrapper.failed:
+        return StopOutcome.FAILED
+    return StopOutcome.DRAINING
 
 
 @dataclass(frozen=True)
@@ -445,8 +454,31 @@ class OpenCodeRuntime:
         if self._adopted:
             await self._generations.reap()
 
-    async def retire_current(self) -> None:
-        await self._generations.retire_current()
+    async def retire_confirmed(
+        self,
+        generations: Optional[Iterable[OpenCodeGeneration]] = None,
+    ) -> dict[str, StopOutcome]:
+        """Retire generations, wait for their stops, and report each outcome.
+
+        This is the controller's one confirmed-stop primitive: a stop counts as
+        done only after the reconciler has run it. ``generations`` defaults to
+        the current generation.
+        """
+
+        if generations is None:
+            current = self._generations.current
+            wrappers = [current] if current is not None else []
+        else:
+            wrappers = [
+                wrapper
+                for generation in generations
+                if (wrapper := self._wrappers.get(generation.generation_id)) is not None
+            ]
+        for wrapper in wrappers:
+            await self._generations.retire(wrapper)
+        # Waits for the reconciler, and retries graceful stops that declined earlier.
+        await self._generations.reap()
+        return {wrapper.runtime.generation_id: _stop_outcome(wrapper) for wrapper in wrappers}
 
     async def close(self) -> None:
         """Admit nothing more; idle generations stop now, bound ones once drained."""
@@ -468,10 +500,8 @@ class OpenCodeRuntime:
         closed, so it never serves again and a later sweep retries its stop.
         """
 
-        await self.retire_all()
-        # Also retries graceful stops that declined while work was in flight.
-        await self._generations.reap()
-        if self._generations.generations:
+        outcomes = await self.retire_confirmed(self.generations())
+        if any(outcome is not StopOutcome.STOPPED for outcome in outcomes.values()):
             raise RuntimeError("OpenCode server did not exit")
 
     async def _start(self, spec: Any) -> OpenCodeGeneration:
@@ -501,7 +531,12 @@ class OpenCodeRuntime:
 
         generation = wrapper.runtime
         if not force and generation.process_alive() and not generation.is_drained():
-            return False
+            # A run marker that no durable poll backs, left by an adoption
+            # whose record rewrite failed, keeps the process only until a
+            # later sweep's retry of that reconciliation succeeds.
+            self._reconcile_run_markers(generation, self._durable_polls())
+            if not generation.is_drained():
+                return False
         if self.on_generation_stopping is not None:
             await self.on_generation_stopping(generation, force)
         await stop_generation(generation)

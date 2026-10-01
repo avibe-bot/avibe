@@ -6,6 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 import json
 import logging
 import os
@@ -232,6 +233,17 @@ class OpenCodePromptRejectedError(RuntimeError):
 
 class OpenCodeDirectoryBootstrapTimeoutError(RuntimeError):
     """OpenCode is still bootstrapping a directory after the readiness ceiling."""
+
+
+class StopOutcome(str, Enum):
+    """What a confirmed stop found once nothing about it was still pending."""
+
+    # The process is gone and its record removed.
+    STOPPED = "stopped"
+    # Work or a lease still binds it; it stops once that drains.
+    DRAINING = "draining"
+    # Its stop ran and the process survived; its record stays for a retry.
+    FAILED = "failed"
 
 
 class OpenCodeGenerationStartError(RuntimeError):
@@ -1960,11 +1972,7 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
         if not (await generation.is_healthy() and _pid_listens_on(generation.pid, generation.port)):
             logger.info("Stopping recorded OpenCode server pid=%s that no longer serves", generation.pid)
             await generation.close_http_session()
-            if await asyncio.to_thread(terminate_pid_tree_sync, generation.pid):
-                forget_record(path)
-            else:
-                # The record stays, so a later adoption or ``vibe stop`` retries.
-                logger.warning("Recorded OpenCode server pid=%s survived its stop", generation.pid)
+            await asyncio.to_thread(stop_recorded_server_sync, path, info)
             continue
         # This controller owns it from now on.
         generation.owner_pid = _CURRENT_OWNER_PID
@@ -2001,22 +2009,33 @@ def forget_record(path: Path) -> None:
         _remove_quietly(path.with_name(path.name.removesuffix(".json") + ".overlay.json"))
 
 
-def recorded_server_pids() -> list[tuple[int, Path]]:
+def recorded_servers() -> list[tuple[int, Path, Dict[str, Any]]]:
     """The live, proven OpenCode servers Avibe recorded, for status and ``vibe stop``."""
 
     return [
-        (int(info["pid"]), path)
+        (int(info["pid"]), path, info)
         for path, info in _recorded_processes()
         if _record_proves_process(info, require_port=False)
     ]
+
+
+def stop_recorded_server_sync(path: Path, info: Mapping[str, Any]) -> StopOutcome:
+    """Stop one recorded server outside any runtime, confirming the outcome.
+
+    A record no live process of ours backs is simply forgotten. A process
+    that survives its stop keeps its record, so ``vibe stop`` or the next
+    adoption retries it.
+    """
+
+    if _record_proves_process(info, require_port=False) and not terminate_pid_tree_sync(int(info["pid"])):
+        logger.warning("Recorded OpenCode server pid=%s survived its stop", info["pid"])
+        return StopOutcome.FAILED
+    forget_record(path)
+    return StopOutcome.STOPPED
 
 
 def terminate_recorded_generations_sync() -> None:
     """Stop every recorded OpenCode server during an explicit Avibe shutdown."""
 
     for path, info in _recorded_processes():
-        if _record_proves_process(info, require_port=False) and not terminate_pid_tree_sync(int(info["pid"])):
-            # The record stays, so ``vibe stop`` or the next adoption retries.
-            logger.warning("OpenCode server pid=%s survived shutdown", info["pid"])
-            continue
-        forget_record(path)
+        stop_recorded_server_sync(path, info)

@@ -98,6 +98,7 @@ from .poll_loop import (
 from .server import (
     OpenCodeDirectoryBootstrapTimeoutError,
     OpenCodeGeneration,
+    StopOutcome,
     OpenCodePromptRejectedError,
     OpenCodeRuntimeConfigInvalidError,
     native_part_id_for_attempt,
@@ -1284,9 +1285,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         """
         await self._runtime.close()
 
-    async def retire_current_generation(self) -> None:
-        """Stop the current generation once drained; the next turn starts a fresh one."""
-        await self._runtime.retire_current()
+    async def retire_current_generation(self) -> StopOutcome | None:
+        """Retire the current generation and report its confirmed outcome.
+
+        ``None`` means no generation was running. The next turn starts a fresh
+        generation either way.
+        """
+        outcomes = await self._runtime.retire_confirmed()
+        return next(iter(outcomes.values()), None)
 
     async def _cancel_active_requests(self, base_session_ids: set[str] | None = None) -> None:
         """Cancel request tasks before a forced generation stop.

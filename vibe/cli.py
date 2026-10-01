@@ -13875,27 +13875,21 @@ def _stop_opencode_server(runtime_ids: frozenset[str] = frozenset()):
 
     A server of another Runtime is left running, as the scoped stop leaves it.
     """
-    from modules.agents.opencode.server import forget_record, recorded_server_pids, terminate_pid_tree_sync
+    from modules.agents.opencode.server import StopOutcome, recorded_servers, stop_recorded_server_sync
 
-    stopped_any = False
-    survived = False
-    for pid, record_path in recorded_server_pids():
+    outcomes = []
+    for pid, record_path, info in recorded_servers():
         try:
             runtime.refuse_foreign_desktop_process(pid, "opencode", runtime_ids)
         except runtime.DesktopRuntimeClaimRefused as refusal:
             logger.warning("Leaving the OpenCode server pid=%s running: %s", pid, refusal)
             continue
         # OpenCode starts each tool command in its own session, so stopping only
-        # the server pid would leave a running command behind. Stop the whole tree
-        # the way the service's own teardown does.
-        if terminate_pid_tree_sync(pid, timeout=5):
-            forget_record(record_path)
-            stopped_any = True
-        else:
-            logger.warning("Failed to stop OpenCode server (pid=%s)", pid)
-            survived = True
+        # the server pid would leave a running command behind. The confirmed stop
+        # takes the whole tree, the way the service's own teardown does.
+        outcomes.append(stop_recorded_server_sync(record_path, info))
     # One survivor means OpenCode did not stop, however many others did.
-    return stopped_any and not survived
+    return bool(outcomes) and all(outcome is StopOutcome.STOPPED for outcome in outcomes)
 
 
 def _pid_file_points_to_live_process(pid_path: Path) -> bool:

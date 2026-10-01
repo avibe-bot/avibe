@@ -9847,10 +9847,10 @@ def _compare_versions(current: str | None, latest: str | None) -> bool:
 
 
 def _opencode_process_status() -> str:
-    from modules.agents.opencode.server import recorded_server_pids
+    from modules.agents.opencode.server import recorded_servers
 
     try:
-        return "running" if recorded_server_pids() else "stopped"
+        return "running" if recorded_servers() else "stopped"
     except Exception:  # noqa: BLE001
         return "unknown"
 

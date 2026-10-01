@@ -723,11 +723,17 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
     if not callable(retire):
         return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
     try:
-        await retire()
+        outcome = await retire()
     except Exception as exc:  # noqa: BLE001
         logger.warning("end: opencode idle server retirement failed for %s: %s", base_session_id, exc)
         return {"ok": False, "error": "runtime_retirement_failed", "detail": str(exc)}
-    return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": True}
+    outcome = getattr(outcome, "value", outcome)
+    if outcome == "failed":
+        # The stop ran and the process survived; its record stays for a retry.
+        return {"ok": False, "error": "runtime_retirement_failed", "detail": "OpenCode server did not exit"}
+    # "draining": a lease or other work still binds the process, which stops
+    # once that drains. Only a confirmed stop reports a killed process.
+    return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": outcome == "stopped"}
 
 
 async def _settle_workbench_turn(

@@ -940,3 +940,74 @@ def test_runtime_gen_024_a_mode_switch_during_a_hub_run_moves_new_turns_to_direc
     assert hub_kept_for_its_run
     assert fake_processes.stopped == [hub]
     assert direct.spec_digest != hub.spec_digest
+
+
+# ------------------------------------------------- review round 2 regressions
+
+
+def test_a_confirmed_retirement_of_a_leased_generation_reports_it_draining(fake_processes):
+    from modules.agents.opencode.server import StopOutcome
+
+    agent = object.__new__(OpenCodeAgent)
+    agent._runtime = _runtime()
+
+    async def scenario():
+        lease_id, leased = await agent._runtime.lease(OpenCodeLaunchSpec(digest="v1", binary="opencode"), 60)
+        outcome = await agent.retire_current_generation()
+        still_running = leased not in fake_processes.stopped
+        await agent._runtime.release_lease(lease_id)
+        await agent._runtime._generations.settled()
+        return outcome, still_running, leased
+
+    outcome, still_running, leased = asyncio.run(scenario())
+
+    # Retiring a leased generation is no stop until the lease drains.
+    assert outcome is StopOutcome.DRAINING and still_running
+    assert fake_processes.stopped == [leased]
+
+
+def test_a_confirmed_retirement_of_an_idle_generation_reports_it_stopped(fake_processes):
+    from modules.agents.opencode.server import StopOutcome
+
+    agent = object.__new__(OpenCodeAgent)
+    agent._runtime = _runtime()
+
+    async def scenario():
+        turn = await agent._runtime.acquire(OpenCodeLaunchSpec(digest="v1", binary="opencode"))
+        running = turn.generation.runtime
+        await turn.release()
+        return running, await agent.retire_current_generation(), await agent.retire_current_generation()
+
+    running, stopped, nothing = asyncio.run(scenario())
+
+    assert stopped is StopOutcome.STOPPED
+    assert fake_processes.stopped == [running]
+    assert nothing is None
+
+
+def test_an_orphaned_run_marker_is_reconciled_again_by_a_later_sweep(fake_processes, monkeypatch):
+    generation = _generation("ocg_orphan", 50, "spec-old")
+    generation.active_run_sessions = {"ses_without_poll"}
+    fake_processes.alive.add(generation.generation_id)
+    monkeypatch.setattr(client_manager, "adopt_recorded_generations", AsyncMock(return_value=[generation]))
+    writes = {"count": 0}
+
+    def write_record(self):
+        writes["count"] += 1
+        if writes["count"] == 1:
+            raise OSError("state dir briefly unwritable")
+
+    monkeypatch.setattr(OpenCodeGeneration, "write_record", write_record)
+    runtime = _runtime()
+    runtime.durable_poll_generations = lambda: {}
+
+    async def scenario():
+        # Adoption cannot persist the dropped marker, so it keeps it for now.
+        await runtime.ensure_adopted(OpenCodeLaunchSpec(digest="spec-new", binary="opencode"))
+        pinned = generation in runtime.generations()
+        await runtime.reap()
+        return pinned
+
+    assert asyncio.run(scenario())
+    assert fake_processes.stopped == [generation]
+    assert generation.active_run_sessions == set()
