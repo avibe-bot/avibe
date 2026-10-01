@@ -1027,6 +1027,93 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         transport.stop.assert_awaited_once_with()
         agent.controller.agent_service.force_end_runtime_work.assert_not_awaited()
 
+    async def test_refresh_keeps_sessions_bound_to_a_process_that_failed_to_stop(self):
+        """A surviving process still holds its threads, so its Sessions stay bound to it."""
+        agent = init_generation_state(object.__new__(CodexAgent))
+        transport = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("stop failed")), _process=None)
+        invalidated = []
+        agent._session_mgr = SimpleNamespace(
+            all_base_sessions=lambda: ["session-1", "session-2"],
+            invalidate_thread=invalidated.append,
+        )
+        agent._turn_registry = SimpleNamespace(clear_session=Mock())
+        agent.controller = SimpleNamespace()
+        install_codex_transport(
+            agent, "/tmp/work", transport, sessions={"session-1": "thread-1", "session-2": "thread-2"}
+        )
+
+        await agent.refresh_auth_state()
+
+        self.assertIs(agent.transport_for_session("session-1"), transport)
+        self.assertIs(agent.transport_for_session("session-2"), transport)
+        self.assertEqual(invalidated, [])
+
+    async def test_clearing_a_session_releases_its_thread_on_a_shared_app_server(self):
+        """A cleared conversation must not leave its thread loaded in a shared process."""
+        agent = init_generation_state(object.__new__(CodexAgent))
+        sent = []
+
+        async def send_request(method, params):
+            sent.append((method, params))
+            return {"status": "notLoaded"}
+
+        transport = SimpleNamespace(is_alive=True, send_request=send_request, stop=AsyncMock())
+        session_mgr = RealCodexSessionManager()
+        for base, key in (("session-1", "key-a"), ("session-2", "key-b")):
+            session_mgr.set_session_key(base, key)
+            session_mgr.set_cwd(base, "/tmp/work")
+            session_mgr.set_thread_id(base, f"thread-{base}")
+        agent._session_mgr = session_mgr
+        agent.sessions = SimpleNamespace(clear_agent_sessions=Mock())
+        agent._turn_registry = SimpleNamespace(get_active_turn=lambda _base: None, clear_session=Mock())
+        agent._session_locks = {}
+        install_codex_transport(
+            agent,
+            "/tmp/work",
+            transport,
+            sessions={"session-1": "thread-session-1", "session-2": "thread-session-2"},
+        )
+
+        await agent.clear_sessions("key-a")
+
+        self.assertEqual(sent, [("thread/unsubscribe", {"threadId": "thread-session-1"})])
+        self.assertIsNone(agent.transport_for_session("session-1"))
+        self.assertIs(agent.transport_for_session("session-2"), transport)
+        transport.stop.assert_not_awaited()
+
+    async def test_last_session_end_settles_activity_owners_before_the_kill(self):
+        """End kills the process only after the ending Session's Activities settle."""
+        agent = init_generation_state(object.__new__(CodexAgent))
+        events = []
+
+        async def stop():
+            events.append("stop")
+
+        async def end_work(backend, *, base_session_ids, activity_runtime_keys):
+            events.append(("settle", backend, set(base_session_ids), set(activity_runtime_keys)))
+
+        transport = SimpleNamespace(stop=stop, _process=None)
+        agent._session_mgr = SimpleNamespace(
+            sessions_for_cwd=lambda _cwd: ["session-1"],
+            invalidate_thread=Mock(),
+        )
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=lambda _base: None,
+            has_pending_turn_start=lambda _base: False,
+            clear_session=Mock(),
+        )
+        agent.controller = SimpleNamespace(agent_service=SimpleNamespace(force_end_runtime_work=end_work))
+        install_codex_transport(agent, "/tmp/work", transport, sessions={"session-1": "thread-1"})
+
+        self.assertTrue(
+            await agent.retire_unowned_session_transport("/tmp/work", ending_session_id="session-1")
+        )
+
+        self.assertEqual(
+            events,
+            [("settle", "codex", set(), {"session-1:/tmp/work"}), "stop"],
+        )
+
     async def test_forced_stop_settles_activity_only_work(self):
         """A forced stop ends durable Activities even when no foreground turn runs."""
         agent = init_generation_state(object.__new__(CodexAgent))

@@ -59,7 +59,21 @@ directory (`_units[cwd]`). Each generation wraps one `_CodexRuntime`:
 
 `_session_generations[base_session_id]` names the generation holding each
 Session's thread. `_session_mgr.get_thread_id(bid)` is set only while that
-thread is loaded there; `_unbind_session` clears both together. Every
+thread is loaded there.
+
+A live binding has exactly two owners, because Codex lets one process at a
+time hold a thread:
+
+- the process ending (`_forget_runtime_sessions`);
+- the thread's release (`_release_session_thread`).
+
+Every other path uses `_forget_stale_session`, which clears only thread ids
+that no live process holds:
+
+- the bulk refresh, migration, and resume paths;
+- `/new`, through `clear_sessions`, which first releases each live thread.
+
+A Session whose process survived a failed stop therefore stays bound to it. Every
 per-Session path routes through this binding: `handle_stop`,
 `steer_active_turn`, `reconcile_steer_attempt`, liveness capture, activation
 lookup, and notification filtering. `_runtimes[cwd]` tracks every process not
@@ -187,6 +201,13 @@ refresh need processes gone outside the core's own decisions. They use
 - After the final synchronous check, it detaches every selected generation
   before the first stop awaits. A turn arriving meanwhile starts its own
   generation and cannot bind to one about to be killed.
+- `_end_bound_work` is the single owner of settling bound work, meaning turns
+  and every bound Session's Activities, before an adapter-initiated kill:
+  - the forced stop and End settle;
+  - migration and the exclusive refresh pass `settle=False`, because
+    `migration_guard` and the coordinator already settled the backend;
+  - shutdown deliberately shows no notice, since the whole runtime is going
+    away and restart recovery reports interrupted work.
 - If a stop fails, the still-running process is adopted back as retiring, with
   its Sessions still bound, so a later call or sweep can retry.
 
