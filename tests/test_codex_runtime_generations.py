@@ -500,9 +500,20 @@ async def test_runtime_gen_018_fork_boundary_reads_the_source_sessions_generatio
         return_value={"data": [{"id": running, "status": "interrupted"}]}
     )
 
+    # Fork metadata names the durable Session id, never the base session; the
+    # running turn is found through the persisted fork boundary.
+    agent.controller.session_turns = SimpleNamespace(
+        native_turn_id_for_initial_message=lambda session_id, message_id: (
+            running if (session_id, message_id) == ("ses-source-durable", "message-1") else None
+        )
+    )
     still_running, boundary = await agent._fork_source_last_completed_turn_id(
         target_server,
-        {"source_session_id": "source", "source_native_session_id": source_thread},
+        {
+            "source_session_id": "ses-source-durable",
+            "source_native_session_id": source_thread,
+            "source_message_id": "message-1",
+        },
     )
 
     assert (still_running, boundary) == (True, "turn-done")

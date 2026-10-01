@@ -1027,6 +1027,26 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         transport.stop.assert_awaited_once_with()
         agent.controller.agent_service.force_end_runtime_work.assert_not_awaited()
 
+    async def test_forced_stop_settles_activity_only_work(self):
+        """A forced stop ends durable Activities even when no foreground turn runs."""
+        agent = init_generation_state(object.__new__(CodexAgent))
+        transport = SimpleNamespace(stop=AsyncMock(), _process=None)
+        agent._session_mgr = SimpleNamespace(invalidate_thread=Mock())
+        agent._turn_registry = SimpleNamespace(get_active_turn=Mock(return_value=None), clear_session=Mock())
+        agent.controller = SimpleNamespace(
+            agent_service=SimpleNamespace(force_end_runtime_work=AsyncMock())
+        )
+        generation = install_codex_transport(agent, "/tmp/work", transport, sessions={"session-1": "thread-1"})
+
+        self.assertTrue(await agent._stop_generation(generation, True))
+
+        agent.controller.agent_service.force_end_runtime_work.assert_awaited_once_with(
+            "codex",
+            base_session_ids=set(),
+            activity_runtime_keys={"session-1:/tmp/work"},
+        )
+        transport.stop.assert_awaited_once_with()
+
     def test_request_activation_resolves_one_live_session_key_transport(self):
         agent = init_generation_state(object.__new__(CodexAgent))
         activation = RuntimeActivationRegistry()
@@ -1795,7 +1815,9 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
                 agent._start_turn = AsyncMock()
 
                 def snapshot(target):
-                    self.assertEqual([binding.session_id for binding in target.bindings], ["ses-durable"])
+                    # The retired broken generation answers only for Sessions
+                    # holding a thread there; the resume never loaded one.
+                    self.assertEqual(target.bindings, ())
                     return SimpleNamespace(blocks_dead_transport_replacement=False)
 
                 agent.controller = SimpleNamespace(
@@ -1855,7 +1877,7 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
             sessions={"session-2": "thread-2"},
         )
 
-        self.assertTrue(await agent._drop_generation_after_failure(old, request))
+        self.assertTrue(await agent._drop_generation_after_failure(old, request, bind_installed(agent, old)))
 
         old_transport.stop.assert_awaited_once()
         self.assertIs(codex_transports(agent)["/tmp/work"], fresh_transport)
@@ -1888,7 +1910,7 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
         agent.controller = SimpleNamespace(runtime_activation=activation)
         generation = install_codex_transport(agent, "/tmp/work", transport, activation=identity)
 
-        await agent._drop_generation_after_failure(generation, request)
+        await agent._drop_generation_after_failure(generation, request, bind_installed(agent, generation))
 
         self.assertEqual(observed_current, [False])
         self.assertEqual(codex_transports(agent), {})
@@ -2033,17 +2055,23 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
                     sessions={"failed": "thread-failed", "neighbour": "thread-neighbour"},
                 )
                 result = await agent._drop_generation_after_failure(
-                    generation, SimpleNamespace(base_session_id="failed"),
+                    generation,
+                    SimpleNamespace(base_session_id="failed"),
+                    bind_installed(agent, generation),
                 )
                 self.assertIs(result, allowed)
                 if result:
                     transport.stop.assert_awaited_once()
-                    self.assertEqual(codex_transports(agent), {})
+                    self.assertEqual(agent._units["/tmp/work"].generations, ())
                 else:
                     transport.stop.assert_not_awaited()
                     agent._session_mgr.invalidate_thread.assert_not_called()
                     agent._turn_registry.clear_session.assert_not_called()
-                    self.assertIs(codex_transports(agent)["/tmp/work"], transport)
+                    # Retired, so no new turn binds to it, but the neighbour's
+                    # process keeps running until its work drains.
+                    self.assertIn(generation, agent._units["/tmp/work"].generations)
+                    self.assertTrue(generation.closed)
+                    self.assertFalse(generation.runtime.ended)
                     self.assertTrue(activation.is_current(identity))
 
     async def test_start_or_resume_preserves_oversized_response_identity(self):

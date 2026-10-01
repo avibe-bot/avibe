@@ -961,6 +961,88 @@ def test_end_codex_can_retry_failed_last_transport_retirement():
     assert attempts == [("/w", "b1"), ("/w", "b1")]
 
 
+def test_end_codex_on_a_shared_app_server_releases_only_that_sessions_thread():
+    """Codex holds one writer per thread: an ended Session must not keep its thread loaded."""
+    from unittest.mock import AsyncMock
+
+    from modules.agents.codex.agent import CodexAgent
+    from modules.agents.codex.session import CodexSessionManager
+
+    async def exercise():
+        agent = init_generation_state(object.__new__(CodexAgent))
+        agent._registered_runtime = False
+        manager = CodexSessionManager()
+        for base in ("b1", "b2"):
+            manager.set_cwd(base, "/w")
+            manager.set_thread_id(base, f"thread-{base}")
+        agent._session_mgr = manager
+        agent._turn_registry = types.SimpleNamespace(
+            get_active_turn=lambda _base: None,
+            clear_session=lambda _base: None,
+        )
+        sent = []
+
+        async def send_request(method, params):
+            sent.append((method, params))
+            return {"status": "notLoaded"}
+
+        transport = types.SimpleNamespace(is_alive=True, send_request=send_request, stop=AsyncMock())
+        install_codex_transport(agent, "/w", transport, sessions={"b1": "thread-b1", "b2": "thread-b2"})
+
+        result = await running_agents.end_running_agent(
+            _make_controller(codex=agent), backend="codex", base_session_id="b1"
+        )
+
+        assert result["ok"] is True and result["process_killed"] is False
+        assert sent == [("thread/unsubscribe", {"threadId": "thread-b1"})]
+        assert agent.transport_for_session("b1") is None
+        assert agent.transport_for_session("b2") is transport
+        transport.stop.assert_not_awaited()
+
+    asyncio.run(exercise())
+
+
+def test_codex_idle_retirement_detaches_every_generation_before_its_first_stop():
+    """A turn arriving during End never binds to a generation End is about to kill."""
+    from modules.agents.codex.agent import CodexAgent
+    from tests.codex_generation_support import FakeLaunchSpec
+
+    async def exercise():
+        agent = init_generation_state(object.__new__(CodexAgent))
+        agent._registered_runtime = False
+        agent._session_mgr = types.SimpleNamespace(sessions_for_cwd=lambda _cwd: [])
+        agent._turn_registry = types.SimpleNamespace(clear_session=lambda _base: None)
+        fresh = object()
+
+        async def start(_spec):
+            return types.SimpleNamespace(cwd="/w", threads={}, transport=fresh, hub=False, ended=False)
+
+        agent._start_generation = start
+        stopping = asyncio.Event()
+        resume_stop = asyncio.Event()
+
+        class Transport:
+            _process = None
+
+            async def stop(self):
+                stopping.set()
+                await resume_stop.wait()
+
+        install_codex_transport(agent, "/w", Transport(), digest="older")
+        current = install_codex_transport(agent, "/w", Transport(), digest="current")
+        retirement = asyncio.create_task(agent.retire_unowned_session_transport("/w"))
+        await asyncio.wait_for(stopping.wait(), timeout=1)
+
+        # The turn needs exactly the spec End's current generation was started from.
+        binding = await agent._units["/w"].acquire(FakeLaunchSpec("current"))
+        assert binding.generation is not current
+        assert binding.generation.runtime.transport is fresh
+        resume_stop.set()
+        assert await asyncio.wait_for(retirement, timeout=1) is True
+
+    asyncio.run(exercise())
+
+
 def test_codex_idle_retirement_keeps_a_successor_started_during_its_stop():
     from modules.agents.codex.agent import CodexAgent
 

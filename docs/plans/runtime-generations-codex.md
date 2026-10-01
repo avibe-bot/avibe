@@ -139,8 +139,9 @@ release. A thread-level event without a turn id is dropped when its Session is
 no longer bound to the emitting generation. A turn that completes on a
 non-current generation schedules a reap.
 
-The fork boundary is read through the source Session's generation, because
-another process reports a live turn as `interrupted`.
+The fork boundary is read through the generation that holds the source thread.
+Fork metadata names the durable source Session, not its base session, and any
+other process reports a live turn as `interrupted`.
 
 ## Stop and reap
 
@@ -155,8 +156,10 @@ reconciler is its only caller:
 
   A turn on an exited process does not block.
 - A **forced** stop at the cap settles the generation's running turns through
-  `AgentService.force_end_runtime_work` with the runtime-update notice, then
-  ends the process. Shutdown ends the process without that notice.
+  `AgentService.force_end_runtime_work` with the runtime-update notice. It also
+  settles the Activities of every Session bound to the generation, since an
+  Activity can outlive its turn. Then it ends the process. Shutdown ends the
+  process without that notice.
 - Either way, `_stop_runtime` reserves the activation identity's retirement
   before the process stops, so late owner commits are fenced. Only after a
   successful stop are the generation's Sessions unbound and its Hub scope
@@ -177,16 +180,23 @@ Idle eviction of the current generation keeps the idle timeout, the two
 ownership snapshots, and the stuck-active backstop. It then calls
 `unit.retire` and waits for `unit.settled()`.
 
-Paths that need a process gone outside the core's own decisions use
-`_discard_generation`, which detaches, then stops:
+Native-credential migration, End from Running Agents, and the exclusive
+refresh need processes gone outside the core's own decisions. They use
+`_stop_generations_now`:
 
-- failure replacement;
-- native-credential migration;
-- End from Running Agents;
-- the exclusive refresh.
+- After the final synchronous check, it detaches every selected generation
+  before the first stop awaits. A turn arriving meanwhile starts its own
+  generation and cannot bind to one about to be killed.
+- If a stop fails, the still-running process is adopted back as retiring, with
+  its Sessions still bound, so a later call or sweep can retry.
 
-If that stop fails, the still-running process is adopted back into its unit
-as retiring, with its Sessions still bound, so a later call or sweep can retry.
+Failure replacement instead releases its own binding and retires the broken
+generation, which is atomic with admission. The process then stops only
+through the drained check, so a neighbour's running turn is never killed.
+
+End on an app-server that other Sessions still use releases only the ending
+Session's thread (`release_session_runtime`). Otherwise the thread would keep
+Codex's writer lock in that process.
 
 An unusable current generation is retired before a new turn acquires:
 

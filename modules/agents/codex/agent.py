@@ -740,7 +740,7 @@ class CodexAgent(BaseAgent):
                     request.base_session_id,
                     e,
                 )
-                if await self._drop_generation_after_failure(generation, request):
+                if await self._drop_generation_after_failure(generation, request, binding):
                     try:
                         binding = await self._acquire_generation(
                             request.working_path, launch, config=config
@@ -1323,14 +1323,29 @@ class CodexAgent(BaseAgent):
             # A teardown already in flight must answer before custody moves.
             await unit.settled()
             for generation in unit.generations:
-                if generation.bindings or not await self._generation_drained(generation):
+                if not await self._generation_drained(generation):
                     raise RuntimeError("Codex runtime retirement was refused")
-            for generation in unit.generations:
-                await self._discard_generation(generation, require_process_exit=True)
+            # Re-check synchronously: work may have bound during the awaits above.
+            generations = unit.generations
+            if any(self._generation_has_live_work(generation) for generation in generations):
+                raise RuntimeError("Codex runtime retirement was refused")
+            await self._stop_generations_now(unit, generations, require_process_exit=True)
         await self._end_unattached_runtimes(require_process_exit=True)
         for base_session_id in self._session_mgr.all_base_sessions():
             self._unbind_session(base_session_id)
             self._turn_registry.clear_session(base_session_id)
+
+    async def release_session_runtime(self, base_session_id: str) -> None:
+        """Unload an ending Session's thread so no app-server keeps holding it.
+
+        Codex lets one process at a time hold a thread; a thread left loaded in
+        a shared app-server would block resuming that conversation elsewhere.
+        """
+        generation = self._generation_for_session(base_session_id)
+        if generation is None:
+            self._unbind_session(base_session_id)
+            return
+        await self._release_session_thread(generation, base_session_id)
 
     async def retire_unowned_session_transport(
         self, cwd: str, *, ending_session_id: str | None = None
@@ -1349,8 +1364,7 @@ class CodexAgent(BaseAgent):
             generation.bindings for generation in unit.generations
         ):
             return False
-        for generation in unit.generations:
-            await self._discard_generation(generation, require_process_exit=True)
+        await self._stop_generations_now(unit, unit.generations, require_process_exit=True)
         return True
 
     async def refresh_auth_state(self) -> None:
@@ -1371,13 +1385,12 @@ class CodexAgent(BaseAgent):
         stopped = 0
         for unit in list(self._units.values()):
             await unit.settled()
-            for generation in unit.generations:
-                try:
-                    await self._discard_generation(generation)
-                except Exception as exc:
-                    logger.warning("Failed to stop Codex transport during auth refresh: %s", exc)
-                    continue
-                stopped += 1
+            generations = unit.generations
+            try:
+                await self._stop_generations_now(unit, generations)
+            except Exception as exc:
+                logger.warning("Failed to stop Codex transport during auth refresh: %s", exc)
+            stopped += sum(1 for generation in generations if generation.runtime.ended)
         try:
             await self._end_unattached_runtimes()
         except Exception as exc:
@@ -1858,6 +1871,13 @@ class CodexAgent(BaseAgent):
             return None
         return generation
 
+    def _generation_holding_thread(self, thread_id: str) -> _CodexGeneration | None:
+        """The live generation that has ``thread_id`` loaded, if any."""
+        for generation in self._session_generations.values():
+            if not generation.runtime.ended and thread_id in generation.runtime.threads.values():
+                return generation
+        return None
+
     def transport_for_session(self, base_session_id: str) -> CodexTransport | None:
         """The app-server process serving this Session's thread, if one is live.
 
@@ -2123,19 +2143,20 @@ class CodexAgent(BaseAgent):
         return True
 
     async def _end_bound_work(self, runtime: _CodexRuntime) -> None:
-        """Settle the turns running on a force-stopped generation with the update notice.
+        """Settle a force-stopped generation's work with the runtime-update notice.
 
-        Only registered turns are settled here. A turn still starting holds the
-        unit's binding inside ``handle_message`` and fails or retries on its
-        own once its process is gone.
+        Registered turns and every bound Session's Activities settle here. A
+        turn still starting holds the unit's binding inside ``handle_message``
+        and fails or retries on its own once its process is gone.
         """
+        sessions = set(runtime.threads)
+        if not sessions:
+            return
         busy = {
             base_session_id
-            for base_session_id in runtime.threads
+            for base_session_id in sessions
             if self._turn_registry.get_active_turn(base_session_id)
         }
-        if not busy:
-            return
         logger.warning(
             "Force-stopping Codex app-server generation %s for cwd=%s with %d running turn(s)",
             runtime.serial,
@@ -2145,10 +2166,12 @@ class CodexAgent(BaseAgent):
         service = getattr(getattr(self, "controller", None), "agent_service", None)
         end_work = getattr(service, "force_end_runtime_work", None)
         if callable(end_work):
+            # A durable Activity can outlive its foreground turn and keep this
+            # process owned, so every bound Session's Activities settle too.
             await end_work(
                 self.name,
                 base_session_ids=busy,
-                activity_runtime_keys={f"{base_session_id}:{runtime.cwd}" for base_session_id in busy},
+                activity_runtime_keys={f"{base_session_id}:{runtime.cwd}" for base_session_id in sessions},
             )
 
     async def _stop_runtime(self, runtime: _CodexRuntime, *, require_process_exit: bool = False) -> None:
@@ -2186,33 +2209,51 @@ class CodexAgent(BaseAgent):
             # gateway credential; only the last one may revoke it.
             self._retire_model_hub_process_scope(runtime.cwd)
 
-    async def _discard_generation(
+    def _generation_has_live_work(self, generation: _CodexGeneration) -> bool:
+        runtime = generation.runtime
+        return bool(generation.bindings) or any(
+            self._session_has_turn(base_session_id) for base_session_id in runtime.threads
+        )
+
+    async def _stop_generations_now(
         self,
-        generation: _CodexGeneration,
+        unit: RuntimeGenerationSet[CodexLaunchSpec, _CodexRuntime],
+        generations: Sequence[_CodexGeneration],
         *,
         require_process_exit: bool = False,
     ) -> None:
-        """Remove a generation outside the core's own stop decisions, then stop it."""
-        runtime = generation.runtime
-        unit = self._units.get(runtime.cwd)
-        if unit is not None:
-            await unit.discard(generation)
-        try:
-            await self._stop_runtime(runtime, require_process_exit=require_process_exit)
-        except BaseException:
-            if unit is not None and not runtime.ended:
-                # The process still runs: keep it in its unit, retiring, so the
-                # next sweep or caller can retry, with its Sessions still bound.
-                try:
-                    restored = await unit.adopt(generation.spec, runtime, current=False)
-                except RuntimeUnitStopping:
-                    pass  # Shutdown ends it through ``_runtimes``.
-                else:
-                    for base_session_id, bound in list(self._session_generations.items()):
-                        if bound is generation:
-                            self._session_generations[base_session_id] = restored
-            raise
-        self._forget_runtime_sessions(runtime)
+        """Stop generations outside the core's own decisions.
+
+        Every generation is detached before the first stop awaits, so a turn
+        arriving meanwhile starts its own generation instead of binding to one
+        about to be killed. A process whose stop fails is adopted back as
+        retiring, with its Sessions still bound, so a later call can retry.
+        """
+        generations = tuple(generations)
+        for generation in generations:
+            await unit.discard(generation)  # synchronous bookkeeping
+        failure: BaseException | None = None
+        for generation in generations:
+            runtime = generation.runtime
+            try:
+                await self._stop_runtime(runtime, require_process_exit=require_process_exit)
+            except BaseException as exc:
+                if not runtime.ended:
+                    try:
+                        restored = await unit.adopt(generation.spec, runtime, current=False)
+                    except RuntimeUnitStopping:
+                        pass  # Shutdown ends it through ``_runtimes``.
+                    else:
+                        for base_session_id, bound in list(self._session_generations.items()):
+                            if bound is generation:
+                                self._session_generations[base_session_id] = restored
+                if not isinstance(exc, Exception):
+                    raise
+                failure = failure or exc
+                continue
+            self._forget_runtime_sessions(runtime)
+        if failure is not None:
+            raise failure
 
     async def _end_unattached_runtimes(self, *, require_process_exit: bool = False) -> None:
         """End every process this Agent still owns that no unit holds any longer."""
@@ -2582,25 +2623,26 @@ class CodexAgent(BaseAgent):
         self,
         generation: _CodexGeneration,
         request: AgentRequest,
+        binding: RuntimeBinding[CodexLaunchSpec, _CodexRuntime],
     ) -> bool:
-        """Replace a broken app-server generation when no other work still needs it."""
+        """Replace a broken app-server generation when no other work still needs it.
+
+        Retiring is atomic with admission, so no new turn binds to the broken
+        process; it stops only through the core's drained check.
+        """
         runtime = generation.runtime
         # Stopping the generation forgets every Session it held.
         forgotten_by_stop = request.base_session_id in runtime.threads and not runtime.ended
         if not runtime.ended:
-            if not await self._generation_drained(generation):
+            unit = self._units.get(runtime.cwd)
+            await binding.release()  # this turn no longer needs the broken process
+            if unit is not None:
+                await unit.retire(generation)
+                await unit.settled()
+            if not runtime.ended:
                 logger.warning(
                     "Codex failure recovery cannot replace an owned transport for cwd=%s",
                     runtime.cwd,
-                )
-                return False
-            try:
-                await self._discard_generation(generation)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to stop broken Codex transport for cwd=%s: %s",
-                    runtime.cwd,
-                    exc,
                 )
                 return False
         if not forgotten_by_stop:
@@ -3095,11 +3137,11 @@ class CodexAgent(BaseAgent):
         if not active_turn_id or not source_thread_id:
             return True, None
         # Another process reads a live turn as interrupted; only the generation
-        # running the source turn reports it in progress.
-        source_session_id = str(fork.get("source_session_id") or "").strip()
-        source_transport = self.transport_for_session(source_session_id) if source_session_id else None
-        if source_transport is not None and source_transport.is_initialized:
-            transport = source_transport
+        # holding the source thread reports it in progress. ``source_session_id``
+        # is the durable Session id, not a base session, so look up the thread.
+        source_generation = self._generation_holding_thread(source_thread_id)
+        if source_generation is not None and source_generation.runtime.transport.is_initialized:
+            transport = source_generation.runtime.transport
 
         cursor: Optional[str] = None
         seen_cursors: set[str] = set()

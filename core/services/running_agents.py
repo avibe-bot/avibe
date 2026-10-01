@@ -690,6 +690,16 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
             return {"ok": False, "error": "transport_retire_failed", "detail": str(exc)}
         if not process_killed:
             return {"ok": False, "error": "transport_retire_failed"}
+    elif transport is not None:
+        # The app-server keeps serving other sessions: unload only this
+        # session's thread, so no process keeps holding that conversation.
+        release = getattr(agent, "release_session_runtime", None)
+        if callable(release):
+            try:
+                await release(base_session_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("end: codex thread release failed for %s", base_session_id, exc_info=True)
+                return {"ok": False, "error": "thread_release_failed", "detail": str(exc)}
     try:
         # Keep the cwd mapping until transport retirement succeeds, so a failed
         # close remains reachable by Session ID for a later End attempt.
