@@ -64,9 +64,10 @@ GENERATION_RECORD_SCHEMA = 1
 # The spec of a server adopted from the single-server record of a release
 # before generations. No new turn's spec ever equals it.
 LEGACY_SPEC_DIGEST = "legacy"
-# Generations a runtime of this process started or adopted. Adoption leaves
-# them to that runtime, for example the one of an OpenCode backend disabled and
-# enabled again while its turn still runs; it stops them once their work drains.
+# Generations a runtime of this process is starting or has attached. Adoption
+# leaves them to that runtime, for example the one of an OpenCode backend
+# disabled and enabled again while its turn still runs; it stops them once
+# their work drains.
 _OWNED_HERE: set[str] = set()
 _DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
 # Bump whenever the process-level Avibe policy applied at launch changes. It is
@@ -1660,7 +1661,10 @@ class OpenCodeGeneration(OpenCodeServerClient):
 
     def is_drained(self) -> bool:
         """Whether no request or native run of this process is in flight."""
-        return self._active_requests == 0 and not self.active_run_sessions
+        return not self.has_requests_in_flight() and not self.active_run_sessions
+
+    def has_requests_in_flight(self) -> bool:
+        return self._active_requests > 0
 
     def process_alive(self) -> bool:
         process = self._process
@@ -1694,7 +1698,7 @@ def _remove_quietly(path: Path) -> None:
         logger.debug("Could not remove %s", path, exc_info=True)
 
 
-def _apply_resource_governance(resource_governor: Any | None, pid: int | None) -> None:
+def apply_resource_governance(resource_governor: Any | None, pid: int | None) -> None:
     apply_to_pid = getattr(resource_governor, "apply_to_pid", None)
     if callable(apply_to_pid):
         apply_to_pid(pid, label="opencode serve")
@@ -1807,7 +1811,7 @@ async def start_generation(
                 # the start leaves a record its successor cleans up.
                 generation.write_record()
                 _OWNED_HERE.add(generation_id)
-                _apply_resource_governance(resource_governor, process.pid)
+                apply_resource_governance(resource_governor, process.pid)
                 outcome = await _wait_until_ready(generation, process)
             except BaseException:
                 await generation.close_http_session()
@@ -1876,14 +1880,19 @@ async def stop_generation(generation: OpenCodeGeneration) -> None:
 
 
 def _read_json_object(path: Path) -> Optional[Dict[str, Any]]:
+    """A record's content; ``None`` when it is missing or cannot be parsed."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except Exception:
-        logger.warning("Ignoring an unreadable OpenCode process record at %s", path)
-        return {}
-    return data if isinstance(data, dict) else {}
+        data = None
+    if not isinstance(data, dict):
+        # Its process may still run on a port nothing else records, so the
+        # record stays for a person to inspect rather than counting as dead.
+        logger.warning("Keeping an unreadable OpenCode process record at %s", path)
+        return None
+    return data
 
 
 def _record_proves_process(info: Mapping[str, Any], *, require_port: bool = True) -> bool:
@@ -2019,7 +2028,6 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
             # The legacy record goes once the generation record replacing it exists.
             generation._supersedes = path
             generation.write_record_or_defer("the record of an adopted pre-generations server")
-        _OWNED_HERE.add(generation.generation_id)
         logger.info("Adopted OpenCode generation %s pid=%s", generation.generation_id, generation.pid)
         adopted.append(generation)
     records_dir = generation_records_dir()
@@ -2031,6 +2039,11 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
             ).exists():
                 _remove_quietly(path)
     return adopted
+
+
+def own_generation(generation_id: str) -> None:
+    """Mark an adopted generation as attached to a runtime of this process."""
+    _OWNED_HERE.add(generation_id)
 
 
 def forget_record(path: Path) -> None:

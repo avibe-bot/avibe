@@ -40,6 +40,8 @@ from .server import (
     OpenCodeServerClient,
     StopOutcome,
     adopt_recorded_generations,
+    apply_resource_governance,
+    own_generation,
     start_generation,
     stop_generation,
 )
@@ -244,6 +246,8 @@ class OpenCodeRuntime:
         self._wrappers: dict[str, RuntimeGeneration[Any, OpenCodeGeneration]] = {}
         self._adopted = False
         self._adopt_lock: Optional[asyncio.Lock] = None
+        # Set once the backend is disabled: no generation will serve again.
+        self._closed = False
         self._leases: dict[str, tuple[RuntimeBinding[Any, OpenCodeGeneration], Optional[asyncio.TimerHandle]]] = {}
         self._lease_tasks: set[asyncio.Task[None]] = set()
         # Pid of the last start whose process exited on its own: resource evidence.
@@ -320,6 +324,10 @@ class OpenCodeRuntime:
                     current=generation is serving,
                 )
                 self._wrappers[generation.generation_id] = wrapper
+                # Owned only once attached, so an adoption cut short leaves
+                # the rest for its retry.
+                own_generation(generation.generation_id)
+                apply_resource_governance(self.resource_governor, generation.pid)
                 if self.on_generation_ready is not None:
                     self.on_generation_ready(generation)
                 now = time.time()
@@ -483,6 +491,7 @@ class OpenCodeRuntime:
 
     async def close(self) -> None:
         """Admit nothing more; idle generations stop now, bound ones once drained."""
+        self._closed = True
         await self._generations.stop_all(force=False)
 
     async def retire_all(self) -> None:
@@ -532,12 +541,19 @@ class OpenCodeRuntime:
 
         generation = wrapper.runtime
         if not force and generation.process_alive() and not generation.is_drained():
-            # A run marker that no durable poll backs, left by an adoption
-            # that could not read the durable polls, keeps the process only
-            # until a later sweep's retry of that reconciliation succeeds.
-            self._reconcile_run_markers(generation, self._durable_polls())
-            if not generation.is_drained():
-                return False
+            if self._closed:
+                # A disabled backend serves no native run its bindings do not
+                # hold, and nothing sweeps its runtime, so a run marker, such
+                # as one whose clear failed, must not keep the process.
+                if generation.has_requests_in_flight():
+                    return False
+            else:
+                # A run marker that no durable poll backs, left by an adoption
+                # that could not read the durable polls, keeps the process only
+                # until a later sweep's retry of that reconciliation succeeds.
+                self._reconcile_run_markers(generation, self._durable_polls())
+                if not generation.is_drained():
+                    return False
         if self.on_generation_stopping is not None:
             await self.on_generation_stopping(generation, force)
         await stop_generation(generation)

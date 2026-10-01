@@ -343,6 +343,7 @@ def fake_processes(tmp_path, monkeypatch):
     """Generations that start and stop without any process."""
 
     monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: tmp_path / "generations")
+    monkeypatch.setattr(opencode_server, "_OWNED_HERE", set())
     started: list[OpenCodeGeneration] = []
     stopped: list[OpenCodeGeneration] = []
     alive: set[str] = set()
@@ -799,19 +800,23 @@ def test_adoption_leaves_another_runtime_of_this_controller_its_generations(isol
     monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=50021")
     isolated_launch.processes.append(_Process(fake_pid(20)))
 
+    spec = OpenCodeLaunchSpec(digest="spec-ocg_crashed", binary="/bin/opencode")
+
     async def scenario():
         started = await opencode_server.start_generation(OpenCodeLaunchSpec(digest="v1", binary="/bin/opencode"))
-        first = await opencode_server.adopt_recorded_generations()
+        old = _runtime()
+        await old.ensure_adopted(spec)
         # The OpenCode backend is disabled and enabled again while the old
         # runtime's turn still runs: that runtime keeps and later stops both.
-        second = await opencode_server.adopt_recorded_generations()
-        return started, first, second
+        new = _runtime()
+        await new.ensure_adopted(spec)
+        return started, old.generations(), new.generations()
 
-    started, first, second = asyncio.run(scenario())
+    started, old, new = asyncio.run(scenario())
 
     assert started.record_path.exists()
-    assert [generation.generation_id for generation in first] == ["ocg_crashed"]
-    assert second == []
+    assert [generation.generation_id for generation in old] == ["ocg_crashed"]
+    assert new == ()
 
 
 def test_strict_retirement_retries_a_stop_that_declined_while_a_request_ran(fake_processes):
@@ -1126,3 +1131,97 @@ def test_adoption_tracks_a_serving_process_whose_record_cannot_be_rewritten(
     adopted[0].flush_record()
     assert adopted[0].record_path.exists()
     assert not legacy_path.exists()
+
+
+# ------------------------------------------------- review round 5 regressions
+
+
+def test_a_disabled_backend_stops_a_generation_whose_run_marker_clear_failed(fake_processes):
+    runtime = _runtime()
+
+    async def scenario():
+        turn = await runtime.acquire(OpenCodeLaunchSpec(digest="v1", binary="opencode"))
+        running = turn.generation.runtime
+        # The turn finished, but its marker could not be cleared, so the
+        # marker and its durable poll both stay for a later restore.
+        running.active_run_sessions = {"ses_finished"}
+        runtime.durable_poll_generations = lambda: {"ses_finished": running.generation_id}
+        await runtime.close()
+        await turn.release()
+        await runtime._generations.settled()
+        return running
+
+    running = asyncio.run(scenario())
+
+    # Nothing sweeps a disabled backend's runtime; the release is its last chance.
+    assert fake_processes.stopped == [running]
+
+
+def test_an_unreadable_record_is_kept_for_its_possibly_running_process(isolated_launch, monkeypatch):
+    records = isolated_launch.records
+    records.mkdir(parents=True)
+    corrupt = records / "ocg_corrupt.json"
+    corrupt.write_text('{"generation_id": "ocg_corrupt", "pid": ', encoding="utf-8")
+    overlay = records / "ocg_corrupt.overlay.json"
+    overlay.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: records / "absent.json")
+
+    assert asyncio.run(opencode_server.adopt_recorded_generations()) == []
+    opencode_server.forget_dead_records()
+
+    # Generation ports are dynamic: without its record nothing finds the server.
+    assert corrupt.exists() and overlay.exists()
+
+
+def test_adoption_applies_resource_governance_to_every_adopted_generation(fake_processes, monkeypatch):
+    generation = _generation("ocg_adopted", 44, "spec")
+    fake_processes.alive.add(generation.generation_id)
+    monkeypatch.setattr(client_manager, "adopt_recorded_generations", AsyncMock(return_value=[generation]))
+    governed: list[tuple[int, str]] = []
+    runtime = OpenCodeRuntime(
+        SimpleNamespace(binary="opencode", request_timeout_seconds=60),
+        resource_governor=SimpleNamespace(apply_to_pid=lambda pid, label: governed.append((pid, label))),
+    )
+
+    asyncio.run(runtime.ensure_adopted(OpenCodeLaunchSpec(digest="spec", binary="opencode")))
+
+    assert governed == [(generation.pid, "opencode serve")]
+
+
+def test_an_adoption_cut_short_leaves_every_record_to_its_retry(isolated_launch, monkeypatch):
+    records = isolated_launch.records
+    for generation_id, index in (("ocg_a", 45), ("ocg_b", 46)):
+        _record(records, generation_id, fake_pid(index), 50000 + index, active_run_sessions=[f"ses_{generation_id}"])
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: records / "absent.json")
+    ports = {fake_pid(45): 50045, fake_pid(46): 50046}
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid in ports)
+    monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: f"/bin/opencode serve --port={ports[pid]}")
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: True)
+    probing_b = asyncio.Event()
+    probes = {"ocg_b": 0}
+
+    async def is_healthy(generation):
+        if generation.generation_id == "ocg_b":
+            probes["ocg_b"] += 1
+            if probes["ocg_b"] == 1:
+                probing_b.set()
+                await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(opencode_server.OpenCodeGeneration, "is_healthy", is_healthy)
+    runtime = _runtime()
+    # Each record's run has a durable poll, so neither generation stops here.
+    runtime.durable_poll_generations = lambda: {"ses_ocg_a": "ocg_a", "ses_ocg_b": "ocg_b"}
+    spec = OpenCodeLaunchSpec(digest="spec-ocg_b", binary="/bin/opencode")
+
+    async def scenario():
+        # A turn's /stop cancels it while adoption probes the second record.
+        first = asyncio.get_running_loop().create_task(runtime.ensure_adopted(spec))
+        await probing_b.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await runtime.ensure_adopted(spec)
+        return {generation.generation_id for generation in runtime.generations()}
+
+    assert asyncio.run(scenario()) == {"ocg_a", "ocg_b"}

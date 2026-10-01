@@ -26,11 +26,19 @@ are the Phase 1 design. Their line references are to
   Restart, and installs bump the renewal epoch.
 - A forced refresh cancels running work and retires every generation. This is
   the coordinator's interrupt path, kept until it is deleted.
-- Adoption skips generations that a runtime of this controller process
-  started or adopted. Those belong to the runtime of an OpenCode backend that
-  was disabled and enabled again, and that runtime stops them itself. The
-  process keeps this ownership in memory, so the record has no `owner_pid` and
-  adoption writes nothing except the conversion of a legacy record.
+- Adoption skips generations that a runtime of this controller process is
+  starting or has attached. Those belong to the runtime of an OpenCode backend
+  that was disabled and enabled again, and that runtime stops them itself. The
+  process keeps this ownership in memory, marking an adopted generation only
+  once a runtime attaches it, so an adoption cut short leaves the rest to its
+  retry. The record has no `owner_pid`, and adoption writes nothing except the
+  conversion of a legacy record. Adoption applies resource governance to each
+  adopted generation, as a start does.
+- A disabled backend's runtime is no longer swept by the controller, so run
+  markers do not keep its generations. Each one stops once its bindings and
+  requests drain.
+- A record that cannot be parsed is kept and never counted as dead. Its
+  process may still run on a port that nothing else records.
 - A failed record write never leaves a record protecting less than its process
   runs. A run marker or lease is persisted before its work starts. A turn
   clears its run marker together with its durable poll, so when the write
