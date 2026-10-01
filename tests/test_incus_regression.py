@@ -878,7 +878,7 @@ def test_build_base_uses_publishable_temp_instance() -> None:
     assert ".npm-global" in joined
     assert 'ln -sf "$avibe_home/.npm-global/bin/claude" "$avibe_home/.local/bin/claude"' in joined
     assert 'ln -sf "$avibe_home/.npm-global/bin/codex" "$avibe_home/.local/bin/codex"' in joined
-    assert 'curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path' in backend_install
+    assert incus_regression.OPENCODE_INSTALL_SH in backend_install
     assert 'ln -sf "$avibe_home/.opencode/bin/opencode" "$avibe_home/.local/bin/opencode"' in joined
     # Backends must not be root-global: the non-root avibe user owns them and self-updates.
     assert "/usr/local/bin/opencode" not in joined
@@ -984,7 +984,9 @@ fi
         "curl",
         r'''
 case "$*" in
-    '-fsSL https://opencode.ai/install')
+    *' https://github.com/anomalyco/opencode/releases/latest')
+        printf 'https://github.com/anomalyco/opencode/releases/tag/v1.99.0' ;;
+    *' https://opencode.ai/install')
         [ "$TEST_FAIL_STAGE" != opencode-download ] || exit 23
         cat <<'INSTALLER'
 mkdir -p "$HOME/.opencode/bin"
@@ -1057,7 +1059,8 @@ def test_build_base_executes_backend_heredoc_and_post_bootstrap(tmp_path: Path, 
     # #2235: a freshly launched container has no network until first boot finishes.
     assert events[:3] == [f"cloud-init|{outer_home}", "cloud-init status --wait", f"apt-get|{outer_home}"]
     assert events[events.index(f"sudo|{outer_home}") + 1:] == [
-        f"npm|{service_home}", f"curl|{service_home}",
+        # OpenCode: the release redirect names the version, then the installer downloads it.
+        f"npm|{service_home}", f"curl|{service_home}", f"curl|{service_home}",
         f"claude|{service_home}", f"codex|{service_home}", f"opencode|{service_home}",
         f"curl|{outer_home}", f"askill|{outer_home}", f"node|{outer_home}", f"npm|{outer_home}",
         f"cloud-init|{outer_home}", "cloud-init clean --logs",
@@ -4941,7 +4944,8 @@ def test_migrate_legacy_backend_runtimes_uses_user_owned_layout() -> None:
     assert '[ ! -x "$user_bin/opencode" ]' in joined
     assert 'npm config set prefix "$npm_prefix" --location=user' in joined
     assert 'npm install --global --prefix "$npm_prefix" "${npm_packages[@]}"' in joined
-    assert "HOME=/home/avibe bash -s -- --no-modify-path" in joined
+    assert "opencode_home=/home/avibe" in joined
+    assert incus_regression.OPENCODE_INSTALL_SH in joined
     assert "/home/avibe/.npm-global/bin/claude" not in joined
     assert "/home/avibe/.npm-global/bin/codex" not in joined
 
@@ -5789,3 +5793,99 @@ def test_restart_waits_for_service_and_status_running() -> None:
     assert "systemctl is-active --quiet avibe-regression.service" in joined
     assert "http://127.0.0.1:5123/status" in joined
     assert "'\"state\":\"running\"'" in joined
+
+
+# opencode.ai/install as released: without --version it asks the unauthenticated
+# GitHub REST API for the latest tag, and stops when that answer has none.
+_OPENCODE_INSTALLER = r"""
+version=""
+while [ $# -gt 0 ]; do
+  case "$1" in --version) version="$2"; shift 2 ;; *) shift ;; esac
+done
+if [ -z "$version" ]; then
+  version=$(curl -s https://api.github.com/repos/anomalyco/opencode/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+  [ -n "$version" ] || { echo "Failed to fetch version information"; exit 1; }
+fi
+echo "$version" > "$INSTALLED"
+"""
+# GitHub as a shared egress address sees it once its REST budget is spent: the
+# API refuses, while the release page still redirects to the latest tag.
+_RATE_LIMITED_CURL = r"""#!/bin/sh
+case "$*" in
+  *api.github.com*) echo '{"message":"API rate limit exceeded"}' ;;
+  *releases/latest*) echo "https://github.com/anomalyco/opencode/releases/tag/v1.99.0" ;;
+  *opencode.ai/install*) cat "$INSTALLER" ;;
+  *) exit 22 ;;
+esac
+"""
+
+
+def _opencode_install_steps(script: str) -> str:
+    """The lines of a generated script that install OpenCode, continuations joined."""
+    joined = script.replace("\\\n", " ")
+    lines = [line.strip() for line in joined.splitlines()]
+    return "\n".join(line for line in lines if line.startswith("opencode_home=") or "opencode.ai/install" in line)
+
+
+def _generated_opencode_install(source: str) -> str:
+    commands = []
+
+    class RecordingRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        def run(self, command, *, check=True, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+    if source == "build-base":
+        args = argparse.Namespace(
+            dry_run=True, remote=None, source_image="images:ubuntu/24.04/cloud",
+            temp_instance="avibe-regression-base-build", image="avibe-regression-base-current",
+            storage_pool="default", network="incusbr0",
+        )
+        original_runner = incus_regression.Runner
+        try:
+            incus_regression.Runner = RecordingRunner
+            assert incus_regression.cmd_build_base(args) == 0
+        finally:
+            incus_regression.Runner = original_runner
+    else:
+        target = incus_regression.RegressionTarget(
+            target="worktree", slug="demo", project="avr-wt-demo", instance="avibe-wt-demo",
+            host_port=15200, ui_host="127.0.0.1", ui_port=5123,
+        )
+        incus_regression.migrate_legacy_backend_runtimes(RecordingRunner(), target, remote=None)
+    script = next(part for command in commands for part in command if "opencode.ai/install" in part)
+    return _opencode_install_steps(script)
+
+
+@pytest.mark.parametrize("source", ["build-base", "legacy-migration"])
+def test_opencode_installs_when_the_github_rest_api_is_rate_limited(tmp_path: Path, source: str) -> None:
+    # A fresh regression instance failed `up` with "Failed to fetch version
+    # information" whenever the shared address had spent its unauthenticated
+    # GitHub REST budget, which the installer uses to resolve "latest".
+    steps = _generated_opencode_install(source)
+    assert steps
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    curl = fake_bin / "curl"
+    curl.write_text(_RATE_LIMITED_CURL, encoding="utf-8")
+    curl.chmod(0o755)
+    installer = tmp_path / "install.sh"
+    installer.write_text(_OPENCODE_INSTALLER, encoding="utf-8")
+    installed = tmp_path / "installed"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "INSTALLER": str(installer),
+        "INSTALLED": str(installed),
+        "HOME": str(tmp_path),
+        "avibe_home": str(tmp_path),
+    }
+
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c", steps], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    # The installer got the latest tag from the release redirect, not the API.
+    assert installed.read_text(encoding="utf-8").strip() == "1.99.0"

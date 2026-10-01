@@ -51,6 +51,20 @@ SERVICE_HOME = f"/home/{SERVICE_USER}"
 AVIBE_HOME = f"{SERVICE_HOME}/.avibe"
 LEGACY_HOME = f"{SERVICE_HOME}/.vibe_remote"
 SOURCE_DIR = "/opt/avibe/source"
+# OpenCode's installer resolves "latest" through the unauthenticated GitHub REST
+# API, whose hourly budget a shared egress address exhausts; it then stops with
+# "Failed to fetch version information". The release page's redirect names the
+# same latest tag without that budget, and an explicit --version makes the
+# installer download straight from the release. One line, so it can sit inside
+# the dedented scripts below, including a quoted heredoc.
+OPENCODE_INSTALL_SH = (
+    "opencode_release=$(curl -fsSIL --retry 3 --retry-delay 2 --retry-all-errors -o /dev/null "
+    "-w '%{url_effective}' https://github.com/anomalyco/opencode/releases/latest); "
+    'case "$opencode_release" in */releases/tag/v?*) opencode_version=${opencode_release##*/releases/tag/v} ;; '
+    '*) echo "Could not resolve the latest OpenCode release" >&2; exit 1 ;; esac; '
+    "curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors https://opencode.ai/install "
+    '| HOME="$opencode_home" bash -s -- --no-modify-path --version "$opencode_version"'
+)
 VENV_DIR = "/opt/avibe/venv"
 METADATA_DIR = "/var/lib/avibe-regression"
 METADATA_PATH = f"{METADATA_DIR}/metadata.json"
@@ -1846,8 +1860,8 @@ def migrate_legacy_backend_runtimes(runner: Runner, target: RegressionTarget, *,
                         ln -sfn "{SERVICE_HOME}/.opencode/bin/opencode" "$user_bin/opencode"
                     elif [ -x /usr/local/bin/opencode ] || [ -x /usr/bin/opencode ]; then
                         echo "Migrating legacy OpenCode into {SERVICE_HOME}/.opencode"
-                        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors https://opencode.ai/install \
-                            | HOME={shlex.quote(SERVICE_HOME)} bash -s -- --no-modify-path
+                        opencode_home={shlex.quote(SERVICE_HOME)}
+                        {OPENCODE_INSTALL_SH}
                         test -x "{SERVICE_HOME}/.opencode/bin/opencode"
                         ln -sfn "{SERVICE_HOME}/.opencode/bin/opencode" "$user_bin/opencode"
                     fi
@@ -2606,7 +2620,8 @@ def build_base_image(args: argparse.Namespace) -> int:
                 ln -sf "$avibe_home/.npm-global/bin/claude" "$avibe_home/.local/bin/claude"
                 ln -sf "$avibe_home/.npm-global/bin/codex" "$avibe_home/.local/bin/codex"
                 # OpenCode installs into the service user's home via its own updater.
-                curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
+                opencode_home="$avibe_home"
+                {OPENCODE_INSTALL_SH}
                 if [ ! -x "$avibe_home/.opencode/bin/opencode" ]; then
                     echo "OpenCode installer did not produce an opencode binary" >&2
                     exit 1
