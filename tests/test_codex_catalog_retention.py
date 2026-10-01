@@ -17,7 +17,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from config import paths
-from modules.agents.codex.agent import CodexAgent, CodexModelHubCatalogUnavailableError
+from modules.agents.codex import agent as codex_agent_module
+from modules.agents.codex.agent import CodexAgent, CodexModelHubCatalogUnavailableError, CodexRuntimeChangeBlockedError
 from modules.agents.codex.transport import CodexTransport
 from vibe import backend_model_catalog as catalogs
 
@@ -353,13 +354,17 @@ async def test_agent_launch_keeps_pin_across_invalidation_and_reuses_transport(m
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["idle", "busy", "unchanged"])
-async def test_mh_runtime_013_catalog_change_replaces_only_an_idle_hub_transport(monkeypatch, tmp_path, case):
-    """MH-RUNTIME-013: a changed catalog never waits for or interrupts a directory's work.
+@pytest.mark.parametrize(
+    ("case", "model"),
+    [("idle", "edited"), ("busy", "kept"), ("busy", "edited"), ("unchanged", "edited")],
+)
+async def test_mh_runtime_013_catalog_change_replaces_only_an_idle_hub_transport(monkeypatch, tmp_path, case, model):
+    """MH-RUNTIME-013: a changed catalog never interrupts a directory's work.
 
     An idle directory's next Hub turn gets an app-server serving the committed
-    catalog. A directory with live work keeps its app-server, as does an
-    unchanged catalog.
+    catalog. In a busy directory a turn whose model row is unchanged keeps the
+    running app-server at once, while a turn on a changed row waits a bounded
+    time and is refused. An unchanged catalog keeps the app-server.
     """
     value = agent()
     value._transports = {}
@@ -377,8 +382,9 @@ async def test_mh_runtime_013_catalog_change_replaces_only_an_idle_hub_transport
     )
     value._clear_thread_developer_instructions = lambda _session_id: None
     value._runtime_ownership_snapshot_for_cwd = lambda _cwd: SimpleNamespace(blocks_transport_replacement=False)
-    exported = [b'{"models":[{"slug":"launched"}]}']
+    exported = [b'{"models":[{"slug":"kept","context_window":1},{"slug":"edited","context_window":1}]}']
     monkeypatch.setattr(catalogs, "_export_codex_bundled_catalog", lambda *_: exported[0])
+    monkeypatch.setattr(codex_agent_module, "_RUNTIME_CHANGE_WAIT_SECONDS", 0.2)
     spawn = asyncio.create_subprocess_exec
 
     async def fixture_spawn(*_args, **kwargs):
@@ -386,7 +392,7 @@ async def test_mh_runtime_013_catalog_change_replaces_only_an_idle_hub_transport
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fixture_spawn)
     launch = SimpleNamespace(
-        channel="hub", fingerprint="hub:test",
+        channel="hub", fingerprint="hub:test", requested_model=model, runtime_model=model,
         gateway_base_url="http://127.0.0.1:1", gateway_token="fixture-only",
     )
     cwd = str(tmp_path)
@@ -394,10 +400,17 @@ async def test_mh_runtime_013_catalog_change_replaces_only_an_idle_hub_transport
     current = launched
     try:
         if case != "unchanged":
-            exported[0] = b'{"models":[{"slug":"committed"}]}'
+            exported[0] = b'{"models":[{"slug":"kept","context_window":1},{"slug":"edited","context_window":2}]}'
         await value.invalidate_model_hub_runtime()
         if case == "busy":
             active["long-job"] = "turn-running"
+
+        if case == "busy" and model == "edited":
+            with pytest.raises(CodexRuntimeChangeBlockedError):
+                await asyncio.wait_for(value._get_or_create_transport(cwd, launch), 5)
+            assert value._transports[cwd] is launched
+            assert launched._process.returncode is None
+            return
 
         current = await asyncio.wait_for(value._get_or_create_transport(cwd, launch), 5)
 

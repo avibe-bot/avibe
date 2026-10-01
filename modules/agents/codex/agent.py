@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import shlex
@@ -161,6 +162,16 @@ class CodexResumeUnavailableError(RuntimeError):
             "Not starting a new conversation to avoid silently losing context — start a new session to continue."
         )
         super().__init__(f"{msg} ({detail})" if detail else msg)
+
+
+def _codex_catalog_model_row(path: Path, model: str) -> dict[str, Any] | None:
+    """Return one model's row from a Codex catalog file, without its list rank."""
+
+    payload = json.loads(path.read_bytes())
+    for row in payload.get("models", []) if isinstance(payload, dict) else []:
+        if isinstance(row, dict) and row.get("slug") == model:
+            return {key: value for key, value in row.items() if key != "priority"}
+    return None
 
 
 class CodexAgent(BaseAgent):
@@ -2133,23 +2144,23 @@ class CodexAgent(BaseAgent):
             and (dead or not self._has_active_turns_for_cwd(cwd))
         )
 
-    async def _idle_transport_catalog_changed(
+    async def _transport_catalog_change(
         self,
         cwd: str,
         transport: CodexTransport,
         launch: "ModelHubLaunch | None",
-    ) -> bool:
-        """Whether an idle Hub app-server serves an outdated catalog.
+    ) -> str | None:
+        """Classify a Hub app-server's catalog against the committed one for a turn.
 
-        A catalog is metadata within the same runtime, so it never waits for or
-        interrupts work: a directory with live work keeps its app-server until
-        a later turn finds it idle.
+        ``None`` when it serves the committed catalog or cannot tell;
+        ``"compatible"`` when only rows other than the turn's model changed;
+        ``"incompatible"`` when the turn's model is new or defined differently.
         """
         if launch is None or launch.channel != "hub":
-            return False
+            return None
         launched = getattr(transport, "model_hub_catalog_path", None)
         if launched is None:
-            return False
+            return None
         try:
             # Cached until invalidated; the path is the catalog's digest.
             current = await self.prepare_model_hub_runtime()
@@ -2159,8 +2170,21 @@ class CodexAgent(BaseAgent):
                 cwd,
                 exc_info=True,
             )
-            return False
-        return current.path != launched and await self._transport_replacement_is_safe(cwd, transport)
+            return None
+        if current.path == launched:
+            return None
+        model = launch.runtime_model or launch.requested_model
+        try:
+            # The running app-server's pin keeps its catalog file in place.
+            before, after = await asyncio.to_thread(
+                lambda: (
+                    _codex_catalog_model_row(Path(launched), model),
+                    _codex_catalog_model_row(current.path, model),
+                )
+            )
+        except (OSError, ValueError):
+            return "incompatible"
+        return "compatible" if before is not None and before == after else "incompatible"
 
     async def _drop_transport_after_failure(
         self,
@@ -2261,7 +2285,7 @@ class CodexAgent(BaseAgent):
         wait_deadline: float | None = None
         while True:
             wait_for_active_turns = False
-            catalog_changed = False
+            catalog_change = None
             async with self._transport_locks[cwd], AsyncExitStack() as catalog_pins:
                 # Double-check after acquiring lock
                 existing = self._transports.get(cwd)
@@ -2280,14 +2304,24 @@ class CodexAgent(BaseAgent):
                     spawned_ino = self._cwd_inodes().get(cwd)
                     stale_cwd = spawned_ino is not None and self._cwd_inode(cwd) != spawned_ino
                     if not stale_cwd and not runtime_changed:
-                        catalog_changed = allow_runtime_replacement and await self._idle_transport_catalog_changed(
-                            cwd, existing, launch
+                        catalog_change = (
+                            await self._transport_catalog_change(cwd, existing, launch)
+                            if allow_runtime_replacement
+                            else None
                         )
-                        if not catalog_changed:
+                        # A turn whose model the running catalog defines alike
+                        # never waits; it only refreshes an idle directory.
+                        if catalog_change is None or (
+                            catalog_change == "compatible"
+                            and not await self._transport_replacement_is_safe(cwd, existing)
+                        ):
                             self._attach_transport_activation(cwd, existing)
                             self._touch_transport_activity(cwd)
                             return existing
-                        logger.info("Restarting idle Codex transport after Model Hub catalog change for cwd=%s", cwd)
+                        if catalog_change == "incompatible" and self._has_active_turns_for_cwd(cwd):
+                            wait_for_active_turns = True
+                        else:
+                            logger.info("Restarting Codex transport after Model Hub catalog change for cwd=%s", cwd)
                     elif runtime_changed and self._has_active_turns_for_cwd(cwd):
                         wait_for_active_turns = True
                     elif stale_cwd:
@@ -2349,7 +2383,7 @@ class CodexAgent(BaseAgent):
                             final_predicate=lambda: self._transport_replacement_is_safe(cwd, existing),
                         )
                         if not detached:
-                            if catalog_changed:
+                            if catalog_change == "compatible":
                                 # Work claimed the directory after the idle check;
                                 # it keeps serving, and a later idle turn retries.
                                 self._attach_transport_activation(cwd, existing)

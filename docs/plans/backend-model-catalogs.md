@@ -71,21 +71,23 @@ persist anything.
 
 After a successful catalog mutation, the controller invalidates the affected backend's
 runtime projection without restarting the backend, so a catalog change never interrupts
-running work. The same rule covers unattended built-in snapshot refreshes:
+running work. The same rule covers unattended built-in snapshot refreshes. A runtime keeps
+the catalog it was launched with until a turn finds it idle and replaces it; a turn may
+share a busy runtime only when that runtime defines the turn's own model exactly as the
+committed catalog does:
 
-- Claude Code resolves the committed catalog on its next turn.
-- OpenCode runs one shared server, and a new overlay replaces it. While runs hold that
-  server, including runs an adopted server's durable polls still own, a turn whose model
-  the running overlay still serves, with only model rows changed, starts on it at once
-  and reads its model row from that overlay. Another turn's queued switch never holds it.
-  A turn that needs the new overlay, such as one on a newly added model, waits up to 30
-  seconds for those runs and is then refused with a retry message; the runs are never
-  interrupted. The first turn that finds the server idle switches it.
-- A Codex launch whose catalog export overlaps a change prepares the committed catalog
-  instead of failing.
+- Claude Code resolves the committed catalog on its next turn; its runtimes are not shared.
+- OpenCode runs one shared server. While runs hold it, including runs an adopted server's
+  durable polls still own, a turn whose model row is unchanged, with no change outside
+  model rows, starts on it at once; another turn's queued switch never holds it. A turn on
+  a changed or newly added model waits up to 30 seconds for those runs and is then refused
+  with a retry message. The PID file keeps a per-row signature of the running overlay, so
+  an adopted server is judged the same way.
 - Codex replaces a directory's app-server when a turn finds that directory idle and its
-  catalog changed. A turn in a directory with other live work keeps the app-server's
-  earlier metadata until a later turn finds the directory idle.
+  catalog changed. In a directory with other live work, a turn whose model row is unchanged
+  keeps the app-server at once, and a turn on a changed or new row waits up to 30 seconds
+  and is refused, as for any other runtime change. A launch whose catalog export overlaps
+  a change prepares the committed catalog instead of failing.
 
 Catalog storage is mode-independent so a Direct to Gateway switch preserves prior work.
 The product editor is Gateway-only: Direct mode continues to use each CLI's native model

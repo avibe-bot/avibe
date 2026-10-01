@@ -252,6 +252,38 @@ class OpenCodeDirectoryBootstrapTimeoutError(RuntimeError):
     """OpenCode is still bootstrapping a directory after the readiness ceiling."""
 
 
+def _digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _overlay_signature(content: str | None) -> dict[str, Any] | None:
+    """Digest an overlay as one ``base`` without model rows plus one digest per row."""
+
+    if content is None:
+        return None
+    try:
+        document = json.loads(content)
+    except ValueError:
+        return None
+    if not isinstance(document, dict):
+        return None
+    providers = document.get("provider")
+    if not isinstance(providers, dict):
+        return {"base": _digest(document), "rows": {}}
+    base_providers: dict[str, Any] = {}
+    rows: dict[str, str] = {}
+    for provider_id, provider in providers.items():
+        if not isinstance(provider, dict):
+            base_providers[provider_id] = provider
+            continue
+        base_providers[provider_id] = {key: value for key, value in provider.items() if key != "models"}
+        models = provider.get("models")
+        if isinstance(models, dict):
+            for model_id, row in models.items():
+                rows[f"{provider_id}/{model_id}"] = _digest(row)
+    return {"base": _digest({**document, "provider": base_providers}), "rows": rows}
+
+
 class OpenCodeServerManager:
     """Manages a singleton OpenCode server process shared across all working directories."""
 
@@ -891,8 +923,9 @@ class OpenCodeServerManager:
         """Select an overlay and reserve it until the caller registers its run.
 
         ``required_model`` is the ``provider/model`` the caller's turn runs.
-        While live runs hold the server, a turn the running overlay still
-        serves keeps it; only a turn that needs the new one waits, bounded.
+        While live runs hold the server, a turn whose model the running overlay
+        defines identically keeps it; only a turn that needs the new overlay
+        waits, bounded.
         """
 
         desired_path = str(overlay.path) if overlay is not None else None
@@ -969,13 +1002,14 @@ class OpenCodeServerManager:
                         or self._model_hub_overlay_reservations
                     )
                     if live_runs and self._running_overlay_serves(
+                        info,
                         effective_hash,
                         desired_content,
                         required_model,
                     ):
-                        # Only model rows changed and this turn's model is still
-                        # served. The turn reads its model row from the running
-                        # overlay; a turn that finds the server idle switches.
+                        # Only other model rows changed: this turn runs exactly as
+                        # it would on the new overlay. A turn that finds the server
+                        # idle switches it.
                         self._model_hub_overlay_reservations[transition_owner] = (
                             effective_path,
                             effective_hash,
@@ -1044,6 +1078,7 @@ class OpenCodeServerManager:
 
     def _running_overlay_serves(
         self,
+        info: Dict[str, Any],
         effective_hash: str | None,
         desired_content: str | None,
         required_model: str | None,
@@ -1051,56 +1086,31 @@ class OpenCodeServerManager:
         """Whether the running overlay serves a turn exactly as the desired one would.
 
         True only when the two documents differ in model rows alone and the
-        running one still lists the turn's model, so the turn reaches the same
-        providers, endpoint, and credentials.
+        turn's own model row is identical in both, so the turn reaches the same
+        providers, endpoint, credentials, and model definition.
         """
-        running_content = self._model_hub_overlay_content
+        if effective_hash is None:
+            return False
+        if effective_hash == self._model_hub_overlay_hash and self._model_hub_overlay_content is not None:
+            running = _overlay_signature(self._model_hub_overlay_content)
+        elif info.get("model_hub_overlay_hash") == effective_hash:
+            # An adopted server: the PID file keeps its signature, not its
+            # credential-bearing content.
+            running = info.get("model_hub_overlay_signature")
+        else:
+            running = None
+        desired = _overlay_signature(desired_content)
         if (
-            desired_content is None
-            or running_content is None
-            or effective_hash is None
-            or effective_hash != self._model_hub_overlay_hash
+            desired is None
+            or not isinstance(running, dict)
+            or running.get("base") != desired["base"]
+            or not isinstance(running.get("rows"), dict)
         ):
             return False
-        try:
-            running = json.loads(running_content)
-            desired = json.loads(desired_content)
-        except ValueError:
-            return False
-        if not isinstance(running, dict) or not isinstance(desired, dict):
-            return False
-        if required_model is not None:
-            provider_id, _, model_id = required_model.partition("/")
-            provider = (running.get("provider") or {}).get(provider_id)
-            models = provider.get("models") if isinstance(provider, dict) else None
-            if not isinstance(models, dict) or model_id not in models:
-                return False
-
-        def without_model_rows(document: dict[str, Any]) -> dict[str, Any]:
-            providers = document.get("provider")
-            if not isinstance(providers, dict):
-                return document
-            return {
-                **document,
-                "provider": {
-                    provider_id: (
-                        {key: value for key, value in provider.items() if key != "models"}
-                        if isinstance(provider, dict)
-                        else provider
-                    )
-                    for provider_id, provider in providers.items()
-                },
-            }
-
-        return without_model_rows(running) == without_model_rows(desired)
-
-    def model_hub_overlay_content_for(self, reservation: object) -> str | None:
-        """Return the overlay document the server runs for a reserved turn."""
-
-        reserved = self._model_hub_overlay_reservations.get(reservation)
-        if reserved is None or reserved[1] != self._model_hub_overlay_hash:
-            return None
-        return self._model_hub_overlay_content
+        if required_model is None:
+            return True
+        row = desired["rows"].get(required_model)
+        return row is not None and running["rows"].get(required_model) == row
 
     async def release_model_hub_overlay_reservation(
         self,
@@ -1214,6 +1224,9 @@ class OpenCodeServerManager:
             if self._model_hub_overlay_path and self._model_hub_overlay_hash:
                 payload["model_hub_overlay_path"] = self._model_hub_overlay_path
                 payload["model_hub_overlay_hash"] = self._model_hub_overlay_hash
+                signature = _overlay_signature(self._model_hub_overlay_content)
+                if signature is not None:
+                    payload["model_hub_overlay_signature"] = signature
             if self._model_hub_overlay_provider_ids:
                 payload["model_hub_overlay_provider_ids"] = list(
                     self._model_hub_overlay_provider_ids

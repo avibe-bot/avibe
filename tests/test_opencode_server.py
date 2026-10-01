@@ -3535,10 +3535,10 @@ def test_mh_runtime_004_overlay_reservation_promotes_atomically_to_active_run():
 
 
 def test_mh_runtime_014_a_busy_server_keeps_serving_turns_its_overlay_still_serves():
-    """MH-RUNTIME-014: a model-row change never makes turns wait behind live runs.
+    """MH-RUNTIME-014: a catalog change never makes an unaffected turn wait behind live runs.
 
-    A turn whose model the running overlay still serves starts on it at once. A
-    turn that needs a model only the new overlay lists waits a bounded time and
+    A turn whose model row the running overlay defines identically starts on it
+    at once. A turn on a changed or newly added model waits a bounded time and
     is refused, never interrupting the live run. A turn that finds the server
     idle switches it to the committed overlay.
     """
@@ -3546,13 +3546,17 @@ def test_mh_runtime_014_a_busy_server_keeps_serving_turns_its_overlay_still_serv
     old_overlay = _model_hub_overlay(
         "/tmp/old-overlay.json",
         None,
-        models={"kept": {"id": "kept", "limit": {"context": 1000, "output": 100}}},
+        models={
+            "kept": {"id": "kept", "limit": {"context": 1000, "output": 100}},
+            "edited": {"id": "edited", "limit": {"context": 1000, "output": 100}},
+        },
     )
     new_overlay = _model_hub_overlay(
         "/tmp/new-overlay.json",
         None,
         models={
-            "kept": {"id": "kept", "limit": {"context": 2000, "output": 100}},
+            "kept": {"id": "kept", "limit": {"context": 1000, "output": 100}},
+            "edited": {"id": "edited", "limit": {"context": 2000, "output": 100}},
             "added": {"id": "added"},
         },
     )
@@ -3573,23 +3577,21 @@ def test_mh_runtime_014_a_busy_server_keeps_serving_turns_its_overlay_still_serv
             timeout=0.1,
         )
         assert manager._model_hub_overlay_hash == old_overlay.content_hash
-        # The kept turn reads its model row from the overlay it runs on.
-        assert manager.model_hub_overlay_content_for(kept) == manager._model_hub_overlay_content
-        assert '"context":1000' in manager.model_hub_overlay_content_for(kept).replace(" ", "")
         await manager.release_model_hub_overlay_reservation(kept)
 
-        with pytest.raises(SERVER_MODULE.OpenCodeModelHubOverlaySwitchBlockedError):
-            await asyncio.wait_for(
-                manager.configure_model_hub_overlay(new_overlay, required_model="avibe-openai/added"),
-                timeout=2,
-            )
-        assert manager._model_hub_overlay_transition is None
+        for model in ("edited", "added"):
+            with pytest.raises(SERVER_MODULE.OpenCodeModelHubOverlaySwitchBlockedError):
+                await asyncio.wait_for(
+                    manager.configure_model_hub_overlay(new_overlay, required_model=f"avibe-openai/{model}"),
+                    timeout=2,
+                )
+            assert manager._model_hub_overlay_transition is None
         assert manager._active_run_sessions == {"sess-long-running"}
         manager._restart_for_auth_refresh_locked.assert_not_awaited()
 
         manager._active_run_sessions.clear()
         switched = await asyncio.wait_for(
-            manager.configure_model_hub_overlay(new_overlay, required_model="avibe-openai/kept"),
+            manager.configure_model_hub_overlay(new_overlay, required_model="avibe-openai/edited"),
             timeout=0.2,
         )
         await manager.release_model_hub_overlay_reservation(switched)
@@ -3600,39 +3602,50 @@ def test_mh_runtime_014_a_busy_server_keeps_serving_turns_its_overlay_still_serv
     manager._restart_for_auth_refresh_locked.assert_awaited_once()
 
 
-def test_an_overlay_switch_treats_an_adopted_run_its_durable_poll_owns_as_live():
+def test_an_overlay_switch_treats_an_adopted_run_its_durable_poll_owns_as_live(tmp_path):
     """MH-RUNTIME-014: after a controller restart, an adopted server's run is live work.
 
-    A switch is refused after its bound instead of restarting the server under
-    the run that only the PID file and its durable poll still record.
+    The PID file the launching process wrote lets the adopter keep unaffected
+    turns on the running overlay at once; a turn that needs the new overlay is
+    refused after its bound instead of restarting the server under the run.
     """
 
-    old_overlay = _model_hub_overlay("/tmp/old-overlay.json", "old-model")
-    new_overlay = _model_hub_overlay("/tmp/new-overlay.json", "new-model")
+    old_overlay = _model_hub_overlay("/tmp/old-overlay.json", "kept")
+    new_overlay = _model_hub_overlay(
+        "/tmp/new-overlay.json",
+        None,
+        models={"kept": {"id": "kept"}, "added": {"id": "added"}},
+    )
+    launcher = OpenCodeServerManager(binary="opencode", port=4096)
+    launcher._pid_file = tmp_path / "opencode_server.json"
+    launcher._model_hub_overlay_path = str(old_overlay.path)
+    launcher._model_hub_overlay_hash = old_overlay.content_hash
+    launcher._model_hub_overlay_content = SERVER_MODULE._managed_runtime_config_content(old_overlay.content)
+    launcher._active_run_sessions.add("sess-adopted")
+    launcher._write_pid_file(321)
+
     manager = OpenCodeServerManager(binary="opencode", port=4096)
-    manager._model_hub_overlay_path = str(old_overlay.path)
-    manager._model_hub_overlay_hash = old_overlay.content_hash
+    manager._pid_file = launcher._pid_file
     manager._model_hub_overlay_drain_timeout_seconds = 0.05
     manager._model_hub_overlay_switch_wait_seconds = 0.2
-    manager._read_pid_file = lambda: {  # type: ignore[method-assign]
-        "pid": 321,
-        "port": 4096,
-        "model_hub_overlay_path": str(old_overlay.path),
-        "model_hub_overlay_hash": old_overlay.content_hash,
-        "active_run_sessions": ["sess-adopted"],
-    }
     manager._pid_file_references_current_server = Mock(return_value=True)  # type: ignore[method-assign]
     manager.set_active_poll_session_ids_provider(lambda: {"sess-adopted"})
     manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
     manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
 
-    with pytest.raises(SERVER_MODULE.OpenCodeModelHubOverlaySwitchBlockedError):
-        asyncio.run(
-            asyncio.wait_for(
-                manager.configure_model_hub_overlay(new_overlay, required_model="avibe-openai/new-model"),
+    async def exercise():
+        kept = await asyncio.wait_for(
+            manager.configure_model_hub_overlay(new_overlay, required_model="avibe-openai/kept"),
+            timeout=0.1,
+        )
+        await manager.release_model_hub_overlay_reservation(kept)
+        with pytest.raises(SERVER_MODULE.OpenCodeModelHubOverlaySwitchBlockedError):
+            await asyncio.wait_for(
+                manager.configure_model_hub_overlay(new_overlay, required_model="avibe-openai/added"),
                 timeout=2,
             )
-        )
+
+    asyncio.run(exercise())
 
     manager._restart_for_auth_refresh_locked.assert_not_awaited()
     assert manager._active_run_sessions == {"sess-adopted"}
