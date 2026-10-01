@@ -77,16 +77,42 @@ Clearing to empty instead of pre-creating a replacement lets every backend
 reuse its normal first-bind path. This matters for Claude, which only learns a
 new session id from the init message of the first query.
 
-### Execution point (core)
+### Rotation lifecycle (core)
 
-Rotation runs only at turn start: after the durable turn is `starting` and
-before the backend target (`agent_session_target`) is built from the row, so the
-context carries the empty native id. It never runs mid-turn; steering and
-interrupts target the live native turn.
+Rotation has two persisted phases. Both are driven from one turn-start
+chokepoint: after the durable turn is `starting` and before the backend target
+(`agent_session_target`) is built from the row. Rotation never runs mid-turn,
+because steering and interrupts target the live native turn.
 
-Every trigger only sets a due marker (`metadata_json.context_rotation_due`).
-That single turn-start chokepoint consumes it. A rotation requested while a turn
-is running therefore takes effect on the next turn and cannot race it.
+1. **Due** (`metadata_json.context_rotation_due`). Triggers only set this
+   marker, so a request made while a turn is running takes effect on the next
+   turn and cannot race it.
+   - At the chokepoint, a due session that is not already pending runs the
+     storage supersede. The same transaction clears `due` and sets
+     `context_handoff.pending`.
+   - A due session with no bound native has nothing to rotate; `due` is simply
+     cleared.
+2. **Pending** (`metadata_json.context_handoff.pending`). On every turn start
+   while pending:
+   1. Release the backend runtime for the session (idempotent; see below).
+      If release fails, the turn fails before dispatch and `pending` stays set,
+      so the next turn retries the release. A handoff is never sent through the
+      old cached runtime.
+   2. Build the handoff from fresh durable state and prepend it to this turn's
+      input. The native id is either empty (the normal case) or already bound
+      to a new native that never accepted input. The second case happens when
+      Codex `_start_thread` binds the thread and the following `turn/start`
+      fails. Either way the new backend context has not seen a handoff, so
+      sending one is correct.
+   3. Clear `pending` only on acceptance evidence. That evidence is the native
+      start receipt (`SessionTurns.on_native_start`) of the turn that carried
+      the handoff; binding a native id is not enough. The clear is
+      compare-and-set on `context_handoff.rotated_at`, so a late receipt cannot
+      clear a newer rotation.
+
+Delivery is at-least-once. If the receipt was recorded but the clear write was
+lost, the next turn repeats the handoff into the same native, which is harmless.
+The phases are never skipped.
 
 ### Backend runtime release (agent abstraction)
 
@@ -106,30 +132,41 @@ Its default is a no-op:
 The existing `clear_sessions` paths cannot be reused. They delete or archive the
 Avibe rows that `/new` retires.
 
+Release must be idempotent and cheap when nothing is cached, because it runs on
+every pending turn start. Each backend's release must be complete: it removes
+every cache that a resume consults before the database.
+
 ### Handoff
 
-Built at the chokepoint and prepended once to the first turn of the new native
-session, as a bounded block in the turn input. It does not go into the system
-prompt, so system prompt bytes stay stable for backend caches. Rendered from a
-`core/prompts/` template:
+Built at the chokepoint while `pending` is set, as one block in the turn input.
+It does not go into the system prompt, so system prompt bytes stay stable for
+backend caches. Rendered from a `core/prompts/` template.
+
+**One budget covers the whole block.** The budget is a small fraction of the
+session's known context window, or a fixed character cap when the window is
+unknown. Sections fill it in priority order. Every list is truncated to what
+fits and ends with the count of omitted items plus the command that lists them
+all, so the size stays bounded however much open work exists.
 
 1. **Continuity notice.** This is a continuing conversation in Avibe session
    `S`; the earlier backend context was rotated.
-2. **Recent transcript.** The tail of `list_session_messages(...,
-   types=TRANSCRIPT_TYPES, tail=True)`, newest first until a fixed character
-   budget, then restored to chronological order.
-3. **Open work**, read from the durable store at that moment:
-   - `derive_session_harness_activities(conn, S)`: watches, tasks, and delegated
-     runs awaiting callback;
-   - queued deliveries;
-   - pending vault requests for `S`.
+2. **Open work**, one line per item, read from the durable store at that moment.
+   It comes before the transcript because the transcript cannot reconstruct it.
+   - **Delegated runs:** every `agent_runs` row with `callback_session_id = S`
+     and `callback_status = 'pending'`, whatever its run status. This includes
+     runs that have finished but whose callback has not yet been delivered.
+     The handoff owns this query rather than reusing the banner helper, which
+     shows only active runs.
+   - **Watches and tasks** bound to `S`, from
+     `derive_session_harness_activities`.
+   - **Queued deliveries** for `S`.
+   - **Pending vault requests** for `S`.
+3. **Recent transcript.** The tail of `list_session_messages(...,
+   types=TRANSCRIPT_TYPES, tail=True)`. It is taken newest first until the
+   remaining budget runs out, then restored to chronological order.
 4. **History pointer.** Older history is available on demand through
    `vibe data query` over `messages` where `session_id = S`. The memory package
    was removed in #2120, so on-demand query replaces memory retrieval.
-
-`context_handoff.pending` is cleared only when the new native id is bound. If
-the first turn fails before binding, the next turn rebuilds the handoff from
-fresh state.
 
 v1 summaries are mechanical; there is no LLM summarizer in the runtime today.
 An agent-authored handoff note is a follow-up, added only if transcripts show
@@ -138,21 +175,45 @@ material loss.
 ### Context pressure trigger
 
 Context occupancy is in memory only today (`MessageDispatcher._session_token_total`)
-and is lost on restart. Persist the last observation per session at turn end in
-`metadata_json.context_usage = {"tokens", "window", "observed_at"}`:
+and is lost on restart. At turn end, persist the turn's observation in
+`metadata_json.context_usage = {"peak_tokens", "window", "compacted", "observed_at"}`.
+`peak_tokens` is the maximum occupancy snapshot seen during the turn, not the
+last one, so a drop after a mid-turn compaction does not hide the peak.
 
-- Claude: per-assistant-message usage (`_extract_context_tokens`). The window
-  comes from the Model Hub launch config; whether the SDK reports the window
-  for official models is to be verified.
-- Codex: `tokenUsage.last.totalTokens` and `tokenUsage.modelContextWindow` from
-  `thread/tokenUsage/updated`.
-- OpenCode: none yet (follow-up: read step-finish token parts).
+Occupancy, in tokens:
 
-The rotation is due when `tokens >= 0.6 * window` and both values are known.
-The ratio sits below backend auto-compaction thresholds, so Avibe rotates before
-the backend compacts and leaves headroom for the handoff. It is an internal
-constant, not a user setting. When the window or tokens are unknown, automatic
-rotation does not fire and the backend's own compaction remains the fallback.
+- Claude: per-assistant-message usage (`_extract_context_tokens`).
+- Codex: `tokenUsage.last.totalTokens` from `thread/tokenUsage/updated`.
+- OpenCode: none yet (follow-up: step-finish token parts).
+
+Window, in priority order:
+
+1. The backend's own report:
+   - Claude: `ResultMessage.model_usage[<model>].contextWindow`, present in
+     `claude-agent-sdk` 0.2.159, the lowest version pinned. This also covers
+     direct, non-Hub launches, whose `ModelHubLaunch` carries no
+     `context_window`.
+   - Codex: `tokenUsage.modelContextWindow`.
+2. The configured Model Hub `context_window`.
+
+Backend compaction observed during the turn sets `compacted`:
+
+- Codex: `thread/compacted`; its handler is a no-op today.
+- Claude: the compaction-boundary system message.
+- OpenCode: an assistant message carrying `info.summary`.
+
+The rotation is due when either signal holds:
+
+- **Ratio.** `peak_tokens >= 0.6 * window`, with both values known. The ratio
+  sits below backend auto-compaction thresholds and leaves headroom for the
+  handoff. It is an internal constant, not a user setting.
+- **Compaction.** `compacted` is true. This covers a single turn that jumps
+  past the backend threshold before any snapshot is emitted. It is also the
+  only automatic signal for OpenCode and for any session whose window is
+  unknown.
+
+Both are evaluated at turn end, and the rotation itself runs at the next turn
+start.
 
 ### Policy
 
@@ -174,6 +235,28 @@ fields. There is no schema migration:
 - older releases ignore the keys;
 - rows written by older releases have no keys and keep today's behavior.
 
+Safe degradation. All four keys are read through one normalizer, and each key
+is validated independently:
+
+- A value that is malformed (wrong type, partial object, unparsable timestamp)
+  or of an unknown newer shape is treated as absent for that key alone.
+- A malformed value logs one warning per session and process.
+- The normalizer never raises on the turn-start, turn-end, or startup paths.
+- Writers always write the full canonical shape.
+
+What "treated as absent" means for each key:
+
+| Key | Behaves as |
+|---|---|
+| `context_rotation` | off |
+| `context_rotation_due` | not due |
+| `context_usage` | no observation |
+| `context_handoff` | not pending |
+
+The last row means that if an interrupted rotation leaves a malformed handoff,
+the next turn starts a fresh native without a handoff. That degrades
+continuity but does not fail dispatch.
+
 ## Invariants and tests
 
 - Rotating preserves everything keyed by the session id. Seed one row of every
@@ -181,10 +264,23 @@ fields. There is no schema migration:
   unchanged and still points at `S`.
 - After rotation the active row has an empty native id, and exactly one new
   archived snapshot row holds the previous id.
-- The next turn binds a fresh native id through the normal bind path, receives
-  the handoff exactly once, and clears `context_handoff.pending`.
-- A failed first turn leaves `pending` set, and the following turn delivers the
-  handoff.
+- The next turn binds a fresh native id through the normal bind path and
+  receives the handoff. `context_handoff.pending` is cleared only by that turn's
+  native start receipt.
+- Any failure before the receipt leaves `pending` set, and the following turn
+  delivers the handoff. The failures covered are a release error, a failure
+  before bind, and a bind followed by a failed `turn/start`.
+- A release failure blocks dispatch. No pending turn reaches the backend's old
+  cached runtime.
+- The handoff never exceeds its budget, for any number of open items, and every
+  truncated list reports its omitted count.
+- Every run with `callback_session_id = S` and a pending callback appears in the
+  handoff, whatever its run status.
+- A turn whose occupancy peaks at or above the ratio, or that observes a backend
+  compaction, marks the session due even if its last snapshot is lower.
+- Load fixtures: rows with no rotation keys (every released shape), and rows
+  with each key malformed or in an unknown shape. Turn start, turn end, and
+  startup all succeed, and each key behaves as absent.
 - No rotation happens while a turn is live. A request made mid-turn takes effect
   at the next turn start.
 - Per backend: after release, a turn does not reuse the cached runtime or thread
@@ -220,8 +316,10 @@ fields. There is no schema migration:
       runtime, inject the handoff.
 - [ ] `BaseAgent.release_native_runtime`, implemented for Claude and Codex.
 - [ ] Handoff prompt template and builder.
-- [ ] Persist context usage at turn end (Claude, Codex) and evaluate the 0.6
-      rule.
+- [ ] Persist per-turn peak usage and window at turn end (Claude, Codex) and
+      observe backend compaction (all three backends). Evaluate the ratio and
+      compaction rules.
+- [ ] Single metadata normalizer with malformed-shape fixtures.
 - [ ] `vibe session rotate` CLI and per-session `context_rotation` policy.
 - [ ] Tests for the invariants above.
 - [ ] Update `skills/use-avibe` docs for `vibe session rotate`.
