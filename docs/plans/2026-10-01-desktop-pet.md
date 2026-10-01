@@ -152,27 +152,38 @@ as it does for the Workbench.
   connection per window. The server has no per-session filter, so the route
   filters on `session_id` on the client.
 
-**Durable load and reconciliation.** The SSE broker is an in-memory fan-out
-with no replay, so the stream alone cannot be the pet's source of truth. A pet
-created after the reply landed, or one hidden through a reconnect, would
-otherwise show stale or empty state. The route follows the chat page's model
-(`ChatPage.tsx` mount load and `reconcile`):
+**Input freshness.** The SSE broker is an in-memory fan-out with no replay,
+and some state changes publish no event at all. So every input the pet derives
+from needs three things: an initial read, a live trigger, and a gap fallback.
+The table is the contract. Its rule is that any trigger re-reads the
+authoritative API; events are hints, never state.
 
-- **Read on bind.** When the route mounts or the bound session changes, it
-  reads every input `derivePetState` and the panel need:
-  - the message tail, `listSessionMessages(S, {limit, tail: true, cache: false})`;
-  - `GET /api/sessions/S/turn-state`;
-  - pending vault requests for `S`;
-  - the session row (`agent_status`);
-  - the unread count for `S`, from the Inbox provider's `unread_by_session`,
-    which the provider refreshes on its own reconnect.
-- **Re-read on gaps.** The same read runs again on the provider's
-  `onConnected`, which is the one catch-up signal for every stream gap, and
-  when the window becomes visible after being hidden.
-- **Merge.** Live `message.new` rows are merged into the fetched tail,
-  deduped by id, as the chat page does.
+| Input | Initial read | Live trigger | Gap fallback |
+|---|---|---|---|
+| Message tail (latest exchange, `quick_replies`, `quick_reply_chosen`) | `listSessionMessages(S, {tail: true, cache: false})` | `message.new` for `S` (merged, deduped by id); `queue.updated` and `turn.start` for `S` re-read the tail | `onConnected`; window becomes visible |
+| Quick-reply choice made in the pet | n/a | on the `202` from the choice POST, patch `quick_reply_chosen` on that row locally, then re-read the tail | as above |
+| Turn state (`foreground`, `in_flight`, `background_activities`) | `GET /api/sessions/S/turn-state` | `turn.start`, `turn.end`, `queue.updated` for `S`; `runs.updated` for `S` or with no `session_id` | `onConnected`; visible; the chat page's interval reconcile while work is present and the window is visible |
+| Pending vault requests | `usePendingVaultRequests` | `vaults.updated` (`useVaultRequestRefresh`) | expiry timer; `onConnected` |
+| `agent_status` | Projects provider session row | `session.status` (already consumed by `WorkbenchProjectsProvider`) | provider's own reconnect |
+| Unread count | Inbox provider `unread_by_session` | `inbox.unread.changed` | provider's own reconnect |
 
-The read is idempotent and small, so the pet never polls on a timer.
+Two notes on the table:
+
+- **Quick replies.** The server records `quick_reply_chosen` on the agent row
+  when it accepts the choice, but it publishes no row update. A choice made in
+  the pet is therefore patched from the POST result. A choice made in another
+  window is seen through the user message it sends: `message.new` if it
+  started a turn, `queue.updated` if it was queued. Both triggers re-read the
+  tail, which carries the recorded choice, so Needs input clears.
+- **Turn state.** The chat page already owns the subtle part: a grace window
+  after a local send, and an interval reconcile (60 s while working, 10 s while
+  background work is present) that recovers a dropped `turn.end` without ever
+  clearing a live turn on a timer. That logic is extracted from `ChatPage.tsx`
+  into a shared `useSessionTurnState(S)` hook used by both, rather than
+  re-implemented. The pet adds the `runs.updated` trigger, so a delegated run
+  that starts or finishes while the pet is visible updates the activity strip
+  at once. The interval runs only while work is present and the window is
+  visible, so an idle pet does no network work.
 
 **Session binding.** The route reads the bound session id from `localStorage`
 key `avibe.pet.sessionId` on the Runtime origin.
@@ -325,9 +336,16 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 - **Vitest:**
   - `derivePetState` covers every row and the priority order;
   - session binding through `localStorage` and the `storage` event;
-  - the route re-reads tail, turn-state, vault requests, and the session row
-    on bind, on `onConnected`, and on becoming visible, and merges live rows
-    without duplicates;
+  - each row of the input-freshness table: the initial read on bind, each
+    live trigger, and each gap fallback re-read the authoritative API, and
+    live rows merge without duplicates;
+  - a quick-reply choice clears Needs input from the POST result, and a
+    choice made in another window clears it through `message.new` or
+    `queue.updated`;
+  - `runs.updated` for `S`, or without `session_id`, refreshes the activity
+    strip;
+  - the extracted `useSessionTurnState` keeps the chat page's existing
+    turn-state tests passing;
   - a voice claim from another realm (simulated `BroadcastChannel` message)
     finishes the local owner, and a realm's own claim does not;
   - hotkey summon starts voice only when ASR is available.
@@ -374,7 +392,7 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 - [ ] `/pet` route, session binding, "Show in pet".
 - [ ] `derivePetState` with Vitest coverage.
 - [ ] Panel: latest exchange, activity strip, needs input, text send.
-- [ ] Durable load and gap reconciliation for the pet route.
+- [ ] Input-freshness table for the pet route; extract `useSessionTurnState` from the chat page.
 - [ ] Shared dictation hook; cross-window voice claim; pet listening flow.
 - [ ] Sprite and panel design in `design.pen`; i18n strings.
 - [ ] Rust boundary tests; manual checks on macOS and Windows.
