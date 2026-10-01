@@ -104,9 +104,15 @@ extra window:
 - Only `main` bootstraps. `pet` is remote from its first frame. It never loads
   the bootstrap page and is granted no bootstrap capability; existing
   capability files stay keyed to `main`.
-- `pet` exists only while a Runtime is ready. It is created when the Runtime
-  becomes ready and the pet is enabled, and it is destroyed when the Runtime
-  stops or the pet is disabled.
+- `pet` exists exactly when the pet is enabled and a Runtime is ready. One
+  shell function, `pet_reconcile()`, owns that invariant: it creates the
+  window if it should exist and is missing, and destroys it if it should not
+  exist. It runs on Runtime ready and stop, on a preference change, and at the
+  start of every wake. No other path creates or destroys `pet`.
+- An OS close request on `pet` (for example `Alt+F4` on Windows) is prevented
+  and hides the pet, as `main` already does for itself. Turning the pet off
+  goes through the tray switch, not the window's close. If the window is lost
+  anyway, the next wake recreates it through `pet_reconcile()`.
 - Closing or destroying `pet` never stops the Runtime and never quits the app.
   Single-instance hand-off and deep links keep targeting `main`.
 - Navigation in `pet` is confined to the Runtime origin and the `/pet` path,
@@ -146,7 +152,8 @@ as it does for the Workbench.
   another app holds it, the failure is shown in the tray submenu. It is never
   swallowed.
 - **One wake function.** Every wake path (hotkey, tray item, any future one)
-  calls `pet_wake()`. It checks the enabled flag first, then shows the pet and
+  calls `pet_wake()`. It checks the enabled flag first, runs
+  `pet_reconcile()` so a missing window is recreated, then shows the pet and
   emits `pet:summon`.
 - **Off switch.** A tray `CheckMenuItem` "Show pet", next to "Notifications".
   Off destroys the window and unregisters the shortcut, so nothing can wake it.
@@ -188,7 +195,7 @@ The table is the contract. Its rules:
 | `quick_reply_chosen` | in the tail rows | `message.updated` for `S`, replacing the row by id, as the chat page already does. The Runtime starts publishing it for this field (see note) | as above |
 | Turn state (`foreground`, `in_flight`, `background_activities`) | `GET /api/sessions/S/turn-state` | `turn.start`, `turn.end`, `queue.updated` for `S`; every `runs.updated` and every `definitions.updated`, unfiltered and coalesced | `onConnected`; visible; the chat page's interval reconcile while work is present and the window is visible |
 | Pending vault requests | `usePendingVaultRequests` | `vaults.updated` (`useVaultRequestRefresh`) | expiry timer; `onConnected` |
-| `agent_status` | `getSession(S, {cache: false})` | `session.status` for `S`, applied to the pet's own copy | `onConnected`; visible: re-read `getSession(S)` |
+| Session row (`status`, `agent_status`) | `getSession(S, {cache: false})` | `session.status` for `S`, applied to the pet's own copy; any `session.activity` for `S` re-reads the row | `onConnected`; visible: re-read `getSession(S)` |
 | Unread count | Inbox provider `unread_by_session`, which its bootstrap reads for every session | `inbox.unread.changed` | provider's own `onConnected` |
 
 Two notes on the table:
@@ -228,6 +235,13 @@ key `avibe.pet.sessionId` on the Runtime origin.
 - The panel also has a compact recent-session switcher.
 - Both windows use the default WebKit/WebView2 data store for the same origin,
   so they share the key. This must be verified (see Risks).
+- **A binding is valid only while `S` is an active session.** Every read of
+  `getSession(S)` checks this, on bind, on gaps, and on any `session.activity`
+  for `S` (archive, move, and the rest are all published there). When the
+  read returns an archived session or `404`, the route clears the key and
+  shows the empty state with the switcher, so the pet never accepts input it
+  cannot send. The rule is checked on the read, not tied to a particular
+  event kind.
 - When the main-agent session type lands, the route resolves the main-agent
   session instead, and the switcher is removed.
 
@@ -320,14 +334,19 @@ composer just hides its mic button.
 module variable, so it arbitrates only inside one JavaScript realm. `main` and
 `pet` are separate realms: a hotkey summon while the composer is dictating
 would start a second recorder. The claim is extended across same-origin realms
-with a `BroadcastChannel` (`avibe.voice-capture`):
+with the Web Locks API, which already gives one total order across them, so no
+home-made protocol has to resolve simultaneous claims:
 
-- Claiming posts a message with a per-realm id and token.
-- A realm that receives a claim from another realm finishes its local owner
-  through the same `finish()` callback a local replacement uses. Captured
-  speech is preserved, exactly as today.
-- Local semantics (`isCurrent`, `release`) are unchanged, and a realm without
-  `BroadcastChannel` falls back to local-only ownership.
+- Claiming requests the lock `avibe.voice-capture` with `steal: true` and
+  holds it for the life of the capture.
+- The lock manager grants steals in order, so the newest claim always holds
+  the lock, even when two realms claim within the same instant.
+- A realm whose lock is stolen sees its request reject with `AbortError`. It
+  finishes its local owner through the same `finish()` callback a local
+  replacement uses, so captured speech is preserved, exactly as today.
+- `release` releases the lock. Local semantics (`isCurrent`, `release`) are
+  unchanged, and a realm without `navigator.locks` falls back to local-only
+  ownership.
 
 This lives in `claimVoiceCapture` itself, so every caller (composer, Show Page
 dictation, pet) inherits it, and two Workbench browser tabs gain the same
@@ -391,7 +410,9 @@ The microphone usage string and audio-input entitlement already ship (#2293).
   - navigation outside `/pet` is denied;
   - destroying `pet` leaves the Runtime running and `main` intact;
   - disabling unregisters the shortcut, and every wake path is a no-op while
-    disabled.
+    disabled;
+  - an OS close request on `pet` hides it, and a wake after the window is
+    lost recreates it through `pet_reconcile()`;
   - the saved anchor is the pet image position whichever side the panel
     opened on, and a restore onto a missing monitor is clamped on screen.
 - **Vitest:**
@@ -410,8 +431,11 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     coalesces to at most one in-flight and one trailing read;
   - the extracted `useSessionTurnState` keeps the chat page's existing
     turn-state tests passing;
-  - a voice claim from another realm (simulated `BroadcastChannel` message)
-    finishes the local owner, and a realm's own claim does not;
+  - a stolen voice lock finishes the local owner and preserves its speech;
+    two claims made at the same time leave exactly one owner, the later
+    one; `release` frees the lock;
+  - an archived or missing bound session clears the binding, from the
+    initial read and after `session.activity`;
   - hotkey summon starts voice only when ASR is available.
 - **Manual sanity on a signed macOS build and on Windows:**
   - transparency;
@@ -426,9 +450,9 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 ## Risks to verify during implementation
 
 - **Shared origin storage.** Confirm that `main` and `pet` share
-  `localStorage` and `BroadcastChannel` delivery on both WKWebView and
-  WebView2. If not, move the binding to the Runtime, and relay voice claims
-  through a shell event to every window.
+  `localStorage` and Web Locks on both WKWebView and WebView2. If not, move
+  the binding to the Runtime, and have the shell arbitrate voice claims in
+  the order it receives them.
 - **Mic prompts.** WKWebView may prompt for the mic separately in the second
   webview. Confirm that the prompt appears once and is remembered.
 - **Full-screen Spaces.** On macOS, appearing over full-screen apps may need
