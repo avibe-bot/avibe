@@ -178,9 +178,11 @@ Source-of-truth rule:
   config and built-in Agent rows alone do not update the in-memory backend
   registry, and callers must not issue a second restart after the config API
   accepts that reconciliation
-- configuration changes never interrupt running work or hold new turns: a
-  backend that supports runtime generations renews in place and moves each
-  runtime unit at its next turn; see `docs/plans/runtime-generations.md`
+- configuration changes, including enabling or disabling a backend, never
+  interrupt running work or hold new turns: each runtime unit moves at its
+  next turn, and a disabled backend's agent retires once its work finishes.
+  Only a native credential cutover interrupts; see
+  `docs/plans/runtime-generations.md`
 
 ## 5. Development Workflow
 

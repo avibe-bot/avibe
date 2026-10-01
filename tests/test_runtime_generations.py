@@ -337,6 +337,35 @@ def test_stop_all_closes_admission_and_keeps_bound_work_on_a_graceful_stop(force
     asyncio.run(run())
 
 
+def test_a_start_that_lands_after_a_graceful_stop_all_costs_no_running_work():
+    """A unit at the cap that stops gracefully never force-stops bound work for a late start."""
+    runtimes = _Runtimes()
+    generations = runtimes.generation_set(cap=3)
+
+    async def run():
+        bound = [await generations.acquire(_Spec(digest)) for digest in ("1", "2", "3")]
+        runtimes.start_gate = asyncio.Event()
+        late = asyncio.create_task(generations.acquire(_Spec("4")))
+        await asyncio.sleep(0)
+
+        stopping = asyncio.create_task(generations.stop_all(force=False))
+        await asyncio.sleep(0)
+        runtimes.start_gate.set()
+        await stopping
+        with pytest.raises(RuntimeUnitStopping):
+            await late
+
+        # Only the late, unbound start stops; the bound work keeps running.
+        assert runtimes.stopped == [("4#3", False)]
+        for binding in bound:
+            await binding.release()
+        await generations.settled()
+        assert runtimes.live == []
+        assert all(not force for _runtime, force in runtimes.stopped)
+
+    asyncio.run(run())
+
+
 def test_a_forced_stop_all_forces_a_generation_whose_graceful_stop_was_in_flight():
     runtimes = _Runtimes()
     generations = runtimes.generation_set()

@@ -285,7 +285,8 @@ Implemented in the first PR; the Codex and OpenCode adapters build on it.
   - Every routine trigger reaches the coordinator, so implementing the hook
     moves all of them at once: `agents.*` saves, credential flows, provider
     edits, manual Restart, and the install job.
-  - Disabled backends, and backends without the hook, keep the drain path.
+  - Enabling and disabling a backend follow the same rule; see "One
+    lifecycle: deleting the drain path" below.
 - **Renewal epoch.**
   - `renew_runtime(runtime_config, *, config_save)` bumps the backend's renewal
     epoch, which is part of every launch spec. A config save
@@ -431,8 +432,8 @@ reply. After this step:
   strict retirement also cover retired agents, because their processes may
   still read the native credential.
 - Deleted: the 300 s drain, `AVIBE_BACKEND_RESTART_DRAIN_TIMEOUT_SECONDS`,
-  `"draining"` as a restart result, and the non-forced refresh branches. The
-  forced refresh survives only inside `migration_guard`.
+  `"draining"` as a restart result, and the legacy catalog restart. The
+  refresh that tears a runtime down survives only inside `migration_guard`.
 
 ### Adapter hooks
 

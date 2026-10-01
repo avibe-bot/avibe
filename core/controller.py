@@ -2193,20 +2193,27 @@ class Controller:
                 claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
 
                 # Retiring runtime generations stop once drained, whatever the
-                # idle timeouts say.
-                for agent in list(getattr(self.agent_service, "agents", {}).values()):
+                # idle timeouts say. This sweep is the only one that reaches the
+                # agents of disabled backends while their work finishes.
+                for agent in self.agent_service.runtime_agents():
                     reap = getattr(agent, "reap_runtime_generations", None)
                     if callable(reap):
                         try:
                             await reap()
                         except Exception as e:
                             logger.error("Runtime generation sweep failed for %s: %s", agent.name, e, exc_info=True)
+                try:
+                    self.agent_service.forget_retired_agents()
+                except Exception as e:
+                    logger.error("Retired agent sweep failed: %s", e, exc_info=True)
 
+                try:
+                    # A client from before the latest renewal is reclaimed once
+                    # idle, even with idle eviction off.
+                    await self.session_handler.evict_idle_sessions(claude_timeout)
+                except Exception as e:
+                    logger.error("Claude idle cleanup failed: %s", e, exc_info=True)
                 if claude_timeout > 0:
-                    try:
-                        await self.session_handler.evict_idle_sessions(claude_timeout)
-                    except Exception as e:
-                        logger.error("Claude idle cleanup failed: %s", e, exc_info=True)
                     try:
                         # Defense-in-depth: reconcile live claude subprocesses
                         # against tracked sessions and reap orphans (no-owner /
@@ -2654,27 +2661,12 @@ class Controller:
             except FileNotFoundError:
                 return
             self.config.model_hub = latest.model_hub
+            # Each runtime moves to the committed catalog at its next turn;
+            # nothing restarts or drains. A disabled backend has nothing to adopt.
             agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)
             adopt_catalog = getattr(agent, "adopt_model_hub_catalog", None)
             if callable(adopt_catalog):
-                # The backend moves each runtime to the committed catalog at
-                # that runtime's next turn; nothing restarts or drains.
                 await adopt_catalog()
-                return
-            if latest.model_hub.agents[backend].mode != "hub":
-                if backend == "codex":
-                    agent_service = getattr(self, "agent_service", None)
-                    if agent_service is None:
-                        raise RuntimeError("Agent service is unavailable")
-                    await agent_service.invalidate_model_hub_runtime(backend)
-                return
-            runtime_config = getattr(latest.agents, backend, None)
-            if runtime_config is None:
-                return
-            coordinator = getattr(self, "backend_restart_coordinator", None)
-            if coordinator is None:
-                raise RuntimeError("Backend restart coordinator is unavailable")
-            await coordinator.request_restart(backend)
 
         async def repair_model_selections(addresses: frozenset[str]) -> int:
             # A Vibe Agent's model, a channel's routing override, and a

@@ -150,9 +150,12 @@ def test_only_confirmed_new_controller_clears_old_failed_delivery(connection, mo
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
-@pytest.mark.parametrize("application", ["applied", "draining", "failed", "stopped"])
+@pytest.mark.parametrize("application", ["applied", "busy", "failed", "stopped"])
 def test_install_job_applies_persisted_path_before_admitting_connection(monkeypatch, tmp_path, backend, application):
-    """The real install-job result and readiness consume the same rolling apply."""
+    """The real install-job result and readiness consume the same in-place renewal.
+
+    Work running on the backend never holds the install's application back.
+    """
     from core.backend_restart import BackendRestartCoordinator
     from vibe import opencode_config
 
@@ -185,7 +188,7 @@ def test_install_job_applies_persisted_path_before_admitting_connection(monkeypa
     async def run():
         service = SimpleNamespace(
             agents={name: object() for name in ("claude", "codex", "opencode")},
-            active=application == "draining",
+            active=application == "busy",
             begin_backend_drain=Mock(), end_backend_drain=Mock(),
             prepare_backend_restart=AsyncMock(),
         )
@@ -195,13 +198,13 @@ def test_install_job_applies_persisted_path_before_admitting_connection(monkeypa
         ))
         applied = []
 
-        async def refresh(name, _forced):
+        async def renew(name, _config_save):
             applied.append(name)
             if application == "failed":
                 raise RuntimeError("fixture apply failed")
             controller.config = V2Config.load()
 
-        coordinator = BackendRestartCoordinator(controller, refresh, poll_interval=0.001)
+        coordinator = BackendRestartCoordinator(controller, AsyncMock(), renew=renew, poll_interval=0.001)
         loop = asyncio.get_running_loop()
 
         def marker(name, **_kwargs):
@@ -228,20 +231,14 @@ def test_install_job_applies_persisted_path_before_admitting_connection(monkeypa
         assert job["path"] == installed_path
         assert getattr(V2Config.load().agents, backend).cli_path == installed_path
         state = await api.get_backend_connection(backend)
-        assert state["application"] == application, (job, state)
-        assert state["ready"] is (application == "applied")
-        assert state["entry_eligible"] is (application in {"applied", "stopped"})
+        expected = "applied" if application == "busy" else application
+        assert state["application"] == expected, (job, state)
+        assert state["ready"] is (expected == "applied")
+        assert state["entry_eligible"] is (expected in {"applied", "stopped"})
         assert job["ok"] is (application != "failed")
         if application == "stopped":
             assert job["restart"]["apply_on_next_start"] and not applied
-        elif application == "draining":
-            assert getattr(controller.config.agents, backend).cli_path == "/old/missing-cli"
-            service.active = False
-            await coordinator.wait(backend)
-            assert (await api.get_backend_connection(backend))["ready"]
-            assert getattr(controller.config.agents, backend).cli_path == installed_path
-            assert applied == [backend]
-        elif application == "applied":
+        elif expected == "applied":
             assert getattr(controller.config.agents, backend).cli_path == installed_path
             assert applied == [backend]
         else:
@@ -283,19 +280,30 @@ def test_disabled_applied_configuration_stays_saved_without_readiness(monkeypatc
         controller = SimpleNamespace(config=to_app_config(config), agent_service=service,
             session_turns=SimpleNamespace(begin_backend_drain=Mock(), end_backend_drain=AsyncMock()))
         # Claude's loaded compat object remains registered even when disabled.
-        claude = SimpleNamespace(config=controller.config, controller=controller, refresh_auth_state=AsyncMock())
-        claude.refresh_runtime_config = lambda value: ClaudeAgent.refresh_runtime_config(claude, value)
+        claude = SimpleNamespace(config=controller.config, controller=controller)
+        claude.renew_runtime = lambda value, config_save=False: ClaudeAgent.renew_runtime(
+            claude, value, config_save=config_save
+        )
         service.agents["claude"] = claude
         if backend != "claude":
-            service.agents[backend] = SimpleNamespace(shutdown_runtime=AsyncMock())
-        async def refresh(name, value):
-            if name == "claude":
-                await claude.refresh_runtime_config(value)
-                return True
-            return False
-        service.refresh_runtime_config = refresh
+            service.agents[backend] = SimpleNamespace(retire_runtime=AsyncMock())
+
+        async def retire_backend(name):
+            agent = service.agents.pop(name, None)
+            if agent is not None:
+                await agent.retire_runtime()
+            return agent is not None
+
+        service.retire_backend = retire_backend
         owner = AgentAuthService(controller)
-        coordinator = BackendRestartCoordinator(controller, owner._apply_backend_runtime_refresh)
+        failure = []
+
+        async def renew(name, config_save):
+            if failure:
+                raise failure[0]
+            await owner.renew_backend_runtime(name, config_save)
+
+        coordinator = BackendRestartCoordinator(controller, owner._apply_backend_runtime_refresh, renew=renew)
         async def projection(name):
             return {"status_code": 200, "body": {"ok": True, **coordinator.snapshot(name)}}
         monkeypatch.setattr(internal_client, "backend_application", projection)
@@ -331,7 +339,7 @@ def test_disabled_applied_configuration_stays_saved_without_readiness(monkeypatc
             assert state["application"] == "applied"
             assert not state["enabled"] and not state["ready"] and not state["entry_eligible"]
         # Startup from the same loaded disabled shape is also authoritative.
-        startup = BackendRestartCoordinator(controller, owner._apply_backend_runtime_refresh)
+        startup = BackendRestartCoordinator(controller, owner._apply_backend_runtime_refresh, renew=renew)
         assert startup.snapshot(backend) == {"state": "applied", "disabled": True}
         # A concurrent disk enable cannot borrow the disabled controller's
         # applied state before that enablement is reconciled.
@@ -341,8 +349,8 @@ def test_disabled_applied_configuration_stays_saved_without_readiness(monkeypatc
         assert stale["application"] == "unknown" and not stale["ready"] and not stale["entry_eligible"]
         getattr(config.agents, backend).enabled = False
         config.save()
-        # A failed subsequent prepare retains the failure even when disabled.
-        service.prepare_backend_restart.side_effect = RuntimeError("fixture failure")
+        # A failed subsequent application retains the failure even when disabled.
+        failure.append(RuntimeError("fixture failure"))
         with pytest.raises(RuntimeError, match="fixture failure"):
             await coordinator.request_restart(backend)
         assert (await api.get_backend_connection(backend))["application"] == "failed"

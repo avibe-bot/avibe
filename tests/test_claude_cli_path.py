@@ -2484,6 +2484,51 @@ def test_session_handler_uses_scheduled_turn_source_for_dm_anchor(monkeypatch, t
     assert getattr(client, "_vibe_runtime_session_key") == f"{base_session_id}:{tmp_path}"
 
 
+def test_runtime_gen_006_a_client_from_before_a_renewal_is_reclaimed_once_idle(monkeypatch, tmp_path: Path) -> None:
+    """RUNTIME-GEN-006 (Claude): a disabled or renewed Claude stops its clients once idle.
+
+    Disabling Claude renews it in place. Each client from before the renewal
+    is disconnected at the first sweep that finds it idle, even with idle
+    eviction off. A busy one keeps running until then.
+    """
+    disconnects: list[str] = []
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            disconnects.append("disconnect")
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    handler = SessionHandler(controller)
+    _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.session_last_activity[composite_key] = 1000.0
+
+    # Idle eviction is off and the client is current: it stays.
+    assert asyncio.run(handler.evict_idle_sessions(0)) == 0
+
+    handler.renew_runtime()
+    handler.active_sessions.add(composite_key)
+    # Its own background work still runs, so the stale client keeps serving it.
+    assert asyncio.run(handler.evict_idle_sessions(0)) == 0
+    assert disconnects == []
+
+    handler.active_sessions.discard(composite_key)
+    assert asyncio.run(handler.evict_idle_sessions(0)) == 1
+    assert disconnects == ["disconnect"]
+    assert composite_key not in controller.claude_sessions
+
+
 def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 

@@ -143,8 +143,12 @@ class _StubController:
 
 
 class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyncioTestCase):
-    async def test_renewal_in_place_declines_a_disabled_backend(self):
-        """RUNTIME-GEN-004: disabling a backend keeps the retirement path; enabling renews."""
+    async def test_claude_renews_in_place_whether_enabled_or_disabled(self):
+        """RUNTIME-GEN-004: Claude stays registered while disabled and renews in place.
+
+        Its renewal retires every client once idle, so disabling it waits for
+        and interrupts nothing.
+        """
         for enabled in (True, False):
             controller = _StubController()
             renew = AsyncMock()
@@ -154,13 +158,10 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             service._load_backend_runtime_config = lambda _backend, config=runtime_config: config
             service._sync_builtin_default_agents = lambda: None
 
-            renewed = await service.renew_backend_runtime("claude")
+            await service.renew_backend_runtime("claude")
 
-            assert renewed is enabled
-            if enabled:
-                renew.assert_awaited_once_with(runtime_config, config_save=False)
-            else:
-                renew.assert_not_awaited()
+            renew.assert_awaited_once_with(runtime_config, config_save=False)
+            assert "claude" in controller.agent_service.agents
 
     async def test_handle_setup_command_submits_code(self):
         controller = _StubController()
@@ -1607,19 +1608,19 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         finally:
             await finisher
 
-    async def test_refresh_backend_runtime_uses_backend_specific_runtime_refresh(self):
+    async def test_cutover_refresh_uses_backend_specific_runtime_refresh(self):
         controller = _StubController()
         controller.agent_service.agents["codex"] = SimpleNamespace(refresh_auth_state=AsyncMock())
         controller.agent_service.agents["claude"] = SimpleNamespace(refresh_auth_state=AsyncMock())
         service = AgentAuthService(controller)
 
-        await service._refresh_backend_runtime("codex")
-        await service._refresh_backend_runtime("claude")
+        await service._apply_backend_runtime_refresh("codex")
+        await service._apply_backend_runtime_refresh("claude")
 
         controller.agent_service.agents["codex"].refresh_auth_state.assert_awaited_once()
         controller.agent_service.agents["claude"].refresh_auth_state.assert_awaited_once()
 
-    async def test_refresh_backend_runtime_prefers_runtime_config_reload(self):
+    async def test_cutover_refresh_prefers_runtime_config_reload(self):
         controller = _StubController()
         agent = SimpleNamespace(
             refresh_runtime_config=AsyncMock(),
@@ -1630,13 +1631,13 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         runtime_config = object()
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
 
-        await service._refresh_backend_runtime("codex")
+        await service._apply_backend_runtime_refresh("codex")
 
         service._load_backend_runtime_config.assert_called_once_with("codex")
         agent.refresh_runtime_config.assert_awaited_once_with(runtime_config)
         agent.refresh_auth_state.assert_not_awaited()
 
-    async def test_refresh_backend_runtime_releases_runtime_tokens_after_refresh(self):
+    async def test_cutover_refresh_releases_runtime_tokens_after_refresh(self):
         controller = _StubController()
         runtime_tokens = {"session:/repo": "token-1"}
         controller.agent_service.runtime_turn_tokens_for_backend = Mock(return_value=runtime_tokens)
@@ -1647,7 +1648,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         runtime_config = object()
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
 
-        await service._refresh_backend_runtime("codex")
+        await service._apply_backend_runtime_refresh("codex")
 
         controller.agent_service.runtime_turn_tokens_for_backend.assert_called_once_with("codex")
         controller.agent_service.refresh_runtime_config.assert_awaited_once_with("codex", runtime_config)
@@ -1719,7 +1720,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertIs(registered.codex_config, runtime_config)
         self.assertIs(controller.config.codex, runtime_config)
 
-    async def test_refresh_backend_runtime_unregisters_disabled_codex(self):
+    async def test_refresh_backend_runtime_retires_disabled_codex_in_place(self):
         from modules.agent_router import AgentRouter
         from modules.agents.service import AgentService
 
@@ -1729,7 +1730,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.config.codex = SimpleNamespace(binary="/old/codex")
         controller.config.default_backend = "codex"
         controller.agent_service.register(SimpleNamespace(name="claude"))
-        agent = SimpleNamespace(name="codex", shutdown_runtime=AsyncMock())
+        agent = SimpleNamespace(name="codex", retire_runtime=AsyncMock(), shutdown_runtime=AsyncMock())
         controller.agent_service.register(agent)
         service = AgentAuthService(controller)
         service._load_backend_runtime_config = Mock(return_value=None)
@@ -1743,7 +1744,10 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertEqual(controller.agent_router.global_default, "codex")
         self.assertEqual(controller.agent_router.platform_routes["slack"].default, "codex")
         self.assertEqual(controller.config.default_backend, "codex")
-        agent.shutdown_runtime.assert_awaited_once()
+        # The agent retires without a forced stop; its running work finishes in place.
+        agent.retire_runtime.assert_awaited_once_with()
+        agent.shutdown_runtime.assert_not_awaited()
+        self.assertEqual(controller.agent_service.runtime_agents("codex"), [agent])
         service._sync_builtin_default_agents.assert_called_once_with()
 
     async def test_refresh_backend_runtime_does_not_restore_legacy_default_after_late_registration(self):
@@ -1800,7 +1804,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         from config.v2_compat import ClaudeCompatConfig
 
         controller = _StubController()
-        agent = SimpleNamespace(refresh_runtime_config=AsyncMock())
+        agent = SimpleNamespace(renew_runtime=AsyncMock())
         controller.agent_service.agents["claude"] = agent
         service = AgentAuthService(controller)
 
@@ -1821,7 +1825,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
                 await service._refresh_backend_runtime("claude")
 
-        runtime_config = agent.refresh_runtime_config.await_args.args[0]
+        runtime_config = agent.renew_runtime.await_args.args[0]
         self.assertIsInstance(runtime_config, ClaudeCompatConfig)
         self.assertEqual(runtime_config.cli_path, "/opt/claude/bin/claude")
 

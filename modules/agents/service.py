@@ -52,6 +52,8 @@ class AgentService:
     ):
         self.controller = controller
         self.agents: Dict[str, BaseAgent] = {}
+        # Agents of disabled backends whose running work has not finished yet.
+        self._retired_agents: list[BaseAgent] = []
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
         self.activities = activities or SessionActivityRegistry()
@@ -154,13 +156,20 @@ class AgentService:
             )
             return RuntimeActivationResolution(authoritative=False)
     async def prepare_backend_restart(self, backend: str) -> None:
-        agent = self.agents.get(backend)
-        prepare = getattr(agent, "prepare_runtime_restart", None)
-        if callable(prepare):
-            await prepare()
+        for agent in self.runtime_agents(backend):
+            prepare = getattr(agent, "prepare_runtime_restart", None)
+            if callable(prepare):
+                await prepare()
 
     async def backend_runtime_active(self, backend: str) -> bool:
-        agent = self.agents.get(backend)
+        if self.activities.has_backend_work(backend):
+            return True
+        for agent in self.runtime_agents(backend):
+            if await self._agent_runtime_active(backend, agent):
+                return True
+        return False
+
+    async def _agent_runtime_active(self, backend: str, agent: BaseAgent) -> bool:
         ownership_probe = getattr(agent, "runtime_ownership_snapshots", None)
         if callable(ownership_probe):
             try:
@@ -180,8 +189,6 @@ class AgentService:
                 return True
             if any(snapshot.blocks_reclamation for snapshot in snapshots):
                 return True
-        if self.activities.has_backend_work(backend):
-            return True
         probe = getattr(agent, "runtime_has_active_turns", None)
         if not callable(probe):
             return False
@@ -224,11 +231,47 @@ class AgentService:
         self.agents[agent.name] = agent
         logger.info(f"Registered agent backend: {agent.name}")
 
+    async def retire_backend(self, backend: str) -> bool:
+        """Unregister a disabled backend's agent without interrupting its work.
+
+        New messages no longer reach the agent. Its running work finishes on
+        the processes it started on, and Stop, Activity callbacks, liveness,
+        and the sweep still reach it until it reports ``runtime_retired()``.
+        """
+        agent = self.agents.pop(backend, None)
+        if agent is None:
+            return False
+        self._retired_agents.append(agent)
+        retire = getattr(agent, "retire_runtime", None)
+        if callable(retire):
+            await retire()
+        logger.info("Retired agent backend %s; its running work finishes in place", backend)
+        return True
+
+    def runtime_agents(self, backend: str | None = None) -> list[BaseAgent]:
+        """Registered agents and retired ones whose work still runs."""
+        return [
+            agent
+            for agent in (*self.agents.values(), *self._retired_agents)
+            if backend is None or agent.name == backend
+        ]
+
+    def forget_retired_agents(self) -> None:
+        """Drop retired agents that no longer run any process."""
+
+        def retired(agent: BaseAgent) -> bool:
+            probe = getattr(agent, "runtime_retired", None)
+            return not callable(probe) or bool(probe())
+
+        self._retired_agents = [agent for agent in self._retired_agents if not retired(agent)]
+
     def _on_activity_output_settled(self, activity: Any) -> None:
-        agent = self.agents.get(str(getattr(activity, "backend", "") or ""))
-        notify = getattr(agent, "on_activity_output_settled", None)
-        if callable(notify):
-            notify(str(getattr(activity, "runtime_key", "") or ""))
+        backend = str(getattr(activity, "backend", "") or "")
+        runtime_key = str(getattr(activity, "runtime_key", "") or "")
+        for agent in self.runtime_agents(backend):
+            notify = getattr(agent, "on_activity_output_settled", None)
+            if callable(notify):
+                notify(runtime_key)
 
     def on_activity_terminal(self, activity: Any) -> bool:
         """Let the Run owner acknowledge one terminal Activity."""
@@ -573,7 +616,12 @@ class AgentService:
             self.release_runtime_turn_key(runtime_key, runtime_token)
 
     async def handle_stop(self, agent_name: str, request: AgentRequest) -> bool:
-        current_agent = self.get(agent_name)
+        target = agent_name or self.default_agent
+        # A disabled backend's running turn still stops on its retired agent.
+        agents = self.runtime_agents(target)
+        current_agent = self.agents.get(target) or (agents[-1] if agents else None)
+        if current_agent is None:
+            raise KeyError(target)
         payload = getattr(request.context, "platform_specific", None) or {}
         stamped_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
         runtime_key = stamped_key or self._runtime_turn_key(current_agent, request)
@@ -1388,17 +1436,6 @@ class AgentService:
             return True
         finally:
             self.release_runtime_turn_tokens(runtime_tokens)
-
-    async def invalidate_model_hub_runtime(self, agent_name: str) -> bool:
-        """Invalidate future Hub-only runtime state without disturbing Direct work."""
-        agent = self.agents.get(agent_name)
-        if agent is None:
-            return False
-        invalidate = getattr(agent, "invalidate_model_hub_runtime", None)
-        if not callable(invalidate):
-            return False
-        await invalidate()
-        return True
 
 
 @dataclass

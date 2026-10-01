@@ -2601,9 +2601,11 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         fake_process = FakeProcess()
         runtime = _FakeCodexNextTurnRuntime()
         runner = ScenarioRunner(harness)
-        harness.controller.agent_service.agents["codex"] = SimpleNamespace(
-            refresh_auth_state=AsyncMock(side_effect=runtime.refresh)
-        )
+        async def renew(_runtime_config, **_kwargs):
+            await runtime.refresh()
+
+        harness.controller.agent_service.agents["codex"] = SimpleNamespace(renew_runtime=AsyncMock(side_effect=renew))
+        harness.service._load_backend_runtime_config = Mock(return_value=SimpleNamespace(enabled=True))
         harness.service._start_codex_process = AsyncMock(return_value=fake_process)
         harness.service._read_codex_output = AsyncMock(return_value=None)
         harness.service._verify_login = AsyncMock(return_value=(True, "Logged in using ChatGPT"))
@@ -2634,7 +2636,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        harness.controller.agent_service.agents["codex"].refresh_auth_state.assert_awaited_once()
+        harness.controller.agent_service.agents["codex"].renew_runtime.assert_awaited_once()
         ScenarioExpect.step_history(runner, ["start_setup", "emit_device_url", "next_turn_after_success"])
         ScenarioExpect.text_contains(harness, "codex login is active again")
         ScenarioExpect.flow_missing(harness, "C1:codex")
@@ -3058,7 +3060,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         # starts a generation that loaded it.
         agent = SimpleNamespace(
             clear_sessions=AsyncMock(side_effect=runtime.clear_sessions),
-            refresh_runtime_config=AsyncMock(side_effect=renew),
+            renew_runtime=AsyncMock(side_effect=renew),
         )
         harness.controller.agent_service.agents["opencode"] = agent
         harness.service._resolve_opencode_provider = AsyncMock(return_value="opencode")
@@ -3084,7 +3086,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
 
         harness.service._install_opencode_api_key.assert_awaited_once_with("opencode", "oc_live_Abcdef1234567890")
-        agent.refresh_runtime_config.assert_awaited_once()
+        agent.renew_runtime.assert_awaited_once()
         ScenarioExpect.step_history(runner, ["start_setup", "submit_direct_credential", "next_turn_after_success"])
         ScenarioExpect.text_contains(harness, "opencode login is active again")
         ScenarioExpect.flow_missing(harness, "C1:opencode")
@@ -4126,8 +4128,8 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
         service.agents = {"opencode": object()}
         service.active = True
         controller = _controller(service)
-        refresh = AsyncMock()
-        coordinator = BackendRestartCoordinator(controller, refresh, poll_interval=0.001)
+        renew = AsyncMock()
+        coordinator = BackendRestartCoordinator(controller, AsyncMock(), renew=renew, poll_interval=0.001)
         controller.backend_restart_coordinator = coordinator
         internal_app = create_app(controller)
         callbacks = []
@@ -4192,13 +4194,11 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
             assert h.web_flow.state == "success"
             state = await api.get_backend_connection("opencode")
             assert state["auth"] == "subscription"
-            assert state["application"] == "draining" and not state["ready"]
+            # Work still running on OpenCode never holds the new credential back.
+            assert state["application"] == "applied" and state["ready"]
 
         async def apply(h):
-            service.active = False
-            await coordinator.wait("opencode")
-            assert (await api.get_backend_connection("opencode"))["ready"]
-            refresh.assert_awaited_once_with("opencode", False)
+            renew.assert_awaited_once_with("opencode", False)
             assert len(callbacks) == 1
             assert await api._read_opencode_config_api_key("test-provider") is None
 

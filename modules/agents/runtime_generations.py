@@ -288,9 +288,11 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         unforced = [generation for generation in self._retiring if generation.serial not in forced]
         if self._force_all and unforced:
             return unforced[0], True
-        if len(self._retiring) + (self._current is not None) > self._cap and unforced:
+        if not self._stopping and len(self._retiring) + (self._current is not None) > self._cap and unforced:
             # Never make a new turn wait: the oldest work gives way, whether its
-            # adapter still reports work or an earlier stop failed.
+            # adapter still reports work or an earlier stop failed. A stopping
+            # unit admits no new turn, so a start that lands after admission
+            # closed stops by itself instead of costing the oldest its work.
             return unforced[0], True
         drained = next(
             (

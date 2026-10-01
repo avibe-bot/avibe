@@ -472,6 +472,12 @@ class SessionHandler(BaseHandler):
         """Move every session to a new client at its next turn, interrupting nothing."""
         self.controller.claude_runtime_epoch = getattr(self.controller, "claude_runtime_epoch", 0) + 1
 
+    def _idle_eviction_after(self, client: Any, idle_timeout: float) -> float | None:
+        """Seconds a client may stay idle before eviction; None keeps it."""
+        if getattr(client, "_vibe_runtime_epoch", 0) != getattr(self.controller, "claude_runtime_epoch", 0):
+            return 0.0
+        return idle_timeout if idle_timeout > 0 else None
+
     async def _replace_stale_cached_claude_client(
         self,
         composite_key: str,
@@ -2425,17 +2431,18 @@ class SessionHandler(BaseHandler):
     ) -> int:
         """Disconnect Claude sessions that have been idle beyond the timeout.
 
+        A client from before the latest runtime renewal can never serve another
+        turn, so it is disconnected as soon as it is idle, even when
+        ``idle_timeout <= 0`` turns idle eviction off.
+
         Durable Turn and Activity ownership always vetoes reclamation, even
         during silent inference or tools. The age backstop repairs an
         adapter-local active flag only after durable ownership independently
         allows reclamation. Pass ``stuck_active_multiplier <= 0`` to disable
         that stale-flag repair.
         """
-        if idle_timeout <= 0:
-            return 0
-
         stuck_threshold = None
-        if stuck_active_multiplier > 0:
+        if idle_timeout > 0 and stuck_active_multiplier > 0:
             stuck_threshold = max(
                 idle_timeout * stuck_active_multiplier,
                 max(0.0, stuck_active_floor_seconds),
@@ -2448,6 +2455,10 @@ class SessionHandler(BaseHandler):
             (composite_key, client)
             for composite_key in self.session_last_activity
             if (client := self.claude_sessions.get(composite_key)) is not None
+            and (
+                self._idle_eviction_after(client, idle_timeout) is not None
+                or (stuck_threshold is not None and composite_key in self.active_sessions)
+            )
         )
         targets_by_key = self._claude_runtime_ownership_targets(ownership_items)
         provider = getattr(self.controller, "runtime_ownership", None)
@@ -2493,7 +2504,8 @@ class SessionHandler(BaseHandler):
                 ):
                     expired.append((composite_key, idle_for))
                 continue
-            if not ownership.blocks_reclamation and idle_for >= idle_timeout:
+            evict_after = self._idle_eviction_after(client, idle_timeout)
+            if not ownership.blocks_reclamation and evict_after is not None and idle_for >= evict_after:
                 expired.append((composite_key, idle_for))
 
         evicted = 0
@@ -2551,9 +2563,11 @@ class SessionHandler(BaseHandler):
                                 and not ownership.blocks_reclamation
                             )
                         else:
+                            evict_after = self._idle_eviction_after(client, idle_timeout)
                             allowed = bool(
                                 not ownership.blocks_reclamation
-                                and recheck_idle >= idle_timeout
+                                and evict_after is not None
+                                and recheck_idle >= evict_after
                             )
                     else:
                         allowed = False

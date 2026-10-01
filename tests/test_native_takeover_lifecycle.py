@@ -31,6 +31,9 @@ def controller_fixture(*, backends=("claude", "codex", "opencode"), busy=False):
     turns = set()
     service = SimpleNamespace(
         agents={name: SimpleNamespace(retire_for_native_migration=AsyncMock()) for name in backends},
+        runtime_agents=lambda backend=None: [
+            agent for name, agent in service.agents.items() if backend in (None, name)
+        ],
         begin_backend_drain=Mock(side_effect=admissions.add),
         end_backend_drain=Mock(side_effect=admissions.discard),
         prepare_backend_restart=AsyncMock(),
@@ -53,7 +56,7 @@ def controller_fixture(*, backends=("claude", "codex", "opencode"), busy=False):
         config=SimpleNamespace(),
     )
     coordinator = BackendRestartCoordinator(
-        controller, AsyncMock(), process_inventory=Mock(return_value=()), drain_timeout=0.01, settle_timeout=0.01,
+        controller, AsyncMock(), renew=AsyncMock(), process_inventory=Mock(return_value=()), settle_timeout=0.01,
         poll_interval=0.001,
     )
     controller.backend_restart_coordinator = coordinator
@@ -176,15 +179,11 @@ async def test_guard_closes_both_admissions_before_retirement_and_retains_only_b
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("drain_timeout", [1, 0])
-async def test_busy_guard_interrupts_running_work_then_retires_and_yields(drain_timeout):
+async def test_busy_guard_interrupts_running_work_then_retires_and_yields():
     """MH-MIG-009: every caller applies an explicit user switch, so live work is
-    interrupted, not awaited; a guard that waits for idle leaves the switch spinning.
-    The settle window is independent of the drain timeout, which only decides when
-    a restart stops waiting: an immediate drain must not refuse a brief teardown."""
+    interrupted, not awaited; a guard that waits for idle leaves the switch spinning."""
     controller, coordinator, admissions, turns = controller_fixture(busy=True)
     service = controller.agent_service
-    coordinator._drain_timeout = drain_timeout
     coordinator._settle_timeout = 1
     controller.session_turns.active_runtime_session_ids_for_backend.return_value = {"session-1"}
     order = []
@@ -217,7 +216,7 @@ async def test_switch_waits_out_a_teardown_that_takes_its_bounded_worst_case(mon
     controller, _, admissions, turns = controller_fixture(busy=True)
     service = controller.agent_service
     coordinator = BackendRestartCoordinator(
-        controller, AsyncMock(), process_inventory=Mock(return_value=()), drain_timeout=0.01, poll_interval=0.001,
+        controller, AsyncMock(), renew=AsyncMock(), process_inventory=Mock(return_value=()), poll_interval=0.001,
     )
     controller.backend_restart_coordinator = coordinator
     loop = asyncio.get_running_loop()
@@ -437,15 +436,23 @@ async def test_live_auth_lease_refuses_migration_before_admission_closes():
 
 
 @pytest.mark.asyncio
-async def test_restart_task_and_migration_have_one_owner():
-    controller, coordinator, admissions, turns = controller_fixture(busy=True)
-    coordinator._drain_timeout = 1
-    assert await coordinator.request_restart("codex") == "draining"
+async def test_maintenance_and_migration_have_one_owner():
+    controller, coordinator, admissions, turns = controller_fixture()
+    installing = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def install():
+        installing.set()
+        await finish.wait()
+        return {"ok": True}
+
+    maintenance = asyncio.create_task(coordinator.run_when_idle("codex", install))
+    await installing.wait()
     with pytest.raises(NativeMigrationBlockedError, match="backend_restart_in_progress"):
         async with coordinator.migration_guard(("codex",)):
-            pytest.fail("competing restart")
-    controller.agent_service.backend_runtime_active.return_value = False
-    await coordinator.wait("codex")
+            pytest.fail("competing maintenance")
+    finish.set()
+    assert await maintenance == {"ok": True}
     assert not admissions and not turns
 
 

@@ -35,12 +35,12 @@ scenarios:
     backend: shared
     test: tests/test_runtime_generations.py::test_runtime_gen_003_at_the_cap_the_oldest_retiring_generation_gives_way
   - id: RUNTIME-GEN-004
-    name: A routine restart request on a backend that renews in place neither drains nor interrupts
+    name: A routine restart request renews in place and never drains, holds a turn, or interrupts
     status: covered
     kind: lifecycle
     layer: contract
     backend: shared
-    test: tests/test_backend_restart.py::test_runtime_gen_004_a_backend_that_renews_in_place_never_drains
+    test: tests/test_backend_restart.py::test_runtime_gen_004_a_restart_request_never_drains_holds_or_interrupts
   - id: RUNTIME-GEN-005
     name: A saved idle timeout applies without a backend restart, and retiring generations are swept regardless of idle timeouts
     status: covered
@@ -50,6 +50,29 @@ scenarios:
     test: tests/test_controller_idle_cleanup.py::test_a_saved_idle_timeout_applies_without_a_backend_restart
     related_tests:
       - tests/test_claude_cli_path.py::test_a_config_save_that_only_changes_live_fields_renews_no_client
+  - id: RUNTIME-GEN-006
+    name: Disabling a backend holds no message and interrupts nothing; running work finishes and the processes stop once drained
+    status: covered
+    kind: lifecycle
+    layer: contract
+    backend: shared
+    test: tests/test_backend_restart.py::test_runtime_gen_006_disabling_a_backend_holds_no_message_and_interrupts_nothing
+    related_tests:
+      - tests/test_claude_cli_path.py::test_runtime_gen_006_a_client_from_before_a_renewal_is_reclaimed_once_idle
+  - id: RUNTIME-GEN-007
+    name: Re-enabling a backend while its retired agent drains starts new work at once and leaves the retired work running
+    status: covered
+    kind: lifecycle
+    layer: contract
+    backend: shared
+    test: tests/test_backend_restart.py::test_runtime_gen_007_re_enabling_starts_a_new_agent_beside_the_retired_one
+  - id: RUNTIME-GEN-008
+    name: An unattended CLI update closes admission only for its install, then renews in place instead of tearing the runtime down
+    status: covered
+    kind: lifecycle
+    layer: contract
+    backend: shared
+    test: tests/test_backend_restart.py::test_runtime_gen_008_idle_maintenance_runs_behind_closed_admission_then_renews
   - id: RUNTIME-GEN-010
     name: A Codex turn on a new launch spec starts at once on a new app-server while a busy one in the same directory finishes on its own
     status: covered

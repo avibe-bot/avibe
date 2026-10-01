@@ -2248,25 +2248,14 @@ class AgentAuthService:
         except Exception as err:  # noqa: BLE001
             logger.warning("Failed to sync built-in Agents after backend runtime refresh: %s", err)
 
-    async def _unregister_disabled_backend_agent(self, backend: str) -> bool:
+    async def _retire_disabled_backend_agent(self, backend: str) -> bool:
+        """Unregister a disabled backend at once; its running work finishes in place."""
         agent_service = getattr(self.controller, "agent_service", None)
-        agent = getattr(agent_service, "agents", {}).pop(backend, None) if agent_service else None
-        if agent is None:
-            setattr(self.controller.config, backend, None)
-            self._sync_builtin_default_agents()
-            return False
-
-        shutdown = getattr(agent, "shutdown_runtime", None)
-        if callable(shutdown):
-            await shutdown()
-        refresh = getattr(agent, "refresh_auth_state", None)
-        if callable(refresh):
-            await refresh()
-
+        retire = getattr(agent_service, "retire_backend", None)
+        retired = bool(await retire(backend)) if callable(retire) else False
         setattr(self.controller.config, backend, None)
         self._sync_builtin_default_agents()
-        logger.info("Unregistered disabled %s backend after runtime config refresh", backend)
-        return True
+        return retired
 
     def _register_missing_backend_agent(self, backend: str, runtime_config: Any) -> bool:
         agent_service = getattr(self.controller, "agent_service", None)
@@ -2291,32 +2280,37 @@ class AgentAuthService:
         logger.info("Registered %s backend after runtime config refresh", backend)
         return True
 
-    async def renew_backend_runtime(self, backend: str, config_save: bool = False) -> bool:
-        """Adopt persisted config without a drain when the backend renews in place.
+    async def renew_backend_runtime(self, backend: str, config_save: bool = False) -> None:
+        """Apply persisted runtime config without waiting for or interrupting work.
 
-        Returns False for a backend without that ability, and for a disabled
-        backend, both of which keep the drain path.
+        An enabled backend renews in place, so each runtime unit moves at its
+        next turn. A newly enabled backend registers at once. A disabled Codex
+        or OpenCode agent retires: it leaves the registry, and its running
+        work finishes on the processes it started on. Claude stays registered
+        while disabled; its renewal retires every client once it is idle.
         """
+        runtime_config = self._load_backend_runtime_config(backend)
+        if runtime_config is None:
+            await self._retire_disabled_backend_agent(backend)
+            return
+        if self._register_missing_backend_agent(backend, runtime_config):
+            return
         agent_service = getattr(self.controller, "agent_service", None)
         agent = getattr(agent_service, "agents", {}).get(backend) if agent_service else None
         renew = getattr(agent, "renew_runtime", None)
-        if not callable(renew):
-            return False
-        runtime_config = self._load_backend_runtime_config(backend)
-        if runtime_config is None or getattr(runtime_config, "enabled", True) is False:
-            return False
-        await renew(runtime_config, config_save=config_save)
+        if callable(renew):
+            await renew(runtime_config, config_save=config_save)
         self._sync_builtin_default_agents()
-        return True
 
     async def _refresh_backend_runtime(self, backend: str) -> None:
         coordinator = getattr(self.controller, "backend_restart_coordinator", None)
         if coordinator is not None:
             await coordinator.request_restart(backend)
             return
-        await self._apply_backend_runtime_refresh(backend, False)
+        await self.renew_backend_runtime(backend)
 
     async def _apply_backend_runtime_refresh(self, backend: str, force: bool = False) -> None:
+        """Reload a backend's runtime for a native credential cutover, after its work was interrupted."""
         agent_service = getattr(self.controller, "agent_service", None)
         runtime_tokens: dict[str, str] = {}
         snapshot_tokens = getattr(agent_service, "runtime_turn_tokens_for_backend", None)
@@ -2328,7 +2322,7 @@ class AgentAuthService:
             if callable(refresh_runtime_config):
                 runtime_config = self._load_backend_runtime_config(backend)
                 if runtime_config is None:
-                    await self._unregister_disabled_backend_agent(backend)
+                    await self._retire_disabled_backend_agent(backend)
                     return
                 if runtime_config is not None and self._register_missing_backend_agent(
                     backend,
