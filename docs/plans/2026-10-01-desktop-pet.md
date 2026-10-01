@@ -279,24 +279,41 @@ rest of the pet's durable state lives: `binding` in the shell-owned
 `pet.json`. Browser storage is scoped to the Runtime origin, which changes
 when the user changes the UI port, so it cannot own anything durable.
 
-- The Workbench chat page's "Show in pet" action calls `pet_bind(S)`.
+- The Workbench chat page's "Show in pet" action calls `pet_bind(S)`. It is
+  offered only where the chat page's composer is: it is hidden whenever
+  `isSessionReadOnly(session)` (`sessionArchived.ts`) is true.
 - The panel's compact recent-session switcher calls `pet_bind` the same way.
+  Its rows come from the global `listSessions({status: 'active', limit: 20})`
+  (`GET /api/sessions` with no project, newest first), filtered by the same
+  `isSessionReadOnly` predicate. It is read when the switcher opens, and
+  re-read on `session.activity` and `onConnected` while it is open, so a new
+  session with no reply yet is listed.
 - The shell writes `pet.json` and emits `pet:bound` to the pet. On load, the
   pet reads the binding from `pet_ready()`.
-- **A binding is valid only while `S` is an active session.** Every read of
-  `getSession(S)` checks this, on bind, on gaps, and on any `session.activity`
-  for `S` (archive, move, and the rest are all published there). When the
-  read returns an archived session or `404`, the route calls `pet_unbind(S)` and
+- **A binding is valid only while `S` is a writable session**, by the chat
+  page's own predicate: `getSession(S)` succeeds and
+  `isSessionReadOnly(session)` is false. That rejects archived sessions and
+  Runtime-owned system sessions such as the workspace-notices session, whose
+  messages endpoint always refuses a send. Every read of `getSession(S)`
+  checks this, on bind, on gaps, and on any `session.activity` for `S`
+  (archive, move, and the rest are all published there). When the read
+  returns a read-only session or `404`, the route calls `pet_unbind(S)` and
   shows the empty state with the switcher, so the pet never accepts input it
   cannot send. The rule is checked on the read, not tied to a particular
   event kind.
-- **Every asynchronous read is tied to the binding it was issued for.** Each
-  read (session, tail, turn state, vault requests) carries the session id it
-  was started for. When it resolves, the route applies it only if that id is
-  still the current binding; otherwise it is dropped. A switch from `A` to `B`
-  therefore never shows `A`'s state, and a late `404` for `A` cannot clear `B`:
-  the route drops it, and `pet_unbind(A)` would be a no-op in the shell
-  anyway.
+- **Every asynchronous read is fenced by binding and by order.** Each source
+  (session, tail, turn state, vault requests) keeps a generation counter.
+  Starting a read, and merging a live event into that source, both bump it. A
+  read carries the session id and the generation it started at, and its
+  result is applied only if the session is still the binding and no newer
+  read or live merge has happened on that source since; otherwise it is
+  dropped. A live merge that invalidates an in-flight read schedules one
+  trailing read, so the source still converges on the server's state.
+  - Across bindings, a switch from `A` to `B` never shows `A`'s state, and a
+    late `404` for `A` cannot clear `B`: the route drops it, and
+    `pet_unbind(A)` would be a no-op in the shell anyway.
+  - Within one binding, a tail read started before a quick-reply
+    `message.updated` cannot land after it and restore Needs input.
 - When the main-agent session type lands, the route resolves the main-agent
   session instead, and the switcher is removed.
 
@@ -515,6 +532,12 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     from `A` to `B` while `A`'s reads are in flight, with `A`'s results
     (including a `404`) arriving after the switch, leaves `B` bound and shows
     only `B`'s state;
+  - a tail read started before a `message.updated` and resolved after it is
+    dropped, the chosen row stays, and one trailing read follows;
+  - "Show in pet" is hidden for archived and system sessions, a persisted
+    binding to the workspace-notices session is cleared on load, and the
+    switcher lists a new active session that has no reply yet and omits
+    read-only ones;
   - an older unanswered quick-reply group under a newer agent result does not
     derive Needs input; the hotkey with
     no valid binding opens the switcher and never starts capture;
