@@ -108,7 +108,10 @@ extra window:
   shell function, `pet_reconcile()`, owns that invariant: it creates the
   window if it should exist and is missing, and destroys it if it should not
   exist. It runs on Runtime ready and stop, on a preference change, and at the
-  start of every wake. No other path creates or destroys `pet`.
+  start of every wake. No other path creates or destroys `pet`. A Runtime
+  origin change (a changed `ui.setup_port`) returns the shell to bootstrap,
+  so the pet is destroyed and then recreated at the new origin by the same
+  function.
 - An OS close request on `pet` (for example `Alt+F4` on Windows) is prevented
   and hides the pet, as `main` already does for itself. Turning the pet off
   goes through the tray switch, not the window's close. If the window is lost
@@ -127,13 +130,24 @@ The IPC surface is kept minimal. It is granted to window `pet` for the remote
 loopback origin only, through a new capability file:
 
 - event `pet:summon`, sent from the shell to the pet when the hotkey fires;
-- command `pet_set_expanded(expanded: bool)`, to resize and anchor the window;
+- command `pet_set_expanded(expanded: bool) -> PetLayout`, to resize and
+  anchor the window. The shell is the only owner of placement, because only
+  it knows the monitor work area and the anchor. It returns the layout it
+  chose, `{panel_side: left | right, panel_edge: top | bottom, pet_offset}`,
+  and the route renders the pet and panel from that value. The native frame
+  and the DOM therefore share one placement decision;
+- command `pet_binding() -> session_id | null` and event `pet:bound`, which
+  carry the session binding (see Session binding);
 - command `pet_open(link)`, which takes an `avibe://session/<id>` or
   `avibe://vaults/request/<request_id>` link. It is parsed and validated by the existing
   deep-link parser (`desktop-deep-links.md`) and then focuses `main` through
   the same path a clicked deep link uses. The pet gets no new routing logic;
   anything the parser rejects is dropped;
 - permission `start-dragging`.
+
+`main` gets one more command, `pet_bind(session_id | null)`, through its own
+new capability file for the remote loopback origin. It is the "Show in pet"
+action. No other `main` capability changes.
 
 Everything else the pet needs comes from the Runtime HTTP and SSE API, exactly
 as it does for the Workbench.
@@ -158,7 +172,8 @@ as it does for the Workbench.
 - **Off switch.** A tray `CheckMenuItem` "Show pet", next to "Notifications".
   Off destroys the window and unregisters the shortcut, so nothing can wake it.
 - **Preferences.** `pet.json` in `app_local_data_dir`, the same pattern as
-  `notifications.json`: `{enabled, shortcut, anchor}`. Pet visibility defaults to off
+  `notifications.json`: `{enabled, shortcut, anchor, binding}`. All durable
+  pet state lives here. Pet visibility defaults to off
   until voice ships, then on.
 
 ### Pet route (web UI)
@@ -167,6 +182,10 @@ as it does for the Workbench.
 
 - It sits inside `AuthGuard` and the existing providers (Api, Inbox), but
   outside `AppShell`, so it has no sidebar or chrome.
+- `/pet` is exempt from `AuthGuard`'s setup redirect. Before setup is
+  complete, it renders its own setup-pending state ("Finish setting up in
+  Avibe", which focuses `main`) and stays on `/pet`. So a default-on pet on a
+  fresh install never becomes a pet-sized setup wizard.
 - It reuses the provider's single `EventSource('/api/events')`. That is one
   connection per window. The server has no per-session filter, so the route
   filters on `session_id` on the client.
@@ -227,18 +246,19 @@ Two notes on the table:
   strip at once. The interval runs only while work is present and the window is
   visible, so an idle pet does no network work.
 
-**Session binding.** The route reads the bound session id from `localStorage`
-key `avibe.pet.sessionId` on the Runtime origin.
+**Session binding.** The binding is durable pet state, so it lives where the
+rest of the pet's durable state lives: `binding` in the shell-owned
+`pet.json`. Browser storage is scoped to the Runtime origin, which changes
+when the user changes the UI port, so it cannot own anything durable.
 
-- The Workbench chat page gets a "Show in pet" action that writes the key.
-- The `storage` event updates an open pet live.
-- The panel also has a compact recent-session switcher.
-- Both windows use the default WebKit/WebView2 data store for the same origin,
-  so they share the key. This must be verified (see Risks).
+- The Workbench chat page's "Show in pet" action calls `pet_bind(S)`.
+- The panel's compact recent-session switcher calls `pet_bind` the same way.
+- The shell writes `pet.json` and emits `pet:bound` to the pet. On load, the
+  pet reads `pet_binding()`.
 - **A binding is valid only while `S` is an active session.** Every read of
   `getSession(S)` checks this, on bind, on gaps, and on any `session.activity`
   for `S` (archive, move, and the rest are all published there). When the
-  read returns an archived session or `404`, the route clears the key and
+  read returns an archived session or `404`, the route calls `pet_bind(null)` and
   shows the empty state with the switcher, so the pet never accepts input it
   cannot send. The rule is checked on the read, not tied to a particular
   event kind.
@@ -263,12 +283,18 @@ comes from an API the Workbench already uses:
   (`turn_state.background_activities`) do not change the state. The panel
   shows them as an activity strip, and the collapsed pet shows a count. The pet
   is "Running" only when the agent itself is working.
-- **Reading.** Viewing a reply in the expanded panel calls the existing
-  `POST /api/sessions/S/mark-read` with `until_message_id` set to the id of
-  the agent row the panel is showing (`markSessionRead(S, untilMessageId)`).
-  Ready clears in the pet and in the Workbench together, but only up to
-  what the pet actually showed. A later result that lands meanwhile, for
-  example from a queued turn, stays unread and keeps the badge.
+- **Reading.** The pet marks read only what it rendered. The expanded panel
+  renders every unread agent result in the loaded tail, oldest first, in a
+  scrollable list, rather than only the latest one.
+  - It then calls the existing `POST /api/sessions/S/mark-read` with
+    `until_message_id` set to the last row it rendered
+    (`markSessionRead(S, untilMessageId)`). Ready clears in the pet and in the
+    Workbench together.
+  - A result that lands after rendering, for example from a queued turn,
+    stays unread and keeps the badge.
+  - If the unread rows reach past the loaded tail, the panel does not mark
+    read at all. It shows "More in Avibe" (`pet_open` with the session link)
+    and leaves reading to the Workbench.
 
 Tool approvals and `AskUserQuestion`-style waits do not exist today. Claude
 runs with permissions bypassed and Codex auto-approves, so vault requests and
@@ -281,7 +307,8 @@ Expanded, top to bottom:
 
 1. **Live transcript** while listening, then an editable input that is always
    available for typing.
-2. **Latest exchange.** The last user message and the last agent result, from
+2. **Latest exchange.** The last user message and the unread agent results (or
+   the last one, when none are unread), from
    the durable tail plus `message.new` for `S`, rendered with the existing
    message renderer in a compact variant. Replies are not streamed: the
    Runtime persists an agent reply atomically as one result row, and there is
@@ -304,6 +331,9 @@ Workbench. The pet shows "Queued" and offers no steering control in v1.
 - **Hotkey tap with the pet collapsed or hidden.** Show the pet, expand it,
   focus it, and start listening. If voice is unavailable, focus the text input
   instead.
+- **No valid binding** (none chosen yet, or cleared after an archive). The
+  hotkey opens the panel on the session switcher and does not start listening
+  or accept input, so nothing is ever captured without a destination.
 - **Hotkey tap while listening.** Stop and send the transcript.
 - **Esc.** Cancel listening, or collapse the panel if not listening.
 - **Click into the transcript while listening.** Stop listening and keep the
@@ -351,8 +381,8 @@ home-made protocol has to resolve simultaneous claims:
 This lives in `claimVoiceCapture` itself, so every caller (composer, Show Page
 dictation, pet) inherits it, and two Workbench browser tabs gain the same
 guarantee. The shell is not involved, so the pet capability file stays as
-listed. Delivery between the two webviews depends on the same shared data
-store as the `localStorage` binding and is verified with it (see Risks).
+listed. Lock sharing between the two webviews depends on their sharing one
+origin data store, which is verified during implementation (see Risks).
 
 The microphone usage string and audio-input entitlement already ship (#2293).
 
@@ -414,12 +444,21 @@ The microphone usage string and audio-input entitlement already ship (#2293).
   - an OS close request on `pet` hides it, and a wake after the window is
     lost recreates it through `pet_reconcile()`;
   - the saved anchor is the pet image position whichever side the panel
-    opened on, and a restore onto a missing monitor is clamped on screen.
+    opened on, and a restore onto a missing monitor is clamped on screen;
+  - `pet_set_expanded` returns the layout it applied, near each screen edge;
+  - `pet_bind` persists to `pet.json` and emits `pet:bound`, and the binding
+    survives a Runtime origin change;
+  - `main` gains only `pet_bind`.
 - **Vitest:**
   - `derivePetState` covers every row and the priority order;
-  - session binding through `localStorage` and the `storage` event;
-  - mark-read passes the displayed row as `until_message_id`, and a result
-    that arrives after rendering stays unread;
+  - session binding through `pet_binding()` and `pet:bound`; the hotkey with
+    no valid binding opens the switcher and never starts capture;
+  - before setup is complete, `/pet` renders its setup-pending state and is
+    not redirected to `/setup`;
+  - the route renders the pet and panel from each `PetLayout` orientation;
+  - with several unread results, all are rendered and mark-read passes the
+    last rendered row; a result that arrives after rendering stays unread;
+    unread rows past the loaded tail are not marked;
   - each row of the input-freshness table: the initial read on bind, each
     live trigger, and each gap fallback re-read the authoritative API, and
     live rows merge without duplicates;
@@ -449,10 +488,9 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 
 ## Risks to verify during implementation
 
-- **Shared origin storage.** Confirm that `main` and `pet` share
-  `localStorage` and Web Locks on both WKWebView and WebView2. If not, move
-  the binding to the Runtime, and have the shell arbitrate voice claims in
-  the order it receives them.
+- **Shared Web Locks.** Confirm that `main` and `pet` share one origin data
+  store, and therefore Web Locks, on both WKWebView and WebView2. If not, the
+  shell arbitrates voice claims in the order it receives them.
 - **Mic prompts.** WKWebView may prompt for the mic separately in the second
   webview. Confirm that the prompt appears once and is remembered.
 - **Full-screen Spaces.** On macOS, appearing over full-screen apps may need
