@@ -654,9 +654,15 @@ class BackendRestartCoordinator:
             # A backend whose runtime units renew in place needs no drain: new
             # turns start on a new generation, and running work finishes on the
             # one it started on.
-            if self._renew is not None and await self._renew(backend, config_save):
-                self._outcomes[backend] = {"state": "applied"}
-                return "restarted"
+            if self._renew is not None:
+                try:
+                    renewed = await self._renew(backend, config_save)
+                except BaseException as exc:
+                    self._outcomes[backend] = {"state": "failed", "error": str(exc) or type(exc).__name__}
+                    raise
+                if renewed:
+                    self._outcomes[backend] = {"state": "applied"}
+                    return "restarted"
 
             agent_service = self.controller.agent_service
             session_turns = self.controller.session_turns

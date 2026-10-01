@@ -113,6 +113,15 @@ def test_runtime_gen_004_a_backend_that_renews_in_place_never_drains() -> None:
                 await coordinator.wait("opencode")
                 refresh.assert_awaited_once_with("opencode", False)
 
+        # A renewal that fails is reported, never shown as applied.
+        controller = _controller(_AgentService())
+        coordinator = BackendRestartCoordinator(
+            controller, AsyncMock(), renew=AsyncMock(side_effect=RuntimeError("config rejected"))
+        )
+        with pytest.raises(RuntimeError, match="config rejected"):
+            await coordinator.request_restart("opencode")
+        assert coordinator.snapshot("opencode") == {"state": "failed", "error": "config rejected"}
+
     asyncio.run(run())
 
 

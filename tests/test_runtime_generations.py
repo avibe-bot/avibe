@@ -337,6 +337,29 @@ def test_stop_all_closes_admission_and_keeps_bound_work_on_a_graceful_stop(force
     asyncio.run(run())
 
 
+def test_a_forced_stop_all_forces_a_generation_whose_graceful_stop_was_in_flight():
+    runtimes = _Runtimes()
+    generations = runtimes.generation_set()
+
+    async def run():
+        old = await generations.acquire(_Spec("a"))
+        await generations.acquire(_Spec("b"))
+        runtimes.stop_gate = asyncio.Event()
+        runtimes.decline_stops = 1
+        await old.release()
+        await asyncio.sleep(0)
+
+        stopping = asyncio.create_task(generations.stop_all(force=True))
+        await asyncio.sleep(0)
+        runtimes.stop_gate.set()
+        await asyncio.wait_for(stopping, timeout=1)
+
+        assert runtimes.live == []
+        assert (old.generation.runtime, True) in runtimes.stopped
+
+    asyncio.run(run())
+
+
 def test_a_failed_start_leaves_the_current_generation_serving():
     runtimes = _Runtimes()
     generations = runtimes.generation_set()

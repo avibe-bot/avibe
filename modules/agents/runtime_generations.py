@@ -277,31 +277,40 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         if self._reconciler is None or self._reconciler.done():
             self._reconciler = asyncio.get_running_loop().create_task(self._reconcile())
 
-    def _next_victim(self, attempted: set[int]) -> tuple[RuntimeGeneration[_S, _R], bool] | None:
-        # Each pass tries a generation at most once, so a stop that keeps failing
-        # is retried by the next pass rather than in a tight loop.
-        pending = [generation for generation in self._retiring if generation.serial not in attempted]
-        if self._force_all and pending:
-            return pending[0], True
-        if len(self._retiring) + (self._current is not None) > self._cap and pending:
+    def _next_victim(
+        self,
+        forced: set[int],
+        graceful: set[int],
+    ) -> tuple[RuntimeGeneration[_S, _R], bool] | None:
+        # Each pass tries a generation at most once per kind of stop, so a stop
+        # that keeps failing is retried by the next pass rather than in a tight
+        # loop, while a declined graceful stop can still be forced in this pass.
+        unforced = [generation for generation in self._retiring if generation.serial not in forced]
+        if self._force_all and unforced:
+            return unforced[0], True
+        if len(self._retiring) + (self._current is not None) > self._cap and unforced:
             # Never make a new turn wait: the oldest work gives way, whether its
             # adapter still reports work or an earlier stop failed.
-            return pending[0], True
+            return unforced[0], True
         drained = next(
             (
                 generation
-                for generation in pending
-                if generation.bindings == 0 and not generation.deferred and not generation.failed
+                for generation in unforced
+                if generation.serial not in graceful
+                and generation.bindings == 0
+                and not generation.deferred
+                and not generation.failed
             ),
             None,
         )
         return (drained, False) if drained is not None else None
 
     async def _reconcile(self) -> None:
-        attempted: set[int] = set()
-        while (choice := self._next_victim(attempted)) is not None:
+        forced: set[int] = set()
+        graceful: set[int] = set()
+        while (choice := self._next_victim(forced, graceful)) is not None:
             generation, force = choice
-            attempted.add(generation.serial)
+            (forced if force else graceful).add(generation.serial)
             self._detach(generation)
             try:
                 stopped = await self._stop(generation, force)
