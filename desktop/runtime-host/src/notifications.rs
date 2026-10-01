@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::DateTime;
 use serde::Deserialize;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use url::Url;
@@ -20,6 +20,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_DETAIL_LOOKUPS: usize = 16;
 const MAX_PENDING_LOOKUPS: usize = 64;
+/// Shortest gap between two unread reads. Events arriving inside it collapse
+/// into one read after it, so a busy stream costs at most one read per gap.
+pub const UNREAD_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SseFrame {
@@ -134,6 +137,9 @@ pub trait NotificationSink: Send + Sync {
     /// `source` names where a run happened ("Project · Session"), already
     /// sanitized by [`RunDetail::source`]; `None` keeps the generic copy.
     fn deliver(&self, intent: NotificationIntent, source: Option<String>);
+    /// The Runtime's unread total, for the app icon badge. It is state rather
+    /// than an interruption, so neither the toggle nor focus gates it.
+    fn show_unread(&self, total: u64);
 }
 
 #[derive(Default)]
@@ -372,6 +378,7 @@ pub struct StreamError;
 pub trait NotificationTransport: Send + Sync {
     async fn connect(&self) -> Result<Box<dyn EventStream>, StreamError>;
     async fn run_detail(&self, run_id: &str) -> Option<RunDetail>;
+    async fn unread_total(&self) -> Option<u64>;
 }
 
 pub struct HttpNotificationTransport {
@@ -456,6 +463,22 @@ impl NotificationTransport for HttpNotificationTransport {
         }
         serde_json::from_value(detail.get("run")?.clone()).ok()
     }
+
+    /// The same whole-account total the Workbench Inbox badges, counted by the
+    /// Runtime: the shell never derives a count of its own.
+    async fn unread_total(&self) -> Option<u64> {
+        let mut url = self.url("/api/inbox");
+        url.query_pairs_mut()
+            .append_pair("platform", "avibe")
+            .append_pair("limit", "1");
+        let response = self.client.get(url).timeout(REQUEST_TIMEOUT).send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let bytes = bounded_detail_body(response).await?;
+        let inbox: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        inbox.get("unread_total")?.as_u64()
+    }
 }
 
 async fn bounded_detail_body(mut response: reqwest::Response) -> Option<Vec<u8>> {
@@ -498,6 +521,13 @@ pub async fn run_notifications(
     sink: Arc<dyn NotificationSink>,
 ) {
     let mut backoff = ReconnectBackoff::default();
+    // Any frame may follow an unread change, and listing the event types that
+    // can would miss the next one added, so every connection and every frame
+    // (the 15-second heartbeat included) asks for a fresh total. The reader
+    // owns the rate. Dropping the set with this future stops it.
+    let unread_changed = Arc::new(Notify::new());
+    let mut unread = JoinSet::new();
+    unread.spawn(follow_unread(transport.clone(), sink.clone(), unread_changed.clone()));
     // Detail reads run beside the stream, never inside it: a slow read must
     // not hold back the next chunk (and the approval it may carry). Dropping
     // the set with this future aborts whatever is still in flight.
@@ -506,6 +536,7 @@ pub async fn run_notifications(
     loop {
         let connected_at = Instant::now();
         if let Ok(mut stream) = transport.connect().await {
+            unread_changed.notify_one();
             let mut decoder = SseDecoder::new();
             while let Ok(Ok(Some(chunk))) = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next_chunk()).await {
                 if Instant::now().duration_since(connected_at) >= STREAM_IDLE_TIMEOUT {
@@ -516,6 +547,7 @@ pub async fn run_notifications(
                 // its de-duplication stays current, then are dropped.
                 let allowed_at_receipt = sink.gate().allows();
                 for frame in decoder.push(&chunk) {
+                    unread_changed.notify_one();
                     let candidate = filter
                         .lock()
                         .ok()
@@ -561,6 +593,24 @@ pub async fn run_notifications(
             }
         }
         tokio::time::sleep(backoff.next_delay()).await;
+    }
+}
+
+/// Reads the total after each signal, then waits out the refresh interval.
+/// `Notify` keeps at most one stored signal, so any number of events during a
+/// read or a wait become exactly one more read. A failed read keeps the badge
+/// already shown until the next frame — at the latest the next heartbeat.
+async fn follow_unread(
+    transport: Arc<dyn NotificationTransport>,
+    sink: Arc<dyn NotificationSink>,
+    changed: Arc<Notify>,
+) {
+    loop {
+        changed.notified().await;
+        if let Some(total) = transport.unread_total().await {
+            sink.show_unread(total);
+        }
+        tokio::time::sleep(UNREAD_REFRESH_INTERVAL).await;
     }
 }
 

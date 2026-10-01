@@ -384,6 +384,19 @@ v1 uses OS-default notification activation; explicit cross-platform show/focus
 and session deep-link targets require follow-up work. See
 `../docs/plans/desktop-notifications-sse.md` for the frozen contract.
 
+The same shell-owned connection keeps the app icon badge (the macOS Dock and
+supported Linux docks) equal to the Runtime's Avibe inbox `unread_total`. Each
+connect and each SSE frame, heartbeats included, schedules one
+`GET /api/inbox?platform=avibe&limit=1`; reads are coalesced to at most one per
+second, and a failed read keeps the current badge until the next frame. The
+badge is state, not an interruption, so neither the Notifications toggle nor
+window focus gates it. Zero clears it, and so does giving up the connection
+(stopping, quitting, or losing the Runtime). The badge works without the WebView
+because WebKit suspends page timers while the window is in the background. That
+is also why the Workbench's own `navigator.setAppBadge` call, which only browsers
+and PWAs implement, is not relied on here. Windows has no badge count in Tauri;
+a taskbar overlay icon is follow-up work.
+
 ## Microphone
 
 Workbench voice input records through `getUserMedia` inside the WebView. On

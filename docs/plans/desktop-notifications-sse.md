@@ -297,6 +297,22 @@ Drive the filter with a fake SSE collaborator under tokio's virtual
 clock (same pattern as `runtime-host/tests/bootstrap.rs`) so the 30s
 threshold is exercised in microseconds.
 
+## Unread badge (follow-up)
+
+The app icon badge is the second consumer of the shell-owned connection,
+not a second connection. Each connect and each decoded frame, of any
+type, schedules a read of `GET /api/inbox?platform=avibe&limit=1` and
+paints its `unread_total`. A trailing-edge coalescer allows at most one
+read per second. Triggering on every frame instead of an allowlist means
+the badge never depends on knowing which events change unread state, and
+the 15s heartbeat bounds staleness after a failed read. The badge is
+state, so the Notifications toggle and the focus gate do not apply.
+`stop` clears it on the main thread, behind any paint the voided
+generation queued. The WebView cannot own the badge: WebKit suspends
+page timers while the window is backgrounded, and WKWebView does not
+implement `navigator.setAppBadge`. Windows lacks a Tauri badge count; an
+overlay icon is follow-up work.
+
 ## Explicit non-goals (v1)
 
 - A new HTTP route or a Python "please notify" flag. (The run detail

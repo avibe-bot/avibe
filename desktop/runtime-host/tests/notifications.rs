@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use avibe_runtime_host::notifications::{
     run_notifications, EventStream, NotificationFilter, NotificationGate, NotificationIntent, NotificationSink,
     NotificationTransport, ReconnectBackoff, RunDetail, RunTimestamps, SseDecoder, StreamError, RETAINED_KEYS,
-    RETENTION,
+    RETENTION, UNREAD_REFRESH_INTERVAL,
 };
 use serde_json::{json, Value};
 use tokio::time::Instant;
@@ -15,12 +15,14 @@ use tokio::time::Instant;
 struct FakeStream {
     chunks: VecDeque<Vec<u8>>,
     drop_after: bool,
+    gap: Duration,
 }
 
 #[async_trait]
 impl EventStream for FakeStream {
     async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, StreamError> {
         if let Some(chunk) = self.chunks.pop_front() {
+            tokio::time::sleep(self.gap).await;
             return Ok(Some(chunk));
         }
         if self.drop_after {
@@ -38,6 +40,8 @@ struct FakeTransport {
     details: Mutex<HashMap<String, RunDetail>>,
     refetched: Mutex<Vec<String>>,
     detail_delay: Duration,
+    unread: Mutex<Option<u64>>,
+    unread_reads: Mutex<Vec<Instant>>,
 }
 
 #[async_trait]
@@ -57,13 +61,23 @@ impl NotificationTransport for FakeTransport {
         tokio::time::sleep(self.detail_delay).await;
         self.details.lock().unwrap().get(run_id).cloned()
     }
+
+    async fn unread_total(&self) -> Option<u64> {
+        self.unread_reads.lock().unwrap().push(Instant::now());
+        *self.unread.lock().unwrap()
+    }
 }
 
 impl FakeTransport {
     fn stream(&self, frames: impl IntoIterator<Item = Vec<u8>>, drop_after: bool) {
+        self.paced_stream(frames, drop_after, Duration::ZERO);
+    }
+
+    fn paced_stream(&self, frames: impl IntoIterator<Item = Vec<u8>>, drop_after: bool, gap: Duration) {
         self.streams.lock().unwrap().push_back(FakeStream {
             chunks: frames.into_iter().collect(),
             drop_after,
+            gap,
         });
     }
 }
@@ -74,6 +88,7 @@ struct FakeSink {
     visible: AtomicBool,
     delivered: Mutex<Vec<NotificationIntent>>,
     sources: Mutex<Vec<Option<String>>>,
+    unread: Mutex<Vec<u64>>,
 }
 
 impl Default for FakeSink {
@@ -84,6 +99,7 @@ impl Default for FakeSink {
             visible: AtomicBool::new(true),
             delivered: Mutex::new(Vec::new()),
             sources: Mutex::new(Vec::new()),
+            unread: Mutex::new(Vec::new()),
         }
     }
 }
@@ -100,6 +116,10 @@ impl NotificationSink for FakeSink {
     fn deliver(&self, intent: NotificationIntent, source: Option<String>) {
         self.delivered.lock().unwrap().push(intent);
         self.sources.lock().unwrap().push(source);
+    }
+
+    fn show_unread(&self, total: u64) {
+        self.unread.lock().unwrap().push(total);
     }
 }
 
@@ -787,4 +807,56 @@ async fn stopping_the_loop_cancels_detail_reads_in_flight() {
     tokio::time::advance(Duration::from_secs(5)).await;
     settle().await;
     assert!(sink.delivered.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_connection_and_frame_refreshes_the_runtime_unread_total_at_a_bounded_rate() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    // Gated off: the badge is state, not an interruption.
+    sink.enabled.store(false, Ordering::SeqCst);
+    sink.focused.store(true, Ordering::SeqCst);
+    *transport.unread.lock().unwrap() = Some(3);
+    let gap = UNREAD_REFRESH_INTERVAL / 10;
+    let events = ["message.new", "session.activity", "invented.event", "heartbeat"];
+    let frames: Vec<Vec<u8>> = (0..8).map(|i| frame(events[i % events.len()], json!({}))).collect();
+    transport.paced_stream(frames, false, gap);
+    let start = Instant::now();
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    // The connection itself reads the current total.
+    assert_eq!(*sink.unread.lock().unwrap(), [3]);
+    *transport.unread.lock().unwrap() = Some(0);
+    for _ in 0..30 {
+        tokio::time::advance(gap).await;
+        settle().await;
+    }
+    // Eight frames of any type inside the cooldown collapse into one trailing
+    // read, and that read happens after the last of them.
+    assert_eq!(*sink.unread.lock().unwrap(), [3, 0]);
+    let reads = transport.unread_reads.lock().unwrap().clone();
+    assert_eq!(reads.len(), 2);
+    assert!(reads[1] >= start + gap * 8);
+    assert!(sink.delivered.lock().unwrap().is_empty());
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_unread_read_keeps_the_last_total_until_the_next_frame() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    *transport.unread.lock().unwrap() = Some(5);
+    transport.stream([frame("heartbeat", json!({}))], true);
+    transport.stream([frame("message.new", json!({}))], false);
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    *transport.unread.lock().unwrap() = None;
+    // The first stream drops; the reconnect and its frame read and fail.
+    for _ in 0..4 {
+        tokio::time::advance(UNREAD_REFRESH_INTERVAL).await;
+        settle().await;
+    }
+    assert!(transport.unread_reads.lock().unwrap().len() >= 2);
+    assert_eq!(*sink.unread.lock().unwrap(), [5]);
+    task.abort();
 }

@@ -210,3 +210,35 @@ async fn identifiers_are_encoded_as_one_path_segment_not_runtime_selected_routes
         requests[0].starts_with("GET /api/harness/runs/..%2Fsettings%3Ftoken=secret%23%E7%89%87%E6%AE%B5 HTTP/1.1\r\n")
     );
 }
+
+#[tokio::test]
+async fn unread_total_reads_the_runtime_inbox_total_and_fails_closed_on_anything_else() {
+    let server = FakeServer::start([
+        response(
+            "200 OK",
+            "application/json",
+            br#"{"sessions":[],"unread_by_session":{"a":2,"b":1},"unread_total":3}"#,
+        ),
+        response("200 OK", "application/json", br#"{"sessions":[],"unread_total":0}"#),
+        response("401 Unauthorized", "application/json", br#"{"unread_total":9}"#),
+        response("200 OK", "application/json", br#"{"unread_total":-1}"#),
+        response("200 OK", "application/json", br#"{"sessions":[]}"#),
+        response("200 OK", "text/html", b"<html>"),
+        response("200 OK", "application/json", &vec![b' '; 300 * 1024]),
+    ]);
+    let transport = server.transport();
+    assert_eq!(transport.unread_total().await, Some(3));
+    assert_eq!(transport.unread_total().await, Some(0));
+    for _ in 0..5 {
+        assert_eq!(transport.unread_total().await, None);
+    }
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 7);
+    for request in requests.iter() {
+        let normalized = request.to_ascii_lowercase();
+        assert!(request.starts_with("GET /api/inbox?platform=avibe&limit=1 HTTP/1.1\r\n"));
+        for forbidden in ["authorization:", "cookie:"] {
+            assert!(!normalized.contains(forbidden));
+        }
+    }
+}

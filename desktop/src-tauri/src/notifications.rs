@@ -208,14 +208,41 @@ impl NotificationSink for NativeSink {
             }
         });
     }
+
+    fn show_unread(&self, total: u64) {
+        let sink = self.clone();
+        let _ = self.app.run_on_main_thread(move || {
+            // A total read for a connection that has since stopped or moved to
+            // another Runtime describes nothing on screen.
+            if sink.generation.load(Ordering::SeqCst) == sink.observed_generation {
+                paint_badge(&sink.app, total);
+            }
+        });
+    }
+}
+
+/// The Badging API's rule: zero clears. macOS would otherwise draw a literal
+/// "0". Windows has no badge count, so the call is a no-op error there.
+fn badge_count(total: u64) -> Option<i64> {
+    (total > 0).then(|| i64::try_from(total).unwrap_or(i64::MAX))
+}
+
+fn paint_badge(app: &AppHandle, total: u64) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = window.set_badge_count(badge_count(total));
+    }
 }
 
 pub fn start(app: &AppHandle, origin: LoopbackOrigin) {
     app.state::<Notifications>().start(app, origin);
 }
 
+/// A stopped connection leaves no count it can vouch for. The clear queues
+/// behind any paint already dispatched, which the generation bump voids.
 pub fn stop(app: &AppHandle) {
     app.state::<Notifications>().stop();
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || paint_badge(&handle, 0));
 }
 
 #[cfg(test)]
@@ -241,6 +268,14 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn zero_clears_the_badge_and_totals_saturate() {
+        assert_eq!(badge_count(0), None);
+        assert_eq!(badge_count(1), Some(1));
+        assert_eq!(badge_count(42), Some(42));
+        assert_eq!(badge_count(u64::MAX), Some(i64::MAX));
     }
 
     #[test]
