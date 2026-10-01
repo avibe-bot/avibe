@@ -915,7 +915,11 @@ def test_a_lease_released_before_adoption_never_pins_its_generation(fake_process
     assert bindings == 0 and generation.leases == {}
 
 
-def test_disabling_the_backend_closes_admission_and_drains_bound_work(fake_processes):
+def test_runtime_gen_006_a_retired_opencode_runtime_keeps_its_turn_and_stops_once_drained(fake_processes):
+    """RUNTIME-GEN-006, at the OpenCode adapter: disabling the backend retires
+    its runtime. The running turn keeps its generation, nothing new is
+    admitted, and the generation stops once the turn releases it."""
+
     from modules.agents.runtime_generations import RuntimeUnitStopping
 
     agent = object.__new__(OpenCodeAgent)
@@ -924,20 +928,23 @@ def test_disabling_the_backend_closes_admission_and_drains_bound_work(fake_proce
     async def scenario():
         turn = await agent._runtime.acquire(OpenCodeLaunchSpec(digest="v1", binary="opencode"))
         running = turn.generation.runtime
-        await agent.shutdown_runtime()
-        kept_for_its_turn = running in agent._runtime.generations()
+        await agent.retire_runtime()
+        await agent.retire_runtime()
+        kept_for_its_turn = running in agent._runtime.generations() and not fake_processes.stopped
+        retired_while_running = agent.runtime_retired()
         # A lease or turn that looked the agent up before it was unregistered.
         with pytest.raises(RuntimeUnitStopping):
             await agent._runtime.acquire(OpenCodeLaunchSpec(digest="v1", binary="opencode"))
         await turn.release()
         await agent._runtime._generations.settled()
-        return kept_for_its_turn, running
+        return kept_for_its_turn, retired_while_running, running, agent.runtime_retired()
 
-    kept_for_its_turn, running = asyncio.run(scenario())
+    kept_for_its_turn, retired_while_running, running, retired = asyncio.run(scenario())
 
-    assert kept_for_its_turn
+    assert kept_for_its_turn and not retired_while_running
     assert fake_processes.stopped == [running]
     assert len(fake_processes.started) == 1
+    assert retired
 
 
 def test_a_start_whose_process_survives_its_stop_keeps_record_and_overlay(isolated_launch, monkeypatch):
@@ -1240,28 +1247,29 @@ def test_an_adoption_cut_short_leaves_every_record_to_its_retry(isolated_launch,
 # ---------------------------------------------- lifecycle audit regressions
 
 
-def test_a_disabled_runtime_retries_a_stop_its_last_release_could_not_run(fake_processes, monkeypatch):
-    monkeypatch.setattr(client_manager, "CLOSED_RUNTIME_SWEEP_SECONDS", 0.05)
-    runtime = _runtime()
+def test_a_retired_runtime_reaps_until_it_reports_retired(fake_processes):
+    agent = object.__new__(OpenCodeAgent)
+    agent._runtime = _runtime()
 
     async def scenario():
-        turn = await runtime.acquire(OpenCodeLaunchSpec(digest="v1", binary="opencode"))
+        turn = await agent._runtime.acquire(OpenCodeLaunchSpec(digest="v1", binary="opencode"))
         running = turn.generation.runtime
-        await runtime.close()
+        await agent.retire_runtime()
         # A request still in flight when the last binding releases declines
-        # the stop, and no controller sweep reaches a disabled backend.
+        # the stop; the service's sweep is the retired agent's only retry.
         running._active_requests = 1
         await turn.release()
-        await runtime._generations.settled()
-        declined = list(fake_processes.stopped)
+        await agent._runtime._generations.settled()
+        declined = (list(fake_processes.stopped), agent.runtime_retired())
         running._active_requests = 0
-        await asyncio.sleep(0.3)
-        return running, declined
+        await agent.reap_runtime_generations()
+        return running, declined, agent.runtime_retired()
 
-    running, declined = asyncio.run(scenario())
+    running, declined, retired = asyncio.run(scenario())
 
-    assert declined == []
+    assert declined == ([], False)
     assert fake_processes.stopped == [running]
+    assert retired
 
 
 def test_disabling_the_backend_stops_a_previous_controllers_generations(fake_processes, monkeypatch):
@@ -1412,3 +1420,37 @@ def test_adoption_never_holds_a_recorded_lease_longer_than_any_lease_is_granted(
         return timer.when() - asyncio.get_running_loop().time()
 
     assert asyncio.run(scenario()) <= client_manager.MAX_LEASE_SECONDS
+
+
+@pytest.mark.parametrize("opencode_enabled", [False, True], ids=["disabled", "enabled"])
+def test_a_controller_starting_with_opencode_disabled_stops_a_crashed_controllers_servers(
+    isolated_launch, monkeypatch, opencode_enabled
+):
+    """A controller that crashed left a server recorded. Started with OpenCode
+    disabled, no agent will ever adopt it, so startup stops it. Started with
+    OpenCode enabled, the agent adopts it and its restorable runs."""
+
+    from core import controller as controller_module
+    from tests.test_service_readiness import _install_runtime_ready_dependencies
+
+    record = _record(isolated_launch.records, "ocg_left", fake_pid(52), 50052)
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid == fake_pid(52))
+    monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=50052")
+    stopped: list[int] = []
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: stopped.append(pid) or True)
+    controller = controller_module.Controller.__new__(controller_module.Controller)
+    _install_runtime_ready_dependencies(controller, [])
+    controller.agent_service = SimpleNamespace(agents={"opencode": object()} if opencode_enabled else {})
+    controller._publish_readiness_unless_im_runtime_failed = lambda: None
+    controller._start_model_hub_snapshot_reconcile_loop = lambda: None
+    controller.periodic_cleanup = AsyncMock()
+    controller.trace_retention_task = None
+    controller._agent_events_retention_loop = AsyncMock()
+
+    asyncio.run(controller_module.Controller._on_runtime_ready(controller))
+
+    if opencode_enabled:
+        assert stopped == [] and record.exists()
+    else:
+        assert stopped == [fake_pid(52)] and not record.exists()

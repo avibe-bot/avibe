@@ -1111,6 +1111,17 @@ class Controller:
             logger.error("Failed to start runtime command watcher: %s", e, exc_info=True)
 
         try:
+            if "opencode" not in getattr(agent_service, "agents", {}):
+                # OpenCode is disabled, so no agent here will ever adopt the
+                # servers a crashed controller recorded.
+                from modules.agents.opencode.server import stop_recorded_servers_sync
+                from vibe.desktop_runtime import desktop_caller_provenance
+
+                await asyncio.to_thread(stop_recorded_servers_sync, desktop_caller_provenance())
+        except Exception as e:
+            logger.error("Failed to stop OpenCode servers a previous controller left: %s", e, exc_info=True)
+
+        try:
             self._start_model_hub_snapshot_reconcile_loop()
         except Exception as e:
             logger.error(

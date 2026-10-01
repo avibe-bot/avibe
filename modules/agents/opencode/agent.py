@@ -1304,14 +1304,20 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     async def reap_runtime_generations(self) -> None:
         await self._runtime.reap()
 
-    async def shutdown_runtime(self) -> None:
+    async def retire_runtime(self) -> None:
         """The backend is disabled: admit nothing more, and stop every generation
-        once its work drains.
+        once its work drains. Nothing is interrupted, and a second call changes
+        nothing.
 
         Closing admission matters: a lease or turn already past this agent's
-        lookup must not start a generation nobody would ever stop.
+        lookup must not start a generation nobody would ever stop. The
+        service's sweep keeps reaping this agent until ``runtime_retired()``.
         """
         await self._runtime.close()
+
+    def runtime_retired(self) -> bool:
+        """No generation or recorded process of this retired agent remains."""
+        return self._runtime.retired()
 
     async def retire_current_generation(self) -> StopOutcome | None:
         """Retire the current generation and report its confirmed outcome.

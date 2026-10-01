@@ -59,10 +59,6 @@ MAX_LEASE_SECONDS = 1800.0
 # The runtime holding each live lease. A release reaches it there even after
 # its backend was disabled and its agent unregistered while the lease drains.
 _LEASE_HOLDERS: dict[str, "OpenCodeRuntime"] = {}
-# The controller sweeps only registered agents, so a disabled backend's runtime
-# sweeps itself at this interval until its last generation stopped.
-CLOSED_RUNTIME_SWEEP_SECONDS = 60.0
-_CLOSED_SWEEPS: set[asyncio.Task[None]] = set()
 
 
 def _digest(value: object) -> str:
@@ -255,7 +251,6 @@ class OpenCodeRuntime:
         # Work outside a turn admitted but not yet bound; a native migration
         # counts it as active, so it never overlaps a process start.
         self.outside_turn_acquisitions = 0
-        self._closed_sweep: Optional[asyncio.Task[None]] = None
         self._leases: dict[str, tuple[RuntimeBinding[Any, OpenCodeGeneration], Optional[asyncio.TimerHandle]]] = {}
         self._lease_tasks: set[asyncio.Task[None]] = set()
         # Pid of the last start whose process exited on its own: resource evidence.
@@ -501,8 +496,8 @@ class OpenCodeRuntime:
         """Admit nothing more; idle generations stop now, bound ones once drained.
 
         A previous controller's generations are adopted first, so disabling
-        the backend stops them too. The runtime then sweeps itself until its
-        last generation stopped.
+        the backend stops them too. Each later ``reap()`` retries the stops
+        that declined or failed, until ``retired()``.
         """
         self._closed = True
         try:
@@ -512,19 +507,10 @@ class OpenCodeRuntime:
             # record for shutdown and ``vibe stop``.
             logger.warning("Could not adopt OpenCode generations before disabling the backend", exc_info=True)
         await self._generations.stop_all(force=False)
-        if self._generations.generations and self._closed_sweep is None:
-            self._closed_sweep = asyncio.get_running_loop().create_task(self._sweep_until_stopped())
-            _CLOSED_SWEEPS.add(self._closed_sweep)
-            self._closed_sweep.add_done_callback(_CLOSED_SWEEPS.discard)
 
-    async def _sweep_until_stopped(self) -> None:
-        while self._generations.generations:
-            await asyncio.sleep(CLOSED_RUNTIME_SWEEP_SECONDS)
-            try:
-                await self.reap()
-            except Exception:
-                # The next pass retries; a disabled runtime has no other sweeper.
-                logger.exception("Sweeping a disabled OpenCode runtime failed")
+    def retired(self) -> bool:
+        """Closed, and no process of this runtime remains."""
+        return self._closed and not self._generations.generations
 
     async def retire_all(self) -> None:
         """Admit nothing more to any live generation; each stops once its work drains.

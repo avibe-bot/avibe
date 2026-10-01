@@ -13875,27 +13875,10 @@ def _stop_opencode_server(runtime_ids: frozenset[str] = frozenset()):
 
     A server of another Runtime is left running, as the scoped stop leaves it.
     """
-    from modules.agents.opencode.server import (
-        StopOutcome,
-        forget_dead_records,
-        recorded_servers,
-        stop_recorded_server_sync,
-    )
+    from modules.agents.opencode.server import StopOutcome, stop_recorded_servers_sync
 
-    # A record whose process already ended, with the credential-bearing
-    # overlay beside it, is forgotten; it stopped nothing.
-    forget_dead_records()
-    outcomes = []
-    for pid, record_path, info in recorded_servers():
-        try:
-            runtime.refuse_foreign_desktop_process(pid, "opencode", runtime_ids)
-        except runtime.DesktopRuntimeClaimRefused as refusal:
-            logger.warning("Leaving the OpenCode server pid=%s running: %s", pid, refusal)
-            continue
-        # OpenCode starts each tool command in its own session, so stopping only
-        # the server pid would leave a running command behind. The confirmed stop
-        # takes the whole tree, the way the service's own teardown does.
-        outcomes.append(stop_recorded_server_sync(record_path, info))
+    # Forgetting the record of a server that already ended stops nothing.
+    outcomes = stop_recorded_servers_sync(runtime_ids)
     # One survivor means OpenCode did not stop, however many others did.
     return bool(outcomes) and all(outcome is StopOutcome.STOPPED for outcome in outcomes)
 

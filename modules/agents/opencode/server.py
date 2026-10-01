@@ -2013,24 +2013,20 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
     legacy_path = legacy_pid_file()
     for path, info in _recorded_processes():
         is_legacy = path == legacy_path
-        if not is_legacy and info.get("generation_id") in _OWNED_HERE:
+        if _owned_here(info, by_id=not is_legacy):
+            # A legacy file a runtime here already converted goes once the
+            # converted record is written.
             continue
         if not _record_proves_process(info):
             _remove_quietly(path)
             if not is_legacy and isinstance(info.get("generation_id"), str):
                 _remove_quietly(generation_records_dir() / f"{info['generation_id']}.overlay.json")
             continue
-        if is_legacy:
-            identity = (int(info["pid"]), runtime.process_create_time(int(info["pid"])))
-            if identity in _OWNED_HERE.values():
-                # A runtime here runs it under the converted record that
-                # replaces this file once it is written.
-                continue
-            if identity in adopted_processes:
-                # This pass adopted it from its converted record; a crash or a
-                # failed removal after the conversion left this file behind.
-                _remove_quietly(path)
-                continue
+        if is_legacy and (int(info["pid"]), runtime.process_create_time(int(info["pid"]))) in adopted_processes:
+            # This pass adopted it from its converted record; a crash or a
+            # failed removal after the conversion left this file behind.
+            _remove_quietly(path)
+            continue
         recorded_id = info.get("generation_id")
         generation = _generation_from_record(
             info,
@@ -2067,6 +2063,20 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
             ).exists():
                 _remove_quietly(path)
     return adopted
+
+
+def _owned_here(info: Mapping[str, Any], *, by_id: bool = True) -> bool:
+    """Whether a runtime of this process started or attached the recorded process."""
+
+    if not _OWNED_HERE:
+        # A CLI process, or a controller whose OpenCode never ran, owns nothing.
+        return False
+    if by_id and info.get("generation_id") in _OWNED_HERE:
+        return True
+    pid = info.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return False
+    return (pid, runtime.process_create_time(pid)) in _OWNED_HERE.values()
 
 
 def own_generation(generation: OpenCodeGeneration) -> None:
@@ -2117,6 +2127,31 @@ def stop_recorded_server_sync(path: Path, info: Mapping[str, Any]) -> StopOutcom
         return StopOutcome.FAILED
     forget_record(path)
     return StopOutcome.STOPPED
+
+
+def stop_recorded_servers_sync(runtime_ids: frozenset[str] = frozenset()) -> list[StopOutcome]:
+    """Stop every recorded server no runtime of this process owns.
+
+    ``vibe stop`` runs it, as does a controller that starts with OpenCode
+    disabled, since no agent there would adopt what a crashed controller left
+    running. A record whose process already ended is forgotten with its
+    overlay. A server of another desktop Runtime than ``runtime_ids`` is left
+    running. OpenCode starts each tool command in its own session, so each
+    stop takes the whole process tree.
+    """
+
+    forget_dead_records()
+    outcomes: list[StopOutcome] = []
+    for pid, path, info in recorded_servers():
+        if _owned_here(info):
+            continue
+        try:
+            runtime.refuse_foreign_desktop_process(pid, "opencode", runtime_ids)
+        except runtime.DesktopRuntimeClaimRefused as refusal:
+            logger.warning("Leaving the OpenCode server pid=%s running: %s", pid, refusal)
+            continue
+        outcomes.append(stop_recorded_server_sync(path, info))
+    return outcomes
 
 
 def terminate_recorded_generations_sync() -> None:
