@@ -3895,6 +3895,72 @@ def test_mh_unlisted_002_model_list_save_names_the_agents_a_removed_row_stops(
     assert model_id not in {model.id for model in store.config.agents[backend].models}
 
 
+@pytest.mark.parametrize(
+    ("fallback_supplied", "expected_gaps"),
+    (
+        (True, []),
+        (False, [{"backend": "opencode", "model_id": "kimi-k2", "agents": ["writer"]}]),
+    ),
+)
+def test_mh_unlisted_002_opencode_fallback_row_keeps_an_agent_running(
+    monkeypatch,
+    tmp_path,
+    fallback_supplied,
+    expected_gaps,
+):
+    """MH-UNLISTED-002: an OpenCode selection that still names a surviving row
+    after the save is stopped only when that row cannot run, and is then named
+    under the row it now runs on."""
+
+    service, store, _adapter = _service(tmp_path)
+    agent = store.config.agents["opencode"]
+    agent.models = [
+        ModelHubBackendModelConfig(id=model_id, native_protocol="openai_responses")
+        for model_id in ("moonshotai/kimi-k2", "kimi-k2")
+    ]
+    agent.menu.checked = ["moonshotai/kimi-k2", "kimi-k2"]
+    if fallback_supplied:
+        store.config.sources = [
+            ModelHubSourceConfig(
+                id="src_fallback01",
+                kind="api_key",
+                vendor="openai",
+                display_name="Fallback source",
+                protocol="openai_responses",
+                supply_channel="hub",
+                billing="metered",
+                state=ModelHubSourceStateConfig(status="standby"),
+                models=[ModelHubModelConfig(id="kimi-k2", provenance="discovered")],
+                credential_ref="cred_fallback01",
+            )
+        ]
+        agent.sources.order = ["src_fallback01"]
+    service.named_agents_override = lambda name: (
+        [("writer", "moonshotai/kimi-k2")] if name == "opencode" else []
+    )
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: _as_ui_client(service))
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, base_url)
+    baseline = next(item["catalog_models"] for item in service.list_agents() if item["backend"] == "opencode")
+
+    response = client.put(
+        "/api/models/agents/opencode/models",
+        json={"baseline": baseline, "models": [row for row in baseline if row["id"] != "moonshotai/kimi-k2"]},
+        headers=headers,
+        base_url=base_url,
+    )
+
+    # A supplied fallback leaves only the removed row's passthrough hop to confirm.
+    assert response.status_code == 409
+    refusal = response.get_json()
+    _assert_valid("guard-refusal.schema.json", refusal)
+    assert refusal["would_interrupt"] == expected_gaps
+    assert [hop["menu_model"] for hop in refusal["would_remove_hops"]] == (
+        ["moonshotai/kimi-k2"] if fallback_supplied else []
+    )
+
+
 def test_backend_catalog_removes_model_with_empty_route(tmp_path):
     service, store, _adapter = _service(tmp_path)
     baseline = next(agent["catalog_models"] for agent in service.list_agents() if agent["backend"] == "codex")

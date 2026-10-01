@@ -697,7 +697,10 @@ save with the rule the turn path uses (`opencode_menu_model_candidates` /
 `opencode_menu_model_id`: the whole selection first, then the model part of an OpenCode
 `<provider>/<model>` selection), so an Agent on `openai/gpt-5.6-sol` names row
 `gpt-5.6-sol`. A row is reported whatever its supply before the save, because removing it
-stops those Agents either way; Direct mode reports none. Per-Session model overrides are
+stops those Agents either way; Direct mode reports none. An OpenCode selection that
+still names a surviving row after the save (`openai/foo` falling back to row `foo`) is
+not stopped by the removal: it is reported only when that row has no runnable hop,
+under the surviving row's id. Per-Session model overrides are
 not enumerated: a turn that asks for a model the list no longer holds fails once with
 `turn.no_candidate.unlisted`. The consumer is the backend catalog dialog's guard, which
 names those Agents through `GuardImpact`; a refusal with no route hops gets its own

@@ -3905,25 +3905,46 @@ class ModelHubService:
     def _removed_agent_models(
         self,
         previous: ModelHubConfig,
+        updated: ModelHubConfig,
         backend: BackendName,
         removed_model_ids: set[str],
     ) -> list[dict]:
-        """The removed menu rows that enabled Agents still select, as supply gaps.
+        """The Agents a model-list removal stops, as supply gaps.
 
-        A removed row stops every Agent that selects it, whatever supply the row
-        had before, so each such row is reported under its own menu id. The
-        selection is matched against the list before the save, the same way the
-        turn path matches it, because after the save it names no row at all.
+        An Agent is affected only when the row its selection names before the
+        save is removed. If its selection then names no surviving row, the
+        removal stops it whatever supply the row had, and the gap carries the
+        removed row's id. An OpenCode selection can still name a surviving row
+        (``openai/foo`` falls back to ``foo``); it is stopped only when that row
+        has no runnable hop, and the gap carries the row it now runs on. Both
+        lists are matched the way the turn path matches them.
         """
 
-        agent = previous.agents[backend]
-        if agent.mode != "hub" or self.named_agents_override is None:
+        before = previous.agents[backend]
+        after = updated.agents[backend]
+        if before.mode != "hub" or self.named_agents_override is None:
             return []
+        unavailable_source_ids = self._unavailable_native_sources(updated, backend)
+        live_recovery = self.recovery_annotations(updated)
+        surviving_ids = {model.id for model in after.models}
         agents_by_model: dict[str, set[str]] = {}
         for name, selected in self.named_agents_override(backend):
-            model_id = self._menu_model_for_selection(agent, str(selected or "").strip())
-            if model_id in removed_model_ids:
-                agents_by_model.setdefault(model_id, set()).add(name)
+            selected = str(selected or "").strip()
+            if self._menu_model_for_selection(before, selected) not in removed_model_ids:
+                continue
+            model_id = self._menu_model_for_selection(after, selected)
+            if model_id in surviving_ids and resolve_model_hub_turn(
+                updated,
+                backend,
+                model_id,
+                now=self.now(),
+                unavailable_source_ids=unavailable_source_ids,
+                live_recovery=live_recovery,
+            ).candidates:
+                continue
+            if model_id not in surviving_ids:
+                model_id = self._menu_model_for_selection(before, selected)
+            agents_by_model.setdefault(model_id, set()).add(name)
         return [
             {"backend": backend, "model_id": model_id, "agents": sorted(names)}
             for model_id, names in sorted(agents_by_model.items())
@@ -5544,6 +5565,7 @@ class ModelHubService:
 
             interrupted = self._removed_agent_models(
                 previous,
+                config,
                 agent_backend,
                 removed_model_id_set,
             )
