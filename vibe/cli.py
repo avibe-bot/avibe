@@ -13903,7 +13903,12 @@ def _stop_opencode_server(runtime_ids: frozenset[str] = frozenset()):
         logger.warning("Leaving the OpenCode server pid=%s running: %s", pid, refusal)
         return False
 
-    if runtime.stop_pid(pid, timeout=5):
+    # OpenCode starts each tool command in its own session, so stopping only
+    # the server pid would leave a running command behind. Stop the whole tree
+    # the way the service's own teardown does.
+    from modules.agents.opencode.server import OpenCodeServerManager
+
+    if OpenCodeServerManager._terminate_pid_tree_sync(pid, timeout=5):
         pid_file.unlink(missing_ok=True)
         return True
     logger.warning("Failed to stop OpenCode server (pid=%s)", pid)

@@ -1011,10 +1011,70 @@ def test_cli_stop_opencode_server_uses_runtime_helpers(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "get_logs_dir", lambda: tmp_path)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 321)
     monkeypatch.setattr(runtime, "get_process_command", lambda pid: "C:\\opencode.exe serve --port=4096")
-    monkeypatch.setattr(runtime, "stop_pid", lambda pid, timeout=5: pid == 321)
+    from modules.agents.opencode.server import OpenCodeServerManager
+
+    monkeypatch.setattr(OpenCodeServerManager, "_terminate_pid_tree_sync", staticmethod(lambda pid, timeout=5: pid == 321))
 
     assert cli._stop_opencode_server() is True
     assert not pid_file.exists()
+
+
+# A server that starts its tool the way OpenCode's shell tool does (detached, so
+# setsid): the tool leads its own session, out of reach of a signal to the server.
+# The tool names the test's tmp_path, which keeps the orphan it becomes on master
+# signalable for cleanup under the test signal guard.
+_SERVER_WITH_DETACHED_TOOL = """
+import subprocess, sys
+tool = subprocess.Popen(["/bin/sh", "-c", "while :; do sleep 1; done", "tool", sys.argv[1]], start_new_session=True)
+print(tool.pid, flush=True)
+tool.wait()
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sessions and process groups")
+def test_cli_stop_fallback_stops_tool_commands_with_the_opencode_server(tmp_path, monkeypatch):
+    # `vibe stop` and /api/control fall back to this path when the service's
+    # own teardown did not stop OpenCode. Stopping only the server pid left the
+    # running tool command behind, still executing after the stop.
+    import psutil
+
+    server = subprocess.Popen(
+        [sys.executable, "-c", _SERVER_WITH_DETACHED_TOOL, str(tmp_path)],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    tool_pid = None
+    try:
+        tool_pid = int(server.stdout.readline())
+        tool = psutil.Process(tool_pid)
+        assert os.getsid(tool_pid) == tool_pid != os.getsid(server.pid)
+        # Reap the server when it exits, as its real parent would.
+        threading.Thread(target=server.wait, daemon=True).start()
+        pid_file = tmp_path / "opencode_server.json"
+        pid_file.write_text(json.dumps({"pid": server.pid}), encoding="utf-8")
+        monkeypatch.setattr(paths, "get_logs_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            runtime,
+            "get_process_command",
+            lambda pid: "opencode serve --hostname=127.0.0.1 --port=4096" if pid == server.pid else "",
+        )
+
+        assert cli._stop_opencode_server() is True
+
+        assert not pid_file.exists()
+        try:
+            assert not tool.is_running() or tool.status() == psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            pass
+    finally:
+        if tool_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(tool_pid, signal.SIGKILL)
+        if server.poll() is None:
+            server.kill()
+        server.wait(timeout=5)
+        server.stdout.close()
 
 
 def test_proc_cmdline_decode_preserves_argv_boundaries():
