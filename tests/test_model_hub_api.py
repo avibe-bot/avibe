@@ -4993,6 +4993,30 @@ def test_mode_switch_interrupts_nothing_and_keeps_admitted_hub_turns_served(tmp_
     assert resolution.requested_model == "claude-opus-4-6"
 
 
+def test_a_mode_switch_whose_runtime_adoption_failed_is_finished_by_a_retry(tmp_path):
+    """MH-MIG-011: a committed switch counts as applied only once the runtime adopted it."""
+    service, store, _adapter = _service(tmp_path)
+    service.migration_home = tmp_path / "native-home"
+    store.config.agents["claude"].mode = "hub"
+    attempts = []
+
+    async def catalog_changed(backend):
+        attempts.append(backend)
+        if len(attempts) == 1:
+            raise RuntimeError("runtime refresh failed")
+
+    service.backend_catalog_changed = catalog_changed
+
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.set_agent_mode("claude", "direct"))
+    assert store.config.agents["claude"].mode == "direct"
+
+    assert asyncio.run(service.set_agent_mode("claude", "direct"))["mode"] == "direct"
+    assert attempts == ["claude", "claude"]
+    asyncio.run(service.set_agent_mode("claude", "direct"))
+    assert attempts == ["claude", "claude"]
+
+
 async def _confirm_guard(call):
     try:
         return await call({})

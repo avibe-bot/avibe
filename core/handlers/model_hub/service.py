@@ -5080,24 +5080,32 @@ class ModelHubService:
         # was admitted before a switch to Direct. Mode-only consent never
         # imports a login: native auth stays native beside the Hub, where the
         # migration dialog can still take it over later.
+        name = cast(BackendName, backend)
         async with self._migration_lock:
             async with self._mutation_lock:
                 previous = self.store.load()
                 agent = self._agent(previous, backend)
                 if agent.mode == mode:
-                    return self._agent_payload(previous, agent)
-                try:
-                    if mode == "hub" and await self._native_config_blocks_launch(previous, backend):
-                        raise ModelHubError("mode_switch_blocked", status=409)
-                    config = self._clone_config(previous)
-                    self._agent(config, backend).mode = mode
-                    if mode == "hub":
-                        self._carry_agent_selections(config, cast(BackendName, backend))
-                    await self._commit_synced(previous, config)
-                except (TakeoverStateError, OSError):
-                    raise ModelHubError("mode_switch_blocked", status=409) from None
-                committed = self.store.load()
-            await self._refresh_backend_catalog(cast(BackendName, backend))
+                    # A committed switch is applied only once the runtime has
+                    # adopted it; a retry of the same mode finishes that.
+                    if name not in self._pending_builtin_catalog_refresh:
+                        return self._agent_payload(previous, agent)
+                    committed = previous
+                else:
+                    try:
+                        if mode == "hub" and await self._native_config_blocks_launch(previous, backend):
+                            raise ModelHubError("mode_switch_blocked", status=409)
+                        config = self._clone_config(previous)
+                        self._agent(config, backend).mode = mode
+                        if mode == "hub":
+                            self._carry_agent_selections(config, name)
+                        await self._commit_synced(previous, config)
+                    except (TakeoverStateError, OSError):
+                        raise ModelHubError("mode_switch_blocked", status=409) from None
+                    committed = self.store.load()
+                    self._pending_builtin_catalog_refresh.add(name)
+            await self._refresh_backend_catalog(name)
+            self._pending_builtin_catalog_refresh.discard(name)
             return self._agent_payload(committed, self._agent(committed, backend))
 
     async def reorder_agent_chains(
