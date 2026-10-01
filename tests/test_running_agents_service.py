@@ -14,6 +14,7 @@ import pytest
 
 from core.message_context import build_context_turn_sink_key
 from core.services import running_agents
+from tests.codex_generation_support import codex_transports, init_generation_state, install_codex_transport
 
 
 class _AsyncFlag:
@@ -266,14 +267,18 @@ def test_subagent_composite_key_base_parsing():
     assert row["workdir"] == "/srv/app"
 
 
+def _transport_by_cwd(mgr, transports):
+    """Codex test double: every Session uses its directory's app-server."""
+    return lambda base: transports.get(mgr.get_cwd(base))
+
+
 def test_codex_shared_pid_one_row_per_session():
     mgr = _FakeSessionMgr({"base-1": "/work/x", "base-2": "/work/x", "base-3": "/work/y"})
     turns = _FakeTurnRegistry({"base-1": "turn-1"})  # base-1 active, others idle
     codex = types.SimpleNamespace(
         _session_mgr=mgr,
         _turn_registry=turns,
-        _transports={"/work/x": _FakeTransport(7001), "/work/y": _FakeTransport(7002)},
-        _transport_last_activity={"/work/x": 0.0, "/work/y": 0.0},
+        transport_for_session=_transport_by_cwd(mgr, {"/work/x": _FakeTransport(7001), "/work/y": _FakeTransport(7002)}),
     )
     controller = _make_controller(codex=codex)
     snap = running_agents.snapshot_running_agents(controller)
@@ -293,7 +298,7 @@ def test_codex_skips_evicted_idle_base_without_transport():
     codex = types.SimpleNamespace(
         _session_mgr=mgr,
         _turn_registry=turns,
-        _transports={"/work/live": _FakeTransport(7001)},
+        transport_for_session=_transport_by_cwd(mgr, {"/work/live": _FakeTransport(7001)}),
     )
     controller = _make_controller(codex=codex)
     snap = running_agents.snapshot_running_agents(controller)
@@ -307,14 +312,14 @@ def test_codex_skips_evicted_idle_base_without_transport():
 
 def test_codex_skips_dead_transport_object():
     # A transport whose app-server already exited (is_alive False) can linger in
-    # _transports; such a base must not surface as a phantom idle row, nor count
+    # its bound generation; such a base must not surface as a phantom idle row, nor count
     # toward pid_shared for a sibling on the same cwd.
     mgr = _FakeSessionMgr({"dead": "/work/x", "alive": "/work/y"})
     turns = _FakeTurnRegistry({})
     codex = types.SimpleNamespace(
         _session_mgr=mgr,
         _turn_registry=turns,
-        _transports={"/work/x": _FakeTransport(8001, is_alive=False), "/work/y": _FakeTransport(8002)},
+        transport_for_session=_transport_by_cwd(mgr, {"/work/x": _FakeTransport(8001, is_alive=False), "/work/y": _FakeTransport(8002)}),
     )
     controller = _make_controller(codex=codex)
     snap = running_agents.snapshot_running_agents(controller)
@@ -393,7 +398,7 @@ def test_codex_pending_turn_start_counts_as_active():
     codex = types.SimpleNamespace(
         _session_mgr=mgr,
         _turn_registry=turns,
-        _transports={"/work/p": _FakeTransport(9100)},
+        transport_for_session=_transport_by_cwd(mgr, {"/work/p": _FakeTransport(9100)}),
     )
     controller = _make_controller(codex=codex)
     snap = running_agents.snapshot_running_agents(controller)
@@ -826,8 +831,7 @@ def test_end_codex_interrupts_clears_and_stops_last_transport():
     codex = types.SimpleNamespace(
         _session_mgr=mgr,
         _turn_registry=treg,
-        _transports=transports,
-        _transport_last_activity={"/w": 0.0},
+        transport_for_session=_transport_by_cwd(mgr, transports),
         _session_locks={"b1": asyncio.Lock()},
         _session_last_activity={"b1": 1.0},
         _thread_developer_instructions={"b1": ("th1", "instructions")},
@@ -867,7 +871,9 @@ def test_end_codex_keeps_transport_when_other_sessions_share_cwd():
         sessions_for_cwd=lambda cwd: ["other-base"],  # another session still uses it
     )
     treg = types.SimpleNamespace(get_active_turn=lambda b: None, clear_session=lambda b: None)
-    codex = types.SimpleNamespace(_session_mgr=mgr, _turn_registry=treg, _transports=transports)
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr, _turn_registry=treg, transport_for_session=_transport_by_cwd(mgr, transports)
+    )
     res = asyncio.run(
         running_agents.end_running_agent(_make_controller(codex=codex), backend="codex", base_session_id="b1")
     )
@@ -895,7 +901,7 @@ def test_end_codex_reports_transport_retirement_failure():
     codex = types.SimpleNamespace(
         _session_mgr=mgr,
         _turn_registry=treg,
-        _transports={"/w": object()},
+        transport_for_session=_transport_by_cwd(mgr, {"/w": object()}),
         retire_unowned_session_transport=retire,
     )
 
@@ -932,7 +938,7 @@ def test_end_codex_can_retry_failed_last_transport_retirement():
             get_active_turn=lambda _base: None,
             clear_session=lambda _base: None,
         ),
-        _transports={"/w": object()},
+        transport_for_session=_transport_by_cwd(mgr, {"/w": object()}),
         retire_unowned_session_transport=retire,
     )
     controller = _make_controller(codex=codex)
@@ -955,42 +961,34 @@ def test_end_codex_can_retry_failed_last_transport_retirement():
     assert attempts == [("/w", "b1"), ("/w", "b1")]
 
 
-def test_codex_idle_retirement_serializes_successor_transport_generation():
+def test_codex_idle_retirement_keeps_a_successor_started_during_its_stop():
     from modules.agents.codex.agent import CodexAgent
 
     async def exercise():
-        agent = object.__new__(CodexAgent)
+        agent = init_generation_state(object.__new__(CodexAgent))
         agent._registered_runtime = False
-        agent._transport_locks = {}
-        agent._transport_last_activity = {"/w": 1.0}
-        agent._transport_cwd_inodes = {}
         agent._session_mgr = types.SimpleNamespace(sessions_for_cwd=lambda _cwd: [])
-        agent._has_active_turns_for_cwd = lambda _cwd: False
+        agent._turn_registry = types.SimpleNamespace(clear_session=lambda _base: None)
         stopping = asyncio.Event()
         resume_stop = asyncio.Event()
 
         class Transport:
+            _process = None
+
             async def stop(self):
                 stopping.set()
                 await resume_stop.wait()
 
-        old_transport = Transport()
+        install_codex_transport(agent, "/w", Transport())
         successor = Transport()
-        agent._transports = {"/w": old_transport}
         retirement = asyncio.create_task(agent.retire_unowned_session_transport("/w"))
         await asyncio.wait_for(stopping.wait(), timeout=1)
 
-        async def install_successor():
-            async with agent._transport_locks["/w"]:
-                agent._transports["/w"] = successor
-
-        installation = asyncio.create_task(install_successor())
-        await asyncio.sleep(0)
-        assert not installation.done()
+        # A turn arriving meanwhile starts its own generation at once.
+        install_codex_transport(agent, "/w", successor, digest="successor")
         resume_stop.set()
         assert await asyncio.wait_for(retirement, timeout=1) is True
-        await asyncio.wait_for(installation, timeout=1)
-        assert agent._transports["/w"] is successor
+        assert codex_transports(agent) == {"/w": successor}
 
     asyncio.run(exercise())
 
@@ -1000,15 +998,14 @@ def test_codex_last_session_retirement_keeps_generation_on_failed_stop():
     from modules.agents.codex.session import CodexSessionManager
 
     async def exercise():
-        agent = object.__new__(CodexAgent)
+        agent = init_generation_state(object.__new__(CodexAgent))
         agent._registered_runtime = False
-        agent._transport_locks = {}
-        agent._transport_last_activity = {"/w": 1.0}
-        agent._transport_cwd_inodes = {}
-        agent._retire_model_hub_process_scope = lambda _cwd: None
         agent._session_mgr = CodexSessionManager()
         agent._session_mgr.set_cwd("b1", "/w")
-        agent._has_active_turns_for_cwd = lambda _cwd: False
+        agent._turn_registry = types.SimpleNamespace(
+            get_active_turn=lambda _base: None,
+            clear_session=lambda _base: None,
+        )
 
         class Transport:
             _process = None
@@ -1022,17 +1019,19 @@ def test_codex_last_session_retirement_keeps_generation_on_failed_stop():
                     raise RuntimeError("stop failed")
 
         transport = Transport()
-        agent._transports = {"/w": transport}
+        install_codex_transport(agent, "/w", transport, sessions={"b1": "thread-1"})
         with pytest.raises(RuntimeError, match="stop failed"):
             await agent.retire_unowned_session_transport(
                 "/w", ending_session_id="b1"
             )
-        assert agent._transports["/w"] is transport
+        assert [generation.runtime.transport for generation in agent._units["/w"].generations] == [transport]
+        assert agent.transport_for_session("b1") is transport
         assert agent._session_mgr.get_cwd("b1") == "/w"
         assert await agent.retire_unowned_session_transport(
             "/w", ending_session_id="b1"
         )
-        assert "/w" not in agent._transports
+        assert agent._units["/w"].generations == ()
+        assert agent.transport_for_session("b1") is None
 
     asyncio.run(exercise())
 
@@ -1524,8 +1523,7 @@ def test_end_active_codex_frees_runtime_after_stop():
     codex = types.SimpleNamespace(
         _session_mgr=mgr,
         _turn_registry=treg,
-        _transports=transports,
-        _transport_last_activity={"/w": 0.0},
+        transport_for_session=_transport_by_cwd(mgr, transports),
         _runtime_turn_key_for_base_session=lambda b: f"{b}:/w",
     )
     async def retire(_cwd, *, ending_session_id=None):
@@ -1572,8 +1570,7 @@ def test_end_active_codex_clears_stale_row_even_when_stop_fails():
     codex = types.SimpleNamespace(
         _session_mgr=mgr,
         _turn_registry=treg,
-        _transports={},  # app-server already gone
-        _transport_last_activity={},
+        transport_for_session=_transport_by_cwd(mgr, {}),  # app-server already gone
         _runtime_turn_key_for_base_session=lambda b: f"{b}:/w",
     )
     controller = _make_controller(codex=codex)
@@ -1708,7 +1705,7 @@ def test_end_does_not_cancel_unrelated_inflight_turn_of_other_backend():
     treg = _FakeTurnRegistry({}, pending=set())  # the codex base is genuinely idle
     treg.clear_session = lambda b: cleared.__setitem__("treg", b)
     codex = types.SimpleNamespace(
-        _session_mgr=mgr, _turn_registry=treg, _transports={"/w": transport}, _transport_last_activity={"/w": 0.0}
+        _session_mgr=mgr, _turn_registry=treg, transport_for_session=_transport_by_cwd(mgr, {"/w": transport})
     )
     controller = _make_controller(codex=codex)
     controller.session_turns = manager
@@ -1751,7 +1748,7 @@ def test_end_does_not_promote_unrelated_durable_owner_of_other_backend(monkeypat
     treg = _FakeTurnRegistry({}, pending=set())
     treg.clear_session = lambda b: cleared.__setitem__("treg", b)
     codex = types.SimpleNamespace(
-        _session_mgr=mgr, _turn_registry=treg, _transports={"/w": transport}, _transport_last_activity={"/w": 0.0}
+        _session_mgr=mgr, _turn_registry=treg, transport_for_session=_transport_by_cwd(mgr, {"/w": transport})
     )
     controller = _make_controller(codex=codex)
     controller.session_turns = manager
@@ -1806,7 +1803,7 @@ def test_end_does_not_cancel_unrelated_durable_owner_when_clicked_row_is_live(
     treg = _FakeTurnRegistry({"codex-base": "turn-live"}, pending=set())
     treg.clear_session = lambda b: cleared.__setitem__("treg", b)
     codex = types.SimpleNamespace(
-        _session_mgr=mgr, _turn_registry=treg, _transports={"/w": transport}, _transport_last_activity={"/w": 0.0}
+        _session_mgr=mgr, _turn_registry=treg, transport_for_session=_transport_by_cwd(mgr, {"/w": transport})
     )
     controller = _make_controller(codex=codex)
     controller.session_turns = manager
@@ -1886,7 +1883,7 @@ def test_end_rechecks_live_state_active_to_idle():
     treg = _FakeTurnRegistry({}, pending=set())  # no active turn, no pending start
     treg.clear_session = lambda b: cleared.__setitem__("treg", b)
     codex = types.SimpleNamespace(
-        _session_mgr=mgr, _turn_registry=treg, _transports={"/w": transport}, _transport_last_activity={"/w": 0.0}
+        _session_mgr=mgr, _turn_registry=treg, transport_for_session=_transport_by_cwd(mgr, {"/w": transport})
     )
     controller = _make_controller(codex=codex)
     controller.session_turns = types.SimpleNamespace(is_in_flight=lambda sid: False)

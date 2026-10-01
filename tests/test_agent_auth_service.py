@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, Mock, patch
+from tests.codex_generation_support import init_generation_state
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -2276,11 +2277,10 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         old_config = CodexCompatConfig(enabled=True, binary="/old/codex", extra_args=[])
         new_config = CodexCompatConfig(enabled=True, binary="/new/codex", extra_args=[])
-        agent = CodexAgent.__new__(CodexAgent)
+        agent = init_generation_state(object.__new__(CodexAgent))
         agent.codex_config = old_config
-        agent._model_hub_catalog = SimpleNamespace(path=Path("/runtime/codex-old.json"), close=Mock())
-        agent._model_hub_catalog_lock = asyncio.Lock()
-        agent._model_hub_catalog_generation = 0
+        old_catalog = SimpleNamespace(path=Path("/runtime/codex-old.json"), close=Mock())
+        agent._model_hub_catalogs[("old", "models")] = old_catalog
         agent.controller = SimpleNamespace(config=SimpleNamespace(codex=old_config))
         agent.refresh_auth_state = AsyncMock()
 
@@ -2293,8 +2293,8 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         prepare_catalog.assert_not_called()
         self.assertIs(agent.codex_config, new_config)
         self.assertIs(agent.controller.config.codex, new_config)
-        self.assertIsNone(agent._model_hub_catalog)
-        self.assertEqual(agent._model_hub_catalog_generation, 1)
+        self.assertEqual(dict(agent._model_hub_catalogs), {})
+        old_catalog.close.assert_called_once_with()
         agent.refresh_auth_state.assert_awaited_once()
 
     async def test_claude_runtime_config_reload_updates_cli_path_before_refresh(self):

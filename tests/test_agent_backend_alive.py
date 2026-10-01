@@ -12,6 +12,7 @@ import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -74,10 +75,19 @@ class ClaudeBackendAliveTests(unittest.TestCase):
 
 class CodexBackendAliveTests(unittest.TestCase):
     def _agent(self, *, cwd_for_session, transports):
-        agent = CodexAgent.__new__(CodexAgent)  # bypass heavy __init__
+        agent = init_generation_state(object.__new__(CodexAgent))  # bypass heavy __init__
         agent._session_mgr = types.SimpleNamespace(get_cwd=lambda bid: cwd_for_session.get(bid))
-        agent._transports = transports
+        self.cwd_for_session = cwd_for_session
+        for cwd, transport in transports.items():
+            self._replace(agent, cwd, transport)
         return agent
+
+    def _replace(self, agent, cwd, transport):
+        """Start a new generation for ``cwd`` that its Sessions move to."""
+        sessions = {base: "thread" for base, mapped in self.cwd_for_session.items() if mapped == cwd}
+        install_codex_transport(
+            agent, cwd, transport, sessions=sessions, digest=f"spec-{id(transport)}"
+        )
 
     def _ctx_base(self, base_session_id):
         return MessageContext(
@@ -124,10 +134,10 @@ class CodexBackendAliveTests(unittest.TestCase):
         probe = agent.capture_backend_liveness(context)
 
         accepted.is_alive = False
-        agent._transports["/repo"] = types.SimpleNamespace(
+        self._replace(agent, "/repo", types.SimpleNamespace(
             is_alive=True,
             has_pending_notifications=False,
-        )
+        ))
 
         self.assertIs(agent.backend_alive(context), True)
         self.assertIs(probe(), False)
@@ -145,10 +155,10 @@ class CodexBackendAliveTests(unittest.TestCase):
         diagnose = agent.capture_backend_exit_failure(self._ctx_base("b1"))
         self.assertIsNotNone(diagnose)
         process.returncode = 137
-        agent._transports["/repo"] = types.SimpleNamespace(
+        self._replace(agent, "/repo", types.SimpleNamespace(
             is_alive=True,
             _process=types.SimpleNamespace(returncode=None),
-        )
+        ))
         pressure = AgentResourceFailure(
             kind="pids",
             message="shared cgroup limit event",

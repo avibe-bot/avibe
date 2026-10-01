@@ -29,6 +29,7 @@ from tests.test_agent_steering import (
 from tests.test_internal_server import _build_controller_double, _reserve_submission
 from tests.test_ui_session_stream import _make_session, isolated_state  # noqa: F401
 from tests.ui_server_test_helpers import csrf_headers
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -116,11 +117,11 @@ def test_uploaded_image_survives_real_queue_admission_and_send_now(isolated_stat
         "unknown_refused": TimeoutError("native write acknowledgement lost"),
         "refused": RuntimeError("activeTurnNotSteerable"),
     }[receipt])
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent.config = SimpleNamespace(include_time_info=False, include_user_info=False)
     agent._turn_registry = _CodexTurnRegistry(session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(session_id, "codex-thread", primary.working_path)
-    agent._transports = {primary.working_path: native}
+    install_codex_transport(agent, primary.working_path, native, sessions={session_id: "codex-thread"})
     controller = _build_controller_double()
     controller.agent_service = SimpleNamespace(
         agents={"codex": agent},

@@ -50,3 +50,73 @@ scenarios:
     test: tests/test_controller_idle_cleanup.py::test_a_saved_idle_timeout_applies_without_a_backend_restart
     related_tests:
       - tests/test_claude_cli_path.py::test_a_config_save_that_only_changes_live_fields_renews_no_client
+  - id: RUNTIME-GEN-010
+    name: A Codex turn on a new launch spec starts at once on a new app-server while a busy one in the same directory finishes on its own
+    status: covered
+    kind: concurrency
+    layer: unit
+    backend: codex
+    test: tests/test_codex_runtime_generations.py::test_runtime_gen_010_a_busy_directory_never_holds_a_turn_on_a_new_spec
+  - id: RUNTIME-GEN-011
+    name: A Codex Session leaving an app-server releases its thread there before resuming it on the new one, and the old process keeps serving its other Sessions
+    status: covered
+    kind: lifecycle
+    layer: unit
+    backend: codex
+    test: tests/test_codex_runtime_generations.py::test_runtime_gen_011_a_session_releases_its_thread_before_resuming_elsewhere
+  - id: RUNTIME-GEN-012
+    name: A new message to a busy Codex Session interrupts its own turn and proceeds on the new launch spec
+    status: covered
+    kind: concurrency
+    layer: unit
+    backend: codex
+    test: tests/test_codex_runtime_generations.py::test_runtime_gen_012_a_busy_session_moves_after_its_own_turn_is_interrupted
+  - id: RUNTIME-GEN-013
+    name: At the cap a fourth Codex launch spec starts at once and only the oldest app-server's turns are interrupted
+    status: covered
+    kind: concurrency
+    layer: unit
+    backend: codex
+    test: tests/test_codex_runtime_generations.py::test_runtime_gen_013_at_the_cap_the_oldest_busy_generation_gives_way
+  - id: RUNTIME-GEN-014
+    name: A direct Codex launch with Model Hub enabled keeps the desktop-managed environment
+    status: covered
+    kind: regression
+    layer: unit
+    backend: codex
+    test: tests/test_codex_runtime_generations.py::test_runtime_gen_014_a_direct_launch_with_model_hub_keeps_the_managed_environment
+  - id: RUNTIME-GEN-015
+    name: Direct and native-CLI Codex launches with identical process inputs share one app-server
+    status: covered
+    kind: regression
+    layer: unit
+    backend: codex
+    test: tests/test_codex_runtime_generations.py::test_runtime_gen_015_direct_and_native_cli_launches_share_one_process
+  - id: RUNTIME-GEN-016
+    name: Retiring one Codex Hub app-server keeps the directory's gateway credential until the last Hub app-server stops
+    status: covered
+    kind: lifecycle
+    layer: unit
+    backend: codex
+    test: tests/test_codex_runtime_generations.py::test_runtime_gen_016_hub_scope_is_revoked_only_with_the_last_hub_generation
+  - id: RUNTIME-GEN-017
+    name: A Codex Session that moved app-servers never receives late thread-level events from the one it left
+    status: covered
+    kind: concurrency
+    layer: unit
+    backend: codex
+    test: tests/test_codex_runtime_generations.py::test_runtime_gen_017_late_thread_events_from_a_previous_generation_are_dropped
+  - id: RUNTIME-GEN-018
+    name: A Codex fork reads its boundary from the app-server running the source turn
+    status: covered
+    kind: concurrency
+    layer: unit
+    backend: codex
+    test: tests/test_codex_runtime_generations.py::test_runtime_gen_018_fork_boundary_reads_the_source_sessions_generation
+  - id: RUNTIME-GEN-019
+    name: The real Codex CLI moves a thread between two app-servers in one directory only after release, without touching its rollout
+    status: covered
+    kind: contract
+    layer: e2e
+    backend: codex
+    test: tests/e2e/test_codex_runtime_generations_contract.py::test_runtime_gen_019_a_thread_moves_between_app_servers_only_after_release

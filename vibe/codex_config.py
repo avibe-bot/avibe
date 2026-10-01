@@ -17,6 +17,7 @@ changes via ``restart_backend('codex')``.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import logging
 import os
@@ -616,6 +617,55 @@ def _extract_chatgpt_account(auth_data: dict) -> Optional[Dict[str, Any]]:
         "plan_type": plan_type,
         "organizations": organizations or None,
     }
+
+
+def codex_credential_identity(codex_home: Path) -> str:
+    """Digest of the credentials a starting app-server adopts from ``codex_home``.
+
+    A running app-server keeps its loaded credentials. On a 401 it rereads
+    ``auth.json`` only for the ChatGPT account it already runs as, and never
+    for an API key. An account switch, a key change, a mode change, or a
+    sign-out therefore needs a new process, while a token refresh does not:
+    tokens are deliberately left out.
+    """
+    auth = _load_auth(codex_home / "auth.json")
+    store = _load_toml(codex_home / "config.toml").get(CREDENTIALS_STORE_KEY)
+    api_key = auth.get("OPENAI_API_KEY")
+    tokens = auth.get("tokens")
+    account_id = None
+    if _tokens_bag_is_usable(tokens):
+        account_id = tokens.get("account_id") if isinstance(tokens.get("account_id"), str) else None
+        if account_id is None:
+            account_id = _chatgpt_account_id_claim(tokens.get("id_token"))
+    identity = {
+        "store": store if isinstance(store, str) else "auto",
+        "auth_mode": auth.get("auth_mode") if isinstance(auth.get("auth_mode"), str) else None,
+        "api_key": (
+            hashlib.sha256(api_key.encode()).hexdigest()
+            if isinstance(api_key, str) and api_key
+            else None
+        ),
+        "chatgpt": bool(_tokens_bag_is_usable(tokens)),
+        "account_id": account_id,
+    }
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def _chatgpt_account_id_claim(id_token: object) -> Optional[str]:
+    if not isinstance(id_token, str):
+        return None
+    parts = id_token.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        import base64
+
+        claims = json.loads(base64.urlsafe_b64decode((parts[1] + "=" * (-len(parts[1]) % 4)).encode("ascii")))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    auth = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else None
+    account_id = auth.get("chatgpt_account_id") if isinstance(auth, dict) else None
+    return account_id if isinstance(account_id, str) else None
 
 
 def read_codex_auth_state(home: Path | None = None) -> Dict[str, Any]:

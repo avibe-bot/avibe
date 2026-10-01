@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 import pytest
 
 from modules.agents.codex.agent import CodexAgent, CodexPromptRefreshUnavailableError
+from tests.codex_generation_support import acquire_returning, init_generation_state
 
 
 PROMPT_A = "完整的 Avibe baseline A.\nKeep the user's preferences."
@@ -27,7 +28,7 @@ def _request():
 
 
 def _agent(marker):
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent.controller = SimpleNamespace(get_codex_overrides=Mock(return_value=(None, None, None)))
     agent.codex_config = SimpleNamespace(default_model=None)
     native_binding = {}
@@ -191,11 +192,10 @@ async def test_dispatch_renders_once_even_for_empty_prompt_and_transport_recover
     agent._turn_registry.remember_request = Mock()
     agent._turn_registry.get_active_turn = Mock(return_value=None)
     agent._delete_ack = AsyncMock()
-    agent._touch_transport_activity = Mock()
     transport = _transport()
     fresh = _transport()
-    agent._get_or_create_transport = AsyncMock(side_effect=[transport, fresh])
-    agent._drop_transport_after_failure = AsyncMock(return_value=True)
+    agent._acquire_generation = acquire_returning(agent, transport, fresh, session=request.base_session_id)
+    agent._drop_generation_after_failure = AsyncMock(return_value=True)
     agent._refresh_thread_developer_instructions_if_needed = AsyncMock()
     agent._bind_runtime_agent_session_id = Mock()
     agent._build_thread_developer_instructions = AsyncMock(return_value=prompt)

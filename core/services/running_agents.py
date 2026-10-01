@@ -6,7 +6,7 @@ liveness source it reads is controller in-memory state:
 
 - Claude: ``controller.claude_sessions`` (composite_key -> SDK client),
   ``claude_active_sessions`` (active turn set), ``session_last_activity``.
-- Codex: ``CodexAgent._session_mgr`` / ``_turn_registry`` / ``_transports``
+- Codex: ``CodexAgent._session_mgr`` / ``_turn_registry`` / ``transport_for_session``
   (one transport/pid per working dir, shared by many sessions).
 - OpenCode: ``OpenCodeAgent._active_requests`` (no OS subprocess / pid).
 - Orphans: the persisted Claude process registry (``claude_processes.json``)
@@ -206,17 +206,17 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
         return rows
     session_mgr = getattr(agent, "_session_mgr", None)
     turn_registry = getattr(agent, "_turn_registry", None)
-    transports = getattr(agent, "_transports", {}) or {}
-    if session_mgr is None:
+    transport_for_session = getattr(agent, "transport_for_session", None)
+    if session_mgr is None or not callable(transport_for_session):
         return rows
 
     # ``all_base_sessions`` unions three lock-free dicts internally, so guard it
     # against concurrent mutation (we run in a worker thread, §to_thread).
     base_ids = list(_safe_call(session_mgr.all_base_sessions, []))
-    # Resolve each base's cwd once, then count sessions per cwd (so the UI can
-    # flag a pid shared across sessions) — avoids a second get_cwd pass.
+    # Resolve each base's app-server once, then count sessions per process (so
+    # the UI can flag a pid shared across sessions).
     entries: list[tuple[str, Optional[str], bool, Any]] = []
-    cwd_session_count: dict[str, int] = {}
+    transport_session_count: dict[int, int] = {}
     for base in base_ids:
         cwd = session_mgr.get_cwd(base)
         active_turn = turn_registry.get_active_turn(base) if turn_registry is not None else None
@@ -231,11 +231,11 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
             else False
         )
         is_active = bool(active_turn) or has_pending
-        transport = transports.get(cwd) if cwd else None
+        transport = _safe_call(lambda base=base: transport_for_session(base), None)
         # A transport object can outlive its app-server when the process exits out
-        # of band (crash / reader-task failure): it lingers in ``_transports`` with
-        # ``is_alive`` False until a later cleanup removes it. Treat a dead transport
-        # as no live transport so it can't surface as a phantom idle row.
+        # of band (crash / reader-task failure): it stays bound with ``is_alive``
+        # False until a later cleanup removes it. Treat a dead transport as no
+        # live transport so it can't surface as a phantom idle row.
         if transport is not None and not getattr(transport, "is_alive", True):
             transport = None
         # Idle eviction drops the app-server transport but preserves cwd/session
@@ -245,16 +245,16 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
         if transport is None and not is_active:
             continue
         entries.append((base, cwd, is_active, transport))
-        if cwd and transport is not None:
-            cwd_session_count[cwd] = cwd_session_count.get(cwd, 0) + 1
+        if transport is not None:
+            transport_session_count[id(transport)] = transport_session_count.get(id(transport), 0) + 1
 
     for base, cwd, is_active, transport in entries:
         pid = getattr(transport, "pid", None) if transport is not None else None
-        # No per-session elapsed for codex: ``_transport_last_activity`` is keyed
-        # by cwd (shared across every session on that transport) and is touched on
-        # every streaming event, so it reflects neither this session's turn
-        # duration nor its idle time. Report ``None`` rather than a misleading
-        # value; the row still shows backend / state / pid_shared.
+        # No per-session elapsed for codex: an app-server's activity time is shared
+        # across every session on that process and is touched on every streaming
+        # event, so it reflects neither this session's turn duration nor its idle
+        # time. Report ``None`` rather than a misleading value; the row still
+        # shows backend / state / pid_shared.
         rows.append(
             _make_row(
                 backend="codex",
@@ -262,7 +262,7 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
                 base_session_id=base,
                 workdir=cwd,
                 pid=pid,
-                pid_shared=bool(cwd and transport is not None and cwd_session_count.get(cwd, 0) > 1),
+                pid_shared=bool(transport is not None and transport_session_count.get(id(transport), 0) > 1),
                 elapsed_seconds=None,
             )
         )
@@ -650,13 +650,13 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
         return {"ok": False, "error": "codex_unavailable"}
     session_mgr = getattr(agent, "_session_mgr", None)
     turn_registry = getattr(agent, "_turn_registry", None)
-    transports = getattr(agent, "_transports", {}) or {}
-    if session_mgr is None or turn_registry is None:
+    transport_for_session = getattr(agent, "transport_for_session", None)
+    if session_mgr is None or turn_registry is None or not callable(transport_for_session):
         return {"ok": False, "error": "codex_registries_unavailable"}
     cwd = session_mgr.get_cwd(base_session_id)
     thread_id = session_mgr.get_thread_id(base_session_id)
     turn_id = turn_registry.get_active_turn(base_session_id)
-    transport = transports.get(cwd) if cwd else None
+    transport = transport_for_session(base_session_id)
     # Interrupt the active turn (the shared app-server transport stays up for
     # other sessions on the same cwd); then clear THIS session's thread/turn state.
     interrupted = False

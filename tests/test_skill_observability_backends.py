@@ -8,11 +8,12 @@ import pytest
 
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.opencode.agent import _OpenCodeSteerState, _SteeringAwareOpenCodeServer
+from tests.codex_generation_support import init_generation_state
 
 
 @pytest.mark.asyncio
 async def test_codex_counts_only_positive_injection_acknowledgements(monkeypatch):
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent.controller = SimpleNamespace()
     agent._read_persisted_prompt_strategy_marker = Mock(return_value=None)
     agent._persist_prompt_strategy = Mock(return_value=True)

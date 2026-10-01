@@ -22,6 +22,7 @@ import pytest
 import yaml
 from aiohttp import web
 from cryptography.hazmat.primitives.asymmetric import rsa
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
@@ -1550,20 +1551,30 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.Event().wait()
 
         controller = _ReloadingV2ConfigController()
-        agent = object.__new__(CodexAgent)
+        agent = init_generation_state(object.__new__(CodexAgent))
         agent.controller = controller
-        agent._transports = {str(home): FakeCodexTransport()}
-        agent._transport_last_activity = {}
         agent._connection_probes = {}
         agent._connection_probe_turns = {}
-        agent._connection_probe_cwds = {}
-        agent._get_or_create_transport = AsyncMock(
-            return_value=agent._transports[str(home)]
-        )
         controller.agent_service = SimpleNamespace(agents={"codex": agent})
         service = AgentAuthService(controller)
+        installed = {}
 
         async def run_connection_probe(current):
+            # The persistent app-server was started exactly as a direct launch
+            # with the saved configuration would start it now.
+            agent.codex_config = SimpleNamespace(binary="codex-probe", extra_args=[], auth_mode="oauth")
+            installed["generation"] = install_codex_transport(
+                agent,
+                str(home),
+                FakeCodexTransport(),
+                digest=agent._launch_spec_digest(
+                    str(home),
+                    binary="codex-probe",
+                    args=(),
+                    extra_args=(),
+                    env=dict(agent._codex_runtime_environment()),
+                ),
+            )
             current.test_result = await probe_backend_auth_async(
                 "codex",
                 model="gpt-5.4-mini",
@@ -1586,10 +1597,9 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(harness.test_result["ok"])
         self.assertEqual(harness.test_result["excerpt"], "codex-probe-ok")
-        agent._get_or_create_transport.assert_awaited_once_with(
-            str(home),
-            allow_runtime_replacement=False,
-        )
+        # The probe borrowed the running generation and started nothing.
+        self.assertIs(agent._current_generation(str(home)), installed["generation"])
+        self.assertEqual(installed["generation"].bindings, 0)
         self.assertEqual(
             requests,
             [
@@ -1626,7 +1636,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_codex_thread_rebinds_once_after_api_key_endpoint_switch(self):
         """Scenario: AUTH-SETUP-903"""
-        agent = object.__new__(CodexAgent)
+        agent = init_generation_state(object.__new__(CodexAgent))
         agent.controller = SimpleNamespace(
             config=SimpleNamespace(platform="avibe", reply_enhancements=True)
         )

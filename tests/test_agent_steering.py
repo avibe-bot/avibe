@@ -37,6 +37,7 @@ from tests.test_session_delivery_fsm import (
     _context, _seed_session,
     _fsm_schema_template, managers,  # noqa: F401 -- hermetic durable delivery fixtures
 )
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 
 STEER_TEXT = "补充：**不要改写**\n```python\nprint('λ')\n```"
@@ -304,10 +305,10 @@ async def test_native_steer_uses_normal_attachment_input_without_replacing_prima
     client = _ClaudeClient()
     server = _OpenCodeServer()
     if backend == "codex":
-        agent = object.__new__(CodexAgent)
+        agent = init_generation_state(object.__new__(CodexAgent))
         agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
         agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
-        agent._transports = {primary.working_path: transport}
+        install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     elif backend == "claude":
         agent = object.__new__(ClaudeAgent)
         agent.claude_sessions = {"runtime-key": client}
@@ -367,11 +368,11 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn(n
     primary = _primary_request(backend="codex")
     gate_task = await _held_task()
     transport = _CodexTransport()
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent.config = SimpleNamespace(include_time_info=True, include_user_info=True)
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
-    agent._transports = {primary.working_path: transport}
+    install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     try:
         identity = active_steer_identity(controller, "codex", "avibe-session")
@@ -394,7 +395,7 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn(n
             )
         ]
         assert len(agent._turn_registry.active_turns) == 1
-        assert primary.working_path in agent._transport_last_activity
+        assert agent.transport_for_session(primary.base_session_id) is transport
         assert not gate_task.done()
     finally:
         await _cancel_tasks(gate_task)
@@ -427,14 +428,14 @@ async def test_codex_steer_reconciliation_uses_persisted_client_message_id() -> 
             return {"turnId": "codex-turn"}
 
     transport = _ReconcileTransport()
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(
         primary.base_session_id,
         "codex-thread",
         primary.working_path,
     )
-    agent._transports = {primary.working_path: transport}
+    install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     target = ActiveSteerTarget(
         runtime_key="runtime-key",
@@ -511,15 +512,14 @@ async def test_codex_steer_reconciliation_survives_completed_native_turn() -> No
             }
 
     transport = _CompletedTurnTransport()
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(
         primary.base_session_id,
         "codex-thread",
         primary.working_path,
     )
-    agent._transports = {primary.working_path: transport}
-    agent._transport_last_activity = {}
+    install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     request = SteerRequest(
         target_session_id="avibe-session",
@@ -583,14 +583,14 @@ async def test_codex_steer_reconciliation_uses_durable_binding_after_restart(mon
         ),
     )
     transport = _CompletedTransport()
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "different-turn")
     agent._session_mgr = _CodexSessionManager(
         primary.base_session_id,
         "stale-thread",
         primary.working_path,
     )
-    agent._transports = {primary.working_path: transport}
+    install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     agent._steer_reconciliation_targets = {}
 
     request = SteerReconcileRequest(
@@ -617,15 +617,14 @@ async def test_codex_steer_reconciliation_cache_keeps_only_unknown_receipts() ->
     async def run(error: Exception | None, response: dict | None) -> dict:
         gate_task = await _held_task()
         transport = _CodexTransport(error=error, response=response)
-        agent = object.__new__(CodexAgent)
+        agent = init_generation_state(object.__new__(CodexAgent))
         agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
         agent._session_mgr = _CodexSessionManager(
             primary.base_session_id,
             "codex-thread",
             primary.working_path,
         )
-        agent._transports = {primary.working_path: transport}
-        agent._transport_last_activity = {}
+        install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
         controller = _controller_with_active_gate(agent, primary, gate_task)
         try:
             await steer_active_turn(
@@ -661,7 +660,7 @@ async def test_codex_start_renders_now_after_runtime_prompt_preparation(monkeypa
     ))
     request = _primary_request(backend="codex")
     request.input_metadata = AgentInputMetadata(user_id="sender", user_name="Sender")
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent.config = SimpleNamespace(include_time_info=True, include_user_info=True)
     agent.controller = SimpleNamespace()
     agent._prompt_state_agent_session_id = lambda _request: None
@@ -693,10 +692,10 @@ async def test_shared_gate_remains_steerable_after_dispatch_task_returns() -> No
     completed_dispatch = asyncio.create_task(asyncio.sleep(0))
     await completed_dispatch
     transport = _CodexTransport()
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
-    agent._transports = {primary.working_path: transport}
+    install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     controller = _controller_with_active_gate(agent, primary, completed_dispatch)
 
     identity = active_steer_identity(controller, "codex", "avibe-session")
@@ -722,19 +721,19 @@ async def test_codex_maps_native_failures_without_turn_start(error: Exception, e
     primary = _primary_request(backend="codex")
     gate_task = await _held_task()
     transport = _CodexTransport(error=error)
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
-    agent._transports = {primary.working_path: transport}
+    agent_generation = install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     try:
         receipt = await steer_active_turn(controller, "codex", _steer_request("codex-turn"))
         assert receipt.outcome is expected
         assert [method for method, _params in transport.calls] == ["turn/steer"]
         if expected is SteerOutcome.UNKNOWN:
-            assert primary.working_path in agent._transport_last_activity
+            assert agent_generation.runtime.last_activity > 0.0
         else:
-            assert primary.working_path not in getattr(agent, "_transport_last_activity", {})
+            assert agent_generation.runtime.last_activity == 0.0
     finally:
         await _cancel_tasks(gate_task)
 
@@ -744,17 +743,17 @@ async def test_codex_rejects_stale_native_turn_and_unavailable_runtime() -> None
     primary = _primary_request(backend="codex")
     gate_task = await _held_task()
     transport = _CodexTransport()
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
-    agent._transports = {primary.working_path: transport}
+    install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     try:
         stale = await steer_active_turn(controller, "codex", _steer_request("stale-turn"))
         assert stale.outcome is SteerOutcome.NOT_ACTIVE
         assert transport.calls == []
 
-        agent._transports.clear()
+        agent._session_generations.clear()
         unavailable = await steer_active_turn(controller, "codex", _steer_request("codex-turn"))
         assert unavailable.outcome is SteerOutcome.REFUSED
         assert unavailable.reason == "runtime_unavailable"
@@ -2730,10 +2729,10 @@ async def test_shared_guard_rejects_stale_logical_or_missing_active_turn() -> No
     primary = _primary_request(backend="codex")
     gate_task = await _held_task()
     transport = _CodexTransport()
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
-    agent._transports = {primary.working_path: transport}
+    install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     try:
         stale = await steer_active_turn(
@@ -2757,10 +2756,10 @@ async def test_shared_guard_requires_the_avibe_session_identity() -> None:
     primary.base_session_id = "backend-anchor"
     gate_task = await _held_task()
     transport = _CodexTransport()
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
-    agent._transports = {primary.working_path: transport}
+    install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     request = _steer_request("codex-turn")
     request = SteerRequest(
@@ -2782,24 +2781,23 @@ async def test_shared_service_uses_the_active_runtime_generation_after_registry_
     primary = _primary_request(backend="codex")
     gate_task = await _held_task()
     active_transport = _CodexTransport()
-    active_agent = object.__new__(CodexAgent)
+    active_agent = init_generation_state(object.__new__(CodexAgent))
     active_agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     active_agent._session_mgr = _CodexSessionManager(
         primary.base_session_id,
         "codex-thread",
         primary.working_path,
     )
-    active_agent._transports = {primary.working_path: active_transport}
+    install_codex_transport(active_agent, primary.working_path, active_transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     controller = _controller_with_active_gate(active_agent, primary, gate_task)
 
-    replacement_agent = object.__new__(CodexAgent)
+    replacement_agent = init_generation_state(object.__new__(CodexAgent))
     replacement_agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "replacement-turn")
     replacement_agent._session_mgr = _CodexSessionManager(
         primary.base_session_id,
         "replacement-thread",
         primary.working_path,
     )
-    replacement_agent._transports = {}
     controller.agent_service.agents["codex"] = replacement_agent
     try:
         identity = active_steer_identity(controller, "codex", "avibe-session")
@@ -2821,20 +2819,20 @@ async def test_shared_guard_disambiguates_concurrent_gates_by_expected_turn_iden
     second_task = await _held_task()
 
     first_transport = _CodexTransport(response={"turnId": "codex-turn-1"})
-    first_agent = object.__new__(CodexAgent)
+    first_agent = init_generation_state(object.__new__(CodexAgent))
     first_agent._turn_registry = _CodexTurnRegistry(first.base_session_id, "codex-turn-1")
     first_agent._session_mgr = _CodexSessionManager(first.base_session_id, "codex-thread-1", first.working_path)
-    first_agent._transports = {first.working_path: first_transport}
+    install_codex_transport(first_agent, first.working_path, first_transport, sessions={first.base_session_id: "codex-thread"}, last_activity=0.0)
 
     second_transport = _CodexTransport(response={"turnId": "codex-turn-2"})
-    second_agent = object.__new__(CodexAgent)
+    second_agent = init_generation_state(object.__new__(CodexAgent))
     second_agent._turn_registry = _CodexTurnRegistry(second.base_session_id, "codex-turn-2")
     second_agent._session_mgr = _CodexSessionManager(
         second.base_session_id,
         "codex-thread-2",
         second.working_path,
     )
-    second_agent._transports = {second.working_path: second_transport}
+    install_codex_transport(second_agent, second.working_path, second_transport, sessions={second.base_session_id: "codex-thread"}, last_activity=0.0)
 
     gates = {
         "main": SimpleNamespace(
@@ -2889,14 +2887,14 @@ async def test_shared_service_prefers_explicit_session_target_over_legacy_id() -
     primary.context.platform_specific["agent_session_id"] = "stale-session"
     gate_task = await _held_task()
     transport = _CodexTransport()
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(
         primary.base_session_id,
         "codex-thread",
         primary.working_path,
     )
-    agent._transports = {primary.working_path: transport}
+    install_codex_transport(agent, primary.working_path, transport, sessions={primary.base_session_id: "codex-thread"}, last_activity=0.0)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     try:
         assert active_steer_identity(controller, "codex", "stale-session") is None

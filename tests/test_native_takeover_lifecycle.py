@@ -23,6 +23,7 @@ from core.backend_restart import (
     native_cli_processes,
     pending_native_backends,
 )
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 
 def controller_fixture(*, backends=("claude", "codex", "opencode"), busy=False):
@@ -795,36 +796,50 @@ async def test_terminal_ttl_does_not_drop_failed_cleanup_owner(monkeypatch):
     await service._cleanup_native_flow(flow)
 
 
-@pytest.mark.asyncio
-async def test_codex_strict_retirement_propagates_stop_failure():
+def _codex_migration_agent(transport, *, activation=None):
     from modules.agents.codex.agent import CodexAgent
 
-    transport = SimpleNamespace()
-    agent = CodexAgent.__new__(CodexAgent)
-    agent._transports = {"cwd": transport}
-    agent._transport_locks = {}
-    agent._stop_and_detach_transport_generation = AsyncMock(side_effect=RuntimeError("stop failed"))
-    agent._session_mgr = SimpleNamespace(all_base_sessions=Mock(return_value=["session"]), invalidate_thread=Mock())
+    agent = init_generation_state(object.__new__(CodexAgent))
+    agent.controller = SimpleNamespace(runtime_activation=activation)
+    agent._session_mgr = SimpleNamespace(
+        all_base_sessions=Mock(return_value=["session"]),
+        sessions_for_cwd=Mock(return_value=["session"]),
+        invalidate_thread=Mock(),
+    )
+    agent._turn_registry = SimpleNamespace(get_active_turn=Mock(return_value=None), clear_session=Mock())
+    agent._ownership_snapshots = AsyncMock(
+        return_value=(SimpleNamespace(blocks_transport_replacement=False, blocks_dead_transport_replacement=False),)
+    )
+    identity = activation.attach("codex", "cwd#1") if activation is not None else None
+    install_codex_transport(agent, "cwd", transport, activation=identity, sessions={"session": "thread"})
+    return agent, identity
+
+
+@pytest.mark.asyncio
+async def test_codex_strict_retirement_propagates_stop_failure():
+    transport = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("stop failed")), _process=None)
+    agent, _identity = _codex_migration_agent(transport)
     with pytest.raises(RuntimeError, match="stop failed"):
         await agent.retire_for_native_migration()
-    assert agent._transports["cwd"] is transport
+    assert [generation.runtime.transport for generation in agent._units["cwd"].generations] == [transport]
+    assert agent.transport_for_session("session") is transport
     agent._session_mgr.invalidate_thread.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_codex_strict_retirement_checks_exit_before_detaching():
-    from modules.agents.codex.agent import CodexAgent
+    from core.runtime_activation import RuntimeActivationRegistry
 
     process = SimpleNamespace(returncode=None, wait=AsyncMock())
     transport = SimpleNamespace(_process=process, stop=AsyncMock())
-    agent = CodexAgent.__new__(CodexAgent)
-    agent._reserve_transport_retirement = Mock(return_value="generation")
-    agent._finish_transport_retirement = Mock(return_value=True)
-    agent._detach_transport_bookkeeping = Mock(return_value=True)
+    activation = RuntimeActivationRegistry()
+    agent, identity = _codex_migration_agent(transport, activation=activation)
     with pytest.raises(RuntimeError, match="did not exit"):
-        await agent._stop_and_detach_transport_generation("cwd", transport, require_process_exit=True)
-    agent._finish_transport_retirement.assert_called_once_with("generation", retire=False)
-    agent._detach_transport_bookkeeping.assert_not_called()
+        await agent.retire_for_native_migration()
+    # The aborted retirement leaves the exact generation live and bound.
+    assert activation.is_current(identity)
+    assert agent.transport_for_session("session") is transport
+    agent._session_mgr.invalidate_thread.assert_not_called()
 
 
 @pytest.mark.asyncio

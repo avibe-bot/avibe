@@ -20,6 +20,7 @@ from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.service import AgentService
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 
 def _join(thread: threading.Thread) -> None:
@@ -219,12 +220,11 @@ def test_backend_binding_resolvers_use_exact_anchor_and_workdir() -> None:
             workdir="/other",
         )
 
-    codex_identity = registry.attach("codex", "/work")
-    codex_transport = SimpleNamespace(
-        _vibe_runtime_activation_identity=codex_identity,
+    codex_identity = registry.attach("codex", "/work#1")
+    codex = init_generation_state(object.__new__(CodexAgent))
+    install_codex_transport(
+        codex, "/work", SimpleNamespace(), activation=codex_identity, sessions={"anchor": "thread"}
     )
-    codex = object.__new__(CodexAgent)
-    codex._transports = {"/work": codex_transport}
     codex._session_mgr = SimpleNamespace(
         get_cwd=lambda anchor: "/work" if anchor == "anchor" else None,
     )
@@ -522,10 +522,9 @@ def test_hfr_137_codex_session_key_claim_observes_retired_generation() -> None:
     """HFR-137: legacy routes cannot bypass the exact Codex generation."""
 
     registry = RuntimeActivationRegistry()
-    identity = registry.attach("codex", "/work")
-    transport = SimpleNamespace(_vibe_runtime_activation_identity=identity)
-    codex = object.__new__(CodexAgent)
-    codex._transports = {"/work": transport}
+    identity = registry.attach("codex", "/work#1")
+    codex = init_generation_state(object.__new__(CodexAgent))
+    install_codex_transport(codex, "/work", SimpleNamespace(), activation=identity, sessions={"base": "thread"})
     codex._session_mgr = SimpleNamespace(
         get_sessions_by_session_key=lambda _route: ["base"],
         get_cwd=lambda _base: "/work",

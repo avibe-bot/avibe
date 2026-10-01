@@ -105,6 +105,8 @@ capabilities:
     observations: tests/scenarios/runtime_generations/observations.yaml
     scenario_tests:
       - tests/test_runtime_generations.py
+      - tests/test_codex_runtime_generations.py
+      - tests/e2e/test_codex_runtime_generations_contract.py
     unit_or_contract_tests:
       - tests/test_claude_cli_path.py
       - tests/test_backend_restart.py

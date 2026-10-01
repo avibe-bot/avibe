@@ -17,9 +17,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from config import paths
-from modules.agents.codex.agent import CodexAgent, CodexModelHubCatalogUnavailableError
+from modules.agents.codex.agent import CodexAgent
 from modules.agents.codex.transport import CodexTransport
 from vibe import backend_model_catalog as catalogs
+from tests.codex_generation_support import init_generation_state
 
 
 def publish(slug):
@@ -38,10 +39,7 @@ def churn(count=6):
 
 
 def agent():
-    value = CodexAgent.__new__(CodexAgent)
-    value._model_hub_catalog = None
-    value._model_hub_catalog_lock = asyncio.Lock()
-    value._model_hub_catalog_generation = 0
+    value = init_generation_state(object.__new__(CodexAgent))
     value.codex_config = SimpleNamespace(binary="fixture-codex", extra_args=[])
     value.controller = SimpleNamespace()
     return value
@@ -215,16 +213,16 @@ async def test_cache_invalidation_during_pending_launch_keeps_local_reference(mo
     monkeypatch.setattr(catalogs, "_export_codex_bundled_catalog", lambda *_: b'{"models":[{"slug":"first"}]}')
     starting = (await value.prepare_model_hub_runtime()).retain()
     path = starting.path
-    await value.invalidate_model_hub_runtime()
+    await value.adopt_model_hub_catalog()
     churn()
-    assert value._model_hub_catalog is None and path in retained()
+    assert not value._model_hub_catalogs and path in retained()
     starting.close()
     churn()
     assert len(retained()) <= 1
 
 
 @pytest.mark.asyncio
-async def test_invalidated_export_releases_unpublished_pin(monkeypatch):
+async def test_export_finishing_after_adoption_stays_releasable(monkeypatch):
     value = agent()
     entered = threading.Event()
     released = threading.Event()
@@ -237,12 +235,13 @@ async def test_invalidated_export_releases_unpublished_pin(monkeypatch):
     monkeypatch.setattr(catalogs, "_export_codex_bundled_catalog", export)
     preparation = asyncio.create_task(value.prepare_model_hub_runtime())
     assert await asyncio.to_thread(entered.wait, 2)
-    await value.invalidate_model_hub_runtime()
+    await value.adopt_model_hub_catalog()
     released.set()
-    with pytest.raises(CodexModelHubCatalogUnavailableError, match="generation changed"):
-        await preparation
-    assert value._model_hub_catalog is None
-    del preparation
+    # Keyed to the snapshot it was prepared for, the result is still valid.
+    prepared = await preparation
+    assert list(value._model_hub_catalogs.values()) == [prepared]
+    await value.adopt_model_hub_catalog()
+    del preparation, prepared
     churn()
     assert len(retained()) <= 1
 
@@ -274,7 +273,7 @@ async def test_cancelled_export_closes_its_eventual_result(monkeypatch):
         await preparation
     finish.set()
     await asyncio.wait_for(closed.wait(), 5)
-    assert value._model_hub_catalog is None
+    assert not value._model_hub_catalogs
     churn()
     assert len(retained()) <= 1
 
@@ -295,9 +294,6 @@ for line in sys.stdin:
 @pytest.mark.asyncio
 async def test_agent_launch_keeps_pin_across_invalidation_and_reuses_transport(monkeypatch, tmp_path):
     value = agent()
-    value._transports = {}
-    value._transport_locks = {}
-    value._transport_cwd_inodes = {}
     initialized = asyncio.Event()
     finish = asyncio.Event()
     spawn = asyncio.create_subprocess_exec
@@ -319,28 +315,31 @@ async def test_agent_launch_keeps_pin_across_invalidation_and_reuses_transport(m
     # An extra argument must not override the path whose lifetime we protect.
     value.codex_config.extra_args = ["-c", 'model_catalog_json="/obsolete/catalog.json"']
     launch = SimpleNamespace(
-        channel="hub", fingerprint="hub:test",
+        channel="hub",
         gateway_base_url="http://127.0.0.1:1", gateway_token="fixture-only",
     )
-    starting = asyncio.create_task(value._get_or_create_transport(str(tmp_path), launch))
+    starting = asyncio.create_task(value._acquire_generation(str(tmp_path), launch))
     try:
         await asyncio.wait_for(initialized.wait(), 5)
-        path = value._model_hub_catalog.path
+        path = next(iter(value._model_hub_catalogs.values())).path
         assert argv[-1] == f"model_catalog_json={json.dumps(str(path))}"
-        await value.invalidate_model_hub_runtime()
+        await value.adopt_model_hub_catalog()
         churn()
         assert path in retained()
         finish.set()
-        transport = await starting
-        assert (await value._get_or_create_transport(str(tmp_path), launch)) is transport
+        transport = (await starting).generation.runtime.transport
+        # Same catalog content, same spec: the running generation is reused.
+        reused = await value._acquire_generation(str(tmp_path), launch)
+        assert reused.generation.runtime.transport is transport
         assert path in retained()
+        await value.adopt_model_hub_catalog()
         await transport.stop()
         await transport._catalog_exit_task
         churn()
         assert len(retained()) <= 1
     finally:
         finish.set()
-        transport = await starting
+        transport = (await starting).generation.runtime.transport
         await transport.stop()
 
 

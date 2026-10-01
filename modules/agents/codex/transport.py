@@ -59,6 +59,10 @@ AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
     "features.tool_suggest=false",
     "features.workspace_dependencies=false",
     "skills.include_instructions=false",
+    # Unload a thread as soon as Avibe unsubscribes from it while it is idle.
+    # That releases Codex's cross-process thread writer lock, so another
+    # app-server generation for the same directory can resume the thread.
+    "thread_unload_delay_secs=0",
     # Host-owned questions. Codex 0.153.2 gates the synchronous tool only;
     # asynchronous exposure still needs upstream support (openai/codex#43821).
     "tools.experimental_request_user_input.enabled=false",
@@ -109,7 +113,6 @@ class CodexTransport:
         extra_args: list[str] | None = None,
         runtime_args: list[str] | None = None,
         runtime_env: dict[str, str] | None = None,
-        runtime_fingerprint: str = "direct",
         model_hub_catalog: CodexHubCatalog | None = None,
     ) -> None:
         self._binary = binary
@@ -117,7 +120,6 @@ class CodexTransport:
         self._extra_args = extra_args or []
         self._runtime_args = runtime_args or []
         self._runtime_env = runtime_env
-        self.runtime_fingerprint = runtime_fingerprint
         self._model_hub_catalog = model_hub_catalog.retain() if model_hub_catalog is not None else None
         self._catalog_required = model_hub_catalog is not None
         self._catalog_exit_task: asyncio.Task[None] | None = None
