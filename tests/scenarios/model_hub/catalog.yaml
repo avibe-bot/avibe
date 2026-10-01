@@ -1339,11 +1339,11 @@ scenarios:
     related_tests:
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
   - id: MH-MIG-011
-    name: Switching back to direct interrupts running gateway work instead of leaving it to fail on the Hub's refusal
+    name: A mode switch interrupts nothing, and a Hub turn admitted before a switch to Direct keeps resolving its routes
     status: covered
     kind: migration
     layer: unit
-    test: tests/test_model_hub_api.py::test_mode_switch_commits_only_inside_the_interrupting_guard
+    test: tests/test_model_hub_api.py::test_mode_switch_interrupts_nothing_and_keeps_admitted_hub_turns_served
   - id: MH-MIG-012
     name: Work interrupted by a runtime refresh is reported to the user as that interruption on every backend
     status: covered

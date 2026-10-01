@@ -4958,42 +4958,39 @@ def test_hub_to_direct_fallback_does_not_require_engine_sync(tmp_path):
 
 
 @pytest.mark.parametrize(("start", "target"), [("direct", "hub"), ("hub", "direct")])
-def test_mode_switch_commits_only_inside_the_interrupting_guard(tmp_path, start, target):
-    """MH-MIG-011: either direction retires the managed runtime under the
-    migration guard, which interrupts running work. Switching back to direct
-    outside it left a running gateway turn to fail later on the Hub's refusal."""
+def test_mode_switch_interrupts_nothing_and_keeps_admitted_hub_turns_served(tmp_path, start, target):
+    """MH-MIG-011: a mode switch is a launch-input change, not an exclusive cutover.
+
+    It never enters the interrupting migration guard; it commits and lets each
+    runtime move at its next turn. A Hub turn admitted before a switch to Direct
+    keeps resolving its routes, so it is not failed by a later refusal.
+    """
     service, store, _adapter = _service(tmp_path)
     service.migration_home = tmp_path / "native-home"
     store.config.agents["claude"].mode = start
-    observed = []
+    _set_claude_route_fixture(store, ("src_first0001",), "claude-opus-4-6")
+    entered = []
+    refreshed = []
 
     @asynccontextmanager
     async def guard(backends, *, external_processes=True):
-        observed.append(("enter", backends, external_processes, store.config.agents["claude"].mode))
+        entered.append(backends)
+        yield lambda: None
 
-        async def verify_idle():
-            pass
-
-        yield verify_idle
-        observed.append(("exit", store.config.agents["claude"].mode))
+    async def catalog_changed(backend):
+        refreshed.append((backend, store.config.agents[backend].mode))
 
     service.migration_guard = guard
+    service.backend_catalog_changed = catalog_changed
+
     switched = asyncio.run(service.set_agent_mode("claude", target))
 
     assert switched["mode"] == target
-    assert observed == [("enter", ("claude",), False, start), ("exit", target)]
-
-    @asynccontextmanager
-    async def refusing(backends, *, external_processes=True):
-        raise NativeMigrationBlockedError("native_runtime_busy", backends)
-        yield  # pragma: no cover - required async context-manager shape
-
-    service.migration_guard = refusing
-    with pytest.raises(ModelHubError) as refusal:
-        asyncio.run(service.set_agent_mode("claude", start))
-
-    assert refusal.value.code == "mode_switch_blocked"
     assert store.config.agents["claude"].mode == target
+    assert entered == []
+    assert refreshed == [("claude", target)]
+    resolution = service._invocation_resolution(store.config, "claude", "claude-opus-4-6")
+    assert resolution.requested_model == "claude-opus-4-6"
 
 
 async def _confirm_guard(call):

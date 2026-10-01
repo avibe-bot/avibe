@@ -375,11 +375,14 @@ Three PRs; the second and third run in parallel lanes:
    - removal of the reload, deferral, transition, and refusal paths;
    - the UI-process launch path.
 
-Whichever of 2 and 3 lands last also does two more things:
+The Hub/Direct mode switch is a snapshot change in the first PR. It never enters
+`migration_guard`. The gateway keeps resolving a Hub turn that was admitted
+before a switch to Direct, until that turn ends.
 
-- deletes the drain-then-interrupt path;
-- turns the Hub/Direct mode switch into a snapshot change, updating
-  `backend-rolling-restart.md`.
+The Codex adapter is integrated into the first PR's branch before that PR
+merges, so the shared core ships with a production caller. The OpenCode
+adapter follows as a stacked PR. The drain-then-interrupt path is deleted
+once the last backend renews in place.
 
 Each PR ships scenario IDs and regression tests that fail on the code before
 it.
