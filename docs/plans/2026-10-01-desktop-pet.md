@@ -129,25 +129,32 @@ extra window:
 The IPC surface is kept minimal. It is granted to window `pet` for the remote
 loopback origin only, through a new capability file:
 
-- event `pet:summon`, sent from the shell to the pet when the hotkey fires;
+- command `pet_ready() -> {binding, summon_pending}`, which the route calls
+  once `/pet` has mounted and its listeners are installed. It returns the
+  current binding and consumes any summon that arrived before the page was
+  ready, so a summon that recreated the window is never lost;
+- event `pet:summon`, sent from the shell to the pet when a wake happens and
+  the page is ready. Before `pet_ready()`, the shell records the summon as
+  pending instead of emitting it, because Tauri events have no replay;
 - command `pet_set_expanded(expanded: bool) -> PetLayout`, to resize and
   anchor the window. The shell is the only owner of placement, because only
   it knows the monitor work area and the anchor. It returns the layout it
   chose, `{panel_side: left | right, panel_edge: top | bottom, pet_offset}`,
   and the route renders the pet and panel from that value. The native frame
   and the DOM therefore share one placement decision;
-- command `pet_binding() -> session_id | null` and event `pet:bound`, which
-  carry the session binding (see Session binding);
-- command `pet_open(link)`, which takes an `avibe://session/<id>` or
-  `avibe://vaults/request/<request_id>` link. It is parsed and validated by the existing
-  deep-link parser (`desktop-deep-links.md`) and then focuses `main` through
-  the same path a clicked deep link uses. The pet gets no new routing logic;
-  anything the parser rejects is dropped;
+- command `pet_bind(session_id | null)` and event `pet:bound`, which set and
+  carry the session binding (see Session binding). The pet uses `pet_bind`
+  for its switcher and to clear an invalid binding;
+- command `pet_open(link)`, which takes any link the existing deep-link
+  parser (`desktop-deep-links.md`) accepts: session, Show Page, settings, and
+  vault request. It focuses `main` through the same path a clicked deep link
+  uses. The pet gets no new routing logic; anything the parser rejects is
+  dropped;
 - permission `start-dragging`.
 
-`main` gets one more command, `pet_bind(session_id | null)`, through its own
-new capability file for the remote loopback origin. It is the "Show in pet"
-action. No other `main` capability changes.
+`main` gets one command, `pet_bind`, through its own new capability file for
+the remote loopback origin. It is the "Show in pet" action. No other `main`
+capability changes.
 
 Everything else the pet needs comes from the Runtime HTTP and SSE API, exactly
 as it does for the Workbench.
@@ -168,13 +175,23 @@ as it does for the Workbench.
 - **One wake function.** Every wake path (hotkey, tray item, any future one)
   calls `pet_wake()`. It checks the enabled flag first, runs
   `pet_reconcile()` so a missing window is recreated, then shows the pet and
-  emits `pet:summon`.
+  delivers the summon: emitted at once if the page is ready, otherwise
+  recorded as pending for `pet_ready()`.
 - **Off switch.** A tray `CheckMenuItem` "Show pet", next to "Notifications".
   Off destroys the window and unregisters the shortcut, so nothing can wake it.
 - **Preferences.** `pet.json` in `app_local_data_dir`, the same pattern as
-  `notifications.json`: `{enabled, shortcut, anchor, binding}`. All durable
-  pet state lives here. Pet visibility defaults to off
-  until voice ships, then on.
+  `notifications.json`: `{version: 1, enabled?, shortcut?, anchor?, binding?}`.
+  All durable pet state lives here.
+  - `enabled` is written only by the tray switch. An absent `enabled` means
+    "use this build's default", so writes of the anchor or binding never
+    freeze the default.
+  - The default is off in the shell-and-state build and on from the voice
+    build. A user who never touched the switch therefore gets the pet when
+    voice ships, and a user who turned it off stays off.
+  - Unknown versions and unreadable files load as defaults with a warning; the
+    app never fails to start because of `pet.json`. Load fixtures cover an
+    absent file, a file without `enabled`, an explicit `false`, and an
+    unreadable file.
 
 ### Pet route (web UI)
 
@@ -184,7 +201,8 @@ as it does for the Workbench.
   outside `AppShell`, so it has no sidebar or chrome.
 - `/pet` is exempt from `AuthGuard`'s setup redirect. Before setup is
   complete, it renders its own setup-pending state ("Finish setting up in
-  Avibe", which focuses `main`) and stays on `/pet`. So a default-on pet on a
+  Avibe", which calls `pet_open("avibe://settings")`; `main`'s own guard then
+  shows setup) and stays on `/pet`. So a default-on pet on a
   fresh install never becomes a pet-sized setup wizard.
 - It reuses the provider's single `EventSource('/api/events')`. That is one
   connection per window. The server has no per-session filter, so the route
@@ -254,7 +272,7 @@ when the user changes the UI port, so it cannot own anything durable.
 - The Workbench chat page's "Show in pet" action calls `pet_bind(S)`.
 - The panel's compact recent-session switcher calls `pet_bind` the same way.
 - The shell writes `pet.json` and emits `pet:bound` to the pet. On load, the
-  pet reads `pet_binding()`.
+  pet reads the binding from `pet_ready()`.
 - **A binding is valid only while `S` is an active session.** Every read of
   `getSession(S)` checks this, on bind, on gaps, and on any `session.activity`
   for `S` (archive, move, and the rest are all published there). When the
@@ -448,10 +466,18 @@ The microphone usage string and audio-input entitlement already ship (#2293).
   - `pet_set_expanded` returns the layout it applied, near each screen edge;
   - `pet_bind` persists to `pet.json` and emits `pet:bound`, and the binding
     survives a Runtime origin change;
-  - `main` gains only `pet_bind`.
+  - `main` gains only `pet_bind`, and `pet` is granted exactly `pet_ready`,
+    `pet_set_expanded`, `pet_bind`, `pet_open`, the two events, and
+    `start-dragging`; `pet_bind` from `pet` sets and clears the binding;
+  - a wake that recreates the window delivers the summon through
+    `pet_ready()`, and a summon to a ready page is emitted once;
+  - `pet.json` load fixtures: absent file, no `enabled`, explicit `false`,
+    unreadable file; an absent `enabled` follows the build default and an
+    explicit `false` survives the default change.
 - **Vitest:**
   - `derivePetState` covers every row and the priority order;
-  - session binding through `pet_binding()` and `pet:bound`; the hotkey with
+  - session binding through `pet_ready()` and `pet:bound`; the switcher and
+    an invalid binding both go through `pet_bind`; the hotkey with
     no valid binding opens the switcher and never starts capture;
   - before setup is complete, `/pet` renders its setup-pending state and is
     not redirected to `/setup`;
