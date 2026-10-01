@@ -32,6 +32,7 @@ def init_generation_state(agent: Any) -> Any:
     agent._generation_serials = itertools.count(1)
     agent._runtimes = {}
     agent._shutting_down = False
+    agent._retired = False
     agent._runtime_epoch = 0
     agent._reap_tasks = set()
     agent._model_hub_catalogs = OrderedDict()

@@ -1,4 +1,4 @@
-"""RUNTIME-GEN-010..018 and HFR-144: Codex app-server generations per working directory.
+"""RUNTIME-GEN-006, RUNTIME-GEN-010..018, and HFR-144: Codex app-server generations per working directory.
 
 The fake app-server enforces Codex's cross-process thread writer lock: a thread
 loaded in one process cannot be resumed in another until the first releases it.
@@ -22,7 +22,9 @@ from modules.agents.codex.session import CodexSessionManager
 from modules.agents.codex.transport import CodexRPCError
 from modules.agents.codex.turn_state import CodexTurnRegistry
 from modules.agents.model_hub import ModelHubLaunch
+from modules.agents.runtime_generations import RuntimeUnitStopping
 from tests.codex_generation_support import init_generation_state
+from vibe.i18n import t as i18n_t
 
 
 CWD_NAME = "项目 work"
@@ -347,6 +349,86 @@ async def _until(condition, *, timeout=1.0):
     while not condition():
         assert loop.time() < deadline, "condition not reached"
         await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_006_a_retired_codex_agent_finishes_its_work_and_admits_nothing(tmp_path, monkeypatch):
+    """RUNTIME-GEN-006: disabling Codex interrupts nothing, and each app-server stops once drained.
+
+    A turn already past the agent lookup fails visibly and starts no process,
+    whether its directory has an app-server or not.
+    """
+    failures = AsyncMock()
+    monkeypatch.setattr(codex_agent_module, "emit_backend_failure", failures)
+    router = _Router()
+    router.launches["model-a"] = _launch("model-a")
+    agent, cwd = _agent(tmp_path, router=router)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    await agent.handle_message(_request(cwd, "s1"))
+    busy = _server_for(agent, "s1")
+    await agent.handle_message(_request(str(elsewhere), "s2"))
+    idle = _server_for(agent, "s2")
+    await idle.complete(agent._session_mgr.get_thread_id("s2"))
+    started = len(FakeAppServer.started)
+    # One turn for a directory with no app-server yet is resolving its launch.
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    resolving, resolved = asyncio.Event(), asyncio.Event()
+    resolve = router.resolve
+
+    async def slow_resolve(*args, **kwargs):
+        resolving.set()
+        await resolved.wait()
+        return await resolve(*args, **kwargs)
+
+    router.resolve = slow_resolve
+    in_flight = asyncio.create_task(agent.handle_message(_request(str(fresh), "s3")))
+    await asyncio.wait_for(resolving.wait(), 1)
+
+    await agent.retire_runtime()
+    await agent.retire_runtime()  # A second call changes nothing.
+
+    assert idle.stopped and not busy.stopped
+    assert agent._turn_registry.get_active_turn("s1")
+    assert not agent.runtime_retired()
+    resolved.set()
+    await asyncio.wait_for(in_flight, 1)
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s4")), 1)
+    assert [type(call.kwargs["cause"]) for call in failures.await_args_list] == [RuntimeUnitStopping] * 2
+    assert {call.kwargs["display_text"] for call in failures.await_args_list} == {
+        f"❌ {i18n_t('error.codexRuntimeRetired', 'en')}"
+    }
+    assert len(FakeAppServer.started) == started
+
+    # The running turn finishes on its own app-server, which then stops.
+    await busy.complete(agent._session_mgr.get_thread_id("s1"))
+    await agent.reap_runtime_generations()
+    assert busy.stopped and agent.runtime_retired()
+    assert not any(method == "turn/interrupt" for method, _params in busy.requests)
+    agent.controller.agent_service.force_end_runtime_work.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_006_the_sweep_ends_a_retired_agents_process_whose_stop_failed(tmp_path):
+    """RUNTIME-GEN-006: a retired agent's unit takes nothing back, so a survivor stays the sweep's to stop."""
+    agent, cwd = _agent(tmp_path)
+    await agent.handle_message(_request(cwd, "s1"))
+    server = _server_for(agent, "s1")
+    await server.complete(agent._session_mgr.get_thread_id("s1"))
+    stop = server.stop
+    server.stop = AsyncMock(side_effect=RuntimeError("the child did not stop"))
+    await agent.retire_runtime()
+    # A native-credential migration reaches retired agents too; its stop fails again.
+    with pytest.raises(RuntimeError, match="did not stop"):
+        await agent.retire_for_native_migration()
+    assert not agent.runtime_retired()
+
+    server.stop = stop
+    await agent.reap_runtime_generations()
+
+    assert server.stopped and agent.runtime_retired()
+    assert agent._generation_for_session("s1") is None
 
 
 @pytest.mark.asyncio

@@ -59,6 +59,8 @@ scenarios:
     test: tests/test_backend_restart.py::test_runtime_gen_006_disabling_a_backend_holds_no_message_and_interrupts_nothing
     related_tests:
       - tests/test_claude_cli_path.py::test_runtime_gen_006_a_client_from_before_a_renewal_is_reclaimed_once_idle
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_retired_codex_agent_finishes_its_work_and_admits_nothing
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_006_the_sweep_ends_a_retired_agents_process_whose_stop_failed
   - id: RUNTIME-GEN-007
     name: Re-enabling a backend while its retired agent drains starts new work at once and leaves the retired work running
     status: covered

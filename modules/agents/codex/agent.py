@@ -154,8 +154,9 @@ class _CodexRuntime:
     ended: bool = False
     # Set while a teardown holds the activation fence; done when it finishes.
     teardown: asyncio.Future[None] | None = None
-    # A child that outlived its own failed start; the sweep retries its stop.
-    failed_start: bool = False
+    # No unit holds this running process: it outlived its own failed start,
+    # or its stop failed in a closed unit. The sweep retries its stop.
+    orphaned: bool = False
 
 
 _CodexGeneration = RuntimeGeneration[CodexLaunchSpec, _CodexRuntime]
@@ -266,6 +267,9 @@ class CodexAgent(BaseAgent):
         self._runtimes: Dict[str, set[_CodexRuntime]] = {}
         # Shutdown ends every process without the runtime-update notice.
         self._shutting_down = False
+        # Set once the backend is disabled: nothing is admitted any more, and
+        # each process stops once its work drains.
+        self._retired = False
         # Part of every launch spec: renewing moves each cwd to a new process
         # at its next turn.
         self._runtime_epoch = 0
@@ -624,6 +628,10 @@ class CodexAgent(BaseAgent):
         launch = None
         config = None
         try:
+            if self._retired or self._shutting_down:
+                # Past the agent lookup already: refuse before anything is
+                # recorded or a Hub launch is resolved for this turn.
+                raise RuntimeUnitStopping("runtime unit is stopping")
             # Register a complete durable binding before any transport
             # acquisition or resume can fail and require ownership checks.
             self.ensure_agent_session_id(request)
@@ -677,6 +685,9 @@ class CodexAgent(BaseAgent):
                 # input for an explicit retry.
                 mark_prewrite_recovery_required(request.context, e.reason)
                 display_text = f"❌ {i18n_t('error.codexThreadReleaseUnavailable', language)}"
+            elif isinstance(e, RuntimeUnitStopping):
+                # Not a source failure: no Hub cooldown.
+                display_text = f"❌ {i18n_t('error.codexRuntimeRetired', language)}"
             elif isinstance(e, CodexModelHubCatalogUnavailableError):
                 await self._record_model_hub_native_failure(request.context, str(e))
                 display_text = f"❌ {i18n_t('modelHub.errors.codex_catalog_unavailable', language)}"
@@ -1604,8 +1615,35 @@ class CodexAgent(BaseAgent):
             self._turn_registry.clear_session(base_session_id)
         logger.info("Prepared Codex runtime for resumed session %s", base_session_id)
 
+    async def retire_runtime(self) -> None:
+        """Retire every app-server because the backend was disabled.
+
+        The core has already removed this agent from its registry, so routing
+        sends it nothing new; a turn already past that lookup fails visibly
+        instead of starting a process. Running turns keep streaming, and Stop,
+        steer, liveness, and Activities still reach them. Each generation
+        stops once its work drains, when a turn completes or at the
+        controller's sweep. Nothing is interrupted, and calling this again
+        changes nothing.
+        """
+        self._retired = True
+        for unit in list(self._units.values()):
+            await unit.stop_all(force=False)
+
+    def runtime_retired(self) -> bool:
+        """Whether retirement finished: no process of this agent remains.
+
+        That covers every process, attached to a unit or not, including a
+        child that outlived its own failed start.
+        """
+        return self._retired and not any(self._runtimes.values())
+
     async def shutdown_runtime(self) -> None:
-        """Stop all app-server transports during vibe-remote shutdown."""
+        """Stop all app-server transports during vibe-remote shutdown.
+
+        It ends running work, so it serves service shutdown and probe teardown
+        only; a disabled backend retires through ``retire_runtime``.
+        """
         await self.adopt_model_hub_catalog()
         self._session_last_activity.clear()
         self._shutting_down = True
@@ -1677,6 +1715,12 @@ class CodexAgent(BaseAgent):
                 or "en"
             )
             message = i18n_t("error.codexPromptRefreshUnavailable", language)
+        elif isinstance(error, RuntimeUnitStopping):
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            message = i18n_t("error.codexRuntimeRetired", language)
         elif isinstance(error, CodexForkBoundaryUnavailableError):
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
@@ -1930,6 +1974,10 @@ class CodexAgent(BaseAgent):
     def _unit(self, cwd: str) -> RuntimeGenerationSet[CodexLaunchSpec, _CodexRuntime]:
         unit = self._units.get(cwd)
         if unit is None:
+            if self._retired or self._shutting_down:
+                # Every existing unit already refuses admission; a new
+                # directory must not start a process nobody would stop.
+                raise RuntimeUnitStopping("runtime unit is stopping")
             unit = RuntimeGenerationSet(
                 start=self._start_generation,
                 stop=self._stop_generation,
@@ -2221,7 +2269,7 @@ class CodexAgent(BaseAgent):
                 self._retire_hub_scope_after(runtime)
             else:
                 # Its own cleanup failed; the sweep stops it.
-                runtime.failed_start = True
+                runtime.orphaned = True
             raise
         governor_from_controller(self.controller).apply_to_pid(
             getattr(transport, "pid", None),
@@ -2374,7 +2422,7 @@ class CodexAgent(BaseAgent):
             runtime.teardown = None
             teardown.set_result(None)
         runtime.ended = True
-        runtime.failed_start = False
+        runtime.orphaned = False
         self._runtimes.get(runtime.cwd, set()).discard(runtime)
         if reservation is not None:
             registry.finish_retirement(reservation, retire=True)
@@ -2458,7 +2506,11 @@ class CodexAgent(BaseAgent):
         try:
             restored = await unit.adopt(generation.spec, runtime, current=False)
         except RuntimeUnitStopping:
-            return  # Shutdown ends it through ``_runtimes``.
+            # A retired or shut-down agent's unit takes nothing back. Its
+            # Sessions stay bound, and the sweep, or shutdown through
+            # ``_runtimes``, retries the stop.
+            runtime.orphaned = True
+            return
         for base_session_id, bound in list(self._session_generations.items()):
             if bound is generation:
                 self._session_generations[base_session_id] = restored
@@ -2500,19 +2552,20 @@ class CodexAgent(BaseAgent):
 
         The sweep also retires processes that exited or stopped answering, so
         an idle directory's dead process and its Hub scope do not linger, and
-        retries the stop of a child that outlived its own failed start.
+        retries the stop of every process no unit holds. It is the only
+        sweeper of a retired agent, so it drives that agent's stops too.
         """
         for unit in list(self._units.values()):
             await self._retire_unusable_generations(unit)
             await unit.reap()
         for runtimes in list(self._runtimes.values()):
-            for runtime in [runtime for runtime in runtimes if runtime.failed_start]:
+            for runtime in [runtime for runtime in runtimes if runtime.orphaned]:
                 try:
                     await self._stop_runtime(runtime)
                 except Exception:
-                    logger.warning("Failed to stop a Codex app-server that failed to start", exc_info=True)
+                    logger.warning("Failed to stop a Codex app-server no generation holds", exc_info=True)
                     continue
-                self._retire_hub_scope_after(runtime)
+                self._forget_runtime_sessions(runtime)
 
     async def _move_session_to(self, generation: _CodexGeneration, request: AgentRequest) -> None:
         """Make sure this Session's thread can be loaded in ``generation``."""
