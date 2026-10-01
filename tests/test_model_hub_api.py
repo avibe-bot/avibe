@@ -3895,6 +3895,7 @@ def test_mh_unlisted_002_model_list_save_names_the_agents_a_removed_row_stops(
     assert model_id not in {model.id for model in store.config.agents[backend].models}
 
 
+@pytest.mark.parametrize("fallback", ("kept", "added_in_same_save"))
 @pytest.mark.parametrize(
     ("fallback_supplied", "expected_gaps"),
     (
@@ -3905,20 +3906,24 @@ def test_mh_unlisted_002_model_list_save_names_the_agents_a_removed_row_stops(
 def test_mh_unlisted_002_opencode_fallback_row_keeps_an_agent_running(
     monkeypatch,
     tmp_path,
+    fallback,
     fallback_supplied,
     expected_gaps,
 ):
-    """MH-UNLISTED-002: an OpenCode selection that still names a surviving row
-    after the save is stopped only when that row cannot run, and is then named
-    under the row it now runs on."""
+    """MH-UNLISTED-002: an OpenCode selection that names a row of the saved
+    catalog, kept or added by the same save, is stopped only when that row
+    cannot run, and is then named under the row it now runs on. The plan is
+    computed from the complete staged catalog, so the exact echo of the same
+    request commits it."""
 
     service, store, _adapter = _service(tmp_path)
     agent = store.config.agents["opencode"]
+    kept_ids = ("moonshotai/kimi-k2", "kimi-k2") if fallback == "kept" else ("moonshotai/kimi-k2",)
     agent.models = [
         ModelHubBackendModelConfig(id=model_id, native_protocol="openai_responses")
-        for model_id in ("moonshotai/kimi-k2", "kimi-k2")
+        for model_id in kept_ids
     ]
-    agent.menu.checked = ["moonshotai/kimi-k2", "kimi-k2"]
+    agent.menu.checked = list(kept_ids)
     if fallback_supplied:
         store.config.sources = [
             ModelHubSourceConfig(
@@ -3943,13 +3948,13 @@ def test_mh_unlisted_002_opencode_fallback_row_keeps_an_agent_running(
     base_url = "http://127.0.0.1:15131"
     headers = csrf_headers(client, base_url)
     baseline = next(item["catalog_models"] for item in service.list_agents() if item["backend"] == "opencode")
+    desired = [row for row in baseline if row["id"] != "moonshotai/kimi-k2"]
+    if fallback == "added_in_same_save":
+        desired.append({**baseline[0], "id": "kimi-k2", "origin": "manual"})
+    request_body = {"baseline": baseline, "models": desired}
+    endpoint = "/api/models/agents/opencode/models"
 
-    response = client.put(
-        "/api/models/agents/opencode/models",
-        json={"baseline": baseline, "models": [row for row in baseline if row["id"] != "moonshotai/kimi-k2"]},
-        headers=headers,
-        base_url=base_url,
-    )
+    response = client.put(endpoint, json=request_body, headers=headers, base_url=base_url)
 
     # A supplied fallback leaves only the removed row's passthrough hop to confirm.
     assert response.status_code == 409
@@ -3959,6 +3964,22 @@ def test_mh_unlisted_002_opencode_fallback_row_keeps_an_agent_running(
     assert [hop["menu_model"] for hop in refusal["would_remove_hops"]] == (
         ["moonshotai/kimi-k2"] if fallback_supplied else []
     )
+
+    committed = client.put(
+        endpoint,
+        json={
+            **request_body,
+            "force": True,
+            "would_remove_hops": refusal["would_remove_hops"],
+            "would_interrupt": refusal["would_interrupt"],
+        },
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert committed.status_code == 200
+    assert committed.get_json()["interrupted"] == expected_gaps
+    assert [model.id for model in store.config.agents["opencode"].models] == ["kimi-k2"]
 
 
 def test_backend_catalog_removes_model_with_empty_route(tmp_path):

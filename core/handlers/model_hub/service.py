@@ -5563,21 +5563,6 @@ class ModelHubService:
                 if model.id not in removed_model_id_set
             ]
 
-            interrupted = self._removed_agent_models(
-                previous,
-                config,
-                agent_backend,
-                removed_model_id_set,
-            )
-            self._require_guard_plan(
-                force=force,
-                confirmed_remove_hops=confirmed_remove_hops,
-                confirmed_interruptions=confirmed_interruptions,
-                would_remove_hops=removed_hops,
-                would_interrupt=interrupted,
-                error="backend_model_in_route",
-            )
-
             for model_id, desired in desired_by_id.items():
                 baseline_model = baseline_by_id.get(model_id)
                 current = current_by_id.get(model_id)
@@ -5652,6 +5637,24 @@ class ModelHubService:
                     view=agent.menu.view if agent.menu else "featured",
                     checked=list(ordered_ids),
                 )
+            # The guard plans against the complete staged catalog, including the
+            # rows this same save adds, edits and reorders: a removed row's Agent
+            # may run on one of them afterwards. A save that conflicts has
+            # already refused above, so it never asks a confirmation for nothing.
+            interrupted = self._removed_agent_models(
+                previous,
+                config,
+                agent_backend,
+                removed_model_id_set,
+            )
+            self._require_guard_plan(
+                force=force,
+                confirmed_remove_hops=confirmed_remove_hops,
+                confirmed_interruptions=confirmed_interruptions,
+                would_remove_hops=removed_hops,
+                would_interrupt=interrupted,
+                error="backend_model_in_route",
+            )
             await self._commit_synced(previous, config)
             await self._refresh_backend_catalog(cast(BackendName, backend))
             committed = self.store.load()
