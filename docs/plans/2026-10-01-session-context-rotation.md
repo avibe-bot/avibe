@@ -152,13 +152,17 @@ all, so the size stays bounded however much open work exists.
    `S`; the earlier backend context was rotated.
 2. **Open work**, one line per item, read from the durable store at that moment.
    It comes before the transcript because the transcript cannot reconstruct it.
+   The four sources below are disjoint by construction, and each item appears
+   once.
    - **Delegated runs:** every `agent_runs` row with `callback_session_id = S`
      and `callback_status = 'pending'`, whatever its run status. This includes
      runs that have finished but whose callback has not yet been delivered.
      The handoff owns this query rather than reusing the banner helper, which
      shows only active runs.
-   - **Watches and tasks** bound to `S`, from
-     `derive_session_harness_activities`.
+   - **Watches and tasks** bound to `S`: the rows of
+     `derive_session_harness_activities` whose `item_kind` is `watch` or
+     `task`. That helper also returns active delegated runs (`agent_run`), which
+     the query above already covers, so they are dropped here.
    - **Queued deliveries** for `S`.
    - **Pending vault requests** for `S`.
 3. **Recent transcript.** The tail of `list_session_messages(...,
@@ -205,7 +209,8 @@ signal applies.
 Backend compaction observed during the turn sets `compacted`:
 
 - Codex: `thread/compacted`; its handler is a no-op today.
-- Claude: the compaction-boundary system message.
+- Claude: a `SystemMessage` with subtype `compact_boundary`. The CLI bundled
+  at the 0.2.158 floor emits it.
 - OpenCode: an assistant message carrying `info.summary`.
 
 The rotation is due when either signal holds:
@@ -250,6 +255,17 @@ is validated independently:
 - The normalizer never raises on the turn-start, turn-end, or startup paths.
 - Writers always write the full canonical shape.
 
+Concurrent writers. The rotation keys share the `metadata_json` column with each
+other and with backend runtime markers. Several writers can touch it at the same
+time: `vibe session rotate` setting `due` mid-turn, the turn-end usage writer,
+the turn-start supersede, and the receipt clear.
+
+Every write of a rotation key goes through one storage method. It follows
+`set_agent_session_runtime_marker`: inside one transaction it takes
+`reserve_write_lock`, re-reads the current metadata, changes only its own key,
+and writes the result back. No writer persists a metadata snapshot read
+earlier, so a turn-end write cannot erase a `due` marker set during the turn.
+
 What "treated as absent" means for each key:
 
 | Key | Behaves as |
@@ -289,6 +305,8 @@ continuity but does not fail dispatch.
 - Load fixtures: rows with no rotation keys (every released shape), and rows
   with each key malformed or in an unknown shape. Turn start, turn end, and
   startup all succeed, and each key behaves as absent.
+- Interleaving: set `due` between the turn-end writer's read and its write.
+  Both `due` and `context_usage` survive, and the next turn rotates.
 - No rotation happens while a turn is live. A request made mid-turn takes effect
   at the next turn start.
 - Per backend: after release, a turn does not reuse the cached runtime or thread
@@ -327,7 +345,8 @@ continuity but does not fail dispatch.
 - [ ] Persist per-turn peak usage and window at turn end (Claude, Codex) and
       observe backend compaction (all three backends). Evaluate the ratio and
       compaction rules.
-- [ ] Single metadata normalizer with malformed-shape fixtures.
+- [ ] Single metadata normalizer with malformed-shape fixtures, and one
+      locked per-key merge writer.
 - [ ] `vibe session rotate` CLI and per-session `context_rotation` policy.
 - [ ] Tests for the invariants above.
 - [ ] Update `skills/use-avibe` docs for `vibe session rotate`.
