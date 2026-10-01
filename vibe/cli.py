@@ -13875,9 +13875,10 @@ def _stop_opencode_server(runtime_ids: frozenset[str] = frozenset()):
 
     A server of another Runtime is left running, as the scoped stop leaves it.
     """
-    from modules.agents.opencode.server import recorded_server_pids, terminate_pid_tree_sync
+    from modules.agents.opencode.server import forget_record, recorded_server_pids, terminate_pid_tree_sync
 
     stopped_any = False
+    survived = False
     for pid, record_path in recorded_server_pids():
         try:
             runtime.refuse_foreign_desktop_process(pid, "opencode", runtime_ids)
@@ -13888,11 +13889,13 @@ def _stop_opencode_server(runtime_ids: frozenset[str] = frozenset()):
         # the server pid would leave a running command behind. Stop the whole tree
         # the way the service's own teardown does.
         if terminate_pid_tree_sync(pid, timeout=5):
-            record_path.unlink(missing_ok=True)
+            forget_record(record_path)
             stopped_any = True
         else:
             logger.warning("Failed to stop OpenCode server (pid=%s)", pid)
-    return stopped_any
+            survived = True
+    # One survivor means OpenCode did not stop, however many others did.
+    return stopped_any and not survived
 
 
 def _pid_file_points_to_live_process(pid_path: Path) -> bool:

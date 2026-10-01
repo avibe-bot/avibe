@@ -171,3 +171,10 @@ scenarios:
     layer: contract
     backend: opencode
     test: tests/test_opencode_generations.py::test_runtime_gen_023_the_ui_process_leases_the_controllers_generation_over_control_ipc
+  - id: RUNTIME-GEN-024
+    name: A Hub-to-Direct mode switch while a Hub run is live moves new OpenCode turns to a Direct generation and lets the Hub one finish its run
+    status: covered
+    kind: concurrency
+    layer: unit
+    backend: opencode
+    test: tests/test_opencode_generations.py::test_runtime_gen_024_a_mode_switch_during_a_hub_run_moves_new_turns_to_direct

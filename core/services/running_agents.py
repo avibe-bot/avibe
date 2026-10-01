@@ -719,11 +719,11 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
     # The serve process is shared across Sessions. Retiring the current
     # generation stops it now when idle; work bound to any generation keeps
     # that process until the work drains.
-    shutdown = getattr(agent, "shutdown_runtime", None)
-    if not callable(shutdown):
+    retire = getattr(agent, "retire_current_generation", None)
+    if not callable(retire):
         return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
     try:
-        await shutdown()
+        await retire()
     except Exception as exc:  # noqa: BLE001
         logger.warning("end: opencode idle server retirement failed for %s: %s", base_session_id, exc)
         return {"ok": False, "error": "runtime_retirement_failed", "detail": str(exc)}

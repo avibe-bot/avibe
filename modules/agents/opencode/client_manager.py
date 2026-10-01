@@ -243,14 +243,16 @@ class OpenCodeRuntime:
         self.on_generation_stopping: Optional[Callable[[OpenCodeGeneration, bool], Awaitable[None]]] = None
 
     def renew(self) -> None:
-        """New turns start a new generation; running work stays where it is."""
-        self._renew_epoch += 1
-        try:
-            path = _renew_epoch_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            write_atomic(path, str(self._renew_epoch))
-        except OSError:
-            logger.warning("Could not persist the OpenCode renewal epoch", exc_info=True)
+        """New turns start a new generation; running work stays where it is.
+
+        The epoch is persisted before it takes effect. A renewal that cannot be
+        persisted fails rather than being undone by the next controller.
+        """
+        epoch = self._renew_epoch + 1
+        path = _renew_epoch_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(path, str(epoch))
+        self._renew_epoch = epoch
 
     async def launch_spec(self, overlay: Any | None) -> OpenCodeLaunchSpec:
         return await asyncio.to_thread(compute_launch_spec, self.config.binary, overlay, self._renew_epoch)
@@ -445,6 +447,10 @@ class OpenCodeRuntime:
 
     async def retire_current(self) -> None:
         await self._generations.retire_current()
+
+    async def close(self) -> None:
+        """Admit nothing more; idle generations stop now, bound ones once drained."""
+        await self._generations.stop_all(force=False)
 
     async def retire_all(self) -> None:
         """Admit nothing more to any live generation; each stops once its work drains.

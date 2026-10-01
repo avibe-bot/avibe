@@ -1145,7 +1145,7 @@ def test_end_idle_opencode_retires_the_current_generation_after_its_last_session
     agent = types.SimpleNamespace(
         _active_requests={},
         _session_manager=manager,
-        shutdown_runtime=retired,
+        retire_current_generation=retired,
     )
 
     result = asyncio.run(

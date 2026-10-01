@@ -3614,30 +3614,31 @@ class AgentAuthService:
                 method=method_index,
                 prompt_answers=prompt_answers,
             )
+            url = authorize.get("url") if isinstance(authorize, dict) else None
+            instructions = authorize.get("instructions") if isinstance(authorize, dict) else None
+            if not isinstance(url, str) or not url.strip():
+                raise RuntimeError("opencode_authorize_missing_url")
+            flow.url = url.strip()
+            if isinstance(instructions, str):
+                match = self._OPENCODE_DEVICE_CODE_RE.search(instructions)
+                if match:
+                    flow.device_code = match.group(1)
+                flow.last_status_text = instructions
+            mode = authorize.get("method")
+            if mode not in {None, "auto", "code"}:
+                raise RuntimeError("opencode_authorize_unsupported_method")
+            flow.callback_kind = "code" if mode == "code" else "device" if flow.device_code else "redirect"
+            flow.state = "awaiting_code"
+            flow.awaiting_code = mode == "code"
+            if flow.awaiting_code:
+                flow.submitted_code = asyncio.get_running_loop().create_future()
+            self._arm_flow_waiter(
+                flow, self._wait_for_opencode_oauth_web(flow, provider_id, method_index, prompt_answers),
+            )
         except BaseException:
+            # Until the waiter is armed, nothing else releases this lease.
             await self._release_opencode_flow_lease(flow)
             raise
-        url = authorize.get("url") if isinstance(authorize, dict) else None
-        instructions = authorize.get("instructions") if isinstance(authorize, dict) else None
-        if not isinstance(url, str) or not url.strip():
-            raise RuntimeError("opencode_authorize_missing_url")
-        flow.url = url.strip()
-        if isinstance(instructions, str):
-            match = self._OPENCODE_DEVICE_CODE_RE.search(instructions)
-            if match:
-                flow.device_code = match.group(1)
-            flow.last_status_text = instructions
-        mode = authorize.get("method")
-        if mode not in {None, "auto", "code"}:
-            raise RuntimeError("opencode_authorize_unsupported_method")
-        flow.callback_kind = "code" if mode == "code" else "device" if flow.device_code else "redirect"
-        flow.state = "awaiting_code"
-        flow.awaiting_code = mode == "code"
-        if flow.awaiting_code:
-            flow.submitted_code = asyncio.get_running_loop().create_future()
-        self._arm_flow_waiter(
-            flow, self._wait_for_opencode_oauth_web(flow, provider_id, method_index, prompt_answers),
-        )
 
     async def _submit_opencode_callback_url(self, flow: WebAuthFlow, code: str) -> dict[str, Any]:
         """Forward a manually-pasted 127.0.0.1 callback URL to OpenCode.

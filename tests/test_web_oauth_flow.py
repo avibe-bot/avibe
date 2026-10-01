@@ -2192,3 +2192,21 @@ def test_manual_opencode_submit_keeps_start_waiter_and_cancel_before_dispatch_wi
         assert not (await service.submit_web_code(flow.flow_id, "stale"))["ok"]
 
     asyncio.run(run())
+
+
+def test_start_web_setup_opencode_releases_its_lease_when_authorize_is_unusable(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An authorize response with no URL fails setup; nothing else would ever
+    # release the generation this flow pinned for its whole budget.
+    fake = _FakeOpencodeServer()
+    fake.auth_map = {"openai": [{"type": "oauth", "label": "ChatGPT Pro/Plus"}]}
+    fake.next_authorize = {"instructions": "no url"}
+    leaser = lease_returning(fake)
+    monkeypatch.setattr(service, "_lease_opencode_server", leaser)
+
+    flow = _run(service.start_web_setup("opencode", provider_id="openai"))
+
+    assert flow.state == "failed"
+    assert [lease.released for lease in leaser.leases] == [True]
+    assert flow.opencode_lease is None

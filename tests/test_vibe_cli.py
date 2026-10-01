@@ -5021,3 +5021,25 @@ def test_doctor_bare_dry_run_does_not_request_repair():
     assert args.command == "doctor"
     assert args.doctor_action is None
     assert cli._doctor_repair_requested(args) is False
+
+
+def test_cli_stop_reports_a_surviving_generation_and_drops_stopped_overlays(tmp_path, monkeypatch):
+    from modules.agents.opencode import server as opencode_server
+
+    records = tmp_path / "generations"
+    records.mkdir()
+    monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: records)
+    monkeypatch.setattr(paths, "get_logs_dir", lambda: tmp_path)
+    for generation_id, pid, port in (("ocg_a", 331, 50031), ("ocg_b", 332, 50032)):
+        (records / f"{generation_id}.json").write_text(
+            json.dumps({"generation_id": generation_id, "pid": pid, "port": port}), encoding="utf-8"
+        )
+        # A Hub generation's overlay carries the gateway credential.
+        (records / f"{generation_id}.overlay.json").write_text("{}", encoding="utf-8")
+    ports = {331: 50031, 332: 50032}
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in ports)
+    monkeypatch.setattr(runtime, "get_process_command", lambda pid: f"opencode serve --port={ports[pid]}")
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5: pid == 331)
+
+    assert cli._stop_opencode_server() is False
+    assert sorted(path.name for path in records.iterdir()) == ["ocg_b.json", "ocg_b.overlay.json"]

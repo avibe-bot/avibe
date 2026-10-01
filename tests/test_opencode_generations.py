@@ -810,3 +810,133 @@ def test_shutdown_keeps_the_record_of_a_server_that_survived(isolated_launch, mo
 
     assert record.exists()
     assert not gone.exists()
+
+
+# ------------------------------------------------- review round 1 regressions
+
+
+def test_a_renewal_that_cannot_be_persisted_fails_without_taking_effect(opencode_home, monkeypatch):
+    runtime = OpenCodeRuntime(SimpleNamespace(binary=str(opencode_home.binary), request_timeout_seconds=60))
+    before = asyncio.run(runtime.launch_spec(None)).digest
+
+    def unwritable(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(client_manager, "write_atomic", unwritable)
+
+    # A crash after an unpersisted renewal would promote the retired generation.
+    with pytest.raises(OSError):
+        runtime.renew()
+    assert asyncio.run(runtime.launch_spec(None)).digest == before
+
+
+def test_a_lease_released_before_adoption_never_pins_its_generation(fake_processes, monkeypatch):
+    generation = _generation("ocg_leased", 40, "spec")
+    generation.leases = {"ocl_ui": 4_000_000_000.0}
+    monkeypatch.setattr(client_manager, "adopt_recorded_generations", AsyncMock(return_value=[generation]))
+    fake_processes.alive.add(generation.generation_id)
+    agent = object.__new__(OpenCodeAgent)
+    agent.controller = SimpleNamespace(model_hub_runtime=None)
+    agent._runtime = _runtime()
+    agent._runtime.launch_spec = AsyncMock(return_value=OpenCodeLaunchSpec(digest="spec", binary="opencode"))
+
+    async def scenario():
+        # The UI finishes its OAuth flow right after a controller restart.
+        released = await agent.release_generation_lease("ocl_ui")
+        wrapper = agent._runtime._wrappers[generation.generation_id]
+        return released, wrapper.bindings
+
+    released, bindings = asyncio.run(scenario())
+
+    assert released is True
+    assert bindings == 0 and generation.leases == {}
+
+
+def test_disabling_the_backend_closes_admission_and_drains_bound_work(fake_processes):
+    from modules.agents.runtime_generations import RuntimeUnitStopping
+
+    agent = object.__new__(OpenCodeAgent)
+    agent._runtime = _runtime()
+
+    async def scenario():
+        turn = await agent._runtime.acquire(OpenCodeLaunchSpec(digest="v1", binary="opencode"))
+        running = turn.generation.runtime
+        await agent.shutdown_runtime()
+        kept_for_its_turn = running in agent._runtime.generations()
+        # A lease or turn that looked the agent up before it was unregistered.
+        with pytest.raises(RuntimeUnitStopping):
+            await agent._runtime.acquire(OpenCodeLaunchSpec(digest="v1", binary="opencode"))
+        await turn.release()
+        await agent._runtime._generations.settled()
+        return kept_for_its_turn, running
+
+    kept_for_its_turn, running = asyncio.run(scenario())
+
+    assert kept_for_its_turn
+    assert fake_processes.stopped == [running]
+    assert len(fake_processes.started) == 1
+
+
+def test_a_start_whose_process_survives_its_stop_keeps_record_and_overlay(isolated_launch, monkeypatch):
+    isolated_launch.processes.append(_Process(fake_pid(41)))
+    monkeypatch.setattr(opencode_server.OpenCodeGeneration, "is_healthy", AsyncMock(return_value=False))
+    monkeypatch.setattr(opencode_server, "SERVER_START_TIMEOUT", 0.3)
+    monkeypatch.setattr(opencode_server, "_terminate_started_process", AsyncMock(return_value=False))
+    overlay = _overlay()
+    spec = OpenCodeLaunchSpec(
+        digest="hub",
+        binary="/bin/opencode",
+        overlay_hash=overlay.content_hash,
+        overlay_file_content=overlay.content,
+        overlay_inline_content=opencode_server._managed_runtime_config_content(overlay.content),
+    )
+
+    with pytest.raises(opencode_server.OpenCodeGenerationStartError):
+        asyncio.run(opencode_server.start_generation(spec))
+
+    # The late process stays recorded, so adoption or ``vibe stop`` finds it.
+    names = sorted(path.name for path in isolated_launch.records.iterdir())
+    assert len(names) == 2 and names[0].endswith(".json") and names[1].endswith(".overlay.json")
+
+
+def test_adoption_keeps_the_record_of_an_unhealthy_server_that_survives_its_stop(isolated_launch, monkeypatch):
+    record = _record(isolated_launch.records, "ocg_stubborn", fake_pid(42), 50042)
+    overlay = isolated_launch.records / "ocg_stubborn.overlay.json"
+    overlay.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid == fake_pid(42))
+    monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=50042")
+    monkeypatch.setattr(opencode_server.OpenCodeGeneration, "is_healthy", AsyncMock(return_value=False))
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: False)
+
+    assert asyncio.run(opencode_server.adopt_recorded_generations()) == []
+    assert record.exists() and overlay.exists()
+
+
+def test_runtime_gen_024_a_mode_switch_during_a_hub_run_moves_new_turns_to_direct(fake_processes, opencode_home):
+    """RUNTIME-GEN-024: switching OpenCode from Hub to Direct while a Hub run is
+    live starts a Direct generation for the next turn and lets the Hub
+    generation finish its run before it stops."""
+
+    async def scenario():
+        runtime = OpenCodeRuntime(SimpleNamespace(binary=str(opencode_home.binary), request_timeout_seconds=60))
+        hub_turn = await runtime.acquire(await runtime.launch_spec(_overlay()))
+        hub = hub_turn.generation.runtime
+        await hub.mark_run_active("ses_hub")
+        # The mode switch commits Direct; the next turn's snapshot has no overlay.
+        direct_turn = await runtime.acquire(await runtime.launch_spec(None))
+        direct = direct_turn.generation.runtime
+        both = (hub in runtime.generations(), runtime.current() is direct)
+        await hub_turn.release()
+        await runtime.reap()
+        hub_kept_for_its_run = hub in runtime.generations()
+        await hub.mark_run_inactive("ses_hub")
+        await runtime.reap()
+        return both, hub_kept_for_its_run, hub, direct
+
+    both, hub_kept_for_its_run, hub, direct = asyncio.run(scenario())
+
+    assert both == (True, True)
+    assert hub_kept_for_its_run
+    assert fake_processes.stopped == [hub]
+    assert direct.spec_digest != hub.spec_digest

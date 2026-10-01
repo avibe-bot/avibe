@@ -863,6 +863,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         return {"lease_id": lease_id, "server": generation}
 
     async def release_generation_lease(self, lease_id: str) -> bool:
+        # After a controller restart the lease lives only in its generation's
+        # record until adoption re-holds it; release it there, not nowhere.
+        await self._ensure_adopted()
         return await self._runtime.release_lease(lease_id)
 
     def _track_lifecycle(self, operation: Any) -> None:
@@ -1273,7 +1276,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         await self._runtime.reap()
 
     async def shutdown_runtime(self) -> None:
-        """Stop admitting new work; running generations stop once drained."""
+        """The backend is disabled: admit nothing more, and stop every generation
+        once its work drains.
+
+        Closing admission matters: a lease or turn already past this agent's
+        lookup must not start a generation nobody would ever stop.
+        """
+        await self._runtime.close()
+
+    async def retire_current_generation(self) -> None:
+        """Stop the current generation once drained; the next turn starts a fresh one."""
         await self._runtime.retire_current()
 
     async def _cancel_active_requests(self, base_session_ids: set[str] | None = None) -> None:

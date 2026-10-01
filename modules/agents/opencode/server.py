@@ -1684,13 +1684,17 @@ async def _wait_until_ready(generation: OpenCodeGeneration, process: Process) ->
     return "exited" if process.returncode is not None else "timeout"
 
 
-async def _terminate_started_process(process: Process, reason: str) -> None:
+async def _terminate_started_process(process: Process, reason: str) -> bool:
+    """Stop a process this start spawned; return whether it has exited."""
+
     logger.info("Stopping OpenCode server pid=%s (%s)", process.pid, reason)
     await asyncio.to_thread(terminate_pid_tree_sync, process.pid)
     try:
         await asyncio.wait_for(process.wait(), timeout=5)
     except asyncio.TimeoutError:
         logger.warning("OpenCode server pid=%s did not exit after it was stopped", process.pid)
+        return False
+    return True
 
 
 async def start_generation(
@@ -1714,6 +1718,9 @@ async def start_generation(
     env = _launch_environment(spec, overlay_path)
     exited_pid: int | None = None
     exit_code: int | None = None
+    # A process that survives its stop keeps its record and overlay, so
+    # adoption or ``vibe stop`` can still find and stop it.
+    survivor = False
     try:
         for _attempt in range(_PORT_ATTEMPTS):
             port = _choose_port(DEFAULT_OPENCODE_HOST)
@@ -1752,22 +1759,27 @@ async def start_generation(
                 _apply_resource_governance(resource_governor, process.pid)
                 outcome = await _wait_until_ready(generation, process)
             except BaseException:
-                await _terminate_started_process(process, "start interrupted")
                 await generation.close_http_session()
-                _remove_quietly(generation.record_path)
+                if await _terminate_started_process(process, "start interrupted"):
+                    _remove_quietly(generation.record_path)
+                else:
+                    survivor = True
                 raise
             if outcome == "ready":
                 logger.info("OpenCode generation %s serves at %s", generation_id, generation.base_url)
                 return generation
             await generation.close_http_session()
-            _remove_quietly(generation.record_path)
             if outcome == "exited":
                 # Most often another process took the port first.
+                _remove_quietly(generation.record_path)
                 exited_pid, exit_code = process.pid, process.returncode
                 continue
             # A late-starting process must not become a healthy server that
             # nothing records.
-            await _terminate_started_process(process, "startup timeout")
+            if await _terminate_started_process(process, "startup timeout"):
+                _remove_quietly(generation.record_path)
+            else:
+                survivor = True
             raise OpenCodeGenerationStartError(
                 f"OpenCode server failed to start within {SERVER_START_TIMEOUT}s."
             )
@@ -1776,7 +1788,7 @@ async def start_generation(
             exited_pid=exited_pid,
         )
     except BaseException:
-        if overlay_path is not None:
+        if overlay_path is not None and not survivor:
             _remove_quietly(overlay_path)
         raise
 
@@ -1948,9 +1960,11 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
         if not (await generation.is_healthy() and _pid_listens_on(generation.pid, generation.port)):
             logger.info("Stopping recorded OpenCode server pid=%s that no longer serves", generation.pid)
             await generation.close_http_session()
-            await asyncio.to_thread(terminate_pid_tree_sync, generation.pid)
-            _remove_quietly(path)
-            _remove_quietly(generation.overlay_path)
+            if await asyncio.to_thread(terminate_pid_tree_sync, generation.pid):
+                forget_record(path)
+            else:
+                # The record stays, so a later adoption or ``vibe stop`` retries.
+                logger.warning("Recorded OpenCode server pid=%s survived its stop", generation.pid)
             continue
         # This controller owns it from now on.
         generation.owner_pid = _CURRENT_OWNER_PID
@@ -1975,6 +1989,18 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
     return adopted
 
 
+def forget_record(path: Path) -> None:
+    """Remove a generation record and the overlay copy beside it.
+
+    The overlay carries the Model Hub gateway credential, so it never outlives
+    its record.
+    """
+
+    _remove_quietly(path)
+    if path.name.endswith(".json") and path.parent == generation_records_dir():
+        _remove_quietly(path.with_name(path.name.removesuffix(".json") + ".overlay.json"))
+
+
 def recorded_server_pids() -> list[tuple[int, Path]]:
     """The live, proven OpenCode servers Avibe recorded, for status and ``vibe stop``."""
 
@@ -1993,7 +2019,4 @@ def terminate_recorded_generations_sync() -> None:
             # The record stays, so ``vibe stop`` or the next adoption retries.
             logger.warning("OpenCode server pid=%s survived shutdown", info["pid"])
             continue
-        _remove_quietly(path)
-        generation_id = info.get("generation_id")
-        if isinstance(generation_id, str) and generation_id:
-            _remove_quietly(generation_records_dir() / f"{generation_id}.overlay.json")
+        forget_record(path)
