@@ -140,6 +140,30 @@ export const settingsOverlayStateForOrigin = (
  */
 const retainsOriginOnMobile = (pathname: string): boolean => pathname === '/' || pathname === '/setup';
 
+/**
+ * The origin a Settings-bound navigation from `source` carries: the one an
+ * open Settings visit already holds, or else `source` itself when it may be
+ * retained. A Settings route is never an origin, so a navigation inside
+ * Settings keeps the visit's origin instead of replacing it.
+ */
+const sourceOrigin = (source: Location, retains: boolean, historyState: unknown): SettingsOverlayOrigin | null =>
+  settingsOverlayOriginFromState(source.state)
+    ?? (retains && !isSettingsEntryPath(source.pathname) ? originFromLocation(source, historyState) : null);
+
+/**
+ * State for a continuation into Settings that must come back to where it
+ * started, such as a model picker's Add model exit, on every device. Mobile
+ * otherwise retains only the routes above, and the page this leaves may hold
+ * a draft.
+ */
+export const settingsOverlayContinuationState = (
+  source: Location,
+  historyState: unknown = currentHistoryState(),
+): SettingsOverlayState | undefined => {
+  const origin = sourceOrigin(source, true, historyState);
+  return origin ? overlayStateForOrigin(origin) : undefined;
+};
+
 export const settingsOverlayNavigationState = ({
   destinationPathname,
   desktop,
@@ -156,12 +180,7 @@ export const settingsOverlayNavigationState = ({
   if (!isSettingsEntryPath(destinationPathname)) return targetState;
   if (settingsOverlayOriginFromState(targetState)) return targetState;
 
-  const retainedOrigin = settingsOverlayOriginFromState(source.state);
-  const retains = desktop || retainsOriginOnMobile(source.pathname);
-  const origin = retainedOrigin
-    ?? (retains && !isSettingsEntryPath(source.pathname)
-      ? originFromLocation(source, historyState)
-      : null);
+  const origin = sourceOrigin(source, desktop || retainsOriginOnMobile(source.pathname), historyState);
   if (!origin) return targetState;
   return settingsOverlayStateForOrigin(origin, targetState);
 };

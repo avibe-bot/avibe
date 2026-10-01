@@ -13,7 +13,7 @@ import type { AgentSupply } from '../components/settings/models/types';
 import { InstanceAuthorizationContext } from '../context/InstanceAuthorizationContext';
 import { useAddModelExit } from './backendModels';
 import { RouteSurfaceActiveContext } from './routeSurfaceActivity';
-import { settingsOverlayOriginFromState } from './settingsOverlay';
+import { settingsOverlayOpenState, settingsOverlayOriginFromState } from './settingsOverlay';
 import { capabilitiesFor } from './testing/instanceRoleCapabilities';
 import type { InstanceRole } from './sessionInfo';
 
@@ -38,7 +38,9 @@ const land = async (agent: PickerAgent) => {
   await act(async () => reads.at(-1)!.answer(agent));
 };
 
-const setup = (initial: { backend: string; enabled?: boolean; surfaceActive?: boolean; role?: InstanceRole }) => {
+type Entry = string | { pathname: string; state: unknown };
+
+const setup = (initial: { backend: string; enabled?: boolean; surfaceActive?: boolean; role?: InstanceRole; entry?: Entry }) => {
   let surfaceActive = initial.surfaceActive ?? true;
   let role: InstanceRole = initial.role ?? 'owner';
   const wrapper = ({ children }: { children: ReactNode }) => (
@@ -46,7 +48,7 @@ const setup = (initial: { backend: string; enabled?: boolean; surfaceActive?: bo
       value={{ remote: false, instanceKind: null, instanceRole: role, capabilities: capabilitiesFor(role) }}
     >
       <RouteSurfaceActiveContext.Provider value={surfaceActive}>
-        <MemoryRouter initialEntries={['/agents?tab=definitions']}>{children}</MemoryRouter>
+        <MemoryRouter initialEntries={[initial.entry ?? '/agents?tab=definitions']}>{children}</MemoryRouter>
       </RouteSurfaceActiveContext.Provider>
     </InstanceAuthorizationContext.Provider>
   );
@@ -91,6 +93,21 @@ describe('useAddModelExit', () => {
       pathname: '/agents',
       search: '?tab=definitions',
     });
+  });
+
+  it('keeps the Settings visit it starts in coming back to the same place', async () => {
+    // The IM channel settings page is a Settings route over a session. A
+    // Settings route is never an origin, so the exit must carry the visit's.
+    const session = { pathname: '/chat/ses_1', search: '', hash: '', state: null, key: 'k1' };
+    const { result } = setup({
+      backend: 'codex',
+      entry: { pathname: '/settings/platforms/groups', state: settingsOverlayOpenState(session, null) },
+    });
+    await land(hub('codex'));
+    act(() => result.current.exit!());
+
+    expect(result.current.location.pathname).toBe('/settings/models');
+    expect(settingsOverlayOriginFromState(result.current.location.state)?.location.pathname).toBe('/chat/ses_1');
   });
 
   it.each([

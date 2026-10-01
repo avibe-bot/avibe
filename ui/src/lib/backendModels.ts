@@ -7,7 +7,7 @@ import type { AgentSupply } from '../components/settings/models/types';
 import { ApiError, useApi, type ApiContextType } from '../context/ApiContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { useRouteSurfaceActive } from './routeSurfaceActivity';
-import { settingsOverlayOpenState } from './settingsOverlay';
+import { settingsOverlayContinuationState } from './settingsOverlay';
 
 export interface BackendModels {
   /** Selectable model identifiers for the backend. */
@@ -161,9 +161,9 @@ export async function fetchBackendModels(
  * turns off — so no exit outlives the read that justified it, and a failed read
  * shows none. `enabled` lets a picker read only while its menu is open.
  *
- * The exit is a detour to come back from, so it records where it starts. On a
- * phone, Settings otherwise keeps only the Workbench home mounted behind it, and
- * a draft in the page the picker sits on would be gone on return.
+ * The exit is a detour to come back from, so it records where it starts, on a
+ * phone too, where Settings otherwise keeps only the Workbench home mounted
+ * behind it. From a picker already inside Settings it keeps the visit's origin.
  */
 export function useAddModelExit(backend: string, enabled = true): (() => void) | null {
   const api = useApi();
@@ -185,7 +185,7 @@ export function useAddModelExit(backend: string, enabled = true): (() => void) |
     };
   }, [api, backend, readable]);
   if (!readable || hubBackend !== backend) return null;
-  return () => navigate(modelHubCatalogPath(backend), { state: settingsOverlayOpenState(location) });
+  return () => navigate(modelHubCatalogPath(backend), { state: settingsOverlayContinuationState(location) });
 }
 
 /**
