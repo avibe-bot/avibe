@@ -1,0 +1,365 @@
+# Runtime Generations
+
+Status: approved by the owner on 2026-10-01 (decisions recorded below). Supersedes the per-backend catalog
+compatibility approach in #2328 (draft). Extends `backend-rolling-restart.md`
+by implementing its deferred "prepare a new generation during DRAINING".
+
+## Background
+
+### One case today
+
+A user adds model `X` to the Codex catalog. Session `S1` is running a two-hour
+task in `/repo`, and session `S2` in the same directory sends a message.
+
+1. The catalog callback calls `BackendRestartCoordinator.request_restart`.
+2. Admission closes for every Codex directory. `S2`'s message, and any message
+   to any other Codex session, waits.
+3. After 300 s `S1` is force-interrupted, every app-server is stopped, and
+   admission reopens.
+
+The same drain-then-interrupt runs for any `agents.*` save, credential change,
+OpenCode provider edit, manual restart, or CLI install. It runs for Claude
+too, although every Claude session owns its own process.
+
+### What exists, and what does not
+
+- Shared runtime units: a Claude client serves one session; a Codex app-server
+  serves one working directory; one `opencode serve` serves the whole instance.
+- `backend-rolling-restart.md` defines the barrier
+  `READY -> DRAINING -> SWITCHING -> READY`. Turns admitted before the barrier
+  finish on the old process, while new turns wait. The document defers
+  "prepare a new generation during DRAINING", so no backend runs an old and a
+  new process side by side.
+- `RuntimeActivationRegistry` keeps exactly one live generation per
+  `(backend, resource)`. It is a fence against late commits from a retired
+  process, not a router.
+
+### How changes reach runtimes today
+
+| Trigger | Policy | Interrupts running work |
+| --- | --- | --- |
+| `agents.*` save, credential save or removal, OpenCode provider edits, manual restart, CLI install job | Whole-backend drain, 300 s, then interrupt | Yes |
+| Hub/Direct mode switch, native credential migration | Immediate interrupt, user-confirmed | Yes, by design |
+| Unattended CLI auto-update | Only when idle, otherwise skipped | No |
+| Codex gateway channel or token change | Per directory: wait 30 s, then refuse the new turn | Only the same session's own stale turn |
+| OpenCode overlay change | The next turn waits for every run on the shared server, with no bound | No, but new turns can wait indefinitely |
+| Claude per-session launch input change | Some inputs wait for the session to idle (no bound); others rebuild immediately | Possibly, for immediate rebuilds |
+
+Defects found while mapping these paths:
+
+- Fields that are read live still drain and interrupt, for example
+  `idle_timeout_seconds`, and Codex's unused `auth_mode`.
+- Direct-mode Claude credentials and the CLI path are never compared on
+  client reuse. Their correctness depends on the global teardown.
+- An in-place OpenCode CLI upgrade keeps the old server, because an unchanged
+  binary path selects the `PATCH /global/config` reload.
+- Codex interrupts the session's own turn before it knows the replacement can
+  proceed. If the directory stays busy, both turns are lost.
+- No turn is bound to one configuration snapshot from model resolution through
+  process launch. Review of #2328 kept finding races where a turn resolved its
+  model from one catalog and ran on a runtime holding another.
+
+## Goal
+
+- **G1.** A new turn or session is never blocked or refused because of a
+  configuration change. No routine change interrupts running work, except to
+  reclaim a generation at the cap below.
+- **G2.** Every turn runs against one configuration snapshot end to end. Its
+  model resolution and its runtime's launch inputs come from the same snapshot.
+- **G3.** One mechanism serves all backends. Backends differ only in how they
+  declare their runtime unit, their launch spec, and whether generations can
+  run side by side.
+
+Exclusive, user-confirmed operations keep their explicit cutover: Hub/Direct
+mode switch, native credential migration, and an explicit "stop running work".
+
+## Model
+
+**Configuration snapshot.** An immutable view of every input that affects a
+runtime: Model Hub configuration and catalogs, `agents.*` runtime config, and
+credential identity. A turn captures one snapshot when it is admitted.
+
+**Runtime unit.** The scope one runtime process serves:
+
+- Claude: one session client (composite session key);
+- Codex: one working directory;
+- OpenCode: the Avibe instance.
+
+**Launch spec.** A comparable digest, computed by the backend, of every
+process-level input for a unit under a snapshot. It covers binary identity
+(resolved path and version), credential identity, Hub channel, gateway URL and
+token, catalog or overlay digest, managed policy, and launch environment.
+Per-turn inputs (model, effort, prompt text, per-turn routing metadata) are not
+part of it.
+
+**Generation.** One running process for a unit, with one launch spec. It is in
+one of three states:
+
+- `current`: admits new turns;
+- `retiring`: serves only work already bound to it;
+- `stopped`.
+
+A unit has at most one `current` generation and a bounded number of
+`retiring` ones.
+
+**Binding.** A turn binds to exactly one generation at admission, together
+with any Activity, delivery, or scheduled run it owns. Only bound work keeps a
+retiring generation alive.
+
+### Turn admission
+
+1. Capture the snapshot and resolve the turn's launch (model, route, efforts)
+   from it.
+2. Compute the unit's desired launch spec from the same snapshot.
+3. Let `G` be the unit's current generation:
+   - if `G.spec == desired`, bind to `G`;
+   - otherwise, if nothing is bound to `G`, replace `G` in place and bind;
+   - otherwise, if the backend runs generations side by side, start `G'` with
+     the desired spec, mark `G` retiring, and bind to `G'`;
+   - otherwise, when the new generation cannot coexist with `G` (the cap is
+     reached, or the backend cannot run the two side by side), force-stop the
+     oldest conflicting generation, interrupt its work with the standard
+     runtime-update notice, and start `G'`. The new turn never waits for the
+     old work and is never refused.
+4. When a retiring generation's bound work reaches zero, stop it.
+5. When a stale current generation goes idle, replace it eagerly, so the next
+   turn does not pay the startup cost.
+
+The same example under this model: `S2` resolves with the snapshot that
+contains `X`. `/repo`'s app-server is busy with `S1`, so Avibe starts a second
+app-server for `/repo` and `S2` resumes its thread there. `S1` finishes on the
+first app-server, which then stops. `S1`'s next turn runs on the second one.
+
+### Invariants
+
+- A session is active on at most one generation at a time. The session turn FSM
+  already guarantees one active turn per session.
+- A generation stops only when no turn, Activity, delivery, or durable owner is
+  bound to it. Durable ownership snapshots already enumerate these.
+- Starting a generation is serialized per backend.
+- A unit runs at most three generations. When another one is needed at the
+  cap, the oldest retiring generation is force-stopped. Its sessions get the
+  runtime-update interruption notice and continue on the current generation.
+
+## Per-backend design
+
+### Claude Code
+
+- **Unit:** one session client.
+- **Side by side:** not within one session. Two processes must never resume
+  the same session transcript concurrently.
+- **Launch spec:** the existing fingerprint (Hub channel, gateway, token,
+  process settings) plus the inputs reuse ignores today:
+  - direct-mode credential environment (`build_claude_subprocess_env`);
+  - CLI path identity;
+  - system prompt;
+  - caller identity, Skill bindings, git PATH;
+  - reasoning effort.
+- **Spec change while the session's own background Activity runs:** the turn
+  stays on the session's current client, resolved from that client's snapshot,
+  and the session switches at its next idle point. Only when that client
+  cannot serve the turn is it force-stopped and replaced. That happens when the
+  turn's Hub launch needs a different gateway route, token, or process settings.
+  A model added after the client started does not count: a live client accepts
+  `set_model` for it, which a hermetic probe confirmed on Claude CLI 2.1.286.
+  Nothing waits.
+- **Removed:** the backend-wide barrier and the `refresh_auth_state` teardown
+  for routine changes. A configuration or credential save only advances the
+  snapshot. Each session rebuilds at its next turn when its spec differs.
+
+### Codex
+
+- **Unit:** one working directory.
+- **Side by side:** yes, behind the verification gate below.
+- **Launch spec:** binary identity, credential identity (`CODEX_HOME` auth
+  digest), Hub channel, gateway URL and token, catalog digest, managed launch
+  environment.
+- **Routing:** `_transports[cwd]` becomes the directory's generation set. A
+  session's live turn is routed to the generation it is bound to. A new turn
+  goes to the current generation and resumes its thread there, which replacement
+  already does today.
+- **Removed:**
+  - the 30 s runtime-change wait and `CodexRuntimeChangeBlockedError` for
+    routine changes;
+  - `_interrupt_active_turn_before_runtime_change`;
+  - the catalog compatibility checks from #2328;
+  - `refresh_auth_state` as the apply path for configuration and credential
+    changes.
+
+### OpenCode
+
+- **Unit:** the instance.
+- **Side by side:** yes. See the verification below.
+- **Launch spec:**
+  - binary identity;
+  - Hub overlay digest;
+  - managed policy revision and caller-context plugin digest;
+  - digest of the user `opencode.json` and `auth.json` that the server loads.
+- **Required changes:**
+  - one port per generation (the pinned 4096 goes away);
+  - one PID record per generation, and adoption of every recorded generation
+    after a controller restart;
+  - per-generation event streams, poll loops, and active-run tracking;
+  - serialized generation starts.
+- **Removed:**
+  - the overlay transition and its reservations;
+  - the deferred auth refresh flags;
+  - the `PATCH /global/config` reload path;
+  - the policy-pending and plugin-pending refusals;
+  - the compatibility checks from #2328.
+
+## Existing mechanisms and their fate
+
+Rule: a lifecycle that can run through generations does. Only an operation that
+must be exclusive for safety keeps a dedicated path. A legacy convention is not
+a reason to keep a path.
+
+| Mechanism today | Used by | Fate |
+| --- | --- | --- |
+| `BackendRestartCoordinator.request_restart`: whole-backend drain, 300 s, then interrupt | `agents.*` save; credential save or removal; Web OAuth; IM `/setup`; OpenCode provider edits; manual Restart; CLI install job; catalog changes before #2328 | Replaced. Every caller advances the snapshot. The drain path is deleted. |
+| `migration_guard`: immediate interrupt, then exclusive cutover | Native credential migration, startup migration recovery, Hub re-authentication | Kept. Custody needs exclusivity: an old process can rewrite a credential file that is being moved. |
+| `migration_guard` for the Hub/Direct mode switch | Mode toggle | Replaced. Mode becomes a launch-spec input. The gateway keeps admitting turns bound to a Hub-mode generation until they end, so a switch interrupts nothing. |
+| `run_when_idle` | Unattended CLI auto-update | Kept for the install step only. The refresh that follows is replaced by the binary identity in the spec. |
+| Backend drain admission (`begin/end_backend_drain`, `wait_backend_ready`) | All coordinator paths | Kept only inside `migration_guard` and the install window. |
+| `RuntimeActivationRegistry` | Turn, Activity, delivery, and scheduled-task commits | Kept as the fence. Each generation gets its own resource key, so one live identity per key still holds. |
+| Durable runtime ownership snapshots | Replacement safety | Kept as the evidence that a generation is drained. |
+| `restart_backend` marker file and `RuntimeCommandWatcher` | UI-process requests to the controller | Kept as the signal. Its action becomes "advance the snapshot", or "renew generations" for manual Restart. |
+| CLI install job fingerprint (path, realpath, version) | Decides whether to restart after an install | Replaced. Binary identity is part of every launch spec. |
+| Claude `refresh_auth_state` global teardown | Every Claude refresh | Kept for shutdown and migration only. |
+| Claude lazy rebuild on fingerprint or effort change: waits for idle with no bound | Hub route, process settings, effort | Unified under the Claude rule. |
+| Claude immediate rebuild on prompt, caller env, Skills, or git PATH change | Reuse check | Unified under the Claude rule; these become spec inputs. |
+| Codex `refresh_auth_state` stop-all | Every Codex refresh | Kept for shutdown and migration only. |
+| Codex fingerprint replacement: 30 s wait, then `CodexRuntimeChangeBlockedError` | Channel or token change | Replaced by directory generation sets. |
+| Codex `_interrupt_active_turn_before_runtime_change` | Channel change | Deleted. A new message to a busy session keeps Codex's normal semantics. |
+| Codex catalog invalidation and the #2328 compatibility checks | Catalog change | Replaced. The catalog digest is a spec input. |
+| Codex replaced-cwd, dead-transport, and idle-eviction replacement | Health | Kept. Idle eviction becomes the generation reaper. |
+| OpenCode `PATCH /global/config` reload | Settings and credential refreshes | Deleted. User config and credential digests are spec inputs. |
+| OpenCode deferred refresh (`_auth_refresh_pending`, `_pending_runtime_config`) | Busy refreshes | Deleted. |
+| OpenCode overlay transition and reservations | Hub overlay changes | Deleted. The overlay digest is a spec input. |
+| OpenCode policy-pending and plugin-pending refusals | Policy or plugin changes | Deleted. Both are spec inputs, so new turns are never refused. |
+| OpenCode single-port singleton manager, one PID file, adoption | Every OpenCode turn | Replaced by generation servers on dynamic ports, one PID record per generation, and adoption of every record. |
+| UI-process OpenCode manager calling `ensure_running` | Web OAuth flows | Replaced. The UI process asks the controller and never launches a server. |
+
+Defects that the refactor fixes as it touches these paths:
+
+- Claude `idle_timeout_seconds` is read once at startup. It becomes live.
+- An in-place OpenCode CLI upgrade is ignored. Binary identity includes the
+  version.
+- Codex direct launches with Model Hub enabled lose the desktop-managed
+  environment.
+- Codex `direct` and `native_cli` launch identical processes under different
+  fingerprints. Comparing specs removes the needless replacement.
+
+## Triggers after the refactor
+
+| Trigger | Action |
+| --- | --- |
+| `agents.*` save, credential save or removal, provider settings, CLI install or upgrade, catalog edit, built-in snapshot refresh, credential-address repair, Hub/Direct mode switch | Advance the snapshot. Each unit switches generation at its next turn. |
+| Manual "Restart backend" | Renew generations: new turns start a new generation, and old ones retire when their work is done. Nothing is interrupted. |
+| Explicit "stop running work" | The existing interruption path. |
+| Native credential migration, migration recovery, Hub re-authentication | `migration_guard`, unchanged. |
+| Unattended CLI auto-update | `run_when_idle` for the install step only. |
+| Backend disabled | The current generation stops admitting. Retiring generations finish their work, then stop. |
+
+The `AGENTS.md` rule that an `agents.*` save reconciles "through the backend
+rolling-refresh path" becomes: the save advances the snapshot, and live units
+move to it through generations.
+
+## Core contract
+
+The shared core owns the admission algorithm. Adapters supply the
+backend-specific parts.
+
+- **`modules/agents/runtime_generations.py`** holds one generation set per
+  unit. `acquire(spec)` runs turn admission step 3:
+  - the cap of three, force-stopping the oldest retiring generation;
+  - generation starts serialized per backend;
+  - eager replacement of an idle stale current generation;
+  - reaping retiring generations once their bound work is drained.
+- **Adapter hooks:**
+  - `launch_spec(snapshot) -> str`;
+  - `start_generation(spec)`;
+  - `stop_generation(generation, force)`;
+  - `generation_idle(generation)`, answered from the existing turn and
+    ownership evidence;
+  - `can_coexist`.
+- **Snapshot discipline:** a turn loads its configuration once. Its launch
+  resolution and its launch spec both derive from that load. No adapter re-reads
+  the store between resolution and launch.
+- **`AgentService.apply_runtime_config_change(backend)`** replaces
+  `request_restart` for routine triggers. It invalidates adapter caches and
+  returns without draining. `AgentService.renew_runtime(backend)` serves manual
+  Restart.
+
+## Verification
+
+### OpenCode, two servers on one home (done)
+
+Hermetic probe, OpenCode 1.18.33, temporary `HOME` and XDG directories, fake
+OpenAI-compatible upstream. Two `opencode serve` processes ran on different
+ports over one data directory:
+
+| Check | Result |
+| --- | --- |
+| Storage | One SQLite database in WAL mode (`opencode.db`, `-wal`, `-shm`) |
+| Session created and prompted on A | Visible on B with its messages |
+| Same session continued on B | Both servers then list four messages; no stale cache on A |
+| Concurrent prompts on different sessions, one per server | Both completed in parallel (1.6 s against a 1.5 s upstream delay) |
+| Both servers started at the same moment on a fresh home | Both failed with `database is locked` while migrating. Starting them in sequence works, so generation starts must be serialized. |
+
+### Codex, two app-servers in one directory (gate for the Codex PR)
+
+Hermetic probe with a fake Responses upstream:
+
+- two app-servers run in one directory at the same time;
+- a thread started on A resumes on B while A is still alive;
+- A's later shutdown appends nothing to that thread's rollout.
+
+If the last check fails, A must unload a thread before the thread moves.
+
+## Delivery
+
+Three PRs; the second and third run in parallel lanes:
+
+1. **Core and Claude** (orchestrator):
+   - the core contract above;
+   - Claude on the complete launch spec and the Claude rule;
+   - every routine trigger routed through `apply_runtime_config_change`. Codex
+     and OpenCode keep their current path until their own PR lands;
+   - the Model Hub catalog callback;
+   - this document and `AGENTS.md`.
+2. **Codex** (lane):
+   - the verification gate;
+   - directory generation sets;
+   - Codex triggers on the new entry;
+   - the Codex defects above.
+3. **OpenCode** (lane):
+   - generation servers;
+   - OpenCode triggers on the new entry;
+   - removal of the reload, deferral, transition, and refusal paths;
+   - the UI-process launch path.
+
+Whichever of 2 and 3 lands last also does two more things:
+
+- deletes the drain-then-interrupt path;
+- turns the Hub/Direct mode switch into a snapshot change, updating
+  `backend-rolling-restart.md`.
+
+Each PR ships scenario IDs and regression tests that fail on the code before
+it.
+
+## Decisions
+
+Recorded from the owner, 2026-10-01:
+
+1. A configuration change never blocks or refuses a new turn or session. The
+   user experience takes precedence over legacy conventions.
+2. Manual "Restart backend" renews generations without interrupting running
+   work.
+3. A unit runs at most three generations. At the cap, the oldest retiring
+   generation is force-stopped and its work interrupted.
+4. When a Claude spec changes while the session's own background Activity
+   runs, the turn stays on the current client until the session is idle. The
+   client is force-replaced only when its snapshot cannot serve the turn.
+5. Lifecycles are unified under generations wherever safety allows. PRs are
+   few, and work that can run in parallel does.
