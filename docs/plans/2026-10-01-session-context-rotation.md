@@ -45,9 +45,10 @@ between two owners.
 1. The user has talked to the main agent (session `S`, native Claude session
    `n1`) for weeks. A delegated run `R` is still running with
    `callback_session_id = S`.
-2. A turn ends with context occupancy at 62% of the window. Avibe marks `S` as
-   rotation-due.
-3. The user sends the next message. Before the backend is invoked, Avibe
+2. A turn ends with context occupancy at 62% of the window. Avibe records that
+   peak on `S`.
+3. The user sends the next message. At turn start the recorded peak is past
+   the ratio, so `S` is rotation-due. Before the backend is invoked, Avibe
    archives `n1` as a superseded snapshot row, clears `S.native_session_id`,
    releases the backend's cached runtime for `S`, and prepends a handoff block
    to this turn's input.
@@ -84,9 +85,12 @@ chokepoint: after the durable turn is `starting` and before the backend target
 (`agent_session_target`) is built from the row. Rotation never runs mid-turn,
 because steering and interrupts target the live native turn.
 
-1. **Due** (`metadata_json.context_rotation_due`). Triggers only set this
-   marker, so a request made while a turn is running takes effect on the next
-   turn and cannot race it.
+1. **Due.** A session is due when the explicit marker
+   `metadata_json.context_rotation_due` is set, or when its persisted
+   `context_usage` meets the pressure rule and its policy is `auto` (see
+   Context pressure trigger). Triggers only write state and never rotate, so a
+   request made while a turn is running takes effect on the next turn and
+   cannot race it.
    - At the chokepoint, a due session that is not already pending first asks
      the backend whether its native runtime is settled
      (`native_runtime_settled`, below). If the runtime is not settled, rotation
@@ -113,14 +117,22 @@ because steering and interrupts target the live native turn.
       fails. Either way the new backend context has not seen a handoff, so
       sending one is correct.
    3. Clear `pending` only on acceptance evidence. That evidence is the native
-      start receipt (`SessionTurns.on_native_start`) of the turn that carried
-      the handoff; binding a native id is not enough. The clear is
-      compare-and-set on `context_handoff.rotated_at`, so a late receipt cannot
-      clear a newer rotation.
+      start receipt of the turn that carried the handoff; binding a native id
+      is not enough.
+      - When the handoff is injected, the durable turn records the
+        `context_handoff.rotated_at` it carries.
+      - `SessionTurns.on_native_start` already writes the receipt
+        (`bind_native_start`) inside one SQLite transaction. The pending clear
+        joins that same transaction: compare-and-set on the recorded
+        `rotated_at`, so a late receipt cannot clear a newer rotation.
+      - The receipt and the clear therefore commit together or not at all. A
+        native that accepted the handoff never receives it again.
 
-Delivery is at-least-once. If the receipt was recorded but the clear write was
-lost, the next turn repeats the handoff into the same native, which is harmless.
-The phases are never skipped.
+The phases are never skipped. The handoff is resent only when no receipt was
+committed. The one case where the native may have accepted it anyway is a
+process crash between native acceptance and the receipt transaction. That is
+the same window in which ordinary turn delivery can already duplicate a turn,
+and it is not widened.
 
 ### Backend runtime release (agent abstraction)
 
@@ -207,10 +219,27 @@ material loss.
 ### Context pressure trigger
 
 Context occupancy is in memory only today (`MessageDispatcher._session_token_total`)
-and is lost on restart. At turn end, persist the turn's observation in
-`metadata_json.context_usage = {"peak_tokens", "window", "compacted", "observed_at"}`.
-`peak_tokens` is the maximum occupancy snapshot seen during the turn, not the
-last one, so a drop after a mid-turn compaction does not hide the peak.
+and is lost on restart. Persist it as
+`metadata_json.context_usage = {"peak_tokens", "window", "compacted", "observed_at"}`,
+covering the current native since its last rotation.
+
+**When it is written.** An observation is written whenever a native phase
+settles, not only at an Avibe turn end:
+
+- the end of an Avibe turn;
+- the terminal `ResultMessage` of a detached Claude Activity phase, which can
+  arrive after the originating turn has ended
+  (`docs/plans/claude-result-provenance.md`).
+
+Each write merges into the stored value through the locked per-key writer:
+
+- `peak_tokens` takes the maximum of the stored value and the phase's peak
+  snapshot, so a drop after a compaction does not hide the peak;
+- `compacted` is OR-ed;
+- `window` takes the latest known value.
+
+The supersede moves `context_usage` into the snapshot row
+(`context_tokens`, `context_window`) and clears it on the active row.
 
 Occupancy, in tokens:
 
@@ -234,7 +263,7 @@ Each source is optional at runtime. If a source reports no window, the next
 one is used; if none does, the window is unknown and only the compaction
 signal applies.
 
-Backend compaction observed during the turn sets `compacted`:
+Backend compaction observed in any native phase sets `compacted`:
 
 - Codex: `thread/compacted`; its handler is a no-op today.
 - Claude: a `SystemMessage` with subtype `compact_boundary`. The CLI bundled
@@ -251,8 +280,10 @@ The rotation is due when either signal holds:
   only automatic signal for OpenCode and for any session whose window is
   unknown.
 
-Both are evaluated at turn end, and the rotation itself runs at the next turn
-start.
+Both are evaluated at the turn-start chokepoint, from the persisted
+`context_usage`. So pressure that a detached phase recorded while the session
+was idle is seen by the next human turn. The rotation itself then follows the
+lifecycle above.
 
 ### Policy
 
@@ -285,14 +316,14 @@ is validated independently:
 
 Concurrent writers. The rotation keys share the `metadata_json` column with each
 other and with backend runtime markers. Several writers can touch it at the same
-time: `vibe session rotate` setting `due` mid-turn, the turn-end usage writer,
+time: `vibe session rotate` setting `due` mid-turn, the usage writer,
 the turn-start supersede, and the receipt clear.
 
 Every write of a rotation key goes through one storage method. It follows
 `set_agent_session_runtime_marker`: inside one transaction it takes
 `reserve_write_lock`, re-reads the current metadata, changes only its own key,
 and writes the result back. No writer persists a metadata snapshot read
-earlier, so a turn-end write cannot erase a `due` marker set during the turn.
+earlier, so a usage write cannot erase a `due` marker set during the turn.
 
 What "treated as absent" means for each key:
 
@@ -326,14 +357,19 @@ continuity but does not fail dispatch.
   truncated list reports its omitted count.
 - Every run with `callback_session_id = S` and a pending callback appears in the
   handoff, whatever its run status.
-- A turn whose occupancy peaks at or above the ratio, or that observes a backend
-  compaction, marks the session due even if its last snapshot is lower.
+- A native phase whose occupancy peaks at or above the ratio, or that observes
+  a backend compaction, makes the next turn start rotate, even if its last
+  snapshot is lower. This holds for a detached Claude Activity phase that
+  settles after its turn ended.
+- A crash or failure after the receipt transaction does not resend the
+  handoff. Seeding a committed receipt leaves `pending` cleared; with no
+  committed receipt, `pending` stays set.
 - The window comes from the first source that reports one. With none, ratio
   rotation is skipped and compaction still marks the session due.
 - Load fixtures: rows with no rotation keys (every released shape), and rows
   with each key malformed or in an unknown shape. Turn start, turn end, and
   startup all succeed, and each key behaves as absent.
-- Interleaving: set `due` between the turn-end writer's read and its write.
+- Interleaving: set `due` between the usage writer's read and its write.
   Both `due` and `context_usage` survive, and the next turn rotates.
 - A Claude session with an active detached Activity, or with completed Activity
   output not yet delivered, is not rotated. `due` stays set, the turn runs on
@@ -379,9 +415,12 @@ continuity but does not fail dispatch.
 - [ ] `BaseAgent.native_runtime_settled` (Claude Activity gate) and
       `BaseAgent.release_native_runtime`, implemented for Claude and Codex.
 - [ ] Handoff prompt template and builder.
-- [ ] Persist per-turn peak usage and window at turn end (Claude, Codex) and
-      observe backend compaction (all three backends). Evaluate the ratio and
-      compaction rules.
+- [ ] Persist peak usage and window on every settled native phase, including
+      detached Claude Activity results (Claude, Codex). Observe backend
+      compaction on all three backends. Evaluate the ratio and compaction rules
+      at turn start.
+- [ ] Clear `context_handoff.pending` inside the `on_native_start` receipt
+      transaction.
 - [ ] Single metadata normalizer with malformed-shape fixtures, and one
       locked per-key merge writer.
 - [ ] `vibe session rotate` CLI and per-session `context_rotation` policy.
