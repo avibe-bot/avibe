@@ -889,41 +889,51 @@ async def test_claude_retirement_never_uses_broad_reaper_or_swallows_disconnect(
 
 
 @pytest.mark.asyncio
-async def test_opencode_unproven_pid_file_is_blocker_not_kill_target():
-    from modules.agents.opencode.server import OpenCodeServerManager
+async def test_opencode_reused_pid_record_is_dropped_not_killed(tmp_path, monkeypatch):
+    from modules.agents.opencode import server as opencode_server
 
-    server = OpenCodeServerManager.__new__(OpenCodeServerManager)
-    server._get_lock = lambda: asyncio.Lock()
-    server._active_requests = 0
-    server._has_active_run_sessions = Mock(return_value=False)
-    server._runtime_activation_retire = Mock(return_value=True)
-    server._process = None
-    server.port = 4096
-    server._read_pid_file = Mock(return_value={"pid": 123})
-    server._pid_exists = Mock(return_value=True)
-    server._terminate_pid_tree_sync = Mock(side_effect=AssertionError("must not kill"))
-    server._clear_pid_file = Mock()
-    with pytest.raises(RuntimeError, match="ownership cannot be proven"):
-        await server.retire_for_native_migration()
-    server._terminate_pid_tree_sync.assert_not_called()
-    server._clear_pid_file.assert_not_called()
+    monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: tmp_path)
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: tmp_path / "legacy.json")
+    record = tmp_path / "ocg_reused.json"
+    record.write_text(
+        json.dumps({"generation_id": "ocg_reused", "pid": os.getpid(), "port": 4100, "process_created_at": 1.0}),
+        encoding="utf-8",
+    )
+    terminate = Mock(side_effect=AssertionError("must not kill"))
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", terminate)
+
+    # The pid now belongs to another process born later than the record says.
+    assert await opencode_server.adopt_recorded_generations() == []
+
+    terminate.assert_not_called()
+    assert not record.exists()
 
 
 @pytest.mark.asyncio
-async def test_opencode_strict_stop_failure_retains_tracking():
-    from modules.agents.opencode.server import OpenCodeServerManager
+async def test_opencode_strict_stop_failure_retains_tracking(tmp_path, monkeypatch):
+    from modules.agents.opencode import server as opencode_server
+    from modules.agents.opencode.client_manager import OpenCodeRuntime
 
-    server = OpenCodeServerManager.__new__(OpenCodeServerManager)
-    server._get_lock = lambda: asyncio.Lock()
-    server._active_requests = 0
-    server._has_active_run_sessions = Mock(return_value=False)
-    server._runtime_activation_retire = Mock(return_value=True)
-    process = SimpleNamespace(pid=123, returncode=None, wait=AsyncMock())
-    server._process = process
-    server._read_pid_file = Mock(return_value={"pid": 123})
-    server._terminate_pid_tree_sync = Mock(return_value=False)
-    server._clear_pid_file = Mock()
+    monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: tmp_path)
+    generation = opencode_server.OpenCodeGeneration(
+        generation_id="ocg_stuck",
+        pid=4321,
+        port=4100,
+        spec_digest="spec",
+        process_created_at=1.0,
+    )
+    generation.write_record()
+    monkeypatch.setattr(generation, "process_alive", lambda: True)
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", Mock(return_value=False))
+    runtime = OpenCodeRuntime(SimpleNamespace(binary="opencode", request_timeout_seconds=60))
+    runtime._adopted = True
+    wrapper = await runtime._generations.adopt(SimpleNamespace(digest="spec"), generation, current=True)
+    runtime._wrappers[generation.generation_id] = wrapper
+
     with pytest.raises(RuntimeError, match="did not exit"):
-        await server.retire_for_native_migration()
-    assert server._process is process
-    server._clear_pid_file.assert_not_called()
+        await runtime.retire_all_strict()
+
+    # The survivor stays tracked and recorded, never to serve again.
+    assert runtime.generations() == (generation,)
+    assert wrapper.closed
+    assert generation.record_path.exists()

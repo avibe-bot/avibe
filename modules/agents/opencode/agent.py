@@ -1,7 +1,8 @@
 """OpenCode agent implementation (coordinator).
 
 Most heavy lifting lives in:
-- server.py: OpenCodeServerManager
+- server.py: OpenCode generations (processes) and their HTTP API
+- client_manager.py: the OpenCode instance's generation set and launch specs
 - poll_loop.py: unified poll loop
 - session.py: session mapping + concurrency guards
 """
@@ -9,12 +10,13 @@ Most heavy lifting lives in:
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import os
 import secrets
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 import aiohttp
 
@@ -65,6 +67,7 @@ from core.system_prompt_injection import (
     get_enabled_agents_for_prompt,
 )
 from modules.agents.base import AgentRequest, BaseAgent, message_with_files
+from modules.agents.runtime_generations import RuntimeBinding
 from modules.agents.model_hub import (
     ModelHubLaunch,
     OpenCodeOverlay,
@@ -84,7 +87,7 @@ from .caller_context import (
     refresh_session as refresh_caller_context_session,
     unbind_session as unbind_caller_context_session,
 )
-from .client_manager import OpenCodeClientManager
+from .client_manager import OpenCodeRuntime
 from .message_processor import OpenCodeMessageProcessorMixin
 from .poll_loop import (
     OpenCodePollLoop,
@@ -94,11 +97,9 @@ from .poll_loop import (
 )
 from .server import (
     OpenCodeDirectoryBootstrapTimeoutError,
-    OpenCodeManagedPolicyRefreshPendingError,
-    OpenCodeModelHubOverlayRequiredError,
+    OpenCodeGeneration,
     OpenCodePromptRejectedError,
     OpenCodeRuntimeConfigInvalidError,
-    OpenCodeServerManager,
     native_part_id_for_attempt,
 )
 from .session import (
@@ -112,6 +113,9 @@ logger = logging.getLogger(__name__)
 _STEERING_SNAPSHOT_KEY = "opencode_native_steering"
 _MODEL_HUB_DISPLAY_MODEL_KEY = "model_hub_display_model"
 _CALLER_CONTEXT_ENV_SNAPSHOT_KEY = "opencode_caller_context_env"
+# The generation whose process runs a polled native turn; polls persisted by
+# releases before generations lack it.
+_GENERATION_SNAPSHOT_KEY = "opencode_generation_id"
 _MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY = "opencode_managed_skill_project_base"
 _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY = "opencode_managed_skill_builtin_snapshot"
 _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
@@ -147,6 +151,24 @@ def _binding_path_kwargs(path: str | None) -> dict[str, str]:
     return {"path": path} if path else {}
 
 
+def _poll_generation_id(poll_info: Any) -> str | None:
+    snapshot = getattr(poll_info, "processing_indicator", None)
+    value = snapshot.get(_GENERATION_SNAPSHOT_KEY) if isinstance(snapshot, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _log_lifecycle_failure(task: asyncio.Task) -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("OpenCode generation lifecycle step failed", exc_info=task.exception())
+
+
+@dataclass
+class _TurnGeneration:
+    """The binding that keeps a turn's generation alive until the turn settles."""
+
+    binding: RuntimeBinding | None = None
+
+
 def _task_is_stopping(task: asyncio.Task) -> bool:
     cancelling = getattr(task, "cancelling", None)
     return task.done() or bool(cancelling and cancelling())
@@ -180,6 +202,8 @@ class _OpenCodeSteerState:
     status_reconciliation_failures: int = 0
     terminal_status_failure_messages: list[Dict[str, Any]] | None = None
     terminal_status_failure_generation: int = 0
+    # The generation whose process runs this native turn.
+    generation: Any = None
 
     @property
     def native_turn_id(self) -> str:
@@ -191,7 +215,7 @@ class _SteeringAwareOpenCodeServer:
 
     def __init__(
         self,
-        server: OpenCodeServerManager,
+        server: OpenCodeGeneration,
         state: _OpenCodeSteerState,
     ) -> None:
         self._server = server
@@ -744,16 +768,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         super().__init__(controller)
         self.opencode_config = opencode_config
 
-        self._client_manager = OpenCodeClientManager(opencode_config)
-        self._client_manager.set_resource_governor(governor_from_controller(controller))
-        model_hub_runtime = getattr(controller, "model_hub_runtime", None)
-        prepare_overlay = getattr(
-            model_hub_runtime,
-            "prepare_opencode_overlay",
-            None,
+        self._runtime = OpenCodeRuntime(
+            opencode_config,
+            resource_governor=governor_from_controller(controller),
         )
-        if callable(prepare_overlay):
-            self._client_manager.set_model_hub_overlay_preparer(prepare_overlay)
+        self._runtime.durable_poll_generations = self._durable_poll_generations
+        self._runtime.on_generation_ready = self._attach_generation_activation
+        self._runtime.on_generation_stopping = self._on_generation_stopping
         self._session_manager = OpenCodeSessionManager(self.settings_manager, self.name)
 
         self._poll_loop = OpenCodePollLoop(self)
@@ -770,19 +791,94 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         # their own cleanup. A forced refresh never cancels these again, and a
         # restored poll it interrupted retires its own durable record.
         self._settling_request_tasks: set[asyncio.Task] = set()
+        # The generation each running native turn is bound to, by base session.
+        self._session_generations: Dict[str, OpenCodeGeneration] = {}
+        # Binding releases and reaps run apart from the turn that ends them, so
+        # no turn's cleanup waits on another generation's start or stop.
+        self._lifecycle_tasks: set[asyncio.Task] = set()
+        self._resource_failures: Dict[tuple[Any, ...], AgentResourceFailure | None] = {}
 
-    async def _get_server(self) -> OpenCodeServerManager:
-        current_task = asyncio.current_task()
-        if current_task is not None:
-            restored_server = self._restored_poll_servers.get(current_task)
-            if restored_server is not None:
-                return restored_server
-        server = await self._client_manager.get_server()
-        server.set_active_poll_session_ids_provider(
-            lambda: set(self.sessions.get_all_active_polls())
+    def _durable_poll_generations(self) -> Dict[str, Optional[str]]:
+        return {
+            session_id: _poll_generation_id(poll_info)
+            for session_id, poll_info in self.sessions.get_all_active_polls().items()
+        }
+
+    async def _prepare_launch(self, context: Any = None) -> tuple[Any, OpenCodeOverlay | None]:
+        """Load one Model Hub snapshot, then the overlay a launch derives from it."""
+
+        model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
+        snapshot = getattr(model_hub_runtime, "snapshot", None)
+        config = snapshot() if callable(snapshot) else None
+        snapshot_kwargs = {"config": config} if config is not None else {}
+        turn_mode = getattr(model_hub_runtime, "turn_mode", None)
+        if context is not None and callable(turn_mode):
+            bind_turn_mode(context, turn_mode("opencode", **snapshot_kwargs))
+        prepare_overlay = getattr(model_hub_runtime, "prepare_opencode_overlay", None)
+        overlay = await prepare_overlay(**snapshot_kwargs) if callable(prepare_overlay) else None
+        return config, overlay
+
+    async def _ensure_adopted(self) -> None:
+        """Adopt a previous controller's generations against the current spec."""
+
+        if self._runtime.adopted:
+            return
+        try:
+            _config, overlay = await self._prepare_launch()
+            current_spec = await self._runtime.launch_spec(overlay)
+        except Exception:
+            # Without a spec nothing can keep serving; every adopted generation
+            # retires and stops once its restored work drains.
+            logger.warning("Adopting OpenCode generations without the current launch spec", exc_info=True)
+            current_spec = None
+        await self._runtime.ensure_adopted(current_spec)
+
+    async def _acquire_generation(self, overlay: OpenCodeOverlay | None) -> RuntimeBinding:
+        spec = await self._runtime.launch_spec(overlay)
+        return await self._runtime.acquire(spec)
+
+    @asynccontextmanager
+    async def current_server(self) -> AsyncIterator[OpenCodeGeneration]:
+        """Pin the current generation for one controller-side request sequence."""
+
+        _config, overlay = await self._prepare_launch()
+        binding = await self._acquire_generation(overlay)
+        try:
+            yield binding.generation.runtime
+        finally:
+            await self._release_binding(binding)
+
+    async def lease_generation(self, purpose: str, *, ttl_seconds: float) -> Dict[str, Any]:
+        """Pin the current generation for a caller outside the controller."""
+
+        _config, overlay = await self._prepare_launch()
+        spec = await self._runtime.launch_spec(overlay)
+        lease_id, generation = await self._runtime.lease(spec, ttl_seconds)
+        logger.info(
+            "Leased OpenCode generation %s for %s (%s)",
+            generation.generation_id,
+            purpose,
+            lease_id,
         )
-        self._attach_server_activation(server)
-        return server
+        return {"lease_id": lease_id, "server": generation}
+
+    async def release_generation_lease(self, lease_id: str) -> bool:
+        return await self._runtime.release_lease(lease_id)
+
+    def _track_lifecycle(self, operation: Any) -> None:
+        task = asyncio.get_running_loop().create_task(operation)
+        self._lifecycle_tasks.add(task)
+        task.add_done_callback(self._lifecycle_tasks.discard)
+        task.add_done_callback(_log_lifecycle_failure)
+
+    async def _release_binding(self, binding: RuntimeBinding | None) -> None:
+        # Release is bookkeeping only; the set stops a drained generation in
+        # its own reconciler, so no turn's cleanup waits on a teardown.
+        if binding is not None:
+            await binding.release()
+
+    def _schedule_reap(self) -> None:
+        self._track_lifecycle(self._runtime.reap())
 
     async def _maintain_caller_context_binding(
         self,
@@ -877,75 +973,59 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             return True
 
-    @staticmethod
-    def _server_activation_identity(
-        server: OpenCodeServerManager | None,
-    ) -> RuntimeActivationIdentity | None:
-        identity = getattr(server, "_vibe_runtime_activation_identity", None)
-        return identity if isinstance(identity, RuntimeActivationIdentity) else None
-
-    def _attach_server_activation(
-        self,
-        server: OpenCodeServerManager,
-    ) -> RuntimeActivationIdentity | None:
+    def _attach_generation_activation(self, generation: OpenCodeGeneration) -> None:
         registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
-        if registry is None:
-            return None
-        existing = self._server_activation_identity(server)
-        if existing is not None and registry.is_current(existing):
-            return existing
-        identity = registry.attach(self.name, server.base_url)
-        setattr(server, "_vibe_runtime_activation_identity", identity)
-        set_retire = getattr(server, "set_runtime_activation_retire", None)
-        if callable(set_retire):
-            set_retire(
-                lambda force=False, native_turns_drained=False: self._retire_server_activation(
-                    server,
-                    force=force,
-                    native_turns_drained=native_turns_drained,
-                )
-            )
-        return identity
+        if registry is not None:
+            generation.identity = registry.attach(self.name, f"opencode:{generation.generation_id}")
 
-    def _retire_server_activation(
-        self,
-        server: OpenCodeServerManager,
-        *,
-        force: bool = False,
-        native_turns_drained: bool = False,
-    ) -> bool:
+    def _retire_generation_activation(self, generation: OpenCodeGeneration) -> None:
         registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
-        identity = self._server_activation_identity(server)
-        if registry is None or identity is None:
-            return True
-        if not registry.is_current(identity):
-            return True
+        identity = generation.identity
+        if registry is not None and isinstance(identity, RuntimeActivationIdentity):
+            # A turn never needs one particular unbound generation, and bound
+            # work keeps a generation from stopping unless it is forced. No
+            # commit fenced by this identity is lost when it retires.
+            registry.retire_if_current(identity, lambda: True)
 
-        def final_predicate() -> bool:
-            if force:
-                return True
-            snapshots = self.runtime_ownership_snapshots()
-            return bool(
-                snapshots is not None
-                and all(
-                    not (
-                        snapshot.blocks_transport_replacement_after_turn_drain
-                        if native_turns_drained
-                        else snapshot.blocks_transport_replacement
-                    )
-                    for snapshot in snapshots
-                )
+    async def _on_generation_stopping(self, generation: OpenCodeGeneration, force: bool) -> None:
+        self._retire_generation_activation(generation)
+        if force:
+            await self._interrupt_generation_work(generation)
+
+    async def _interrupt_generation_work(self, generation: OpenCodeGeneration) -> None:
+        """Settle every turn bound to a generation that is being force-stopped."""
+
+        sessions = {
+            base_session_id
+            for base_session_id, bound in self._session_generations.items()
+            if bound is generation
+        }
+        if not sessions:
+            return
+        logger.warning(
+            "Force-stopping OpenCode generation %s interrupts %s session(s)",
+            generation.generation_id,
+            len(sessions),
+        )
+        force_end = getattr(getattr(self.controller, "agent_service", None), "force_end_runtime_work", None)
+        if callable(force_end):
+            await force_end(
+                self.name,
+                base_session_ids=sessions,
+                activity_runtime_keys=set(),
             )
+        await self._cancel_active_requests(base_session_ids=sessions)
 
-        return bool(registry.retire_if_current(identity, final_predicate))
+    def _bound_generation(self, base_session_id: str | None) -> OpenCodeGeneration | None:
+        return self._session_generations.get(str(base_session_id or ""))
 
     def runtime_activation_identity_for_request(
         self,
         request: Any,
     ) -> RuntimeActivationIdentity | None:
-        del request
-        server = self._client_manager._server_manager
-        return self._attach_server_activation(server) if server is not None else None
+        generation = self._bound_generation(getattr(request, "base_session_id", None)) or self._runtime.current()
+        identity = getattr(generation, "identity", None)
+        return identity if isinstance(identity, RuntimeActivationIdentity) else None
 
     def runtime_activation_identity_for_session_binding(
         self,
@@ -960,8 +1040,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         active = self._session_manager.get_request_session(normalized_anchor)
         if active is not None and str(active[1] or "").strip() != normalized_workdir:
             raise ValueError("OpenCode Session binding changed workdir")
-        server = self._client_manager._server_manager
-        return self._attach_server_activation(server) if server is not None else None
+        generation = self._bound_generation(normalized_anchor) or self._runtime.current()
+        identity = getattr(generation, "identity", None)
+        return identity if isinstance(identity, RuntimeActivationIdentity) else None
 
     def _idle_reconciliation_message(
         self,
@@ -986,49 +1067,24 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
     def _resource_failure_for_server(
         self,
-        server: OpenCodeServerManager | None,
+        server: Any,
     ) -> AgentResourceFailure | None:
-        process = getattr(server, "_process", None)
-        if process is not None:
-            if getattr(process, "returncode", None) is None:
-                return None
-            pid = getattr(process, "pid", None)
-            generation = ("process", process)
+        """Attribute a generation's own exit to shared resource pressure, once."""
+
+        observed_exit = getattr(server, "observed_exit_pid", None)
+        if callable(observed_exit):
+            pid = observed_exit()
+            key: tuple[Any, ...] = ("generation", getattr(server, "generation_id", None), pid)
         else:
-            pid = getattr(server, "_last_start_failure_pid", None)
-            if pid is not None:
-                generation = (
-                    "startup",
-                    getattr(server, "_start_attempt_generation", 0),
-                    pid,
-                )
-            else:
-                observed_exit = getattr(server, "observed_runtime_exit_pid", None)
-                if callable(observed_exit):
-                    pid = observed_exit()
-                generation = (
-                    "adopted",
-                    getattr(server, "_runtime_generation_token", None),
-                    pid,
-                )
+            # The turn has no generation: the start itself failed.
+            pid = self._runtime.last_start_failure_pid
+            key = ("startup", self._runtime.start_failures, pid)
         if not isinstance(pid, int) or pid <= 0:
             return None
-        cached_generation = getattr(server, "_vibe_resource_failure_generation", None)
-        same_generation = (
-            cached_generation is not None
-            and cached_generation[0] == generation[0]
-            and (
-                cached_generation[1] is process
-                if generation[0] == "process"
-                else cached_generation == generation
-            )
-        )
-        if same_generation:
-            return getattr(server, "_vibe_resource_failure", None)
+        if key in self._resource_failures:
+            return self._resource_failures[key]
         failure = observe_agent_resource_pressure(self.controller)
-        if server is not None:
-            setattr(server, "_vibe_resource_failure_generation", generation)
-            setattr(server, "_vibe_resource_failure", failure)
+        self._resource_failures[key] = failure
         if failure is not None:
             logger.error(
                 "OpenCode server exited while the shared Agent cgroup reported resource pressure: %s",
@@ -1061,11 +1117,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         resource_failure: AgentResourceFailure | None = None,
     ) -> str:
         localized_key = None
-        if isinstance(error, OpenCodeModelHubOverlayRequiredError):
-            localized_key = "error.opencodeModelHubOverlayRequired"
-        elif isinstance(error, OpenCodeManagedPolicyRefreshPendingError):
-            localized_key = "error.opencodePolicyRefreshPending"
-        elif isinstance(error, OpenCodeRuntimeConfigInvalidError):
+        if isinstance(error, OpenCodeRuntimeConfigInvalidError):
             localized_key = "error.opencodeRuntimeConfigInvalid"
         elif isinstance(error, OpenCodeDirectoryBootstrapTimeoutError):
             localized_key = "error.opencodeDirectoryBootstrapTimeout"
@@ -1080,25 +1132,31 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         return f"❌ {message}{self._resource_failure_suffix(resource_failure)}"
 
     async def prepare_runtime_restart(self) -> None:
-        """Adopt persisted server state before the shared drain snapshot."""
-        await self._get_server()
+        """Adopt the generations a previous controller left running."""
+        await self._ensure_adopted()
 
     async def retire_for_native_migration(self) -> None:
-        server = self._client_manager._server_manager
-        if server is not None:
-            await server.retire_for_native_migration()
+        """Strictly stop every generation; native custody needs no OpenCode process."""
+        await self._ensure_adopted()
+        if self.runtime_has_active_turns():
+            raise RuntimeError("OpenCode runtime is busy")
+        await self._runtime.retire_all_strict()
 
     def runtime_has_active_turns(self) -> bool:
         if any(not task.done() for task in self._active_requests.values()):
             return True
-        server = self._client_manager._server_manager
-        return bool(server is not None and server.runtime_has_active_turns())
+        return any(not generation.is_drained() for generation in self._runtime.generations())
 
     def runtime_ownership_snapshots(self) -> tuple[Any, ...] | None:
-        """Map the one shared OpenCode server to its exact durable identities."""
+        """Map each generation to the exact durable identities it serves.
 
-        server = self._client_manager._server_manager
-        if server is None:
+        Unbound Sessions acquire the current generation, so its target keeps
+        every backend Session in view. A retiring generation serves only the
+        Sessions bound to it.
+        """
+
+        generations = self._runtime.generations()
+        if not generations:
             return ()
         request_sessions = self._session_manager.list_all()
         get_agent_session_id = getattr(
@@ -1130,33 +1188,38 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     fallback_route_keys=(session_key,),
                 )
             )
-        target = RuntimeResourceTarget(
-            backend="opencode",
-            resource_key=server.base_url,
-            bindings=tuple(bindings),
-            known_activity_runtime_keys=tuple(sorted(self.runtime_turn_keys())),
-            known_fallback_route_keys=tuple(
-                sorted(
-                    session_key
-                    for (
-                        _native_session_id,
-                        _working_path,
-                        session_key,
-                    ) in request_sessions.values()
-                )
-            ),
-            include_all_backend_sessions=True,
-            maps_all_backend_activities=True,
-            maps_all_backend_fallback_runs=True,
-        )
         provider = getattr(self.controller, "runtime_ownership", None)
         snapshot = getattr(provider, "snapshot", None)
         if not callable(snapshot):
             logger.error("OpenCode runtime ownership provider is unavailable")
             return None
-        result = snapshot(target)
-        wake_runtime_ownership(self.controller, result)
-        return (result,)
+        catch_all = self._runtime.current() or generations[-1]
+        results = []
+        for generation in generations:
+            serves_all = generation is catch_all
+            served = tuple(
+                binding
+                for binding in bindings
+                if serves_all or self._bound_generation(binding.session_anchor) is generation
+            )
+            target = RuntimeResourceTarget(
+                backend="opencode",
+                resource_key=f"opencode:{generation.generation_id}",
+                bindings=served,
+                known_activity_runtime_keys=tuple(
+                    sorted(key for binding in served for key in binding.activity_runtime_keys)
+                ),
+                known_fallback_route_keys=tuple(
+                    sorted(key for binding in served for key in binding.fallback_route_keys)
+                ),
+                include_all_backend_sessions=serves_all,
+                maps_all_backend_activities=serves_all,
+                maps_all_backend_fallback_runs=serves_all,
+            )
+            result = snapshot(target)
+            wake_runtime_ownership(self.controller, result)
+            results.append(result)
+        return tuple(results)
 
     def record_runtime_turn_start(
         self,
@@ -1168,62 +1231,53 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         if request is not None:
             self._session_last_activity[request.base_session_id] = time.monotonic()
 
-    async def refresh_runtime_config(self, opencode_config, *, force: bool = False) -> None:
-        """Reload runtime config and refresh the shared server.
-
-        OpenCode caches opencode.json provider/model config in the serve
-        process. Prefer OpenCode's own global-config reload endpoint so
-        Settings writes take effect without terminating active serve
-        processes; fall back to restart for older OpenCode versions.
-        """
-        if force:
-            await self._cancel_active_requests()
-        previous_server = await self._client_manager.reset_config(opencode_config)
-        if previous_server is None:
-            previous_server = await OpenCodeServerManager.get_instance_if_managed_server_exists(
-                binary=self.opencode_config.binary,
-                port=self.opencode_config.port,
-                request_timeout_seconds=self.opencode_config.request_timeout_seconds,
-                resource_governor=governor_from_controller(self.controller),
-            )
+    def _adopt_runtime_config(self, opencode_config) -> None:
         self.opencode_config = opencode_config
         self.controller.config.opencode = opencode_config
-        if previous_server is not None:
-            refreshed = False
-            runtime_unchanged = (
-                previous_server.binary == opencode_config.binary
-                and previous_server.port == opencode_config.port
-                and previous_server.request_timeout_seconds == opencode_config.request_timeout_seconds
-            )
-            refresh_global_config = getattr(previous_server, "refresh_global_config", None)
-            if not force and runtime_unchanged and callable(refresh_global_config):
-                try:
-                    refreshed = bool(await refresh_global_config())
-                except Exception:
-                    logger.warning("OpenCode global config refresh failed; falling back to restart", exc_info=True)
-                    refreshed = False
-            if not refreshed:
-                detach = getattr(previous_server, "detach_after_deferred_refresh", None)
-                if callable(detach):
-                    if force:
-                        await detach(force=True)
-                    else:
-                        await detach()
-                elif hasattr(previous_server, "restart_for_auth_refresh"):
-                    if force:
-                        await previous_server.restart_for_auth_refresh(force=True)
-                    else:
-                        await previous_server.restart_for_auth_refresh()
-            reload_config = getattr(previous_server, "reload_runtime_config", None)
-            if callable(reload_config):
-                await reload_config(
-                    binary=opencode_config.binary,
-                    port=opencode_config.port,
-                    request_timeout_seconds=opencode_config.request_timeout_seconds,
-                )
+        self._runtime.config = opencode_config
 
-    async def _cancel_active_requests(self) -> None:
-        """Cancel every request task before a forced server teardown.
+    async def renew_runtime(self, opencode_config, *, config_save: bool = False) -> None:
+        """Adopt persisted runtime config; the next turn moves to a new generation.
+
+        Nothing reloads or drains here: running turns finish on the generation
+        they started on. Every ``agents.opencode`` field is read per turn except
+        the CLI path, whose binary identity is already a launch spec input, so a
+        plain config save renews nothing. Credential flows, a manual Restart,
+        and installs can change what a process loaded without touching a file
+        the spec reads, so they renew every generation.
+        """
+        self._adopt_runtime_config(opencode_config)
+        if not config_save:
+            self._runtime.renew()
+        self._schedule_reap()
+
+    async def refresh_runtime_config(self, opencode_config, *, force: bool = False) -> None:
+        """Adopt runtime config; ``force`` interrupts every generation's work first."""
+        if not force:
+            await self.renew_runtime(opencode_config)
+            return
+        self._adopt_runtime_config(opencode_config)
+        await self._cancel_active_requests()
+        # The interrupted work releases its bindings, and each generation
+        # stops as it drains. A new turn starts on a fresh generation.
+        await self._runtime.retire_all()
+
+    async def adopt_model_hub_catalog(self) -> None:
+        """Nothing to apply: each turn builds its overlay from one catalog snapshot.
+
+        A turn whose overlay changed gets a new generation by the same rule as
+        any other launch-input change.
+        """
+
+    async def reap_runtime_generations(self) -> None:
+        await self._runtime.reap()
+
+    async def shutdown_runtime(self) -> None:
+        """Stop admitting new work; running generations stop once drained."""
+        await self._runtime.retire_current()
+
+    async def _cancel_active_requests(self, base_session_ids: set[str] | None = None) -> None:
+        """Cancel request tasks before a forced generation stop.
 
         Turn owners cancel foreground requests first; restored polls have no
         owner, so without this they would poll the stopped server until their
@@ -1231,6 +1285,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         """
         cancelled: list[asyncio.Task] = []
         for base_session_id, task in list(self._active_requests.items()):
+            if base_session_ids is not None and base_session_id not in base_session_ids:
+                continue
             # Cancelling a task that is already settling could abort the
             # retirement in its cleanup.
             if task.done() or task in self._settling_request_tasks:
@@ -1264,8 +1320,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     request.base_session_id,
                 )
                 req_info = self._session_manager.get_request_session(request.base_session_id)
-                if req_info:
-                    server = await self._get_server()
+                server = self._bound_generation(request.base_session_id)
+                if req_info and server is not None:
                     await self._abort_active_request(
                         request.base_session_id,
                         existing_task,
@@ -1314,13 +1370,22 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     _mark(request.context)
 
     async def _process_message(self, request: AgentRequest) -> None:
+        turn = _TurnGeneration()
+        try:
+            await self._run_turn(request, turn)
+        finally:
+            generation = turn.binding.generation.runtime if turn.binding is not None else None
+            if generation is not None and self._session_generations.get(request.base_session_id) is generation:
+                self._session_generations.pop(request.base_session_id, None)
+            await self._release_binding(turn.binding)
+
+    async def _run_turn(self, request: AgentRequest, turn: _TurnGeneration) -> None:
         run_registered = False
         steer_state: _OpenCodeSteerState | None = None
         poll_server: _SteeringAwareOpenCodeServer | None = None
         model_hub_overlay: OpenCodeOverlay | None = None
-        model_hub_turn_mode: str | None = None
+        model_hub_config: Any = None
         model_hub_launch: ModelHubLaunch | None = None
-        model_hub_overlay_reservation: object | None = None
         server = None
         # Bind early: get_or_create_session_id (below) can raise BEFORE assigning
         # session_id (a transient server error now that get_session raises on
@@ -1346,25 +1411,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 active_poll_removal_pending = True
         try:
             model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
-            turn_mode = getattr(model_hub_runtime, "turn_mode", None)
-            if callable(turn_mode):
-                model_hub_turn_mode = turn_mode("opencode")
-                bind_turn_mode(
-                    request.context,
-                    model_hub_turn_mode,
-                )
-            prepare_overlay = getattr(model_hub_runtime, "prepare_opencode_overlay", None)
-            if callable(prepare_overlay):
-                model_hub_overlay = await prepare_overlay()
-            server = await self._get_server()
-            configure_overlay = getattr(server, "configure_model_hub_overlay", None)
-            if callable(configure_overlay):
-                model_hub_overlay_reservation = await configure_overlay(
-                    model_hub_overlay
-                )
-            await server.ensure_running()
+            # One Model Hub load serves this turn end to end: its overlay is a
+            # launch spec input, and its model resolves from the same overlay.
+            model_hub_config, model_hub_overlay = await self._prepare_launch(request.context)
+            turn.binding = await self._acquire_generation(model_hub_overlay)
+            server = turn.binding.generation.runtime
+            self._session_generations[request.base_session_id] = server
             caller_context_binding_path = _caller_context_path_for_server(server)
-            activation_identity = self._attach_server_activation(server)
+            activation_identity = getattr(server, "identity", None)
             await self._session_manager.ensure_working_dir(request.working_path)
             # A healthy server may still be bootstrapping this directory (about
             # a minute on a fresh host). Waiting here, before the ack is deleted,
@@ -1372,18 +1426,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # its ordinary request timeout.
             await server.ensure_directory_ready(request.working_path)
         except asyncio.CancelledError:
-            await self._finish_prestart_cancellation(
-                request,
-                server,
-                model_hub_overlay_reservation,
-            )
+            await self._finish_prestart_cancellation(request)
             raise
         except Exception as e:
-            await self._release_model_hub_overlay_reservation(
-                server,
-                model_hub_overlay_reservation,
-            )
-            model_hub_overlay_reservation = None
             resource_failure = self._resource_failure_for_server(server)
             logger.error(f"Failed to start OpenCode server: {e}", exc_info=True)
             await emit_backend_failure(
@@ -1404,34 +1449,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._delete_ack(request)
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
-                await self._finish_prestart_cancellation(
-                    request,
-                    server,
-                    model_hub_overlay_reservation,
-                )
-            else:
-                await self._release_model_hub_overlay_reservation(
-                    server,
-                    model_hub_overlay_reservation,
-                )
-            model_hub_overlay_reservation = None
+                await self._finish_prestart_cancellation(request)
             raise
 
         try:
             session_id = await self._session_manager.get_or_create_session_id(request, server)
         except asyncio.CancelledError:
-            await self._finish_prestart_cancellation(
-                request,
-                server,
-                model_hub_overlay_reservation,
-            )
+            await self._finish_prestart_cancellation(request)
             raise
         except OpenCodeResumeUnavailableError as e:
-            await self._release_model_hub_overlay_reservation(
-                server,
-                model_hub_overlay_reservation,
-            )
-            model_hub_overlay_reservation = None
             resource_failure = resource_failure or self._resource_failure_for_server(server)
             # The previous session is gone server-side — surface it as a terminal
             # ERROR result (outbound chokepoint turns the dot red), don't silently
@@ -1447,11 +1473,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._remove_ack_reaction(request)
             return
         except Exception as e:
-            await self._release_model_hub_overlay_reservation(
-                server,
-                model_hub_overlay_reservation,
-            )
-            model_hub_overlay_reservation = None
             resource_failure = resource_failure or self._resource_failure_for_server(server)
             # A transient/transport/auth failure while acquiring the session
             # (get_session now raises on non-404, Codex P2): surface it as a
@@ -1471,11 +1492,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._remove_ack_reaction(request)
             return
         if not session_id:
-            await self._release_model_hub_overlay_reservation(
-                server,
-                model_hub_overlay_reservation,
-            )
-            model_hub_overlay_reservation = None
             await emit_backend_failure(
                 self.controller,
                 request.context,
@@ -1500,17 +1516,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
-                await self._finish_prestart_cancellation(
-                    request,
-                    server,
-                    model_hub_overlay_reservation,
-                )
-            else:
-                await self._release_model_hub_overlay_reservation(
-                    server,
-                    model_hub_overlay_reservation,
-                )
-            model_hub_overlay_reservation = None
+                await self._finish_prestart_cancellation(request)
             raise
 
         try:
@@ -1547,6 +1553,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     requested_model_str,
                     model_hub_overlay,
                     context=request.context,
+                    config=model_hub_config,
                 )
                 bind_launch(request.context, model_hub_launch)
             model_str = opencode_model_for_overlay(
@@ -1744,15 +1751,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 processing_indicator["model_hub_launch"] = launch_identity
             if display_model_dict is not None:
                 processing_indicator[_MODEL_HUB_DISPLAY_MODEL_KEY] = display_model_dict
+            # A restored poll resumes on the process that runs this native turn.
+            processing_indicator[_GENERATION_SNAPSHOT_KEY] = server.generation_id
 
-            if model_hub_overlay_reservation is None:
-                await server.mark_run_active(session_id)
-            else:
-                await server.mark_run_active(
-                    session_id,
-                    overlay_reservation=model_hub_overlay_reservation,
-                )
-                model_hub_overlay_reservation = None
+            await server.mark_run_active(session_id)
             run_registered = True
             # Persist the complete recovery address before the first native write.
             # A crash after OpenCode accepts the exact attempt part can now rebuild
@@ -1836,6 +1838,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reasoning_effort=reasoning_effort,
                 system=system_prompt_injection,
                 baseline_message_ids=set(baseline_message_ids),
+                generation=server,
                 catalog_accepted=lambda: accept_catalog(
                     self.controller, request.context, skill_catalog_sink[0] if skill_catalog_sink else None,
                     backend="opencode",
@@ -2060,28 +2063,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         caller_context_binding_session_id,
                         exc_info=True,
                     )
-            await self._release_model_hub_overlay_reservation(
-                server,
-                model_hub_overlay_reservation,
-            )
-
-    @staticmethod
-    async def _release_model_hub_overlay_reservation(
-        server: Any,
-        reservation: object | None,
-    ) -> None:
-        if server is None or reservation is None:
-            return
-        release = getattr(server, "release_model_hub_overlay_reservation", None)
-        if not callable(release):
-            return
-        try:
-            await release(reservation)
-        except Exception:
-            logger.warning(
-                "Failed to release OpenCode Model Hub overlay reservation",
-                exc_info=True,
-            )
 
     async def _retire_active_poll(
         self,
@@ -2097,15 +2078,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             return False
         self.sessions.remove_active_poll(session_id)
+        # A retiring generation may have just drained.
+        self._schedule_reap()
         return True
 
-    async def _finish_prestart_cancellation(
-        self,
-        request: AgentRequest,
-        server: Any,
-        reservation: object | None,
-    ) -> None:
-        await self._release_model_hub_overlay_reservation(server, reservation)
+    async def _finish_prestart_cancellation(self, request: AgentRequest) -> None:
         await self._remove_ack_reaction(
             request,
             terminal_emoji=(
@@ -2173,7 +2150,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         if native_turn_id != request.expected_native_turn_id:
             return steer_result(SteerOutcome.NOT_ACTIVE, reason="stale_native_turn", backend=self.name)
 
-        server = self._client_manager._server_manager
+        # Status, prompts, and aborts act on one process's in-memory run state,
+        # so a steer goes to the generation that runs this native turn.
+        server = state.generation
         if server is None:
             return steer_result(SteerOutcome.REFUSED, reason="runtime_unavailable", backend=self.name)
 
@@ -2366,7 +2345,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reason="stale_native_session",
                 backend=self.name,
             )
-        server = self._client_manager._server_manager
+        # The part lives in the shared database, so any generation can find it.
+        server = self._bound_generation(base_session_id) or self._runtime.current()
         if server is None:
             return steer_result(
                 SteerOutcome.UNKNOWN,
@@ -2435,6 +2415,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             opencode_session_id = None
             if req_info:
                 opencode_session_id = req_info[0]
+            # Read before the task settles: its cleanup unbinds the generation.
+            generation = self._bound_generation(request.base_session_id)
             # Claimed BEFORE the abort: the request coroutine is what owns the 👀,
             # and its cancellation handler is the only place that trades it for the
             # ⏹️ receipt. The helper waits for any already-started steering write,
@@ -2472,11 +2454,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 # past the handlers; a claimed intent is already gone.
                 self._user_stopped_sessions.discard(request.base_session_id)
 
-            if opencode_session_id and self._active_poll_is_persisted(
+            if (
                 opencode_session_id
+                and generation is not None
+                and self._active_poll_is_persisted(opencode_session_id)
             ):
-                server = await self._get_server()
-                await self._retire_active_poll(server, opencode_session_id)
+                await self._retire_active_poll(generation, opencode_session_id)
 
             # A user-initiated stop is terminal but intentional, so it carries NO
             # user-facing message: a single SILENT result settles the dot to idle +
@@ -2502,6 +2485,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             req_info = self._session_manager.get_request_session(base_id)
             if req_info and len(req_info) >= 3 and req_info[2] == session_key:
                 opencode_session_id = req_info[0]
+                generation = self._bound_generation(base_id)
                 if not task.done():
                     try:
                         await self._abort_active_request(base_id, task, req_info)
@@ -2513,9 +2497,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     except asyncio.CancelledError:
                         pass
                     terminated += 1
-                if self._active_poll_is_persisted(opencode_session_id):
-                    server = await self._get_server()
-                    await self._retire_active_poll(server, opencode_session_id)
+                if generation is not None and self._active_poll_is_persisted(opencode_session_id):
+                    await self._retire_active_poll(generation, opencode_session_id)
         return terminated
 
     async def _abort_active_request(
@@ -2526,6 +2509,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         *,
         cancel_before_abort: bool = False,
     ) -> bool:
+        # Only the process running the native turn can abort it. Without a bound
+        # generation no native run exists yet.
+        server = self._bound_generation(base_session_id)
         state = self._steering_states.get(base_session_id)
         if state is not None and state.task is task:
             async with state.lock:
@@ -2534,16 +2520,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     if task.done():
                         return False
                     task.cancel()
-                if request_session:
-                    server = await self._get_server()
+                if request_session and server is not None:
                     await server.abort_session(request_session[0], request_session[1])
             return True
         if cancel_before_abort:
             if task.done():
                 return False
             task.cancel()
-        if request_session:
-            server = await self._get_server()
+        if request_session and server is not None:
             await server.abort_session(request_session[0], request_session[1])
         return True
 
@@ -2631,8 +2615,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 else ""
             )
             verification_unknown = False
+            binding: RuntimeBinding | None = None
+            server: OpenCodeGeneration | None = None
             try:
-                server = await self._get_server()
+                binding = await self._bind_restored_poll(poll_info)
+                server = binding.generation.runtime
                 messages = await server.list_messages(
                     session_id=poll_info.opencode_session_id,
                     directory=poll_info.working_path,
@@ -2734,6 +2721,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                             "attempt for Turn=%s",
                             logical_turn_id,
                         )
+                        await self._release_binding(binding)
                         continue
                 logger.info(f"OpenCode session {session_id} has completed, removing from active polls")
                 try:
@@ -2744,7 +2732,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         "preserving its active poll and continuing restoration",
                         poll_info.opencode_session_id,
                     )
+                    await self._release_binding(binding)
                     continue
+                await self._release_binding(binding)
                 await self._poll_loop.remove_restored_ack(poll_info)
                 stale_poll_ids.append(session_id)
                 continue
@@ -2755,7 +2745,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
 
             restored_binding_token = secrets.token_hex(16)
-            restored_binding_path = _caller_context_path_for_server(server)
+            restored_binding_path = (
+                _caller_context_path_for_server(server) if server is not None else None
+            )
             restored_caller_env = validated_caller_env_snapshot(
                 processing_snapshot.get(_CALLER_CONTEXT_ENV_SNAPSHOT_KEY)
             )
@@ -2847,6 +2839,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             task = asyncio.create_task(
                 self._run_restored_poll_loop_with_tracking(
                     poll_info,
+                    generation_binding=binding,
                     reconcile_initial_status=status_unknown,
                     reconcile_after_message_ids=reconcile_after_message_ids,
                     restoration_ready=restoration_ready,
@@ -2914,6 +2907,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self,
         poll_info,
         *,
+        generation_binding: RuntimeBinding | None = None,
         reconcile_initial_status: bool = False,
         reconcile_after_message_ids: set[str] | None = None,
         restoration_ready: asyncio.Future[bool] | None = None,
@@ -2948,7 +2942,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             registration_attempts = 2 if poll_platform in _RESTORED_IM_PLATFORMS else 1
             for attempt in range(registration_attempts):
                 try:
-                    server = await self._get_server()
+                    if generation_binding is None:
+                        generation_binding = await self._bind_restored_poll(poll_info)
+                    server = generation_binding.generation.runtime
+                    self._session_generations[poll_info.base_session_id] = server
                     await server.mark_run_active(poll_info.opencode_session_id)
                     break
                 except Exception:
@@ -3021,6 +3018,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     ),
                     restored=True,
                     reconcile_initial_status=reconcile_initial_status,
+                    generation=server,
                 )
                 if has_steering_identity:
                     self._steering_states[poll_info.base_session_id] = steer_state
@@ -3041,7 +3039,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if delivery_recovery_complete is not None:
                 await delivery_recovery_complete.wait()
             terminal_poll_cleanup = bool(
-                await self._poll_loop.run_restored_poll_loop(poll_info)
+                await self._poll_loop.run_restored_poll_loop(
+                    poll_info,
+                    self._restored_poll_servers.get(current_task) or server,
+                )
             )
         except Exception as err:
             if restoration_registered:
@@ -3080,51 +3081,82 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     err,
                 )
         finally:
-            interrupted = current_task in self._settling_request_tasks
-            if current_task is not None:
-                # Settling from here on, however the poll ended.
-                self._settling_request_tasks.add(current_task)
-                current_task.add_done_callback(self._settling_request_tasks.discard)
-            await self._stop_caller_context_binding_renewal(
-                caller_context_binding_renewal
-            )
-            if current_task is not None:
-                self._restored_poll_servers.pop(current_task, None)
-            if steer_state is not None:
-                async with steer_state.lock:
-                    steer_state.closing = True
-                if self._steering_states.get(poll_info.base_session_id) is steer_state:
-                    self._steering_states.pop(poll_info.base_session_id, None)
-            if (terminal_poll_cleanup or interrupted) and server is not None:
-                await self._retire_active_poll(
-                    server,
-                    poll_info.opencode_session_id,
+            try:
+                interrupted = current_task in self._settling_request_tasks
+                if current_task is not None:
+                    # Settling from here on, however the poll ended.
+                    self._settling_request_tasks.add(current_task)
+                    current_task.add_done_callback(self._settling_request_tasks.discard)
+                await self._stop_caller_context_binding_renewal(
+                    caller_context_binding_renewal
                 )
-            elif interrupted:
-                # Interrupted before registering a run marker: only the durable
-                # record would bring the run back after a restart.
-                self.sessions.remove_active_poll(poll_info.opencode_session_id)
-            if caller_context_binding_token and not self._active_poll_is_persisted(
-                poll_info.opencode_session_id
-            ):
-                try:
-                    await asyncio.to_thread(
-                        unbind_caller_context_session,
+                if current_task is not None:
+                    self._restored_poll_servers.pop(current_task, None)
+                if steer_state is not None:
+                    async with steer_state.lock:
+                        steer_state.closing = True
+                    if self._steering_states.get(poll_info.base_session_id) is steer_state:
+                        self._steering_states.pop(poll_info.base_session_id, None)
+                if (terminal_poll_cleanup or interrupted) and server is not None:
+                    await self._retire_active_poll(
+                        server,
                         poll_info.opencode_session_id,
-                        binding_token=caller_context_binding_token,
-                        **_binding_path_kwargs(caller_context_binding_path),
                     )
-                except Exception:
-                    logger.warning(
-                        "Failed to clear restored OpenCode caller context for session %s",
-                        poll_info.opencode_session_id,
-                        exc_info=True,
-                    )
-            if self._active_requests.get(poll_info.base_session_id) is current_task:
-                self._active_requests.pop(poll_info.base_session_id, None)
-                self._session_manager.pop_request_session(poll_info.base_session_id)
-            if restoration_ready is not None and not restoration_ready.done():
-                restoration_ready.set_result(False)
+                elif interrupted:
+                    # Interrupted before registering a run marker: only the durable
+                    # record would bring the run back after a restart.
+                    self.sessions.remove_active_poll(poll_info.opencode_session_id)
+                if caller_context_binding_token and not self._active_poll_is_persisted(
+                    poll_info.opencode_session_id
+                ):
+                    try:
+                        await asyncio.to_thread(
+                            unbind_caller_context_session,
+                            poll_info.opencode_session_id,
+                            binding_token=caller_context_binding_token,
+                            **_binding_path_kwargs(caller_context_binding_path),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to clear restored OpenCode caller context for session %s",
+                            poll_info.opencode_session_id,
+                            exc_info=True,
+                        )
+            finally:
+                # A cancel that lands while the cleanup above awaits must not
+                # leave this poll's request, generation, or binding behind.
+                if self._active_requests.get(poll_info.base_session_id) is current_task:
+                    self._active_requests.pop(poll_info.base_session_id, None)
+                    self._session_manager.pop_request_session(poll_info.base_session_id)
+                if server is not None and self._session_generations.get(poll_info.base_session_id) is server:
+                    self._session_generations.pop(poll_info.base_session_id, None)
+                await self._release_binding(generation_binding)
+                if restoration_ready is not None and not restoration_ready.done():
+                    restoration_ready.set_result(False)
+
+    async def _bind_restored_poll(self, poll_info) -> RuntimeBinding:
+        """Bind a restored poll to the generation whose process runs its native turn."""
+
+        await self._ensure_adopted()
+        generation_id = _poll_generation_id(poll_info)
+        generation = self._runtime.generation(generation_id) if generation_id else None
+        if generation is None and generation_id is None:
+            # Polls written before generations name no process: the adopted
+            # legacy server is the one that recorded their run.
+            generation = next(
+                (
+                    candidate
+                    for candidate in self._runtime.generations()
+                    if poll_info.opencode_session_id in candidate.active_run_sessions
+                ),
+                None,
+            )
+        if generation is not None:
+            return await self._runtime.bind(generation)
+        # No live process owns this run any more. Its messages are in the
+        # shared database, so the current generation reads and settles it.
+        _config, overlay = await self._prepare_launch()
+        return await self._acquire_generation(overlay)
 
     def _prepare_message_with_files(self, request: AgentRequest) -> str:
         return message_with_files(request.message, request.files)

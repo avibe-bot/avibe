@@ -158,6 +158,7 @@ def _opencode_stop_case():
         get_request_session=lambda _base: None,
     )
     agent._user_stopped_sessions = set()
+    agent._session_generations = {}
 
     async def _in_flight():
         await asyncio.Event().wait()

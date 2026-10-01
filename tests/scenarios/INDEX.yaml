@@ -111,6 +111,7 @@ capabilities:
       - tests/test_claude_cli_path.py
       - tests/test_backend_restart.py
       - tests/test_controller_idle_cleanup.py
+      - tests/test_opencode_generations.py
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery
     status: active

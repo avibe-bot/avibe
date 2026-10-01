@@ -20,6 +20,7 @@ from typing import Any, List, Tuple
 
 import pytest
 
+from tests.opencode_generation_fakes import ui_lease
 from vibe import api
 
 
@@ -132,7 +133,7 @@ def fake_save_env(monkeypatch, tmp_path):
     async def _fake_get_server():
         return server
 
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(api, "restart_backend", lambda backend: {"ok": True})
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
@@ -146,7 +147,7 @@ def fake_model_env(monkeypatch, tmp_path):
     async def _fake_get_server():
         return server
 
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(api, "restart_backend", lambda backend: {"ok": True})
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {"x": {"data": {}, "updated_at": 1}})
@@ -536,7 +537,7 @@ def test_save_provider_model_rejects_builtin_duplicate_from_list_models(monkeypa
             }
         )
 
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(api, "restart_backend", lambda backend: {"ok": True})
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
@@ -667,7 +668,7 @@ def test_save_custom_provider_rejects_reserved_id_when_catalog_unavailable(monke
     async def _fail_get_server():
         raise RuntimeError("daemon unavailable")
 
-    monkeypatch.setattr(api, "_opencode_get_server", _fail_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fail_get_server))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
     result = _save_custom(
@@ -926,7 +927,7 @@ def test_base_url_persist_failure_surfaces_to_caller(monkeypatch, tmp_path) -> N
     async def _fake_get_server():
         return server
 
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
     def _explode(*args, **kwargs):

@@ -33,6 +33,7 @@ from modules.agents.opencode.server import OpenCodePromptRejectedError
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
 
+from tests.opencode_generation_fakes import serve_opencode_agent
 from tests.test_session_delivery_fsm import (
     _context, _seed_session,
     _fsm_schema_template, managers,  # noqa: F401 -- hermetic durable delivery fixtures
@@ -1014,7 +1015,9 @@ def _opencode_agent(primary: AgentRequest, task: asyncio.Task, server: _OpenCode
         "opencode-session",
         primary.working_path,
     )
-    agent._client_manager = SimpleNamespace(_server_manager=server)
+    serve_opencode_agent(agent, server)
+    if server is not None:
+        agent._session_generations[primary.base_session_id] = server
     agent._user_stopped_sessions = set()
     agent._steering_states = {
         primary.base_session_id: _OpenCodeSteerState(
@@ -1029,6 +1032,7 @@ def _opencode_agent(primary: AgentRequest, task: asyncio.Task, server: _OpenCode
             reasoning_effort="high",
             system="primary system prompt",
             baseline_message_ids=set(),
+            generation=server,
         )
     }
     return agent
@@ -1209,7 +1213,6 @@ async def test_opencode_stop_waits_for_in_flight_steering_write() -> None:
     agent = _opencode_agent(primary, gate_task, server)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     controller.emit_agent_message = AsyncMock()
-    agent._get_server = AsyncMock(return_value=server)
     removed_polls: list[str] = []
     agent.sessions = SimpleNamespace(
         get_all_active_polls=lambda: {"opencode-session": object()},
@@ -1272,7 +1275,6 @@ async def test_opencode_replacement_waits_for_in_flight_steering_write() -> None
         primary.working_path,
     )
     agent.controller = controller
-    agent._get_server = AsyncMock(return_value=server)
     agent._process_message = AsyncMock(return_value=None)
     try:
         identity = active_steer_identity(controller, "opencode", "avibe-session")
@@ -1408,8 +1410,7 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
     agent._poll_loop = SimpleNamespace()
     agent._steering_states = {}
     agent._active_requests = {}
-    agent._client_manager = SimpleNamespace(_server_manager=server)
-    agent._get_server = AsyncMock(return_value=server)
+    serve_opencode_agent(agent, server)
     agent._delete_ack = AsyncMock()
     agent._remove_ack_reaction = AsyncMock()
     agent._prepare_message_with_files = lambda request: request.message
@@ -1538,8 +1539,7 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
     agent._poll_loop = SimpleNamespace()
     agent._steering_states = {}
     agent._active_requests = {}
-    agent._client_manager = SimpleNamespace(_server_manager=server)
-    agent._get_server = AsyncMock(return_value=server)
+    serve_opencode_agent(agent, server)
     agent._delete_ack = AsyncMock()
     agent._remove_ack_reaction = AsyncMock()
     agent._prepare_message_with_files = lambda request: request.message
@@ -2713,7 +2713,8 @@ async def test_opencode_rejects_stale_runner_and_unavailable_runtime() -> None:
         assert stale.outcome is SteerOutcome.NOT_ACTIVE
         assert server.prompt_calls == []
 
-        agent._client_manager._server_manager = None
+        # The native turn has no generation that could take the steer.
+        agent._steering_states[primary.base_session_id].generation = None
         identity = agent.steering_native_turn_id(
             SimpleNamespace(runtime_key="runtime-key", agent_request=primary)
         )
@@ -3050,8 +3051,7 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     agent._poll_loop = _PollLoop()
     agent._steering_states = {}
     agent._active_requests = {}
-    agent._client_manager = SimpleNamespace(_server_manager=server)
-    agent._get_server = AsyncMock(return_value=server)
+    serve_opencode_agent(agent, server)
     agent._delete_ack = AsyncMock()
     agent._remove_ack_reaction = AsyncMock()
     agent._prepare_message_with_files = lambda request: request.message

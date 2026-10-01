@@ -51,7 +51,6 @@ class CodexCompatConfig:
 class OpenCodeCompatConfig:
     enabled: bool
     binary: str
-    port: int
     request_timeout_seconds: int
     default_reasoning_effort: Optional[str] = None
     error_retry_limit: int = DEFAULT_OPENCODE_ERROR_RETRY_LIMIT  # Max retries on LLM stream errors (0 = no retry)
@@ -178,7 +177,6 @@ def to_app_config(
                 "opencode",
                 resolve_agent_paths=resolve_agent_paths,
             ),
-            port=4096,
             request_timeout_seconds=60,
             default_reasoning_effort=v2.agents.opencode.default_reasoning_effort,
             error_retry_limit=v2.agents.opencode.error_retry_limit,

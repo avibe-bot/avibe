@@ -692,8 +692,10 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
         # Active End has already gone through the canonical stop path. Finish
         # interrupting its native poll, but do not retire a shared server here.
         try:
-            if req_info:
-                server = await agent._get_server()
+            # Only the generation running this native turn can abort it.
+            bound = getattr(agent, "_bound_generation", None)
+            server = bound(base_session_id) if callable(bound) else None
+            if req_info and server is not None:
                 await server.abort_session(req_info[0], req_info[1])
         except Exception:  # noqa: BLE001
             logger.debug("end: opencode remote abort failed for %s", base_session_id, exc_info=True)
@@ -714,13 +716,14 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
     if any(not request.done() for request in active_requests.values()):
         return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
 
-    # The serve process is shared across Sessions. Its existing strict idle
-    # retirement checks native requests, durable ownership, and process proof.
-    server = getattr(getattr(agent, "_client_manager", None), "_server_manager", None)
-    if server is None:
+    # The serve process is shared across Sessions. Retiring the current
+    # generation stops it now when idle; work bound to any generation keeps
+    # that process until the work drains.
+    shutdown = getattr(agent, "shutdown_runtime", None)
+    if not callable(shutdown):
         return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
     try:
-        await server.retire_for_native_migration()
+        await shutdown()
     except Exception as exc:  # noqa: BLE001
         logger.warning("end: opencode idle server retirement failed for %s: %s", base_session_id, exc)
         return {"ok": False, "error": "runtime_retirement_failed", "detail": str(exc)}

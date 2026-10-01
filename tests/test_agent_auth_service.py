@@ -4,7 +4,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, Mock, patch
@@ -22,6 +22,16 @@ from core.agent_auth_service import (
 )
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
+
+
+def _opencode_agent_serving(server):
+    """An OpenCode agent whose current generation is ``server``."""
+
+    @asynccontextmanager
+    async def current_server():
+        yield server
+
+    return SimpleNamespace(current_server=current_server)
 
 
 class _IsolatedClaudeConfigDirMixin:
@@ -852,7 +862,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             get_agent_model_from_config=lambda agent_name: None,
         )
         controller.agent_service = SimpleNamespace(
-            agents={"opencode": SimpleNamespace(_get_server=AsyncMock(return_value=mock_server))}
+            agents={"opencode": _opencode_agent_serving(mock_server)}
         )
         service = AgentAuthService(controller)
         context = MessageContext(user_id="U1", channel_id="C1")
@@ -877,7 +887,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             get_agent_model_from_config=lambda agent_name: None,
         )
         controller.agent_service = SimpleNamespace(
-            agents={"opencode": SimpleNamespace(_get_server=AsyncMock(return_value=mock_server))}
+            agents={"opencode": _opencode_agent_serving(mock_server)}
         )
         service = AgentAuthService(controller)
         context = MessageContext(
@@ -1016,7 +1026,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         server = SimpleNamespace(set_api_key_auth=AsyncMock(side_effect=set_api_key_auth))
         controller.agent_service = SimpleNamespace(
-            agents={"opencode": SimpleNamespace(_get_server=AsyncMock(return_value=server))}
+            agents={"opencode": _opencode_agent_serving(server)}
         )
 
         cleanup_calls = []
@@ -1602,15 +1612,12 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.agent_service.agents["codex"] = SimpleNamespace(refresh_auth_state=AsyncMock())
         controller.agent_service.agents["claude"] = SimpleNamespace(refresh_auth_state=AsyncMock())
         service = AgentAuthService(controller)
-        service._refresh_opencode_server = AsyncMock()
 
         await service._refresh_backend_runtime("codex")
         await service._refresh_backend_runtime("claude")
-        await service._refresh_backend_runtime("opencode")
 
         controller.agent_service.agents["codex"].refresh_auth_state.assert_awaited_once()
         controller.agent_service.agents["claude"].refresh_auth_state.assert_awaited_once()
-        service._refresh_opencode_server.assert_awaited_once()
 
     async def test_refresh_backend_runtime_prefers_runtime_config_reload(self):
         controller = _StubController()
@@ -1778,468 +1785,15 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         controller.vibe_agent_store.ensure_builtin_default_agents.assert_called_once_with(["codex"])
 
-    async def test_refresh_opencode_runtime_reloads_v2_cli_path(self):
-        from config.v2_config import AgentsConfig, OpenCodeConfig, RuntimeConfig, SlackConfig, V2Config
-        from config.v2_compat import OpenCodeCompatConfig
 
-        controller = _StubController()
-        previous_server = SimpleNamespace(
-            reload_runtime_config=AsyncMock(),
-            detach_after_deferred_refresh=AsyncMock(),
-            refresh_global_config=AsyncMock(return_value=False),
-        )
 
-        class _FakeOpenCodeAgent:
-            def __init__(self) -> None:
-                self.refreshed = None
 
-            async def _get_server(self):
-                return previous_server
 
-            async def refresh_runtime_config(self, opencode_config):
-                self.refreshed = opencode_config
-                controller.config.opencode = opencode_config
-                await previous_server.detach_after_deferred_refresh()
-                await previous_server.reload_runtime_config(
-                    binary=opencode_config.binary,
-                    port=opencode_config.port,
-                    request_timeout_seconds=opencode_config.request_timeout_seconds,
-                )
 
-        agent = _FakeOpenCodeAgent()
-        controller.agent_service.agents["opencode"] = agent
-        service = AgentAuthService(controller)
 
-        with tempfile.TemporaryDirectory() as home:
-            with _temporary_vibe_home(Path(home)):
-                V2Config(
-                    mode="self_host",
-                    version="v2",
-                    slack=SlackConfig(),
-                    runtime=RuntimeConfig(default_cwd="/tmp/work"),
-                    agents=AgentsConfig(
-                        opencode=OpenCodeConfig(
-                            enabled=True,
-                            cli_path="/opt/opencode/bin/opencode",
-                        )
-                    ),
-                ).save()
 
-                await service._refresh_backend_runtime("opencode")
 
-        self.assertIsInstance(agent.refreshed, OpenCodeCompatConfig)
-        self.assertEqual(agent.refreshed.binary, "/opt/opencode/bin/opencode")
-        previous_server.reload_runtime_config.assert_awaited_once_with(
-            binary="/opt/opencode/bin/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        previous_server.detach_after_deferred_refresh.assert_awaited_once()
 
-    async def test_opencode_agent_refresh_runtime_config_updates_cached_server(self):
-        from config.v2_compat import OpenCodeCompatConfig
-        from modules.agents.opencode.agent import OpenCodeAgent
-
-        old_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        new_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        calls: list[str] = []
-
-        async def _detach() -> None:
-            calls.append("detach")
-
-        async def _reload_runtime_config(**kwargs) -> None:
-            calls.append("reload")
-
-        previous_server = SimpleNamespace(
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-            reload_runtime_config=AsyncMock(side_effect=_reload_runtime_config),
-            detach_after_deferred_refresh=AsyncMock(side_effect=_detach),
-            refresh_global_config=AsyncMock(return_value=False),
-        )
-        agent = OpenCodeAgent.__new__(OpenCodeAgent)
-        agent.opencode_config = old_config
-        agent.controller = SimpleNamespace(config=SimpleNamespace(opencode=old_config))
-        agent._client_manager = SimpleNamespace(reset_config=AsyncMock(return_value=previous_server))
-
-        await agent.refresh_runtime_config(new_config)
-
-        self.assertIs(agent.opencode_config, new_config)
-        self.assertIs(agent.controller.config.opencode, new_config)
-        agent._client_manager.reset_config.assert_awaited_once_with(new_config)
-        previous_server.detach_after_deferred_refresh.assert_awaited_once()
-        previous_server.reload_runtime_config.assert_awaited_once_with(
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        self.assertEqual(calls, ["detach", "reload"])
-
-    async def test_opencode_agent_refresh_runtime_config_uses_global_config_refresh(self):
-        from config.v2_compat import OpenCodeCompatConfig
-        from modules.agents.opencode.agent import OpenCodeAgent
-
-        old_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        new_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        previous_server = SimpleNamespace(
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-            refresh_global_config=AsyncMock(return_value=True),
-            detach_after_deferred_refresh=AsyncMock(),
-            reload_runtime_config=AsyncMock(),
-        )
-        agent = OpenCodeAgent.__new__(OpenCodeAgent)
-        agent.opencode_config = old_config
-        agent.controller = SimpleNamespace(config=SimpleNamespace(opencode=old_config))
-        agent._client_manager = SimpleNamespace(reset_config=AsyncMock(return_value=previous_server))
-
-        await agent.refresh_runtime_config(new_config)
-
-        previous_server.refresh_global_config.assert_awaited_once()
-        previous_server.detach_after_deferred_refresh.assert_not_awaited()
-        previous_server.reload_runtime_config.assert_awaited_once_with(
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-
-    async def test_opencode_agent_force_refresh_restarts_after_global_config_change(self):
-        from config.v2_compat import OpenCodeCompatConfig
-        from modules.agents.opencode.agent import OpenCodeAgent
-
-        old_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        new_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        calls = []
-        previous_server = SimpleNamespace(
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-            refresh_global_config=AsyncMock(return_value=True),
-            detach_after_deferred_refresh=AsyncMock(side_effect=lambda **_kw: calls.append(("detach", restored_poll.done()))),
-            reload_runtime_config=AsyncMock(),
-        )
-        # A poll restored after a restart has no turn owner to cancel it; left
-        # running, it would poll the stopped server and surface a transport
-        # error for an interruption the user chose.
-        restored_poll = asyncio.create_task(asyncio.Event().wait())
-        agent = OpenCodeAgent.__new__(OpenCodeAgent)
-        agent.opencode_config = old_config
-        agent.controller = SimpleNamespace(config=SimpleNamespace(opencode=old_config))
-        agent._client_manager = SimpleNamespace(
-            reset_config=AsyncMock(return_value=previous_server),
-        )
-        agent._active_requests = {"base-restored": restored_poll}
-        agent._steering_states = {}
-        agent._settling_request_tasks = set()
-
-        await agent.refresh_runtime_config(new_config, force=True)
-
-        self.assertTrue(restored_poll.cancelled())
-        self.assertEqual(calls, [("detach", True)])
-        previous_server.refresh_global_config.assert_not_awaited()
-        previous_server.detach_after_deferred_refresh.assert_awaited_once_with(force=True)
-        previous_server.reload_runtime_config.assert_awaited_once_with(
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-
-    async def test_opencode_agent_refresh_runtime_config_attaches_uncached_server(self):
-        from config.v2_compat import OpenCodeCompatConfig
-        from modules.agents.opencode.agent import OpenCodeAgent
-        from modules.agents.opencode.server import OpenCodeServerManager
-
-        old_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/old/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        new_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/new/opencode",
-            port=4100,
-            request_timeout_seconds=15,
-        )
-        live_server = SimpleNamespace(
-            binary="/old/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-            refresh_global_config=AsyncMock(return_value=True),
-            detach_after_deferred_refresh=AsyncMock(),
-            reload_runtime_config=AsyncMock(),
-        )
-        agent = OpenCodeAgent.__new__(OpenCodeAgent)
-        agent.opencode_config = old_config
-        agent.controller = SimpleNamespace(config=SimpleNamespace(opencode=old_config))
-        agent._client_manager = SimpleNamespace(
-            reset_config=AsyncMock(return_value=None),
-        )
-
-        with patch.object(
-            OpenCodeServerManager,
-            "get_instance_if_managed_server_exists",
-            AsyncMock(return_value=live_server),
-        ) as get_instance:
-            await agent.refresh_runtime_config(new_config)
-
-        agent._client_manager.reset_config.assert_awaited_once_with(new_config)
-        get_instance.assert_awaited_once_with(
-            binary="/old/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-            resource_governor=agent.controller._agent_resource_governor,
-        )
-        live_server.refresh_global_config.assert_not_awaited()
-        live_server.detach_after_deferred_refresh.assert_awaited_once()
-        live_server.reload_runtime_config.assert_awaited_once_with(
-            binary="/new/opencode",
-            port=4100,
-            request_timeout_seconds=15,
-        )
-
-    async def test_opencode_agent_refresh_runtime_config_skips_uncached_refresh_without_managed_server(self):
-        from config.v2_compat import OpenCodeCompatConfig
-        from modules.agents.opencode.agent import OpenCodeAgent
-        from modules.agents.opencode.server import OpenCodeServerManager
-
-        old_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        new_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        agent = OpenCodeAgent.__new__(OpenCodeAgent)
-        agent.opencode_config = old_config
-        agent.controller = SimpleNamespace(config=SimpleNamespace(opencode=old_config))
-        agent._client_manager = SimpleNamespace(
-            reset_config=AsyncMock(return_value=None),
-        )
-
-        with patch.object(
-            OpenCodeServerManager,
-            "get_instance_if_managed_server_exists",
-            AsyncMock(return_value=None),
-        ) as get_instance:
-            await agent.refresh_runtime_config(new_config)
-
-        agent._client_manager.reset_config.assert_awaited_once_with(new_config)
-        get_instance.assert_awaited_once_with(
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-            resource_governor=agent.controller._agent_resource_governor,
-        )
-        self.assertIs(agent.opencode_config, new_config)
-        self.assertIs(agent.controller.config.opencode, new_config)
-
-    async def test_web_opencode_server_uses_v2_runtime_resource_governance(self):
-        from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
-        from modules.agents.opencode.server import OpenCodeServerManager
-
-        controller = _StubController()
-        service = AgentAuthService(controller)
-        v2_config = V2Config(
-            mode="self_host",
-            version="v2",
-            slack=SlackConfig(),
-            agents=AgentsConfig(),
-            runtime=RuntimeConfig(
-                default_cwd=".",
-                resource_governance={
-                    "mode": "enabled",
-                    "agent_group_name": "web-oauth-agents",
-                },
-            ),
-        )
-        server = SimpleNamespace(ensure_running=AsyncMock())
-
-        with (
-            patch("config.v2_config.V2Config.load", return_value=v2_config),
-            patch.object(
-                OpenCodeServerManager,
-                "get_instance",
-                AsyncMock(return_value=server),
-            ) as get_instance,
-        ):
-            result = await service._opencode_server()
-
-        self.assertIs(result, server)
-        server.ensure_running.assert_awaited_once()
-        self.assertNotIn(
-            "model_hub_overlay_required",
-            get_instance.await_args.kwargs,
-        )
-        governor = get_instance.await_args.kwargs["resource_governor"]
-        self.assertEqual(governor.mode, "enabled")
-        self.assertEqual(governor.config["agent_group_name"], "web-oauth-agents")
-
-    async def test_web_opencode_server_requires_controller_overlay_in_hub_mode(self):
-        from config.v2_config import (
-            AgentsConfig,
-            RuntimeConfig,
-            SlackConfig,
-            V2Config,
-        )
-        from modules.agents.opencode.server import (
-            OpenCodeModelHubOverlayRequiredError,
-            OpenCodeServerManager,
-        )
-
-        controller = _StubController()
-        service = AgentAuthService(controller)
-        v2_config = V2Config(
-            mode="self_host",
-            version="v2",
-            slack=SlackConfig(),
-            agents=AgentsConfig(),
-            runtime=RuntimeConfig(default_cwd="."),
-        )
-        v2_config.model_hub.agents["opencode"].mode = "hub"
-        server = SimpleNamespace(
-            ensure_running=AsyncMock(
-                side_effect=OpenCodeModelHubOverlayRequiredError(
-                    "controller overlay is not ready"
-                )
-            )
-        )
-
-        with (
-            patch("config.v2_config.V2Config.load", return_value=v2_config),
-            patch.object(
-                OpenCodeServerManager,
-                "get_instance",
-                AsyncMock(return_value=server),
-            ),
-        ):
-            result = await service._opencode_server()
-
-        self.assertIsNone(result)
-        server.ensure_running.assert_awaited_once()
-
-    async def test_opencode_agent_refresh_runtime_config_restarts_uncached_adopted_server_on_refresh_miss(self):
-        from config.v2_compat import OpenCodeCompatConfig
-        from modules.agents.opencode.agent import OpenCodeAgent
-        from modules.agents.opencode.server import OpenCodeServerManager
-
-        old_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        new_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        live_server = SimpleNamespace(
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-            refresh_global_config=AsyncMock(return_value=False),
-            detach_after_deferred_refresh=AsyncMock(),
-            reload_runtime_config=AsyncMock(),
-        )
-        agent = OpenCodeAgent.__new__(OpenCodeAgent)
-        agent.opencode_config = old_config
-        agent.controller = SimpleNamespace(config=SimpleNamespace(opencode=old_config))
-        agent._client_manager = SimpleNamespace(
-            reset_config=AsyncMock(return_value=None),
-        )
-
-        with patch.object(
-            OpenCodeServerManager,
-            "get_instance_if_managed_server_exists",
-            AsyncMock(return_value=live_server),
-        ):
-            await agent.refresh_runtime_config(new_config)
-
-        live_server.refresh_global_config.assert_awaited_once()
-        live_server.detach_after_deferred_refresh.assert_awaited_once()
-        live_server.reload_runtime_config.assert_awaited_once_with(
-            binary="/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-
-    async def test_opencode_agent_refresh_runtime_config_restarts_when_runtime_changes(self):
-        from config.v2_compat import OpenCodeCompatConfig
-        from modules.agents.opencode.agent import OpenCodeAgent
-
-        old_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/old/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-        )
-        new_config = OpenCodeCompatConfig(
-            enabled=True,
-            binary="/new/opencode",
-            port=4100,
-            request_timeout_seconds=15,
-        )
-        previous_server = SimpleNamespace(
-            binary="/old/opencode",
-            port=4096,
-            request_timeout_seconds=60,
-            refresh_global_config=AsyncMock(return_value=True),
-            detach_after_deferred_refresh=AsyncMock(),
-            reload_runtime_config=AsyncMock(),
-        )
-        agent = OpenCodeAgent.__new__(OpenCodeAgent)
-        agent.opencode_config = old_config
-        agent.controller = SimpleNamespace(config=SimpleNamespace(opencode=old_config))
-        agent._client_manager = SimpleNamespace(reset_config=AsyncMock(return_value=previous_server))
-
-        await agent.refresh_runtime_config(new_config)
-
-        previous_server.refresh_global_config.assert_not_awaited()
-        previous_server.detach_after_deferred_refresh.assert_awaited_once()
-        previous_server.reload_runtime_config.assert_awaited_once_with(
-            binary="/new/opencode",
-            port=4100,
-            request_timeout_seconds=15,
-        )
 
     async def test_refresh_claude_runtime_reloads_v2_cli_path(self):
         from config.v2_config import AgentsConfig, ClaudeConfig, RuntimeConfig, SlackConfig, V2Config

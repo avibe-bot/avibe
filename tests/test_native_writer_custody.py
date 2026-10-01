@@ -32,7 +32,7 @@ def no_live_operations(monkeypatch):
     monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
     monkeypatch.setattr(psutil, "process_iter", forbidden)
     monkeypatch.setattr(api, "restart_backend", Mock(return_value={"ok": True}))
-    monkeypatch.setattr(api, "_opencode_get_server", AsyncMock(return_value=None))
+    monkeypatch.setattr(api, "_opencode_lease", AsyncMock(return_value=None))
     monkeypatch.setattr(api, "_config_recovery_message", lambda: None)
 
 
@@ -305,7 +305,7 @@ async def test_non_auth_rmw_is_excluded_before_first_read(monkeypatch, kind, blo
             "native_auth_in_progress" if blocker == "lease" else "migration_recovery_pending"
         )
         assert path.read_bytes() == before
-        api._opencode_get_server.assert_not_awaited()
+        api._opencode_lease.assert_not_awaited()
     finally:
         lease.release()
 

@@ -120,8 +120,8 @@ def test_opencode_permission_does_not_gate_another_backend_or_launch_daemon(conn
     monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", AsyncMock(return_value={"provider"}))
     monkeypatch.setattr(opencode_config, "read_opencode_provider_auth_entries", lambda **_: {})
     monkeypatch.setattr(api, "opencode_permission_status", lambda: {"ok": True, "permission_allowed": False})
-    daemon = AsyncMock(side_effect=AssertionError("readiness must not launch a daemon"))
-    monkeypatch.setattr(api, "_opencode_get_server", daemon)
+    daemon = AsyncMock(side_effect=AssertionError("readiness must not lease an OpenCode server"))
+    monkeypatch.setattr(api, "_opencode_lease", daemon)
     state = asyncio.run(api.get_backend_connection("opencode"))
     assert state["auth"] == "api_key" and state["permission_required"] and not state["entry_eligible"]
     assert asyncio.run(api.get_backend_connection("claude"))["ready"]

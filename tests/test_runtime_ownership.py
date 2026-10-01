@@ -25,6 +25,8 @@ from core.session_turns import SessionTurnManager
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.codex.session import CodexSessionManager
 from modules.agents.opencode.agent import OpenCodeAgent
+from modules.agents.opencode.server import OpenCodeGeneration
+from tests.fake_pid_helpers import fake_pid
 from modules.agents.service import AgentService
 from storage import message_deliveries as delivery_store
 from storage import workbench_sessions_service as workbench_sessions
@@ -331,32 +333,53 @@ def test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership() -> N
         runtime_ownership=SimpleNamespace(snapshot=snapshot),
         runtime_work_supervisor=SimpleNamespace(notify=Mock()),
     )
-    opencode = object.__new__(OpenCodeAgent)
-    opencode._client_manager = SimpleNamespace(
-        _server_manager=SimpleNamespace(
-            base_url="http://127.0.0.1:4096",
-            runtime_has_active_turns=lambda: False,
+    def generation(generation_id: str, index: int) -> OpenCodeGeneration:
+        return OpenCodeGeneration(
+            generation_id=generation_id,
+            pid=fake_pid(index),
+            port=50000 + index,
+            spec_digest=generation_id,
+            process_created_at=1.0,
         )
+
+    retiring, current = generation("ocg_old", 1), generation("ocg_new", 2)
+    opencode = object.__new__(OpenCodeAgent)
+    opencode._runtime = SimpleNamespace(
+        generations=lambda: (retiring, current),
+        current=lambda: current,
     )
+    # base-a still runs on the retiring generation; base-b is between turns.
+    opencode._session_generations = {"base-a": retiring}
     opencode._session_manager = SimpleNamespace(
-        list_all=lambda: {"base-a": ("native-a", "/work", "route:a")},
-        get_agent_session_id=lambda _base: "ses-a",
+        list_all=lambda: {
+            "base-a": ("native-a", "/work", "route:a"),
+            "base-b": ("native-b", "/work", "route:b"),
+        },
+        get_agent_session_id=lambda base: {"base-a": "ses-a", "base-b": "ses-b"}[base],
     )
     opencode._active_requests = {}
-    opencode.runtime_turn_keys = lambda: {"base-a:/work"}
     opencode.controller = controller
     service = AgentService(controller)
     service.register(opencode)
 
     assert not asyncio.run(service.backend_runtime_active("opencode"))
-    target = target_snapshots[0]
-    assert target.resource_key == "http://127.0.0.1:4096"
-    assert target.include_all_backend_sessions
-    assert target.maps_all_backend_activities
-    assert target.maps_all_backend_fallback_runs
-    assert target.bindings[0].session_id == "ses-a"
-    assert target.bindings[0].fallback_route_keys == ("route:a",)
-    assert target.known_fallback_route_keys == ("route:a",)
+    old_target, current_target = target_snapshots
+    assert old_target.resource_key == "opencode:ocg_old"
+    assert not old_target.include_all_backend_sessions
+    assert not old_target.maps_all_backend_activities
+    assert not old_target.maps_all_backend_fallback_runs
+    assert [binding.session_id for binding in old_target.bindings] == ["ses-a"]
+    assert old_target.bindings[0].fallback_route_keys == ("route:a",)
+    assert old_target.known_fallback_route_keys == ("route:a",)
+    assert old_target.known_activity_runtime_keys == ("base-a:/work",)
+    # Unbound sessions acquire the current generation, so its target keeps
+    # every backend session in view for exclusive operations.
+    assert current_target.resource_key == "opencode:ocg_new"
+    assert current_target.include_all_backend_sessions
+    assert current_target.maps_all_backend_activities
+    assert current_target.maps_all_backend_fallback_runs
+    assert [binding.session_id for binding in current_target.bindings] == ["ses-a", "ses-b"]
+    assert current_target.known_fallback_route_keys == ("route:a", "route:b")
     opencode._session_manager.get_agent_session_id = lambda _base: None
     assert opencode.runtime_ownership_snapshots() is None
 

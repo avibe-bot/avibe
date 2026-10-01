@@ -5784,7 +5784,6 @@ async def opencode_options_async(
     model_hub_models: dict[str, Any] | None = None,
 ) -> dict:
     # Expand ~ to user home directory
-    request_loop = asyncio.get_running_loop()
     expanded_cwd = os.path.expanduser(cwd)
     cache_entry = _OPENCODE_OPTIONS_CACHE.get(expanded_cwd, {})
     cache_data = cache_entry.get("data")
@@ -5795,17 +5794,16 @@ async def opencode_options_async(
     cache_projection_matches = False
     cache_mode_matches = cache_entry.get("mode") == "direct"
     model_hub_mode = None
-    server = None
+    lease = None
     try:
         from config.v2_compat import to_app_config
         from config.v2_config import is_model_hub_enabled
         from core.handlers.model_hub import load_opencode_public_models
-        from core.resource_governance import AgentResourceGovernor, config_from_runtime
         from modules.agents.opencode import (
-            OpenCodeServerManager,
             build_reasoning_effort_options,
             project_opencode_model_hub_models,
         )
+        from modules.agents.opencode.client_manager import lease_opencode_server
         from modules.agents.opencode.utils import opencode_model_picker_value
 
         v2_config = V2Config.load()
@@ -5899,13 +5897,12 @@ async def opencode_options_async(
             }
             return {"ok": True, "data": data}
 
-        server = await OpenCodeServerManager.get_instance(
-            binary=opencode_config.binary,
-            port=opencode_config.port,
-            request_timeout_seconds=opencode_config.request_timeout_seconds,
-            resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
+        # The controller owns every OpenCode process; this process only leases one.
+        lease = await asyncio.wait_for(
+            lease_opencode_server("model options", ttl_seconds=60.0),
+            timeout=timeout_seconds,
         )
-        await asyncio.wait_for(server.ensure_running(), timeout=timeout_seconds)
+        server = lease.server
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
         model_request = (
             server.get_available_models(expanded_cwd)
@@ -5984,8 +5981,8 @@ async def opencode_options_async(
             return {"ok": True, "data": cache_data, "cached": True, "warning": str(exc)}
         return {"ok": False, "error": str(exc)}
     finally:
-        if server is not None:
-            await server.close_http_session(loop=request_loop)
+        if lease is not None:
+            await lease.release()
 
 
 def _current_platform() -> str:
@@ -9849,26 +9846,13 @@ def _compare_versions(current: str | None, latest: str | None) -> bool:
     return cur_is_pre and not new_is_pre
 
 
-def _opencode_server_pid() -> int | None:
-    pid_path = paths.get_logs_dir() / "opencode_server.json"
-    if not pid_path.exists():
-        return None
-    try:
-        info = json.loads(pid_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    pid = info.get("pid") if isinstance(info, dict) else None
-    return pid if isinstance(pid, int) and pid > 0 else None
-
-
 def _opencode_process_status() -> str:
-    from vibe import runtime
+    from modules.agents.opencode.server import recorded_server_pids
 
-    pid = _opencode_server_pid()
-    if not pid or not runtime.pid_alive(pid):
-        return "stopped"
-    cmd = runtime.get_process_command(pid) or ""
-    return "running" if "opencode" in cmd and "serve" in cmd else "unknown"
+    try:
+        return "running" if recorded_server_pids() else "stopped"
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 def _process_matches_codex_binary(cmdline: list[str], resolved_binary: str | None) -> bool:
@@ -11663,38 +11647,22 @@ def save_claude_auth(payload: dict, *, _native_lease=None) -> dict:
 # sync across restarts.
 
 
-async def _opencode_get_server():
-    """Get the OpenCode server manager for UI-process HTTP calls.
+async def _opencode_lease(purpose: str):
+    """Lease a controller-owned OpenCode generation for UI-process HTTP calls.
 
-    Mirrors the pattern used by ``opencode_options_async``: pull the
-    OpenCode config from V2Config and ensure the daemon is reachable.
-    In Hub mode only the controller may launch the daemon; this caller
-    can adopt an already-running overlaid server. Returns ``None`` if
-    OpenCode is disabled or the controller-owned Hub overlay is not ready.
+    The UI process never launches OpenCode. Returns ``None`` when OpenCode is
+    disabled or the controller has no generation that can serve.
     """
     from config.v2_compat import to_app_config
-    from core.resource_governance import AgentResourceGovernor, config_from_runtime
-    from modules.agents.opencode import (
-        OpenCodeModelHubOverlayRequiredError,
-        OpenCodeServerManager,
-    )
+    from modules.agents.opencode.client_manager import lease_opencode_server
 
-    v2_config = V2Config.load()
-    config = to_app_config(v2_config)
-    if not config.opencode:
+    if not to_app_config(V2Config.load()).opencode:
         return None
-    opencode_config = config.opencode
-    server = await OpenCodeServerManager.get_instance(
-        binary=opencode_config.binary,
-        port=opencode_config.port,
-        request_timeout_seconds=opencode_config.request_timeout_seconds,
-        resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
-    )
     try:
-        await server.ensure_running()
-    except OpenCodeModelHubOverlayRequiredError:
+        return await lease_opencode_server(purpose, ttl_seconds=60.0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("No OpenCode generation for %s: %s", purpose, exc)
         return None
-    return server
 
 
 _LOCAL_PROVIDER_IDS = {"ollama", "lmstudio", "lm-studio"}
@@ -12027,11 +11995,11 @@ def _coerce_opencode_provider_catalog(providers_raw) -> dict:
 
 async def _get_opencode_providers_async() -> dict:
     """Build the merged provider catalog reported to the Settings UI."""
-    server = await _opencode_get_server()
-    if server is None:
+    lease = await _opencode_lease("provider catalog")
+    if lease is None:
         return {"ok": False, "message": "OpenCode is disabled in V2Config"}
 
-    request_loop = asyncio.get_running_loop()
+    server = lease.server
     try:
         providers_raw, auth_raw, config_raw = await asyncio.gather(
             server.get_providers(),
@@ -12040,7 +12008,7 @@ async def _get_opencode_providers_async() -> dict:
             return_exceptions=False,
         )
     finally:
-        await server.close_http_session(loop=request_loop)
+        await lease.release()
 
     all_providers = _coerce_opencode_provider_catalog(providers_raw)
 
@@ -12588,12 +12556,11 @@ async def save_opencode_provider_model_async(provider_id: str, payload: dict) ->
     except Exception as exc:
         logger.debug("OpenCode user-model lookup failed for %s: %s", pid, exc)
 
-    server = await _opencode_get_server()
-    request_loop = asyncio.get_running_loop()
+    lease = await _opencode_lease("provider model save")
     try:
-        if server is not None:
+        if lease is not None:
             try:
-                config_raw = await server.get_native_available_models(os.path.expanduser("~"))
+                config_raw = await lease.server.get_native_available_models(os.path.expanduser("~"))
             except Exception as exc:
                 logger.warning(
                     "OpenCode provider model catalog fetch failed for %s/%s: %s",
@@ -12620,8 +12587,8 @@ async def save_opencode_provider_model_async(provider_id: str, payload: dict) ->
             if model_id in model_index and model_id not in existing_user_models:
                 return {"ok": False, "message": "model_id already exists"}
     finally:
-        if server is not None:
-            await server.close_http_session(loop=request_loop)
+        if lease is not None:
+            await lease.release()
 
     try:
         from vibe.opencode_config import upsert_opencode_provider_model
@@ -12931,14 +12898,13 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
 
 
 async def _delete_opencode_provider_auth_async(provider_id: str) -> dict:
-    server = await _opencode_get_server()
-    if server is None:
+    lease = await _opencode_lease("provider auth removal")
+    if lease is None:
         return {"ok": False, "message": "OpenCode is disabled in V2Config"}
-    request_loop = asyncio.get_running_loop()
     try:
-        await server.remove_provider_auth(provider_id)
+        await lease.server.remove_provider_auth(provider_id)
     finally:
-        await server.close_http_session(loop=request_loop)
+        await lease.release()
     return {"ok": True}
 
 

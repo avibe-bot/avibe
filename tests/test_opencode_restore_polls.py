@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config.v2_sessions import ActivePollInfo  # noqa: E402
 from core.services.agent_steering import SteerOutcome, SteerRequest, active_steer_identity, steer_active_turn  # noqa: E402
 from modules.agents.opencode.agent import OpenCodeAgent  # noqa: E402
+from tests.opencode_generation_fakes import serve_opencode_agent  # noqa: E402
 
 
 ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
@@ -90,7 +91,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             prompt_calls.append(kwargs)
 
     class _PollLoop:
-        async def run_restored_poll_loop(self, poll_info):
+        async def run_restored_poll_loop(self, poll_info, server):
             return True
 
         async def remove_restored_ack(self, poll_info):
@@ -145,13 +146,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     agent._settling_request_tasks = set()
 
     server = _Server()
-    agent._client_manager = SimpleNamespace(_server_manager=server)
-
-    async def _get_server():
-        current_task = asyncio.current_task()
-        return agent._restored_poll_servers.get(current_task, server)
-
-    agent._get_server = _get_server
+    serve_opencode_agent(agent, server)
     agent.controller.agent_service = SimpleNamespace(agents={"opencode": agent}, _turn_gates={})
     agent._test_prompt_calls = prompt_calls
     agent._test_inactive_runs = inactive_runs
@@ -266,7 +261,7 @@ def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch) -> No
         return True
 
     class _WaitForBindingPollLoop:
-        async def run_restored_poll_loop(self, _poll_info):
+        async def run_restored_poll_loop(self, _poll_info, _server):
             for _ in range(100):
                 if attempts >= 4:
                     return True
@@ -309,7 +304,7 @@ def test_restore_delayed_binding_does_not_replace_a_newer_turn(monkeypatch) -> N
         return False
 
     class _WaitForConditionalAttemptPollLoop:
-        async def run_restored_poll_loop(self, _poll_info):
+        async def run_restored_poll_loop(self, _poll_info, _server):
             for _ in range(100):
                 if len(attempts) >= 4:
                     return True
@@ -398,7 +393,7 @@ def test_restore_im_registration_failure_retries_before_releasing_poll() -> None
             raise RuntimeError("temporary registration failure")
 
     class _HeldPollLoop:
-        async def run_restored_poll_loop(self, _poll_info):
+        async def run_restored_poll_loop(self, _poll_info, _server):
             poll_started.set()
             await release_poll.wait()
 
@@ -451,7 +446,7 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
     agent.controller._delivery_recovery_complete = recovery_complete
 
     class _HeldPollLoop:
-        async def run_restored_poll_loop(self, poll_info):
+        async def run_restored_poll_loop(self, poll_info, server):
             poll_started.set()
             await release_poll.wait()
 
@@ -559,7 +554,7 @@ def test_restore_preserves_durable_poll_when_verification_is_temporarily_unavail
     agent._test_server.messages_error = TimeoutError("temporary verification failure")
 
     class _RecoveredPollLoop:
-        async def run_restored_poll_loop(self, poll_info):
+        async def run_restored_poll_loop(self, poll_info, server):
             agent._test_server.messages_error = None
 
         async def remove_restored_ack(self, poll_info):
@@ -612,7 +607,7 @@ def test_restore_rebuilds_completed_exact_start_attempt() -> None:
     agent.controller._delivery_recovery_complete = recovery_complete
 
     class _HeldPollLoop:
-        async def run_restored_poll_loop(self, _poll_info):
+        async def run_restored_poll_loop(self, _poll_info, _server):
             poll_started.set()
             await release_poll.wait()
 
@@ -690,8 +685,7 @@ def test_restore_keeps_accepted_steer_with_post_assistant_user_evidence() -> Non
     reconciled_messages: list[dict] = []
 
     class _ReconcilePollLoop:
-        async def run_restored_poll_loop(self, poll_info):
-            server = await agent._get_server()
+        async def run_restored_poll_loop(self, poll_info, server):
             reconciled_messages.extend(
                 await server.list_messages(
                     poll_info.opencode_session_id,
@@ -813,9 +807,8 @@ def test_restore_preserves_user_only_poll_when_native_status_is_unknown() -> Non
     reconciled_messages: list[dict] = []
 
     class _ReconcilePollLoop:
-        async def run_restored_poll_loop(self, poll_info):
+        async def run_restored_poll_loop(self, poll_info, server):
             agent._test_server.status_error = None
-            server = await agent._get_server()
             reconciled_messages.extend(
                 await server.list_messages(
                     poll_info.opencode_session_id,
@@ -878,8 +871,7 @@ def test_busy_restore_reconciles_inserted_user_that_later_becomes_idle() -> None
     agent._test_server.get_session_status = _transitioning_status
 
     class _ReconcilePollLoop:
-        async def run_restored_poll_loop(self, poll_info):
-            server = await agent._get_server()
+        async def run_restored_poll_loop(self, poll_info, server):
             while True:
                 batch = await server.list_messages(
                     poll_info.opencode_session_id,
@@ -932,8 +924,7 @@ def test_busy_restore_preserves_completed_answer_without_later_user() -> None:
     agent._test_server.get_session_status = _busy_then_idle
 
     class _ReconcilePollLoop:
-        async def run_restored_poll_loop(self, poll_info):
-            server = await agent._get_server()
+        async def run_restored_poll_loop(self, poll_info, server):
             reconciled_messages.extend(
                 await server.list_messages(
                     poll_info.opencode_session_id,
@@ -985,8 +976,7 @@ def test_busy_restore_preserves_completed_answer_when_status_becomes_unavailable
     agent._test_server.get_session_status = _busy_then_unavailable
 
     class _ReconcilePollLoop:
-        async def run_restored_poll_loop(self, poll_info):
-            server = await agent._get_server()
+        async def run_restored_poll_loop(self, poll_info, server):
             reconciled_messages.extend(
                 await server.list_messages(
                     poll_info.opencode_session_id,
@@ -1042,10 +1032,9 @@ def test_unknown_restore_seeds_boundary_when_status_recovers_busy() -> None:
         return {"type": "busy" if status_calls == 1 else "idle"}
 
     class _ReconcilePollLoop:
-        async def run_restored_poll_loop(self, poll_info):
+        async def run_restored_poll_loop(self, poll_info, server):
             agent._test_server.status_error = None
             agent._test_server.get_session_status = _busy_then_idle
-            server = await agent._get_server()
             reconciled_messages.extend(
                 await server.list_messages(
                     poll_info.opencode_session_id,
@@ -1083,9 +1072,8 @@ def test_restore_settles_incomplete_assistant_when_unknown_status_recovers_idle(
     reconciled_messages: list[dict] = []
 
     class _ReconcilePollLoop:
-        async def run_restored_poll_loop(self, poll_info):
+        async def run_restored_poll_loop(self, poll_info, server):
             agent._test_server.status_error = None
-            server = await agent._get_server()
             reconciled_messages.extend(
                 await server.list_messages(
                     poll_info.opencode_session_id,
@@ -1137,7 +1125,7 @@ def test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll(stall
 
         agent._test_server.mark_run_inactive = slow_mark_run_inactive
 
-    async def run_restored_poll_loop(poll_info):
+    async def run_restored_poll_loop(poll_info, _server):
         if stall == "retiring":
             return True
         if stall == "steering_lock":
@@ -1370,3 +1358,35 @@ def test_workbench_session_id_for_poll_resolution():
     slack = _make_poll(platform="slack", base_session_id="slack:thread", opencode_session_id="oc-2")
     assert OpenCodeAgent._workbench_session_id_for_poll(avibe) == "ses_wb"
     assert OpenCodeAgent._workbench_session_id_for_poll(slack) is None
+
+
+def test_a_cancel_during_restored_cleanup_still_releases_its_generation(monkeypatch) -> None:
+    import threading
+
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    unbinding, finish_unbind = threading.Event(), threading.Event()
+
+    def unbind(*_args, **_kwargs):
+        unbinding.set()
+        finish_unbind.wait(5)
+        return True
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", lambda *a, **k: True)
+    monkeypatch.setattr("modules.agents.opencode.agent.unbind_caller_context_session", unbind)
+
+    async def run() -> None:
+        assert await agent.restore_active_polls() == 1
+        task = agent._active_requests["ses_wb"]
+        await asyncio.to_thread(unbinding.wait, 5)
+        # A supersede or /stop cancels the poll while its cleanup awaits.
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        finish_unbind.set()
+
+    asyncio.run(run())
+
+    assert [binding.released for binding in agent._runtime.bindings] == [True]
+    assert agent._session_generations == {}
+    assert agent._active_requests == {}

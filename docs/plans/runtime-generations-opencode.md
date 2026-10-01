@@ -1,8 +1,38 @@
 # OpenCode on Runtime Generations: Adapter Design
 
-Status: Phase 1 design for the OpenCode lane of `runtime-generations.md`. No
-code has changed yet. Line references are to `refactor/runtime-generations`
-at 1eec27fab.
+Status: implemented on the core contract at 32f655d2e. The sections below
+are the Phase 1 design. Their line references are to
+`refactor/runtime-generations` at 1eec27fab.
+
+## How the implementation differs from the Phase 1 design
+
+- The adapter's generation set is `OpenCodeRuntime` in `client_manager.py`.
+- The core has no idle hook. `stop(generation, force)` declines a graceful
+  stop while the process still has requests in flight or native run markers.
+  The set then retries it on the next release or sweep.
+- Leases are core bindings plus an adapter timer. Their expiry is persisted
+  in the generation record.
+- Adoption keeps the newest adopted generation whose recorded digest equals
+  the current spec as current. Every other adopted generation retires and
+  stops once its restored work drains.
+- `renew_runtime(config, config_save=True)` renews nothing. Every
+  `agents.opencode` field is read per turn except the CLI path, and the CLI
+  path's binary identity is already a spec input. Credential flows, manual
+  Restart, and installs bump the renewal epoch.
+- A forced refresh cancels running work and retires every generation. This is
+  the coordinator's interrupt path, kept until it is deleted.
+- Adoption skips records owned by this controller process. Those belong to the
+  runtime of an OpenCode backend that was disabled and enabled again, and that
+  runtime stops them itself. An adopted record is rewritten with this
+  controller as its owner.
+- The renewal epoch is persisted under `runtime/opencode/renew_epoch`. A
+  generation retired by a renewal therefore never serves again after a crash.
+- Readiness and adoption accept a listener that is the spawned process or one
+  of its descendants, as with npm shims and Windows `.cmd` wrappers.
+- The two-version gate in section 11 passed (RUNTIME-GEN-OBS-020), so a
+  version change can coexist.
+- Status, abort, and prompts are confirmed to be per process
+  (RUNTIME-GEN-OBS-021).
 
 ## Worked example
 

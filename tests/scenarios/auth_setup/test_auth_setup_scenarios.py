@@ -42,6 +42,7 @@ from config.v2_config import (
     UiConfig,
     V2Config,
 )
+from tests.opencode_generation_fakes import ui_lease, lease_returning
 from core.agent_auth_service import AgentAuthService
 from core.handlers.model_hub.adapter import SOURCE_PROTOCOLS
 from core.handlers.model_hub.service import (
@@ -3050,12 +3051,19 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         runtime = _FakeNextTurnRuntime()
         runner = ScenarioRunner(harness)
 
-        harness.controller.agent_service.agents["opencode"] = SimpleNamespace(
-            clear_sessions=AsyncMock(side_effect=runtime.clear_sessions)
+        async def renew(_runtime_config, **_kwargs):
+            await runtime.refresh()
+
+        # The new credential reaches the runtime by renewal: the next turn
+        # starts a generation that loaded it.
+        agent = SimpleNamespace(
+            clear_sessions=AsyncMock(side_effect=runtime.clear_sessions),
+            refresh_runtime_config=AsyncMock(side_effect=renew),
         )
+        harness.controller.agent_service.agents["opencode"] = agent
         harness.service._resolve_opencode_provider = AsyncMock(return_value="opencode")
         harness.service._install_opencode_api_key = AsyncMock()
-        harness.service._refresh_opencode_server = AsyncMock(side_effect=runtime.refresh)
+        harness.service._load_backend_runtime_config = Mock(return_value=SimpleNamespace(enabled=True))
 
         await runner.run(
             ScenarioStep(
@@ -3076,7 +3084,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
 
         harness.service._install_opencode_api_key.assert_awaited_once_with("opencode", "oc_live_Abcdef1234567890")
-        harness.service._refresh_opencode_server.assert_awaited_once()
+        agent.refresh_runtime_config.assert_awaited_once()
         ScenarioExpect.step_history(runner, ["start_setup", "submit_direct_credential", "next_turn_after_success"])
         ScenarioExpect.text_contains(harness, "opencode login is active again")
         ScenarioExpect.flow_missing(harness, "C1:opencode")
@@ -4094,7 +4102,7 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
     """AUTH-SETUP-119: runtime manual-code transport -> native store -> apply -> read."""
     from core.backend_restart import BackendRestartCoordinator
     from core.internal_server import create_app
-    from modules.agents.opencode.server import OpenCodeServerManager
+    from modules.agents.opencode.server import OpenCodeServerClient
     from vibe import api, internal_client
     from vibe.opencode_config import get_opencode_auth_path, upsert_opencode_provider_api_key
     from tests.test_backend_restart import _AgentService, _controller
@@ -4140,7 +4148,7 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
         site = web.TCPSite(server, "127.0.0.1", 0)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
-        transport = SimpleNamespace(base_url=f"http://127.0.0.1:{port}", ensure_running=AsyncMock())
+        transport = SimpleNamespace(base_url=f"http://127.0.0.1:{port}")
 
         class Provider:
             async def get_provider_auth(self):
@@ -4151,11 +4159,11 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
                 return {"method": "code", "url": "https://provider.invalid/authorize"}
 
             async def wait_provider_oauth(self, provider_id, **kwargs):
-                return await OpenCodeServerManager.wait_provider_oauth(transport, provider_id, **kwargs)
+                return await OpenCodeServerClient.wait_provider_oauth(transport, provider_id, **kwargs)
 
         harness = AuthSetupScenarioHarness()
         auth = harness.service
-        monkeypatch.setattr(auth, "_opencode_server", AsyncMock(return_value=Provider()))
+        monkeypatch.setattr(auth, "_lease_opencode_server", lease_returning(Provider()))
         monkeypatch.setattr(auth, "_OPENCODE_OAUTH_PROMPT_ANSWERS", {"test-provider": {"deployment": "fixture", "method": 999, "code": "must-not-override"}})
         # No-hook consumers retain the existing coordinator application owner.
         monkeypatch.setattr(auth, "_refresh_backend_runtime", coordinator.request_restart)
@@ -4309,7 +4317,7 @@ def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypa
         ]}),
         close_http_session=AsyncMock(),
     )
-    monkeypatch.setattr(api, "_opencode_get_server", AsyncMock(return_value=server))
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(AsyncMock(return_value=server)))
     monkeypatch.setattr(api, "resolve_cli_path", lambda _: str(tmp_path / "测试/bin/opencode"))
     # Isolated application evidence, never the machine's running controller.
     from vibe import internal_client

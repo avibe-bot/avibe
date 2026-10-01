@@ -25,7 +25,7 @@ from modules.im import MessageContext
 from vibe.i18n import t as i18n_t
 
 from .message_processor import is_empty_terminal_opencode_message
-from .server import OpenCodeServerManager
+from .server import OpenCodeGeneration
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +322,7 @@ class OpenCodePollLoop:
 
     async def _native_session_is_live(
         self,
-        server: OpenCodeServerManager,
+        server: OpenCodeGeneration,
         session_id: str,
         directory: str,
         *,
@@ -361,7 +361,7 @@ class OpenCodePollLoop:
         self,
         *,
         request: AgentRequest,
-        server: OpenCodeServerManager,
+        server: OpenCodeGeneration,
         session_id: str,
         working_path: str,
         timeout_seconds: float,
@@ -405,7 +405,7 @@ class OpenCodePollLoop:
         self,
         *,
         request: AgentRequest,
-        server: OpenCodeServerManager,
+        server: OpenCodeGeneration,
         session_id: str,
         working_path: str,
         failures: int,
@@ -578,7 +578,7 @@ class OpenCodePollLoop:
     async def run_prompt_poll(
         self,
         request: AgentRequest,
-        server: OpenCodeServerManager,
+        server: OpenCodeGeneration,
         session_id: str,
         *,
         agent_to_use: Optional[str],
@@ -902,8 +902,8 @@ class OpenCodePollLoop:
 
         return final_text, True
 
-    async def run_restored_poll_loop(self, poll_info) -> bool:
-        """Continue a poll loop that was interrupted by restart."""
+    async def run_restored_poll_loop(self, poll_info, server: OpenCodeGeneration) -> bool:
+        """Continue a poll loop that was interrupted by restart, on its own generation."""
 
         session_id = poll_info.opencode_session_id
         restored_request = self._build_restored_ack_request(poll_info)
@@ -919,7 +919,6 @@ class OpenCodePollLoop:
             "Resuming interrupted OpenCode session after restart...",
         )
 
-        server = await self._agent._get_server()
         baseline_message_ids = set(poll_info.baseline_message_ids)
         seen_tool_calls = set(poll_info.seen_tool_calls)
         emitted_assistant_messages = set(poll_info.emitted_assistant_messages)

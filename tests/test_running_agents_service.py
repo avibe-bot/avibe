@@ -1130,14 +1130,13 @@ def test_end_opencode_cancels_active_task():
 
 
 @pytest.mark.parametrize("has_other_session", [False, True])
-def test_end_idle_opencode_retires_only_last_shared_server(has_other_session):
+def test_end_idle_opencode_retires_the_current_generation_after_its_last_session(has_other_session):
     sessions = {
         "b1": ("oc-1", "/work", "channel-1"),
     }
     if has_other_session:
         sessions["b2"] = ("oc-2", "/work", "channel-2")
     retired = _AsyncFlag()
-    server = types.SimpleNamespace(retire_for_native_migration=retired)
     manager = types.SimpleNamespace(
         get_request_session=lambda base: sessions.get(base),
         pop_request_session=lambda base: sessions.pop(base, None),
@@ -1146,7 +1145,7 @@ def test_end_idle_opencode_retires_only_last_shared_server(has_other_session):
     agent = types.SimpleNamespace(
         _active_requests={},
         _session_manager=manager,
-        _client_manager=types.SimpleNamespace(_server_manager=server),
+        shutdown_runtime=retired,
     )
 
     result = asyncio.run(
@@ -1180,7 +1179,6 @@ def test_end_idle_opencode_clears_disposable_session_caches():
         _active_requests={},
         _session_manager=manager,
         _session_last_activity={"b1": 1.0, "b2": 2.0},
-        _client_manager=types.SimpleNamespace(_server_manager=None),
     )
 
     result = asyncio.run(

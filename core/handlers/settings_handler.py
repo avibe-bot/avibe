@@ -453,30 +453,28 @@ class SettingsHandler(BaseHandler):
         if "opencode" in backends_to_load:
             try:
                 opencode_agent = self.controller.agent_service.agents.get("opencode")
-                if opencode_agent and hasattr(opencode_agent, "_get_server"):
-                    server = await opencode_agent._get_server()  # type: ignore[attr-defined]
-                    await server.ensure_running()
-
-                    cwd = self.controller.get_cwd(context)
-                    opencode_agents = await server.get_available_agents(cwd)
-                    model_hub_service = getattr(
-                        self.controller,
-                        "model_hub_service",
-                        None,
-                    )
-                    public_models = (
-                        model_hub_service.opencode_public_models()
-                        if model_hub_service is not None
-                        else None
-                    )
-                    if public_models is None:
-                        opencode_models = await server.get_available_models(cwd)
-                    else:
-                        opencode_models = await server.get_available_models(
-                            cwd,
-                            model_hub_models=public_models,
+                if opencode_agent and hasattr(opencode_agent, "current_server"):
+                    async with opencode_agent.current_server() as server:  # type: ignore[attr-defined]
+                        cwd = self.controller.get_cwd(context)
+                        opencode_agents = await server.get_available_agents(cwd)
+                        model_hub_service = getattr(
+                            self.controller,
+                            "model_hub_service",
+                            None,
                         )
-                    opencode_default_config = await server.get_default_config(cwd)
+                        public_models = (
+                            model_hub_service.opencode_public_models()
+                            if model_hub_service is not None
+                            else None
+                        )
+                        if public_models is None:
+                            opencode_models = await server.get_available_models(cwd)
+                        else:
+                            opencode_models = await server.get_available_models(
+                                cwd,
+                                model_hub_models=public_models,
+                            )
+                        opencode_default_config = await server.get_default_config(cwd)
             except Exception as e:
                 logger.warning(f"Failed to fetch OpenCode data: {e}")
 

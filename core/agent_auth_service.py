@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Coroutine, Optional
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
 
 from core.backend_failure import terminal_backend_failure_output
 from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError, finish_native_operation
@@ -50,6 +50,9 @@ from modules.agents.opencode.utils import (
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from vibe.i18n import t as i18n_t
 from vibe.opencode_config import remove_opencode_provider_api_key
+
+if TYPE_CHECKING:
+    from modules.agents.opencode.client_manager import OpenCodeServerLease
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +440,8 @@ class WebAuthFlow:
     source_account_label: str | None = None
     native_cli: bool = False
     native_lease: NativeCredentialLease | None = field(default=None, repr=False)
+    # The controller-owned OpenCode generation one OpenCode login runs on.
+    opencode_lease: OpenCodeServerLease | None = field(default=None, repr=False)
     cancel_requested: bool = field(default=False, repr=False)
     submission_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     native_closing: bool = field(default=False, repr=False)
@@ -793,10 +798,10 @@ class AgentAuthService:
 
         agent_service = getattr(self.controller, "agent_service", None)
         opencode_agent = getattr(agent_service, "agents", {}).get("opencode") if agent_service else None
-        if opencode_agent and hasattr(opencode_agent, "_get_server"):
+        if opencode_agent and hasattr(opencode_agent, "current_server"):
             try:
-                server = await opencode_agent._get_server()
-                runtime_provider = await self._resolve_opencode_provider_from_existing_session(context, server)
+                async with opencode_agent.current_server() as server:
+                    runtime_provider = await self._resolve_opencode_provider_from_existing_session(context, server)
                 if runtime_provider:
                     return runtime_provider
             except Exception as err:  # noqa: BLE001
@@ -2112,14 +2117,11 @@ class AgentAuthService:
     async def _install_opencode_api_key(self, provider: str, api_key: str) -> None:
         agent_service = getattr(self.controller, "agent_service", None)
         opencode_agent = getattr(agent_service, "agents", {}).get("opencode") if agent_service else None
-        if not opencode_agent or not hasattr(opencode_agent, "_get_server"):
+        if not opencode_agent or not hasattr(opencode_agent, "current_server"):
             raise RuntimeError("OpenCode agent is not available for auth setup.")
 
-        server = await opencode_agent._get_server()
-        setter = getattr(server, "set_api_key_auth", None)
-        if not callable(setter):
-            raise RuntimeError("OpenCode server does not support non-interactive auth setup.")
-        await setter(provider, api_key)
+        async with opencode_agent.current_server() as server:
+            await server.set_api_key_auth(provider, api_key)
         try:
             await _native_auth_thread(
                 remove_opencode_provider_api_key,
@@ -2145,18 +2147,6 @@ class AgentAuthService:
             )
         except Exception as err:  # noqa: BLE001
             logger.warning("Failed to clear OpenCode provider option apiKey after OAuth for %s: %s", provider, err)
-
-    async def _refresh_opencode_server(self, *, force: bool = False) -> None:
-        agent_service = getattr(self.controller, "agent_service", None)
-        opencode_agent = getattr(agent_service, "agents", {}).get("opencode") if agent_service else None
-        if not opencode_agent or not hasattr(opencode_agent, "_get_server"):
-            return
-        server = await opencode_agent._get_server()
-        if hasattr(server, "restart_for_auth_refresh"):
-            if force:
-                await server.restart_for_auth_refresh(force=True)
-            else:
-                await server.restart_for_auth_refresh()
 
     def _load_backend_runtime_config(self, backend: str):
         from config.v2_compat import to_app_config
@@ -2269,15 +2259,6 @@ class AgentAuthService:
         shutdown = getattr(agent, "shutdown_runtime", None)
         if callable(shutdown):
             await shutdown()
-        elif backend == "opencode":
-            server_manager = getattr(agent, "_client_manager", None)
-            reset_config = getattr(server_manager, "reset_config", None)
-            if callable(reset_config):
-                previous_server = await reset_config(None)
-                if previous_server is not None:
-                    detach = getattr(previous_server, "detach_after_deferred_refresh", None)
-                    if callable(detach):
-                        await detach()
         refresh = getattr(agent, "refresh_auth_state", None)
         if callable(refresh):
             await refresh()
@@ -2373,12 +2354,6 @@ class AgentAuthService:
                 if runtime_config is None:
                     return
                 await refresh_config(runtime_config)
-                return
-            if backend == "opencode":
-                if force:
-                    await self._refresh_opencode_server(force=True)
-                else:
-                    await self._refresh_opencode_server()
                 return
             refresh = getattr(agent, "refresh_auth_state", None)
             if callable(refresh):
@@ -3242,10 +3217,28 @@ class AgentAuthService:
         if not provider_id:
             return {"ok": False, "error": "missing_provider"}
 
-        server = await self._opencode_server()
-        if server is None:
+        # The lease keeps the probe's generation alive until the probe ends.
+        opencode_lease = await self._lease_opencode_server("provider probe", ttl_seconds=timeout + 60.0)
+        if opencode_lease is None:
             return {"ok": False, "error": "opencode_server_unavailable"}
+        try:
+            return await self._probe_opencode_provider(
+                opencode_lease.server,
+                provider_id,
+                model=model,
+                timeout=timeout,
+            )
+        finally:
+            await opencode_lease.release()
 
+    async def _probe_opencode_provider(
+        self,
+        server: Any,
+        provider_id: str,
+        *,
+        model: str | None,
+        timeout: float,
+    ) -> dict[str, Any]:
         directory = os.path.expanduser("~")
         # On a fresh install the first request for a directory waits while
         # OpenCode bootstraps it, which can outlast the catalog request's
@@ -3292,7 +3285,6 @@ class AgentAuthService:
         # flow uses.
         started = time.monotonic()
         session_id: str | None = None
-        active_registered = False
         try:
             try:
                 created = await server.create_session(directory, title="vibe-test-probe")
@@ -3347,8 +3339,6 @@ class AgentAuthService:
                     reasoning_effort=reasoning_effort,
                     tools={"question": False},
                 )
-                await server.mark_run_active(session_id)
-                active_registered = True
             except Exception as err:  # noqa: BLE001
                 detail = str(err)
                 return {
@@ -3523,8 +3513,6 @@ class AgentAuthService:
                     await server.abort_session(session_id, directory)
                 except Exception:  # noqa: BLE001
                     pass
-            if active_registered and session_id:
-                await server.mark_run_inactive(session_id)
 
     async def cancel_web_flow(self, flow_id: str) -> dict[str, Any]:
         async with self._flow_lock:
@@ -3539,48 +3527,35 @@ class AgentAuthService:
             self._flow_registry.drop(flow)
         return {"ok": True}
 
-    async def _opencode_server(self):
-        """Lazy lookup of the live OpenCode server client.
+    async def _lease_opencode_server(
+        self,
+        purpose: str,
+        *,
+        ttl_seconds: float,
+    ) -> OpenCodeServerLease | None:
+        """Pin a controller-owned OpenCode generation; this process never launches one.
 
-        Mirrors ``vibe.api._opencode_get_server`` rather than the IM
-        controller's ``agent_service.agents['opencode']`` (the web auth
-        service runs in the UI process — there is no controller-level
-        agent_service). Returns ``None`` when OpenCode is disabled in
-        V2Config so the caller can surface a typed error.
+        Returns ``None`` when OpenCode is disabled or no generation can serve,
+        so the caller can surface a typed error.
         """
+        from modules.agents.opencode.client_manager import lease_opencode_server
+
         try:
-            from config.v2_compat import to_app_config
-            from config.v2_config import V2Config
-            from core.resource_governance import AgentResourceGovernor, config_from_runtime
-            from modules.agents.opencode import (
-                OpenCodeModelHubOverlayRequiredError,
-                OpenCodeServerManager,
+            return await lease_opencode_server(
+                purpose,
+                ttl_seconds=ttl_seconds,
+                controller=self.controller,
             )
-        except ImportError:
-            return None
-        try:
-            v2_config = V2Config.load()
-            compat = to_app_config(v2_config)
         except Exception as err:  # noqa: BLE001
-            logger.warning("V2Config.load failed in web OAuth path: %s", err)
+            logger.warning("No OpenCode generation for %s: %s", purpose, err)
             return None
-        opencode_cfg = getattr(compat, "opencode", None)
-        if opencode_cfg is None:
-            return None
-        try:
-            server = await OpenCodeServerManager.get_instance(
-                binary=opencode_cfg.binary,
-                port=opencode_cfg.port,
-                request_timeout_seconds=opencode_cfg.request_timeout_seconds,
-                resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
-            )
-            await server.ensure_running()
-            return server
-        except OpenCodeModelHubOverlayRequiredError:
-            return None
-        except Exception as err:  # noqa: BLE001
-            logger.warning("OpenCodeServerManager.get_instance failed for web OAuth: %s", err)
-            return None
+
+    @staticmethod
+    async def _release_opencode_flow_lease(flow: WebAuthFlow) -> None:
+        lease = flow.opencode_lease
+        flow.opencode_lease = None
+        if lease is not None:
+            await lease.release()
 
     async def _resolve_opencode_oauth_method(
         self, server, provider_id: str
@@ -3618,18 +3593,30 @@ class AgentAuthService:
     _OPENCODE_DEVICE_CODE_RE = re.compile(r"Enter code:\s*([A-Za-z0-9-]+)")
 
     async def _start_opencode_oauth_web(self, flow: WebAuthFlow, provider_id: str) -> None:
-        server = await self._opencode_server()
-        if server is None:
+        # Authorize, the pasted callback, and the wait must reach one process:
+        # the pending login lives in that server's memory. One lease pins that
+        # generation for the flow's whole budget.
+        lease = await self._lease_opencode_server(
+            "web OAuth",
+            ttl_seconds=self._remaining_flow_timeout(flow) + 60.0,
+        )
+        if lease is None:
             raise RuntimeError("opencode_server_unavailable")
-        method_index, prompt_answers = await self._resolve_opencode_oauth_method(
-            server, provider_id
-        )
-        flow.last_status_text = None
-        authorize = await server.start_provider_oauth(
-            provider_id,
-            method=method_index,
-            prompt_answers=prompt_answers,
-        )
+        flow.opencode_lease = lease
+        server = lease.server
+        try:
+            method_index, prompt_answers = await self._resolve_opencode_oauth_method(
+                server, provider_id
+            )
+            flow.last_status_text = None
+            authorize = await server.start_provider_oauth(
+                provider_id,
+                method=method_index,
+                prompt_answers=prompt_answers,
+            )
+        except BaseException:
+            await self._release_opencode_flow_lease(flow)
+            raise
         url = authorize.get("url") if isinstance(authorize, dict) else None
         instructions = authorize.get("instructions") if isinstance(authorize, dict) else None
         if not isinstance(url, str) or not url.strip():
@@ -3682,11 +3669,11 @@ class AgentAuthService:
         provider_id = flow.provider
         if not provider_id:
             return {"ok": False, "error": "flow_missing_provider"}
-        server = await self._opencode_server()
-        if server is None:
+        lease = flow.opencode_lease
+        if lease is None:
             return {"ok": False, "error": "opencode_server_unavailable"}
         try:
-            await server.forward_oauth_redirect(provider_id, callback_url)
+            await lease.server.forward_oauth_redirect(provider_id, callback_url)
         except Exception as err:  # noqa: BLE001
             logger.error(
                 "Failed to forward OpenCode OAuth callback for %s: %s",
@@ -3712,10 +3699,10 @@ class AgentAuthService:
                 # the provider until an explicit code reaches this waiter.
                 code = await flow.submitted_code
                 flow.submitted_code = None
-            server = await self._opencode_server()
-            if server is None:
+            lease = flow.opencode_lease
+            if lease is None:
                 raise RuntimeError("opencode_server_unavailable")
-            await server.wait_provider_oauth(
+            await lease.server.wait_provider_oauth(
                 provider_id,
                 method=method_index,
                 prompt_answers=prompt_answers,
@@ -3747,6 +3734,8 @@ class AgentAuthService:
             )
             flow.state = "failed"
             flow.error = str(err)
+        finally:
+            await self._release_opencode_flow_lease(flow)
     async def _read_codex_output_web(self, flow: WebAuthFlow) -> None:
         """Parse ``codex login --device-auth`` stdout for URL + device code.
 
@@ -4528,6 +4517,7 @@ class AgentAuthService:
         if flow.submitted_code is not None:
             flow.submitted_code.cancel()
             flow.submitted_code = None
+        await self._release_opencode_flow_lease(flow)
         flow.awaiting_code = False
         # Cleanup can race with a completed waiter. Preserve its terminal
         # outcome instead of relabelling success/failure as a later cancel.

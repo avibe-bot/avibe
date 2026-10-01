@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from unittest.mock import patch
@@ -460,9 +461,6 @@ class _FakeOpenCodeServer:
         self.calls: list[str] = []
         self.model_hub_models: list[dict | None] = []
 
-    async def ensure_running(self) -> None:
-        self.calls.append("ensure_running")
-
     async def get_available_agents(self, directory: str) -> list[dict]:
         self.calls.append(f"agents:{directory}")
         return [{"name": "build"}]
@@ -486,8 +484,10 @@ class _FakeOpenCodeAgent:
     def __init__(self, server: _FakeOpenCodeServer) -> None:
         self.server = server
 
-    async def _get_server(self) -> _FakeOpenCodeServer:
-        return self.server
+    @asynccontextmanager
+    async def current_server(self):
+        self.server.calls.append("current_server")
+        yield self.server
 
 
 def _make_routing_handler() -> tuple[SettingsHandler, _FakeOpenCodeServer]:
@@ -531,7 +531,7 @@ def test_gather_routing_modal_data_only_fetches_current_backend() -> None:
     assert data.current_backend == "opencode"
     assert data.registered_backends == ["opencode", "claude", "codex"]
     assert server.calls == [
-        "ensure_running",
+        "current_server",
         "agents:/tmp/workspace",
         "models:/tmp/workspace",
         "config:/tmp/workspace",
@@ -609,7 +609,7 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
         "codex": {"gpt-5.4": [{"value": "ultra", "label": "Ultra"}]},
     }
     assert server.calls == [
-        "ensure_running",
+        "current_server",
         "agents:/tmp/workspace",
         "models:/tmp/workspace",
         "config:/tmp/workspace",
@@ -626,7 +626,7 @@ def test_gather_routing_modal_data_hides_disabled_backends() -> None:
 
     assert data.registered_backends == ["opencode"]
     assert server.calls == [
-        "ensure_running",
+        "current_server",
         "agents:/tmp/workspace",
         "models:/tmp/workspace",
         "config:/tmp/workspace",
@@ -650,7 +650,7 @@ def test_gather_routing_modal_data_falls_back_to_visible_backend_when_current_is
     assert data.registered_backends == ["opencode", "codex"]
     assert data.opencode_agents == [{"name": "build"}]
     assert server.calls == [
-        "ensure_running",
+        "current_server",
         "agents:/tmp/workspace",
         "models:/tmp/workspace",
         "config:/tmp/workspace",
