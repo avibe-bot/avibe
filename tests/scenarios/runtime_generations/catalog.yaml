@@ -48,3 +48,5 @@ scenarios:
     layer: unit
     backend: shared
     test: tests/test_controller_idle_cleanup.py::test_a_saved_idle_timeout_applies_without_a_backend_restart
+    related_tests:
+      - tests/test_claude_cli_path.py::test_a_config_save_that_only_changes_live_fields_renews_no_client

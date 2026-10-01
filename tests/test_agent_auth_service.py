@@ -147,7 +147,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
             assert renewed is enabled
             if enabled:
-                renew.assert_awaited_once_with(runtime_config)
+                renew.assert_awaited_once_with(runtime_config, config_save=False)
             else:
                 renew.assert_not_awaited()
 

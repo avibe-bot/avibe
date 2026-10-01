@@ -505,7 +505,7 @@ class Controller:
 
         states: dict[str, str] = {}
         for backend in requested:
-            states[backend] = await self.backend_restart_coordinator.request_restart(backend)
+            states[backend] = await self.backend_restart_coordinator.request_restart(backend, config_save=True)
 
         logger.info("Hot-reconciled Agent backends: %s", states)
         return {

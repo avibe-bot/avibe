@@ -487,20 +487,23 @@ class SessionHandler(BaseHandler):
 
         An idle session moves to a new client at once. While the session's own
         background work still runs, the turn stays on the current client, and the
-        session moves at its next idle turn. The exception is a turn that needs a
-        Model Hub launch this client cannot carry: then the client is replaced
-        and that work interrupted.
+        session moves at its next idle turn. The exceptions are a turn that needs
+        a Model Hub launch this client cannot carry and a turn from a different
+        caller: then the client is replaced and that work interrupted.
         """
         launch_changed = getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint
+        # The caller's identity carries its resource authority, so a different
+        # caller can never run in a process that holds the previous one's.
+        caller_changed = getattr(client, "_vibe_caller_env", {}) != self._caller_env_for_context(context)
         changes = (
             ("model_hub_channel_changed", launch_changed),
+            ("caller_env_changed", caller_changed),
             ("reasoning_effort_changed", getattr(client, "_vibe_reasoning_effort", None) != effective_effort),
             (
                 "runtime_renewed",
                 getattr(client, "_vibe_runtime_epoch", 0) != getattr(self.controller, "claude_runtime_epoch", 0),
             ),
             ("system_prompt_changed", self.claude_system_prompts.get(composite_key) != system_prompt),
-            ("caller_env_changed", getattr(client, "_vibe_caller_env", {}) != self._caller_env_for_context(context)),
             (
                 "managed_skills_changed",
                 getattr(client, "_vibe_managed_skills_env", {})
@@ -516,7 +519,7 @@ class SessionHandler(BaseHandler):
         if reason is None:
             return False
         if composite_key in self.active_sessions:
-            if not launch_changed:
+            if not (launch_changed or caller_changed):
                 logger.info(
                     "Keeping the busy Claude SDK client for %s until its session is idle: %s",
                     composite_key,

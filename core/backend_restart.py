@@ -393,7 +393,7 @@ class BackendRestartCoordinator:
         controller: Any,
         refresh: Callable[[str, bool], Awaitable[None]],
         *,
-        renew: Callable[[str], Awaitable[bool]] | None = None,
+        renew: Callable[[str, bool], Awaitable[bool]] | None = None,
         drain_timeout: float | None = None,
         settle_timeout: float = _INTERRUPT_SETTLE_SECONDS,
         poll_interval: float = _POLL_INTERVAL_SECONDS,
@@ -634,8 +634,13 @@ class BackendRestartCoordinator:
                     else:
                         lease.release()
 
-    async def request_restart(self, backend: str) -> str:
-        """Begin or join a restart and return without waiting for a long drain."""
+    async def request_restart(self, backend: str, *, config_save: bool = False) -> str:
+        """Begin or join a restart and return without waiting for a long drain.
+
+        ``config_save`` marks a request that only applies a saved runtime config,
+        so a backend that renews in place may skip renewal when no launch input
+        changed. Credential flows, manual restarts, and installs renew always.
+        """
         self.assert_native_auth_available(backend)
         lock = self._request_locks.setdefault(backend, asyncio.Lock())
         async with lock:
@@ -649,7 +654,7 @@ class BackendRestartCoordinator:
             # A backend whose runtime units renew in place needs no drain: new
             # turns start on a new generation, and running work finishes on the
             # one it started on.
-            if self._renew is not None and await self._renew(backend):
+            if self._renew is not None and await self._renew(backend, config_save):
                 self._outcomes[backend] = {"state": "applied"}
                 return "restarted"
 

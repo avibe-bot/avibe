@@ -104,6 +104,18 @@ class _ClaudeOutputRecoveryRecord:
     claim_metadata: dict[str, object] | None = None
 
 
+
+# Read live on every use, so changing them needs no new client.
+_CLAUDE_LIVE_CONFIG_FIELDS = frozenset({"idle_timeout_seconds"})
+
+
+def _claude_launch_inputs(claude_config: Any) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in vars(claude_config).items()
+        if key not in _CLAUDE_LIVE_CONFIG_FIELDS
+    }
+
 class ClaudeAgent(BaseAgent):
     """Existing Claude Code integration extracted into an agent backend."""
 
@@ -1059,19 +1071,24 @@ class ClaudeAgent(BaseAgent):
         turn, by the same rule as any other launch-input change.
         """
 
-    async def renew_runtime(self, claude_config) -> None:
+    async def renew_runtime(self, claude_config, *, config_save: bool = False) -> None:
         """Adopt persisted runtime config; each session moves to it at its next turn.
 
         Every session owns its own process, so nothing drains or reconnects
         here: a session's next turn starts a new client, unless background work
-        it started is still running.
+        it started is still running. A config save that changes only fields read
+        live, such as the idle timeout, renews nothing.
         """
+        previous = self.config.claude
         self.config.claude = claude_config
         self.controller.config.claude = claude_config
         session_handler = getattr(self, "session_handler", None)
-        if session_handler is not None:
-            session_handler.config = self.controller.config
-            session_handler.renew_runtime()
+        if session_handler is None:
+            return
+        session_handler.config = self.controller.config
+        if config_save and _claude_launch_inputs(previous) == _claude_launch_inputs(claude_config):
+            return
+        session_handler.renew_runtime()
 
     async def refresh_runtime_config(self, claude_config) -> None:
         """Reload persisted runtime config before reconnecting Claude sessions."""

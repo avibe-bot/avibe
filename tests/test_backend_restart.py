@@ -99,7 +99,7 @@ def test_runtime_gen_004_a_backend_that_renews_in_place_never_drains() -> None:
 
             state = await coordinator.request_restart("opencode")
 
-            renew.assert_awaited_once_with("opencode")
+            renew.assert_awaited_once_with("opencode", False)
             if renews:
                 assert state == "restarted"
                 assert service.draining is False

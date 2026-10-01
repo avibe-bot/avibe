@@ -2310,7 +2310,7 @@ class AgentAuthService:
         logger.info("Registered %s backend after runtime config refresh", backend)
         return True
 
-    async def renew_backend_runtime(self, backend: str) -> bool:
+    async def renew_backend_runtime(self, backend: str, config_save: bool = False) -> bool:
         """Adopt persisted config without a drain when the backend renews in place.
 
         Returns False for a backend without that ability, and for a disabled
@@ -2324,7 +2324,7 @@ class AgentAuthService:
         runtime_config = self._load_backend_runtime_config(backend)
         if runtime_config is None or getattr(runtime_config, "enabled", True) is False:
             return False
-        await renew(runtime_config)
+        await renew(runtime_config, config_save=config_save)
         self._sync_builtin_default_agents()
         return True
 

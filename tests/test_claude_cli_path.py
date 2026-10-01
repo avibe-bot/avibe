@@ -597,14 +597,15 @@ def test_cached_claude_rechecks_effective_reasoning_and_preserves_resume(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("change", ["reasoning_effort", "runtime_renewal", "model_hub_launch"])
+@pytest.mark.parametrize("change", ["reasoning_effort", "runtime_renewal", "model_hub_launch", "caller"])
 def test_claude_launch_change_keeps_a_busy_client_until_its_session_is_idle(monkeypatch, tmp_path, change) -> None:
     """RUNTIME-GEN-001: a launch change never makes a session's turn wait.
 
     While background work the session started still runs, its next turn stays
     on the current client, and the first turn after the session is idle gets a
-    new client built from the changed inputs. Only a turn whose Model Hub launch
-    the current client cannot carry replaces it at once, interrupting that work.
+    new client built from the changed inputs. A turn whose Model Hub launch the
+    current client cannot carry, or that comes from a different caller, replaces
+    it at once and interrupts that work.
     """
     from modules.agents.model_hub import ModelHubLaunch
 
@@ -646,6 +647,8 @@ def test_claude_launch_change_keeps_a_busy_client_until_its_session_is_idle(monk
     controller.settings_manager.get_channel_routing = lambda _key: routing
     handler = SessionHandler(controller)
     context = MessageContext(user_id="U123", channel_id="C123")
+    callers = [{"AVIBE_CALLER_FIXTURE": "first"}]
+    monkeypatch.setattr(handler, "_caller_env_for_context", lambda _context: dict(callers[0]))
 
     async def run():
         first = await handler.get_or_create_claude_session(context)
@@ -655,11 +658,13 @@ def test_claude_launch_change_keeps_a_busy_client_until_its_session_is_idle(monk
             routing.reasoning_effort = "medium"
         elif change == "runtime_renewal":
             handler.renew_runtime()
+        elif change == "caller":
+            callers[0] = {"AVIBE_CALLER_FIXTURE": "second"}
         else:
             tokens[0] = "second-launch-token"
 
         during = await asyncio.wait_for(handler.get_or_create_claude_session(context), timeout=1)
-        if change == "model_hub_launch":
+        if change in {"model_hub_launch", "caller"}:
             assert during is not first and first.disconnected
             controller.agent_service.force_end_runtime_activities.assert_called_once_with("claude", key)
             return
@@ -709,6 +714,34 @@ def test_a_renewal_during_client_creation_leaves_one_coherent_launch_config(monk
 
     assert captured["options"].cli_path == "/usr/local/bin/claude-proxy"
     assert client._vibe_runtime_epoch == 0
+
+
+def test_a_config_save_that_only_changes_live_fields_renews_no_client() -> None:
+    """RUNTIME-GEN-005: an idle-timeout save keeps every cached client; other changes renew."""
+    from modules.agents.claude_agent import ClaudeAgent
+
+    def agent_with(config):
+        agent = ClaudeAgent.__new__(ClaudeAgent)
+        agent.config = SimpleNamespace(claude=config)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(claude=config), claude_runtime_epoch=0)
+        agent.session_handler = SimpleNamespace(config=None, renew_runtime=Mock())
+        return agent
+
+    base = _ClaudeRuntimeConfig()
+    cases = [
+        (_ClaudeRuntimeConfig(), True, False),
+        (_ClaudeRuntimeConfig(cli_path="/opt/other/claude"), True, True),
+        (_ClaudeRuntimeConfig(), False, True),
+    ]
+    for saved, config_save, renews in cases:
+        saved.idle_timeout_seconds = 60
+        agent = agent_with(base)
+        base.idle_timeout_seconds = 3600
+
+        asyncio.run(agent.renew_runtime(saved, config_save=config_save))
+
+        assert agent.controller.config.claude is saved
+        assert agent.session_handler.renew_runtime.called is renews
 
 
 @pytest.mark.parametrize("channel", ["hub", "native_cli"])

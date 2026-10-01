@@ -164,7 +164,9 @@ first app-server, which then stops. `S1`'s next turn runs on the second one.
   stays on the session's current client, keeping that client's process inputs,
   and the session switches at its next idle point. Only when that client
   cannot serve the turn is it force-stopped and replaced. That happens when the
-  turn's Hub launch needs a different gateway route, token, or process settings.
+  turn's Hub launch needs a different gateway route, token, or process settings,
+  and when the turn comes from a different caller, whose resource authority
+  the old process must never carry.
   A model added after the client started does not count: a live client accepts
   `set_model` for it, which a hermetic probe confirmed on Claude CLI 2.1.286.
   Nothing waits.
@@ -284,8 +286,10 @@ Implemented in the first PR; the Codex and OpenCode adapters build on it.
     edits, manual Restart, and the install job.
   - Disabled backends, and backends without the hook, keep the drain path.
 - **Renewal epoch.**
-  - `renew_runtime` bumps the backend's renewal epoch, which is part of every
-    launch spec. Each unit therefore moves at its next turn even when the
+  - `renew_runtime(runtime_config, *, config_save)` bumps the backend's renewal
+    epoch, which is part of every launch spec. A config save
+    (`config_save=True`) whose only changes are fields read live renews
+    nothing. Each unit therefore moves at its next turn even when the
     change is invisible to the spec, such as a credential written to the
     CLI's own store.
   - `idle_timeout_seconds` is read on every idle sweep, so it needs no
@@ -304,11 +308,19 @@ Implemented in the first PR; the Codex and OpenCode adapters build on it.
   - Adapters provide `start(spec)` and `stop(generation, force) -> bool`, and
     own the routing of bound work. The core decides "drained" from its own
     binding count alone. A graceful stop may decline with `False` while the
-    adapter's own evidence still shows work. Every bookkeeping section is
-    synchronous, so no adapter call runs under the set's lock.
-  - A declined, failed, or cancelled teardown re-attaches the generation for
-    the next sweep. A failed or cancelled one is also `closed`, so it never
-    serves a turn again. `stop_all` closes admission before it stops anything.
+    adapter's own evidence still shows work.
+  - Admission is pure bookkeeping: every state change happens in one
+    synchronous step, and no admission path ever awaits a teardown. One
+    reconciler task per set owns every stop. It runs stops one at a time and,
+    after each, re-evaluates the cap and which generations are drained.
+  - The cap counts every attached generation, including ones whose graceful
+    stop declined. When a unit is over the cap, the oldest generation is
+    force-stopped.
+  - A declined stop is retried on the next release or sweep. A failed or
+    cancelled stop is retried only by the next sweep; the generation is
+    `closed`, so it never serves a turn again.
+  - `stop_all` closes admission first. A graceful `stop_all` lets bound
+    generations finish their work. `settled()` waits for the reconciler.
 - **Forced stops.** `AgentService.force_end_runtime_activities(backend,
   runtime_key)` settles one runtime's Activities as interrupted by a runtime
   update, using the existing backend-refresh notice.

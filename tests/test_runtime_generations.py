@@ -24,19 +24,24 @@ class _Runtimes:
         self.fail_start = False
         self.fail_stops = 0
         self.decline_stops = 0
+        self.stop_gate: asyncio.Event | None = None
         self.before_stop = None
         self.start_gate: asyncio.Event | None = None
+        self.started = 0
 
     async def start(self, spec: _Spec) -> str:
         if self.start_gate is not None:
             await self.start_gate.wait()
         if self.fail_start:
             raise RuntimeError("start failed")
-        runtime = f"{spec.digest}#{len(self.live) + len(self.stopped)}"
+        runtime = f"{spec.digest}#{self.started}"
+        self.started += 1
         self.live.append(runtime)
         return runtime
 
     async def stop(self, generation, force: bool) -> bool:
+        if self.stop_gate is not None:
+            await self.stop_gate.wait()
         if self.before_stop is not None:
             await self.before_stop(generation)
         if self.fail_stops:
@@ -71,18 +76,18 @@ def test_runtime_gen_002_a_busy_generation_finishes_while_new_turns_use_a_new_on
         await same.release()
 
         replaced = await generations.acquire(_Spec("b"))
+        await generations.settled()
         assert runtimes.stopped == [(first.generation.runtime, False)]
         assert runtimes.live == [replaced.generation.runtime]
 
         new = await asyncio.wait_for(generations.acquire(_Spec("c")), timeout=1)
-        assert generations.current is new.generation
-        assert replaced.generation.retiring
-        assert replaced.generation.runtime in runtimes.live
-
         await generations.reap()
-        assert replaced.generation.runtime in runtimes.live
+        assert generations.current is new.generation
+        assert replaced.generation.retiring and replaced.generation.runtime in runtimes.live
+
         await replaced.release()
         await replaced.release()
+        await generations.settled()
         assert runtimes.stopped[-1] == (replaced.generation.runtime, False)
         assert generations.generations == (new.generation,)
 
@@ -92,9 +97,9 @@ def test_runtime_gen_002_a_busy_generation_finishes_while_new_turns_use_a_new_on
 def test_runtime_gen_003_at_the_cap_the_oldest_retiring_generation_gives_way():
     """RUNTIME-GEN-003: at the cap a new turn still starts at once.
 
-    The new generation starts first and the oldest retiring one is then
-    force-stopped, so the unit is back at the cap. A forced stop that settles
-    its work releases that work's bindings without deadlocking admission.
+    The oldest retiring generation is force-stopped, even while its adapter
+    still reports work and its stop settles that work's bindings, and the unit
+    is back at the cap.
     """
     runtimes = _Runtimes()
     generations = runtimes.generation_set(cap=3)
@@ -103,7 +108,6 @@ def test_runtime_gen_003_at_the_cap_the_oldest_retiring_generation_gives_way():
         oldest = await generations.acquire(_Spec("1"))
         middle = await generations.acquire(_Spec("2"))
         current = await generations.acquire(_Spec("3"))
-        assert runtimes.stopped == []
 
         async def settle_bound_work(generation):
             if generation is oldest.generation:
@@ -112,6 +116,7 @@ def test_runtime_gen_003_at_the_cap_the_oldest_retiring_generation_gives_way():
         runtimes.before_stop = settle_bound_work
 
         newest = await asyncio.wait_for(generations.acquire(_Spec("4")), timeout=1)
+        await generations.settled()
 
         assert runtimes.stopped == [(oldest.generation.runtime, True)]
         assert generations.generations == (middle.generation, current.generation, newest.generation)
@@ -120,25 +125,50 @@ def test_runtime_gen_003_at_the_cap_the_oldest_retiring_generation_gives_way():
     asyncio.run(run())
 
 
-def test_the_cap_holds_when_graceful_stops_decline():
-    """Generations whose adapters still report work count toward the cap."""
+def test_the_cap_holds_when_graceful_stops_decline_or_are_still_running():
+    """Generations whose adapters still report work, or whose stop is pending, count toward the cap."""
     runtimes = _Runtimes()
     generations = runtimes.generation_set(cap=3)
 
     async def run():
-        # Bindings are released while each adapter still reports live work,
-        # so every graceful stop declines.
         runtimes.decline_stops = 10
-        bindings = []
         for digest in ("1", "2", "3", "4", "5"):
             binding = await generations.acquire(_Spec(digest))
-            bindings.append(binding)
             await binding.release()
+            await generations.settled()
             assert len(runtimes.live) <= 3
 
-        assert [runtime for runtime, force in runtimes.stopped] == ["1#0", "2#1"]
-        assert all(force for _runtime, force in runtimes.stopped)
+        assert runtimes.stopped == [("1#0", True), ("2#1", True)]
         assert [generation.spec.digest for generation in generations.generations] == ["3", "4", "5"]
+
+        # A graceful stop still pending when more generations arrive is
+        # rechecked against the cap once it declines.
+        runtimes.stop_gate = asyncio.Event()
+        for digest in ("6", "7"):
+            await generations.acquire(_Spec(digest))
+        runtimes.stop_gate.set()
+        await generations.settled()
+        assert len(runtimes.live) == 3
+
+    asyncio.run(run())
+
+
+def test_admission_never_waits_for_a_teardown():
+    runtimes = _Runtimes()
+    generations = runtimes.generation_set()
+
+    async def run():
+        first = await generations.acquire(_Spec("a"))
+        await first.release()
+        runtimes.stop_gate = asyncio.Event()
+
+        second = await asyncio.wait_for(generations.acquire(_Spec("b")), timeout=1)
+        assert generations.current is second.generation
+        assert first.generation.runtime in runtimes.live
+
+        runtimes.stop_gate.set()
+        await generations.settled()
+        assert runtimes.stopped == [(first.generation.runtime, False)]
 
     asyncio.run(run())
 
@@ -152,6 +182,7 @@ def test_a_live_generation_with_the_needed_spec_serves_again():
         hub = await generations.acquire(_Spec("hub"))
         native = await generations.acquire(_Spec("native"))
         again = await generations.acquire(_Spec("hub"))
+        await generations.settled()
         assert again.generation is hub.generation
         assert generations.current is hub.generation and native.generation.retiring
         assert len(runtimes.live) == 2 and runtimes.stopped == []
@@ -168,9 +199,11 @@ def test_adopted_and_restored_work_keep_their_generation_alive():
         previous = await generations.adopt(_Spec("old"), "previous", current=False)
         restored = await generations.bind(previous)
         current = await generations.acquire(_Spec("new"))
+        await generations.settled()
         assert previous.retiring and "previous" in runtimes.live
 
         await restored.release()
+        await generations.settled()
         assert runtimes.stopped == [("previous", False)]
         assert generations.generations == (current.generation,)
 
@@ -184,18 +217,22 @@ def test_a_retired_generation_stops_once_unbound_and_admits_no_new_turn():
     async def run():
         bound = await generations.acquire(_Spec("a"))
         await generations.retire(bound.generation)
+        await generations.settled()
         assert generations.current is None and bound.generation.runtime in runtimes.live
 
         fresh = await generations.acquire(_Spec("a"))
         assert fresh.generation is not bound.generation
         await bound.release()
+        await generations.settled()
         assert runtimes.stopped == [(bound.generation.runtime, False)]
 
         await fresh.release()
         await generations.retire_current()
+        await generations.settled()
         assert runtimes.stopped[-1] == (fresh.generation.runtime, False)
         await generations.retire(fresh.generation)
         await generations.retire_current()
+        await generations.settled()
         assert len(runtimes.stopped) == 2
 
     asyncio.run(run())
@@ -223,12 +260,13 @@ def test_a_generation_whose_teardown_does_not_finish_stays_tracked(outcome):
 
             runtimes.before_stop = cancel_teardown
 
+        await old.release()
         if outcome == "cancelled":
             with pytest.raises(asyncio.CancelledError):
-                await old.release()
+                await generations.settled()
             runtimes.before_stop = None
         else:
-            await old.release()
+            await generations.settled()
         assert old.generation in generations.generations and not old.generation.stopped
 
         again = await generations.acquire(_Spec("a"))
@@ -241,7 +279,8 @@ def test_a_generation_whose_teardown_does_not_finish_stays_tracked(outcome):
     asyncio.run(run())
 
 
-def test_stop_all_closes_admission_and_stops_a_start_in_flight():
+@pytest.mark.parametrize("force", [True, False])
+def test_stop_all_closes_admission_and_keeps_bound_work_on_a_graceful_stop(force):
     runtimes = _Runtimes()
     generations = runtimes.generation_set()
 
@@ -251,15 +290,22 @@ def test_stop_all_closes_admission_and_stops_a_start_in_flight():
         starting = asyncio.create_task(generations.acquire(_Spec("b")))
         await asyncio.sleep(0)
 
-        await generations.stop_all(force=True)
+        await generations.stop_all(force=force)
+        with pytest.raises(RuntimeUnitStopping):
+            await generations.acquire(_Spec("a"))
         runtimes.start_gate.set()
         with pytest.raises(RuntimeUnitStopping):
             await starting
-        with pytest.raises(RuntimeUnitStopping):
-            await generations.acquire(_Spec("a"))
+        await generations.settled()
 
-        assert runtimes.live == []
-        assert serving.generation.stopped
+        if force:
+            assert runtimes.live == []
+        else:
+            # The bound generation keeps its work until that work is released.
+            assert runtimes.live == [serving.generation.runtime]
+            await serving.release()
+            await generations.settled()
+            assert runtimes.live == []
 
     asyncio.run(run())
 
