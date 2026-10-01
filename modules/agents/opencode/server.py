@@ -256,6 +256,10 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _running_overlay_record(overlay_path: str) -> Path:
+    return Path(overlay_path).with_suffix(".running.json")
+
+
 def _overlay_signature(content: str | None) -> dict[str, Any] | None:
     """Digest an overlay as one ``base`` without model rows plus one digest per row."""
 
@@ -969,6 +973,7 @@ class OpenCodeServerManager:
                         # A run that an adopted server's durable poll still
                         # owns is live work, not a stale marker.
                         info = self._reconcile_adopted_active_run_sessions(info) or info
+                        self._restore_adopted_overlay(info)
                     effective_path = (
                         info.get("model_hub_overlay_path") if current_server else None
                     )
@@ -1002,7 +1007,6 @@ class OpenCodeServerManager:
                         or self._model_hub_overlay_reservations
                     )
                     if live_runs and self._running_overlay_serves(
-                        info,
                         effective_hash,
                         desired_content,
                         required_model,
@@ -1076,9 +1080,34 @@ class OpenCodeServerManager:
                     if transition is not None and transition[2] is transition_owner:
                         self._model_hub_overlay_transition = None
 
+    def _restore_adopted_overlay(self, info: Dict[str, Any]) -> None:
+        """Recover the overlay an adopted server runs from its launch record."""
+
+        path = info.get("model_hub_overlay_path")
+        digest = info.get("model_hub_overlay_hash")
+        provider_ids = info.get("model_hub_overlay_provider_ids")
+        if (
+            not isinstance(path, str)
+            or not isinstance(digest, str)
+            or (digest == self._model_hub_overlay_hash and self._model_hub_overlay_content is not None)
+            or not isinstance(provider_ids, list)
+            or not provider_ids
+            or not all(isinstance(item, str) and item for item in provider_ids)
+        ):
+            return
+        try:
+            content = _running_overlay_record(path).read_text()
+        except OSError:
+            return
+        if hashlib.sha256(content.encode()).hexdigest() != digest:
+            return
+        self._model_hub_overlay_path = path
+        self._model_hub_overlay_hash = digest
+        self._model_hub_overlay_content = content
+        self._model_hub_overlay_provider_ids = tuple(provider_ids)
+
     def _running_overlay_serves(
         self,
-        info: Dict[str, Any],
         effective_hash: str | None,
         desired_content: str | None,
         required_model: str | None,
@@ -1089,23 +1118,11 @@ class OpenCodeServerManager:
         turn's own model row is identical in both, so the turn reaches the same
         providers, endpoint, credentials, and model definition.
         """
-        if effective_hash is None:
+        if effective_hash is None or effective_hash != self._model_hub_overlay_hash:
             return False
-        if effective_hash == self._model_hub_overlay_hash and self._model_hub_overlay_content is not None:
-            running = _overlay_signature(self._model_hub_overlay_content)
-        elif info.get("model_hub_overlay_hash") == effective_hash:
-            # An adopted server: the PID file keeps its signature, not its
-            # credential-bearing content.
-            running = info.get("model_hub_overlay_signature")
-        else:
-            running = None
+        running = _overlay_signature(self._model_hub_overlay_content)
         desired = _overlay_signature(desired_content)
-        if (
-            desired is None
-            or not isinstance(running, dict)
-            or running.get("base") != desired["base"]
-            or not isinstance(running.get("rows"), dict)
-        ):
+        if running is None or desired is None or running["base"] != desired["base"]:
             return False
         if required_model is None:
             return True
@@ -1224,9 +1241,6 @@ class OpenCodeServerManager:
             if self._model_hub_overlay_path and self._model_hub_overlay_hash:
                 payload["model_hub_overlay_path"] = self._model_hub_overlay_path
                 payload["model_hub_overlay_hash"] = self._model_hub_overlay_hash
-                signature = _overlay_signature(self._model_hub_overlay_content)
-                if signature is not None:
-                    payload["model_hub_overlay_signature"] = signature
             if self._model_hub_overlay_provider_ids:
                 payload["model_hub_overlay_provider_ids"] = list(
                     self._model_hub_overlay_provider_ids
@@ -1234,6 +1248,17 @@ class OpenCodeServerManager:
             write_atomic(self._pid_file, json.dumps(payload))
         except Exception as e:
             logger.debug(f"Failed to write OpenCode pid file: {e}")
+            return
+        if payload.get("model_hub_overlay_hash") and self._model_hub_overlay_content is not None:
+            # The overlay file is rewritten per turn, so keep the exact document
+            # this server runs for a later controller that adopts it.
+            try:
+                write_atomic(
+                    _running_overlay_record(self._model_hub_overlay_path),
+                    self._model_hub_overlay_content,
+                )
+            except Exception:
+                logger.warning("Could not record the running OpenCode overlay", exc_info=True)
 
     def _apply_resource_governance(self, pid: int | None) -> None:
         governor = getattr(self, "resource_governor", None)

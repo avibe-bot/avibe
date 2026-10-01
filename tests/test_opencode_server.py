@@ -3605,14 +3605,15 @@ def test_mh_runtime_014_a_busy_server_keeps_serving_turns_its_overlay_still_serv
 def test_an_overlay_switch_treats_an_adopted_run_its_durable_poll_owns_as_live(tmp_path):
     """MH-RUNTIME-014: after a controller restart, an adopted server's run is live work.
 
-    The PID file the launching process wrote lets the adopter keep unaffected
-    turns on the running overlay at once; a turn that needs the new overlay is
-    refused after its bound instead of restarting the server under the run.
+    The launching process records the overlay its server runs, so the adopter
+    keeps unaffected turns on it at once with a usable launch boundary; a turn
+    that needs the new overlay is refused after its bound instead of restarting
+    the server under the run.
     """
 
-    old_overlay = _model_hub_overlay("/tmp/old-overlay.json", "kept")
+    old_overlay = _model_hub_overlay(str(tmp_path / "opencode-overlay.json"), "kept")
     new_overlay = _model_hub_overlay(
-        "/tmp/new-overlay.json",
+        str(tmp_path / "opencode-overlay.json"),
         None,
         models={"kept": {"id": "kept"}, "added": {"id": "added"}},
     )
@@ -3621,8 +3622,11 @@ def test_an_overlay_switch_treats_an_adopted_run_its_durable_poll_owns_as_live(t
     launcher._model_hub_overlay_path = str(old_overlay.path)
     launcher._model_hub_overlay_hash = old_overlay.content_hash
     launcher._model_hub_overlay_content = SERVER_MODULE._managed_runtime_config_content(old_overlay.content)
+    launcher._model_hub_overlay_provider_ids = old_overlay.provider_ids
     launcher._active_run_sessions.add("sess-adopted")
     launcher._write_pid_file(321)
+    # Each turn rewrites the shared overlay file with the committed document.
+    old_overlay.path.write_text(new_overlay.content)
 
     manager = OpenCodeServerManager(binary="opencode", port=4096)
     manager._pid_file = launcher._pid_file
@@ -3638,6 +3642,9 @@ def test_an_overlay_switch_treats_an_adopted_run_its_durable_poll_owns_as_live(t
             manager.configure_model_hub_overlay(new_overlay, required_model="avibe-openai/kept"),
             timeout=0.1,
         )
+        # The turn's launch boundary accepts the adopted overlay.
+        assert manager._configured_model_hub_overlay()
+        assert manager._model_hub_overlay_hash == old_overlay.content_hash
         await manager.release_model_hub_overlay_reservation(kept)
         with pytest.raises(SERVER_MODULE.OpenCodeModelHubOverlaySwitchBlockedError):
             await asyncio.wait_for(
