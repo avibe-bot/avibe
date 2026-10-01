@@ -1454,3 +1454,48 @@ def test_a_controller_starting_with_opencode_disabled_stops_a_crashed_controller
         assert stopped == [] and record.exists()
     else:
         assert stopped == [fake_pid(52)] and not record.exists()
+
+
+def test_runtime_gen_007_a_reenabled_opencode_runtime_starts_beside_a_draining_retired_one(fake_processes):
+    """RUNTIME-GEN-007, at the OpenCode adapter: OpenCode is enabled again
+    while the disabled instance still drains a Hub turn. The new instance
+    starts its own generation at once, the retired turn keeps its own, and no
+    stop of either retires the Hub process scope both instances' overlays
+    share, so neither revokes the other's gateway credential."""
+
+    retired_scopes: list[tuple[str, str]] = []
+    controller = SimpleNamespace(
+        model_hub_runtime=SimpleNamespace(
+            retire_process_scope=lambda backend, scope, **_kwargs: retired_scopes.append((backend, scope)),
+        ),
+    )
+
+    def agent():
+        instance = object.__new__(OpenCodeAgent)
+        instance.controller = controller
+        instance._session_generations = {}
+        instance._runtime = _runtime()
+        instance._runtime.on_generation_stopping = instance._on_generation_stopping
+        return instance
+
+    retired, reenabled = agent(), agent()
+    hub = OpenCodeLaunchSpec(digest="hub-overlay", binary="opencode")
+
+    async def scenario():
+        draining = await retired._runtime.acquire(hub)
+        await retired.retire_runtime()
+        fresh = await reenabled._runtime.acquire(hub)
+        both_running = not fake_processes.stopped
+        await draining.release()
+        await retired._runtime._generations.settled()
+        await retired.reap_runtime_generations()
+        await fresh.release()
+        return draining.generation.runtime, fresh.generation.runtime, both_running
+
+    drained, serving, both_running = asyncio.run(scenario())
+
+    assert serving is not drained and both_running
+    assert fake_processes.stopped == [drained]
+    assert retired.runtime_retired()
+    assert reenabled._runtime.generations() == (serving,)
+    assert retired_scopes == []

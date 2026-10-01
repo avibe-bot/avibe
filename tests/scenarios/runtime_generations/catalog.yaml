@@ -74,6 +74,7 @@ scenarios:
     test: tests/test_backend_restart.py::test_runtime_gen_007_re_enabling_starts_a_new_agent_beside_the_retired_one
     related_tests:
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_retired_agent_never_revokes_the_hub_credential_of_its_successor
+      - tests/test_opencode_generations.py::test_runtime_gen_007_a_reenabled_opencode_runtime_starts_beside_a_draining_retired_one
   - id: RUNTIME-GEN-008
     name: An unattended CLI update closes admission only for its install, then renews in place instead of tearing the runtime down
     status: covered
