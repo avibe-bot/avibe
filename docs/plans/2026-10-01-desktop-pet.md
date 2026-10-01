@@ -155,26 +155,39 @@ as it does for the Workbench.
 **Input freshness.** The SSE broker is an in-memory fan-out with no replay,
 and some state changes publish no event at all. So every input the pet derives
 from needs three things: an initial read, a live trigger, and a gap fallback.
-The table is the contract. Its rule is that any trigger re-reads the
-authoritative API; events are hints, never state.
+The table is the contract. Its rules:
+
+- Any trigger re-reads the authoritative API; events are hints, never state.
+- The pet reads its own session `S` directly. It does not rely on a provider
+  having `S` cached: a fresh pet window's providers only hold what their own
+  bootstrap fetched, which is not the session `main` picked.
+- A trigger counts only if it is published after the state it signals is
+  persisted. Each row below was checked against the publishing code for that
+  ordering.
 
 | Input | Initial read | Live trigger | Gap fallback |
 |---|---|---|---|
-| Message tail (latest exchange, `quick_replies`, `quick_reply_chosen`) | `listSessionMessages(S, {tail: true, cache: false})` | `message.new` for `S` (merged, deduped by id); `queue.updated` and `turn.start` for `S` re-read the tail | `onConnected`; window becomes visible |
-| Quick-reply choice made in the pet | n/a | on the `202` from the choice POST, patch `quick_reply_chosen` on that row locally, then re-read the tail | as above |
+| Message tail (latest exchange, `quick_replies`) | `listSessionMessages(S, {tail: true, cache: false})` | `message.new` for `S` (merged, deduped by id) | `onConnected`; window becomes visible |
+| `quick_reply_chosen` | in the tail rows | `message.updated` for `S`, replacing the row by id, as the chat page already does. The Runtime starts publishing it for this field (see note) | as above |
 | Turn state (`foreground`, `in_flight`, `background_activities`) | `GET /api/sessions/S/turn-state` | `turn.start`, `turn.end`, `queue.updated` for `S`; `runs.updated` for `S` or with no `session_id` | `onConnected`; visible; the chat page's interval reconcile while work is present and the window is visible |
 | Pending vault requests | `usePendingVaultRequests` | `vaults.updated` (`useVaultRequestRefresh`) | expiry timer; `onConnected` |
-| `agent_status` | Projects provider session row | `session.status` (already consumed by `WorkbenchProjectsProvider`) | provider's own reconnect |
-| Unread count | Inbox provider `unread_by_session` | `inbox.unread.changed` | provider's own reconnect |
+| `agent_status` | `getSession(S, {cache: false})` | `session.status` for `S`, applied to the pet's own copy | `onConnected`; visible: re-read `getSession(S)` |
+| Unread count | Inbox provider `unread_by_session`, which its bootstrap reads for every session | `inbox.unread.changed` | provider's own `onConnected` |
 
 Two notes on the table:
 
-- **Quick replies.** The server records `quick_reply_chosen` on the agent row
-  when it accepts the choice, but it publishes no row update. A choice made in
-  the pet is therefore patched from the POST result. A choice made in another
-  window is seen through the user message it sends: `message.new` if it
-  started a turn, `queue.updated` if it was queued. Both triggers re-read the
-  tail, which carries the recorded choice, so Needs input clears.
+- **Quick replies.** Today the server records `quick_reply_chosen` on the
+  agent row only after the dispatch returns, and publishes no row update. The
+  user message's `message.new` and `queue.updated` are emitted during dispatch
+  (`_publish_materialized_delivery`), so they can arrive before the choice is
+  persisted, and a re-read on them can race. The fix is at the Runtime layer:
+  when `set_quick_reply_chosen` newly records a choice, the messages endpoint
+  publishes `message.updated` with the updated agent row after the write
+  commits. Every window then clears Needs input from one ordered event, and the
+  Workbench gains the same cross-tab lock for free. The window that clicked
+  also locks optimistically, as `QuickReplies` does today. This is a small
+  server change in the shell-and-state PR, with a pytest that the event follows
+  the write.
 - **Turn state.** The chat page already owns the subtle part: a grace window
   after a local send, and an interval reconcile (60 s while working, 10 s while
   background work is present) that recovers a dropped `turn.end` without ever
@@ -204,7 +217,7 @@ comes from an API the Workbench already uses:
 | State | Condition | Source |
 |---|---|---|
 | Needs input | pending vault request for `S`, or the latest agent result has unanswered `quick_replies` | `GET /api/vault/requests?status=pending&session=S` (`usePendingVaultRequests`, refreshed on `vaults.updated` and expiry); message `content.quick_replies` and `quick_reply_chosen` |
-| Blocked | `agent_status = failed` | `session.status`; bootstrap |
+| Blocked | `agent_status = failed` | `getSession(S)` and `session.status` (see Input freshness) |
 | Ready | foreground idle and `unread_count > 0` | `inbox.unread.changed` (`unread_by_session`) |
 | Running | `turn_state.foreground = running` or `in_flight` | `turn.start`/`turn.end` with `GET /api/sessions/S/turn-state`, as the chat page does |
 | Idle | none of the above | |
@@ -313,6 +326,7 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 ## Delivery
 
 1. **Shell and state.**
+   - Runtime: publish `message.updated` when a quick-reply choice is recorded;
    - `pet` window and its lifecycle invariants;
    - IPC surface;
    - global shortcut, tray toggle and presets, `pet.json`;
@@ -326,6 +340,9 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 
 ## Tests
 
+- **Pytest:** recording a quick-reply choice publishes `message.updated` for
+  the agent row after the write commits, and only when the choice is newly
+  recorded.
 - **Rust** (`desktop/src-tauri/tests/shell_boundaries.rs`):
   - `pet` gets no bootstrap command;
   - pet capabilities grant only the listed command, event, and permission;
@@ -339,9 +356,9 @@ The microphone usage string and audio-input entitlement already ship (#2293).
   - each row of the input-freshness table: the initial read on bind, each
     live trigger, and each gap fallback re-read the authoritative API, and
     live rows merge without duplicates;
-  - a quick-reply choice clears Needs input from the POST result, and a
-    choice made in another window clears it through `message.new` or
-    `queue.updated`;
+  - a `message.updated` row carrying `quick_reply_chosen` clears Needs input;
+  - a freshly bound session that is already failed derives Blocked from
+    `getSession(S)`, with no provider row present;
   - `runs.updated` for `S`, or without `session_id`, refreshes the activity
     strip;
   - the extracted `useSessionTurnState` keeps the chat page's existing
