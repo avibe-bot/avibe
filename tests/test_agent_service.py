@@ -773,6 +773,57 @@ def test_force_cancel_backend_turns_emits_terminal_before_release() -> None:
     asyncio.run(_run())
 
 
+def test_a_runtime_force_end_spares_the_next_turn_admitted_while_it_settles() -> None:
+    """Only the turns running when a runtime is force-ended are its work."""
+
+    async def _run():
+        controller = _Controller()
+        controller.emit_agent_message = AsyncMock()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        agent = _RuntimeAgent()
+        running: dict[str, asyncio.Event] = {}
+
+        async def handle_message(request):
+            running[request.message] = asyncio.Event()
+            await running[request.message].wait()
+
+        agent.handle_message = handle_message
+        service.register(agent)
+        first, second = _request("first"), _request("second")
+        first.base_session_id = second.base_session_id = "s1"
+        first_task = asyncio.create_task(service.handle_message("claude", first))
+        await asyncio.sleep(0)
+        second_task = asyncio.create_task(service.handle_message("claude", second))
+        await asyncio.sleep(0)
+
+        async def release_for_backend_refresh(**_kwargs):
+            # The first turn finishes meanwhile, so the Session's next one starts.
+            service.release_runtime_turn(first.context)
+            running["first"].set()
+            await first_task
+            await asyncio.wait_for(_until_started("second"), 1)
+
+        async def _until_started(message):
+            while message not in running:
+                await asyncio.sleep(0.01)
+
+        controller.session_turns = SimpleNamespace(
+            on_running=lambda _context: None,
+            release_for_backend_refresh=release_for_backend_refresh,
+        )
+
+        await service.force_end_runtime_work("claude", base_session_ids={"s1"}, activity_runtime_keys=set())
+
+        assert not second_task.done()
+        controller.emit_agent_message.assert_not_awaited()
+        assert service.runtime_turn_tokens_for_backend("claude")
+        running["second"].set()
+        await asyncio.wait_for(second_task, 1)
+
+    asyncio.run(_run())
+
+
 class _RecordingIndicator:
     """Records the queued/promote/finish reaction calls the gate drives."""
 

@@ -398,11 +398,14 @@ class CodexTransport:
 
         try:
             await self._write_message(msg)
-        except Exception:
+        except BaseException as exc:
             # Clean up the pending future so it doesn't leak
             self._pending.pop(req_id, None)
             if not fut.done():
-                fut.set_exception(ConnectionError(f"Failed to send {method}"))
+                if isinstance(exc, Exception):
+                    fut.set_exception(ConnectionError(f"Failed to send {method}"))
+                else:
+                    fut.cancel()
             raise
 
         try:

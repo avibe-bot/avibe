@@ -648,70 +648,23 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
     agent = _get_agent(controller, "codex")
     if agent is None:
         return {"ok": False, "error": "codex_unavailable"}
-    session_mgr = getattr(agent, "_session_mgr", None)
-    turn_registry = getattr(agent, "_turn_registry", None)
-    transport_for_session = getattr(agent, "transport_for_session", None)
-    if session_mgr is None or turn_registry is None or not callable(transport_for_session):
+    end_session = getattr(agent, "end_session", None)
+    if not callable(end_session):
         return {"ok": False, "error": "codex_registries_unavailable"}
-    cwd = session_mgr.get_cwd(base_session_id)
-    thread_id = session_mgr.get_thread_id(base_session_id)
-    turn_id = turn_registry.get_active_turn(base_session_id)
-    transport = transport_for_session(base_session_id)
-    # Interrupt the active turn (the shared app-server transport stays up for
-    # other sessions on the same cwd); then clear THIS session's thread/turn state.
-    interrupted = False
-    if turn_id and thread_id and transport is not None:
-        try:
-            await transport.send_request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
-            interrupted = True
-        except Exception:  # noqa: BLE001
-            logger.debug("end: codex turn/interrupt failed for %s", base_session_id, exc_info=True)
+    # The adapter owns End: it serializes it with the Session's turns, releases
+    # the Session's thread on an app-server other Sessions still use, or stops
+    # the directory's app-servers once this was their last user, and clears the
+    # Session only after that succeeded.
     try:
-        turn_registry.clear_session(base_session_id)
+        ended = await end_session(base_session_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("end: codex clear failed for %s: %s", base_session_id, exc)
-        return {"ok": False, "error": "clear_failed", "detail": str(exc)}
-    # The app-server transport is shared per cwd. If THIS was the last session on
-    # that cwd, stop it too so the codex process is actually freed (otherwise it
-    # lingers with zero sessions); if other sessions still use it, leave it up.
-    process_killed = False
-    retire_idle = getattr(agent, "retire_unowned_session_transport", None)
-    other_sessions = (
-        set(session_mgr.sessions_for_cwd(cwd)) - {base_session_id}
-        if cwd else set()
-    )
-    if cwd and transport is not None and not other_sessions and callable(retire_idle):
-        try:
-            process_killed = bool(
-                await retire_idle(cwd, ending_session_id=base_session_id)
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("end: codex transport stop failed for %s", cwd, exc_info=True)
-            return {"ok": False, "error": "transport_retire_failed", "detail": str(exc)}
-        if not process_killed:
-            return {"ok": False, "error": "transport_retire_failed"}
-    elif transport is not None:
-        # The app-server keeps serving other sessions: unload only this
-        # session's thread, so no process keeps holding that conversation.
-        release = getattr(agent, "release_session_runtime", None)
-        if callable(release):
-            try:
-                await release(base_session_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("end: codex thread release failed for %s", base_session_id, exc_info=True)
-                return {"ok": False, "error": "thread_release_failed", "detail": str(exc)}
-    try:
-        # Keep the cwd mapping until transport retirement succeeds, so a failed
-        # close remains reachable by Session ID for a later End attempt.
-        session_mgr.clear(base_session_id)
-        getattr(agent, "_session_locks", {}).pop(base_session_id, None)
-        getattr(agent, "_session_last_activity", {}).pop(base_session_id, None)
-        clear_thread_cache = getattr(agent, "_clear_thread_developer_instructions", None)
-        if callable(clear_thread_cache):
-            clear_thread_cache(base_session_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("end: codex clear failed for %s: %s", base_session_id, exc)
-        return {"ok": False, "error": "clear_failed", "detail": str(exc)}
+        released = getattr(exc, "reason", None) == "codex_thread_release_unavailable"
+        logger.warning("end: codex teardown failed for %s", base_session_id, exc_info=True)
+        return {
+            "ok": False,
+            "error": "thread_release_failed" if released else "transport_retire_failed",
+            "detail": str(exc),
+        }
     # ``interrupted`` is False when there was no active turn to stop (idle/stale):
     # the session state is still cleared, but the caller can tell nothing was
     # actively interrupted.
@@ -719,8 +672,8 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
         "ok": True,
         "action": "ended",
         "backend": "codex",
-        "interrupted": interrupted,
-        "process_killed": process_killed,
+        "interrupted": bool(ended.get("interrupted")),
+        "process_killed": bool(ended.get("process_killed")),
     }
 
 
@@ -1332,7 +1285,9 @@ async def end_running_agent(
                 if teardown.get("process_killed"):
                     result["process_killed"] = True
                 return result
-            return stop_result if stop_ok else (teardown if isinstance(teardown, dict) else stop_result)
+            # The turn may be stopped, but the Session still holds its thread
+            # and its row, so End did not finish: report the teardown failure.
+            return teardown if isinstance(teardown, dict) else stop_result
 
         if not stop_ok:
             return stop_result

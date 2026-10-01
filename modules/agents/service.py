@@ -1130,14 +1130,20 @@ class AgentService:
         and the named runtimes' Activities settle with the runtime-update
         notice, and every other session keeps running.
         """
+        # Only the turns running now: a session's next turn, admitted while the
+        # release below awaits, runs elsewhere and is not this runtime's work.
+        tokens = {
+            gate.token
+            for gate in self._turn_gates.values()
+            if gate.token
+            and gate.backend == backend
+            and getattr(gate.request, "base_session_id", None) in base_session_ids
+        }
         manager = getattr(self.controller, "session_turns", None)
         release = getattr(manager, "release_for_backend_refresh", None)
         if callable(release) and base_session_ids:
             await release(backend=backend, base_session_ids=set(base_session_ids))
-        await self._force_cancel_turns(
-            lambda gate: gate.backend == backend
-            and getattr(gate.request, "base_session_id", None) in base_session_ids
-        )
+        await self._force_cancel_turns(lambda gate: gate.token in tokens)
         for runtime_key in activity_runtime_keys:
             self.force_end_runtime_activities(backend, runtime_key)
 

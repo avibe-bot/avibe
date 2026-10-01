@@ -127,22 +127,51 @@ same load the launch resolution used. It is cached by `(binary identity,
 models digest)`, with the two most recent entries kept. Each Hub generation
 holds its own pin while it runs.
 
+## Lifecycle invariants
+
+Every transition below was audited against each invariant, by the adapter
+author and two independent reviewers.
+
+| Invariant | Rule | Owner |
+| --- | --- | --- |
+| Binding | A live Session binding is dropped only by its process ending or by a proven release. Every other path forgets only bindings whose process is gone. | `_forget_runtime_sessions`, `_release_session_thread`, `_forget_stale_session` |
+| Release proof | A thread loads elsewhere only after `thread/closed`, `notLoaded`, absence from `thread/loaded/list`, or the old process's exit by return code. Anything less raises `CodexThreadReleaseUnavailableError` and changes nothing; every caller propagates it. | `_release_session_thread` |
+| Settlement | Every adapter-initiated kill of a process with bound work settles that work (turns and every bound Session's Activities) with the runtime-update notice, and only that work: the turns are the ones running when settlement begins. | `_end_bound_work` via `_stop_runtime(settle=)`, `force_end_runtime_work` |
+| Fence | Once a teardown begins, no durable owner commits to its generation: the retirement is reserved before the final drained check, settlement, and stop, and aborted when any of them declines or fails. | `_stop_runtime` |
+| Hub scope | The gateway credential is revoked exactly when the directory's last Hub process is gone, a starting or failed-start one included. | `_runtimes`, `_retire_hub_scope_after` |
+| Per generation | A decision about a generation reads only its own Sessions, turns, bindings, and process. | admission, drained check, eviction, End |
+| Session serialization | Turn admission, End, `/new`, and resume preparation run under the Session's lifecycle lock. | `session_lifecycle` |
+| Spec identity | Equal digests are interchangeable processes; the credential identity covers the file store only. | `_launch_spec_digest`, `codex_credential_identity` |
+| Eventual teardown | Every started process is eventually stopped: drained retiring ones, the cap's victim, failed starts, and survivors of a failed or cancelled stop. | core reconciler, sweep, `_readopt` |
+
+Two documented exceptions: shutdown ends processes without the
+runtime-update notice, and a process ending unbinds its Sessions without their
+locks. That unbinding is synchronous and checks generation identity, so it
+never drops a binding that already moved; taking Session locks in the
+reconciler would deadlock against failure replacement, which waits for the
+reconciler while holding one.
+
 ## Turn admission
 
 Under the Session lock, `handle_message`:
 
 1. takes the router snapshot and resolves the launch from it;
 2. builds the spec;
-3. calls `unit.acquire(spec)`;
+3. retires every unusable attached generation, then calls `unit.acquire(spec)`,
+   and checks the acquired process again, since it may have died while the
+   spec was prepared;
 4. keeps that binding until the turn is registered or has failed;
 5. if the Session's thread is loaded in another generation, moves it there
    (`_move_session_to`).
 
-The move, `_release_session_thread`, is the one release primitive. It
-returns only on proof of release; anything less raises
-`CodexThreadReleaseUnavailableError` (a visible failure with the input held for
-an explicit retry) and leaves the binding in place:
+The move, `_release_session_thread`, is the one release primitive. It returns
+only on proof of release; anything less raises
+`CodexThreadReleaseUnavailableError`, a visible failure with the input held for
+an explicit retry, and leaves the binding in place:
 
+- If that process is being torn down, wait for the teardown: its exit releases
+  the thread, and the Session's next turn cannot be among the work the
+  teardown settles.
 - If the Session's own turn is still running there, interrupt it. Only an
   accepted interrupt, or a turn or process that already ended, lets the move
   go on; the interrupted request is then settled locally, because
@@ -156,21 +185,25 @@ an explicit retry) and leaves the binding in place:
   reader does not: the child can outlive it and keep the writer lock, so the
   move waits for the exit within the same bound.
 
-Every caller propagates the failure, so a resume aborts before its mapping
-changes. `/new` is the one exception: it logs the failure and clears the
-mapping, and the binding stays until the next turn retries the release.
-
 The turn then resumes, starts, or forks its thread through
-`_open_session_thread`, which binds whatever thread ended up loaded.
+`_open_session_thread`, which binds whatever thread ended up loaded. A resume
+claims its thread in the target process before the RPC, so one whose answer is
+lost is still released there before any other process resumes it. A new or
+forked thread is persisted before the Session uses it, so a failed write never
+leaves a conversation out of resume history.
+
+A cancelled admission clears its pending turn start, so it never pins its
+generation.
 
 Notifications arrive per generation. `thread/closed` resolves a pending
 release. A thread-level event without a turn id is dropped when its Session is
 no longer bound to the emitting generation. A turn that completes on a
 non-current generation schedules a reap.
 
-The fork boundary is read through the generation that holds the source thread.
-Fork metadata names the durable source Session, not its base session, and any
-other process reports a live turn as `interrupted`.
+The fork boundary is read through the generation that holds the source thread
+while that process runs, even if it stopped answering: reading it then fails
+closed, while any other process reports a live turn as `interrupted`. Fork
+metadata names the durable source Session, not its base session.
 
 ## Stop and reap
 
@@ -178,21 +211,24 @@ other process reports a live turn as `interrupted`.
 reconciler is its only caller:
 
 - A **graceful** stop declines while `_generation_drained` is false. That is
-  the case while a bound Session has a live turn on a live process, or while
+  the case while a bound Session has a live turn on a running process, or while
   the ownership snapshot blocks replacement:
-  - `blocks_transport_replacement` for a live process;
-  - `blocks_dead_transport_replacement` for an exited one.
+  - `blocks_transport_replacement` for a running process;
+  - `blocks_dead_transport_replacement` for one that exited.
 
-  A turn on an exited process does not block.
-- A **forced** stop at the cap settles the generation's running turns through
-  `AgentService.force_end_runtime_work` with the runtime-update notice. It also
-  settles the Activities of every Session bound to the generation, since an
-  Activity can outlive its turn. Then it ends the process. Shutdown ends the
-  process without that notice.
-- Either way, `_stop_runtime` reserves the activation identity's retirement
-  before the process stops, so late owner commits are fenced. Only after a
-  successful stop are the generation's Sessions unbound and its Hub scope
-  revisited.
+  Drained is decided twice: once outside the fence, so a busy generation never
+  blocks admissions, and again inside it before the stop.
+- A **forced** stop at the cap settles the generation's work through
+  `_end_bound_work`, then ends the process. `force_end_runtime_work` captures
+  the exact turns before its first await, so a Session's next turn, admitted
+  while the settlement runs and waiting for the teardown, is never cancelled
+  with them. A registered turn whose gate a later turn already took, such as
+  one the liveness monitor settled after the reader closed, is not settled
+  again. A process whose reader closed while the child runs can never
+  report its work again, so it is stopped the same way. Shutdown ends
+  processes without the notice.
+- `_stop_runtime` owns the fence. Only after a successful stop are the
+  generation's Sessions unbound and its Hub scope revisited.
 
 Ownership targets: the current generation answers for every durable Session in
 its directory, as before. A detached or retiring generation answers only for
@@ -200,51 +236,60 @@ the Sessions it still holds.
 
 Reap triggers:
 
-- the controller sweep (`reap_runtime_generations`, every 60 s);
+- the controller sweep (`reap_runtime_generations`, every 60 s), which also
+  retires processes that exited or stopped answering and retries the stop of a
+  child that outlived its own failed start;
 - a turn completing on a non-current generation;
 - a Session moving off a generation;
 - the release of the last binding.
 
 Idle eviction judges each generation only by the Sessions whose threads it
-holds. The current generation keeps the idle timeout, the two ownership
-snapshots, and the stuck-active backstop, then calls `unit.retire` and waits
-for `unit.settled()`. A retiring generation gets the stuck-active backstop
-only: its stuck turns are settled and it is reaped, so their native turns end
-with its process.
+holds. The current generation keeps the idle timeout and the two ownership
+snapshots, then calls `unit.retire` and waits for `unit.settled()`. The
+stuck-active backstop applies to every generation: it settles only the exact
+stuck turn, under the Session's lifecycle and after the terminal emission, and
+then retires that generation, so a native turn that may still run ends with
+its process once its neighbours finish.
 
-Native-credential migration, End from Running Agents, and the exclusive
-refresh need processes gone outside the core's own decisions. They use
-`_stop_generations_now`:
+Native-credential migration, End, and the exclusive refresh need processes gone
+outside the core's own decisions. They use `_stop_generations_now`:
 
 - After the final synchronous check, it detaches every selected generation
   before the first stop awaits. A turn arriving meanwhile starts its own
   generation and cannot bind to one about to be killed.
-- `_end_bound_work` is the single owner of settling bound work, meaning turns
-  and every bound Session's Activities, before an adapter-initiated kill:
-  - the forced stop and End settle;
-  - migration and the exclusive refresh pass `settle=False`, because
-    `migration_guard` and the coordinator already settled the backend;
-  - shutdown deliberately shows no notice, since the whole runtime is going
-    away and restart recovery reports interrupted work.
-- If a stop fails, the still-running process is adopted back as retiring, with
-  its Sessions still bound, so a later call or sweep can retry.
+- End settles through `_end_bound_work`. Migration and the exclusive refresh
+  pass `settle=False`, because `migration_guard` and the coordinator already
+  settled the backend.
+- A generation whose stop fails, or that a cancellation left unstopped, is
+  adopted back as retiring with its Sessions still bound, so a later call or
+  sweep can retry.
 
 Failure replacement instead releases its own binding and retires the broken
 generation, which is atomic with admission. The process then stops only
 through the drained check, so a neighbour's running turn is never killed.
 
-End on an app-server that other Sessions still use releases only the ending
-Session's thread (`release_session_runtime`). Otherwise the thread would keep
-Codex's writer lock in that process.
+## End, `/new`, and resume
 
-Every unusable attached generation, current or retiring, is retired before
-a new turn acquires, because admission may promote a retiring generation whose
-spec matches:
+`end_session` owns End from Running Agents, under the Session's lifecycle:
 
-- one that exited;
-- one that is alive but uninitialized after a request timeout.
+- It acts on the directory whose app-server holds the Session's thread, not on
+  the Session's configured working directory.
+- If no other Session is bound to that directory's processes, they stop, and
+  the ending Session's own turn and Activities settle first.
+- Otherwise only its thread is released, which interrupts its own turn first
+  and fails rather than forget a turn Codex did not stop. That includes a
+  process the reconciler already detached: its stop may still decline, so End
+  waits out that teardown and proves the release instead of killing it.
+- Its state is cleared only after that succeeded, so a failed End stays
+  retryable; Running Agents reports the failure even after a successful
+  canonical stop.
 
-New turns get a fresh process. A replaced cwd inode changes the spec.
+`clear_sessions` (`/new`) holds every cleared Session's lifecycle, releases
+each thread first, and clears the durable and in-memory mappings only after
+every release succeeded. Those mappings are cleared per session key, so a
+Session of that key that started meanwhile is locked and released too before
+anything is cleared. `prepare_resume_binding` releases the thread under the
+lifecycle; the core rewrites the mapping right after, with no await between.
 
 ## Model Hub gateway scope
 
@@ -262,7 +307,7 @@ retired only when the directory's last Hub process ends.
 | `refresh_runtime_config` / `refresh_auth_state` | Kept only for the exclusive `migration_guard` cutover: stop every generation. |
 | `retire_for_native_migration` | Refuses while any generation is bound or not drained; otherwise ends every process and requires it to exit. |
 | `prepare_resume_binding` | Releases only the resumed Session's thread; the process keeps serving others. |
-| `retire_unowned_session_transport` (End) | Ends the directory's processes once the ending Session was their last user. |
+| `end_session` (End) | See End above. |
 | `probe_connection` | Binds, never acquires, a live generation whose spec equals the current direct spec. The probe never promotes a generation or starts one in a working directory. |
 
 ## Deleted
@@ -305,3 +350,14 @@ generations. RUNTIME-GEN-019 is the opt-in real-binary contract
 - **Pre-existing race.** A turn can resolve its Hub token just before the
   directory's last Hub process retires the scope. It then fails visibly, as it
   did before.
+- **Core resume order.** Resume sends its confirmation and commits channel
+  routing before the backend prepares, so a thread that stays loaded shows the
+  confirmation and then the failure.
+- **Survivors of a failed stop.** The exclusive refresh logs a stop failure
+  and goes on; the survivor is uninitialized, so it is retired and reaped, and
+  migration's exit check backstops it. Shutdown drops the bindings of a process
+  that survived both stop attempts, which matters only when a disabled backend
+  is shut down while the controller keeps running.
+- **Untracked writers.** A thread still held by a process Avibe does not track,
+  such as a wedged child of an earlier controller, fails its resume as
+  unavailable rather than as held.

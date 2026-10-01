@@ -38,6 +38,8 @@ def init_generation_state(agent: Any) -> Any:
     agent._model_hub_catalog_lock = asyncio.Lock()
     if not hasattr(agent, "_session_last_activity"):
         agent._session_last_activity = {}
+    if not hasattr(agent, "_session_locks"):
+        agent._session_locks = {}
     return agent
 
 

@@ -57,6 +57,8 @@ scenarios:
     layer: unit
     backend: codex
     test: tests/test_codex_runtime_generations.py::test_runtime_gen_010_a_busy_directory_never_holds_a_turn_on_a_new_spec
+    related_tests:
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_010_a_cancelled_admission_never_pins_its_generation
   - id: RUNTIME-GEN-011
     name: A Codex Session leaving an app-server releases its thread there before resuming it on the new one, and the old process keeps serving its other Sessions; only thread/closed, Codex reporting it unloaded, or the old process's exit proves the release, so a closed reader alone holds the input
     status: covered
@@ -66,6 +68,9 @@ scenarios:
     test: tests/test_codex_runtime_generations.py::test_runtime_gen_011_a_session_releases_its_thread_before_resuming_elsewhere
     related_tests:
       - tests/test_codex_runtime_generations.py::test_runtime_gen_011_a_closed_reader_is_no_proof_of_release
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_011_a_resume_whose_answer_was_lost_is_released_before_resuming_elsewhere
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_011_end_releases_the_thread_of_a_process_already_being_stopped
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_011_new_releases_a_session_that_started_while_it_cleared
   - id: RUNTIME-GEN-012
     name: A new message to a busy Codex Session interrupts its own turn and proceeds on the new launch spec, and a refused interrupt changes nothing and holds the input
     status: covered
@@ -80,6 +85,9 @@ scenarios:
     layer: unit
     backend: codex
     test: tests/test_codex_runtime_generations.py::test_runtime_gen_013_at_the_cap_the_oldest_busy_generation_gives_way
+    related_tests:
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_013_a_session_leaving_a_force_stopped_generation_waits_for_its_teardown
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_013_a_child_whose_reader_closed_is_settled_before_it_is_killed
   - id: RUNTIME-GEN-014
     name: A direct Codex launch with Model Hub enabled keeps the desktop-managed environment
     status: covered
@@ -96,6 +104,7 @@ scenarios:
     test: tests/test_codex_runtime_generations.py::test_runtime_gen_015_direct_and_native_cli_launches_share_one_process
     related_tests:
       - tests/test_codex_runtime_generations.py::test_runtime_gen_015_a_dead_retiring_generation_is_never_reused
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_015_a_generation_that_dies_while_its_spec_is_prepared_is_not_reused
   - id: RUNTIME-GEN-016
     name: Retiring a Codex Hub app-server, by renewal or a switch to Direct, keeps the directory's gateway credential until the last Hub app-server stops, and a switch to Direct never holds a new turn behind a running Hub turn
     status: covered
@@ -103,6 +112,9 @@ scenarios:
     layer: unit
     backend: codex
     test: tests/test_codex_runtime_generations.py::test_runtime_gen_016_hub_scope_is_revoked_only_with_the_last_hub_generation
+    related_tests:
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_016_a_starting_hub_process_keeps_the_scope
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_016_a_failed_hub_start_is_cleaned_up
   - id: RUNTIME-GEN-017
     name: A Codex Session that moved app-servers never receives late thread-level events from the one it left
     status: covered

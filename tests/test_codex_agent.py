@@ -959,6 +959,55 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cleared_sessions, ["session-1"])
         self.retire_scope.assert_not_called()
 
+    async def test_resume_and_clear_wait_out_a_turn_admission_for_the_session(self):
+        """Neither unloads a Session's thread while a turn for it is being admitted."""
+        for operation in ("resume", "clear"):
+            with self.subTest(operation=operation):
+                agent = init_generation_state(object.__new__(CodexAgent))
+                unsubscribed = asyncio.Event()
+                unload = asyncio.Event()
+
+                async def send_request(method, params):
+                    unsubscribed.set()
+                    await unload.wait()
+                    return {"status": "notLoaded"}
+
+                transport = SimpleNamespace(is_alive=True, _process=None, send_request=send_request, stop=AsyncMock())
+                session_mgr = RealCodexSessionManager()
+                session_mgr.set_session_key("session-1", "key-a")
+                session_mgr.set_cwd("session-1", "/tmp/work")
+                session_mgr.set_thread_id("session-1", "thread-1")
+                agent._session_mgr = session_mgr
+                agent.sessions = SimpleNamespace(clear_agent_sessions=Mock())
+                agent._turn_registry = SimpleNamespace(get_active_turn=lambda _base: None, clear_session=Mock())
+                install_codex_transport(
+                    agent, "/tmp/work", transport, sessions={"session-1": "thread-1", "session-2": "thread-2"}
+                )
+                order = []
+
+                async def admit_turn():
+                    # Turn admission serializes on the Session's registered lock.
+                    async with agent._session_locks.setdefault("session-1", asyncio.Lock()):
+                        order.append("admitted")
+
+                if operation == "resume":
+                    pending = asyncio.create_task(
+                        agent.prepare_resume_binding(
+                            base_session_id="session-1", session_key="key-a", working_path="/tmp/work"
+                        )
+                    )
+                else:
+                    pending = asyncio.create_task(agent.clear_sessions("key-a"))
+                await asyncio.wait_for(unsubscribed.wait(), 1)
+                admission = asyncio.create_task(admit_turn())
+                await asyncio.sleep(0.01)
+                order.append("released")
+                unload.set()
+                await pending
+                await admission
+
+                self.assertEqual(order, ["released", "admitted"])
+
     async def test_prepare_resume_binding_aborts_the_resume_when_the_thread_stays_loaded(self):
         transport = SimpleNamespace(
             is_alive=True,
@@ -1084,6 +1133,87 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(agent.transport_for_session("session-2"), transport)
         transport.stop.assert_not_awaited()
 
+    async def test_clearing_a_session_keeps_it_when_its_thread_stays_loaded(self):
+        """A failed release fails the clear before anything is forgotten, so it can be retried."""
+        agent = init_generation_state(object.__new__(CodexAgent))
+        transport = SimpleNamespace(
+            is_alive=True,
+            send_request=AsyncMock(side_effect=CodexRPCError({"code": -32603, "message": "unsubscribe failed"})),
+            stop=AsyncMock(),
+        )
+        session_mgr = RealCodexSessionManager()
+        session_mgr.set_session_key("session-1", "key-a")
+        session_mgr.set_cwd("session-1", "/tmp/work")
+        session_mgr.set_thread_id("session-1", "thread-session-1")
+        agent._session_mgr = session_mgr
+        agent.sessions = SimpleNamespace(clear_agent_sessions=Mock())
+        agent._turn_registry = SimpleNamespace(get_active_turn=lambda _base: None, clear_session=Mock())
+        install_codex_transport(agent, "/tmp/work", transport, sessions={"session-1": "thread-session-1"})
+
+        with self.assertRaises(_MODULE.CodexThreadReleaseUnavailableError):
+            await agent.clear_sessions("key-a")
+
+        agent.sessions.clear_agent_sessions.assert_not_called()
+        self.assertEqual(session_mgr.get_thread_id("session-1"), "thread-session-1")
+        self.assertEqual(session_mgr.get_sessions_by_session_key("key-a"), ["session-1"])
+        self.assertIs(agent.transport_for_session("session-1"), transport)
+
+    async def test_forced_stop_fences_owner_commits_before_settling(self):
+        """No durable owner can commit to a generation while its forced stop settles work."""
+        agent = init_generation_state(object.__new__(CodexAgent))
+        activation = RuntimeActivationRegistry()
+        identity = activation.attach("codex", "/tmp/work#1")
+        transport = SimpleNamespace(stop=AsyncMock(), _process=None)
+        agent._session_mgr = SimpleNamespace(invalidate_thread=Mock())
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=Mock(return_value="turn-1"), get_request_for_turn=Mock(return_value=None), clear_session=Mock()
+        )
+        commits = []
+
+        async def settle(*_args, **_kwargs):
+            # A queued turn tries to register its owner while the work settles.
+            commits.append(activation.commit_if_current(identity, lambda: "owner").admitted)
+
+        agent.controller = SimpleNamespace(
+            runtime_activation=activation,
+            agent_service=SimpleNamespace(force_end_runtime_work=AsyncMock(side_effect=settle)),
+        )
+        generation = install_codex_transport(
+            agent, "/tmp/work", transport, sessions={"session-1": "thread-1"}, activation=identity
+        )
+
+        self.assertTrue(await agent._stop_generation(generation, True))
+
+        self.assertEqual(commits, [False])
+        transport.stop.assert_awaited_once_with()
+
+    async def test_graceful_stop_rechecks_ownership_inside_the_fence(self):
+        """An owner that commits after the drained check keeps its process."""
+        agent = init_generation_state(object.__new__(CodexAgent))
+        activation = RuntimeActivationRegistry()
+        identity = activation.attach("codex", "/tmp/work#1")
+        transport = SimpleNamespace(stop=AsyncMock(), is_alive=True, _process=None)
+        agent._session_mgr = SimpleNamespace(invalidate_thread=Mock())
+        agent._turn_registry = SimpleNamespace(get_active_turn=Mock(return_value=None), clear_session=Mock())
+        agent.controller = SimpleNamespace(runtime_activation=activation)
+        generation = install_codex_transport(
+            agent, "/tmp/work", transport, sessions={"session-1": "thread-1"}, activation=identity
+        )
+        drained = SimpleNamespace(blocks_transport_replacement=False)
+        # An Activity commits right after the first, drained snapshot.
+        owned = SimpleNamespace(blocks_transport_replacement=True)
+        snapshots = iter([drained, owned])
+
+        async def snapshot(_agent, generations):
+            return (next(snapshots),)
+
+        with patch.object(CodexAgent, "_ownership_snapshots", new=snapshot):
+            self.assertFalse(await agent._stop_generation(generation, False))
+
+        transport.stop.assert_not_awaited()
+        # The aborted reservation leaves the generation admitting owners.
+        self.assertTrue(activation.commit_if_current(identity, lambda: "owner").admitted)
+
     async def test_last_session_end_settles_activity_owners_before_the_kill(self):
         """End kills the process only after the ending Session's Activities settle."""
         agent = init_generation_state(object.__new__(CodexAgent))
@@ -1096,10 +1226,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             events.append(("settle", backend, set(base_session_ids), set(activity_runtime_keys)))
 
         transport = SimpleNamespace(stop=stop, _process=None)
-        agent._session_mgr = SimpleNamespace(
-            sessions_for_cwd=lambda _cwd: ["session-1"],
-            invalidate_thread=Mock(),
-        )
+        agent._session_mgr = SimpleNamespace(invalidate_thread=Mock(), clear=Mock())
         agent._turn_registry = SimpleNamespace(
             get_active_turn=lambda _base: None,
             has_pending_turn_start=lambda _base: False,
@@ -1108,9 +1235,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         agent.controller = SimpleNamespace(agent_service=SimpleNamespace(force_end_runtime_work=end_work))
         install_codex_transport(agent, "/tmp/work", transport, sessions={"session-1": "thread-1"})
 
-        self.assertTrue(
-            await agent.retire_unowned_session_transport("/tmp/work", ending_session_id="session-1")
-        )
+        self.assertTrue((await agent.end_session("session-1"))["process_killed"])
 
         self.assertEqual(
             events,
@@ -1931,7 +2056,8 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
                 agent._acquire_generation = AsyncMock(side_effect=acquire)
                 await agent.handle_message(request)
                 bad.stop.assert_awaited_once()
-                agent.controller.runtime_ownership.snapshot.assert_called_once()
+                # Checked before the fence and again inside it.
+                self.assertEqual(agent.controller.runtime_ownership.snapshot.call_count, 2)
                 self.assertEqual(agent._acquire_generation.await_count, 2)
                 agent._start_turn.assert_awaited_once()
                 agent.controller.emit_agent_message.assert_not_awaited()

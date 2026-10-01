@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 import modules.agents.codex.agent as codex_agent_module
+from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, set_dispatch_phase
 from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
 from modules.agents.codex.agent import CodexAgent
@@ -46,6 +47,10 @@ class FakeAppServer:
 
     writers: dict[str, "FakeAppServer"] = {}
     started: list["FakeAppServer"] = []
+    # Awaited by every start before the server is up; it may raise.
+    on_start = None
+    # The next thread/resume loads its thread, then its answer is lost.
+    lose_next_resume = False
     _ids = itertools.count(1)
 
     def __init__(self, binary, cwd, extra_args=None, runtime_args=None, runtime_env=None, model_hub_catalog=None):
@@ -65,6 +70,7 @@ class FakeAppServer:
         self.supports_turn_collaboration_mode = False
         self.has_pending_notifications = False
         self.refuse_interrupt = False
+        self.wedged = False
 
     def on_notification(self, callback):
         self._notify = callback
@@ -73,8 +79,10 @@ class FakeAppServer:
         self._server_request = callback
 
     async def start(self):
-        self.alive = True
         FakeAppServer.started.append(self)
+        if FakeAppServer.on_start is not None:
+            await FakeAppServer.on_start(self)
+        self.alive = True
 
     async def stop(self):
         # Like the real transport, this ends the process even after its reader closed.
@@ -96,7 +104,7 @@ class FakeAppServer:
 
     @property
     def is_initialized(self):
-        return self.alive
+        return self.alive and not self.wedged
 
     def _release(self, thread_id):
         self.loaded.discard(thread_id)
@@ -120,6 +128,10 @@ class FakeAppServer:
             return {"thread": {"id": thread_id}}
         if method == "thread/resume":
             self._load(params["threadId"])
+            if FakeAppServer.lose_next_resume:
+                FakeAppServer.lose_next_resume = False
+                self.wedged = True
+                raise TimeoutError("Codex RPC thread/resume timed out after 120s")
             return {"thread": {"id": params["threadId"]}}
         if method == "thread/unsubscribe":
             thread_id = params["threadId"]
@@ -189,18 +201,14 @@ class _EventHandler:
 def fake_app_servers(monkeypatch):
     FakeAppServer.writers = {}
     FakeAppServer.started = []
+    FakeAppServer.on_start = None
+    FakeAppServer.lose_next_resume = False
     monkeypatch.setattr(codex_agent_module, "CodexTransport", FakeAppServer)
     return FakeAppServer
 
 
 class _Ownership:
-    """Durable state with no owner, so only live turns keep a generation busy.
-
-    ``held`` names generation resource keys a durable Activity still owns.
-    """
-
-    def __init__(self):
-        self.held = set()
+    """Durable state with no owner, so only live turns keep a generation busy."""
 
     def snapshot_many(self, targets):
         return tuple(
@@ -209,7 +217,7 @@ class _Ownership:
                 resource_key=target.resource_key,
                 activity_runtime_keys=(),
                 sessions=(),
-                sessionless_active_activity_ids=("activity-1",) if target.resource_key in self.held else (),
+                sessionless_active_activity_ids=(),
                 sessionless_fallback_run_ids=(),
                 disposition=SessionRuntimeDisposition.RECLAIMABLE,
             )
@@ -401,12 +409,13 @@ async def test_runtime_gen_011_a_closed_reader_is_no_proof_of_release(tmp_path, 
     old = _server_for(agent, "s1")
     thread = agent._session_mgr.get_thread_id("s1")
     await old.complete(thread)
-    # An Activity that can outlive the process keeps it from being stopped.
     old_generation = agent._generation_for_session("s1")
-    agent.controller.runtime_ownership.held.add(agent._generation_resource_key(old_generation.runtime))
     old.close_reader()
     if process_exits:
         asyncio.get_running_loop().call_later(0.02, old.exit)
+    else:
+        # Avibe ends a child whose reader closed, but here that stop fails.
+        old.stop = AsyncMock(side_effect=RuntimeError("the child did not stop"))
 
     await agent.renew_runtime(agent.codex_config)
     await asyncio.wait_for(agent.handle_message(_request(cwd, "s1")), 1)
@@ -491,6 +500,76 @@ async def test_runtime_gen_013_at_the_cap_the_oldest_busy_generation_gives_way(t
 
 
 @pytest.mark.asyncio
+async def test_runtime_gen_013_a_session_leaving_a_force_stopped_generation_waits_for_its_teardown(tmp_path):
+    """RUNTIME-GEN-013: a turn admitted while the cap's forced stop settles work is never part of that work."""
+    agent, cwd = _agent(tmp_path)
+    servers = []
+    for session in ("s1", "s2", "s3"):
+        await agent.handle_message(_request(cwd, session))
+        servers.append(_server_for(agent, session))
+        await agent.renew_runtime(agent.codex_config)
+    events = []
+    oldest = servers[0]
+    stop_oldest = oldest.stop
+
+    async def stop():
+        events.append("oldest stopped")
+        await stop_oldest()
+
+    oldest.stop = stop
+    start_turn = agent._start_turn
+
+    async def recording_start_turn(transport, request, *args, **kwargs):
+        if request.base_session_id == "s1":
+            events.append("s1 turn started")
+        return await start_turn(transport, request, *args, **kwargs)
+
+    agent._start_turn = recording_start_turn
+    follow_up = []
+
+    async def settle(*_args, **_kwargs):
+        # S1 sends again while its generation's work is being settled.
+        follow_up.append(asyncio.create_task(agent.handle_message(_request(cwd, "s1"))))
+        await asyncio.sleep(0.05)
+        events.append("settled")
+
+    agent.controller.agent_service.force_end_runtime_work = AsyncMock(side_effect=settle)
+
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s4")), 1)
+    await _until(lambda: bool(follow_up))
+    await asyncio.wait_for(follow_up[0], 2)
+
+    assert events == ["settled", "oldest stopped", "s1 turn started"]
+    assert agent._turn_registry.get_active_turn("s1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate_taken", [False, True], ids=["turn-holds-its-gate", "a-later-turn-holds-the-gate"])
+async def test_runtime_gen_013_a_child_whose_reader_closed_is_settled_before_it_is_killed(tmp_path, gate_taken):
+    """RUNTIME-GEN-013: a process that can no longer report its turn is ended like a forced stop.
+
+    Once the liveness monitor settled that turn and the Session's next turn took
+    its gate, settling the Session again would cancel the next turn instead.
+    """
+    agent, cwd = _agent(tmp_path)
+    first = _request(cwd, "s1")
+    await agent.handle_message(first)
+    old = _server_for(agent, "s1")
+    old.close_reader()
+    agent.controller.agent_service.emit_matches_runtime_turn = lambda context: not (
+        gate_taken and context is first.context
+    )
+
+    await agent.renew_runtime(agent.codex_config)
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s2")), 1)
+    await _until(lambda: old.stopped)
+
+    agent.controller.agent_service.force_end_runtime_work.assert_awaited_once()
+    settled = agent.controller.agent_service.force_end_runtime_work.await_args.kwargs["base_session_ids"]
+    assert settled == (set() if gate_taken else {"s1"})
+
+
+@pytest.mark.asyncio
 async def test_runtime_gen_014_a_direct_launch_with_model_hub_keeps_the_managed_environment(tmp_path, monkeypatch):
     """RUNTIME-GEN-014: Model Hub enabled must not drop the desktop-managed environment."""
     router = _Router()
@@ -551,6 +630,100 @@ async def test_runtime_gen_015_a_dead_retiring_generation_is_never_reused(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_runtime_gen_015_a_generation_that_dies_while_its_spec_is_prepared_is_not_reused(tmp_path):
+    """RUNTIME-GEN-015: usability is checked again where the equal-spec process is acquired."""
+    router = _Router()
+    router.launches["model-a"] = _launch("model-a", "hub", token="shared-token")
+    agent, cwd = _agent(tmp_path, router=router)
+    agent.controller.emit_agent_message = AsyncMock()
+    catalog = SimpleNamespace(retain=lambda: SimpleNamespace(path=tmp_path / "catalog.json", close=Mock()))
+    agent.prepare_model_hub_runtime = AsyncMock(return_value=catalog)
+    await agent.handle_message(_request(cwd, "s1"))
+    hub = _server_for(agent, "s1")
+    await hub.complete(agent._session_mgr.get_thread_id("s1"))
+    await agent.adopt_model_hub_catalog()
+
+    async def prepare(*_args, **_kwargs):
+        # The equal-spec process dies while the next turn prepares its catalog.
+        hub.close_reader()
+        hub.exit()
+        return catalog
+
+    agent.prepare_model_hub_runtime = AsyncMock(side_effect=prepare)
+    hub_requests = len(hub.requests)
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s2")), 1)
+
+    assert hub.requests[hub_requests:] == []
+    assert _server_for(agent, "s2") is not hub and agent._turn_registry.get_active_turn("s2")
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_016_a_starting_hub_process_keeps_the_scope(tmp_path):
+    """RUNTIME-GEN-016: a Hub process still starting counts as the directory's Hub process."""
+    router = _Router()
+    router.launches["model-a"] = _launch("model-a", "hub", token="shared-token")
+    agent, cwd = _agent(tmp_path, router=router)
+    agent.prepare_model_hub_runtime = AsyncMock(
+        return_value=SimpleNamespace(retain=lambda: SimpleNamespace(path=tmp_path / "catalog.json", close=Mock()))
+    )
+    await agent.handle_message(_request(cwd, "s1"))
+    retiring_hub = _server_for(agent, "s1")
+    # A switch to Direct leaves the busy Hub process retiring.
+    router.launches["model-a"] = _launch("model-a")
+    await agent.handle_message(_request(cwd, "s2"))
+    # Back to the Hub on a new spec: its process takes a while to start.
+    router.launches["model-a"] = _launch("model-a", "hub", token="shared-token")
+    await agent.renew_runtime(agent.codex_config)
+    started = asyncio.Event()
+    up = asyncio.Event()
+
+    async def slow_start(_server):
+        started.set()
+        await up.wait()
+
+    FakeAppServer.on_start = slow_start
+    s3 = asyncio.create_task(agent.handle_message(_request(cwd, "s3")))
+    await asyncio.wait_for(started.wait(), 1)
+
+    await retiring_hub.complete(agent._session_mgr.get_thread_id("s1"))
+    await _until(lambda: not retiring_hub.alive)
+    assert router.retired == []
+
+    up.set()
+    await asyncio.wait_for(s3, 1)
+    assert router.retired == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child", ["exited", "alive"])
+async def test_runtime_gen_016_a_failed_hub_start_is_cleaned_up(tmp_path, monkeypatch, child):
+    """RUNTIME-GEN-016: a Hub start that fails still revokes the scope and never leaks its child."""
+    monkeypatch.setattr(codex_agent_module, "emit_backend_failure", AsyncMock())
+    router = _Router()
+    router.launches["model-a"] = _launch("model-a", "hub", token="shared-token")
+    agent, cwd = _agent(tmp_path, router=router)
+    agent.prepare_model_hub_runtime = AsyncMock(
+        return_value=SimpleNamespace(retain=lambda: SimpleNamespace(path=tmp_path / "catalog.json", close=Mock()))
+    )
+
+    async def failing_start(server):
+        if child == "exited":
+            server._process.exit(1)
+        raise RuntimeError("initialize failed")
+
+    FakeAppServer.on_start = failing_start
+    await agent.handle_message(_request(cwd, "s1"))
+    [server] = FakeAppServer.started
+    if child == "alive":
+        # Its own cleanup failed; the sweep stops it.
+        assert router.retired == []
+        await agent.reap_runtime_generations()
+        assert server.stopped
+
+    assert router.retired == [("codex", cwd)]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("successor", ["hub", "direct"], ids=["hub-renewal", "switch-to-direct"])
 async def test_runtime_gen_016_hub_scope_is_revoked_only_with_the_last_hub_generation(tmp_path, successor):
     """RUNTIME-GEN-016: retiring one Hub process keeps the credential its running turn or successor uses.
@@ -591,6 +764,170 @@ async def test_runtime_gen_016_hub_scope_is_revoked_only_with_the_last_hub_gener
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled_on", ["first-attempt", "retry"])
+async def test_runtime_gen_010_a_cancelled_admission_never_pins_its_generation(tmp_path, fake_app_servers, cancelled_on):
+    """RUNTIME-GEN-010: a turn start cancelled before Codex answered leaves nothing that keeps its process.
+
+    That holds on the retry too, after the first attempt failed before Codex saw it.
+    """
+    agent, cwd = _agent(tmp_path)
+    await agent.handle_message(_request(cwd, "s1"))
+    old = _server_for(agent, "s1")
+    await old.complete(agent._session_mgr.get_thread_id("s1"))
+    hung = []
+
+    def hang_turn_start(server):
+        send = server.send_request
+
+        async def hanging_send(method, params):
+            if method == "turn/start":
+                hung.append(server)
+                await asyncio.Event().wait()
+            return await send(method, params)
+
+        server.send_request = hanging_send
+
+    if cancelled_on == "first-attempt":
+        hang_turn_start(old)
+    else:
+        send = old.send_request
+
+        async def broken_send(method, params):
+            if method == "thread/start":
+                raise ConnectionError("Codex app-server transport is not available")
+            return await send(method, params)
+
+        old.send_request = broken_send
+
+        async def on_start(server):
+            hang_turn_start(server)
+
+        fake_app_servers.on_start = on_start
+    request = _request(cwd, "s2")
+    # As AgentService marks a turn before handing it over.
+    set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
+    admission = asyncio.create_task(agent.handle_message(request))
+    await _until(lambda: bool(hung))
+    admission.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await admission
+
+    fake_app_servers.on_start = None
+    await agent.renew_runtime(agent.codex_config)
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s3")), 1)
+    await agent.reap_runtime_generations()
+    assert not hung[0].alive
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_011_end_releases_the_thread_of_a_process_already_being_stopped(tmp_path):
+    """RUNTIME-GEN-011: End proves the release of a thread whose process the reconciler took over.
+
+    That stop may still decline, so the process can outlive End.
+    """
+    agent, cwd = _agent(tmp_path)
+    await agent.handle_message(_request(cwd, "s1"))
+    old = _server_for(agent, "s1")
+    thread = agent._session_mgr.get_thread_id("s1")
+    await old.complete(thread)
+    checking, decide = asyncio.Event(), asyncio.Event()
+
+    async def drained(_generation):
+        checking.set()
+        await decide.wait()
+        return False  # Something still owns the process, so the stop declines.
+
+    agent._generation_drained = drained
+    unit = agent._units[cwd]
+    await unit.retire(unit.current)
+    await asyncio.wait_for(checking.wait(), 1)
+
+    ended = await asyncio.wait_for(agent.end_session("s1"), 1)
+    decide.set()
+    await unit.settled()
+
+    assert ended["process_killed"] is False
+    assert old.alive and thread not in old.loaded
+    assert agent._generation_for_session("s1") is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_011_new_releases_a_session_that_started_while_it_cleared(tmp_path):
+    """RUNTIME-GEN-011: ``/new`` clears a whole session key, so it releases every Session it clears."""
+    agent, cwd = _agent(tmp_path)
+    agent.sessions.clear_agent_sessions = Mock()
+    await agent.handle_message(_request(cwd, "s1"))
+    server = _server_for(agent, "s1")
+    await server.complete(agent._session_mgr.get_thread_id("s1"))
+    joining = _request(cwd, "s2")
+    joining.session_key = "key-s1"
+    send = server.send_request
+
+    async def send_while_another_session_starts(method, params):
+        if method == "thread/unsubscribe" and not agent._session_mgr.get_sessions_by_session_key("key-s1")[1:]:
+            # Another Session of the same key starts while the first is released.
+            await agent.handle_message(joining)
+        return await send(method, params)
+
+    server.send_request = send_while_another_session_starts
+
+    await asyncio.wait_for(agent.clear_sessions("key-s1"), 2)
+
+    assert server.loaded == set()
+    assert agent._generation_for_session("s2") is None
+    assert agent._session_mgr.get_sessions_by_session_key("key-s1") == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_011_a_resume_whose_answer_was_lost_is_released_before_resuming_elsewhere(tmp_path, monkeypatch):
+    """RUNTIME-GEN-011: a process that may have loaded the thread releases it before another resumes it."""
+    monkeypatch.setattr(codex_agent_module, "emit_backend_failure", AsyncMock())
+    agent, cwd = _agent(tmp_path)
+    await agent.handle_message(_request(cwd, "s1"))
+    thread = agent._session_mgr.get_thread_id("s1")
+    await _server_for(agent, "s1").complete(thread)
+    await agent.renew_runtime(agent.codex_config)
+    # S2's running turn keeps the next process alive after it fails S1.
+    await agent.handle_message(_request(cwd, "s2"))
+    lost = _server_for(agent, "s2")
+    FakeAppServer.lose_next_resume = True
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s1")), 2)
+    assert lost.alive and thread in lost.loaded
+
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s1")), 2)
+
+    served = _server_for(agent, "s1")
+    assert served not in (None, lost)
+    assert ("thread/unsubscribe", {"threadId": thread}) in lost.requests
+    assert served.active.get(thread) == agent._turn_registry.get_active_turn("s1")
+
+
+@pytest.mark.asyncio
+async def test_a_new_thread_serves_turns_only_once_it_is_persisted(tmp_path, monkeypatch):
+    """A thread the durable mapping lacks would vanish from resume history."""
+    monkeypatch.setattr(codex_agent_module, "emit_backend_failure", AsyncMock())
+    agent, cwd = _agent(tmp_path)
+    remember = agent.bind_agent_session_id.side_effect
+    writes = iter([RuntimeError("database is locked")])
+
+    def bind(request, thread_id):
+        failure = next(writes, None)
+        if failure is not None:
+            raise failure
+        return remember(request, thread_id)
+
+    agent.bind_agent_session_id.side_effect = bind
+
+    await agent.handle_message(_request(cwd, "s1"))
+    assert agent._turn_registry.get_active_turn("s1") is None
+    await agent.handle_message(_request(cwd, "s1"))
+
+    thread = agent._session_mgr.get_thread_id("s1")
+    assert agent.sessions.get_agent_session_id("key-s1", "s1", "codex") == thread
+    assert _server_for(agent, "s1").active.get(thread) == agent._turn_registry.get_active_turn("s1")
+
+
+@pytest.mark.asyncio
 async def test_runtime_gen_017_late_thread_events_from_a_previous_generation_are_dropped(tmp_path):
     """RUNTIME-GEN-017: a moved session never receives thread-level events from the process it left."""
     agent, cwd = _agent(tmp_path)
@@ -612,8 +949,13 @@ async def test_runtime_gen_017_late_thread_events_from_a_previous_generation_are
 
 
 @pytest.mark.asyncio
-async def test_runtime_gen_018_fork_boundary_reads_the_source_sessions_generation(tmp_path):
-    """RUNTIME-GEN-018: only the process running the source turn reports it in progress."""
+@pytest.mark.parametrize("holder", ["serving", "stopped-answering"])
+async def test_runtime_gen_018_fork_boundary_reads_the_source_sessions_generation(tmp_path, holder):
+    """RUNTIME-GEN-018: only the process running the source turn reports it in progress.
+
+    That holds even after one of its requests timed out: the process and its
+    turn still run, and any other process would read the turn as interrupted.
+    """
     agent, cwd = _agent(tmp_path)
     await agent.handle_message(_request(cwd, "source"))
     source_server = _server_for(agent, "source")
@@ -629,6 +971,7 @@ async def test_runtime_gen_018_fork_boundary_reads_the_source_sessions_generatio
         return {"data": [{"id": running, "status": "inProgress"}, {"id": "turn-done", "status": "completed"}]}
 
     source_server.send_request = turns
+    source_server.wedged = holder == "stopped-answering"
     target_server.send_request = AsyncMock(
         return_value={"data": [{"id": running, "status": "interrupted"}]}
     )
@@ -654,27 +997,57 @@ async def test_runtime_gen_018_fork_boundary_reads_the_source_sessions_generatio
 
 
 @pytest.mark.asyncio
-async def test_hfr_144_a_stuck_turn_settles_on_the_generation_that_runs_it(tmp_path):
-    """HFR-144: the stuck-turn backstop settles a turn only through the generation holding it."""
+@pytest.mark.parametrize("stuck_on", ["retiring", "current"])
+async def test_hfr_144_a_stuck_turn_settles_on_the_generation_that_runs_it(tmp_path, stuck_on):
+    """HFR-144: the stuck-turn backstop settles a turn only through the generation holding it.
+
+    That generation is retired, so a native turn that may still run ends with
+    its process, while a busy neighbour's turn finishes first.
+    """
     agent, cwd = _agent(tmp_path)
     agent.controller.emit_agent_message = AsyncMock()
     await agent.handle_message(_request(cwd, "s1"))
     old = _server_for(agent, "s1")
-    await agent.renew_runtime(agent.codex_config)
+    if stuck_on == "retiring":
+        await agent.renew_runtime(agent.codex_config)
     await agent.handle_message(_request(cwd, "s2"))
-    new = _server_for(agent, "s2")
+    neighbour = _server_for(agent, "s2")
     stuck_turn = agent._turn_registry.get_active_turn("s1")
     running_turn = agent._turn_registry.get_active_turn("s2")
-    # S1's turn on the retiring process made no progress for longer than the
-    # backstop (1800 s for a 600 s idle timeout); S2 is busy on the current one.
+    # S1's turn made no progress for longer than the backstop (1800 s for a
+    # 600 s idle timeout); S2 is busy.
     agent._session_last_activity["s1"] = codex_agent_module.time.monotonic() - 10_000
 
     await agent.evict_idle_transports(600)
 
     agent.controller.emit_agent_message.assert_awaited_once()
     assert agent._turn_registry.get_active_turn("s1") is None
-    # Its process stops with it, so the untracked native turn cannot run on.
-    assert not old.alive
-    assert agent._units[cwd].current.runtime.transport is new and new.alive
     assert agent._turn_registry.get_active_turn("s2") == running_turn != stuck_turn
+    if stuck_on == "retiring":
+        assert not old.alive
+        assert agent._units[cwd].current.runtime.transport is neighbour and neighbour.alive
+    else:
+        assert neighbour is old and agent._units[cwd].current is None and old.alive
+        await old.complete(agent._session_mgr.get_thread_id("s2"))
+        await _until(lambda: not old.alive)
+
+
+@pytest.mark.asyncio
+async def test_hfr_144_the_stuck_turn_backstop_never_forgets_a_turn_admitted_meanwhile(tmp_path):
+    """HFR-144: only the exact stuck turn is forgotten, not the one its Session started meanwhile."""
+    agent, cwd = _agent(tmp_path)
+    await agent.handle_message(_request(cwd, "s1"))
+    await agent.renew_runtime(agent.codex_config)
+    await agent.handle_message(_request(cwd, "s2"))
+    agent._session_last_activity["s1"] = codex_agent_module.time.monotonic() - 10_000
+
+    async def emit(*_args, **_kwargs):
+        # The settled request's terminal result lets S1's next message in.
+        await agent.handle_message(_request(cwd, "s1"))
+
+    agent.controller.emit_agent_message = AsyncMock(side_effect=emit)
+    await agent.evict_idle_transports(600)
+
+    new_turn = agent._turn_registry.get_active_turn("s1")
+    assert new_turn and _server_for(agent, "s1").active.get(agent._session_mgr.get_thread_id("s1")) == new_turn
 

@@ -827,6 +827,21 @@ async def test_codex_strict_retirement_propagates_stop_failure():
 
 
 @pytest.mark.asyncio
+async def test_codex_strict_retirement_ignores_a_turn_left_on_an_exited_process():
+    # A crash mid-turn leaves the turn registered; it cannot run on, so it must
+    # not refuse the migration on every retry.
+    process = SimpleNamespace(returncode=-9, wait=AsyncMock())
+    transport = SimpleNamespace(_process=process, stop=AsyncMock(), is_alive=False)
+    agent, _identity = _codex_migration_agent(transport)
+    agent._turn_registry.get_active_turn = Mock(return_value="turn-lost-with-the-process")
+
+    await agent.retire_for_native_migration()
+
+    assert agent._units["cwd"].generations == ()
+    assert agent.transport_for_session("session") is None
+
+
+@pytest.mark.asyncio
 async def test_codex_strict_retirement_checks_exit_before_detaching():
     from core.runtime_activation import RuntimeActivationRegistry
 

@@ -2460,6 +2460,7 @@ scenarios:
     test: tests/test_codex_agent.py::CodexAgentStopTests::test_hfr_144_stuck_active_settles_only_exact_codex_owner
     related_tests:
       - tests/test_codex_runtime_generations.py::test_hfr_144_a_stuck_turn_settles_on_the_generation_that_runs_it
+      - tests/test_codex_runtime_generations.py::test_hfr_144_the_stuck_turn_backstop_never_forgets_a_turn_admitted_meanwhile
   - id: HFR-145
     name: every enabled backend invalidation path consumes exact ownership
     status: covered
