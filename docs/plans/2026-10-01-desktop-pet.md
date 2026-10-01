@@ -129,13 +129,14 @@ extra window:
 The IPC surface is kept minimal. It is granted to window `pet` for the remote
 loopback origin only, through a new capability file:
 
-- command `pet_ready() -> {binding, summon_pending}`, which the route calls
-  once `/pet` has mounted and its listeners are installed. It returns the
-  current binding and consumes any summon that arrived before the page was
-  ready, so a summon that recreated the window is never lost;
-- event `pet:summon`, sent from the shell to the pet when a wake happens and
-  the page is ready. Before `pet_ready()`, the shell records the summon as
-  pending instead of emitting it, because Tauri events have no replay;
+- command `pet_ready() -> {binding, summon_pending: null | {intent}}`, which
+  the route calls once `/pet` has mounted and its listeners are installed. It
+  returns the current binding and consumes any summon that arrived before the
+  page was ready, so a summon that recreated the window is never lost;
+- event `pet:summon {intent: 'listen' | 'show'}`, sent from the shell to the
+  pet when a wake happens and the page is ready. Before `pet_ready()`, the
+  shell records the summon as pending instead of emitting it, because Tauri
+  events have no replay; a later summon replaces a pending one;
 - command `pet_set_expanded(expanded: bool) -> PetLayout`, to resize and
   anchor the window. The shell is the only owner of placement, because only
   it knows the monitor work area and the anchor. It returns the layout it
@@ -175,11 +176,15 @@ as it does for the Workbench.
 - **Registration failure.** If the OS refuses the shortcut, for example because
   another app holds it, the failure is shown in the tray submenu. It is never
   swallowed.
-- **One wake function.** Every wake path (hotkey, tray item, any future one)
-  calls `pet_wake()`. It checks the enabled flag first, runs
-  `pet_reconcile()` so a missing window is recreated, then shows the pet and
-  delivers the summon: emitted at once if the page is ready, otherwise
-  recorded as pending for `pet_ready()`.
+- **One wake function.** Every wake path (hotkey, tray item, "Show in pet",
+  any future one) calls `pet_wake(intent)`. It checks the enabled flag first,
+  runs `pet_reconcile()` so a missing window is recreated, then shows the pet
+  and delivers the summon with its intent: emitted at once if the page is
+  ready, otherwise recorded as pending for `pet_ready()`.
+  - `listen` comes only from the hotkey, the one explicit request to talk.
+  - `show` comes from every display or navigation path (tray item,
+    "Show in pet"). It shows and expands the pet on the bound session and
+    never starts capture.
 - **Off switch.** A tray `CheckMenuItem` "Show pet", next to "Notifications".
   Off destroys the window and unregisters the shortcut, so nothing can wake it.
 - **Preferences.** `pet.json` in `app_local_data_dir`, the same pattern as
@@ -283,8 +288,9 @@ when the user changes the UI port, so it cannot own anything durable.
   offered only where the chat page's composer is: it is hidden whenever
   `isSessionReadOnly(session)` (`sessionArchived.ts`) is true.
 - A bind from `main` also shows the pet: after persisting, the shell runs
-  `pet_wake()`, the same single wake path as the hotkey, so a pet hidden by
-  an OS close reappears. `pet_bind` returns `{shown}`; when the pet is off,
+  `pet_wake('show')`, the same single wake path as the hotkey with a
+  display-only intent, so a pet hidden by an OS close reappears without
+  opening the microphone. `pet_bind` returns `{shown}`; when the pet is off,
   the binding is still saved and `main` shows a toast pointing to the tray's
   "Show pet" switch. A bind from the pet's own switcher does not wake, since
   the pet is already visible.
@@ -402,8 +408,8 @@ Workbench. The pet shows "Queued" and offers no steering control in v1.
 
 ### Interaction
 
-- **Hotkey tap with the pet collapsed or hidden.** Show the pet, expand it,
-  focus it, and start listening. If voice is unavailable, focus the text input
+- **Hotkey tap with the pet collapsed or hidden** (`listen` intent). Show the
+  pet, expand it, focus it, and start listening. If voice is unavailable, focus the text input
   instead.
 - **No valid binding** (none chosen yet, or cleared after an archive). The
   hotkey opens the panel on the session switcher and does not start listening
@@ -532,6 +538,8 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     and `start-dragging`; `pet_unbind(A)` is a no-op when the binding is `B`;
   - a wake that recreates the window delivers the summon through
     `pet_ready()`, and a summon to a ready page is emitted once;
+  - the hotkey wakes with `listen`, and the tray item and "Show in pet" wake
+    with `show`; a pending summon keeps its intent through `pet_ready()`;
   - `pet.json` load fixtures: absent file, no `enabled`, explicit `false`,
     unreadable file; an absent `enabled` follows the build default and an
     explicit `false` survives the default change.
@@ -579,7 +587,8 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     one; `release` frees the lock;
   - an archived or missing bound session clears the binding, from the
     initial read and after `session.activity`;
-  - hotkey summon starts voice only when ASR is available.
+  - hotkey summon starts voice only when ASR is available;
+  - a `show` summon, including from "Show in pet", never starts capture.
 - **Manual sanity on a signed macOS build and on Windows:**
   - transparency;
   - always on top over full-screen apps;
