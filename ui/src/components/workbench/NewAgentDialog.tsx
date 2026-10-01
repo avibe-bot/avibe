@@ -101,7 +101,10 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
         setCatalogAnswered(true);
       },
       () => {
+        // No catalog to check against: the backend's own ladder, as for any
+        // unknown model, never the efforts read before the visit.
         setModelOptions([]);
+        setReasoningOptions({});
         setCatalogAnswered(true);
       },
     );

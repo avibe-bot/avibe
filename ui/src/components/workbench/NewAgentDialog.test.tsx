@@ -44,12 +44,22 @@ type FakeModelCatalog = {
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
 let deferReads = false;
+let failReads = false;
 const pendingReads: (() => void)[] = [];
 
 vi.mock('../../lib/backendModels', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/backendModels')>()),
-  loadBackendModelsWithRefresh: (_api: unknown, _backend: string, onLoaded: (payload: FakeModelCatalog) => void) => {
+  loadBackendModelsWithRefresh: (
+    _api: unknown,
+    _backend: string,
+    onLoaded: (payload: FakeModelCatalog) => void,
+    onInitialError?: () => void,
+  ) => {
     modelCatalogReads += 1;
+    if (failReads) {
+      onInitialError?.();
+      return () => {};
+    }
     const catalog = modelCatalog;
     if (deferReads) pendingReads.push(() => onLoaded(catalog));
     else onLoaded(catalog);
@@ -82,6 +92,7 @@ afterEach(() => {
   modelCatalog = { models: [] };
   modelCatalogReads = 0;
   deferReads = false;
+  failReads = false;
   pendingReads.length = 0;
 });
 
@@ -136,6 +147,30 @@ describe('NewAgentDialog', () => {
     rerender(dialog(true));
 
     expect(modelCatalogReads).toBe(reads + 1);
+  });
+
+  it('falls back to the backend ladder, not the efforts read before a Settings visit, when the read after it fails', () => {
+    // The visit may have removed `max` from this model; a failed read cannot say
+    // it did not, so the pre-visit efforts must not come back as choices.
+    modelCatalog = { models: [], reasoningOptions: { 'only-max': [{ value: 'max', label: 'Max' }] } };
+    apiRef.current = { createVibeAgent: vi.fn() };
+    const dialog = (surfaceActive: boolean) => (
+      <RouteSurfaceActiveContext.Provider value={surfaceActive}>
+        <MemoryRouter>
+          <NewAgentDialog open onClose={vi.fn()} onCreated={vi.fn()} />
+        </MemoryRouter>
+      </RouteSurfaceActiveContext.Provider>
+    );
+    const { rerender } = render(dialog(true));
+    chooseModel('only-max');
+    expect(screen.getByRole('button', { name: 'max', exact: true })).toBeTruthy();
+
+    failReads = true;
+    rerender(dialog(false));
+    rerender(dialog(true));
+
+    expect(screen.queryByRole('button', { name: 'max', exact: true })).toBeNull();
+    expect(screen.getByRole('button', { name: 'medium', exact: true })).toBeTruthy();
   });
 
   it('offers no model read before a Settings visit while the read after it is in flight', () => {
