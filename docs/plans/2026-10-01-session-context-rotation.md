@@ -192,8 +192,16 @@ all, so the size stays bounded however much open work exists.
    `S`; the earlier backend context was rotated.
 2. **Open work**, one line per item, read from the durable store at that moment.
    It comes before the transcript because the transcript cannot reconstruct it.
-   The four sources below are disjoint by construction, and each item appears
-   once.
+   Each item appears once. The builder deduplicates by identity key rather
+   than relying on the sources being disjoint, because the sources are not
+   written atomically with each other. For example, `_process_run_callback`
+   enqueues a callback and only afterwards moves the parent run's
+   `callback_status` from `pending` to `sent`, in a separate operation. A
+   handoff built in that gap sees both.
+   - The identity key of a delegated run is its run id. A queued callback
+     carrying `parent_run_id` takes the same key.
+   - When both appear, one line is kept: the run, marked "callback queued".
+   - Other items are keyed by their own id.
    - **Delegated runs:** every `agent_runs` row with `callback_session_id = S`
      and `callback_status = 'pending'`, whatever its run status. This includes
      runs that have finished but whose callback has not yet been delivered.
@@ -357,6 +365,8 @@ continuity but does not fail dispatch.
   truncated list reports its omitted count.
 - Every run with `callback_session_id = S` and a pending callback appears in the
   handoff, whatever its run status.
+- A run whose callback is already queued while its `callback_status` is still
+  `pending` appears once.
 - A native phase whose occupancy peaks at or above the ratio, or that observes
   a backend compaction, makes the next turn start rotate, even if its last
   snapshot is lower. This holds for a detached Claude Activity phase that
