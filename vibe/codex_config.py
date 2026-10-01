@@ -623,10 +623,16 @@ def codex_credential_identity(codex_home: Path) -> str:
     """Digest of the credentials a starting app-server adopts from ``codex_home``.
 
     A running app-server keeps its loaded credentials. On a 401 it rereads
-    ``auth.json`` only for the ChatGPT account it already runs as, and never
-    for an API key. An account switch, a key change, a mode change, or a
+    its credential store only for the ChatGPT account it already runs as, and
+    never for an API key. An account switch, a key change, a mode change, or a
     sign-out therefore needs a new process, while a token refresh does not:
     tokens are deliberately left out.
+
+    Only ``auth.json`` is read. With the ``keyring`` or ``auto`` store, Codex
+    may keep the credential in the OS keyring or in its keyring-encrypted
+    store, which Avibe never reads, so a change made there outside Avibe is
+    adopted at the next renewal. Avibe's own sign-in renews, and an API key
+    Avibe writes pins the file store.
     """
     auth = _load_auth(codex_home / "auth.json")
     store = _load_toml(codex_home / "config.toml").get(CREDENTIALS_STORE_KEY)

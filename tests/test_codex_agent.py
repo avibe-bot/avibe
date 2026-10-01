@@ -959,7 +959,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cleared_sessions, ["session-1"])
         self.retire_scope.assert_not_called()
 
-    async def test_prepare_resume_binding_keeps_the_binding_when_the_thread_stays_loaded(self):
+    async def test_prepare_resume_binding_aborts_the_resume_when_the_thread_stays_loaded(self):
         transport = SimpleNamespace(
             is_alive=True,
             stop=AsyncMock(),
@@ -969,11 +969,14 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         )
         agent = self._resume_agent(transport, sessions={"session-1": "thread-1"})
 
-        await agent.prepare_resume_binding(
-            base_session_id="session-1",
-            session_key="scope-1",
-            working_path="/tmp/work",
-        )
+        # The resume must fail before its mapping changes, or the next turn
+        # would still reach the old thread.
+        with self.assertRaises(_MODULE.CodexThreadReleaseUnavailableError):
+            await agent.prepare_resume_binding(
+                base_session_id="session-1",
+                session_key="scope-1",
+                working_path="/tmp/work",
+            )
 
         self.assertIs(agent.transport_for_session("session-1"), transport)
         self.assertEqual(self.invalidated, [])

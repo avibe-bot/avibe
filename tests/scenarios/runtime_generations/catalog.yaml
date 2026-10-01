@@ -58,14 +58,16 @@ scenarios:
     backend: codex
     test: tests/test_codex_runtime_generations.py::test_runtime_gen_010_a_busy_directory_never_holds_a_turn_on_a_new_spec
   - id: RUNTIME-GEN-011
-    name: A Codex Session leaving an app-server releases its thread there before resuming it on the new one, and the old process keeps serving its other Sessions
+    name: A Codex Session leaving an app-server releases its thread there before resuming it on the new one, and the old process keeps serving its other Sessions; only thread/closed, Codex reporting it unloaded, or the old process's exit proves the release, so a closed reader alone holds the input
     status: covered
     kind: lifecycle
     layer: unit
     backend: codex
     test: tests/test_codex_runtime_generations.py::test_runtime_gen_011_a_session_releases_its_thread_before_resuming_elsewhere
+    related_tests:
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_011_a_closed_reader_is_no_proof_of_release
   - id: RUNTIME-GEN-012
-    name: A new message to a busy Codex Session interrupts its own turn and proceeds on the new launch spec
+    name: A new message to a busy Codex Session interrupts its own turn and proceeds on the new launch spec, and a refused interrupt changes nothing and holds the input
     status: covered
     kind: concurrency
     layer: unit
@@ -86,12 +88,14 @@ scenarios:
     backend: codex
     test: tests/test_codex_runtime_generations.py::test_runtime_gen_014_a_direct_launch_with_model_hub_keeps_the_managed_environment
   - id: RUNTIME-GEN-015
-    name: Direct and native-CLI Codex launches with identical process inputs share one app-server
+    name: Direct and native-CLI Codex launches with identical process inputs share one app-server, and an equal spec never reuses a process that can no longer serve
     status: covered
     kind: regression
     layer: unit
     backend: codex
     test: tests/test_codex_runtime_generations.py::test_runtime_gen_015_direct_and_native_cli_launches_share_one_process
+    related_tests:
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_015_a_dead_retiring_generation_is_never_reused
   - id: RUNTIME-GEN-016
     name: Retiring a Codex Hub app-server, by renewal or a switch to Direct, keeps the directory's gateway credential until the last Hub app-server stops, and a switch to Direct never holds a new turn behind a running Hub turn
     status: covered

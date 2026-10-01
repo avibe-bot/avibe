@@ -103,10 +103,15 @@ sha256({
   Avibe, and no turn pays for a `--version` subprocess.
 - **Credential identity** (`vibe/codex_config.py`). This is the effective
   credential store, the auth mode, the API key digest, and the ChatGPT
-  `account_id`. Tokens are excluded: a running app-server reloads `auth.json`
-  itself on a 401 for the same account (`UnauthorizedRecovery` in
-  `codex-rs/login`). So only an account, key, mode, or sign-in change needs a
-  new process.
+  `account_id`. Tokens are excluded: a running app-server reloads its
+  credential store itself on a 401 for the same account
+  (`UnauthorizedRecovery` in `codex-rs/login`). So only an account, key, mode,
+  or sign-in change needs a new process. Only `auth.json` is read. With the
+  `keyring` or `auto` store, Codex may keep the credential in the OS keyring
+  (`Direct`, the default off Windows) or in `secrets/codex_auth.age` with its
+  key in the keyring (`Secrets`, the Windows default). Avibe never reads
+  either, so a change made there outside Avibe is adopted at the next renewal.
+  Avibe's own sign-in renews, and an API key Avibe writes pins the file store.
 - `config.toml` is not a process input: app-server reloads it for every
   `thread/start` and `thread/resume`.
 - **Excluded inputs.** `auth_mode` (unused), `idle_timeout_seconds` (read
@@ -133,17 +138,27 @@ Under the Session lock, `handle_message`:
 5. if the Session's thread is loaded in another generation, moves it there
    (`_move_session_to`).
 
-The move:
+The move, `_release_session_thread`, is the one release primitive. It
+returns only on proof of release; anything less raises
+`CodexThreadReleaseUnavailableError` (a visible failure with the input held for
+an explicit retry) and leaves the binding in place:
 
-- If the Session's own turn is still running there, interrupt it and settle
-  the interrupted request locally. Unsubscribing ends this connection's view
-  of that turn.
+- If the Session's own turn is still running there, interrupt it. Only an
+  accepted interrupt, or a turn or process that already ended, lets the move
+  go on; the interrupted request is then settled locally, because
+  unsubscribing ends this connection's view of that turn. A refused interrupt
+  changes nothing.
 - Send `thread/unsubscribe`, then wait for `thread/closed` from that process,
   bounded at 15 s.
-- On a timeout, `thread/loaded/list` decides. A thread still loaded raises
-  `CodexThreadReleaseUnavailableError`: a visible failure with the input held
-  for an explicit retry.
-- A process that has exited counts as released.
+- On a timeout, `thread/loaded/list` decides. A thread still loaded fails the
+  move.
+- The process's exit, by its return code, counts as released. A closed stdout
+  reader does not: the child can outlive it and keep the writer lock, so the
+  move waits for the exit within the same bound.
+
+Every caller propagates the failure, so a resume aborts before its mapping
+changes. `/new` is the one exception: it logs the failure and clears the
+mapping, and the binding stays until the next turn retries the release.
 
 The turn then resumes, starts, or forks its thread through
 `_open_session_thread`, which binds whatever thread ended up loaded.
@@ -190,9 +205,12 @@ Reap triggers:
 - a Session moving off a generation;
 - the release of the last binding.
 
-Idle eviction of the current generation keeps the idle timeout, the two
-ownership snapshots, and the stuck-active backstop. It then calls
-`unit.retire` and waits for `unit.settled()`.
+Idle eviction judges each generation only by the Sessions whose threads it
+holds. The current generation keeps the idle timeout, the two ownership
+snapshots, and the stuck-active backstop, then calls `unit.retire` and waits
+for `unit.settled()`. A retiring generation gets the stuck-active backstop
+only: its stuck turns are settled and it is reaped, so their native turns end
+with its process.
 
 Native-credential migration, End from Running Agents, and the exclusive
 refresh need processes gone outside the core's own decisions. They use
@@ -219,7 +237,9 @@ End on an app-server that other Sessions still use releases only the ending
 Session's thread (`release_session_runtime`). Otherwise the thread would keep
 Codex's writer lock in that process.
 
-An unusable current generation is retired before a new turn acquires:
+Every unusable attached generation, current or retiring, is retired before
+a new turn acquires, because admission may promote a retiring generation whose
+spec matches:
 
 - one that exited;
 - one that is alive but uninitialized after a request timeout.

@@ -1522,21 +1522,16 @@ class CodexAgent(BaseAgent):
         """Release the Session's current thread before it binds another one.
 
         Only this Session's thread is unloaded; the app-server keeps serving
-        every other Session in the directory.
+        every other Session in the directory. Raises
+        ``CodexThreadReleaseUnavailableError`` when the thread stays loaded.
         """
         generation = self._generation_for_session(base_session_id)
         if generation is None:
             self._forget_stale_session(base_session_id)
         else:
-            try:
-                await self._release_session_thread(generation, base_session_id)
-            except CodexThreadReleaseUnavailableError:
-                logger.warning(
-                    "Codex generation for cwd=%s kept the previous thread of resumed session %s",
-                    working_path,
-                    base_session_id,
-                )
-                return
+            # A thread that stays loaded aborts the resume before its mapping
+            # changes; otherwise the next turn would still reach the old thread.
+            await self._release_session_thread(generation, base_session_id)
         self._turn_registry.clear_session(base_session_id)
         logger.info("Prepared Codex runtime for resumed session %s", base_session_id)
 
@@ -2067,7 +2062,7 @@ class CodexAgent(BaseAgent):
     ) -> RuntimeBinding[CodexLaunchSpec, _CodexRuntime]:
         """Bind a new turn to the generation serving this turn's launch spec."""
         unit = self._unit(cwd)
-        await self._retire_broken_current(unit)
+        await self._retire_unusable_generations(unit)
         spec = await self._launch_spec(cwd, launch, config=config)
         try:
             return await unit.acquire(spec)
@@ -2085,22 +2080,28 @@ class CodexAgent(BaseAgent):
                     continue
         return await self._acquire_generation(cwd)
 
-    async def _retire_broken_current(
+    async def _retire_unusable_generations(
         self,
         unit: RuntimeGenerationSet[CodexLaunchSpec, _CodexRuntime],
     ) -> None:
-        """New turns must not bind to a current process that can no longer serve."""
-        generation = unit.current
-        if generation is None or generation.runtime.transport.is_initialized:
-            return
-        # Exited, or alive but unusable after a request timed out. New turns
-        # get a fresh process; this one stops once nothing needs it, which for
-        # an exited process is as soon as no durable owner outlives it.
-        logger.warning(
-            "Retiring unusable Codex app-server for cwd=%s",
-            generation.runtime.cwd,
-        )
-        await unit.retire(generation)
+        """New turns must not bind to a process that can no longer serve.
+
+        Admission may promote a retiring generation whose spec matches, so
+        every attached generation is checked, not only the current one.
+        """
+        for generation in unit.generations:
+            if generation.closed or generation.runtime.transport.is_initialized:
+                continue
+            # Exited, or alive but unusable after a request timed out. New
+            # turns get a fresh process; this one stops once nothing needs it,
+            # which for an exited process is as soon as no durable owner
+            # outlives it.
+            logger.warning(
+                "Retiring unusable Codex app-server generation %s for cwd=%s",
+                generation.runtime.serial,
+                generation.runtime.cwd,
+            )
+            await unit.retire(generation)
 
     async def _start_generation(self, spec: CodexLaunchSpec) -> _CodexRuntime:
         transport = CodexTransport(
@@ -2362,18 +2363,19 @@ class CodexAgent(BaseAgent):
     async def _release_session_thread(self, generation: _CodexGeneration, base_session_id: str) -> None:
         """Have ``generation`` unload this Session's thread so another can resume it.
 
-        Codex lets only one process at a time hold a thread's writer lock. An
-        idle thread with no subscriber unloads at once
-        (``thread_unload_delay_secs=0``) and reports ``thread/closed``; an
-        exited process has already released it.
+        Codex lets only one process at a time hold a thread's writer lock. This
+        returns only on proof that the thread is released: ``thread/closed``
+        from that process, Codex reporting it not loaded there, or the process
+        having exited. Anything less raises
+        ``CodexThreadReleaseUnavailableError`` and leaves the binding in place.
         """
         runtime = generation.runtime
         thread_id = runtime.threads.get(base_session_id) or self._session_mgr.get_thread_id(base_session_id)
         transport = runtime.transport
-        if thread_id and not runtime.ended and transport.is_alive:
+        if thread_id and not runtime.ended and not self._process_exited(transport):
             active_turn = self._turn_registry.get_active_turn(base_session_id)
             if active_turn:
-                await self._interrupt_turn_before_move(transport, thread_id, active_turn)
+                await self._interrupt_turn_before_move(transport, base_session_id, thread_id, active_turn)
             released = asyncio.Event()
             runtime.released_threads[thread_id] = released
             try:
@@ -2383,74 +2385,89 @@ class CodexAgent(BaseAgent):
         self._unbind_session(base_session_id, runtime)
         self._schedule_reap(runtime.cwd)
 
+    @staticmethod
+    def _process_exited(transport: CodexTransport) -> bool:
+        """Whether the app-server process is gone.
+
+        A closed stdout reader is no proof: the child can outlive it and keep
+        every thread's writer lock.
+        """
+        process = getattr(transport, "_process", None)
+        if process is None:
+            return not transport.is_alive
+        return process.returncode is not None
+
     async def _await_thread_release(
         self,
         transport: CodexTransport,
         thread_id: str,
         released: asyncio.Event,
     ) -> None:
+        unavailable = CodexThreadReleaseUnavailableError(f"Codex app-server did not release thread {thread_id}")
         try:
             response = await transport.send_request("thread/unsubscribe", {"threadId": thread_id})
         except ConnectionError:
-            return  # The process ended, and its writer lock with it.
+            # The reader is gone, so only the process exit can release the thread.
+            response = None
         except (CodexRPCError, TimeoutError) as exc:
-            raise CodexThreadReleaseUnavailableError(
-                f"Codex app-server could not release thread {thread_id}: {exc}"
-            ) from exc
-        if response.get("status") == "notLoaded":
+            raise unavailable from exc
+        if self._process_exited(transport) or (response is not None and response.get("status") == "notLoaded"):
             return
-        closed = asyncio.create_task(transport.wait_closed())
-        waiter = asyncio.create_task(released.wait())
+        process = getattr(transport, "_process", None)
+        waits = {asyncio.create_task(released.wait())}
+        if process is not None and process.returncode is None:
+            waits.add(asyncio.create_task(process.wait()))
         try:
-            await asyncio.wait(
-                {closed, waiter},
-                timeout=_THREAD_RELEASE_TIMEOUT_SECONDS,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            await asyncio.wait(waits, timeout=_THREAD_RELEASE_TIMEOUT_SECONDS, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            for task in (closed, waiter):
+            for task in waits:
                 task.cancel()
-            await asyncio.gather(closed, waiter, return_exceptions=True)
-        if released.is_set() or not transport.is_alive:
+            await asyncio.gather(*waits, return_exceptions=True)
+        if released.is_set() or self._process_exited(transport):
             return
+        if response is None or not transport.is_alive:
+            raise unavailable
         try:
             loaded = await transport.send_request("thread/loaded/list", {})
-        except ConnectionError:
-            return
         except Exception as exc:  # noqa: BLE001 - unknown is not released
-            raise CodexThreadReleaseUnavailableError(
-                f"Codex app-server did not release thread {thread_id}"
-            ) from exc
+            if self._process_exited(transport):
+                return
+            raise unavailable from exc
         if thread_id in (loaded.get("data") or ()):
-            raise CodexThreadReleaseUnavailableError(
-                f"Codex app-server did not release thread {thread_id}"
-            )
+            raise unavailable
 
     async def _interrupt_turn_before_move(
         self,
         transport: CodexTransport,
+        base_session_id: str,
         thread_id: str,
         active_turn: str,
     ) -> None:
-        """Interrupt a Session's own running turn before its thread moves."""
+        """Interrupt a Session's own running turn before its thread moves.
+
+        Unsubscribing ends this connection's view of the turn, so the turn is
+        settled here, and only once Codex accepted the interrupt or the turn or
+        its process already ended. A refused interrupt changes nothing.
+        """
         try:
             await transport.send_request(
                 "turn/interrupt",
                 {"threadId": thread_id, "turnId": active_turn},
             )
-        except Exception:
-            logger.warning(
-                "Codex turn interrupt failed before moving thread %s",
-                thread_id,
-                exc_info=True,
-            )
+        except Exception as exc:
+            if self._turn_registry.get_active_turn(base_session_id) == active_turn and not self._process_exited(
+                transport
+            ):
+                raise CodexThreadReleaseUnavailableError(
+                    f"Codex app-server did not interrupt turn {active_turn} before moving thread {thread_id}"
+                ) from exc
         interrupted_request = self._event_handler.clear_pending(active_turn)
         if interrupted_request:
             await self._remove_ack_reaction(interrupted_request)
-            # Unsubscribing ends this connection's view of that turn, so its
-            # completion never arrives here. Settle the old request now; release
-            # is token-guarded, so it cannot close the new turn.
+            # Its completion never arrives here. Release is token-guarded, so
+            # it cannot close the new turn.
             self._event_handler._release_stream_turn(interrupted_request.context)
+        self._turn_registry.clear_session(base_session_id)
 
     async def _open_session_thread(
         self,
@@ -2479,10 +2496,11 @@ class CodexAgent(BaseAgent):
         now: float,
         cap: float | None,
     ) -> list[str]:
+        """The Sessions on ``runtime`` whose turn made no progress within ``cap``."""
         if cap is None:
             return []
         stuck = []
-        for base_session_id in self._session_mgr.sessions_for_cwd(runtime.cwd):
+        for base_session_id in list(runtime.threads):
             if not self._turn_registry.get_active_turn(base_session_id):
                 continue
             last_progress = self._session_last_activity.get(base_session_id)
@@ -2490,11 +2508,30 @@ class CodexAgent(BaseAgent):
                 stuck.append(base_session_id)
         return stuck
 
-    async def evict_idle_transports(self, idle_timeout: float) -> int:
-        """Retire each directory's current app-server after it stays idle.
+    def _has_active_turns_on(self, runtime: _CodexRuntime) -> bool:
+        return any(self._session_has_turn(base_session_id) for base_session_id in list(runtime.threads))
 
-        Two exact ownership snapshots gate the decision, and the shared core
-        stops the generation only if no turn bound to it meanwhile.
+    async def _settle_stuck_sessions(self, runtime: _CodexRuntime, stuck_sessions: Sequence[str]) -> None:
+        for base_session_id in stuck_sessions:
+            logger.warning(
+                "Settling stuck-active Codex session %s for cwd=%s after exact progress timeout",
+                base_session_id,
+                runtime.cwd,
+            )
+            await self._settle_stuck_active_request(base_session_id)
+            self._turn_registry.clear_session(base_session_id)
+            self._session_locks.pop(base_session_id, None)
+            self._session_last_activity.pop(base_session_id, None)
+
+    async def evict_idle_transports(self, idle_timeout: float) -> int:
+        """Retire idle app-servers and repair stuck turns on every generation.
+
+        Each generation is judged only by the Sessions whose threads it holds.
+        A directory's current generation retires once it stays idle; a
+        retiring one whose turn is stuck past the age backstop has that turn
+        settled, so it can drain. Two exact ownership snapshots gate each
+        decision, and the shared core stops a generation only if no turn bound
+        to it meanwhile.
         """
         if idle_timeout <= 0:
             return 0
@@ -2502,7 +2539,11 @@ class CodexAgent(BaseAgent):
         now = time.monotonic()
         evicted = 0
         candidates = tuple(
-            unit.current for unit in list(self._units.values()) if unit.current is not None
+            generation
+            for unit in list(self._units.values())
+            for generation in unit.generations
+            if generation is unit.current
+            or self._stuck_active_sessions(generation.runtime, now=now, cap=stuck_active_cap)
         )
         initial_snapshots = await self._ownership_snapshots(candidates)
         if initial_snapshots is None:
@@ -2511,14 +2552,16 @@ class CodexAgent(BaseAgent):
         for generation, ownership in zip(candidates, initial_snapshots, strict=True):
             runtime = generation.runtime
             unit = self._units.get(runtime.cwd)
-            if unit is None or unit.current is not generation:
+            if unit is None or generation not in unit.generations:
                 continue
+            current = unit.current is generation
             stuck_sessions = self._stuck_active_sessions(runtime, now=now, cap=stuck_active_cap)
             idle_for = now - runtime.last_activity
             ordinary_candidate = (
-                not ownership.blocks_reclamation
+                current
+                and not ownership.blocks_reclamation
                 and not generation.bindings
-                and not self._has_active_turns_for_cwd(runtime.cwd)
+                and not self._has_active_turns_on(runtime)
                 and idle_for >= idle_timeout
             )
             stuck_candidate = bool(stuck_sessions) and not ownership.blocks_reclamation
@@ -2526,23 +2569,22 @@ class CodexAgent(BaseAgent):
                 continue
 
             ownership = await self._ownership_snapshot(generation)
-            if ownership is None or ownership.blocks_reclamation or unit.current is not generation:
+            moved = generation not in unit.generations or (unit.current is generation) != current
+            if ownership is None or ownership.blocks_reclamation or moved:
                 continue
             # Silence cannot revoke a durable Turn or Activity owner. The age
             # backstop only repairs stale adapter-local flags once durable
             # ownership independently allows reclamation.
             current_now = time.monotonic()
             stuck_sessions = self._stuck_active_sessions(runtime, now=current_now, cap=stuck_active_cap)
-            for base_session_id in stuck_sessions:
-                logger.warning(
-                    "Settling stuck-active Codex session %s for cwd=%s after exact progress timeout",
-                    base_session_id,
-                    runtime.cwd,
-                )
-                await self._settle_stuck_active_request(base_session_id)
-                self._turn_registry.clear_session(base_session_id)
-                self._session_locks.pop(base_session_id, None)
-                self._session_last_activity.pop(base_session_id, None)
+            await self._settle_stuck_sessions(runtime, stuck_sessions)
+            if not current:
+                # Already retiring: with its stuck turns settled, it stops once
+                # nothing else needs it.
+                if stuck_sessions:
+                    await unit.reap()
+                    evicted += int(runtime.ended)
+                continue
             if stuck_sessions:
                 ownership = await self._ownership_snapshot(generation)
                 if ownership is None or ownership.blocks_reclamation:
@@ -2550,12 +2592,17 @@ class CodexAgent(BaseAgent):
             idle_for = time.monotonic() - runtime.last_activity
             if (
                 unit.current is not generation
-                or self._has_active_turns_for_cwd(runtime.cwd)
+                or self._has_active_turns_on(runtime)
                 or idle_for < idle_timeout
             ):
                 continue
 
-            sessions = list(self._session_mgr.sessions_for_cwd(runtime.cwd))
+            # Sessions held by another live generation keep their state.
+            sessions = [
+                base_session_id
+                for base_session_id in self._session_mgr.sessions_for_cwd(runtime.cwd)
+                if self._session_generations.get(base_session_id) in (None, generation)
+            ]
             await unit.retire(generation)
             await unit.settled()
             if not runtime.ended:
@@ -2566,10 +2613,13 @@ class CodexAgent(BaseAgent):
                 runtime.cwd,
                 idle_for,
             )
-            # The stop unbound every Session it served.
+            # The stop unbound every Session it served. A Session whose next
+            # turn already holds its lock keeps it.
             for base_session_id in sessions:
-                self._session_locks.pop(base_session_id, None)
-                self._session_last_activity.pop(base_session_id, None)
+                lock = self._session_locks.get(base_session_id)
+                if lock is None or not lock.locked():
+                    self._session_locks.pop(base_session_id, None)
+                    self._session_last_activity.pop(base_session_id, None)
             evicted += 1
 
         return evicted

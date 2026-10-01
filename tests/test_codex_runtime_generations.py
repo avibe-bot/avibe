@@ -1,4 +1,4 @@
-"""RUNTIME-GEN-010..018: Codex app-server generations per working directory.
+"""RUNTIME-GEN-010..018 and HFR-144: Codex app-server generations per working directory.
 
 The fake app-server enforces Codex's cross-process thread writer lock: a thread
 loaded in one process cannot be resumed in another until the first releases it.
@@ -27,6 +27,20 @@ from tests.codex_generation_support import init_generation_state
 CWD_NAME = "项目 work"
 
 
+class _FakeProcess:
+    def __init__(self):
+        self.returncode = None
+        self._exited = asyncio.Event()
+
+    def exit(self, code=0):
+        self.returncode = code
+        self._exited.set()
+
+    async def wait(self):
+        await self._exited.wait()
+        return self.returncode
+
+
 class FakeAppServer:
     """One ``codex app-server`` process sharing a ``CODEX_HOME`` with its peers."""
 
@@ -45,11 +59,12 @@ class FakeAppServer:
         self.alive = False
         self.stopped = False
         self.pid = next(self._ids) + 40000
-        self._process = SimpleNamespace(returncode=None)
+        self._process = _FakeProcess()
         self._notify = None
         self._closed = asyncio.Event()
         self.supports_turn_collaboration_mode = False
         self.has_pending_notifications = False
+        self.refuse_interrupt = False
 
     def on_notification(self, callback):
         self._notify = callback
@@ -62,11 +77,12 @@ class FakeAppServer:
         FakeAppServer.started.append(self)
 
     async def stop(self):
-        if not self.alive:
+        # Like the real transport, this ends the process even after its reader closed.
+        if self._process.returncode is not None:
             return
         self.alive = False
         self.stopped = True
-        self._process.returncode = 0
+        self._process.exit()
         for thread_id in list(self.loaded):
             self._release(thread_id)
         self._closed.set()
@@ -123,9 +139,20 @@ class FakeAppServer:
             self.active[thread_id] = turn_id
             return {"turn": {"id": turn_id}}
         if method == "turn/interrupt":
+            if self.refuse_interrupt:
+                raise CodexRPCError({"code": -32603, "message": "interrupt refused"})
             self.active.pop(params["threadId"], None)
             return {}
         return {}
+
+    def close_reader(self):
+        """Stdout closes, but the process lives on and keeps its writer locks."""
+        self.alive = False
+
+    def exit(self):
+        for thread_id in list(self.loaded):
+            self._release(thread_id)
+        self._process.exit(-9)
 
     async def complete(self, thread_id):
         turn_id = self.active.pop(thread_id)
@@ -167,7 +194,13 @@ def fake_app_servers(monkeypatch):
 
 
 class _Ownership:
-    """Durable state with no owner, so only live turns keep a generation busy."""
+    """Durable state with no owner, so only live turns keep a generation busy.
+
+    ``held`` names generation resource keys a durable Activity still owns.
+    """
+
+    def __init__(self):
+        self.held = set()
 
     def snapshot_many(self, targets):
         return tuple(
@@ -176,7 +209,7 @@ class _Ownership:
                 resource_key=target.resource_key,
                 activity_runtime_keys=(),
                 sessions=(),
-                sessionless_active_activity_ids=(),
+                sessionless_active_activity_ids=("activity-1",) if target.resource_key in self.held else (),
                 sessionless_fallback_run_ids=(),
                 disposition=SessionRuntimeDisposition.RECLAIMABLE,
             )
@@ -357,8 +390,51 @@ async def test_runtime_gen_011_a_session_releases_its_thread_before_resuming_els
 
 
 @pytest.mark.asyncio
-async def test_runtime_gen_012_a_busy_session_moves_after_its_own_turn_is_interrupted(tmp_path):
-    """RUNTIME-GEN-012: a new message to a busy session interrupts it and proceeds on the new spec."""
+@pytest.mark.parametrize("process_exits", [False, True], ids=["process-lives", "process-exits"])
+async def test_runtime_gen_011_a_closed_reader_is_no_proof_of_release(tmp_path, monkeypatch, process_exits):
+    """RUNTIME-GEN-011: only the old process's exit releases a thread its closed reader can no longer unload."""
+    monkeypatch.setattr(codex_agent_module, "_THREAD_RELEASE_TIMEOUT_SECONDS", 0.2)
+    failures = AsyncMock()
+    monkeypatch.setattr(codex_agent_module, "emit_backend_failure", failures)
+    agent, cwd = _agent(tmp_path)
+    await agent.handle_message(_request(cwd, "s1"))
+    old = _server_for(agent, "s1")
+    thread = agent._session_mgr.get_thread_id("s1")
+    await old.complete(thread)
+    # An Activity that can outlive the process keeps it from being stopped.
+    old_generation = agent._generation_for_session("s1")
+    agent.controller.runtime_ownership.held.add(agent._generation_resource_key(old_generation.runtime))
+    old.close_reader()
+    if process_exits:
+        asyncio.get_running_loop().call_later(0.02, old.exit)
+
+    await agent.renew_runtime(agent.codex_config)
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s1")), 1)
+
+    resumed = [
+        server for server in FakeAppServer.started
+        if server is not old and ("thread/resume", thread) in [(m, p.get("threadId")) for m, p in server.requests]
+    ]
+    if process_exits:
+        assert resumed and _server_for(agent, "s1") is resumed[0]
+        failures.assert_not_awaited()
+    else:
+        # The process still holds the thread: the input is held, nothing moved.
+        assert resumed == []
+        assert agent._generation_for_session("s1") is old_generation
+        assert isinstance(failures.await_args.kwargs["cause"], codex_agent_module.CodexThreadReleaseUnavailableError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupt", ["accepted", "refused"])
+async def test_runtime_gen_012_a_busy_session_moves_after_its_own_turn_is_interrupted(tmp_path, monkeypatch, interrupt):
+    """RUNTIME-GEN-012: a new message to a busy session interrupts it and proceeds on the new spec.
+
+    A refused interrupt changes nothing: the running turn stays tracked on its
+    process and the new input is held.
+    """
+    failures = AsyncMock()
+    monkeypatch.setattr(codex_agent_module, "emit_backend_failure", failures)
     router = _Router()
     router.launches["model-a"] = _launch("model-a", "hub", token="token-a")
     agent, cwd = _agent(tmp_path, router=router)
@@ -369,14 +445,24 @@ async def test_runtime_gen_012_a_busy_session_moves_after_its_own_turn_is_interr
     old = _server_for(agent, "s1")
     thread = agent._session_mgr.get_thread_id("s1")
     first_turn = agent._turn_registry.get_active_turn("s1")
+    first_context = agent._turn_registry.get_request_for_turn(first_turn).context
     assert first_turn
 
     router.launches["model-a"] = _launch("model-a", "hub", token="token-b")
+    old.refuse_interrupt = interrupt == "refused"
     await asyncio.wait_for(agent.handle_message(_request(cwd, "s1")), 1)
 
+    methods = [method for method, _ in old.requests]
+    if interrupt == "refused":
+        assert "thread/unsubscribe" not in methods
+        assert _server_for(agent, "s1") is old
+        assert agent._turn_registry.get_active_turn("s1") == first_turn
+        assert old.active == {thread: first_turn}
+        assert all(context is not first_context for context in agent._event_handler.released)
+        assert isinstance(failures.await_args.kwargs["cause"], codex_agent_module.CodexThreadReleaseUnavailableError)
+        return
     new = _server_for(agent, "s1")
     assert new is not old
-    methods = [method for method, _ in old.requests]
     assert methods.index("turn/interrupt") < methods.index("thread/unsubscribe")
     assert agent._turn_registry.get_active_turn("s1") not in (None, first_turn)
     assert new.active.get(thread) == agent._turn_registry.get_active_turn("s1")
@@ -433,6 +519,35 @@ async def test_runtime_gen_015_direct_and_native_cli_launches_share_one_process(
 
     assert _server_for(agent, "s1") is first
     assert len(FakeAppServer.started) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_015_a_dead_retiring_generation_is_never_reused(tmp_path):
+    """RUNTIME-GEN-015: an equal spec reuses a process only while that process can serve."""
+    router = _Router()
+    router.launches["model-a"] = _launch("model-a", "hub", token="shared-token")
+    agent, cwd = _agent(tmp_path, router=router)
+    agent.controller.emit_agent_message = AsyncMock()
+    agent.prepare_model_hub_runtime = AsyncMock(
+        return_value=SimpleNamespace(retain=lambda: SimpleNamespace(path=tmp_path / "catalog.json", close=Mock()))
+    )
+    await agent.handle_message(_request(cwd, "s1"))
+    hub = _server_for(agent, "s1")
+    # A switch to Direct leaves the busy Hub process retiring, then it dies.
+    router.launches["model-a"] = _launch("model-a")
+    await agent.handle_message(_request(cwd, "s2"))
+    assert _server_for(agent, "s2") is not hub
+    hub.close_reader()
+    hub.exit()
+    hub_requests = len(hub.requests)
+
+    router.launches["model-a"] = _launch("model-a", "hub", token="shared-token")
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s3")), 1)
+
+    assert hub.requests[hub_requests:] == []
+    served = _server_for(agent, "s3")
+    assert served not in (hub, _server_for(agent, "s2")) and served.alive
+    assert agent._turn_registry.get_active_turn("s3")
 
 
 @pytest.mark.asyncio
@@ -536,3 +651,30 @@ async def test_runtime_gen_018_fork_boundary_reads_the_source_sessions_generatio
 
     assert (still_running, boundary) == (True, "turn-done")
     target_server.send_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hfr_144_a_stuck_turn_settles_on_the_generation_that_runs_it(tmp_path):
+    """HFR-144: the stuck-turn backstop settles a turn only through the generation holding it."""
+    agent, cwd = _agent(tmp_path)
+    agent.controller.emit_agent_message = AsyncMock()
+    await agent.handle_message(_request(cwd, "s1"))
+    old = _server_for(agent, "s1")
+    await agent.renew_runtime(agent.codex_config)
+    await agent.handle_message(_request(cwd, "s2"))
+    new = _server_for(agent, "s2")
+    stuck_turn = agent._turn_registry.get_active_turn("s1")
+    running_turn = agent._turn_registry.get_active_turn("s2")
+    # S1's turn on the retiring process made no progress for longer than the
+    # backstop (1800 s for a 600 s idle timeout); S2 is busy on the current one.
+    agent._session_last_activity["s1"] = codex_agent_module.time.monotonic() - 10_000
+
+    await agent.evict_idle_transports(600)
+
+    agent.controller.emit_agent_message.assert_awaited_once()
+    assert agent._turn_registry.get_active_turn("s1") is None
+    # Its process stops with it, so the untracked native turn cannot run on.
+    assert not old.alive
+    assert agent._units[cwd].current.runtime.transport is new and new.alive
+    assert agent._turn_registry.get_active_turn("s2") == running_turn != stuck_turn
+
