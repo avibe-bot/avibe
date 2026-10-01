@@ -159,6 +159,9 @@ visibility and launch-at-login **shipped** in #1975.
   not per-session windows. Until that trigger, Workbench split-pane (web
   + desktop) is the cheaper way to sit two sessions side by side.
 - Estimate when reopened: M–L, lifecycle invariants + two window kinds.
+- **Reopened (2026-10-01) for one window kind, the desktop pet.** The first
+  extra window is the `pet` window rather than a torn-out Show Page. It ships
+  with the lifecycle invariants above; see `2026-10-01-desktop-pet.md`.
 
 ### G9. macOS Universal Binary
 
@@ -173,6 +176,8 @@ visibility and launch-at-login **shipped** in #1975.
 - Keyboard access to the full Workbench under WKWebView/WebView2, global
   hotkey to summon the window, standard cut/copy/paste menu wiring on macOS.
 - Estimate: M, spread thin. Audit first, fix by surface.
+- The global hotkey is planned in `2026-10-01-desktop-pet.md`. It summons the
+  pet rather than the main window.
 
 ### G11. Diagnostics surface
 
