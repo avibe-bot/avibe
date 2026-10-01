@@ -422,8 +422,13 @@ home-made protocol has to resolve simultaneous claims:
   finishes its local owner through the same `finish()` callback a local
   replacement uses, so captured speech is preserved, exactly as today.
 - `release` releases the lock. Local semantics (`isCurrent`, `release`) are
-  unchanged, and a realm without `navigator.locks` falls back to local-only
-  ownership.
+  unchanged.
+- **The pet never captures without the cross-window guarantee.** If
+  `navigator.locks` is missing in the pet's webview, pet voice is turned off:
+  the hotkey still summons the pet and focuses the text input, and the mic
+  control is hidden. A browser tab keeps today's local-only behavior, since
+  there is no second desktop realm there. Single ownership across `main` and
+  `pet` is therefore never silently dropped.
 
 This lives in `claimVoiceCapture` itself, so every caller (composer, Show Page
 dictation, pet) inherits it, and two Workbench browser tabs gain the same
@@ -531,6 +536,8 @@ The microphone usage string and audio-input entitlement already ship (#2293).
   - the extracted `useSessionTurnState` keeps the chat page's existing
     turn-state tests passing;
   - a stolen voice lock finishes the local owner and preserves its speech;
+  - without `navigator.locks`, the pet hides the mic and the hotkey focuses
+    text input instead of starting capture;
     two claims made at the same time leave exactly one owner, the later
     one; `release` frees the lock;
   - an archived or missing bound session clears the binding, from the
@@ -549,8 +556,10 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 ## Risks to verify during implementation
 
 - **Shared Web Locks.** Confirm that `main` and `pet` share one origin data
-  store, and therefore Web Locks, on both WKWebView and WebView2. If not, the
-  shell arbitrates voice claims in the order it receives them.
+  store, and therefore Web Locks, on both WKWebView and WebView2. Until this
+  is confirmed for a platform, pet voice stays off there (the gate above). If
+  a platform does not share them, the shell arbitrates voice claims in the
+  order it receives them before pet voice is enabled there.
 - **Mic prompts.** WKWebView may prompt for the mic separately in the second
   webview. Confirm that the prompt appears once and is remembered.
 - **Full-screen Spaces.** On macOS, appearing over full-screen apps may need
