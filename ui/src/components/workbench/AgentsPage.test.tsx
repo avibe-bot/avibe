@@ -1534,10 +1534,13 @@ describe('AgentsPage reconnect reconciliation', () => {
 
     // cmdk scrolls its highlighted row into view; jsdom implements no scrolling.
     Element.prototype.scrollIntoView = vi.fn();
+    // Neither a model nor an effort read before the visit can be picked meanwhile.
+    expect((screen.getByRole('button', { name: 'medium', exact: true }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('combobox'));
     expect(screen.queryByRole('option', { name: 'gpt-hub' })).toBeNull();
     act(() => pendingModelReads.shift()!());
     expect(screen.getByRole('option', { name: 'gpt-hub' })).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'medium', exact: true, hidden: true }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(await screen.findByText('chat.picker.addModel'));
     expect(screen.getByTestId('location').textContent).toBe('/settings/models?manage=codex');
   });

@@ -223,8 +223,12 @@ describe('AgentRoutePicker', () => {
 
     expect(screen.queryByRole('button', { name: 'opus' })).toBeNull();
     expect(screen.getByText('common.loading')).toBeTruthy();
+    // Nor an effort: without the catalog the backend's fallback ladder could
+    // offer one the current model rejects.
+    expect(screen.queryByText('chat.picker.effort')).toBeNull();
     act(() => pendingReads.shift()!());
     expect(screen.getByRole('button', { name: 'opus' })).toBeTruthy();
+    expect(screen.getByText('chat.picker.effort')).toBeTruthy();
   });
 
   it('reads the list again for a menu left open while Settings covered it', async () => {

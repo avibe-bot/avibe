@@ -232,6 +232,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       () => {
         loadedBackends.delete(backend);
         setModelsByBackend((prev) => ({ ...prev, [backend]: [] }));
+        // No catalog to consult: the backend's own ladder, as for any unknown model.
+        setReasoningByBackend((prev) => ({ ...prev, [backend]: prev[backend] ?? {} }));
         setLoadingModels(false);
       },
     );
@@ -261,9 +263,14 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           modelOptionLabel(m, modelLabels).toLowerCase().includes(trimmedQuery),
       )
     : models;
+  // Efforts are a catalog answer too. Until this backend's read has answered
+  // (first open, or the read after a Settings visit dropped the last one), the
+  // fallback ladder could offer an effort the current model rejects, so the
+  // column waits with the model column instead.
+  const catalogAnswered = Object.prototype.hasOwnProperty.call(reasoningByBackend, backend);
   const effortOptions = useMemo(
-    () => resolveEffortOptions(backend, currentModel, backendReasoning),
-    [backend, currentModel, backendReasoning],
+    () => (catalogAnswered ? resolveEffortOptions(backend, currentModel, backendReasoning) : []),
+    [catalogAnswered, backend, currentModel, backendReasoning],
   );
 
   return (

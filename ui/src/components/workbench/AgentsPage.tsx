@@ -2110,6 +2110,10 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   const systemPromptTokens = estimateTokens(systemPrompt);
   // Effort options follow the backend + selected model when the catalog provides them.
   const effortOptions = resolveEffortOptions(agent.backend, model, reasoningOptions);
+  // The efforts shown before the catalog answers are the backend's fallback
+  // ladder, which may hold one the model rejects; they stay visible but cannot
+  // be picked until the read (or its failure) lands.
+  const effortsAnswered = activeModelCatalog !== undefined;
   const markFieldEdit = (field: keyof typeof fieldRevisionRef.current) => {
     fieldRevisionRef.current[field] += 1;
     return fieldRevisionRef.current[field];
@@ -2436,7 +2440,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
               <button
                 key={opt}
                 type="button"
-                disabled={!canEdit}
+                disabled={!canEdit || !effortsAnswered}
                 title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
                 onClick={() => {
                   markFieldEdit('effort');
