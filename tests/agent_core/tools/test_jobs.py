@@ -235,6 +235,16 @@ async def test_a_wrapper_that_cannot_keep_the_log_stops_its_command(tmp_path, mo
     )
 
 
+async def test_a_finished_wrapper_leaves_the_registry(tmp_path):
+    """The reaper drops the wrapper even when no status call comes after it exits."""
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    # The shell exits at once; a background child keeps the pipe, so the wrapper outlives the exit.
+    job_id = await _start(host, tmp_path, "sleep 0.5 &")
+    assert (await host.wait(job_id, deadline_s=5)).state == "exited"
+
+    assert _wait_until(lambda: job_id not in host._children, timeout_s=5)
+
+
 async def test_job_files_stay_until_the_call_is_settled(tmp_path):
     """J5."""
     host = LocalJobHost(str(tmp_path / "jobs"))

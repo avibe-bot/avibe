@@ -82,6 +82,7 @@ OUTPUT_CHUNK_BYTES = 1024 * 1024
 FINISHED_JOB_RETENTION_S = 7 * 24 * 3600
 
 STOP_TIMEOUT = "timeout"
+STOP_ABORTED = "aborted"
 
 _WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "job_wrapper.py")
 _JOB_ID = re.compile(r"^job_[a-z0-9]+$")
@@ -301,7 +302,7 @@ class LocalJobHost:
         finally:
             os.close(diagnostics)
         self._children[job_id] = proc
-        threading.Thread(target=proc.wait, name=f"avibe-{job_id}-reaper", daemon=True).start()
+        threading.Thread(target=self._reap, args=(job_id, proc), name=f"avibe-{job_id}-reaper", daemon=True).start()
 
         identity = await self._await_pid(job_id, proc, marker)
         if identity is not None:
@@ -334,7 +335,6 @@ class LocalJobHost:
     def status(self, job_id: str) -> JobStatus:
         exit_code = self._exit_code(job_id)
         if exit_code is not None:
-            self._reap(job_id)
             return JobStatus("exited", exit_code)
         if self._decision(job_id) != _GO:
             return JobStatus("gone")
@@ -342,7 +342,6 @@ class LocalJobHost:
             return JobStatus("running")
         # The wrapper writes `exit` before it exits, so look once more.
         exit_code = self._exit_code(job_id)
-        self._reap(job_id)
         return JobStatus("exited", exit_code) if exit_code is not None else JobStatus("gone")
 
     async def wait(self, job_id: str, *, deadline_s: Optional[float]) -> JobStatus:
@@ -411,7 +410,6 @@ class LocalJobHost:
             _write_atomic(self._path(job_id, "stopped"), f"{reason}\n")
         if not await asyncio.to_thread(_terminate_group, identity.pid):
             logger.warning("Job %s process group %s survived termination", job_id, identity.pid)
-        self._reap(job_id)
 
     async def hand_over(self, job_id: str) -> str:
         """Give the job to its Watch: adopt-or-create through ``on_hand_over``, then record the id (J6)."""
@@ -499,9 +497,10 @@ class LocalJobHost:
     def _group_carries_marker(self, identity: PersistedProcessIdentity) -> bool:
         return process_group_identity_status(identity.pid, identity, logger, "agent job") == "match"
 
-    def _reap(self, job_id: str) -> None:
-        child = self._children.get(job_id)
-        if child is not None and child.returncode is not None:
+    def _reap(self, job_id: str, proc: subprocess.Popen) -> None:
+        """The reaper thread: wait for the wrapper, then drop it from the registry."""
+        proc.wait()
+        if self._children.get(job_id) is proc:
             del self._children[job_id]
 
 

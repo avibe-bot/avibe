@@ -85,6 +85,28 @@ async def test_a_nul_byte_in_the_command_is_an_error_result(tmp_path, make_ctx):
     assert result_text(result) == "Invalid command: contains a NUL byte"
 
 
+async def test_only_the_recorded_reason_makes_a_gone_job_a_timeout(tmp_path, make_ctx, monkeypatch):
+    """A wrapper failure inside a short timeout is reported as what it was, not as the timeout."""
+    monkeypatch.setattr(jobs_module, "OUTPUT_HEAD_BYTES", 10)
+    host = _host(tmp_path)
+    running = asyncio.ensure_future(
+        BashTool(host).execute({"command": "sleep 0.3; seq 1 1000; sleep 30", "timeout": 1.0}, make_ctx())
+    )
+    job_id = None
+    while job_id is None or not os.path.exists(os.path.join(host.job_dir(job_id), "pid")):
+        await asyncio.sleep(0.01)
+        job_id = job_id or host.find_job("ses_test", "toolu_1")
+    # The wrapper cannot write its tail snapshot once the head is full, as on a full disk.
+    wrapper_pid = open(os.path.join(host.job_dir(job_id), "pid")).read().strip()
+    os.mkdir(os.path.join(host.job_dir(job_id), f"tail.log.{wrapper_pid}.tmp"))
+
+    result = await asyncio.wait_for(running, timeout=10)
+
+    assert host.stop_reason(job_id) == "wrapper_error"
+    assert result.is_error
+    assert result_text(result).endswith("Command terminated without an exit code")
+
+
 async def test_stdin_is_closed(tmp_path, make_ctx):
     started = time.monotonic()
     result = await BashTool(_host(tmp_path)).execute({"command": 'read x; echo "rc=$?"'}, make_ctx())

@@ -19,9 +19,13 @@ from core.agent_core.tools.args import ToolInputError, error_result, os_error_te
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.edit_diff import Edit, EditError, apply_edits, generate_diff_string, generate_unified_patch
 from core.agent_core.tools.paths import file_mutation_lock, resolve_to_cwd
+from core.agent_core.tools.truncate import format_size
 from core.agent_core.tools.write import write_bytes
 
 _SURROGATE = re.compile("[\ud800-\udfff]")
+#: Avibe: larger files are refused rather than loaded whole; the display diff stops at a smaller size.
+MAX_EDIT_BYTES = 10 * 1024 * 1024
+MAX_DIFF_BYTES = 1024 * 1024
 
 EDIT_DESCRIPTION = (
     "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping "
@@ -149,6 +153,13 @@ class EditTool:
                 code = errno.errorcode.get(errno.ENOENT if not os.path.exists(absolute) else errno.EACCES, "EACCES")
                 return error_result(f"Could not edit file: {path}. Error code: {code}.")
             try:
+                size = os.path.getsize(absolute)
+                if size > MAX_EDIT_BYTES:
+                    # The whole file and several copies would sit in the process every Session shares.
+                    return error_result(
+                        f"File {path} is {format_size(size)}, over the {format_size(MAX_EDIT_BYTES)} edit limit. "
+                        "Use bash (for example sed or a short script) to change files this large."
+                    )
                 data, base, new_content = await asyncio.to_thread(_plan_edits, absolute, edits, path)
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
@@ -158,12 +169,10 @@ class EditTool:
             except OSError as exc:
                 return error_result(os_error_text(exc))
 
-        diff, first_changed_line = generate_diff_string(base, new_content)
-        return text_result(
-            f"Successfully replaced {len(edits)} block(s) in {path}.",
-            details={
-                "diff": diff,
-                "patch": generate_unified_patch(path, base, new_content),
-                "first_changed_line": first_changed_line,
-            },
-        )
+        result = f"Successfully replaced {len(edits)} block(s) in {path}."
+        if size > MAX_DIFF_BYTES:
+            # The diff is for display only, and difflib is superlinear on large inputs.
+            return text_result(result, details={"diff_skipped": True})
+        diff, first_changed_line = await asyncio.to_thread(generate_diff_string, base, new_content)
+        patch = await asyncio.to_thread(generate_unified_patch, path, base, new_content)
+        return text_result(result, details={"diff": diff, "patch": patch, "first_changed_line": first_changed_line})

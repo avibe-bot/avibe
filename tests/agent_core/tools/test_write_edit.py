@@ -12,6 +12,8 @@ import pytest
 import core.agent_core.tools.paths as paths_module
 import core.agent_core.tools.write as write_module
 
+import core.agent_core.tools.edit as edit_module
+from core.agent_core.tools.args import ToolInputError
 from core.agent_core.tools.edit import EditTool
 from core.agent_core.tools.read import ReadTool
 from core.agent_core.tools.write import WriteTool
@@ -96,6 +98,27 @@ async def test_replace_all_replaces_every_occurrence(tmp_path, make_ctx):
 
     assert result_text(result) == "Successfully replaced 2 block(s) in f.txt."
     assert (tmp_path / "f.txt").read_text() == "baz(1)\nqux\nbaz(2)\nbaz(3)\n"
+
+
+async def test_files_over_the_edit_limit_are_refused_and_large_diffs_skipped(tmp_path, make_ctx, monkeypatch):
+    (tmp_path / "big.log").write_text("line\n" * 100)
+    monkeypatch.setattr(edit_module, "MAX_EDIT_BYTES", 400)
+
+    refused = await _edit(make_ctx, "big.log", {"oldText": "line", "newText": "x", "replaceAll": True})
+
+    assert refused.is_error
+    assert result_text(refused) == (
+        "File big.log is 500B, over the 400B edit limit. "
+        "Use bash (for example sed or a short script) to change files this large."
+    )
+    assert (tmp_path / "big.log").read_text() == "line\n" * 100
+
+    monkeypatch.setattr(edit_module, "MAX_EDIT_BYTES", 10_000)
+    monkeypatch.setattr(edit_module, "MAX_DIFF_BYTES", 400)
+    edited = await _edit(make_ctx, "big.log", {"oldText": "line", "newText": "x", "replaceAll": True})
+
+    assert not edited.is_error, result_text(edited)
+    assert edited.details == {"diff_skipped": True}
 
 
 @pytest.mark.parametrize("ending", ["\r\n", "\r"])
@@ -285,10 +308,29 @@ async def test_a_path_no_file_can_have_is_an_error_result(make_ctx, tool, argume
 
 
 @pytest.mark.parametrize(
-    ("url", "path"),
-    [("file:///C:/tmp/a%20b.txt", "C:\\tmp\\a b.txt"), ("file://server/share/x.txt", "\\\\server\\share\\x.txt")],
+    ("windows", "url", "expected"),
+    [
+        (False, "file:///tmp/a%20b.txt", "/tmp/a b.txt"),
+        (False, "file://localhost/tmp/x", "/tmp/x"),
+        (False, "file://server/tmp/x", ToolInputError("Invalid path: file URL host must be empty or localhost")),
+        (False, "file:///tmp/a%2Fb", ToolInputError("Invalid path: a file URL must not include encoded / characters")),
+        (True, "file:///C:/tmp/a%20b.txt", "C:\\tmp\\a b.txt"),
+        (True, "file://localhost/C:/x", "C:\\x"),
+        (True, "file://server/share/x.txt", "\\\\server\\share\\x.txt"),
+        (True, "file:///tmp/x", ToolInputError("Invalid path: a file URL must be absolute")),
+        (
+            True,
+            "file:///C:/a%5Cb",
+            ToolInputError("Invalid path: a file URL must not include encoded \\ or / characters"),
+        ),
+    ],
 )
-def test_windows_file_urls_keep_drive_and_share(monkeypatch, url, path):
-    monkeypatch.setattr(paths_module, "_WINDOWS", True)
+def test_file_urls_follow_node_file_url_to_path(monkeypatch, windows, url, expected):
+    monkeypatch.setattr(paths_module, "_WINDOWS", windows)
 
-    assert paths_module.expand_path(url) == path
+    if isinstance(expected, ToolInputError):
+        with pytest.raises(ToolInputError) as raised:
+            paths_module.expand_path(url)
+        assert str(raised.value) == str(expected)
+    else:
+        assert paths_module.expand_path(url) == expected

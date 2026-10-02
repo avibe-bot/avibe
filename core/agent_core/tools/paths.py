@@ -8,7 +8,6 @@ Mario Zechner).
 from __future__ import annotations
 
 import asyncio
-import nturl2path
 import os
 import re
 import unicodedata
@@ -22,6 +21,8 @@ _UNICODE_SPACES = re.compile("[\u00a0\u2000-\u200a\u202f\u205f\u3000]")
 _NARROW_NO_BREAK_SPACE = "\u202f"
 _AM_PM = re.compile(r" (AM|PM)\.", re.IGNORECASE)
 _WINDOWS = os.name == "nt"
+_ENCODED_SEPARATOR = re.compile("%2f", re.IGNORECASE)
+_ENCODED_SEPARATOR_WINDOWS = re.compile("%2f|%5c", re.IGNORECASE)
 
 
 def expand_path(path: str) -> str:
@@ -37,14 +38,28 @@ def expand_path(path: str) -> str:
 
 
 def _file_url_to_path(url: str) -> str:
-    """Like Node's ``fileURLToPath``: drive letters and UNC hosts on Windows, the path elsewhere."""
+    """Node's ``fileURLToPath``, which Pi uses.
+
+    An empty or ``localhost`` host names this machine. Any other host is a UNC share on Windows and
+    an error elsewhere, so a URL can never name a local file it did not mean. Encoded separators
+    are refused, as Node refuses them.
+    """
     parsed = urlparse(url)
-    if not _WINDOWS:
-        return unquote(parsed.path)
-    path = nturl2path.url2pathname(parsed.path)
-    if parsed.netloc and parsed.netloc.lower() != "localhost":
-        return f"\\\\{parsed.netloc}{path}"
-    return path
+    host = "" if parsed.netloc.lower() == "localhost" else parsed.netloc
+    if _WINDOWS:
+        if _ENCODED_SEPARATOR_WINDOWS.search(parsed.path):
+            raise ToolInputError("Invalid path: a file URL must not include encoded \\ or / characters")
+        path = unquote(parsed.path).replace("/", "\\")
+        if host:
+            return f"\\\\{host}{path}"
+        if len(path) >= 3 and path[0] == "\\" and path[1].isascii() and path[1].isalpha() and path[2] == ":":
+            return path[1:]
+        raise ToolInputError("Invalid path: a file URL must be absolute")
+    if host:
+        raise ToolInputError("Invalid path: file URL host must be empty or localhost")
+    if _ENCODED_SEPARATOR.search(parsed.path):
+        raise ToolInputError("Invalid path: a file URL must not include encoded / characters")
+    return unquote(parsed.path)
 
 
 def resolve_to_cwd(path: str, cwd: str) -> str:

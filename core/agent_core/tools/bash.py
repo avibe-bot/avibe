@@ -27,7 +27,7 @@ from core.agent_core.tools.args import (
     text_result,
 )
 from core.agent_core.tools.base import MAX_BYTES, MAX_LINES, JobHost, JobStatus, ToolContext, ToolResult, ToolSpec
-from core.agent_core.tools.jobs import STOP_TIMEOUT, JobStartError, LocalJobHost
+from core.agent_core.tools.jobs import STOP_ABORTED, STOP_TIMEOUT, JobStartError, LocalJobHost
 from core.agent_core.tools.output import JobOutput
 
 logger = logging.getLogger(__name__)
@@ -35,8 +35,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_FOREGROUND_WINDOW_S = 120.0
 _MAX_TIMEOUT_S = 2_147_483.647
 _PROGRESS_INTERVAL_S = 0.1  # Pi's BASH_UPDATE_THROTTLE_MS
-# A job found gone this close to its timeout was killed for it, by this tool or by the job host.
-_DEADLINE_SLACK_S = 1.0
 _WATCH_GRACE_S = 0.5
 
 BASH_SCHEMA: Mapping[str, Any] = {
@@ -106,6 +104,15 @@ def _timed_out_line(timeout_s: float) -> str:
     return f"Command timed out after {format_number(timeout_s)} seconds"
 
 
+def _stopped_line(reason: Optional[str], timeout_s: Optional[float]) -> Optional[str]:
+    """Pi's status line for a job someone stopped, from the reason recorded when it was stopped."""
+    if reason == STOP_TIMEOUT and timeout_s is not None:
+        return _timed_out_line(timeout_s)
+    if reason == STOP_ABORTED:
+        return "Command aborted"
+    return None
+
+
 def handover_result(output: JobOutput, watch_id: str) -> ToolResult:
     """Avibe: the command keeps running as a Watch; the model sees the output so far and how to manage it."""
     output.poll()
@@ -126,10 +133,10 @@ def handover_result(output: JobOutput, watch_id: str) -> ToolResult:
 async def settle_bash_call(jobs: LocalJobHost, session_id: str, tool_call_id: str) -> Optional[ToolResult]:
     """The durable result for a ``bash`` call left open by a crash (``recovery.md``).
 
-    A finished job gets its final output, a job killed at its deadline gets the
-    timeout result, and a running one is handed to Watch. ``None`` means the job
-    is gone, never ran, or does not exist: the caller commits the synthetic
-    interrupted result.
+    A finished job gets its final output, a job stopped at its deadline or by an
+    abort gets that result, and a running one is handed to Watch. ``None`` means
+    the job is gone for another reason, never ran, or does not exist: the caller
+    commits the synthetic interrupted result.
     """
     job_id = jobs.find_job(session_id, tool_call_id)
     if job_id is None:
@@ -140,10 +147,8 @@ async def settle_bash_call(jobs: LocalJobHost, session_id: str, tool_call_id: st
         return handover_result(JobOutput(jobs, job_id), await jobs.hand_over(job_id))
     if status.state == "exited":
         return final_result(JobOutput(jobs, job_id), status)
-    timeout_s = jobs.meta(job_id).get("timeout_s")
-    if jobs.stop_reason(job_id) == STOP_TIMEOUT and timeout_s is not None:
-        return stopped_result(JobOutput(jobs, job_id), _timed_out_line(timeout_s))
-    return None
+    line = _stopped_line(jobs.stop_reason(job_id), jobs.meta(job_id).get("timeout_s"))
+    return stopped_result(JobOutput(jobs, job_id), line) if line else None
 
 
 class BashTool:
@@ -206,20 +211,21 @@ class BashTool:
                 slice_s = min(slice_s, max(0.0, handover_at - elapsed))
             status = await self._wait_or_cancel(job_id, slice_s, ctx.cancel)
 
-            if status is not None and status.state == "gone" and timeout is not None:
-                # Whoever holds the job enforces its deadline; the host may have killed it first.
-                if time.monotonic() - started >= timeout - _DEADLINE_SLACK_S:
-                    return stopped_result(output, _timed_out_line(timeout))
+            if status is not None and status.state == "gone":
+                # Whoever stopped the job recorded why; the job host or its wrapper may have stopped it first.
+                line = _stopped_line(self._jobs.stop_reason(job_id), timeout)
+                if line:
+                    return stopped_result(output, line)
             if status is not None and status.state != "running":
                 note = None
                 if watch and handover_error is not None:
                     note = f"[Watch unavailable ({handover_error}); the command ran in the foreground.]"
                 return final_result(output, status, note=note)
             if ctx.cancel.cancelled:
-                await self._jobs.kill(job_id)
+                await self._jobs.kill(job_id, reason=STOP_ABORTED)
                 return stopped_result(output, "Command aborted")
             if timeout is not None and time.monotonic() - started >= timeout:
-                await self._jobs.kill(job_id)
+                await self._jobs.kill(job_id, reason=STOP_TIMEOUT)
                 return stopped_result(output, _timed_out_line(timeout))
             if hand_over:
                 try:
