@@ -248,7 +248,7 @@ async def test_a_cancelled_write_lands_before_the_next_writer_takes_the_lock(
     assert (tmp_path / "f.txt").read_text() == "second\n"
 
 
-@pytest.mark.parametrize("change", ["replaced", "retargeted", "rewritten"])
+@pytest.mark.parametrize("change", ["replaced", "retargeted", "rewritten", "rewritten-same-size-same-mtime"])
 async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, monkeypatch, change):
     """Another writer (bash, an editor) changed the file after edit read it: nothing is written over it."""
     (tmp_path / "d").mkdir()
@@ -266,8 +266,13 @@ async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, 
         elif change == "retargeted":
             link.unlink()
             link.symlink_to(other)
-        else:
+        elif change == "rewritten":
             real.write_text("unrelated text\n")
+        else:
+            # Same size, in place, mtime put back (as rsync -t or tar do): only ctime still shows it.
+            before = os.stat(real)
+            real.write_text("ALPHA\n")
+            os.utime(real, ns=(before.st_atime_ns, before.st_mtime_ns))
         return planned
 
     monkeypatch.setattr(edit_module, "_plan_edits", plan_then_change)
@@ -277,7 +282,10 @@ async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, 
         True,
         "Could not edit file: d/f.txt. It changed while the edit was being applied; read it again.",
     )
-    expected = {"retargeted": ("alpha\n", "other\n")}.get(change, ("unrelated text\n", "other\n"))
+    expected = {
+        "retargeted": ("alpha\n", "other\n"),
+        "rewritten-same-size-same-mtime": ("ALPHA\n", "other\n"),
+    }.get(change, ("unrelated text\n", "other\n"))
     assert (real.read_text(), other.read_text()) == expected
 
 
@@ -488,6 +496,26 @@ async def test_edit_memory_is_bounded_by_its_budgets_not_by_the_file(tmp_path, m
 
     assert result.is_error == is_error, result_text(result)
     assert peak < 32 * 1024 * 1024
+
+
+async def test_a_large_file_that_nfkc_would_expand_is_not_normalized(tmp_path, make_ctx):
+    """NFKC can make one character eighteen (U+FDFA); a large unnormalized file is matched exactly only."""
+    (tmp_path / "f.txt").write_text("\ufdfa" * 1_100_000 + "\n\u2019marker\u2019\n")
+    tracemalloc.start()
+    started = time.monotonic()
+    try:
+        result = await _edit(make_ctx, "f.txt", {"oldText": "'marker'", "newText": "x"})
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert (result.is_error, result_text(result)) == (
+        True,
+        "Could not find the exact text in f.txt. The old text must match exactly including all whitespace and "
+        "newlines.",
+    )
+    assert peak < 32 * 1024 * 1024
+    assert time.monotonic() - started < 2.0
 
 
 async def test_edit_refuses_files_with_more_lines_than_it_plans(tmp_path, make_ctx, monkeypatch):

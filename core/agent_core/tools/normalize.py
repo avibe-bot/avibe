@@ -17,15 +17,23 @@ import re
 
 from core.agent_core.tools.truncate import utf8_len
 
+# No sequence spans a line break or a carriage return, so stripping a run of whole lines at once equals
+# stripping each redraw segment of each line on its own.
 _ANSI_RE = re.compile(
-    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC ... BEL or ST
-    r"|\x1b[P^_][^\x1b]*\x1b\\"  # DCS, PM, APC ... ST
+    r"\x1b\][^\x07\x1b\n\r]*(?:\x07|\x1b\\)"  # OSC ... BEL or ST
+    r"|\x1b[P^_][^\x1b\n\r]*\x1b\\"  # DCS, PM, APC ... ST
     r"|\x1b\[[0-?]*[ -/]*[@-~]"  # CSI
     r"|\x1b[ -/]*[0-~]"  # other escape sequences
     r"|\x9b[0-?]*[ -/]*[@-~]"  # 8-bit CSI
 )
 # An open line (no newline yet) keeps at most this many characters of its last segment.
 _MAX_OPEN_CHARS = 64 * 1024
+# A line longer than the bound, found from line starts only, so the search is linear.
+_LONG_LINE = re.compile(r"^[^\n]{%d}" % (_MAX_OPEN_CHARS + 1), re.MULTILINE)
+# A redrawn line keeps its last segment that shows something: drop the empty segments at its end,
+# then everything up to its last carriage return.
+_TRAILING_RETURNS = re.compile(r"\r+$", re.MULTILINE)
+_BEFORE_LAST_RETURN = re.compile(r"^[^\n]*\r", re.MULTILINE)
 
 
 def _bounded(segment: str, dropped: int) -> tuple[str, int]:
@@ -96,17 +104,36 @@ class OutputNormalizer:
             # Possibly the first half of "\r\n"; decide with the next chunk.
             self._carry_cr = True
             text = text[:-1]
+        last = text.rfind("\n")
+        if last == -1:
+            self._open_segments(text)
+            return ""
+        first = text.find("\n")
         out: list[str] = []
-        lines = text.split("\n")
-        for line in lines[:-1]:
-            if line.endswith("\r"):
-                line = line[:-1]
-            self._open_segments(line)
-            text, self._finished_line_bytes = self._line_and_size()
-            out.append(text + "\n")
-            self._reset()
-        self._open_segments(lines[-1])
+        self._finish_line(text[:first], out)  # completes the open line
+        if first != last:
+            middle = text[first + 1 : last].replace("\r\n", "\n")
+            if not _LONG_LINE.search(middle):
+                # No line over the bound: each line becomes its last visible segment in a few passes over the
+                # whole run, without a Python step per line, so a flood costs what it reads (redraws included).
+                visible = strip_ansi(middle)
+                if "\r" in visible:
+                    visible = _BEFORE_LAST_RETURN.sub("", _TRAILING_RETURNS.sub("", visible))
+                out.append(visible + "\n")
+                self._finished_line_bytes = utf8_len(visible[visible.rfind("\n") + 1 :])
+            else:
+                for line in middle.split("\n"):
+                    self._finish_line(line, out)
+        self._open_segments(text[last + 1 :])
         return "".join(out)
+
+    def _finish_line(self, line: str, out: list[str]) -> None:
+        if line.endswith("\r"):
+            line = line[:-1]
+        self._open_segments(line)
+        text, self._finished_line_bytes = self._line_and_size()
+        out.append(text + "\n")
+        self._reset()
 
     def _open_segments(self, text: str) -> None:
         segments = (self._cur + text).split("\r")

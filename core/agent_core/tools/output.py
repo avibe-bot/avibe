@@ -18,6 +18,12 @@ from core.agent_core.tools.normalize import OutputNormalizer
 from core.agent_core.tools.truncate import TruncationResult, format_size, truncate_tail, utf8_len
 
 
+#: Raw output one progress poll reads; the next poll continues where it stopped.
+POLL_BYTES = 1024 * 1024
+#: Raw output a final read takes: everything the log keeps on disk, and one more chunk.
+FINISH_BYTES = job_host.OUTPUT_HEAD_BYTES + job_host.OUTPUT_TAIL_BYTES + job_host.OUTPUT_CHUNK_BYTES
+
+
 class OutputAccumulator:
     """Counts every line and byte of normalized output and keeps a tail of at most ``4 * max_bytes``."""
 
@@ -98,10 +104,15 @@ class JobOutput:
     def path(self) -> str:
         return self._jobs.output_path(self._job_id)
 
-    def poll(self) -> bool:
-        """Read everything written so far; ``True`` if there was anything new."""
+    def poll(self, max_bytes: int = POLL_BYTES) -> bool:
+        """Read what was written since the last call, at most ``max_bytes`` of it; ``True`` if anything was new.
+
+        The budget bounds one call however fast the job writes (a reader that falls behind the kept
+        tail jumps forward, J4). Callers run it off the event loop, which every Session shares.
+        """
         changed = False
-        while True:
+        budget = max_bytes
+        while budget > 0:
             data, offset = self._jobs.output(self._job_id, self._offset)
             skipped = offset - len(data) - self._offset
             self._offset = offset
@@ -112,13 +123,19 @@ class JobOutput:
             if not data:
                 return changed or skipped > 0
             changed = True
+            budget -= len(data)
             self._accumulator.append(self._normalizer.feed(data))
+        return True
 
     def finish(self) -> None:
-        """Read the rest and end the stream; call once the job is no longer running."""
+        """Read the rest and end the stream; call once the job is no longer running.
+
+        "The rest" is bounded by what the log keeps on disk: a background child still writing after the
+        shell exited (ledger 11) cannot keep this reading forever.
+        """
         if self._finished:
             return
-        self.poll()
+        self.poll(FINISH_BYTES)
         self._accumulator.append(self._normalizer.flush())
         self._finished = True
 

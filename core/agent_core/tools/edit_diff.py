@@ -71,6 +71,9 @@ def normalize_for_fuzzy_match(text: str) -> str:
 #: Avibe: replacements one edit call may make. Each costs a few hundred bytes of Python objects in
 #: the process every Session shares, so the budget is structural, not only the file's size.
 MAX_REPLACEMENTS = 10_000
+#: Avibe: NFKC can make one character eighteen (U+FDFA), and Pi normalizes the whole file. A file over
+#: this many characters that is not already in NFKC is matched in the exact tier only.
+MAX_FUZZY_UNNORMALIZED_CHARS = 1024 * 1024
 #: Avibe: every edit scans the whole file (``str.count``/``find``, which hold the GIL), so the number of
 #: edits times the file's length is bounded: about a quarter second of scanning.
 MAX_EDIT_SCAN_CHARS = 256 * 1024 * 1024
@@ -89,7 +92,7 @@ def _find_all(content: str, needle: str, limit: int) -> list[int]:
     return found
 
 
-def _tier(content: str, normalized: Callable[[], str], old_text: str) -> tuple[bool, str, str, int]:
+def _tier(content: str, normalized: Callable[[], Optional[str]], old_text: str) -> tuple[bool, str, str, int]:
     """``(used_normalized, haystack, needle, count)`` for the first tier where the edit occurs.
 
     Counting is ``str.count`` (no objects per match), so a match budget holds before any are built.
@@ -102,10 +105,12 @@ def _tier(content: str, normalized: Callable[[], str], old_text: str) -> tuple[b
         # Normalization keeps every line break (NFKC never makes or removes "\n"), so text with more lines
         # than the file cannot match; and model text that long is never split into per-line objects.
         return True, "", "", 0
+    haystack = normalized()
+    if haystack is None:
+        return True, "", "", 0
     fuzzy_old = normalize_for_fuzzy_match(old_text)
     if not fuzzy_old:
         return True, "", "", 0
-    haystack = normalized()
     return True, haystack, fuzzy_old, haystack.count(fuzzy_old)
 
 
@@ -331,11 +336,14 @@ def apply_edits(
     if total * len(text) > MAX_EDIT_SCAN_CHARS:
         raise _too_much_work(path, total, len(text))
     lines = _Lines(text)
-    cache: list[str] = []
+    cache: list[Optional[str]] = []
 
-    def normalized() -> str:
+    def normalized() -> Optional[str]:
+        """The normalized view, or ``None`` when NFKC could expand a file this large (no fuzzy tier)."""
         if not cache:
-            cache.append(normalize_for_fuzzy_match(lines.view))
+            view = lines.view
+            expandable = len(view) > MAX_FUZZY_UNNORMALIZED_CHARS and not unicodedata.is_normalized("NFKC", view)
+            cache.append(None if expandable else normalize_for_fuzzy_match(view))
         return cache[0]
 
     exact: list[_Replacement] = []
@@ -360,7 +368,7 @@ def apply_edits(
         )
 
     _check_disjoint(path, fuzzy)  # in normalized coordinates, before they are grouped into lines
-    replacements = _exact_replacements(lines, exact) + (_line_groups(lines, normalized(), fuzzy) if fuzzy else [])
+    replacements = _exact_replacements(lines, exact) + (_line_groups(lines, normalized() or "", fuzzy) if fuzzy else [])
     _check_disjoint(path, replacements)
     new_text = _apply(text, replacements)
     if new_text == text:

@@ -10,13 +10,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import functools
 import ipaddress
 import os
 import re
 import stat
 import unicodedata
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Callable, Literal, TypeVar
+from concurrent.futures import Executor
+from typing import Any, AsyncIterator, Callable, Literal, Optional, TypeVar
 from urllib.parse import unquote
 
 from core.agent_core.tools.args import ToolInputError
@@ -297,7 +299,12 @@ async def to_thread_joined(func: Callable[..., T], /, *args: Any) -> T:
     the lock was released and overwrite the next writer's result. The cancel is re-raised once the
     thread is done, however often the caller is cancelled and even when the thread raised.
     """
-    worker = asyncio.ensure_future(asyncio.to_thread(func, *args))
+    return await run_joined(None, func, *args)
+
+
+async def run_joined(executor: Optional[Executor], func: Callable[..., T], /, *args: Any) -> T:
+    """``func(*args)`` on ``executor`` (``None``: asyncio's default); a cancel waits for it (see above)."""
+    worker = asyncio.get_running_loop().run_in_executor(executor, functools.partial(func, *args))
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:

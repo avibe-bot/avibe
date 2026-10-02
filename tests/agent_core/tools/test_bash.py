@@ -8,12 +8,14 @@ import functools
 import os
 import signal
 import time
+from datetime import datetime, timezone
 
 import psutil
 import pytest
 
 from core.agent_core.agent.jobs import TrackingJobHost
 from core.agent_core.cancel import CancelToken
+import core.agent_core.tools.bash as bash_module
 from core.agent_core.tools.bash import BashTool, settle_bash_call
 import core.agent_core.tools.jobs as jobs_module
 from core.agent_core.tools.jobs import LocalJobHost
@@ -253,9 +255,8 @@ async def test_only_a_live_wrapper_decides_at_the_deadline(tmp_path, make_ctx, m
     monkeypatch.setattr(jobs_module, "_terminate_group", quick_kill)
     host = _host(tmp_path)
     command = f"echo $$ > {tmp_path / 'sh.pid'}; sleep 30"
-    started = time.monotonic()
     if caller == "bash":
-        running = asyncio.ensure_future(BashTool(host).execute({"command": command, "timeout": 1.0}, make_ctx()))
+        running = asyncio.ensure_future(BashTool(host).execute({"command": command, "timeout": 60}, make_ctx()))
         job_id = None
         while job_id is None:
             await asyncio.sleep(0.01)
@@ -265,28 +266,94 @@ async def test_only_a_live_wrapper_decides_at_the_deadline(tmp_path, make_ctx, m
             command,
             cwd=str(tmp_path),
             env={"PATH": os.environ["PATH"]},
-            timeout_s=1.0,
+            timeout_s=60,
             session_id="ses_test",
             tool_call_id="toolu_1",
         )
         running = asyncio.ensure_future(host.wait(job_id, deadline_s=None))
     wrapper_pid = os.path.join(host.job_dir(job_id), "pid")
-    while not (os.path.exists(wrapper_pid) and (tmp_path / "sh.pid").exists()):
+    # Written, not only created: ``echo $$ >`` creates the file before it writes the pid.
+    while not (os.path.exists(wrapper_pid) and (tmp_path / "sh.pid").exists() and (tmp_path / "sh.pid").read_text()):
         await asyncio.sleep(0.01)
     os.kill(int(open(wrapper_pid).read()), signal.SIGSTOP)  # the wrapper can no longer decide
     shell_pid = int((tmp_path / "sh.pid").read_text())
+    # The deadline passes now, whatever the launch took; the host reads it from meta.json.
+    meta = host.meta(job_id)
+    meta["deadline_at"] = jobs_module._iso(datetime.now(timezone.utc))
+    host._write_meta(job_id, meta)
 
-    await asyncio.sleep(max(0.0, started + 1.3 - time.monotonic()))  # past the deadline, inside the grace
+    await asyncio.sleep(0.3)  # past the deadline, inside the grace
     alive_in_grace = psutil.pid_exists(shell_pid) and psutil.Process(shell_pid).status() != psutil.STATUS_ZOMBIE
     outcome = await asyncio.wait_for(running, timeout=10)
 
     assert alive_in_grace
     assert host.stop_reason(job_id) == "timeout"
     if caller == "bash":
-        assert result_text(outcome).endswith("Command timed out after 1 seconds")
+        assert result_text(outcome).endswith("Command timed out after 60 seconds")
     else:
         assert outcome.state == "gone"
     assert _process_gone(shell_pid)
+
+
+@pytest.mark.parametrize("command", ["yes", "yes $'a\\rb'"], ids=["lines", "redraws"])
+async def test_a_flood_of_output_never_stalls_the_event_loop(tmp_path, make_ctx, command):
+    """Every Session shares the event loop: following a job's output may not hold it, so an abort still lands."""
+    cancel = CancelToken()
+    lags: list[float] = []
+
+    async def ticker():
+        while True:
+            before = time.monotonic()
+            await asyncio.sleep(0.01)
+            lags.append(time.monotonic() - before)
+
+    ticking = asyncio.ensure_future(ticker())
+    asyncio.get_running_loop().call_later(1.0, cancel.cancel)
+    started = time.monotonic()
+    try:
+        result = await BashTool(_host(tmp_path)).execute(
+            {"command": command}, make_ctx(cancel=cancel, on_progress=lambda tail: None)
+        )
+    finally:
+        ticking.cancel()
+
+    assert result_text(result).endswith("Command aborted")
+    assert time.monotonic() - started < 6.0
+    assert max(lags) < 0.5, max(lags)
+
+
+async def test_a_slow_disk_never_stalls_the_event_loop(tmp_path, make_ctx, monkeypatch):
+    """The job host's file work (start, polling, kill) runs off the event loop every Session shares."""
+    real_read, real_write = jobs_module._read_text, jobs_module._write_atomic
+
+    def slow_read(path):
+        time.sleep(0.3)  # a disk busy behind a flood of writes (seen on a USB drive)
+        return real_read(path)
+
+    def slow_write(path, data):
+        time.sleep(0.3)
+        real_write(path, data)
+
+    monkeypatch.setattr(jobs_module, "_read_text", slow_read)
+    monkeypatch.setattr(jobs_module, "_write_atomic", slow_write)
+    cancel = CancelToken()
+    lags: list[float] = []
+
+    async def ticker():
+        while True:
+            before = time.monotonic()
+            await asyncio.sleep(0.01)
+            lags.append(time.monotonic() - before)
+
+    ticking = asyncio.ensure_future(ticker())
+    asyncio.get_running_loop().call_later(3.0, cancel.cancel)
+    try:
+        result = await BashTool(_host(tmp_path)).execute({"command": "sleep 30"}, make_ctx(cancel=cancel))
+    finally:
+        ticking.cancel()
+
+    assert result_text(result).endswith("Command aborted")
+    assert max(lags) < 0.2, max(lags)
 
 
 async def test_the_foreground_window_hands_over_and_the_command_runs_once(tmp_path, make_ctx):
@@ -325,7 +392,9 @@ async def test_watch_true_returns_at_once(tmp_path, make_ctx):
     await host.kill(result.details["job_id"])
 
 
-async def test_watch_true_keeps_the_result_of_a_command_that_already_ended(tmp_path, make_ctx):
+async def test_watch_true_keeps_the_result_of_a_command_that_already_ended(tmp_path, make_ctx, monkeypatch):
+    """A handover is decided only after a fresh status, so a command that has ended keeps its own result."""
+    monkeypatch.setattr(bash_module, "_WATCH_GRACE_S", 30.0)  # the command surely ends within it
     watches = Watches()
 
     result = await BashTool(_host(tmp_path, watches)).execute({"command": "exit 3", "watch": True}, make_ctx())
@@ -384,9 +453,12 @@ async def test_without_a_watch_the_command_stays_in_the_foreground(tmp_path, mak
 async def test_settlement_reports_each_job_state(tmp_path, make_ctx):
     watches = Watches()
     host = _host(tmp_path, watches)
-    tool = BashTool(host, foreground_window_s=0.2)
-    foreground = await tool.execute({"command": "echo out; exit 4"}, make_ctx(tool_call_id="exited"))
-    await tool.execute({"command": "echo still; sleep 30"}, make_ctx(tool_call_id="running"))
+    # Each call's outcome is fixed by construction, not by timing: the exited one runs with the default
+    # window (it cannot be handed over before it ends), the running one never ends.
+    foreground = await BashTool(host).execute({"command": "echo out; exit 4"}, make_ctx(tool_call_id="exited"))
+    await BashTool(host, foreground_window_s=0.2).execute(
+        {"command": "echo still; sleep 30"}, make_ctx(tool_call_id="running")
+    )
 
     recovery = LocalJobHost(str(tmp_path / "jobs"), on_hand_over=watches)
 
@@ -394,7 +466,10 @@ async def test_settlement_reports_each_job_state(tmp_path, make_ctx):
     assert (result_text(exited), exited.is_error) == (result_text(foreground), True)
     running = await settle_bash_call(recovery, "ses_test", "running")
     assert result_text(running).startswith("Command is still running and is now Watch wch_1.")
-    assert result_text(await settle_bash_call(recovery, "ses_test", "running")) == result_text(running)
+    # Settling again adopts the same Watch. (The output may still be arriving, so only the Watch is compared.)
+    again = await settle_bash_call(recovery, "ses_test", "running")
+    assert result_text(again).startswith("Command is still running and is now Watch wch_1.")
+    assert again.details["watch_id"] == running.details["watch_id"] == "wch_1"
     assert await settle_bash_call(recovery, "ses_test", "unknown") is None
     await recovery.kill(running.details["job_id"])
     assert await settle_bash_call(recovery, "ses_test", "running") is None

@@ -127,10 +127,12 @@ class FileIdentity:
     ino: int
     size: int
     mtime_ns: int
+    # Changes on every write and metadata change, and cannot be set back like mtime (rsync -t, tar).
+    ctime_ns: int
 
     @classmethod
     def of(cls, path: str, st: os.stat_result) -> "FileIdentity":
-        return cls(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+        return cls(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
 def _require(expected: Optional[FileIdentity], path: str, st: os.stat_result) -> None:
