@@ -14028,22 +14028,20 @@ def _desktop_provenance_refused(
     return True
 
 
-def _stop_watch_jobs() -> None:
-    """End the commands job Watches own, as a full stop ends other tool commands.
+def _stop_jobs() -> None:
+    """End every command a job runs, Watch-owned or foreground, as a full stop ends other tool commands.
 
     Restarts and upgrades (and a desktop Runtime's scoped stop, which may be one)
     never come here, so those commands keep running. A failure is logged and
     leaves the commands to their own deadlines.
     """
 
-    if not paths.get_sqlite_state_path().exists():
-        return
     try:
-        from core.watches import stop_watch_jobs
+        from core.watches import stop_all_jobs
 
-        stop_watch_jobs()
+        stop_all_jobs(ManagedWatchStore() if paths.get_sqlite_state_path().exists() else None)
     except Exception:
-        logger.warning("Could not stop the commands Watches own", exc_info=True)
+        logger.warning("Could not stop the commands jobs run", exc_info=True)
 
 
 def cmd_stop(*, expect_runtime_id: str | None = None):
@@ -14069,7 +14067,7 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
         return 3
     # Holding the free service lock: neither a service that failed to stop nor one
     # started since owns these commands while they are stopped.
-    runtime.desktop_service_lock_presence(while_absent=_stop_watch_jobs)
+    runtime.desktop_service_lock_presence(while_absent=_stop_jobs)
     from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
 
     # Each tree's owner decides whether it is abandoned, so the reap runs

@@ -3103,6 +3103,12 @@ class ManagedWatchService:
             return False
 
 
+def agent_jobs_dir() -> Path:
+    """Where the Avibe Agent's jobs live (plan section 5.3): the adapter's ``LocalJobHost`` hosts them here."""
+
+    return paths.get_state_dir() / "agent_core" / "jobs"
+
+
 def _job_target_from_meta(job: Mapping[str, Any]) -> dict[str, Any]:
     """The Watch target for a job's ``meta.json`` (``job.schema.json``); ``ValueError`` if it cannot be one."""
 
@@ -3348,26 +3354,56 @@ async def hand_over_job(
     )
 
 
-def stop_watch_jobs(store: Optional[ManagedWatchStore] = None) -> None:
-    """``vibe stop`` ends the commands Watches own, as it ends other tool commands.
+def stop_all_jobs(store: Optional[ManagedWatchStore] = None, *, jobs_dir: Optional[Path] = None) -> None:
+    """``vibe stop`` ends every command a job runs, as it ends other tool commands (plan section 5.3).
 
-    Called holding the free service lock, so no service owns the jobs meanwhile. An
-    enabled Watch stays enabled: the next start re-attaches, finds the job stopped by
-    ``vibe stop``, and reports that once. Jobs of Watches that no longer own them are
-    settled as the service would. Restarts and upgrades never come here, so their jobs
-    keep running.
+    Called holding the free service lock, so no service owns the jobs meanwhile.
+    Watch-owned jobs go first, each stopped with the reason that applies: an enabled
+    Watch stays enabled, and the next start re-attaches, finds the job stopped by
+    ``vibe stop``, and reports that once; jobs of Watches that no longer own them are
+    settled as the service would. Then every job still running in the jobs directory
+    is killed the same way, a foreground ``bash`` call's included. Restarts and
+    upgrades never come here, so their jobs keep running. ``store`` is ``None`` when
+    there is no state database, so no Watch can own a job.
     """
 
-    store = store or ManagedWatchStore()
+    rows = store.list_job_watch_targets() if store is not None else []
+    directories = {os.path.realpath(str(jobs_dir or agent_jobs_dir()))}
+    for row in rows:
+        state_dir = str(row["target"].get("state_dir") or "")
+        if os.path.isabs(state_dir):
+            directories.add(os.path.realpath(os.path.dirname(os.path.normpath(state_dir))))
 
     async def _stop_all() -> None:
-        for row in store.list_job_watch_targets():
+        for row in rows:
             owned = _job_still_owned(row)
             reason = JOB_STOP_VIBE_STOP if owned else _unowned_job_stop_reason(row)
             if await _stop_job(row["target"], reason) and not owned:
                 store.release_job_watch(row["id"], released_at=_utc_now_iso())
+        for directory in sorted(directories):
+            await _kill_every_job(directory, JOB_STOP_VIBE_STOP)
 
     asyncio.run(_stop_all())
+
+
+async def _kill_every_job(jobs_dir: str, reason: str) -> None:
+    """Kill, through the job host, every job under ``jobs_dir`` that still runs; ended jobs are left as they are."""
+
+    from core.agent_core.tools.jobs import LocalJobHost
+
+    host = LocalJobHost(jobs_dir)
+    try:
+        names = sorted(os.listdir(jobs_dir))
+    except OSError:
+        return
+    for name in names:
+        try:
+            host.job_dir(name)  # the host's own job-id rule
+            await host.kill(name, reason=reason)
+        except KeyError:
+            continue  # not a job, or no record left
+        except Exception:
+            logger.warning("Could not stop job %s at vibe stop", name, exc_info=True)
 
 
 def _failure_hook_body(watch: ManagedWatch, *, exit_code: int, error_text: str) -> str:

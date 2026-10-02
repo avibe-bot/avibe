@@ -34,7 +34,7 @@ from core.watches import (
     ManagedWatchStore,
     WatchRuntimeStateStore,
     hand_over_job,
-    stop_watch_jobs,
+    stop_all_jobs,
 )
 from storage.background import SQLiteBackgroundTaskStore
 from storage.models import agent_sessions
@@ -707,7 +707,7 @@ def test_job_exit_code_is_reported_never_read_as_a_watch_control_code(
     ("command", "kept", "dropped", "notice"),
     [
         ("seq 1 3000", "\n1001\n", "\n1000\n", "[Showing lines 1001-3000 of 3000. "),
-        ("head -c 4000000 /dev/zero | tr '\\0' 'x'; echo", "xxxx\n", None, "were omitted; the end of the log is in tail.log"),
+        ("head -c 4000000 /dev/zero | tr '\\0' 'x'; echo", "xxxx\n", None, "tail.log were omitted"),
     ],
     ids=["long-output", "log-bounded-on-disk"],
 )
@@ -878,8 +878,25 @@ def test_vibe_stop_ends_owned_jobs_and_the_watch_reports_after_the_next_start(tm
     (follow_up,) = _follow_ups(watch_id)
     assert follow_up.prompt.endswith("Command stopped by `vibe stop`")
     # Called again, there is nothing left to stop and nothing to report twice.
-    stop_watch_jobs()
+    stop_all_jobs(ManagedWatchStore())
     assert len(_follow_ups(watch_id)) == 1
+
+
+def test_vibe_stop_ends_a_foreground_job_that_no_watch_owns(tmp_path: Path, monkeypatch) -> None:
+    # The adapter's host: the bash tool's jobs live in the state's jobs directory.
+    host = LocalJobHost(str(watches_module.agent_jobs_dir()))
+    job_id = asyncio.run(_start_job(host, tmp_path, "sleep 60 & wait"))
+    assert host.meta(job_id)["watch_id"] is None  # still in the foreground, never handed over
+    monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
+    monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: False)
+    monkeypatch.setattr(cli.runtime, "stop_ui", lambda **kwargs: False)
+    monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
+    monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: None)
+
+    assert cli.cmd_stop() == 0
+
+    assert host.status(job_id).state == "gone"
+    assert host.stop_reason(job_id) == "vibe_stop"
 
 
 def test_vibe_stop_leaves_the_jobs_of_a_service_that_holds_the_lock(tmp_path: Path, monkeypatch) -> None:
