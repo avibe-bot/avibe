@@ -135,19 +135,20 @@ continue in the background as an Avibe Watch; you get a follow-up message when t
 `watch` is an Avibe addition. Behavior:
 
 - stdin is closed; stdout and stderr are merged into the job's `output.log`; the tool follows the file for progress.
-- The tail is kept: `[Showing lines {start}-{end} of {total}. Full output: {path}]`, or with ` (50KB limit)` when the
-  byte cap applied, or `[Showing last {size} of line {n} (line is {size}). Full output: {path}]`. When the job's log
-  itself was bounded on disk (J4), `Full output:` becomes `Output log (middle omitted beyond {cap}):`, so no result
-  promises a complete file that does not exist.
+- The tail is kept: `[Showing lines {start}-{end} of {total}. Output log (middle omitted beyond {cap}): {path}]`, or
+  with ` (50KB limit)` when the byte cap applied, or `[Showing last {size} of line {n} (line is {size}). Output log
+  (middle omitted beyond {cap}): {path}]`. `{cap}` is the on-disk bound (J4). Avibe change to Pi's `Full output:`:
+  one label in every state, because it states the log's policy rather than its current size, and a job that is
+  handed over keeps appending after its result was written, so no result promises a complete file that may not exist.
 - Exit 0 is a normal result; otherwise an error result ending in `Command exited with code {code}`. `(no output)` when
   empty.
 - `timeout` kills the process tree: `Command timed out after {n} seconds`. Abort kills it: `Command aborted`.
 - Handover (Avibe), when `watch: true` or the foreground window passes: the result is not an error and reads
   `Command is still running and is now Watch {watch_id}. You will get a follow-up message when it finishes.` followed
-  by the output so far (tail rules above), `Full output: {path}`, and `Check: vibe watch show {watch_id}`,
-  `Stop: vibe watch remove {watch_id}`.
-- The Watch follow-up states the command, exit code, elapsed time, the tail under the same rules, and the full-output
-  path.
+  by the output so far (tail rules above), `Output log (middle omitted beyond {cap}): {path}`, and
+  `Check: vibe watch show {watch_id}`, `Stop: vibe watch remove {watch_id}`.
+- The Watch follow-up states the command, exit code, elapsed time, the tail under the same rules, and the output log
+  under the same label.
 
 ## 6. Output normalizer
 
