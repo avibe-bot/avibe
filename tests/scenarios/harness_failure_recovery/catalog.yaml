@@ -4408,7 +4408,8 @@ scenarios:
     # Claude dequeues every input queued behind a running response together and
     # replays them as one newline-joined UserMessage. That echo acknowledges the
     # whole FIFO run; a human-origin echo matching no receipt still releases the
-    # pending receipts, while injected turns such as task notifications do not.
+    # pending receipts. Injected turns such as task notifications never consume
+    # receipts, even when their text matches.
     test: tests/test_claude_agent_sessions.py::test_coalesced_or_unrecognized_human_echo_releases_queued_steers
 manual_evidence:
   - local Incus backend process death after prompt acceptance

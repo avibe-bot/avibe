@@ -1564,9 +1564,14 @@ class ClaudeAgent(BaseAgent):
         receipts = receipt_map.get(composite_key) or []
         if not receipts:
             return []
+        origin = self._result_origin_kind(message)
+        if origin not in {None, "human"}:
+            # Injected turns (task notifications, peers, ...) are never Avibe
+            # input, even when their text happens to equal a receipt.
+            return []
         run = self._echoed_receipt_run(receipts, text)
         if run is None:
-            if self._result_origin_kind(message) != "human":
+            if origin != "human":
                 return []
             # Only Avibe writes human input to this process, so a human echo
             # that matches nothing still proves Claude consumed the queued

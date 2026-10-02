@@ -1616,7 +1616,13 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             # replays them as one newline-joined user message.
             ("coalesced", "first steer\nsecond steer", None, True),
             ("unrecognized human", "first steer, rewritten", {"kind": "human"}, True),
-            ("injected notification", "<task-notification>", {"kind": "task-notification"}, False),
+            # Same text as the queued run, but an injected turn is not Avibe input.
+            (
+                "injected notification",
+                "first steer\nsecond steer",
+                {"kind": "task-notification"},
+                False,
+            ),
         )
         for name, echo, origin, settles in cases:
             with self.subTest(name):
