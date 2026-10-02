@@ -467,6 +467,7 @@ def test_cached_catalog_read_does_not_wait_on_a_foreground_fetch(monkeypatch, tm
     assert read == [_catalog()]
 
 
+@pytest.mark.real_catalog_refresh
 def test_first_catalog_read_reports_one_fetch_in_flight_until_it_fails(monkeypatch, tmp_path):
     """MH-PRICE-014: With no cached copy, readers start one fetch and say one is coming; after a failure they do not."""
 
@@ -491,9 +492,16 @@ def test_first_catalog_read_reports_one_fetch_in_flight_until_it_fails(monkeypat
         reader.join(timeout=5)
     assert models_dev_catalog.load_models_dev_catalog_with_date() == ({}, None, True)
     release.set()
-    for thread in threading.enumerate():
-        if thread.name == "models-dev-refresh":
-            thread.join(timeout=5)
+
+    def join_refreshes():
+        for thread in threading.enumerate():
+            if thread.name == "models-dev-refresh":
+                thread.join(timeout=5)
+
+    join_refreshes()
     assert fetches == ["models-dev-refresh"]
     # The fetch failed: the next read retries it, but no longer promises prices.
     assert models_dev_catalog.load_models_dev_catalog_with_date() == ({}, None, False)
+    # That retry runs on its own thread: it must finish while this test's fetch
+    # and cache path are still patched, not after teardown restores the real ones.
+    join_refreshes()
