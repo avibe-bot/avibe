@@ -20,6 +20,7 @@ from aiohttp import web
 from packaging.version import Version
 
 from config import paths
+from config.v2_config import MODEL_HUB_BACKENDS
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from vibe.i18n import t as i18n_t
 
@@ -35,6 +36,7 @@ from .provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
     GatewayTurnTerminalizer,
+    HopOrigin,
     REQUEST_NONFALLBACK_TURN_OUTCOME,
     TurnOutcomeProjectionInput,
     TurnCorrelationRegistry,
@@ -503,7 +505,7 @@ class ModelHubTurnGateway:
         gateway_request_model_id: Optional[str] = None,
         request_scoped: bool = False,
     ) -> tuple[str, str]:
-        if backend not in {"claude", "codex", "opencode"}:
+        if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable", status=409)
         scope = str(process_scope or "").strip() or f"{backend}:untracked"
         token = self.correlation.credentials(
@@ -827,7 +829,7 @@ class ModelHubTurnGateway:
         resources: AsyncExitStack,
     ) -> web.StreamResponse:
         endpoint = request.match_info["endpoint"].strip("/")
-        if backend not in {"claude", "codex", "opencode"} or endpoint not in _SUPPORTED_PATHS:
+        if backend not in MODEL_HUB_BACKENDS or endpoint not in _SUPPORTED_PATHS:
             terminalizer.fail("protocol_error")
             return self._terminal_error_response(
                 execution,
@@ -907,6 +909,7 @@ class ModelHubTurnGateway:
             decision,
             stripped_reasoning_efforts: tuple[str, ...],
             declared_reasoning_efforts: tuple[str, ...],
+            origin: HopOrigin | None,
         ) -> None:
             if outcome is None or decision is None:
                 terminalizer.begin_attempt(
@@ -916,6 +919,7 @@ class ModelHubTurnGateway:
                     via_mapping=via_mapping,
                     stripped_reasoning_efforts=stripped_reasoning_efforts,
                     declared_reasoning_efforts=declared_reasoning_efforts,
+                    origin=origin,
                 )
                 return
             terminalizer.finish_attempt(
@@ -1029,7 +1033,7 @@ class ModelHubTurnGateway:
         writes to the response.
         """
 
-        if not stream or protocol != "anthropic":
+        if not stream or protocol != "anthropic" or request.match_info["backend"] == "avibe":
             yield
             return
         resolution_ended = asyncio.get_running_loop().create_future()
@@ -1093,10 +1097,16 @@ class ModelHubTurnGateway:
     ) -> web.StreamResponse:
         if resolved.supply_channel != "hub":
             return self._error_response(status=409, code="mode_switch_blocked")
+        # Resolution has crossed the engine's first-output barrier or already
+        # settled successfully: this request can no longer fail over. The same
+        # admitted origin is held by its provenance attempt.
+        origin_headers = resolved.origin.response_headers() if resolved.origin is not None else {}
         if resolved.outcome is not None:
             # A call that reached the resolver's own hands has already been
             # metered there; its body never becomes this gateway's to forward.
-            return self._outcome_response(resolved.outcome)
+            response = self._outcome_response(resolved.outcome)
+            response.headers.update(origin_headers)
+            return response
         handle = resolved.handle
         if handle is None or handle.stream is None:
             terminalizer.engine_down()
@@ -1134,7 +1144,10 @@ class ModelHubTurnGateway:
                                 body = await run_owned_in_thread(response_payload.read)
                                 response = web.Response(
                                     status=200, body=body, content_type="application/json",
-                                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+                                    headers={
+                                        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                                        **origin_headers,
+                                    },
                                 )
                             else:
                                 response = web.StreamResponse(
@@ -1142,6 +1155,7 @@ class ModelHubTurnGateway:
                                     headers={
                                         "Cache-Control": "no-store", "Content-Length": str(response_size),
                                         "Content-Type": "application/json", "X-Content-Type-Options": "nosniff",
+                                        **origin_headers,
                                     },
                                 )
                                 await self._downstream_io(response.prepare(request))
@@ -1188,7 +1202,7 @@ class ModelHubTurnGateway:
 
         response = execution.stream_response
         if response is None:
-            response = web.StreamResponse(status=200, headers=_SSE_RESPONSE_HEADERS)
+            response = web.StreamResponse(status=200, headers={**_SSE_RESPONSE_HEADERS, **origin_headers})
             await self._downstream_io(response.prepare(request))
         wire_state = ProtocolSSEState(protocol)
         execution.wire_state = wire_state

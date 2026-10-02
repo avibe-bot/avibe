@@ -1,7 +1,8 @@
 # Model Hub contracts
 
-Status: **contract_version 10**, 2026-09-06: sparse manual overrides, shared effective
-planning and guarded Restore/default membership. The approved routing contract is
+Status: **contract_version 11**, 2026-10-02: Avibe Agent Hub-only consumer, primary-hop
+resolution, and response origin linked to the served attempt. See
+[`avibe-consumer.md`](avibe-consumer.md). The approved routing contract is
 `../model-hub-routing-modes.md`, including the owner-approved Empty Route Inheritance
 correction `352486374`; API-key-only scope remains unchanged.
 
@@ -110,6 +111,9 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    Sources.
 8. Direct mode and a Native hop are distinct. Direct bypasses Gateway for the backend;
    Native is one configured hop inside Gateway mode.
+9. The `avibe` backend is Hub-only and never consumes a native CLI Source or launch
+   overlay. Its empty catalog added on upgrade changes no existing backend intent.
+   Response origin is captured at admission and shared with the recorded attempt.
 
 ### Takeover producer/consumer closure
 
@@ -175,7 +179,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 10 must coexist in all registered version locations on the same tested head:
+`contract_version` 11 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`
@@ -243,4 +247,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `opencode-overlay.md` | Stable OpenCode provider/model identifiers and effective-hop overlay behavior. |
 | `adapter-interface.py` | Adapter protocol, observation, credential, discovery, invocation, cleanup, and classification boundary. |
 | `mirror-registry.json` | Executable authority/mirror registry and terminal contract version. |
+| `avibe-consumer.md` | C-6 launch projection, capability authority, served-hop response headers, and delivery boundaries. |
+| `hop-resolution.schema.json` | Ephemeral in-process Avibe consumer result, including gateway-only credentials and nullable capabilities. |
+| `hop-origin.schema.json` | Non-secret response origin shared by the HTTP response header and provenance attempt. |
 | `README.md` | This ownership, version-closure, and contract-index document. |

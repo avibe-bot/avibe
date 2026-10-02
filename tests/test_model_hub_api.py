@@ -817,8 +817,8 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
         client, base_url = _remote_model_hub_client(isolated_home, role=role, kind=kind)
     service = _seed_response_conformance_service(tmp_path)
     if endpoint == "POST /api/models/runtime/stop":
-        for agent in service.store.config.agents.values():
-            agent.mode = "direct"
+        for backend in ("claude", "codex", "opencode"):
+            service.store.config.agents[backend].mode = "direct"
     admitted = access not in {"organization-editor", "organization-viewer"} or (
         access == "organization-editor"
         and endpoint == "GET /api/models/agents/<backend>/models"
@@ -1025,12 +1025,12 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     assert adapter.start_calls == 1
     assert store.config.enabled is True
     assert runtime["enabled"] is True
-    assert runtime["contract_version"] == 10
+    assert runtime["contract_version"] == 11
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 
-def test_runtime_stop_requires_every_backend_to_be_direct(tmp_path):
+def test_runtime_stop_requires_native_backends_to_be_direct(tmp_path):
     service, _store, adapter = _service(tmp_path)
 
     with pytest.raises(ModelHubError) as exc_info:
@@ -1042,11 +1042,27 @@ def test_runtime_stop_requires_every_backend_to_be_direct(tmp_path):
     assert adapter.stop_runtime_calls == 0
 
 
+def test_runtime_stop_protects_configured_avibe_models(tmp_path):
+    # The new empty Hub row must not strand old installations in the runtime,
+    # but adding a consumer model makes its engine dependency real.
+    service, store, adapter = _service(tmp_path)
+    for backend in ("claude", "codex", "opencode"):
+        store.config.agents[backend].mode = "direct"
+    store.config.agents["avibe"].models = [ModelHubBackendModelConfig(id="agent-model")]
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.runtime_stop())
+
+    assert exc_info.value.code == "runtime_in_use"
+    assert exc_info.value.data == {"backends": ["avibe"]}
+    assert adapter.stop_runtime_calls == 0
+
+
 def test_runtime_stop_returns_explicit_not_started_state(tmp_path):
     service, store, adapter = _service(tmp_path)
     store.config.enabled = True
-    for agent in store.config.agents.values():
-        agent.mode = "direct"
+    for backend in ("claude", "codex", "opencode"):
+        store.config.agents[backend].mode = "direct"
 
     runtime = asyncio.run(service.runtime_stop())
 
@@ -1124,8 +1140,8 @@ def test_runtime_recovery_does_not_wait_for_the_engine_download(tmp_path, ending
         if ending == "runtime_stop":
             # An explicit stop is served during the download, and the resume
             # then honors it instead of starting the engine.
-            for agent in store.config.agents.values():
-                agent.mode = "direct"
+            for backend in ("claude", "codex", "opencode"):
+                store.config.agents[backend].mode = "direct"
             payload = await asyncio.wait_for(service.runtime_stop(), 1)
             assert payload["enabled"] is False
             adapter.release.set()
@@ -1316,7 +1332,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 10, "status": {"health": "ok"}}
+        return {"contract_version": 11, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1333,7 +1349,7 @@ def test_runtime_stop_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 10, "status": {"health": "not_started"}}
+        return {"contract_version": 11, "status": {"health": "not_started"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1350,7 +1366,7 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 10, "status": {"health": "installing"}}
+        return {"contract_version": 11, "status": {"health": "installing"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1368,7 +1384,7 @@ def test_runtime_dependency_ensure_crosses_the_controller_rpc_boundary(monkeypat
     def rpc(operation, payload=None):
         calls.append((operation, payload))
         return {
-            "contract_version": 10,
+            "contract_version": 11,
             "changed": True,
             "status": {"health": "not_started", "verified": True},
         }
@@ -1505,8 +1521,8 @@ def test_runtime_stop_is_allowlisted_by_controller_rpc(tmp_path):
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
     service, store, adapter = _service(tmp_path)
-    for agent in store.config.agents.values():
-        agent.mode = "direct"
+    for backend in ("claude", "codex", "opencode"):
+        store.config.agents[backend].mode = "direct"
 
     runtime = asyncio.run(dispatch_model_hub_rpc(service, "runtime_stop", {}))
 
@@ -4466,6 +4482,7 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
         "claude": True,
         "codex": True,
         "opencode": False,
+        "avibe": False,
     }
 
 
@@ -4784,7 +4801,7 @@ def test_agent_models_route_returns_only_picker_catalog_fields(monkeypatch):
     assert response.status_code == 200
     assert response.get_json() == {
         "ok": True,
-        "contract_version": 10,
+        "contract_version": 11,
         "agent": {
             "backend": "codex",
             "mode": "hub",
@@ -4855,6 +4872,7 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
         "claude": [("pm", "claude-sonnet-4-6"), ("reviewer", "claude-opus-4-6")],
         "codex": [("codex", "gpt-5.3-codex")],
         "opencode": [],
+        "avibe": [],
     }[backend]
     store.config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
         hops=[
@@ -5323,8 +5341,8 @@ def test_runtime_start_recomputes_text_only_marks_from_the_current_catalog_copy(
     # The copy refreshes while the engine keeps its projection; a stop and a
     # start later, the model is known to accept images.
     _cache_models_dev({"deepseek": {_PROJECTION_MODEL: {"modalities": {"input": ["text", "image"]}}}})
-    for agent in store.config.agents.values():
-        agent.mode = "direct"
+    for backend in ("claude", "codex", "opencode"):
+        store.config.agents[backend].mode = "direct"
     asyncio.run(service.runtime_stop())
     asyncio.run(service.runtime_start())
 
@@ -9602,14 +9620,14 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 10
+    assert runtime["contract_version"] == 11
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 
 def test_runtime_stop_route_requires_csrf_before_stopping_engine(monkeypatch, tmp_path):
     service, store, adapter = _service(tmp_path)
-    for agent in store.config.agents.values():
-        agent.mode = "direct"
+    for backend in ("claude", "codex", "opencode"):
+        store.config.agents[backend].mode = "direct"
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"

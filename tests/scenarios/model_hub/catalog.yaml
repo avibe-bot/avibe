@@ -4,6 +4,7 @@ capability:
   name: Model Hub configured routes and turn outcomes
   canonical_tests:
     - tests/test_model_hub_api.py
+    - tests/test_model_hub_avibe_consumer.py
     - tests/test_model_hub_config.py
     - tests/test_model_hub_legacy_opencode_migration.py
     - tests/test_member_management_parity.py
@@ -110,6 +111,36 @@ status_legend:
     expected_fail: false
     priority: false
 scenarios:
+  - id: MH-AVIBE-001
+    name: Avibe resolves the primary native protocol and nullable alias capabilities without a CLI overlay
+    status: covered
+    kind: compatibility
+    layer: contract
+    test: tests/test_model_hub_avibe_consumer.py::test_hop_resolution_uses_primary_protocol_and_alias_capabilities
+  - id: MH-AVIBE-002
+    name: Avibe receives the actual served hop before consuming a cross-protocol fallback response
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_model_hub_avibe_consumer.py::test_failover_origin_is_available_before_body_and_matches_served_attempt
+    related_tests:
+      - tests/test_model_hub_avibe_consumer.py::test_slow_anthropic_resolution_waits_to_publish_origin_and_keeps_source_snapshot
+      - tests/test_model_hub_avibe_consumer.py::test_concurrent_responses_keep_their_own_origin
+  - id: MH-AVIBE-003
+    name: Released three-backend configs gain only an empty Avibe Hub row without changing existing routes
+    status: covered
+    kind: compatibility
+    layer: contract
+    test: tests/test_model_hub_avibe_consumer.py::test_released_config_adds_only_empty_avibe_supply
+  - id: MH-AVIBE-004
+    name: Avibe refuses native CLI sources and Direct mode
+    status: covered
+    kind: validation
+    layer: contract
+    test: tests/test_model_hub_avibe_consumer.py::test_native_cli_and_direct_are_not_avibe_channels
+    related_tests:
+      - tests/test_model_hub_api.py::test_runtime_stop_protects_configured_avibe_models
+      - tests/test_model_hub_api.py::test_runtime_stop_returns_explicit_not_started_state
   - id: MH-CODEX-ROUTING-001
     name: Shared Codex authentication stays stable while concurrent aliases route and settle independently
     status: covered

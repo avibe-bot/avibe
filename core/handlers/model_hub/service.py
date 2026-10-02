@@ -134,6 +134,7 @@ from .provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
     ExactHopBlocker,
+    HopOrigin,
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
     no_candidate_decision,
@@ -169,7 +170,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 10
+CONTRACT_VERSION = 11
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -271,8 +272,8 @@ _MODELS_DEV_CANDIDATE_FIELDS = (
 )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 10
-PROBE_RESULT_CONTRACT_VERSION = 10
+AGENT_CHAIN_CONTRACT_VERSION = 11
+PROBE_RESULT_CONTRACT_VERSION = 11
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 _REORDER_ORDER_UNSET = object()
@@ -625,6 +626,7 @@ class ResolvedInvocation:
     credential_ref: Optional[str] = None
     settlement_generation: Optional[int] = None
     verification_pending: Optional[str] = None
+    origin: HopOrigin | None = None
 
 
 @dataclass(frozen=True)
@@ -647,6 +649,7 @@ AttemptObserver = Callable[
         Optional[ResolutionDecision],
         tuple[str, ...],
         tuple[str, ...],
+        Optional[HopOrigin],
     ],
     None,
 ]
@@ -918,7 +921,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 10,
+        "contract_version": 11,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -4965,7 +4968,7 @@ class ModelHubService:
         live_recovery = self.recovery.annotations(config)
         return [
             self._agent_payload(config, config.agents[backend], live_recovery=live_recovery)
-            for backend in ("claude", "codex", "opencode")
+            for backend in MODEL_HUB_BACKENDS
         ]
 
     def refresh_cli_presence(
@@ -4982,6 +4985,8 @@ class ModelHubService:
             logger.warning("Model Hub CLI presence refresh failed", exc_info=True)
 
     def _cli_present(self, backend: BackendName) -> bool:
+        if backend == "avibe":
+            return False
         if self.cli_present_override is None:
             return False
         try:
@@ -5071,7 +5076,7 @@ class ModelHubService:
             )
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
-        if mode not in {"hub", "direct"}:
+        if mode not in {"hub", "direct"} or (backend == "avibe" and mode != "hub"):
             raise ModelHubError("mode_switch_blocked")
         from core.backend_restart import NativeMigrationBlockedError
 
@@ -7201,6 +7206,7 @@ class ModelHubService:
                     backend
                     for backend, agent in previous.agents.items()
                     if agent.mode == "hub"
+                    and (backend != "avibe" or agent.models)
                 )
                 if hub_backends:
                     raise ModelHubError(
@@ -8011,6 +8017,7 @@ class ModelHubService:
                 decision,
                 (),
                 (),
+                HopOrigin(source.vendor, source.protocol, source_model_id) if backend == "avibe" else None,
             )
         if decision.action == "fallback" or (
             decision.action == "surface"
@@ -8141,7 +8148,7 @@ class ModelHubService:
         attempt_observer: Optional[AttemptObserver] = None,
         recovery_request: RecoveryRequest | None = None,
     ) -> ResolvedInvocation:
-        if backend not in {"claude", "codex", "opencode"}:
+        if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
         engine_prepared = False
         if self.revocations.list():
@@ -8208,6 +8215,7 @@ class ModelHubService:
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
             verification_pending = source.verification_pending
+            origin = HopOrigin(source.vendor, source.protocol, target_model) if backend == "avibe" else None
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
@@ -8247,6 +8255,7 @@ class ModelHubService:
                         None,
                         (),
                         (),
+                        origin,
                     )
 
             try:
@@ -8289,6 +8298,7 @@ class ModelHubService:
                     credential_ref=source.credential_ref,
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
+                    origin=origin,
                 )
             decision = await self._classify_source_outcome(source, outcome)
             if cancelled is not None:
@@ -8323,7 +8333,7 @@ class ModelHubService:
                     )
                 except _InvocationPlanChanged:
                     if attempt_observer is not None:
-                        attempt_observer(source.id, target_model, "hub", False, outcome, decision, (), ())
+                        attempt_observer(source.id, target_model, "hub", False, outcome, decision, (), (), origin)
                     continue
                 except _RecoveryWindowClosed:
                     window_closed = not non_retryable_failure
@@ -8350,6 +8360,7 @@ class ModelHubService:
                         credential_ref=source.credential_ref,
                         settlement_generation=settlement_generation,
                         verification_pending=verification_pending,
+                        origin=origin,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
                 if cancelled is not None:
@@ -8374,6 +8385,7 @@ class ModelHubService:
                     decision,
                     (),
                     (),
+                    origin,
                 )
             if decision.action == "return":
                 if self._verified_recovery_outcome(outcome):
@@ -8402,6 +8414,7 @@ class ModelHubService:
                     credential_ref=source.credential_ref,
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
+                    origin=origin,
                 )
             if decision.action == "surface":
                 self.recovery.release(source.id, settlement_generation)

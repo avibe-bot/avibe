@@ -10,7 +10,7 @@
     "id": { "type": "string" },
     "ts": { "type": "string", "format": "date-time" },
     "agent": {
-      "enum": ["claude", "codex", "opencode", "system"],
+      "enum": ["claude", "codex", "opencode", "avibe", "system"],
       "description": "The discovering backend, or system for a source-scoped non-turn operation. system is never valid for backend-scoped supply_interrupted. Mirrors the backend vocabulary with the one declared extra system."
     },
     "kind": {
@@ -84,7 +84,7 @@
       "then": {
         "required": ["agent", "model_id", "severity"],
         "properties": {
-          "agent": { "enum": ["claude", "codex", "opencode"] },
+          "agent": { "enum": ["claude", "codex", "opencode", "avibe"] },
           "model_id": { "type": "string" },
           "severity": { "const": "action_required" },
           "from_source": { "type": "null" },

@@ -2076,7 +2076,8 @@
       "backends": {
         "claude": "Claude Code",
         "codex": "Codex",
-        "opencode": "OpenCode"
+        "opencode": "OpenCode",
+        "avibe": "Avibe Agent"
       },
       "sourceTest": {
         "open": "测试",

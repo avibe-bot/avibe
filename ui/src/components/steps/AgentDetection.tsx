@@ -63,6 +63,10 @@ type AgentState = {
   status?: 'unknown' | 'ok' | 'missing';
 };
 
+type NativeRouteChainSelection = RouteChainSelection & {
+  agent: AgentSupply & { backend: RuntimeBackendId };
+};
+
 /**
  * The verdict of the latest settled enable write, and the intent that earned it.
  *
@@ -137,7 +141,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     setInstallResults((prev) => (prev[name] ? { ...prev, [name]: undefined } : prev));
   // Which backend's "Configure provider" modal is open (wizard mode only).
   const [providerModal, setProviderModal] = useState<{ backend: RuntimeBackendId; method: 'oauth' | 'api_key' } | null>(null);
-  const [routeSelection, setRouteSelection] = useState<RouteChainSelection | null>(null);
+  const [routeSelection, setRouteSelection] = useState<NativeRouteChainSelection | null>(null);
   const committedRouteRefresh = useRef(false);
   const canEditSetupRoute = Boolean(onNavigate && agentReads);
   const [routeRead, setRouteRead] = useState<{
@@ -920,7 +924,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           const hubRoute = mode === 'hub';
           const openRoute = () => {
             if (mode !== 'hub' || !routeTargetReady(name)) return;
-            const supply = routeRead.supplies.find((row) => row.backend === name);
+            const supply = routeRead.supplies.find(
+              (row): row is NativeRouteChainSelection['agent'] => row.backend === name,
+            );
             const modelId = routeRead.models[name];
             if (supply?.mode === 'hub' && modelId) {
               setRouteSelection({ agent: supply, modelId,

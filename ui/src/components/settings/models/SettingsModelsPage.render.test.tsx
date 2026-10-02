@@ -44,7 +44,7 @@ const manifest = {
 } satisfies RuntimeManifest;
 
 const runtime: RuntimeDependency = {
-  contract_version: 10,
+  contract_version: 11,
   manifest,
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
@@ -115,7 +115,7 @@ const takeoverAgent: AgentSupply = {
 };
 
 const takeoverChain: AgentChain = { manual_override: {hops:[{source_id:'src_head',model_id:'gpt-5.6-sol'},{source_id:'src_relay',model_id:'gpt-5.6-sol'}]}, route_origin: "manual" as const,
-  contract_version: 10,
+  contract_version: 11,
   backend: 'codex',
   model_id: 'gpt-5.6-sol',
   current: { source_id: 'src_relay', model_id: 'gpt-5.6-sol' },
@@ -218,7 +218,7 @@ const routedHubAgent: AgentSupply = {
 const routedChain: AgentChain = {
   manual_override: { hops: [{ source_id: retainedSource.id, model_id: routedModelId }] },
   route_origin: 'manual' as const,
-  contract_version: 10,
+  contract_version: 11,
   backend: 'claude',
   model_id: routedModelId,
   current: { source_id: retainedSource.id, model_id: routedModelId },

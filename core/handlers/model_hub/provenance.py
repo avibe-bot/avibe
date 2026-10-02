@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
-from config.v2_config import ModelHubConfig
+from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig
 from core.os_errors import format_os_errno
 
 from core.run_settlement import (
@@ -36,15 +36,32 @@ from .events import (
     SOURCE_DETAIL_EVENT_REASONS,
     event_reason_label,
 )
-from .resolver import ModelHubTurnResolution, parse_model_hub_timestamp, source_eligible_for_backend
+from .resolver import BackendName, ModelHubTurnResolution, parse_model_hub_timestamp, source_eligible_for_backend
 from .state_file import write_state_document
 
 
-BackendName = Literal["claude", "codex", "opencode"]
 SupplyChannel = Literal["native_cli", "hub"]
 SupplyState = Literal["waiting", "interrupted"]
 ScopeKey = tuple[BackendName, str]
 logger = logging.getLogger(__name__)
+
+SERVED_HOP_HEADER = "x-avibe-served-hop"
+
+
+@dataclass(frozen=True)
+class HopOrigin:
+    """Source identity captured at admission, before mutable config can change."""
+
+    provider: str
+    api: str
+    model: str
+
+    def payload(self) -> dict[str, str]:
+        return {"provider": self.provider, "api": self.api, "model": self.model}
+
+    def response_headers(self) -> dict[str, str]:
+        # JSON escapes keep arbitrary Unicode model ids safe in HTTP headers.
+        return {SERVED_HOP_HEADER: json.dumps(self.payload(), ensure_ascii=True, separators=(",", ":"))}
 
 
 @dataclass(frozen=True)
@@ -54,6 +71,7 @@ class AttemptIdentity:
     channel: SupplyChannel
     stripped_reasoning_efforts: tuple[str, ...] = ()
     declared_reasoning_efforts: tuple[str, ...] = ()
+    origin: HopOrigin | None = None
 
     def payload(self) -> dict:
         payload = {
@@ -68,6 +86,8 @@ class AttemptIdentity:
             payload["declared_reasoning_efforts"] = list(
                 self.declared_reasoning_efforts
             )
+        if self.origin is not None:
+            payload["origin"] = self.origin.payload()
         return payload
 
 
@@ -756,6 +776,7 @@ class GatewayTurnTerminalizer:
         via_mapping: bool,
         stripped_reasoning_efforts: tuple[str, ...] = (),
         declared_reasoning_efforts: tuple[str, ...] = (),
+        origin: HopOrigin | None = None,
     ) -> None:
         self._attempt_started = True
         self._registry.begin_attempt(
@@ -766,6 +787,7 @@ class GatewayTurnTerminalizer:
             via_mapping=via_mapping,
             stripped_reasoning_efforts=stripped_reasoning_efforts,
             declared_reasoning_efforts=declared_reasoning_efforts,
+            origin=origin,
             request_id=self._request_id,
         )
 
@@ -1000,7 +1022,7 @@ class TurnCorrelationRegistry:
 
     @staticmethod
     def _scope_key(backend: str, process_scope: str) -> ScopeKey:
-        if backend not in {"claude", "codex", "opencode"}:
+        if backend not in MODEL_HUB_BACKENDS:
             raise ValueError("unsupported backend")
         normalized = str(process_scope or "").strip()
         if not normalized:
@@ -1974,6 +1996,7 @@ class TurnCorrelationRegistry:
         stripped_reasoning_efforts: tuple[str, ...] = (),
         declared_reasoning_efforts: tuple[str, ...] = (),
         request_id: str = TURN_REQUEST,
+        origin: HopOrigin | None = None,
     ) -> None:
         if turn_id is None:
             return
@@ -1992,6 +2015,7 @@ class TurnCorrelationRegistry:
                 channel=channel,
                 stripped_reasoning_efforts=stripped_reasoning_efforts,
                 declared_reasoning_efforts=declared_reasoning_efforts,
+                origin=origin,
             )
 
     def fail_native_attempt(
@@ -2236,7 +2260,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 10,
+                    "contract_version": 11,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,
