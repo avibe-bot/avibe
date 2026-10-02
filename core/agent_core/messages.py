@@ -8,6 +8,7 @@ rows, so the field names here are a shipped surface.
 
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Union
@@ -107,6 +108,8 @@ class ToolCallBlock:
         _require(self.name, str, "tool name")
         _require(self.arguments, dict, "arguments")
         require_json_value(self.arguments, "arguments")
+        # Detach from the caller's object so later mutation of the input cannot reach this block.
+        object.__setattr__(self, "arguments", copy.deepcopy(self.arguments))
         _require(self.native_id, str, "native_id", optional=True)
         _require(self.signature, str, "signature", optional=True)
         if not self.id or not self.name:
@@ -306,7 +309,9 @@ def _block_to_dict(block: Any) -> dict[str, Any]:
             out["redacted"] = True
         return out
     if isinstance(block, ToolCallBlock):
-        out = {"type": "tool_call", "id": block.id, "name": block.name, "arguments": dict(block.arguments)}
+        # Arguments are a mutable dict on a frozen block; check again at the write boundary.
+        require_json_value(block.arguments, "arguments")
+        out = {"type": "tool_call", "id": block.id, "name": block.name, "arguments": copy.deepcopy(block.arguments)}
         _put(out, "native_id", block.native_id)
         _put(out, "signature", block.signature)
         return out

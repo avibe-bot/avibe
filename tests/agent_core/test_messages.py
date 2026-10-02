@@ -157,3 +157,16 @@ def test_construction_refuses_what_the_reader_would_refuse(build):
     with pytest.raises(ValueError):
         build()
 
+
+def test_tool_arguments_cannot_become_invalid_after_construction():
+    source = {"items": [1, 2]}
+    block = ToolCallBlock(id="c", name="bash", arguments=source)
+    source["items"].append((3, 4))  # the caller's object no longer reaches the block
+    message = AssistantMessage(
+        content=(block,), origin=Origin(provider="anthropic", api="anthropic", model="m"), stop_reason="tool_use"
+    )
+    assert message_to_dict(message)["content"][0]["arguments"] == {"items": [1, 2]}
+    block.arguments["late"] = b"raw"  # a consumer mutating the block itself is refused at the writer
+    with pytest.raises(ValueError):
+        message_to_dict(message)
+
