@@ -899,6 +899,36 @@ def test_vibe_stop_ends_a_foreground_job_that_no_watch_owns(tmp_path: Path, monk
     assert host.stop_reason(job_id) == "vibe_stop"
 
 
+def _corrupt_state_database() -> None:
+    db = paths.get_sqlite_state_path()
+    for suffix in ("-wal", "-shm"):
+        Path(f"{db}{suffix}").unlink(missing_ok=True)
+    db.write_bytes(b"not a database" * 64)
+
+
+def _drop_definitions_table() -> None:
+    _sql("DROP TABLE run_definitions")
+
+
+@pytest.mark.parametrize("break_store", [_corrupt_state_database, _drop_definitions_table], ids=["corrupt-db", "no-table"])
+def test_vibe_stop_ends_foreground_jobs_even_when_the_watch_store_cannot_be_read(
+    tmp_path: Path, monkeypatch, break_store
+) -> None:
+    host = LocalJobHost(str(watches_module.agent_jobs_dir()))
+    job_id = asyncio.run(_start_job(host, tmp_path, "sleep 60"))
+    break_store()
+    monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
+    monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: False)
+    monkeypatch.setattr(cli.runtime, "stop_ui", lambda **kwargs: False)
+    monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
+    monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: None)
+
+    assert cli.cmd_stop() == 0
+
+    assert host.status(job_id).state == "gone"
+    assert host.stop_reason(job_id) == "vibe_stop"
+
+
 def test_vibe_stop_leaves_the_jobs_of_a_service_that_holds_the_lock(tmp_path: Path, monkeypatch) -> None:
     async def hand_over() -> tuple[LocalJobHost, str]:
         store = ManagedWatchStore()

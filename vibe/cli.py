@@ -14039,7 +14039,7 @@ def _stop_jobs() -> None:
     try:
         from core.watches import stop_all_jobs
 
-        stop_all_jobs(ManagedWatchStore() if paths.get_sqlite_state_path().exists() else None)
+        stop_all_jobs()
     except Exception:
         logger.warning("Could not stop the commands jobs run", exc_info=True)
 

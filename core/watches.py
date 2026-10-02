@@ -3363,11 +3363,21 @@ def stop_all_jobs(store: Optional[ManagedWatchStore] = None, *, jobs_dir: Option
     ``vibe stop``, and reports that once; jobs of Watches that no longer own them are
     settled as the service would. Then every job still running in the jobs directory
     is killed the same way, a foreground ``bash`` call's included. Restarts and
-    upgrades never come here, so their jobs keep running. ``store`` is ``None`` when
-    there is no state database, so no Watch can own a job.
+    upgrades never come here, so their jobs keep running.
+
+    ``store`` defaults to the state database's, when there is one. The Watch half and
+    the directory half are independent: Watch rows that cannot be read, or a row
+    that cannot be settled, never keep the directory's jobs running.
     """
 
-    rows = store.list_job_watch_targets() if store is not None else []
+    rows: list[dict[str, Any]] = []
+    try:
+        if store is None and paths.get_sqlite_state_path().exists():
+            store = ManagedWatchStore()
+        if store is not None:
+            rows = store.list_job_watch_targets()
+    except Exception:
+        logger.warning("vibe stop could not read job Watches; it still stops every job in the jobs directory", exc_info=True)
     directories = {os.path.realpath(str(jobs_dir or agent_jobs_dir()))}
     for row in rows:
         state_dir = str(row["target"].get("state_dir") or "")
@@ -3376,10 +3386,13 @@ def stop_all_jobs(store: Optional[ManagedWatchStore] = None, *, jobs_dir: Option
 
     async def _stop_all() -> None:
         for row in rows:
-            owned = _job_still_owned(row)
-            reason = JOB_STOP_VIBE_STOP if owned else _unowned_job_stop_reason(row)
-            if await _stop_job(row["target"], reason) and not owned:
-                store.release_job_watch(row["id"], released_at=_utc_now_iso())
+            try:
+                owned = _job_still_owned(row)
+                reason = JOB_STOP_VIBE_STOP if owned else _unowned_job_stop_reason(row)
+                if await _stop_job(row["target"], reason) and not owned:
+                    store.release_job_watch(row["id"], released_at=_utc_now_iso())
+            except Exception:
+                logger.warning("vibe stop could not settle job Watch %s", row["id"], exc_info=True)
         for directory in sorted(directories):
             await _kill_every_job(directory, JOB_STOP_VIBE_STOP)
 
