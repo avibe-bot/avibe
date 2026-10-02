@@ -248,7 +248,7 @@ async def test_a_cancelled_write_lands_before_the_next_writer_takes_the_lock(
     assert (tmp_path / "f.txt").read_text() == "second\n"
 
 
-@pytest.mark.parametrize("change", ["replaced", "retargeted", "rewritten"])
+@pytest.mark.parametrize("change", ["replaced", "retargeted", "rewritten", "rewritten-same-size-same-mtime"])
 async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, monkeypatch, change):
     """Another writer (bash, an editor) changed the file after edit read it: nothing is written over it."""
     (tmp_path / "d").mkdir()
@@ -266,8 +266,13 @@ async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, 
         elif change == "retargeted":
             link.unlink()
             link.symlink_to(other)
-        else:
+        elif change == "rewritten":
             real.write_text("unrelated text\n")
+        else:
+            # Same size, in place, mtime put back (as rsync -t or tar do): only ctime still shows it.
+            before = os.stat(real)
+            real.write_text("ALPHA\n")
+            os.utime(real, ns=(before.st_atime_ns, before.st_mtime_ns))
         return planned
 
     monkeypatch.setattr(edit_module, "_plan_edits", plan_then_change)
@@ -277,7 +282,10 @@ async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, 
         True,
         "Could not edit file: d/f.txt. It changed while the edit was being applied; read it again.",
     )
-    expected = {"retargeted": ("alpha\n", "other\n")}.get(change, ("unrelated text\n", "other\n"))
+    expected = {
+        "retargeted": ("alpha\n", "other\n"),
+        "rewritten-same-size-same-mtime": ("ALPHA\n", "other\n"),
+    }.get(change, ("unrelated text\n", "other\n"))
     assert (real.read_text(), other.read_text()) == expected
 
 
@@ -328,6 +336,31 @@ async def test_a_name_at_the_length_limit_can_be_replaced(tmp_path, make_ctx, to
     assert (tmp_path / name).read_text() == "new\n"
 
 
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_a_path_retargeted_during_the_write_is_not_written(tmp_path, make_ctx, monkeypatch, tool):
+    """The path names another file by the time of the rename: the old target is not written behind its back."""
+    (tmp_path / "a.txt").write_text("alpha\n")
+    (tmp_path / "b.txt").write_text("beta\n")
+    (tmp_path / "f.txt").symlink_to(tmp_path / "a.txt")
+    real_fsync = write_module.os.fsync
+
+    def fsync_then_retarget(fd):
+        real_fsync(fd)
+        (tmp_path / "f.txt").unlink()
+        (tmp_path / "f.txt").symlink_to(tmp_path / "b.txt")
+
+    monkeypatch.setattr(write_module.os, "fsync", fsync_then_retarget)
+    if tool == "write":
+        result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
+        expected = "Cannot write f.txt: it changed while it was being written; write it again."
+    else:
+        result = await _edit(make_ctx, "f.txt", {"oldText": "alpha", "newText": "new"})
+        expected = "Could not edit file: f.txt. It changed while the edit was being applied; read it again."
+
+    assert (result.is_error, result_text(result)) == (True, expected)
+    assert ((tmp_path / "a.txt").read_text(), (tmp_path / "b.txt").read_text()) == ("alpha\n", "beta\n")
+
+
 async def test_new_files_keep_the_umask_default(tmp_path, make_ctx):
     umask = os.umask(0)
     os.umask(umask)
@@ -349,11 +382,11 @@ async def test_write_and_edit_sanitize_model_text_the_same_way(tmp_path, make_ct
 async def test_the_display_diff_is_bounded_by_lines_not_only_bytes(tmp_path, make_ctx):
     """Repetitive lines made difflib quadratic (Codex measured over 22 s); the changed middle is all it sees."""
     (tmp_path / "rep.txt").write_text("x\n" * 5000 + "target\n" + "x\n" * 5000)
-    started = time.monotonic()
+    started = time.process_time()
 
     result = await _edit(make_ctx, "rep.txt", {"oldText": "target", "newText": "changed"})
 
-    assert time.monotonic() - started < 2.0
+    assert time.process_time() - started < 2.0
     assert not result.is_error, result_text(result)
     # Pi pads line numbers to the widest one (five digits here).
     assert "- 5001 target\n+ 5001 changed" in result.details["diff"]
@@ -427,12 +460,13 @@ async def test_the_display_diff_and_patch_are_pis(tmp_path, make_ctx, original, 
     ids=["whitespace-run", "replace-all"],
 )
 async def test_edit_work_stays_linear_on_adversarial_files(tmp_path, make_ctx, content, edit):
+    """CPU time, which a quadratic match would take seconds of; disk waits do not count."""
     (tmp_path / "f.txt").write_text(content)
-    started = time.monotonic()
+    started = time.process_time()
 
     await _edit(make_ctx, "f.txt", edit)
 
-    assert time.monotonic() - started < 1.0
+    assert time.process_time() - started < 1.0
 
 
 @pytest.mark.parametrize(
@@ -446,8 +480,10 @@ async def test_edit_work_stays_linear_on_adversarial_files(tmp_path, make_ctx, c
         ("x" * 1_000_000, {"oldText": "x", "newText": "y", "replaceAll": True}, True),
         # A result of three million lines, within the byte limit: its view is built without per-line state.
         ("t," * 10, {"oldText": "t", "newText": "\n" * 300_000, "replaceAll": True}, False),
+        # oldText with more lines than the file cannot match, and is never normalized line by line.
+        ("zz\n", {"oldText": "ab\n" * 1_000_000, "newText": "y"}, True),
     ],
-    ids=["duplicate", "many-lines", "many-occurrences", "many-result-lines"],
+    ids=["duplicate", "many-lines", "many-occurrences", "many-result-lines", "long-old-text"],
 )
 async def test_edit_memory_is_bounded_by_its_budgets_not_by_the_file(tmp_path, make_ctx, content, edit, is_error):
     """Python objects per line or per match cost hundreds of bytes each, in the process every Session shares."""
@@ -461,6 +497,54 @@ async def test_edit_memory_is_bounded_by_its_budgets_not_by_the_file(tmp_path, m
 
     assert result.is_error == is_error, result_text(result)
     assert peak < 32 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["\ufdfa" * 1_100_000 + "\n", "".join("\ufdfa" * 1000 + "\n" for _ in range(1100))],
+    ids=["one-long-line", "many-lines"],
+)
+async def test_nfkc_expansion_has_a_budget_and_says_so(tmp_path, make_ctx, content):
+    """NFKC can make one character eighteen (U+FDFA): loose matching stops at a budget and says why."""
+    (tmp_path / "f.txt").write_text(content + "\u2019marker\u2019\n")
+    tracemalloc.start()
+    started = time.process_time()
+    try:
+        result = await _edit(make_ctx, "f.txt", {"oldText": "'marker'", "newText": "x"})
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert (result.is_error, result_text(result)) == (
+        True,
+        "Could not find the exact text in f.txt. The old text must match exactly including all whitespace and "
+        "newlines: the file is too large to match it loosely after Unicode normalization.",
+    )
+    assert peak < 48 * 1024 * 1024
+    assert time.process_time() - started < 3.0
+
+
+async def test_a_large_file_with_a_few_compatibility_characters_still_matches_loosely(tmp_path, make_ctx):
+    """An ellipsis (NFKC "...") in a 2 MiB file costs a few characters of growth, not the fuzzy tier."""
+    body = "".join(f"line {i} \u2026 text\n" for i in range(110_000))  # about 2 MiB, not in NFKC
+    (tmp_path / "f.txt").write_text(body + "say \u2018marker\u2019\n")
+
+    result = await _edit(make_ctx, "f.txt", {"oldText": "say 'marker'", "newText": "said"})
+
+    assert not result.is_error, result_text(result)
+    assert (tmp_path / "f.txt").read_text().endswith("\u2026 text\nsaid\n")
+
+
+async def test_a_long_minified_line_still_matches_loosely(tmp_path, make_ctx):
+    """A 200 KiB line is normalized in pieces split before ASCII characters, which NFKC never composes with."""
+    line = "x=1;" * 50_000 + "\u2026 say \u2018marker\u2019"
+    (tmp_path / "f.min.js").write_text(line + "\n")
+
+    result = await _edit(make_ctx, "f.min.js", {"oldText": "say 'marker'", "newText": "said"})
+
+    assert not result.is_error, result_text(result)
+    # A normalized match rewrites its whole line from the normalized view (ledger 13), so "…" became "...".
+    assert (tmp_path / "f.min.js").read_text() == "x=1;" * 50_000 + "... said\n"
 
 
 async def test_edit_refuses_files_with_more_lines_than_it_plans(tmp_path, make_ctx, monkeypatch):
@@ -488,8 +572,12 @@ async def test_edit_refuses_files_with_more_lines_than_it_plans(tmp_path, make_c
             "Use bash (for example sed or a short script) to replace this many.",
         ),
         (
-            [{"oldText": "zz", "newText": "q"}, {"oldText": "a", "newText": "b", "replaceAll": True}],
-            "Found 11 occurrences of edits[1] in f.txt, over the 10 replaceAll limit. "
+            # The budget is for the whole call: 11 + 10 replacements by two edits, each under it alone.
+            [
+                {"oldText": "a", "newText": "b", "replaceAll": True},
+                {"oldText": "c", "newText": "d", "replaceAll": True},
+            ],
+            "The edits make 21 replacements in f.txt, over the 19 replacement limit. "
             "Use bash (for example sed or a short script) to replace this many.",
         ),
         (
@@ -499,17 +587,48 @@ async def test_edit_refuses_files_with_more_lines_than_it_plans(tmp_path, make_c
             "Use bash (for example sed or a short script) to change files this large.",
         ),
     ],
-    ids=["single", "batch", "inserted-text"],
+    ids=["single", "batch-total", "inserted-text"],
 )
 async def test_replace_all_has_a_budget(tmp_path, make_ctx, monkeypatch, edits, message):
     monkeypatch.setattr(edit_module, "MAX_EDIT_BYTES", 1000)
-    monkeypatch.setattr(edit_diff_module, "MAX_REPLACEMENTS", 10)
+    monkeypatch.setattr(edit_diff_module, "MAX_REPLACEMENTS", 10 if len(edits) == 1 else 19)
     (tmp_path / "f.txt").write_text("a," * 11 + "zz\n" + "c," * 10 + "\n")
 
     result = await _edit(make_ctx, "f.txt", *edits)
 
     assert (result.is_error, result_text(result)) == (True, message)
     assert (tmp_path / "f.txt").read_text() == "a," * 11 + "zz\n" + "c," * 10 + "\n"
+
+
+async def test_edit_work_has_a_budget_over_all_edits(tmp_path, make_ctx, monkeypatch):
+    """Each edit scans the whole file, holding the GIL every Session shares: edits × size is bounded."""
+    monkeypatch.setattr(edit_diff_module, "MAX_EDIT_SCAN_CHARS", 1000)
+    (tmp_path / "f.txt").write_text("".join(f"line {i}\n" for i in range(100)))  # 790 characters
+    edits = [{"oldText": f"line {i}\n", "newText": f"LINE {i}\n"} for i in range(2)]
+
+    one = await _edit(make_ctx, "f.txt", edits[0])
+    two = await _edit(make_ctx, "f.txt", *edits)
+
+    assert not one.is_error, result_text(one)
+    assert (two.is_error, result_text(two)) == (
+        True,
+        "2 edits over f.txt (790 characters) are over the edit work limit. Split them into several edit calls, "
+        "or use bash (for example sed or a short script).",
+    )
+
+
+async def test_the_display_diff_never_splits_a_result_with_too_many_lines(tmp_path, make_ctx):
+    """A result under the diff byte gate can still have a million lines; their count is checked first."""
+    (tmp_path / "f.txt").write_text("t\n" + "x\n" * 100)
+    tracemalloc.start()
+    try:
+        result = await _edit(make_ctx, "f.txt", {"oldText": "t", "newText": "ab\n" * 300_000})
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert result.details == {"diff_skipped": True}
+    assert peak < 8 * 1024 * 1024
 
 
 async def test_a_large_changed_middle_skips_the_display_diff(tmp_path, make_ctx):

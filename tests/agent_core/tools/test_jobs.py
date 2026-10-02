@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 import time
+from datetime import datetime, timezone
 
 import psutil
 import pytest
@@ -55,6 +56,12 @@ def _wrapper_gone(job_dir):
         return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
     except psutil.NoSuchProcess:
         return True
+
+
+def _pid_written(path, timeout_s=10.0):
+    """The pid a command wrote to ``path``: waits until it is written, not only created (``echo $$ >``)."""
+    assert _wait_until(lambda: path.exists() and path.read_text().strip(), timeout_s=timeout_s)
+    return int(path.read_text())
 
 
 def _gone(pid):
@@ -215,16 +222,17 @@ async def test_the_wrapper_enforces_the_deadline_while_no_host_runs(tmp_path):
     """J3: the host crashed right after the start; the deadline still ends the tree and is recorded."""
     host = LocalJobHost(str(tmp_path / "jobs"))
     job_id = await _start(host, tmp_path, f"echo $$ > {tmp_path / 'sh.pid'}; sleep 30 & sleep 30", timeout_s=0.5)
-    shell_pid = None
-    assert _wait_until(lambda: (tmp_path / "sh.pid").exists())
-    shell_pid = int((tmp_path / "sh.pid").read_text())
     del host  # nobody waits on the job from here on
 
-    assert _wait_until(lambda: _wrapper_gone(str(tmp_path / "jobs" / job_id)), timeout_s=6)
+    # Either the shell ran and the deadline stopped its tree, or (on a slow launch) the deadline passed
+    # first and the command never started: the wrapper owns both, and records the timeout either way.
+    assert _wait_until(lambda: _wrapper_gone(str(tmp_path / "jobs" / job_id)), timeout_s=10)
     restarted = LocalJobHost(str(tmp_path / "jobs"))
     assert restarted.status(job_id).state == "gone"
     assert restarted.stop_reason(job_id) == "timeout"
-    assert not psutil.pid_exists(shell_pid) or psutil.Process(shell_pid).status() == psutil.STATUS_ZOMBIE
+    if (tmp_path / "sh.pid").exists():
+        shell_pid = _pid_written(tmp_path / "sh.pid")
+        assert _wait_until(lambda: _gone(shell_pid))
 
 
 async def test_a_wrapper_that_cannot_keep_the_log_stops_its_command(tmp_path, monkeypatch):
@@ -307,8 +315,7 @@ async def test_a_kill_whose_reason_cannot_be_recorded_still_stops_the_command(tm
     """Recording why is best effort at every stopper: a full disk must not leave the command running."""
     host = LocalJobHost(str(tmp_path / "jobs"))
     job_id = await _start(host, tmp_path, f"echo $$ > {tmp_path / 'sh.pid'}; sleep 30")
-    assert _wait_until(lambda: (tmp_path / "sh.pid").exists())
-    shell_pid = int((tmp_path / "sh.pid").read_text())
+    shell_pid = _pid_written(tmp_path / "sh.pid")
     real_create = host._create_once
 
     def full_disk(job_id, name, value):
@@ -354,8 +361,7 @@ async def test_a_signal_to_the_wrapper_alone_stops_its_command(tmp_path, sig):
     """``pkill -f python`` reaches the wrapper but not its shell: the wrapper must take the group with it."""
     host = LocalJobHost(str(tmp_path / "jobs"))
     job_id = await _start(host, tmp_path, f"echo $$ > {tmp_path / 'sh.pid'}; sleep 30", timeout_s=60)
-    assert _wait_until(lambda: (tmp_path / "sh.pid").exists())
-    shell_pid = int((tmp_path / "sh.pid").read_text())
+    shell_pid = _pid_written(tmp_path / "sh.pid")
 
     os.kill(int(open(os.path.join(host.job_dir(job_id), "pid")).read()), sig)
 
@@ -374,11 +380,14 @@ async def test_a_command_outliving_a_killed_wrapper_is_still_running_and_held_to
     # Python as the shell: its environment, and so the marker, is readable on macOS too.
     host = LocalJobHost(str(tmp_path / "jobs"), shell=sys.executable)
     script = f"import os, time; open({str(tmp_path / 'sh.pid')!r}, 'w').write(str(os.getpid())); time.sleep(30)"
-    job_id = await _start(host, tmp_path, script, timeout_s=1.0)
-    assert _wait_until(lambda: (tmp_path / "sh.pid").exists() and (tmp_path / "sh.pid").read_text())
-    shell_pid = int((tmp_path / "sh.pid").read_text())
+    job_id = await _start(host, tmp_path, script, timeout_s=60)
+    shell_pid = _pid_written(tmp_path / "sh.pid")
     os.kill(int(open(os.path.join(host.job_dir(job_id), "pid")).read()), signal.SIGKILL)
     assert _wait_until(lambda: _wrapper_gone(host.job_dir(job_id)))
+    # Only the host is left to enforce the deadline, from meta.json: bring it to now, whatever the launch took.
+    meta = host.meta(job_id)
+    meta["deadline_at"] = jobs_module._iso(datetime.now(timezone.utc))
+    host._write_meta(job_id, meta)
 
     try:
         assert host.status(job_id).state == "running"
@@ -432,6 +441,156 @@ async def test_hosts_over_different_spellings_of_the_jobs_directory_see_the_same
         await host.kill(job_id)
 
 
+async def test_readers_of_job_files_bound_what_they_read(tmp_path):
+    """Job files sit where the command can write: a state file or tail.log header of any size is read in a bound."""
+    import tracemalloc
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    job_id = await _start(host, tmp_path, "true")
+    await host.wait(job_id, deadline_s=5)
+    job_dir = host.job_dir(job_id)
+    with open(os.path.join(job_dir, "stopped"), "w") as handle:
+        handle.write("x" * 20_000_000)
+    with open(os.path.join(job_dir, "tail.log"), "w") as handle:
+        handle.write("[output from byte 0" + "0" * 20_000_000)
+    tracemalloc.start()
+    try:
+        reason = host.stop_reason(job_id)
+        data, offset = host.output(job_id, since=os.path.getsize(host.output_path(job_id)))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 1024 * 1024
+    assert len(reason) <= 4096
+    assert (data, offset) == (b"", os.path.getsize(host.output_path(job_id)))
+
+
+async def test_a_kill_signals_at_once_even_when_worker_threads_are_busy(tmp_path):
+    """The default executor is shared with every file tool: a kill must not queue behind it."""
+    import threading
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    job_id = await _start(host, tmp_path, f"echo $$ > {tmp_path / 'sh.pid'}; sleep 30")
+    shell_pid = _pid_written(tmp_path / "sh.pid")
+    release = threading.Event()
+    busy = [asyncio.ensure_future(asyncio.to_thread(release.wait, 10)) for _ in range(64)]
+    try:
+        killing = asyncio.ensure_future(host.kill(job_id, reason="aborted"))
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not _gone(shell_pid):
+            await asyncio.sleep(0.02)
+        gone_in_time = _gone(shell_pid)
+    finally:
+        release.set()
+        await asyncio.gather(*busy)
+        await killing
+
+    assert gone_in_time
+
+
+async def test_a_cancelled_kill_still_finishes_the_group(tmp_path):
+    """Once the first signal is sent, the SIGKILL fallback runs even if the caller is cancelled meanwhile."""
+    import sys
+
+    host = LocalJobHost(str(tmp_path / "jobs"), shell=sys.executable)
+    script = (
+        "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(tmp_path / 'sh.pid')!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    )
+    job_id = await _start(host, tmp_path, script)
+    shell_pid = _pid_written(tmp_path / "sh.pid")
+    os.kill(int(open(os.path.join(host.job_dir(job_id), "pid")).read()), signal.SIGKILL)  # only the host is left
+    assert _wait_until(lambda: _wrapper_gone(host.job_dir(job_id)))
+
+    killing = asyncio.ensure_future(host.kill(job_id, reason="aborted"))
+    await asyncio.sleep(0.5)  # SIGTERM is ignored; the host is waiting before SIGKILL
+    killing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await killing
+
+    assert _wait_until(lambda: _gone(shell_pid), timeout_s=8)
+
+
+@pytest.mark.parametrize(
+    ("command", "starts"),
+    [
+        ("# " + "\x01" * 1000 + "\ntrue", False),  # JSON escapes each control character to six characters
+        ("# " + "\u4e2d" * 1000 + "\ntrue", True),  # written as it is, not escaped
+    ],
+    ids=["escapes-past-the-bound", "non-ascii"],
+)
+async def test_a_command_whose_record_would_be_unreadable_never_starts(tmp_path, monkeypatch, command, starts):
+    """The host reads meta.json in a bound, so it never writes one past it: such a command is refused unstarted."""
+    monkeypatch.setattr(jobs_module, "_META_CHARS", 2000)
+    host = LocalJobHost(str(tmp_path / "jobs"))
+
+    if not starts:
+        with pytest.raises(JobStartError):
+            await _start(host, tmp_path, command)
+        assert host.find_job("ses_test", "toolu_1") is None
+        return
+    job_id = await _start(host, tmp_path, command)
+    assert (await host.wait(job_id, deadline_s=5)).state == "exited"
+    assert host.meta(job_id)["command"] == command
+
+
+async def test_a_start_cancelled_before_its_decision_abandons_the_wrapper_at_once(tmp_path, monkeypatch):
+    """The only await in ``start`` is the wait for the pid: a cancel there abandons the wrapper, so it
+    exits now instead of waiting 30 s for a decision, and the command never runs."""
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    entered = asyncio.Event()
+    real_await_pid = LocalJobHost._await_pid
+
+    async def slow_await_pid(self, *args):
+        entered.set()
+        await asyncio.sleep(1.0)
+        return await real_await_pid(self, *args)
+
+    monkeypatch.setattr(LocalJobHost, "_await_pid", slow_await_pid)
+    task = asyncio.ensure_future(_start(host, tmp_path, f"echo ran > {tmp_path / 'ran'}"))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    job_id = host.find_job("ses_test", "toolu_1")
+    assert host.started(job_id) is False
+    assert _wait_until(lambda: _wrapper_gone(host.job_dir(job_id)), timeout_s=5)
+    assert not (tmp_path / "ran").exists()
+
+
+async def test_a_cwd_with_bytes_that_are_not_utf8_is_recorded_and_read_back(tmp_path):
+    """POSIX paths are bytes: Python keeps a non-UTF-8 byte as a surrogate escape, which meta.json must keep too."""
+    cwd = str(tmp_path / "d\udcff")  # what os.fsdecode gives for b"d\xff" (not created: APFS refuses the name)
+    host = LocalJobHost(str(tmp_path / "jobs"))
+
+    with pytest.raises(JobStartError):  # the directory does not exist; the record must not be what fails
+        await host.start("true", cwd=cwd, env=_env(), timeout_s=None, session_id="ses_test", tool_call_id="toolu_1")
+
+    assert host.meta(host.find_job("ses_test", "toolu_1"))["cwd"] == cwd
+
+
+async def test_meta_json_is_read_in_a_bound(tmp_path):
+    """The job directory is the command's to write: a huge meta.json is refused as corrupt, not loaded."""
+    import tracemalloc
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    job_id = await _start(host, tmp_path, "true")
+    await host.wait(job_id, deadline_s=5)
+    with open(os.path.join(host.job_dir(job_id), "meta.json"), "w") as handle:
+        handle.write('{"pad": "' + "x" * 20_000_000 + '"}')
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError):
+            host.meta(job_id)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 16 * 1024 * 1024  # the 4 Mi-character bound, read and decoded; the file is 20 MB
+
+
 def test_the_wrapper_stops_its_group_even_when_its_diagnostics_fail(tmp_path, monkeypatch):
     """The wrapper's own failure handler must stop the command even if writing the traceback fails (ENOSPC)."""
     import core.agent_core.tools.job_wrapper as wrapper
@@ -466,6 +625,8 @@ async def test_job_files_stay_until_the_call_is_settled(tmp_path):
     finished = await _start(host, tmp_path, "true", tool_call_id="finished")
     running = await _start(host, tmp_path, "sleep 30", tool_call_id="running")
     await host.wait(finished, deadline_s=5)
+    # An exited job is kept while its wrapper still runs (it may drain children); this one has none.
+    assert _wait_until(lambda: _wrapper_gone(host.job_dir(finished)))
 
     assert host.prune(lambda meta: False, older_than_s=0) == []
     assert host.prune(lambda meta: True, older_than_s=0) == [finished]

@@ -52,7 +52,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 import psutil
 
 from core.agent_core.tools.base import JobStatus
-from core.agent_core.tools.paths import os_reason
+from core.agent_core.tools.paths import os_reason, run_to_end
 from core.process_isolation import (
     DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
     KILL_SIGNAL,
@@ -96,6 +96,10 @@ _JOB_ID = re.compile(r"^job_[a-z0-9]+$")
 _TAIL_HEADER = re.compile(rb"\[output from byte (\d+)\]\n")
 _GO = "go"
 _ABANDON = "abandon"
+_STATE_FILE_CHARS = 4096
+_SURROGATE = re.compile("[\ud800-\udfff]")
+# The host's own meta.json holds the command, which a shell cannot even take past ARG_MAX (1 MiB here).
+_META_CHARS = 4 * 1024 * 1024
 
 
 class JobStartError(RuntimeError):
@@ -134,10 +138,26 @@ def _write_atomic(path: str, data: str) -> None:
     os.replace(tmp, path)
 
 
+def _meta_text(meta: Mapping[str, Any]) -> str:
+    """``meta.json`` as written: UTF-8 as it is (not escaped), and never past the bound ``meta`` reads in.
+
+    A POSIX path can hold bytes that are not UTF-8, which Python keeps as surrogate escapes; UTF-8 cannot
+    carry those, so such a record is written ASCII-escaped instead, which JSON reads back exactly.
+    """
+    text = json.dumps(meta, indent=2, ensure_ascii=False)
+    if _SURROGATE.search(text):
+        text = json.dumps(meta, indent=2)
+    if len(text) > _META_CHARS:
+        raise ValueError(f"the job record would be {len(text)} characters, over {_META_CHARS}")
+    return text
+
+
 def _read_text(path: str) -> Optional[str]:
+    """A small state file (``pid``, ``decision``, ``exit``, ``stopped``), read in a bound: the job's
+    directory is one its command can write to."""
     try:
-        with open(path, encoding="utf-8") as handle:
-            return handle.read().strip()
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read(_STATE_FILE_CHARS).strip()
     except FileNotFoundError:
         return None
 
@@ -179,14 +199,19 @@ class LocalJobHost:
         return self._path(job_id, "output.log")
 
     def meta(self, job_id: str) -> dict[str, Any]:
+        """The job's metadata. Read in a bound: the job's directory is one its command can write to, and a
+        file over the bound is refused as corrupt (``ValueError``), as unreadable JSON is."""
         try:
-            with open(self._path(job_id, "meta.json"), encoding="utf-8") as handle:
-                return json.load(handle)
+            with open(self._path(job_id, "meta.json"), encoding="utf-8", errors="replace") as handle:
+                text = handle.read(_META_CHARS + 1)
         except FileNotFoundError:
             raise KeyError(job_id) from None
+        if len(text) > _META_CHARS:
+            raise ValueError(f"meta.json of job {job_id} is over {_META_CHARS} characters")
+        return json.loads(text)
 
     def _write_meta(self, job_id: str, meta: Mapping[str, Any]) -> None:
-        _write_atomic(self._path(job_id, "meta.json"), json.dumps(meta, indent=2))
+        _write_atomic(self._path(job_id, "meta.json"), _meta_text(meta))
 
     def find_job(self, session_id: str, tool_call_id: str) -> Optional[str]:
         """The job started for a tool call, for settling it at resume."""
@@ -263,10 +288,32 @@ class LocalJobHost:
             raise JobStartError("Command jobs are not supported on Windows yet.")
         if not sys.executable:
             raise JobStartError("No Python interpreter is available to run the command.")
+        # The host's own steps are small and synchronous, so the only await is the wait for the pid: a cancel
+        # can land nowhere else, and never between publishing ``go`` and returning the job id.
+        job_id, proc, marker, meta = self._spawn(command, cwd, env, timeout_s, session_id, tool_call_id)
+        try:
+            identity = await self._await_pid(job_id, proc, marker)
+        except asyncio.CancelledError:
+            # Undecided: abandon the wrapper now rather than leave it waiting 30 s for a decision.
+            self._create_decision(job_id, _ABANDON)
+            raise
+        decision = self._record_and_decide(job_id, meta, identity)
+        if decision != _GO:
+            raise JobStartError("The command did not start.")
+        return job_id
+
+    def _spawn(
+        self,
+        command: str,
+        cwd: str,
+        env: Mapping[str, str],
+        timeout_s: Optional[float],
+        session_id: str,
+        tool_call_id: str,
+    ) -> tuple[str, subprocess.Popen, str, dict[str, Any]]:
+        """The job directory, ``meta.json``, and the wrapper, which waits for the decision (J1)."""
         job_id = f"job_{secrets.token_hex(8)}"
         job_dir = self.job_dir(job_id)
-        os.makedirs(self._jobs_dir, exist_ok=True)
-        os.mkdir(job_dir, 0o700)
         created = datetime.now(timezone.utc)
         deadline = _ceil_ms(created + timedelta(seconds=timeout_s)) if timeout_s is not None else None
         meta: dict[str, Any] = {
@@ -285,6 +332,15 @@ class LocalJobHost:
             "watch_id": None,
             "deadline_at": _iso(deadline) if deadline is not None else None,
         }
+        try:
+            # Checked before anything exists: a record the host could not read back would leave the job unmanaged.
+            _meta_text(meta)
+        except ValueError:
+            raise JobStartError(
+                f"Could not start the command: its job record would be over {_META_CHARS} characters."
+            ) from None
+        os.makedirs(self._jobs_dir, exist_ok=True)
+        os.mkdir(job_dir, 0o700)
         self._write_meta(job_id, meta)
 
         marker = new_process_identity_marker()
@@ -323,15 +379,16 @@ class LocalJobHost:
             os.close(diagnostics)
         self._children[job_id] = proc
         threading.Thread(target=self._reap, args=(job_id, proc), name=f"avibe-{job_id}-reaper", daemon=True).start()
+        return job_id, proc, marker, meta
 
-        identity = await self._await_pid(job_id, proc, marker)
+    def _record_and_decide(
+        self, job_id: str, meta: dict[str, Any], identity: Optional[PersistedProcessIdentity]
+    ) -> str:
+        """Record the identity (J2), then decide: ``go`` only with an identity on record."""
         if identity is not None:
             meta["process"] = {**serialize_process_identity(identity), "pgid": identity.pid}
             self._write_meta(job_id, meta)
-        decision = self._create_decision(job_id, _GO if identity is not None else _ABANDON)
-        if decision != _GO:
-            raise JobStartError("The command did not start.")
-        return job_id
+        return self._create_decision(job_id, _GO if identity is not None else _ABANDON)
 
     async def _await_pid(self, job_id: str, proc: subprocess.Popen, marker: str) -> Optional[PersistedProcessIdentity]:
         deadline = time.monotonic() + PID_TIMEOUT_S
@@ -402,7 +459,7 @@ class LocalJobHost:
             return data, since + len(data)
         try:
             with open(self._path(job_id, "tail.log"), "rb") as handle:
-                header = _TAIL_HEADER.fullmatch(handle.readline())
+                header = _TAIL_HEADER.fullmatch(handle.readline(64))
                 if header is None:
                     raise ValueError("tail.log header")
                 tail_start = int(header.group(1))
@@ -419,23 +476,35 @@ class LocalJobHost:
         ``reason`` is recorded first (``stop_reason``), so whoever reports the
         job later can say why it ended.
         """
-        if self._decision(job_id) != _GO:
+        # The sequence runs to its end once begun: verification records ``stopped``, so stopping short of
+        # the signals, or of the SIGKILL fallback, would leave a running group. A cancel is re-raised after.
+        await run_to_end(self._kill(job_id, reason))
+
+    async def _kill(self, job_id: str, reason: str) -> None:
+        identity = self._verify_for_kill(job_id, reason)
+        if identity is None:
             return
+        if not await _terminate_group(identity.pid):
+            logger.warning("Job %s process group %s survived termination", job_id, identity.pid)
+
+    def _verify_for_kill(self, job_id: str, reason: str) -> Optional[PersistedProcessIdentity]:
+        """The identity to signal, once the group is provably the job's, with ``reason`` recorded; else ``None``."""
+        if self._decision(job_id) != _GO:
+            return None
         identity = self._identity(job_id)
         if identity is None:
             logger.warning("Job %s has no recorded process identity; not signaling", job_id)
-            return
+            return None
         if not (self._alive(job_id) or self._group_carries_marker(identity)):
             if _group_exists(identity.pid):
                 logger.warning("Job %s process group %s cannot be verified; not signaling", job_id, identity.pid)
-            return
+            return None
         try:
             self._create_once(job_id, "stopped", reason)  # the first stopper's reason wins
         except OSError:
             # Recording is best effort at every stopper: the kill matters more than the record.
             logger.warning("Could not record why job %s was stopped", job_id, exc_info=True)
-        if not await asyncio.to_thread(_terminate_group, identity.pid):
-            logger.warning("Job %s process group %s survived termination", job_id, identity.pid)
+        return identity
 
     async def hand_over(self, job_id: str) -> str:
         """Give the job to its Watch: adopt-or-create through ``on_hand_over``, then record the id (J6).
@@ -451,14 +520,17 @@ class LocalJobHost:
         # The Watch owns the job from here on, so nothing below may undo the handover: the recorded id
         # is a cache, and adopt-or-create finds the Watch by job id without it.
         try:
-            meta = self.meta(job_id)
-            meta["watch_id"] = watch_id
-            self._write_meta(job_id, meta)
+            self._record_watch(job_id, watch_id)
         except (OSError, KeyError, ValueError):
             logger.warning(
                 "Job %s is Watch %s, but its meta.json could not record that", job_id, watch_id, exc_info=True
             )
         return watch_id
+
+    def _record_watch(self, job_id: str, watch_id: str) -> None:
+        meta = self.meta(job_id)
+        meta["watch_id"] = watch_id
+        self._write_meta(job_id, meta)
 
     # --- deadline (J3) and reporting --------------------------------------
 
@@ -469,14 +541,17 @@ class LocalJobHost:
         running job may already have ended on time: a live wrapper decides timeout versus exit. The
         host stops the job as the second owner once the wrapper has not, ``_WRAPPER_DECIDES_S`` late.
         """
+        if not self._overdue(job_id):
+            return False
+        await self.kill(job_id, reason=STOP_TIMEOUT)
+        return True
+
+    def _overdue(self, job_id: str) -> bool:
         deadline_at = self.meta(job_id).get("deadline_at")
         if not deadline_at:
             return False
         late = (datetime.now(timezone.utc) - _parse_iso(deadline_at)).total_seconds()
-        if late < _WRAPPER_DECIDES_S or self.status(job_id).state != "running":
-            return False
-        await self.kill(job_id, reason=STOP_TIMEOUT)
-        return True
+        return late >= _WRAPPER_DECIDES_S and self.status(job_id).state == "running"
 
     def stop_reason(self, job_id: str) -> Optional[str]:
         """Why the host killed the job (``"timeout"``, or the caller's reason), if it did."""
@@ -562,11 +637,13 @@ def _group_exists(pgid: int) -> bool:
     return True
 
 
-def _terminate_group(pgid: int, timeout_s: float = DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS) -> bool:
+async def _terminate_group(pgid: int, timeout_s: float = DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS) -> bool:
     """SIGTERM the verified group, then SIGKILL what is left; ``True`` once the group is gone.
 
     The group was verified just before. A process group id is not reused while
     the group exists, so signaling it until it is gone reaches only its members.
+    Signals go out from the event loop at once, never queued behind the shared
+    worker threads; the waits between them are asynchronous.
     """
     if pgid <= 1 or pgid == os.getpgrp():
         logger.error("Refusing to signal process group %s", pgid)
@@ -582,7 +659,7 @@ def _terminate_group(pgid: int, timeout_s: float = DEFAULT_PROCESS_TERMINATE_TIM
         while _group_exists(pgid):
             if time.monotonic() >= deadline:
                 break
-            time.sleep(0.02)
+            await asyncio.sleep(0.02)
         else:
             return True
     return not _group_exists(pgid)

@@ -85,7 +85,7 @@ def _wait_for_decision(job_dir: str, timeout_s: float) -> str:
         time.sleep(delay)
         delay = min(delay * 2, 0.05)
     with open(decision) as handle:
-        return handle.read().strip()
+        return handle.read(64).strip()
 
 
 class _BoundedLog:

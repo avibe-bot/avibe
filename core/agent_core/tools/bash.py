@@ -27,9 +27,15 @@ from core.agent_core.tools.args import (
     text_result,
 )
 from core.agent_core.tools.base import MAX_BYTES, MAX_LINES, JobHost, JobStatus, ToolContext, ToolResult, ToolSpec
-from core.agent_core.tools.jobs import STOP_ABORTED, STOP_TIMEOUT, JobHandOverUnavailable, JobStartError, LocalJobHost
+from core.agent_core.tools.jobs import (
+    STOP_ABORTED,
+    STOP_TIMEOUT,
+    JobHandOverUnavailable,
+    JobStartError,
+    LocalJobHost,
+)
 from core.agent_core.tools.paths import os_reason
-from core.agent_core.tools.output import JobOutput
+from core.agent_core.tools.output import FINISH_BYTES, JobOutput
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +86,9 @@ def _timeout_arg(arguments: Mapping[str, Any]) -> Optional[float]:
     return timeout
 
 
-def final_result(output: JobOutput, status: JobStatus, *, note: Optional[str] = None) -> ToolResult:
+async def final_result(output: JobOutput, status: JobStatus, *, note: Optional[str] = None) -> ToolResult:
     """The result of a job that is no longer running, as Pi formats a finished command."""
-    output.finish()
+    await output.finish_off_loop()
     text, truncation = output.render("(no output)")
     if note:
         text = f"{text}\n\n{note}"
@@ -94,9 +100,9 @@ def final_result(output: JobOutput, status: JobStatus, *, note: Optional[str] = 
     return error_result(_append_status(text, "Command terminated without an exit code"), details=details)
 
 
-def stopped_result(output: JobOutput, status_line: str) -> ToolResult:
+async def stopped_result(output: JobOutput, status_line: str) -> ToolResult:
     """The result of a job that was killed (timeout, abort): the output so far, then why it stopped."""
-    output.finish()
+    await output.finish_off_loop()
     text, truncation = output.render("")
     return error_result(_append_status(text, status_line), details=output.details(truncation))
 
@@ -114,9 +120,10 @@ def _stopped_line(reason: Optional[str], timeout_s: Optional[float]) -> Optional
     return None
 
 
-def handover_result(output: JobOutput, watch_id: str) -> ToolResult:
+async def handover_result(output: JobOutput, watch_id: str) -> ToolResult:
     """Avibe: the command keeps running as a Watch; the model sees the output so far and how to manage it."""
-    output.poll()
+    # A one-shot render reads the whole retained log (head, omitted middle, tail), not one poll's worth.
+    await output.poll_off_loop(FINISH_BYTES)
     text, truncation = output.render("(no output yet)")
     text = text.rstrip("\n")
     lines = [
@@ -145,11 +152,11 @@ async def settle_bash_call(jobs: LocalJobHost, session_id: str, tool_call_id: st
     await jobs.enforce_deadline(job_id)
     status = jobs.status(job_id)
     if status.state == "running":
-        return handover_result(JobOutput(jobs, job_id), await jobs.hand_over(job_id))
+        return await handover_result(JobOutput(jobs, job_id), await jobs.hand_over(job_id))
     if status.state == "exited":
-        return final_result(JobOutput(jobs, job_id), status)
+        return await final_result(JobOutput(jobs, job_id), status)
     line = _stopped_line(jobs.stop_reason(job_id), jobs.meta(job_id).get("timeout_s"))
-    return stopped_result(JobOutput(jobs, job_id), line) if line else None
+    return await stopped_result(JobOutput(jobs, job_id), line) if line else None
 
 
 class BashTool:
@@ -181,8 +188,7 @@ class BashTool:
             return error_result("Command aborted")
 
         # The job host enforces the timeout (its wrapper decides timeout versus exit); bash only reports
-        # the recorded reason. This clock times the handover.
-        started = time.monotonic()
+        # the recorded reason.
         try:
             job_id = await self._jobs.start(
                 command,
@@ -198,6 +204,8 @@ class BashTool:
             logger.warning("Could not start a bash job", exc_info=True)
             return error_result(f"Could not start the command: {os_reason(exc)}.")
 
+        # The handover clock starts once the command may run, so the launch never counts against it.
+        started = time.monotonic()
         output = JobOutput(self._jobs, job_id)
         # watch=true still lets a command that ends at once report its own result instead of becoming a Watch.
         handover_at = min(self._window_s, _WATCH_GRACE_S) if watch else self._window_s
@@ -216,21 +224,22 @@ class BashTool:
                 # Whoever stopped the job recorded why; the job host or its wrapper may have stopped it first.
                 line = _stopped_line(self._jobs.stop_reason(job_id), timeout)
                 if line:
-                    return stopped_result(output, line)
+                    return await stopped_result(output, line)
             if status is not None and status.state != "running":
                 note = None
                 if watch and handover_error is not None:
                     note = f"[Watch unavailable ({handover_error}); the command ran in the foreground.]"
-                return final_result(output, status, note=note)
+                return await final_result(output, status, note=note)
             if ctx.cancel.cancelled:
                 await self._jobs.kill(job_id, reason=STOP_ABORTED)
-                return stopped_result(output, "Command aborted")
+                return await stopped_result(output, "Command aborted")
             if hand_over:
                 watch_id, handover_error = await self._hand_over(job_id)
                 if watch_id is not None:
-                    return handover_result(output, watch_id)
+                    return await handover_result(output, watch_id)
                 continue
-            if ctx.on_progress is not None and output.poll():
+            # Off the event loop: following a flood of output costs CPU every Session would otherwise wait on.
+            if ctx.on_progress is not None and await output.poll_off_loop():
                 tail = output.snapshot().content
                 if tail != last_progress:
                     last_progress = tail

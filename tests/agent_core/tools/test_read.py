@@ -284,9 +284,9 @@ async def test_a_huge_png_shaped_file_is_classified_without_walking_it(tmp_path,
     with open(path, "wb") as handle:
         handle.write(_png()[:33])  # signature and IHDR, then nothing but zero bytes
         handle.truncate(64 * 1024 * 1024)
-    started = time.monotonic()
+    started = time.process_time()
 
     result = await ReadTool().execute({"path": "huge.png"}, make_ctx())
 
-    assert time.monotonic() - started < 1.0
+    assert time.process_time() - started < 1.0
     assert result_text(result).startswith("Read image file [image/png]\n[Image omitted: the file is 64.0MB")
