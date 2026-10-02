@@ -381,7 +381,8 @@ class Agent:
             # Sweep on every terminal path, including failed tool cleanup and
             # cleanup hooks. Handed-over handles are no longer foreground.
             try:
-                await self.jobs.kill_foreground(self.session_id)
+                reason = "aborted" if self._outcome.reason == "aborted" or self._ctx.cancel.cancelled else "killed"
+                await self.jobs.kill_foreground(self.session_id, reason=reason)
             except Exception as error:
                 self._outcome.foreground_leaked()
                 if self._consumer_closed:
@@ -709,4 +710,8 @@ class Agent:
             await asyncio.gather(*(task for task in (update, execution) if task is not None), return_exceptions=True)
             # Release failure is supplementary to a tool's cancellation or
             # result. The final sweep alone arbitrates a still-leaked process.
-            await self._cleanup(lambda: self.jobs.kill_foreground(self.session_id, tool_call_id=call.id))
+            # A user abort is recorded as such, so bash and recovery report "Command aborted".
+            release_reason = "aborted" if self._ctx.cancel.cancelled else "killed"
+            await self._cleanup(
+                lambda: self.jobs.kill_foreground(self.session_id, tool_call_id=call.id, reason=release_reason)
+            )

@@ -562,6 +562,7 @@ async def test_abort_kills_foreground_through_JobHost_but_preserves_handed_over_
     events = await asyncio.wait_for(run, 1)
     assert events[-1].reason == "aborted"
     assert host.killed == ["job_2"]
+    assert agent.jobs.stop_reason("job_2") == "aborted"  # bash reports the end from the recorded reason
     assert host.status("job_1").state == "running"
     assert [row.message.tool_call_id for row in await agent.store.load("session") if row.kind == "tool_result"] == [
         "bg"
@@ -1135,11 +1136,11 @@ async def test_failed_foreground_kill_is_reported_and_does_not_skip_other_handle
             super().__init__()
             self.attempts = []
 
-        async def kill(self, job_id):
+        async def kill(self, job_id, *, reason="killed"):
             self.attempts.append(job_id)
             if job_id == "job_2":
                 raise OSError("kill denied")
-            await super().kill(job_id)
+            await super().kill(job_id, reason=reason)
 
     host = Host()
     provider = ScriptedProvider([[Done(assistant(calls=[ToolCallBlock("a", "bash")]))], [Done(assistant())]])

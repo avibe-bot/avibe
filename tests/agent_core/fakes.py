@@ -148,6 +148,7 @@ class FakeJobHost:
         self.outputs: dict[str, bytes] = {}
         self.starts: list[dict] = []
         self.killed: list[str] = []
+        self.stop_reasons: dict[str, str] = {}
         self.watches: dict[str, str] = {}
         self.changed = asyncio.Event()
 
@@ -184,10 +185,14 @@ class FakeJobHost:
     def output_path(self, job_id) -> str:
         return f"/test-owned/jobs/{job_id}/output.log"
 
-    async def kill(self, job_id) -> None:
+    async def kill(self, job_id, *, reason="killed") -> None:
         self.killed.append(job_id)
+        self.stop_reasons.setdefault(job_id, reason)  # the first recorded reason wins
         self.states[job_id] = JobStatus("gone")
         self.changed.set()
+
+    def stop_reason(self, job_id):
+        return self.stop_reasons.get(job_id)
 
     async def hand_over(self, job_id) -> str:
         watch_id = f"watch_{job_id}"
