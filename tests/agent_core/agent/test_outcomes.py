@@ -11,12 +11,13 @@ from types import SimpleNamespace
 import pytest
 
 from core.agent_core.agent.events import AgentError, MessageCommitted, RunEnded, ToolFinished
-from core.agent_core.agent.hooks import End, Hooks
+from core.agent_core.agent.hooks import AgentInput, AlterResult, End, Hooks
 from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import RetryPolicy
 from core.agent_core.ai.provider import Done, ProviderError
 from core.agent_core.harness.projection import project
-from core.agent_core.messages import LargeRef, TextBlock, ToolCallBlock
+from core.agent_core.messages import LargeRef, TextBlock, ToolCallBlock, UserMessage, text
+from core.agent_core.tools.base import ToolResult
 from tests.agent_core.fakes import (
     FakeJobHost,
     FakeModelRouter,
@@ -295,21 +296,82 @@ async def test_hook_end_is_a_directive_until_required_commits_succeed(stage, fau
     project(rows)
 
 
-@pytest.mark.parametrize("partial", [False, True])
-@pytest.mark.parametrize("invalid", ["duplicate_calls", "large_ref"])
-async def test_response_admission_matches_projection_and_a_fresh_agent_can_resume(partial, invalid):
+@pytest.mark.parametrize(
+    "source,invalid",
+    [(source, invalid) for source in ("response", "partial") for invalid in ("duplicate_calls", "large_ref")]
+    + [(source, "large_ref") for source in ("tool", "after_tool", "terminating_tool", "input", "steer", "follow_up")],
+)
+async def test_message_admission_matches_projection_and_a_fresh_agent_can_resume(source, invalid):
+    """Every writer rejects projection poison before the durable write.
+
+    The old response-only table missed tools, hook rewrites and consumed
+    inputs; each could persist a schema-valid ref that blocks every fresh run.
+    """
+    store = InMemoryTranscriptStore()
+    await store.consume_input("session", "prior", UserMessage((text("preserved history"),)))
+    baseline = await store.load("session")
+    content = (TextBlock(ref=LargeRef("sha256:" + "a" * 64, 1)),)
+    bad_input = AgentInput("bad-input", UserMessage(content))
     message = assistant(calls=[ToolCallBlock("same", "echo"), ToolCallBlock("same", "echo")])
     if invalid == "large_ref":
-        message = replace(message, content=(TextBlock(ref=LargeRef("sha256:" + "a" * 64, 1)),))
-    terminal = ProviderError("server", "partial error", False, partial=message) if partial else Done(message)
-    provider, tool = ScriptedProvider([[terminal]]), FakeTool()
-    agent = agent_for(provider, tools=[tool])
-    events = await collect(agent)
+        message = replace(message, content=content)
+    bad_result = ToolResult(content, terminate=source == "terminating_tool")
+    has_tools = source in {"tool", "after_tool", "terminating_tool"}
+    queued = source in {"steer", "follow_up"}
+
+    async def execute(arguments, ctx):
+        if ctx.tool_call_id == "bad" and source != "after_tool":
+            return bad_result
+        return ToolResult((text(ctx.tool_call_id),))
+
+    class Override(Hooks):
+        async def after_tool(self, call, result, ctx):
+            if source == "after_tool" and call.id == "bad":
+                return AlterResult(bad_result)
+
+    async def queue_input(request, cancel):
+        assert await getattr(agent, source)(bad_input)
+        yield Done(assistant())
+
+    if has_tools:
+        scripts = [
+            [Done(assistant(calls=[ToolCallBlock(name, "echo") for name in ("good", "bad", "later")]))],
+            [Done(assistant())],
+        ]
+    elif queued:
+        scripts = [queue_input, [Done(assistant())]]
+    else:
+        terminal = (
+            ProviderError("server", "partial error", False, partial=message) if source == "partial" else Done(message)
+        )
+        scripts = [[terminal]]
+    provider, tool = ScriptedProvider(scripts), FakeTool(execute=execute)
+    agent = agent_for(provider, store=store, tools=[tool], hooks=[Override()])
+    incoming = bad_input if source == "input" else input_row("input", "hello")
+    events = [event async for event in agent.run(incoming, turn_id="turn")]
     assert events[-1].reason == "error"
-    assert any(isinstance(event, AgentError) and event.kind == "ProviderProtocolViolation" for event in events)
-    assert [row.kind for row in await agent.store.load("session")] == ["input"]
-    assert tool.calls == []
-    assert not any(isinstance(event, MessageCommitted) for event in events)
+    expected_kind = "ProviderProtocolViolation" if source in {"response", "partial"} else "ProjectionError"
+    assert [event.kind for event in events if isinstance(event, AgentError)] == [expected_kind]
+    rows = await store.load("session")
+    assert rows[: len(baseline)] == baseline
+    expected_kinds = ["input"]
+    if source != "input":
+        expected_kinds.append("input")
+    if has_tools or queued:
+        expected_kinds.append("response")
+    if has_tools:
+        expected_kinds.append("tool_result")
+    assert [row.kind for row in rows] == expected_kinds
+    assert [ctx.tool_call_id for _, ctx in tool.calls] == (["good", "bad"] if has_tools else [])
+    assert [event.message_id for event in events if isinstance(event, MessageCommitted)] == [
+        row.row_id for row in rows if row.kind == "response"
+    ]
+    assert [event.event_id for event in events if isinstance(event, ToolFinished)] == [
+        row.row_id for row in rows if row.kind == "tool_result"
+    ]
+    assert len(provider.requests) == (0 if source == "input" else 1)
+    assert await agent.take_pending_inputs() == ((bad_input,) if queued else ())
+    project(rows)
     fresh = agent_for(ScriptedProvider([[Done(assistant())]]), store=agent.store)
     assert (await collect(fresh, "next"))[-1].reason == "completed"
 

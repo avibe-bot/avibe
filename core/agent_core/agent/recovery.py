@@ -10,7 +10,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Callable, Mapping, Optional
 
-from core.agent_core.harness.projection import interrupted_result, open_tool_calls
+from core.agent_core.harness.projection import interrupted_result, open_tool_calls, validate_message_append
 from core.agent_core.harness.store import ContextEntry, TranscriptStore
 from core.agent_core.messages import ToolCallBlock, ToolResultMessage, text
 from core.agent_core.tools.base import JobHost, JobStatus, ToolResult
@@ -44,7 +44,8 @@ async def settle_open_calls(
     is invoked and only a new user input starts another Turn (T4).
     """
     committed: list[ContextEntry] = []
-    for owner, call in open_tool_calls(await store.load(session_id)):
+    rows = list(await store.load(session_id))
+    for owner, call in open_tool_calls(rows):
         job_id = job_ids.get((owner.session_id, call.id))
         message = interrupted_result(call)
         details = {}
@@ -63,6 +64,8 @@ async def settle_open_calls(
                     details["watch_id"] = watch_id
                 if status.state == "exited":
                     details["exit_code"] = status.exit_code
+        validate_message_append(rows, session_id=session_id, kind="tool_result", message=message)
         row = await store.append_tool_result(session_id, deepcopy(message), details=details)
+        rows.append(row)
         committed.append(row)
     return tuple(committed)

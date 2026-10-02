@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Literal, Mapping, Optional, Sequence
 
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
@@ -134,3 +134,21 @@ def project(
             for call in message.tool_calls:
                 messages.append(results.get((row.context_seq, call.id), interrupted_result(call)))
     return Projection(system, tuple(deepcopy(messages)), rows[-1].context_seq if rows else 0, deepcopy(state))
+
+
+def validate_message_append(
+    entries: Sequence[ContextEntry],
+    *,
+    session_id: str,
+    kind: Literal["input", "response", "tool_result"],
+    message: Message,
+) -> None:
+    """Reject a candidate before persistence using the actual projection rules.
+
+    Every message-bearing writer uses this boundary, including resume
+    settlement. The caller owns serialization with other writers; neither
+    the candidate nor the supplied entries are mutated or committed here.
+    """
+    seq = max((entry.context_seq for entry in entries), default=0) + 1
+    candidate = ContextEntry(session_id, seq, kind, f"uncommitted-{kind}", message)
+    project([*entries, candidate])

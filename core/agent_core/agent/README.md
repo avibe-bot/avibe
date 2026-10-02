@@ -101,8 +101,15 @@ text is separate from localized user-facing error delivery.
   The only exception is a foreground job that still cannot be killed, which
   upgrades completed to error. A received terminal is admitted and committed
   before closing its stream; close failure does not retry it or skip its tools.
-  Every response, including a partial, passes the projector's actual invariants
-  before persistence. Invalid provider output cannot poison resume.
+  Every message-bearing write passes the projector's actual invariants through
+  the pure `validate_message_append` helper before persistence. This covers
+  initial/queued input consumption, full/partial responses, post-hook tool
+  results (including terminating tools), and durable recovery results. Invalid
+  candidates cannot poison resume: no unsupported message is appended/consumed,
+  no committed-row event announces it, and prior valid entries remain intact.
+  An invalid tool/hook result ends the run with an error; its call remains open
+  for deterministic projection and T2 settlement. Recovery rejects invalid
+  renderer output before append, so a corrected retry can finish settlement.
 - Every tool execution exit releases that `(Session, tool call)`'s remaining
   foreground handles, including success and failure. Final cleanup sweeps all
   remaining Session-owned handles on every terminal path. Handed-over jobs are
@@ -139,6 +146,10 @@ A primary-outcome/cleanup table checks reasons, durable rows, event order,
 commit-before-close, tools after close failure, and cleanup diagnostics.
 A hook-stage/required-commit table distinguishes successful end directives
 from failed state/result writes and abort before, during, or after a commit.
+The admission source matrix checks provider responses/partials, tools, result
+rewrites, terminating tools, initial inputs and queued steer/follow-up inputs.
+Recovery separately checks invalid renderer output after a prior good commit.
+Both boundaries prove a fresh Agent can continue over the same store.
 These are in-memory engine checks; production provider/store/Watch integration
 is a later layer.
 

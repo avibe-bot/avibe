@@ -9,11 +9,21 @@ import pytest
 
 from core.agent_core.agent.hooks import Snapshot
 from core.agent_core.agent.jobs import TrackingJobHost
+from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.recovery import settle_open_calls
-from core.agent_core.harness.projection import INTERRUPTED, project
-from core.agent_core.messages import ToolCallBlock, ToolResultMessage, text
+from core.agent_core.ai.provider import Done
+from core.agent_core.harness.projection import INTERRUPTED, ProjectionError, project
+from core.agent_core.messages import LargeRef, TextBlock, ToolCallBlock, ToolResultMessage, text
 from core.agent_core.tools.base import JobStatus, ToolResult
-from tests.agent_core.fakes import FakeJobHost, InMemoryTranscriptStore, assistant, user
+from tests.agent_core.fakes import (
+    FakeJobHost,
+    FakeModelRouter,
+    InMemoryTranscriptStore,
+    ScriptedProvider,
+    assistant,
+    input_row,
+    user,
+)
 
 
 def renderer(jobs):
@@ -102,12 +112,15 @@ async def test_resume_settles_each_job_state_once_and_projection_never_rechecks_
     assert project(await store.load("session")) == projected
 
 
-async def test_settlement_resume_after_partial_commit_skips_done_calls_and_keeps_call_order():
+@pytest.mark.parametrize("failure", ["store_write", "unsupported_result"])
+async def test_settlement_resume_after_partial_commit_skips_done_calls_and_keeps_call_order(failure):
+    # A schema-valid but unsupported renderer result must fail before its
+    # append. The prior store-failure-only case could not detect poisoned rows.
     class InterruptedStore(InMemoryTranscriptStore):
         fail = True
 
         async def append_tool_result(self, session_id, message, *, details):
-            if self.fail and message.tool_call_id == "b":
+            if failure == "store_write" and self.fail and message.tool_call_id == "b":
                 raise OSError("crashed before the second result commit")
             return await super().append_tool_result(session_id, message, details=details)
 
@@ -126,17 +139,40 @@ async def test_settlement_resume_after_partial_commit_skips_done_calls_and_keeps
         jobs.states[name] = JobStatus("exited", exit_code=0)
         jobs.outputs[name] = name.encode()
     ids = {("session", name): name for name in ("a", "b")}
-    with pytest.raises(OSError, match="second result"):
-        await settle_open_calls(session_id="session", store=store, jobs=jobs, job_ids=ids, render_result=renderer(jobs))
+
+    def render(call, job_id, status, watch_id):
+        if failure == "unsupported_result" and store.fail and call.id == "b":
+            return ToolResult((TextBlock(ref=LargeRef("sha256:" + "a" * 64, 1)),))
+        return renderer(jobs)(call, job_id, status, watch_id)
+
+    error_type, error_message = (
+        (OSError, "second result") if failure == "store_write" else (ProjectionError, "large-content references")
+    )
+    with pytest.raises(error_type, match=error_message):
+        await settle_open_calls(session_id="session", store=store, jobs=jobs, job_ids=ids, render_result=render)
     assert [row.message.tool_call_id for row in await store.load("session") if row.kind == "tool_result"] == ["a"]
+    before_retry = project(await store.load("session"))
+    assert before_retry.messages[-1].content[0].text == "[tool call interrupted; no result recorded]"
     jobs.outputs["a"] = b"must not replace committed output"
     store.fail = False
-    new_rows = await settle_open_calls(
-        session_id="session", store=store, jobs=jobs, job_ids=ids, render_result=renderer(jobs)
-    )
+    new_rows = await settle_open_calls(session_id="session", store=store, jobs=jobs, job_ids=ids, render_result=render)
     assert [row.message.tool_call_id for row in new_rows] == ["b"]
     results = [m for m in project(await store.load("session")).messages if isinstance(m, ToolResultMessage)]
     assert [m.content[0].text for m in results] == ["a; exit=0", "b; exit=0"]
+    assert (
+        await settle_open_calls(session_id="session", store=store, jobs=jobs, job_ids=ids, render_result=render) == ()
+    )
+    fresh = Agent(
+        session_id="session",
+        models=FakeModelRouter(ScriptedProvider([[Done(assistant())]])),
+        tools=[],
+        hooks=[],
+        store=store,
+        jobs=jobs,
+        cwd="/test-owned",
+    )
+    events = [event async for event in fresh.run(input_row("next", "continue"), turn_id="next")]
+    assert events[-1].reason == "completed"
 
 
 async def test_fork_settlement_uses_parent_job_identity_and_late_rows_project_at_the_call():

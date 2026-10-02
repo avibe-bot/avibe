@@ -55,7 +55,7 @@ from core.agent_core.ai.provider import (
     ThinkingDelta,
 )
 from core.agent_core.cancel import CancelToken
-from core.agent_core.harness.projection import ProjectionError, project
+from core.agent_core.harness.projection import ProjectionError, project, validate_message_append
 from core.agent_core.harness.store import ContextEntry, TranscriptStore
 from core.agent_core.messages import AssistantMessage, Message, TextBlock, ToolCallBlock, ToolResultMessage, text
 from core.agent_core.tools.base import JobHost, Tool, ToolContext, ToolResult
@@ -263,6 +263,7 @@ class Agent:
         return result
 
     async def _consume(self, input: AgentInput) -> None:
+        validate_message_append(self._rows, session_id=self.session_id, kind="input", message=input.message)
         await self._save_state()
         row = await self._scope.call(
             lambda: self.store.consume_input(self.session_id, input.message_id, deepcopy(input.message)),
@@ -271,12 +272,8 @@ class Agent:
         self._rows.append(row)
 
     def _validate_response(self, message: AssistantMessage) -> None:
-        seq = self._rows[-1].context_seq + 1 if self._rows else 1
-        candidate = ContextEntry(self.session_id, seq, "response", "uncommitted-response", message)
         try:
-            # Use the projector itself, not a second approximation of its
-            # invariants. A malformed provider row never enters durable state.
-            project([*self._rows, candidate])
+            validate_message_append(self._rows, session_id=self.session_id, kind="response", message=message)
         except ProjectionError as error:
             raise ProviderProtocolViolation(f"Provider protocol violation: {error}") from error
 
@@ -656,6 +653,7 @@ class Agent:
                 if isinstance(decision, AlterResult):
                     result = decision.result
         message = ToolResultMessage(call.id, call.name, result.content, result.is_error)
+        validate_message_append(self._rows, session_id=self.session_id, kind="tool_result", message=message)
         await self._save_state()
         row = await self._scope.call(
             lambda: self.store.append_tool_result(self.session_id, deepcopy(message), details=deepcopy(result.details)),
