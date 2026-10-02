@@ -845,12 +845,19 @@ def test_persist_agent_assistant_publishes_when_activity_enabled(isolated_state,
     async def scenario():
         sub_id, queue = inbox_events.bus.subscribe()
         try:
+            # The transcript draws a marked narration as its ``interim`` copy, so
+            # the live Activity stream must not repeat it.
+            persist_agent_message(
+                ctx, "assistant", "drawn as a bubble", metadata={"transcript_copy": "interim"}
+            )
+            marked = await _drain_published(queue)
             persist_agent_message(ctx, "assistant", "thinking out loud")
-            return await _drain_published(queue)
+            return marked, await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
 
-    events = asyncio.run(scenario())
+    marked_events, events = asyncio.run(scenario())
+    assert "message.new" not in marked_events
     assert "message.new" in events and "inbox.session.updated" not in events
     assert events["message.new"]["type"] == "assistant"
     assert events["message.new"]["text"] == "thinking out loud"
@@ -858,7 +865,7 @@ def test_persist_agent_assistant_publishes_when_activity_enabled(isolated_state,
     # Persisted as an assistant row (unchanged from the off case).
     with engine.connect() as conn:
         every = messages_service.list_session_messages(conn, session_id="ses_ia", types=("assistant",))
-    assert [m["type"] for m in every["messages"]] == ["assistant"]
+    assert [m["type"] for m in every["messages"]] == ["assistant", "assistant"]
 
 
 def test_persist_agent_output_is_visible_without_activity_streaming(

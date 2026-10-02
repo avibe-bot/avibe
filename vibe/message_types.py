@@ -145,12 +145,19 @@ def is_detached_completion(message_type: str, metadata: Any = None) -> bool:
     )
 
 
+# Metadata on a process-log row whose text the transcript already draws as
+# another row type (the Web ``interim`` bubble). The Activity timeline omits it.
+TRANSCRIPT_COPY_KEY = "transcript_copy"
+
+
 def activity_role_for(message_type: str, metadata: Any = None) -> str:
     """Resolve one row's role in the current Turn's Activity timeline."""
 
     spec = spec_for(message_type)
     values = metadata if isinstance(metadata, Mapping) else {}
     if is_detached_completion(message_type, values):
+        return "none"
+    if values.get(TRANSCRIPT_COPY_KEY):
         return "none"
     # Recovery has already ended the referenced Turn. A delayed visible notice
     # must not close a newer chronological Activity group during history reads.

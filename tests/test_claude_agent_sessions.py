@@ -1608,6 +1608,63 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(composite_key, agent._pending_requests)
         self.assertNotIn(composite_key, agent._native_input_receipts)
 
+    async def test_narration_keeps_claude_markdown_as_written(self):
+        """Narration reaches every surface as the Markdown Claude wrote, like the Result."""
+
+        from modules.im.formatters.avibe_formatter import AvibeFormatter
+
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        agent._get_formatter = lambda _context: AvibeFormatter()
+        composite_key = "session-markdown-narration:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        agent._pending_requests[composite_key] = [
+            SimpleNamespace(
+                context=context,
+                started_at=None,
+                ack_reaction_message_id=None,
+                ack_reaction_emoji=None,
+            )
+        ]
+        narration = "**Plan:** run `vibe status`, then pick one:\n\n---\n[Check] | [Skip]"
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    for text in (narration, "Done."):
+                        yield type("AssistantMessage", (), {"content": [TextBlock(text)]})()
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {"subtype": "success", "result": "Done.", "duration_ms": 1},
+                    )()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-markdown-narration",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        controller.emit_agent_message.assert_any_await(
+            context,
+            "assistant",
+            narration,
+            parse_mode="markdown",
+        )
+
     async def test_ambiguous_results_emit_each_answer_in_order(self):
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"
