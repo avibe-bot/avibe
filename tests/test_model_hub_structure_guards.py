@@ -83,6 +83,32 @@ E64_SETTLEMENT_BOUNDARIES = json.loads((FIXTURES / "e64_settlement_boundaries.js
 # - https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
 STREAM_ENVELOPE_FIXTURES = (
     {
+        "protocol": "google", "terminal_fact": "failed_terminal", "event_name": None,
+        "selector_path": ("error",), "selector_value": None, "error_paths": (("error",),),
+        "payload": b'{"error":{"code":503,"status":"UNAVAILABLE"}}',
+        "source": "https://ai.google.dev/api/generate-content",
+    },
+    {
+        "protocol": "google", "terminal_fact": "failed_terminal", "event_name": "error",
+        "selector_path": ("error",), "selector_value": None, "error_paths": (("error",),),
+        "payload": b'{"error":{"code":503,"status":"UNAVAILABLE"}}',
+        "source": "https://github.com/router-for-me/CLIProxyAPI/blob/c404af96/sdk/api/handlers/gemini/gemini_handlers.go",
+    },
+    {
+        "protocol": "google", "terminal_fact": "served", "event_name": None,
+        "selector_path": ("candidates", "*", "finishReason"), "selector_value": None,
+        "require_nonempty": True, "error_paths": (),
+        "payload": b'{"candidates":[{"finishReason":"STOP"}]}',
+        "source": "https://ai.google.dev/api/generate-content#FinishReason",
+    },
+    {
+        "protocol": "google", "terminal_fact": "served", "event_name": None,
+        "selector_path": ("promptFeedback", "blockReason"), "selector_value": None,
+        "require_nonempty": True, "error_paths": (),
+        "payload": b'{"promptFeedback":{"blockReason":"SAFETY"}}',
+        "source": "https://ai.google.dev/api/generate-content#BlockReason",
+    },
+    {
         "protocol": "anthropic",
         "terminal_fact": "served",
         "event_name": "message_stop",
@@ -174,6 +200,7 @@ STREAM_ENVELOPE_FIXTURES = (
     },
 )
 MODEL_OUTPUT_ENVELOPE_FIXTURES = (
+    ("google", None, ("candidates", "*", "content", "parts"), None, True),
     ("anthropic", "content_block_start", ("type",), "content_block_start", False),
     ("anthropic", "content_block_delta", ("type",), "content_block_delta", False),
     ("openai_responses", "response.output_text.delta", ("type",), "response.output_text.delta", False),
@@ -213,7 +240,7 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
     ("openai_chat", None, ("choices", "*", "delta", "function_call"), None, True),
 )
 BUFFERED_ERROR_TRUST_ROOT_FIXTURES = {
-    protocol: (("error",),) for protocol in ("anthropic", "openai_responses", "openai_chat")
+    protocol: (("error",),) for protocol in ("anthropic", "openai_responses", "openai_chat", "google")
 }
 ACCEPTED_SSE_LINE_ENDINGS = (b"\r\n", b"\n", b"\r")
 STREAM_BOUNDARY_DIMENSIONS = {
@@ -1319,6 +1346,7 @@ def _assert_stream_taxonomy_matches(
             error_envelope_paths=fixture["error_paths"],
             required_error_path=fixture.get("required_error_path"),
             required_error_code_path=fixture.get("required_error_code_path"),
+            require_nonempty=fixture.get("require_nonempty", False),
         )
         for fixture in fixtures
         if "literal" not in fixture

@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agent-core/provider-event.schema.json",
+  "title": "ProviderEvent",
+  "description": "C-2 stream event yielded by ProviderAdapter.stream. A stream yields any number of deltas and ends with exactly one `done` or `error`. `index` is the position of the block in the final message content.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["type", "index", "delta"],
+      "additionalProperties": false,
+      "properties": { "type": { "enum": ["text_delta", "thinking_delta"] }, "index": { "type": "integer", "minimum": 0 }, "delta": { "type": "string" } }
+    },
+    {
+      "type": "object",
+      "required": ["type", "index", "id", "name"],
+      "additionalProperties": false,
+      "properties": { "type": { "const": "tool_call_start" }, "index": { "type": "integer", "minimum": 0 }, "id": { "type": "string" }, "name": { "type": "string" } }
+    },
+    {
+      "type": "object",
+      "required": ["type", "index", "arguments_delta"],
+      "additionalProperties": false,
+      "properties": { "type": { "const": "tool_call_delta" }, "index": { "type": "integer", "minimum": 0 }, "arguments_delta": { "type": "string", "description": "Raw JSON fragment." } }
+    },
+    {
+      "type": "object",
+      "required": ["type", "index"],
+      "additionalProperties": false,
+      "properties": { "type": { "const": "block_end" }, "index": { "type": "integer", "minimum": 0 } }
+    },
+    {
+      "type": "object",
+      "required": ["type", "message"],
+      "additionalProperties": false,
+      "properties": { "type": { "const": "done" }, "message": { "$ref": "message.schema.json#/definitions/AssistantMessage" } }
+    },
+    {
+      "type": "object",
+      "required": ["type", "kind", "retryable", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "error" },
+        "kind": { "enum": ["overflow", "rate_limit", "overloaded", "network", "server", "auth", "invalid_request", "aborted", "unknown"] },
+        "retryable": { "type": "boolean" },
+        "retry_after_s": { "type": "number", "minimum": 0 },
+        "status": { "type": "integer", "description": "HTTP status, when there was one." },
+        "message": { "type": "string", "description": "Provider message with credentials removed." },
+        "partial": { "$ref": "message.schema.json#/definitions/AssistantMessage", "description": "What streamed before the error, with stop_reason `error` or `aborted`; never replayed as a valid response." }
+      }
+    }
+  ],
+  "examples": [
+    { "type": "tool_call_start", "index": 2, "id": "toolu_01AbC", "name": "bash" },
+    { "type": "tool_call_delta", "index": 2, "arguments_delta": "{\"command\":\"pytest" },
+    { "type": "error", "kind": "overflow", "retryable": false, "status": 400, "message": "prompt is too long: 213042 tokens > 200000 maximum" }
+  ]
+}

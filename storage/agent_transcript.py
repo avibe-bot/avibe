@@ -72,6 +72,7 @@ from core.agent_core.messages import (
     UserMessage,
     message_from_dict,
     message_to_dict,
+    require_json_value,
 )
 from storage import agent_events_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
@@ -175,7 +176,7 @@ class SQLiteTranscriptStore:
     async def consume_input(self, session_id: str, message_id: str, message: UserMessage) -> ContextEntry:
         if not isinstance(message, UserMessage):
             raise TypeError("consume_input takes a UserMessage")
-        model = _canonical({"version": PAYLOAD_VERSION, "message": message_to_dict(message)})
+        model = _canonical({"version": PAYLOAD_VERSION, "message": message_to_dict(message)}, "input")
 
         def work(conn: Connection) -> ContextEntry:
             row = conn.execute(
@@ -208,7 +209,7 @@ class SQLiteTranscriptStore:
     async def append_response(self, session_id: str, message: AssistantMessage, *, final: bool) -> ContextEntry:
         if not isinstance(message, AssistantMessage):
             raise TypeError("append_response takes an AssistantMessage")
-        model = _canonical({"version": PAYLOAD_VERSION, "message": message_to_dict(message)})
+        model = _canonical({"version": PAYLOAD_VERSION, "message": message_to_dict(message)}, "response")
 
         def work(conn: Connection) -> ContextEntry:
             origin = _turn_origin(conn, session_id)
@@ -249,7 +250,7 @@ class SQLiteTranscriptStore:
         payload: dict[str, Any] = {"version": PAYLOAD_VERSION, "message": message_to_dict(message)}
         if details:
             payload["details"] = dict(details)
-        payload = _canonical(payload)
+        payload = _canonical(payload, "tool result")
         return await self._write(
             session_id, lambda conn: self._append_event(conn, session_id, "tool_result", payload, message)
         )
@@ -257,7 +258,7 @@ class SQLiteTranscriptStore:
     async def append_payload(self, session_id: str, kind: PayloadKind, payload: Mapping[str, Any]) -> ContextEntry:
         if kind not in ("compaction", "context_edit", "agent_state"):
             raise ValueError(f"not a payload entry kind: {kind!r}")
-        data = _canonical(dict(payload))
+        data = _canonical(dict(payload), f"{kind} payload")
         if not _is_current_version(data):
             raise ValueError(f"a {kind} payload needs version {PAYLOAD_VERSION}")
         return await self._write(session_id, lambda conn: self._append_event(conn, session_id, kind, data, None))
@@ -669,11 +670,16 @@ def _display(rendered: Union[str, RenderedDisplay]) -> RenderedDisplay:
         raise TypeError("a display renderer returns a str or a RenderedDisplay")
     if MODEL_KEY in rendered.content:
         raise TranscriptError(f"display content must not set the reserved {MODEL_KEY!r} key")
-    return RenderedDisplay(rendered.text, _canonical(dict(rendered.content)))
+    return RenderedDisplay(rendered.text, _canonical(dict(rendered.content), "display content"))
 
 
-def _canonical(value: dict[str, Any]) -> dict[str, Any]:
-    """The value exactly as it reads back from a row."""
+def _canonical(value: dict[str, Any], what: str) -> dict[str, Any]:
+    """A detached copy of ``value``, refused unless it reads back from a row unchanged.
+
+    A tuple, a non-str key, NaN, or bytes would otherwise be coerced on the way
+    to disk, and the context would no longer be what its writer committed.
+    """
+    require_json_value(value, what)
     return json.loads(json.dumps(value))
 
 

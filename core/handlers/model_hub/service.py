@@ -38,6 +38,7 @@ from config.v2_config import (
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
     normalized_model_hub_override,
+    validate_model_hub_protocol_vendor,
     validate_model_hub_source_client_nonce,
 )
 from core.agent_auth_service import BackendLoginInProgressError
@@ -131,6 +132,7 @@ from .oauth import (
 from .pricing import VALUE_WINDOW_DAYS, PriceTable, load_price_table, quota_values
 from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
+    REQUEST_NONFALLBACK_TURN_OUTCOME,
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
     ExactHopBlocker,
@@ -171,7 +173,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 11
+CONTRACT_VERSION = 12
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -273,8 +275,8 @@ _MODELS_DEV_CANDIDATE_FIELDS = (
 )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 11
-PROBE_RESULT_CONTRACT_VERSION = 11
+AGENT_CHAIN_CONTRACT_VERSION = 12
+PROBE_RESULT_CONTRACT_VERSION = 12
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 _REORDER_ORDER_UNSET = object()
@@ -614,6 +616,34 @@ class _InvocationPlanChanged(Exception):
     """No transport was admitted; recompute the remaining effective route."""
 
 
+class _InvocationUnsupported(_InvocationPlanChanged):
+    """A request-specific transport limitation, not a Source health failure."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _google_admission_skip_reason(
+    frontend_protocol: str | None,
+    source_protocol: str,
+    model_id: str,
+    stream: bool,
+) -> str | None:
+    """Pinned-engine facts; callers explicitly own where refusal applies."""
+    if frontend_protocol != "google":
+        return None
+    # Pinned CPA splits the decoded action on every colon; escaping cannot
+    # preserve a model colon through that parser.
+    if ":" in model_id:
+        return "google_model_path_unsupported"
+    # CPA c404af96 omits finishReason on its Responses -> Gemini
+    # response.completed conversion. Usage/EOF cannot supply that terminal.
+    if stream and source_protocol == "openai_responses":
+        return "google_stream_responses_unsupported"
+    return None
+
+
 class _RecoveryWindowClosed(Exception):
     """The request may finish its admitted inference, but cannot start another."""
 
@@ -926,7 +956,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 11,
+        "contract_version": 12,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1902,13 +1932,20 @@ class ModelHubService:
             if pinned_protocol is not None:
                 return (pinned_protocol,)
             if vendor == "custom":
-                return SOURCE_PROTOCOLS
+                # Google is explicit API/config admission in v12, not a new
+                # automatic probe or picker option. Its generation path needs
+                # a model, which non-inference observation must not invent.
+                return tuple(protocol for protocol in SOURCE_PROTOCOLS if protocol != "google")
             raise ModelHubError("discovery_failed")
         requested = payload.get("protocol")
         if not isinstance(requested, str) or requested not in SOURCE_PROTOCOLS:
             raise ModelHubError("discovery_failed")
         if pinned_protocol is not None and requested != pinned_protocol:
             raise ModelHubError("discovery_failed")
+        try:
+            validate_model_hub_protocol_vendor(vendor, requested)
+        except ValueError:
+            raise ModelHubError("discovery_failed") from None
         return (requested,)
 
     @staticmethod
@@ -3497,7 +3534,7 @@ class ModelHubService:
                     vendor=vendor,
                     display_name=display_name,
                     protocol=cast(
-                        Literal["anthropic", "openai_responses", "openai_chat"],
+                        Literal["anthropic", "openai_responses", "openai_chat", "google"],
                         protocol_order[0],
                     ),
                     base_url=base_url,
@@ -3556,7 +3593,7 @@ class ModelHubService:
                 self._mark_source_unverified(source)
             if observation is not None:
                 source.protocol = cast(
-                    Literal["anthropic", "openai_responses", "openai_chat"],
+                    Literal["anthropic", "openai_responses", "openai_chat", "google"],
                     observation.protocol,
                 )
             if observation is not None and observation.discovery is ObservationDiscovery.SUCCEEDED:
@@ -6197,6 +6234,11 @@ class ModelHubService:
                 "max_output_tokens": output_tokens,
                 "input": "ping",
             }
+        elif request_protocol == "google":
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+                "generationConfig": {"maxOutputTokens": output_tokens},
+            }
         else:
             payload = {
                 "model": model_id,
@@ -6225,6 +6267,11 @@ class ModelHubService:
                 or not any(model.id == model_id and not model.retired for model in source.models)
             ):
                 raise ModelHubError("mapping_target_unavailable", status=409)
+            # Saved-Source tests are buffered and speak the Source protocol.
+            # Check both initial selection and the locked post-prepare snapshot.
+            reason = _google_admission_skip_reason(source.protocol, source.protocol, model_id, False)
+            if reason is not None:
+                raise ModelHubError(reason, status=422)
             return source
 
         handle = None
@@ -6445,6 +6492,10 @@ class ModelHubService:
         while True:
             try:
                 return await self._probe_agent_once(backend, model_id)
+            except _InvocationUnsupported as skipped:
+                # Explicit probes select one hop, not a fallback turn. A
+                # permanent local limitation cannot restart as route churn.
+                raise ModelHubError(skipped.reason, status=422) from None
             except _InvocationPlanChanged:
                 continue
 
@@ -6511,6 +6562,10 @@ class ModelHubService:
                 ),
             }
 
+        if backend == "avibe":
+            reason = _google_admission_skip_reason(source.protocol, source.protocol, resolved_model, False)
+            if reason is not None:
+                raise _InvocationUnsupported(reason)
         await self._prepare_engine_for_demand()
         started_at = time.monotonic()
         settlement_generation = None
@@ -7825,6 +7880,7 @@ class ModelHubService:
         stream: bool,
         backend: BackendName,
         excluded_source_ids: set[str],
+        excluded_hops: set[tuple[str, str]] | None = None,
         supply_channel: Literal["hub"] | None = None,
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
@@ -7855,6 +7911,7 @@ class ModelHubService:
                 candidates = [
                     hop for hop in resolution.candidate_hops
                     if hop.source_id not in excluded_source_ids
+                    and (hop.source_id, hop.model_id) not in (excluded_hops or ())
                 ]
                 candidate = next(
                     (
@@ -7871,6 +7928,11 @@ class ModelHubService:
                     raise _InvocationPlanChanged
                 attempt_request = request
                 if backend == "avibe":
+                    reason = _google_admission_skip_reason(
+                        getattr(request, "protocol", None), source.protocol, model_id, stream,
+                    )
+                    if reason is not None:
+                        raise _InvocationUnsupported(reason)
                     # Validate the exact rechecked admission snapshot for every
                     # hop, including fallback/refresh. Persisted ids stay intact;
                     # refusal must precede a transport, attempt, or recovery slot.
@@ -7916,6 +7978,7 @@ class ModelHubService:
         backend: str,
         requested_model_id: str,
         excluded_source_ids: set[str],
+        excluded_hops: set[tuple[str, str]] | None = None,
         supply_channel: Literal["hub"] | None = None,
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
@@ -7961,6 +8024,7 @@ class ModelHubService:
                     stream=stream,
                     backend=cast(BackendName, backend),
                     excluded_source_ids=excluded_source_ids,
+                    excluded_hops=excluded_hops,
                     supply_channel=supply_channel,
                     exact_retry=exact_retry,
                     on_admitted=admitted,
@@ -8169,7 +8233,10 @@ class ModelHubService:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
         engine_prepared = False
-        if self.revocations.list():
+        # An entirely unsupported Google request must not reconcile the engine
+        # or custody. Supported hops drain the journal in demand preparation.
+        google_preflight = backend == "avibe" and getattr(request, "protocol", None) == "google"
+        if not google_preflight and self.revocations.list():
             try:
                 await self._ensure_engine_synced()
             except ModelHubError:
@@ -8213,6 +8280,8 @@ class ModelHubService:
         window_closed = False
         non_retryable_failure = False
         globally_blocked_source_ids: set[str] = set()
+        unsupported_hops: set[tuple[str, str]] = set()
+        unsupported_reason: str | None = None
         while True:
             async with self._mutation_lock:
                 if recovery_request is not None and recovery_request.expired:
@@ -8223,7 +8292,11 @@ class ModelHubService:
                     config, cast(BackendName, backend), model_id, supply_channel,
                 )
                 inspection = next(
-                    (hop for hop in resolution.candidate_hops if hop.source_id not in globally_blocked_source_ids),
+                    (
+                        hop for hop in resolution.candidate_hops
+                        if hop.source_id not in globally_blocked_source_ids
+                        and (hop.source_id, hop.model_id) not in unsupported_hops
+                    ),
                     None,
                 )
             if inspection is None:
@@ -8252,8 +8325,6 @@ class ModelHubService:
                     outcome=None,
                     supply_channel="native_cli",
                 )
-            await self._prepare_engine_for_demand(already_synced=engine_prepared)
-            engine_prepared = True
             settlement_generation = None
 
             def admitted(generation: int) -> None:
@@ -8277,6 +8348,14 @@ class ModelHubService:
                     )
 
             try:
+                if backend == "avibe":
+                    reason = _google_admission_skip_reason(
+                        getattr(request, "protocol", None), source.protocol, target_model, stream,
+                    )
+                    if reason is not None:
+                        raise _InvocationUnsupported(reason)
+                await self._prepare_engine_for_demand(already_synced=engine_prepared)
+                engine_prepared = True
                 handle, outcome, cancelled = await self._invoke(
                     source=source,
                     model_id=target_model,
@@ -8285,10 +8364,19 @@ class ModelHubService:
                     backend=backend,
                     requested_model_id=model_id,
                     excluded_source_ids=globally_blocked_source_ids,
+                    excluded_hops=unsupported_hops,
                     supply_channel=supply_channel,
                     on_admitted=admitted,
                     recovery_request=recovery_request,
                 )
+            except _InvocationUnsupported as skipped:
+                unsupported_reason = skipped.reason
+                unsupported_hops.add((source.id, target_model))
+                logger.info(
+                    "Model Hub skipped unsupported hop: %s", skipped.reason,
+                    extra={"reason": skipped.reason, "source_id": source.id, "model_id": target_model},
+                )
+                continue
             except _InvocationPlanChanged:
                 continue
             except _RecoveryWindowClosed:
@@ -8344,6 +8432,7 @@ class ModelHubService:
                         backend=backend,
                         requested_model_id=model_id,
                         excluded_source_ids=globally_blocked_source_ids,
+                        excluded_hops=unsupported_hops,
                         supply_channel=supply_channel,
                         exact_retry=True,
                         on_admitted=admitted,
@@ -8492,6 +8581,12 @@ class ModelHubService:
                 status=502,
                 turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
                 local_error_detail=format_os_errno(outcome.os_errno),
+            )
+        if unsupported_reason is not None and failed_source is None:
+            # No upstream attempt exists. Exhaustion would invent a failed
+            # attempt (and a retryable supply state) for a local limitation.
+            raise ModelHubError(
+                unsupported_reason, status=422, turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
         final_config, final_resolution = self._inspect_terminal_chain(
             backend=cast(BackendName, backend),

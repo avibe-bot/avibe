@@ -92,7 +92,16 @@ class JobHost(Protocol):
         """Raw output bytes after ``since`` and the new offset; callers normalize."""
         ...
 
-    async def kill(self, job_id: str) -> None: ...
+    async def kill(self, job_id: str, *, reason: str = "killed") -> None:
+        """Terminate the job's process tree, recording ``reason`` unless a stop reason was already recorded."""
+        ...
+
+    def stop_reason(self, job_id: str) -> Optional[str]:
+        """Why the job was stopped (``timeout``, ``aborted``, ``wrapper_error``, ``killed``), or ``None``.
+
+        The first recorded reason wins; callers report a job's end from this, never from elapsed time.
+        """
+        ...
 
     async def hand_over(self, job_id: str) -> str:
         """Give the running job to a once Watch and return the Watch id."""

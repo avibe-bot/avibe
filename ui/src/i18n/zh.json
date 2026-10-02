@@ -1883,6 +1883,7 @@
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
           "openaiChatCompletions": "OpenAI Chat Completions",
+          "google": "Google Gemini",
           "idleHint": "填好 Base URL 和 API Key 后自动识别",
           "detecting": "识别接口中…",
           "manual": "手动指定接口类型",

@@ -22,7 +22,7 @@ import {
   transitionManageStage,
 } from './manage';
 import type { ManageStage } from './manage';
-import { SOURCE_PROTOCOLS } from './types';
+import { SELECTABLE_SOURCE_PROTOCOLS } from './types';
 import type { Source, SourceProtocol } from './types';
 
 type ValidationCase = {
@@ -238,12 +238,18 @@ describe('source management capabilities', () => {
     }
   });
 
+  it('leaves API-only Google endpoint policy to the server too', () => {
+    expect(assessSourceEdit(source({ vendor: 'custom', protocol: 'google' }), {
+      displayName: source().display_name, baseUrl: '',
+    })).toEqual({ valid: true, patch: { base_url: null }, reason: null });
+  });
+
   it('holds no vendor or protocol policy for an emptied endpoint', () => {
     const vendors = new Set(validationFixture.empty_targets.map((item) => item.vendor));
     const pairs = new Set(validationFixture.empty_targets.map((item) => `${item.vendor}:${item.protocol}`));
-    expect(pairs.size).toBe(vendors.size * SOURCE_PROTOCOLS.length);
+    expect(pairs.size).toBe(vendors.size * SELECTABLE_SOURCE_PROTOCOLS.length);
     for (const vendor of vendors) {
-      for (const protocol of SOURCE_PROTOCOLS) expect(pairs.has(`${vendor}:${protocol}`)).toBe(true);
+      for (const protocol of SELECTABLE_SOURCE_PROTOCOLS) expect(pairs.has(`${vendor}:${protocol}`)).toBe(true);
     }
 
     for (const item of validationFixture.empty_targets) {

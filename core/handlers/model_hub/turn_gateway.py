@@ -597,6 +597,7 @@ class ModelHubTurnGateway:
             app = web.Application(client_max_size=client_max_size)
             app.router.add_get("/{backend}/v1/models", self._handle_models)
             app.router.add_post("/{backend}/v1/{endpoint:.*}", self._handle_request)
+            app.router.add_post("/{backend}/v1beta/models/{google_action:.*}", self._handle_google_request)
             runner = web.AppRunner(
                 app,
                 access_log=None,
@@ -624,7 +625,8 @@ class ModelHubTurnGateway:
         authorization = request.headers.get("Authorization", "")
         bearer = authorization[7:] if authorization.lower().startswith("bearer ") else ""
         api_key = request.headers.get("x-api-key", "")
-        for candidate in (bearer, api_key):
+        google_key = request.headers.get("x-goog-api-key", "") if "google_action" in request.match_info else ""
+        for candidate in (bearer, api_key, google_key):
             if candidate and self.correlation.authenticates(backend, candidate):
                 return candidate
         return None
@@ -659,6 +661,28 @@ class ModelHubTurnGateway:
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    async def _handle_google_request(self, request: web.Request) -> web.StreamResponse:
+        response = await self._handle_request(request)
+        # Only locally rendered JSON endings need translation. This same
+        # response already owns its status, retry metadata and admitted origin.
+        # Streaming endings use the protocol taxonomy before committing bytes.
+        if isinstance(response, web.Response) and not response.prepared and _LOCAL_ENDING in response:
+            ending = response[_LOCAL_ENDING]
+            response.text = json.dumps({
+                "error": {
+                    "code": response.status,
+                    "status": {
+                        400: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED",
+                        404: "NOT_FOUND", 409: "ABORTED", 413: "RESOURCE_EXHAUSTED",
+                        422: "FAILED_PRECONDITION", 424: "FAILED_PRECONDITION",
+                        429: "RESOURCE_EXHAUSTED", 503: "UNAVAILABLE", 504: "DEADLINE_EXCEEDED",
+                    }.get(response.status, "INTERNAL"),
+                    "message": ending.message,
+                    "details": [{"reason": ending.key}],
+                },
+            })
+        return response
 
     async def _handle_request(self, request: web.Request) -> web.StreamResponse:
         backend = request.match_info["backend"]
@@ -854,8 +878,15 @@ class ModelHubTurnGateway:
         execution: _TurnExecution,
         resources: AsyncExitStack,
     ) -> web.StreamResponse:
-        endpoint = request.match_info["endpoint"].strip("/")
-        if backend not in MODEL_HUB_BACKENDS or endpoint not in _SUPPORTED_PATHS:
+        endpoint = request.match_info.get("endpoint", "").strip("/")
+        google_action = request.match_info.get("google_action")
+        google_model, _, google_method = (google_action or "").rpartition(":")
+        google_request = google_action is not None
+        supported_path = (
+            bool(google_model) and google_method in {"generateContent", "streamGenerateContent"}
+            if google_request else endpoint in _SUPPORTED_PATHS
+        )
+        if backend not in MODEL_HUB_BACKENDS or not supported_path:
             terminalizer.fail("protocol_error")
             return self._terminal_error_response(
                 execution,
@@ -904,8 +935,20 @@ class ModelHubTurnGateway:
                 code="invalid_request_error",
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
-        model_id = payload.get("model")
-        stream = payload.get("stream", False)
+        model_id = google_model if google_request else payload.get("model")
+        stream = google_method == "streamGenerateContent" if google_request else payload.get("stream", False)
+        if google_request and (
+            "model" in payload or "stream" in payload
+            or any(
+                value != "sse" or not stream
+                for name in ("alt", "$alt") for value in request.query.getall(name, [])
+            )
+        ):
+            terminalizer.fail("invalid_parameter")
+            return self._terminal_error_response(
+                execution, terminalizer, status=400, code="invalid_request_error",
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+            )
         if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
             terminalizer.fail("invalid_parameter")
             return self._terminal_error_response(
@@ -953,7 +996,7 @@ class ModelHubTurnGateway:
                 decision=decision,
             )
 
-        protocol = _REQUEST_PROTOCOLS[endpoint]
+        protocol = "google" if google_request else _REQUEST_PROTOCOLS[endpoint]
         try:
             caller_headers = {
                 name.lower(): value for name, value in request.headers.items() if name.lower() in FORWARDED_CALLER_HEADERS

@@ -11,13 +11,23 @@ from urllib.parse import urlsplit
 from config.v2_config import normalize_model_hub_base_url, normalize_model_hub_vendor_id
 
 
-_SUPPORTED_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat"}
+_SUPPORTED_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "google"}
 _LEGACY_OFFICIAL_BASE_URLS = {
     # ``codex`` remains a supported legacy vendor alias outside the shipped
     # api-key vendor preset catalog. Runtime official-URL fallback must keep
     # treating it like OpenAI for persisted Sources that omit ``base_url``.
     "codex": "https://api.openai.com/v1",
 }
+
+
+def google_api_base_url(base_url: str | None) -> str:
+    """CPA's Gemini executor appends /v1beta itself, including on custom roots."""
+    normalized = normalize_model_hub_base_url(base_url)
+    if normalized is None:
+        raise ValueError("Google source requires a base URL")
+    if urlsplit(normalized).query:
+        raise ValueError("Google source Base URL cannot contain a query")
+    return normalized.removesuffix("/v1beta")
 
 
 def _validated_cpa_anthropic_origin(base_url: str | None) -> bool:

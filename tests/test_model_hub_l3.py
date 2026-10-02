@@ -6207,6 +6207,11 @@ def test_production_adapter_retargets_api_keys_without_exposing_or_mutating_them
     assert asyncio.run(adapter.credential_supports_refresh(oauth_ref)) is True
 
 
+# These existing evidence tests exercise model-free Auto probes, not Google's
+# explicitly declared native model-list witness (covered by test_model_hub_google).
+_MODEL_FREE_OBSERVATION_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat")
+
+
 def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     tmp_path: Path,
 ) -> None:
@@ -6215,7 +6220,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     credential_ref = state_store.store_api_key(
         "test-observation-key",
         vendor="custom",
-        protocol=SOURCE_PROTOCOLS[-1],
+        protocol=_MODEL_FREE_OBSERVATION_PROTOCOLS[-1],
         base_url=base_url,
     )
     adapter = CLIProxyEngineAdapter(
@@ -6258,7 +6263,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         shape=_ProtocolObservationShape.NON_JSON,
     )
 
-    hinted_order = tuple(reversed(SOURCE_PROTOCOLS))
+    hinted_order = tuple(reversed(_MODEL_FREE_OBSERVATION_PROTOCOLS))
 
     async def every_candidate_is_supported(**_kwargs) -> _ProtocolEvidence:
         return proven_accepted
@@ -6371,14 +6376,14 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                     "custom",
                     base_url,
                     credential_ref,
-                    SOURCE_PROTOCOLS,
+                    _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is True
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
     async def structured_unknown_sibling(**kwargs) -> _ProtocolEvidence:
@@ -6403,14 +6408,14 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                     "custom",
                     base_url,
                     credential_ref,
-                    SOURCE_PROTOCOLS,
+                    _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is True
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
     async def anthropic_server_error_blocks_openai_pairwise(**kwargs) -> _ProtocolEvidence:
@@ -6437,14 +6442,14 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                     "custom",
                     base_url,
                     credential_ref,
-                    SOURCE_PROTOCOLS,
+                    _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is True
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
     timeout = EngineClientError("protocol observation timed out", error_type="timeout")
@@ -6473,14 +6478,14 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                     "custom",
                     base_url,
                     credential_ref,
-                    SOURCE_PROTOCOLS,
+                    _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is True
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
     async def anthropic_competes_with_openai_pairwise(**kwargs) -> _ProtocolEvidence:
@@ -6507,14 +6512,14 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                     "custom",
                     base_url,
                     credential_ref,
-                    SOURCE_PROTOCOLS,
+                    _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is True
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
     unproven_rejected = _ProtocolEvidence(
@@ -6546,14 +6551,14 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                 "custom",
                 base_url,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is True
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
     async def rejected_anthropic_allows_openai_pairwise(**kwargs) -> _ProtocolEvidence:
@@ -6580,7 +6585,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                 "custom",
                 base_url,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
@@ -6588,7 +6593,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert observed.protocol == "openai_chat"
     assert observed.authenticated is True
     assert observed.model_ids == ("chat-only-model",)
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
 
     transient_non_json = _parse_protocol_authenticated_evidence(
@@ -6625,14 +6630,14 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                 "custom",
                 base_url,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is True
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
     async def anthropic_wrapperless_then_absent_openai(**kwargs) -> _ProtocolEvidence:
@@ -6659,14 +6664,14 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                 "custom",
                 base_url,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert observed.outcome.value == "observed"
     assert observed.protocol == "anthropic"
     assert observed.model_ids == ("relay-model",)
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     assert inventory_probe.await_args.kwargs["protocol"] == "anthropic"
 
     async def anthropic_wrapperless_with_rejected_openai(**kwargs) -> _ProtocolEvidence:
@@ -6693,7 +6698,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                 "custom",
                 base_url,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
@@ -6701,7 +6706,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert observed.protocol == "anthropic"
     assert observed.authenticated is True
     assert observed.model_ids == ("anthropic-relay-model",)
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     assert inventory_probe.await_args.kwargs["protocol"] == "anthropic"
 
     credential_param_rejected = _parse_protocol_authenticated_evidence(
@@ -6745,14 +6750,14 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                 "custom",
                 base_url,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert rejected.outcome.value == "authentication_failed"
     assert rejected.protocol is None
     assert rejected.authenticated is False
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
     with (
@@ -6808,7 +6813,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                 "custom",
                 base_url,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
@@ -6816,12 +6821,12 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert upstream_error.reachable is True
     assert upstream_error.authenticated is None
     assert upstream_error.protocol is None
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     inventory_probe.assert_not_awaited()
     _assert_valid(
         "observation-result.schema.json",
         {
-            "contract_version": 11,
+            "contract_version": 12,
             "outcome": "adapter_error",
             "reachable": True,
             "authenticated": "unknown",
@@ -6832,7 +6837,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
         },
     )
 
-    proved_protocol = SOURCE_PROTOCOLS[1]
+    proved_protocol = _MODEL_FREE_OBSERVATION_PROTOCOLS[1]
 
     async def later_protocol_probe(**kwargs) -> _ProtocolEvidence:
         if kwargs["protocol"] != proved_protocol:
@@ -6854,19 +6859,19 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                 "custom",
                 base_url,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert observed.outcome.value == "observed"
     assert observed.protocol == proved_protocol
     assert observed.model_ids == ("upstream-model",)
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS[:2])
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS[:2])
     assert inventory_probe.await_args.kwargs["protocol"] == proved_protocol
     assert inventory_probe.await_args.kwargs["base_url"] == base_url
 
-    rejected_protocol = SOURCE_PROTOCOLS[0]
-    accepted_protocol = SOURCE_PROTOCOLS[1]
+    rejected_protocol = _MODEL_FREE_OBSERVATION_PROTOCOLS[0]
+    accepted_protocol = _MODEL_FREE_OBSERVATION_PROTOCOLS[1]
 
     async def rejected_then_authenticated(**kwargs) -> _ProtocolEvidence:
         if kwargs["protocol"] == rejected_protocol:
@@ -6890,7 +6895,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                 "custom",
                 base_url,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
@@ -6934,7 +6939,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
                 "custom",
                 base_url,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
@@ -6942,7 +6947,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     assert rejected.reachable is True
     assert rejected.authenticated is False
     assert rejected.protocol is None
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
 
@@ -6990,14 +6995,14 @@ def test_source_observation_accepts_catalog_pin_and_custom_declaration_without_s
                 "deepseek",
                 None,
                 catalog_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert observed.outcome.value == "observed"
     assert observed.protocol == "openai_chat"
     assert observed.model_ids == ("deepseek-chat",)
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     assert inventory_probe.await_args.kwargs["protocol"] == "openai_chat"
 
     with (
@@ -7015,14 +7020,14 @@ def test_source_observation_accepts_catalog_pin_and_custom_declaration_without_s
                 "custom",
                 "https://api.deepseek.com",
                 custom_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
     assert ambiguous.outcome.value == "ambiguous"
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is True
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     inventory_probe.assert_not_awaited()
 
     with (
@@ -7113,7 +7118,7 @@ def test_qwen_catalog_pin_validation_remains_unverified(
                     "qwen",
                     None,
                     credential_ref,
-                    SOURCE_PROTOCOLS,
+                    _MODEL_FREE_OBSERVATION_PROTOCOLS,
                 )
                 inventory_kwargs = dict(inventory_probe.await_args.kwargs)
         finally:
@@ -7128,7 +7133,7 @@ def test_qwen_catalog_pin_validation_remains_unverified(
     assert observed.model_ids == ()
     assert requests == [
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
-        for protocol in SOURCE_PROTOCOLS
+        for protocol in _MODEL_FREE_OBSERVATION_PROTOCOLS
     ]
     assert inventory_kwargs["protocol"] == "openai_chat"
 
@@ -7197,7 +7202,7 @@ def test_openrouter_catalog_pin_numeric_validation_remains_unverified(
                     "openrouter",
                     None,
                     credential_ref,
-                    SOURCE_PROTOCOLS,
+                    _MODEL_FREE_OBSERVATION_PROTOCOLS,
                 )
                 inventory_kwargs = dict(inventory_probe.await_args.kwargs)
         finally:
@@ -7212,7 +7217,7 @@ def test_openrouter_catalog_pin_numeric_validation_remains_unverified(
     assert observed.model_ids == ()
     assert requests == [
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
-        for protocol in SOURCE_PROTOCOLS
+        for protocol in _MODEL_FREE_OBSERVATION_PROTOCOLS
     ]
     assert inventory_kwargs["protocol"] == "openai_chat"
 
@@ -7497,7 +7502,7 @@ def test_custom_auto_numeric_auth_failure_message_stays_authentication_failed(
                     "custom",
                     origin,
                     credential_ref,
-                    SOURCE_PROTOCOLS,
+                    _MODEL_FREE_OBSERVATION_PROTOCOLS,
                 )
                 inventory_probe.assert_not_awaited()
         finally:
@@ -7512,7 +7517,7 @@ def test_custom_auto_numeric_auth_failure_message_stays_authentication_failed(
     assert observed.model_ids == ()
     assert requests == [
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
-        for protocol in SOURCE_PROTOCOLS
+        for protocol in _MODEL_FREE_OBSERVATION_PROTOCOLS
     ]
 
 
@@ -7786,7 +7791,7 @@ def test_auth_setup_executable_scenarios_are_registered() -> None:
             assert registered[scenario_id]["test"].endswith("::" + node.name)
 
 
-@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("protocol", _MODEL_FREE_OBSERVATION_PROTOCOLS)
 @pytest.mark.parametrize("status", [401, 403])
 @pytest.mark.parametrize("body", ['{"message":"Regional policy"}', '{"error":{"code":"invalid_api_key"}}'])
 def test_authentication_status_interpretation_preserves_evidence_role(
@@ -7863,7 +7868,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
             vendor,
             None,
             credential_ref,
-            SOURCE_PROTOCOLS,
+            _MODEL_FREE_OBSERVATION_PROTOCOLS,
         )
     )
 
@@ -7897,7 +7902,7 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
                 vendor,
                 None,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
@@ -7960,7 +7965,7 @@ def test_oauth_observation_does_not_use_api_key_catalog_pins_without_shape_proof
                 "openai",
                 None,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
@@ -7968,7 +7973,7 @@ def test_oauth_observation_does_not_use_api_key_catalog_pins_without_shape_proof
     assert ambiguous.protocol is None
     assert ambiguous.authenticated is True
     discover_models.assert_not_awaited()
-    assert [call.kwargs["protocol"] for call in oauth_probe.call_args_list] == list(SOURCE_PROTOCOLS)
+    assert [call.kwargs["protocol"] for call in oauth_probe.call_args_list] == list(_MODEL_FREE_OBSERVATION_PROTOCOLS)
 
 
 @pytest.mark.parametrize("vendor", sorted(_HUB_SUBSCRIPTION_PROTOCOLS))
@@ -8031,7 +8036,7 @@ def test_hub_subscription_observation_binds_on_the_engine_declared_protocol(
                 vendor,
                 None,
                 credential_ref,
-                SOURCE_PROTOCOLS,
+                _MODEL_FREE_OBSERVATION_PROTOCOLS,
             )
         )
 
@@ -8068,7 +8073,7 @@ def test_hub_subscription_projects_on_its_pin_whatever_the_api_key_pin_is(
         f"{vendor}-test.json",
     )
     protocol = hub_subscription_serving_protocol(vendor)
-    assert protocol in SOURCE_PROTOCOLS
+    assert protocol in _MODEL_FREE_OBSERVATION_PROTOCOLS
 
     projected = state_store.sync_sources(
         [
@@ -8484,7 +8489,7 @@ def test_openai_family_nested_numeric_auth_failure_message_is_rejected(
     )
 
 
-@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("protocol", _MODEL_FREE_OBSERVATION_PROTOCOLS)
 @pytest.mark.parametrize("status", (400, 422))
 def test_request_error_with_credential_param_is_rejected(
     protocol: str,
@@ -8586,7 +8591,7 @@ def test_request_error_404_and_non_json_responses_are_pairwise_exclusion_shapes(
 def test_top_level_authentication_rejection_is_classified_without_forging_protocol() -> None:
     body = json.dumps({"code": "INVALID_API_KEY", "message": "Invalid API key"})
 
-    for protocol in SOURCE_PROTOCOLS:
+    for protocol in _MODEL_FREE_OBSERVATION_PROTOCOLS:
         assert _parse_protocol_authenticated_evidence(
             protocol,
             401,
@@ -8616,7 +8621,7 @@ def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -
         assert site._server is not None
         port = site._server.sockets[0].getsockname()[1]
         try:
-            for protocol in SOURCE_PROTOCOLS:
+            for protocol in _MODEL_FREE_OBSERVATION_PROTOCOLS:
                 await _probe_protocol_response(
                     vendor="custom",
                     protocol=protocol,
@@ -8630,11 +8635,11 @@ def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -
     requests = asyncio.run(scenario())
     paths = [path for path, _query, _body in requests]
 
-    assert len(paths) == len(SOURCE_PROTOCOLS)
+    assert len(paths) == len(_MODEL_FREE_OBSERVATION_PROTOCOLS)
     assert len(set(paths)) == len(paths)
     assert {request_query for _path, request_query, _body in requests} == {query}
     # Model-free bodies fail request validation before a relay schedules capacity.
-    assert dict(zip(SOURCE_PROTOCOLS, (body for _path, _query, body in requests))) == {
+    assert dict(zip(_MODEL_FREE_OBSERVATION_PROTOCOLS, (body for _path, _query, body in requests))) == {
         "anthropic": {"max_tokens": 0, "messages": []},
         "openai_responses": {},
         "openai_chat": {},
@@ -8665,7 +8670,7 @@ def test_protocol_observation_classifies_from_the_body_not_the_status(status) ->
                     base_url=f"http://127.0.0.1:{port}/v1",
                     secret="test-observation-key",
                 )
-                for protocol in SOURCE_PROTOCOLS
+                for protocol in _MODEL_FREE_OBSERVATION_PROTOCOLS
             ]
         finally:
             await runner.cleanup()
@@ -8729,7 +8734,7 @@ def test_protocol_observation_adds_standard_v1_paths_to_a_bare_origin() -> None:
         assert site._server is not None
         port = site._server.sockets[0].getsockname()[1]
         try:
-            for protocol in SOURCE_PROTOCOLS:
+            for protocol in _MODEL_FREE_OBSERVATION_PROTOCOLS:
                 await _probe_protocol_response(
                     vendor="custom",
                     protocol=protocol,
@@ -8742,7 +8747,7 @@ def test_protocol_observation_adds_standard_v1_paths_to_a_bare_origin() -> None:
 
     assert asyncio.run(scenario()) == [
         _PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_path
-        for protocol in SOURCE_PROTOCOLS
+        for protocol in _MODEL_FREE_OBSERVATION_PROTOCOLS
     ]
 
 
@@ -9292,6 +9297,7 @@ def test_probe_2xx_native_auth_error_uses_classified_blocker_detail(
             (
                 {"model", "max_output_tokens", "input"}
                 if source_protocol == "openai_responses"
+                else {"contents", "generationConfig"} if source_protocol == "google"
                 else {"model", "max_tokens", "messages"}
             ),
         )
@@ -9307,6 +9313,8 @@ def test_probe_request_matches_live_backend_protocol_matrix(
 ) -> None:
     source = _source("src_primary01", "Primary")
     source.protocol = source_protocol
+    if source_protocol == "google":
+        source.vendor = "custom"
     service = _service(
         tmp_path,
         sources=[source],
@@ -9349,7 +9357,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
 
     probe = asyncio.run(service.probe_agent("codex", "shared-model"))
     assert probe == {
-        "contract_version": 11,
+        "contract_version": 12,
         "backend": "codex",
         "channel": "native_cli",
         "reachable": True,
