@@ -141,7 +141,7 @@ from .provenance import (
     no_candidate_decision,
     produce_turn_outcome,
 )
-from .request import ModelHubRequest
+from .request import ModelHubRequest, without_opaque_history
 from .reasoning_tiers import resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState
 from .resolver import (
@@ -4788,6 +4788,7 @@ class ModelHubService:
         # Suppliers speak first, models.dev fills what they left unsaid, and
         # an unstated ladder falls back to the tiers the backend's request
         # protocol accepts, unless models.dev says the model cannot reason.
+        # Avibe has no native protocol pin and must not receive guessed tiers.
         enrichment = (
             {field: match[field] for field in _MODELS_DEV_CANDIDATE_FIELDS}
             if match is not None
@@ -4800,7 +4801,7 @@ class ModelHubService:
         display_name = display_name or (match or {}).get("display_name")
         if not reasoning_efforts and match is not None:
             reasoning_efforts = list(match["reasoning_efforts"])
-        if not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
+        if backend != "avibe" and not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
             request_protocol = _FIXED_BACKEND_PROTOCOLS.get(
                 backend
             ) or native_protocol_for_model_id(model_id)
@@ -7864,14 +7865,18 @@ class ModelHubService:
                     or candidate.model_id != model_id
                 ):
                     raise _InvocationPlanChanged
+                attempt_request = request
                 if backend == "avibe":
                     # Validate the exact rechecked admission snapshot for every
                     # hop, including fallback/refresh. Persisted ids stay intact;
                     # refusal must precede a transport, attempt, or recovery slot.
                     try:
-                        HopOrigin(source.vendor, source.protocol, model_id).response_headers()
+                        origin = HopOrigin(source.vendor, source.protocol, model_id)
+                        origin.response_headers()
                     except ServedHopHeaderTooLarge:
                         raise ModelHubError("served_hop_too_large", status=422) from None
+                    if getattr(request, "primary_origin", None) != origin:
+                        attempt_request = without_opaque_history(request)
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:
                         raise _RecoveryWindowClosed
@@ -7881,7 +7886,7 @@ class ModelHubService:
                     # Lock order matches config sync. The adapter hands exclusion
                     # back only after owning the transport that sync must drain.
                     return await self._engine_call(self.adapter.invoke(
-                        source.id, model_id, request, stream, backend, on_admitted=admitted,
+                        source.id, model_id, attempt_request, stream, backend, on_admitted=admitted,
                     ))
             except BaseException:
                 self.recovery.release(source.id, generation)

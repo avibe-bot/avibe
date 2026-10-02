@@ -308,6 +308,10 @@
           "additionalProperties": false,
           "allOf": [
             {
+              "if": { "properties": { "backend": { "const": "avibe" } }, "required": ["backend"] },
+              "then": { "properties": { "mode": { "const": "hub" } } }
+            },
+            {
               "if": { "properties": { "backend": { "const": "opencode" } }, "required": ["backend"] },
               "then": {
                 "properties": {

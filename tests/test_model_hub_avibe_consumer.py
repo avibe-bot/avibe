@@ -11,6 +11,7 @@ import asyncio
 import copy
 import json
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +28,7 @@ from config.v2_config import (
 )
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.provenance import HopOrigin, SERVED_HOP_HEADER
+from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.service import ModelHubError
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
@@ -105,6 +107,388 @@ def _body(protocol, stream):
         b'event: response.completed\ndata: {"type":"response.completed","response":'
         b'{"id":"resp_1","status":"completed","usage":{"input_tokens":2,"output_tokens":1}}}\n\n'
     )
+
+
+def _signed_history(protocol):
+    """Wire-shaped histories and their explicit, non-opaque equivalents."""
+    if protocol == "anthropic":
+        call = {"type": "tool_use", "id": "call_1", "name": "verify", "input": {"signature": "user-data"}}
+        result = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}]}
+        return (
+            {"messages": [{"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Visible reasoning", "signature": "opaque-thinking"},
+                {"type": "redacted_thinking", "data": "opaque-redacted"},
+                {"type": "text", "text": "Answer", "signature": "opaque-text"},
+                {**call, "thoughtSignature": "opaque-call"},
+            ]}, result, {"role": "assistant", "content": [{"type": "redacted_thinking", "data": "opaque-only"}]}]},
+            {"messages": [{"role": "assistant", "content": [
+                {"type": "text", "text": "Visible reasoning"}, {"type": "text", "text": "Answer"}, call,
+            ]}, result]},
+        )
+    if protocol == "openai_responses":
+        call = {"type": "function_call", "call_id": "call_1", "name": "verify", "arguments": '{"signature":"user-data"}'}
+        result = {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+        return (
+            {"input": [
+                {"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque-reasoning",
+                 "summary": [{"type": "summary_text", "text": "Visible reasoning"}]},
+                {"type": "reasoning", "id": "rs_hidden", "encrypted_content": "opaque-only", "summary": []},
+                {"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "Answer", "signature": "opaque-text"},
+                ]},
+                {**call, "signature": "opaque-call"}, result,
+            ], "store": False},
+            {"input": [
+                {"role": "assistant", "content": [{"type": "output_text", "text": "Visible reasoning"}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Answer"}]},
+                call, result,
+            ], "store": False},
+        )
+    call = {"type": "function", "id": "call_1", "function": {"name": "verify", "arguments": '{"signature":"user-data"}'}}
+    result = {"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+    return (
+        {"messages": [{"role": "assistant",
+                       "content": [{"type": "text", "text": "Answer", "thoughtSignature": "opaque-text"}],
+                       "tool_calls": [{**call, "extra_content": {"google": {"thought_signature": "opaque-call"}}}]},
+                      result]},
+        {"messages": [{"role": "assistant", "content": [{"type": "text", "text": "Answer"}],
+                       "tool_calls": [{**call, "extra_content": {"google": {}}}]}, result]},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", PROTOCOL_ENDPOINTS)
+@pytest.mark.parametrize("change", ["same_origin", "provider", "api", "model"])
+async def test_failover_strips_opaque_history_only_when_origin_changes(tmp_path, protocol, change):
+    """MH-AVIBE-005: the engine must never receive primary-signed history at another origin.
+
+    Origin-report tests alone do not inspect the outgoing history at admission.
+    Source identity alone is not origin identity; preserve ordinary tool data.
+    """
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol=protocol)
+    fallback_protocol = "anthropic" if protocol != "anthropic" else "openai_responses"
+    fallback = _source(
+        "src_fallback01", "Fallback",
+        vendor="custom" if change == "provider" else primary.vendor,
+        protocol=fallback_protocol if change == "api" else protocol,
+        model_id="another-model" if change == "model" else "shared-model",
+    )
+    service = _avibe_service(tmp_path, [primary, fallback], handles=[
+        InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error")),
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=fallback.id), (b"{}",)),
+    ])
+    signed, plain = _signed_history(protocol)
+    original = copy.deepcopy(signed)
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="avibe:opaque", turn_id="turn-opaque")
+        common = {"model": hop["runtime_model"], "stream": False, "temperature": 0.25}
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{hop["base_url"]}/{PROTOCOL_ENDPOINTS[protocol]}',
+                headers={
+                    "Authorization": f'Bearer {hop["token"]}',
+                    "anthropic-beta": "fixture-beta",
+                    "User-Agent": "fixture-agent",
+                },
+                json={**common, **signed},
+            ) as response:
+                assert response.status == 200
+                assert await response.read() == b"{}"
+                assert json.loads(response.headers[SERVED_HOP_HEADER]) == {
+                    "provider": fallback.vendor, "api": fallback.protocol, "model": fallback.models[0].id,
+                }
+        assert [entry[0] for entry in service.adapter.invocations] == [primary.id, fallback.id]
+        assert service.adapter.requests[0] == {**common, **original}
+        assert service.adapter.requests[1] == {**common, **(original if change == "same_origin" else plain)}
+        assert all(request.protocol == protocol for request in service.adapter.requests)
+        assert all(request.headers == {
+            "anthropic-beta": "fixture-beta", "user-agent": "fixture-agent",
+        } for request in service.adapter.requests)
+        assert signed == original
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turn_id", ["turn-snapshot", None])
+@pytest.mark.parametrize("origin_state", ["unchanged", "changed", "unverified"])
+async def test_opaque_history_uses_launch_snapshot_without_requiring_turn_attribution(tmp_path, turn_id, origin_state):
+    """MH-AVIBE-005: config reload and untracked calls cannot invent primary provenance.
+
+    A fallback-only case cannot catch snapshot recomputation at HTTP arrival or
+    loss of the route credential when no dispatched turn is being tracked.
+    """
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    service = _avibe_service(tmp_path, [primary], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS), (b"{}",)),
+    ])
+    signed, plain = _signed_history("anthropic")
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        if origin_state == "unverified":
+            base, token = await gateway.endpoint("avibe", process_scope="avibe:unverified")
+            base_url, model = f"{base}/v1", "menu-alias"
+        else:
+            hop = await router.resolve_hop("menu-alias", process_scope="avibe:snapshot", turn_id=turn_id)
+            base_url, model, token = hop["base_url"], hop["runtime_model"], hop["token"]
+        if origin_state == "changed":
+            service.store.config.sources[0].vendor = "custom"
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"{base_url}/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"model": model, **signed},
+            ) as response:
+                assert response.status == 200
+                assert await response.read() == b"{}"
+        assert service.adapter.requests[0]["messages"] == (
+            signed if origin_state == "unchanged" else plain
+        )["messages"]
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovered_hop", ["primary", "fallback"])
+async def test_opaque_history_origin_survives_recovery_walks(tmp_path, recovered_hop):
+    """MH-AVIBE-005: retries keep the launch origin and never mutate signed input.
+
+    Single-walk failover misses both a fresh resolver walk trusting its new first
+    candidate and a destructive scrub leaking back into same-origin recovery.
+    """
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    fallback = _source("src_fallback01", "Fallback", vendor="custom", protocol="anthropic")
+    service = _avibe_service(tmp_path, [primary, fallback], handles=[
+        InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=503, source_id=primary.id)),
+        InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=503, source_id=fallback.id)),
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS), (b"{}",)),
+    ])
+    service.recovery.window_seconds = 120
+    clock = {"now": NOW}
+    service.now = lambda: clock["now"]
+    waits = []
+
+    async def advance(delay):
+        waits.append(delay)
+        clock["now"] += timedelta(seconds=delay)
+        if recovered_hop == "fallback":
+            service.store.config.agents["avibe"].routes["menu-alias"] = ModelHubRouteConfig((
+                ModelHubRouteHopConfig(fallback.id, "shared-model"),
+            ))
+
+    service.recovery.sleep = advance
+    signed, plain = _signed_history("anthropic")
+    gateway = ModelHubTurnGateway(service, now=lambda: clock["now"])
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="avibe:recovery", turn_id="turn-recovery")
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{hop["base_url"]}/messages',
+                headers={"Authorization": f'Bearer {hop["token"]}'},
+                json={"model": hop["runtime_model"], **signed},
+            ) as response:
+                assert response.status == 200
+                assert await response.read() == b"{}"
+        assert waits == [30.0]
+        assert [entry[0] for entry in service.adapter.invocations] == [
+            primary.id, fallback.id, primary.id if recovered_hop == "primary" else fallback.id,
+        ]
+        assert [request["messages"] for request in service.adapter.requests] == [
+            signed["messages"], plain["messages"],
+            (signed if recovered_hop == "primary" else plain)["messages"],
+        ]
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+async def test_native_history_is_not_scrubbed_by_avibe_origin_policy(tmp_path, backend):
+    """Native callers have no primary-origin metadata; their existing policy stays intact."""
+    protocol = {"claude": "anthropic", "codex": "openai_responses", "opencode": "openai_chat"}[backend]
+    primary = _source("src_primary01", "Primary", protocol=protocol)
+    fallback = _source("src_fallback01", "Fallback", vendor="custom", protocol=protocol)
+    service = _service(tmp_path, sources=[primary, fallback], outcomes=[
+        _outcome(RawOutcomeKind.HTTP_ERROR, status=429),
+        _outcome(RawOutcomeKind.SUCCESS),
+    ])
+    selected = _canonicalize_fixed_test_routes(service)
+    signed, _plain = _signed_history(protocol)
+    original = copy.deepcopy(signed)
+    await service.resolve(
+        backend=backend, model_id=selected.get(backend, "shared-model"),
+        request=ModelHubRequest(signed, protocol=protocol), stream=False,
+    )
+    assert [entry[0] for entry in service.adapter.invocations] == [primary.id, fallback.id]
+    assert service.adapter.requests == [original, original]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("metadata", ["unknown", "source", "catalog"])
+async def test_avibe_candidate_capabilities_survive_catalog_admission_without_guesses(tmp_path, metadata):
+    """MH-AVIBE-001: candidate -> persisted catalog -> launch preserves authority.
+
+    Hand-populated launch fixtures never exercise the candidate model-family
+    default, which must not invent a reasoning ladder for a relay model.
+    """
+    source = _source("src_primary01", "Primary", protocol="openai_chat", model_id="claude-unknown")
+    if metadata == "source":
+        source.models[0].reasoning_efforts = ["high"]
+    service = _avibe_service(tmp_path, [source])
+    service.store.config.agents["avibe"].models = []
+    service.store.config.agents["avibe"].routes = {}
+    service.models_dev_catalog = lambda: (
+        {"fixture": {"models": {"claude-unknown": {
+            "reasoning": True, "reasoning_options": [{"type": "effort", "values": ["medium"]}],
+        }}}}
+        if metadata == "catalog" else {}
+    )
+    candidate, = service.agent_model_candidates("avibe")["providers"]
+    desired = {key: value for key, value in candidate.items() if key != "suppliers"}
+    await service.set_agent_models("avibe", [], [desired])
+    gateway = ModelHubTurnGateway(service)
+    try:
+        hop = await ModelHubRuntimeRouter(service=service, turn_gateway=gateway).resolve_hop(
+            "claude-unknown", process_scope="avibe:candidate", turn_id="turn-candidate",
+        )
+        assert hop["protocol"] == "openai_chat"
+        assert hop["capabilities"]["reasoning_efforts"] == {
+            "unknown": [], "source": ["high"], "catalog": ["medium"],
+        }[metadata]
+        assert hop["capabilities"]["supports_reasoning"] is (True if metadata == "catalog" else None)
+        assert hop["capabilities"]["input_limit"] is None
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late_request", ["malformed", "valid"])
+async def test_sequential_avibe_retry_replaces_route_and_retains_served_provenance(tmp_path, late_request):
+    """MH-AVIBE-006: a retryable partial response can resolve a new hop in one turn.
+
+    One-request failover never re-prepares a route, so it misses the native
+    one-launch assumption marking an otherwise successful Avibe turn ambiguous.
+    """
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    fallback = _source("src_fallback01", "Fallback", model_id="next-model")
+    late = _source("src_late00001", "Late continuation", model_id="late-model")
+    partial = b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n'
+    service = _avibe_service(tmp_path, [primary, fallback, late], handles=[
+        LiveInvokeHandle(_outcome(
+            RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error",
+            source_id=primary.id, stream_started=True,
+        ), (partial,)),
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=fallback.id), (b"{}",)),
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=late.id), (b"{}",)),
+    ])
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    turn_id = "turn-sequential"
+    try:
+        initial = await router.resolve_hop("menu-alias", process_scope="avibe:retry", turn_id=turn_id)
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{initial["base_url"]}/messages',
+                headers={"Authorization": f'Bearer {initial["token"]}'},
+                json={"model": initial["runtime_model"], "stream": True, "messages": []},
+            ) as response:
+                assert response.status == 200
+                assert b"partial" in await response.read()
+            retry = await router.resolve_hop("menu-alias", process_scope="avibe:retry", turn_id=turn_id)
+            assert retry["source_id"] == fallback.id
+            async with client.post(
+                f'{retry["base_url"]}/responses',
+                headers={"Authorization": f'Bearer {retry["token"]}'},
+                json={"model": retry["runtime_model"], "input": "retry"},
+            ) as response:
+                assert response.status == 200
+                await response.read()
+                origin = json.loads(response.headers[SERVED_HOP_HEADER])
+            # A late old credential must not arm/poison the retry's attribution,
+            # even if the request is invalid before the model is parsed.
+            service.store.config.agents["avibe"].routes["menu-alias"] = ModelHubRouteConfig((
+                ModelHubRouteHopConfig(late.id, "late-model"),
+            ))
+            async with client.post(
+                f'{initial["base_url"]}/messages',
+                headers={"Authorization": f'Bearer {initial["token"]}'},
+                **(
+                    {"data": "invalid json"} if late_request == "malformed"
+                    else {"json": {"model": initial["runtime_model"], "messages": []}}
+                ),
+            ) as response:
+                assert response.status == (400 if late_request == "malformed" else 200)
+                await response.read()
+                if late_request == "valid":
+                    assert json.loads(response.headers[SERVED_HOP_HEADER])["model"] == "late-model"
+        completion = router.settle_turn(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+        if completion:
+            await completion
+        record = service.provenance.get(turn_id)
+        assert record is not None
+        assert record["outcome"] == "served"
+        assert record["served"]["source_id"] == fallback.id
+        assert record["served"]["origin"] == origin
+        _validate("turn-provenance.schema.json", record)
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_avibe_route_replacement_refuses_overlap_without_poisoning_current_request(tmp_path):
+    """MH-AVIBE-006: a new launch cannot take an in-flight request's turn identity."""
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    fallback = _source("src_fallback01", "Fallback", protocol="anthropic", model_id="next-model")
+    service = _avibe_service(tmp_path, [primary, fallback], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
+    ])
+    entered, release = asyncio.Event(), asyncio.Event()
+    invoke = service.adapter.invoke
+
+    async def held(*args, **kwargs):
+        result = await invoke(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return result
+
+    service.adapter.invoke = held
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    turn_id = "turn-overlap"
+    try:
+        first = await router.resolve_hop("menu-alias", process_scope="avibe:overlap", turn_id=turn_id)
+        async with aiohttp.ClientSession() as client:
+            pending = asyncio.create_task(client.post(
+                f'{first["base_url"]}/messages',
+                headers={"Authorization": f'Bearer {first["token"]}'},
+                json={"model": first["runtime_model"], "messages": []},
+            ))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                service.store.config.agents["avibe"].routes["menu-alias"] = ModelHubRouteConfig((
+                    ModelHubRouteHopConfig(fallback.id, "next-model"),
+                ))
+                with pytest.raises(ModelHubError) as conflict:
+                    await router.resolve_hop("menu-alias", process_scope="avibe:overlap", turn_id=turn_id)
+                assert conflict.value.status == 409
+            finally:
+                release.set()
+                response = await pending
+                assert response.status == 200
+                await response.read()
+                response.release()
+        completion = router.settle_turn(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+        if completion:
+            await completion
+        record = service.provenance.get(turn_id)
+        assert record is not None
+        assert record["served"]["source_id"] == primary.id
+    finally:
+        await gateway.close()
 
 
 def test_released_config_adds_only_empty_avibe_supply():

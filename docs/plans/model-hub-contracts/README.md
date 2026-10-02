@@ -248,6 +248,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `adapter-interface.py` | Adapter protocol, observation, credential, discovery, invocation, cleanup, and classification boundary. |
 | `mirror-registry.json` | Executable authority/mirror registry and terminal contract version. |
 | `avibe-consumer.md` | C-6 launch projection, capability authority, served-hop response headers, and delivery boundaries. |
+| `avibe-boundary-matrix.json` | Executable Avibe backend/channel audit: all declared schema shapes, runtime admission owners, and Hub-only refusal cases. |
 | `hop-resolution.schema.json` | Ephemeral in-process Avibe consumer result, including gateway-only credentials and nullable capabilities. |
 | `hop-origin.schema.json` | Non-secret response origin shared by the HTTP response header and provenance attempt. |
 | `README.md` | This ownership, version-closure, and contract-index document. |

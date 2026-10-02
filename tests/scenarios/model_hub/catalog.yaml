@@ -142,8 +142,30 @@ scenarios:
     layer: contract
     test: tests/test_model_hub_avibe_consumer.py::test_native_cli_and_direct_are_not_avibe_channels
     related_tests:
+      - tests/test_model_hub_avibe_consumer.py::test_avibe_candidate_capabilities_survive_catalog_admission_without_guesses
+      - tests/test_model_hub_avibe_contract_matrix.py::test_avibe_matrix_covers_every_declared_backend_shape
+      - tests/test_model_hub_avibe_contract_matrix.py::test_avibe_channel_matrix_rejects_impossible_shapes_without_changing_native
+      - tests/test_model_hub_avibe_contract_matrix.py::test_avibe_runtime_matrix_refuses_native_admission
       - tests/test_model_hub_api.py::test_runtime_stop_protects_configured_avibe_models
       - tests/test_model_hub_api.py::test_runtime_stop_returns_explicit_not_started_state
+  - id: MH-AVIBE-005
+    name: Avibe failover strips opaque history only for a different or unverified origin
+    status: covered
+    kind: compatibility
+    layer: contract
+    test: tests/test_model_hub_avibe_consumer.py::test_failover_strips_opaque_history_only_when_origin_changes
+    related_tests:
+      - tests/test_model_hub_avibe_consumer.py::test_opaque_history_uses_launch_snapshot_without_requiring_turn_attribution
+      - tests/test_model_hub_avibe_consumer.py::test_opaque_history_origin_survives_recovery_walks
+      - tests/test_model_hub_avibe_consumer.py::test_native_history_is_not_scrubbed_by_avibe_origin_policy
+  - id: MH-AVIBE-006
+    name: Sequential Avibe retries replace a completed route without losing turn provenance
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_model_hub_avibe_consumer.py::test_sequential_avibe_retry_replaces_route_and_retains_served_provenance
+    related_tests:
+      - tests/test_model_hub_avibe_consumer.py::test_avibe_route_replacement_refuses_overlap_without_poisoning_current_request
   - id: MH-CODEX-ROUTING-001
     name: Shared Codex authentication stays stable while concurrent aliases route and settle independently
     status: covered

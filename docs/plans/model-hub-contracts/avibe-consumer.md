@@ -41,6 +41,63 @@ a different hop, or a native CLI default.
 The consumer resolves once per run and again after a retryable failure. Failover,
 recovery, Source health, and credentials remain owned by Model Hub.
 
+Candidate admission also preserves this capability authority: Source metadata
+first, then exact catalog metadata. Avibe never receives the native-backend
+protocol/model-family default reasoning ladder. An undeclared ladder is empty;
+undeclared boolean/numeric capabilities remain null.
+
+## Request origin and sequential retry
+
+The prepared route credential retains the immutable primary `(provider, api,
+model)` from launch, including untracked launches without a turn id. This origin
+travels as in-memory request metadata, never as upstream JSON or a caller-supplied
+header. Each revalidated Avibe attempt compares its admitted origin against that
+original primary, including fallback, credential refresh, and recovery walks.
+
+If any origin component differs, or the primary origin cannot be verified, the
+gateway strips opaque history **before engine invocation and protocol conversion**:
+
+- Block `signature`, `thoughtSignature`, `thought_signature`, and encrypted
+  reasoning payloads are removed, including protocol-owned tool-call extensions.
+- Anthropic `redacted_thinking` blocks and opaque-only reasoning items are dropped.
+- Visible thinking and Responses reasoning summaries become ordinary assistant
+  text; their text survives, but reasoning item identities do not.
+- Tool ids, arguments, results, and unrelated request options remain unchanged.
+  A tool argument named `signature` is user data, not protocol metadata.
+
+Same-origin fallback, even on another Source, retains the original history. Each
+attempt gets its own cleaned history; cleaning never mutates the original request
+that a later same-origin attempt might reuse. Native callers retain their existing
+history behavior.
+
+After a request completes, the consumer may resolve the **same catalog alias and
+turn** again to obtain a different primary hop. The existing turn keeps its attempt
+history and final successful served origin while replacing only its prepared
+launch snapshot. A prior response's remaining owned teardown is drained before
+replacement; an overlapping live request or a changed alias is refused with
+`409 mapping_target_unavailable` before a model call, without poisoning the first
+request's attribution. Retired route credentials may still route late continuations
+but cannot claim or invalidate the replacement's identity, even for malformed JSON.
+Native route-conflict and ambiguity rules are unchanged.
+
+## Hub-only boundary audit
+
+`avibe-boundary-matrix.json` is the executable audit table. It lists every schema
+that declares a backend discriminator, its runtime owner, and the refusal cases.
+Tests discover discriminator sites and run the listed schema/runtime refusals;
+adding a new shape without a policy fails the audit.
+
+| Boundary | Avibe invariant |
+| --- | --- |
+| Supply/config/catalog | Hub mode; no CLI presence, Direct mode, or native protocol pin |
+| Source order/manual route | Native Sources rejected by the shared eligibility owner |
+| Chain/probe | Only Hub channels; no native runnable candidate or native probe result |
+| Attempts/served/canceled | Only Hub channels at admission and provenance recording |
+| Terminal/local failures | Hub producer or null local attribution, never native CLI |
+| Recovery | Reuses the same Hub admission and attempt slots; live annotation adds no channel |
+| Guard/adoption/event references | Reference or diagnostic identity, not a separate transport grant |
+| Native migration scan | Avibe absent; released native shapes remain unchanged |
+
 ## Response origin
 
 Every Avibe model response that the gateway serves carries the response header
@@ -104,6 +161,12 @@ The header needs no upstream credentials and is never forwarded upstream.
   slow Anthropic resolution, buffered/streamed bodies, and concurrent requests.
 - The same attempt's response header and persisted served origin agree, even if
   Source metadata changes while the response is in flight.
+- Cross-origin histories are checked at engine admission across all three existing
+  frontends, same/different protocol fallback, recovery, and launch-time config
+  changes. Same-origin and native histories retain their payloads.
+- Candidate-to-catalog-to-launch tests protect unknown/explicit capabilities.
+  Real gateway retries, overlap refusal, and valid/malformed late credentials
+  protect sequential route replacement.
 - Contract authority/version closure, focused Python tests, and the existing UI
   type/build checks run before push.
 

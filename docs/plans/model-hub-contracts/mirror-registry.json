@@ -14,7 +14,9 @@
       "tests/test_model_hub*.py",
       "tests/e2e/test_model_hub*.py",
       "ui/src/components/settings/models/types.ts",
-      "ui/src/components/settings/models/*.test.*"
+      "ui/src/components/settings/models/*.test.*",
+      "ui/e2e/**/*.ts",
+      "ui/e2e/**/*.tsx"
     ],
     "required_literal_files": [
       "core/handlers/model_hub/service.py",

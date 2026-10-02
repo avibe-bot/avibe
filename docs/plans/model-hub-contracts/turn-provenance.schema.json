@@ -302,6 +302,17 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "agent": { "const": "avibe" } }, "required": ["agent"] },
+      "then": {
+        "properties": {
+          "failed_attempts": { "items": { "properties": { "channel": { "const": "hub" } } } },
+          "served": { "properties": { "channel": { "const": "hub" } } },
+          "terminal_error": { "properties": { "channel": { "enum": ["hub", null] } } },
+          "canceled_attempt": { "properties": { "channel": { "const": "hub" } } }
+        }
+      }
+    },
+    {
       "if": {
         "properties": { "outcome": { "const": "served" } },
         "required": ["outcome"]

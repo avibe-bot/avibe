@@ -37,6 +37,7 @@ from .provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
     GatewayTurnTerminalizer,
     HopOrigin,
+    PreparedGatewayRouteConflict,
     REQUEST_NONFALLBACK_TURN_OUTCOME,
     TurnOutcomeProjectionInput,
     TurnCorrelationRegistry,
@@ -504,9 +505,20 @@ class ModelHubTurnGateway:
         via_mapping: bool = False,
         gateway_request_model_id: Optional[str] = None,
         request_scoped: bool = False,
+        primary_origin: HopOrigin | None = None,
     ) -> tuple[str, str]:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable", status=409)
+        if backend == "avibe" and turn_id:
+            # The caller may read EOF before the previous handler's owned
+            # teardown exits. Drain already-settled responses, not live model
+            # work; the registry still refuses any remaining overlap.
+            finishing = [
+                owned.done for owned in self._turn_requests.get(turn_id, ())
+                if owned.execution.settlement_recorded or owned.execution.terminal_fact_committed
+            ]
+            if finishing:
+                await asyncio.wait(finishing, timeout=self._transport_timeout)
         scope = str(process_scope or "").strip() or f"{backend}:untracked"
         token = self.correlation.credentials(
             backend, scope, turn_id, request_scoped=request_scoped,
@@ -515,16 +527,20 @@ class ModelHubTurnGateway:
             # Credential-bound clients carry their route in authentication.
             # Multiplexed Codex keeps authentication stable and carries this
             # route's handle on each request instead.
-            route_token = self.correlation.prepare_gateway_turn(
-                backend=backend,
-                token=token,
-                turn_id=turn_id,
-                requested_model_id=requested_model_id,
-                resolved_model_id=resolved_model_id,
-                source_id=source_id,
-                via_mapping=via_mapping,
-                gateway_request_model_id=gateway_request_model_id,
-            )
+            try:
+                route_token = self.correlation.prepare_gateway_turn(
+                    backend=backend,
+                    token=token,
+                    turn_id=turn_id,
+                    requested_model_id=requested_model_id,
+                    resolved_model_id=resolved_model_id,
+                    source_id=source_id,
+                    via_mapping=via_mapping,
+                    gateway_request_model_id=gateway_request_model_id,
+                    primary_origin=primary_origin,
+                )
+            except PreparedGatewayRouteConflict:
+                raise ModelHubError("mapping_target_unavailable", status=409) from None
             if not request_scoped:
                 token = route_token
         await self._ensure_started()
@@ -944,6 +960,7 @@ class ModelHubTurnGateway:
                         payload,
                         protocol=protocol,
                         headers=caller_headers,
+                        primary_origin=terminalizer.primary_origin,
                     ),
                     stream=stream,
                     supply_channel="hub",

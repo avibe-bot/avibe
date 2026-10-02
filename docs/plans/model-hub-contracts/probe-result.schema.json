@@ -33,6 +33,10 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "backend": { "const": "avibe" } }, "required": ["backend"] },
+      "then": { "properties": { "channel": { "const": "hub" } } }
+    },
+    {
       "if": { "properties": { "channel": { "const": "hub" }, "reachable": { "const": true } }, "required": ["channel", "reachable"] },
       "then": { "properties": { "latency_ms": { "type": "integer" }, "error": { "type": "null" } } }
     },

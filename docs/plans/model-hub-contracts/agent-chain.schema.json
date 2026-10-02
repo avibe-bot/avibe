@@ -162,6 +162,10 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "backend": { "const": "avibe" } }, "required": ["backend"] },
+      "then": { "properties": { "chain": { "items": { "properties": { "channel": { "const": "hub" } } } } } }
+    },
+    {
       "if": { "properties": { "manual_override": { "type": "object" } }, "required": ["manual_override"] },
       "then": { "properties": { "chain": { "minItems": 1 }, "route_origin": { "const": "manual" } } }
     },

@@ -26,6 +26,7 @@ from core.handlers.model_hub.identifiers import (
 )
 from core.handlers.model_hub.provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
+    HopOrigin,
     PreparedGatewayRoute,
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
@@ -714,6 +715,7 @@ class ModelHubRuntimeRouter:
         source_id: Optional[str] = None,
         via_mapping: bool = False,
         gateway_request_model_id: Optional[str] = None,
+        primary_origin: HopOrigin | None = None,
     ) -> tuple[str, str]:
         if self.turn_gateway is not None:
             return await self.turn_gateway.endpoint(
@@ -726,6 +728,7 @@ class ModelHubRuntimeRouter:
                 via_mapping=via_mapping,
                 gateway_request_model_id=gateway_request_model_id,
                 request_scoped=backend == "codex",
+                **({"primary_origin": primary_origin} if primary_origin is not None else {}),
             )
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
@@ -1080,6 +1083,10 @@ class ModelHubRuntimeRouter:
                 source_id=source.id,
                 via_mapping=False,
                 gateway_request_model_id=runtime_model,
+                primary_origin=(
+                    HopOrigin(source.vendor, source.protocol, target_model)
+                    if backend == "avibe" else None
+                ),
             )
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)

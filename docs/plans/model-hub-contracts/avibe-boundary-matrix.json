@@ -1,0 +1,83 @@
+{
+  "description": "C-6 backend/channel audit. Each backend discriminator declared by a schema has exactly one row; references inherit their named schema. Tests discover new discriminator sites and execute every listed refusal.",
+  "boundaries": [
+    {
+      "schema": "agent-supply.schema.json", "pointer": "", "backend": "backend",
+      "policy": "hub-only", "runtime": "ModelHubAgentSupplyConfig.from_payload; ModelHubService.set_agent_mode/list_agents",
+      "runtime_cases": ["mode", "source_order"],
+      "refusals": [
+        {"fixture": "supply", "path": ["mode"], "value": "direct"},
+        {"fixture": "supply", "path": ["cli_present"], "value": true}
+      ]
+    },
+    {
+      "schema": "agent-chain.schema.json", "pointer": "", "backend": "backend",
+      "policy": "hub-only", "runtime": "ModelHubConfig.from_payload; effective_model_route; inspect_exact_hop; ModelHubService.set_agent_chain",
+      "runtime_cases": ["route_write", "resolve", "resolve_hop"],
+      "refusals": [{"fixture": "chain", "path": ["chain", 0, "channel"], "value": "native_cli"}]
+    },
+    {
+      "schema": "probe-result.schema.json", "pointer": "", "backend": "backend",
+      "policy": "hub-only", "runtime": "ModelHubService.probe_agent -> inspected runnable hop",
+      "runtime_cases": ["probe"],
+      "refusals": [{"fixture": "probe", "path": ["backend"], "value": "avibe"}]
+    },
+    {
+      "schema": "turn-provenance.schema.json", "pointer": "", "backend": "agent",
+      "policy": "hub-only", "runtime": "ModelHubService._invoke_admitted/resolve_with_recovery; GatewayTurnTerminalizer; TurnCorrelationRegistry",
+      "runtime_cases": ["recovery", "native_attempt", "attempt_channel"],
+      "refusals": [
+        {"fixture": "exhausted", "path": ["failed_attempts", 0, "channel"], "value": "native_cli"},
+        {"fixture": "served", "path": ["served", "channel"], "value": "native_cli"},
+        {"fixture": "failed_terminal", "path": ["terminal_error", "channel"], "value": "native_cli"},
+        {"fixture": "canceled", "path": ["canceled_attempt", "channel"], "value": "native_cli"}
+      ],
+      "notes": "Null local terminal attribution and canceled-before-admission remain valid. Recovery uses the same hub-only admission and attempt slots; its live annotation carries no channel."
+    },
+    {
+      "schema": "api-response.schema.json", "pointer": "/definitions/AgentCatalogResponse/properties/agent", "backend": "backend",
+      "policy": "hub-only", "runtime": "ModelHubService.set_agent_models -> ModelHubAgentSupplyConfig",
+      "refusals": [{"fixture": "catalog", "path": ["mode"], "value": "direct"}]
+    },
+    {
+      "schema": "api-response.schema.json", "pointer": "/definitions/AddedTo", "backend": "backend",
+      "policy": "reference", "runtime": "ModelHubService Source adoption -> source_eligible_for_backend",
+      "notes": "References have no transport channel and cannot independently grant invocation."
+    },
+    {
+      "schema": "api-response.schema.json", "pointer": "/definitions/AdoptedBy", "backend": "backend",
+      "policy": "reference", "runtime": "ModelHubService Source adoption -> effective_model_route"
+    },
+    {
+      "schema": "api-response.schema.json", "pointer": "/definitions/RouteHopRef", "backend": "backend",
+      "policy": "reference", "runtime": "ModelHubService guard planning -> effective_model_route"
+    },
+    {
+      "schema": "api-response.schema.json", "pointer": "/definitions/SupplyGap", "backend": "backend",
+      "policy": "reference", "runtime": "ModelHubService guard planning -> inspect_exact_hop"
+    },
+    {
+      "schema": "guard-refusal.schema.json", "pointer": "/definitions/RouteHopRef", "backend": "backend",
+      "policy": "reference", "runtime": "ModelHubService guard planning -> effective_model_route"
+    },
+    {
+      "schema": "guard-refusal.schema.json", "pointer": "/definitions/SupplyGap", "backend": "backend",
+      "policy": "reference", "runtime": "ModelHubService guard planning -> inspect_exact_hop"
+    },
+    {
+      "schema": "source.schema.json", "pointer": "/properties/adopted_by/items", "backend": "backend",
+      "policy": "reference", "runtime": "ModelHubService Source adoption -> effective_model_route",
+      "notes": "Source.supply_channel is source-global, not the channel of a reference. Avibe references are created only through eligible Hub routes."
+    },
+    {
+      "schema": "resolution-event.schema.json", "pointer": "", "backend": "agent",
+      "policy": "reference", "runtime": "ModelHubService classified attempt events and router transitions",
+      "notes": "Events carry backend/reason, not a transport grant or channel; system remains source-scoped."
+    },
+    {
+      "schema": "migration-scan.schema.json", "pointer": "/properties/items/items", "backend": "backend",
+      "policy": "native-only", "runtime": "ModelHubService native migration scanner",
+      "refusals": [{"fixture": "migration", "path": ["backend"], "value": "avibe"}]
+    }
+  ]
+}
