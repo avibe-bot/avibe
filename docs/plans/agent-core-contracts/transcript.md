@@ -73,5 +73,7 @@ The child Session's metadata already records its parent as top-level keys `fork_
 ## 5. Retention and deletion
 
 - Trace retention never selects `visibility = 'context'`; a contract test pins this.
-- Context rows are never updated after commit, except setting `context_seq` and `content_json.model` on an input row
-  once, and never deleted while a Session or a fork descendant references them.
+- The context content of a row never changes after commit: `context_seq` and `content_json.model` are written once
+  (on an input row, when it is consumed). Delivery state in `metadata_json.delivery` is the one field that changes
+  afterwards, and only through the outbox helpers. Context rows are never deleted while a Session or a fork descendant
+  references them.

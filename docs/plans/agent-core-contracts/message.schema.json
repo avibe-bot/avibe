@@ -147,11 +147,12 @@
             "string",
             "null"
           ],
-          "description": "Opaque provider payload (Anthropic signature, OpenAI encrypted reasoning, Gemini thought signature) in the adapter's own encoding. Replayed only to the same origin; never synthesized."
+          "description": "Opaque provider payload in the adapter's own encoding: the Anthropic signature, OpenAI encrypted reasoning, the Gemini thought signature, or, for a redacted block, the whole redacted payload (Anthropic `redacted_thinking.data`). Replayed only to the same origin; never synthesized."
         },
         "redacted": {
           "type": "boolean",
-          "default": false
+          "default": false,
+          "description": "True for reasoning the provider returned only in opaque form; `text` is empty and `signature` holds the payload."
         }
       }
     },

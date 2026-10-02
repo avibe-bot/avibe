@@ -170,6 +170,11 @@ Rules:
 
 ### 5.2 Context management (C-9)
 
+**Draft, not frozen.** The owner deferred the context-management decisions; this section is the working design and
+freezes before P3 together with those decisions. Open points recorded for that freeze: the occupancy baseline
+immediately after a checkpoint or edit, before any response exists; and capabilities of the served hop after a
+failover to a model with smaller limits.
+
 Every rule names its origin in evaluation §4. One pure function, `project(rows, fork_point)`, builds every request,
 resume, fork, and the UI's "model view". Three tiers, cheapest first:
 

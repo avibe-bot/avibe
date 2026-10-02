@@ -58,6 +58,7 @@
       "type": "object",
       "required": [
         "context_window",
+        "input_limit",
         "max_output_tokens",
         "supports_tools",
         "supports_images",

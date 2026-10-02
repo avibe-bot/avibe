@@ -15,7 +15,7 @@ on it fork; after that, a change needs orchestrator approval and lands here firs
 | C-7 | Tools, output governance, job handle | `tools` → `agent`, adapter | [`tools.md`](tools.md), [`job.schema.json`](job.schema.json) | P1 |
 | C-8 | Backend registration | catalog → every backend list | [`backend-registration.md`](backend-registration.md) | P2 |
 | C-5, C-7 | Recovery invariants for jobs, tool calls, and delivery, with owners and proofs | `tools`, `loop`, adapter | [`recovery.md`](recovery.md) | P1 |
-| C-9 | Context management | `harness` → `agent`, adapter | plan §5.2; rows in [`transcript-rows.schema.json`](transcript-rows.schema.json) | P3 |
+| C-9 | Context management (draft, not frozen) | `harness` → `agent`, adapter | plan §5.2; rows in [`transcript-rows.schema.json`](transcript-rows.schema.json) | P3 |
 
 Conventions:
 

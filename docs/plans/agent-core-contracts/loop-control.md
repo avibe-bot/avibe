@@ -11,8 +11,8 @@ class Agent:
                  store: TranscriptStore, jobs: JobHost) -> None: ...
 
     def run(self, input: Input, *, turn_id: str) -> AsyncIterator[AgentEvent]: ...   # one Avibe Turn
-    def steer(self, message: Message) -> None: ...
-    def follow_up(self, message: Message) -> None: ...
+    def steer(self, input: Input) -> bool: ...       # False: not accepted, the adapter keeps ownership
+    def follow_up(self, input: Input) -> bool: ...
     def abort(self, reason: str) -> None: ...
     def set_tools(self, tools: Sequence[Tool]) -> None: ...
     def snapshot(self) -> Snapshot: ...
@@ -39,9 +39,9 @@ commit input → loop:
 ```
 
 Finality is decided before the response row is inserted, so a `result` row is always the run's last response. A final
-response with `stop_reason` `refusal` or `safety` and no text is still committed as `result`, and the run ends with an
-`error` event (`kind` `refusal` or `safety`) so the surface shows an explanation instead of an empty reply; refusal
-text from the provider is kept as the reply. A
+response with `stop_reason` `refusal` or `safety` and no text is still committed as `result`; its rendered display text
+is the localized explanation, written in the same transaction, so re-delivery after a crash shows it too. The run also
+ends with an `error` event of that kind. Refusal text from the provider is kept as the reply. A
 steer that arrives after the queues closed is refused by the running Turn, and Avibe's delivery falls back to the P3
 queue, which starts the next run.
 
@@ -60,8 +60,9 @@ Hooks run in registration order. The first `deny` or `end` wins; rewrites compos
 | `after_tool` | call and result | `alter_result(result)` before commit, or `end` |
 | `after_run` | outcome | nothing |
 
-A `before_model` rewrite changes only that request; permanent changes go through C-5 rows (`context_edit`,
-`context_compaction`). `end` finishes the run after the current step commits.
+A `before_model` rewrite changes only that request and is not persisted by design: a rewritten request is not
+reconstructible from the rows, and A10 is stated for requests without a transient rewrite. Anything that must survive a
+restart, or that context management must see, goes through C-5 rows (`context_edit`, `context_compaction`). `end` finishes the run after the current step commits.
 
 ## 4. Steer, follow-up, abort
 
