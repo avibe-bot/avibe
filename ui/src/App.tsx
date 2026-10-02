@@ -28,6 +28,7 @@ import { SettingsBackendsPage } from './components/settings/SettingsBackendsPage
 import { SettingsDependenciesPage } from './components/settings/SettingsDependenciesPage';
 import { SettingsClaudeProviderPage } from './components/settings/SettingsClaudeProviderPage';
 import { SettingsCodexProviderPage } from './components/settings/SettingsCodexProviderPage';
+import { SettingsBackendPage } from './components/settings/SettingsBackendPage';
 import { SettingsOpencodeProviderPage } from './components/settings/SettingsOpencodeProviderPage';
 import { SettingsLogsPage } from './components/settings/SettingsLogsPage';
 import { SettingsMessagingPage } from './components/settings/SettingsMessagingPage';
@@ -718,6 +719,7 @@ const settingsRoute = () => (
     <Route path="backends/opencode" element={<SettingsOpencodeProviderPage />} />
     <Route path="backends/claude" element={<SettingsClaudeProviderPage />} />
     <Route path="backends/codex" element={<SettingsCodexProviderPage />} />
+    <Route path="backends/avibe" element={<SettingsBackendPage backend="avibe" />} />
     <Route
       path="models"
       element={

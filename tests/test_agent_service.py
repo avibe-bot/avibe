@@ -16,7 +16,7 @@ from core.native_dispatch_phase import (
     set_dispatch_phase,
 )
 from core.session_activities import SessionActivityRegistry
-from core.vibe_agents import SUPPORTED_AGENT_BACKENDS
+from modules.agents.catalog import AGENT_BACKENDS
 from modules.agents import service as service_module
 from modules.agents.service import AgentService
 from modules.agents.codex.transport import CodexTransport
@@ -337,7 +337,7 @@ def _request(message: str, runtime_key: str = "session:/repo"):
     )
 
 
-@pytest.mark.parametrize("backend", sorted(SUPPORTED_AGENT_BACKENDS))
+@pytest.mark.parametrize("backend", sorted(AGENT_BACKENDS))
 @pytest.mark.parametrize("model", [None, "", "   ", "default", "fixture-avibe-model", " padded-model "])
 @pytest.mark.parametrize("selection_field", ["vibe_agent_model", "subagent_model"])
 def test_model_selection_is_required_before_any_backend_dispatch(backend, model, selection_field):

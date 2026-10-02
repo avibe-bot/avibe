@@ -15,6 +15,7 @@ from core.handlers.model_hub.service import (
     PRE_ATTEMPT_SETTLEMENT_GENERATION,
     ModelHubError,
 )
+from modules.agents.catalog import AGENT_BACKENDS
 from modules.agents.model_hub import (
     ModelHubLaunch,
     build_claude_hub_env,
@@ -264,7 +265,7 @@ def test_hub_connection_settings_preserve_explicit_limits_without_promoting_cata
     assert settings["env"]["ANTHROPIC_AUTH_TOKEN"] == launch.gateway_token
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 @pytest.mark.parametrize("has_metadata", [False, True])
 def test_route_alias_keeps_its_own_planning_metadata(tmp_path, monkeypatch, backend, has_metadata):
     from unittest.mock import AsyncMock

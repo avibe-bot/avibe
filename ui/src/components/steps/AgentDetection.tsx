@@ -27,10 +27,10 @@ import { setConfigField } from '@/lib/configMutations';
 import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSetup';
 import { modelHubEnabledFromConfig } from '../settings/models/featureFlags';
 import type { SetupAction, SetupFlowState, SetupScreenHandle, SetupScreenId } from '../onboarding/setupFlow';
-import type { BackendId as RuntimeBackendId } from '../settings/shared/useBackendRuntime';
+import type { NativeCliBackend as RuntimeBackendId } from '@/lib/agentBackends';
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
 import { Button } from '../ui/button';
-import { DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/agentBackends';
+import { DEFAULT_NATIVE_AGENT_STATE, NATIVE_CLI_BACKENDS, getBackendUiMeta } from '@/lib/agentBackends';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
 import { RouteChainDialog, type RouteChainSelection } from '../settings/models/RouteChainDialog';
@@ -90,12 +90,12 @@ type EnableReceipt = { intent: number; message: string };
  */
 type ConnectionRefresh = { acknowledge?: boolean };
 
-const DEFAULT_AGENTS = DEFAULT_AGENT_STATE as Record<string, AgentState>;
+const DEFAULT_AGENTS = DEFAULT_NATIVE_AGENT_STATE as Record<string, AgentState>;
 
 // Backends with a dedicated provider config body (rendered in the wizard
 // modal / the settings route). Mirrors ``BackendProviderConfig``'s switch —
 // anything outside this set has no provider UI to configure.
-const PROVIDER_BACKENDS: ReadonlySet<string> = new Set(['claude', 'codex', 'opencode']);
+const PROVIDER_BACKENDS: ReadonlySet<string> = new Set(NATIVE_CLI_BACKENDS);
 
 const normalizeAgents = (source: any): Record<string, AgentState> => {
   const raw = source?.agents || {};

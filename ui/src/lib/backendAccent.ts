@@ -4,20 +4,24 @@
 // carries Settings-page backend-tile chrome (icons, tile classes, CLI
 // defaults) for a different visual context.
 
-export const BACKEND_ORDER = ['claude', 'opencode', 'codex'] as const;
-export type Backend = (typeof BACKEND_ORDER)[number];
+import { AGENT_BACKENDS, isNativeCliBackend, type AgentBackendId, type NativeCliBackend } from './agentBackends';
 
-export const BACKEND_LABEL = {
-  claude: 'Claude',
-  opencode: 'OpenCode',
-  codex: 'Codex',
-} as const satisfies Record<Backend, string>;
+export const BACKEND_ORDER = [...AGENT_BACKENDS]
+  .sort((left, right) => left.agentOrder - right.agentOrder)
+  .map((backend) => backend.id);
+export const NATIVE_BACKEND_ORDER = BACKEND_ORDER.filter(isNativeCliBackend);
+export type Backend = AgentBackendId;
+
+export const BACKEND_LABEL = Object.fromEntries(
+  AGENT_BACKENDS.map(({ id, label }) => [id, label]),
+) as Record<Backend, string>;
 
 // Text / icon accent — e.g. <Icon className={BACKEND_TEXT[b]} />.
 export const BACKEND_TEXT: Record<Backend, string> = {
   claude: 'text-mint-ink',
   opencode: 'text-cyan-ink',
   codex: 'text-violet-ink',
+  avibe: 'text-mint-ink',
 };
 
 // Solid dot fill — e.g. a status dot inside a chip.
@@ -25,6 +29,7 @@ export const BACKEND_DOT: Record<Backend, string> = {
   claude: 'bg-mint',
   opencode: 'bg-cyan',
   codex: 'bg-violet',
+  avibe: 'bg-mint',
 };
 
 // Full pill surface (soft bg + 40% border + accent text) for backend chips.
@@ -32,6 +37,7 @@ export const BACKEND_CHIP: Record<Backend, string> = {
   claude: 'bg-mint-soft border-mint/40 text-mint-ink',
   opencode: 'bg-cyan-soft border-cyan/40 text-cyan-ink',
   codex: 'bg-violet-soft border-violet/40 text-violet-ink',
+  avibe: 'bg-mint-soft border-mint/40 text-mint-ink',
 };
 
 export function isBackend(value: string): value is Backend {
@@ -40,7 +46,7 @@ export function isBackend(value: string): value is Backend {
 
 // askill agent id (e.g. "claude-code") -> our backend id. Agents we don't
 // surface (cursor, windsurf, …) are intentionally absent.
-export const AGENT_ID_TO_BACKEND: Record<string, Backend> = {
+export const AGENT_ID_TO_BACKEND: Record<string, NativeCliBackend> = {
   'claude-code': 'claude',
   opencode: 'opencode',
   codex: 'codex',
@@ -48,11 +54,11 @@ export const AGENT_ID_TO_BACKEND: Record<string, Backend> = {
 
 // Distinct backends a skill serves, in canonical order, from its linked
 // askill agents. Unknown/unsupported agents are dropped.
-export function backendsFromAgents(agents: ReadonlyArray<{ id: string }> | null | undefined): Backend[] {
-  const seen = new Set<Backend>();
+export function backendsFromAgents(agents: ReadonlyArray<{ id: string }> | null | undefined): NativeCliBackend[] {
+  const seen = new Set<NativeCliBackend>();
   for (const agent of agents ?? []) {
     const backend = AGENT_ID_TO_BACKEND[agent.id];
     if (backend) seen.add(backend);
   }
-  return BACKEND_ORDER.filter((backend) => seen.has(backend));
+  return NATIVE_BACKEND_ORDER.filter((backend) => seen.has(backend));
 }

@@ -743,6 +743,11 @@ async def _probe_protocol_response(
     """Require a response from the candidate protocol's distinct request path."""
 
     validate_api_key_auth_scheme(vendor, protocol, base_url, secret, auth_scheme)
+    if protocol == "google":
+        # Gemini requires the model in the generation URL. Observation never
+        # invents a model or schedules inference: an explicit declaration can
+        # instead authenticate through the existing credential-gated listing.
+        return _ProtocolEvidence(_ProtocolProof.UNPROVEN, _AuthenticationEvidence.UNKNOWN)
     root = base_url or _OFFICIAL_BASE_URLS.get(vendor)
     if not root:
         raise EngineClientError("source requires a base URL for protocol observation")

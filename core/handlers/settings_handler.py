@@ -5,6 +5,7 @@ import logging
 from typing import Optional
 
 from modules.agents import get_agent_display_name
+from modules.agents.catalog import AGENT_BACKENDS
 from modules.im import MessageContext, InlineKeyboard, InlineButton
 from core.modals import RoutingModalData, RoutingModalSelection
 from vibe import backend_model_catalog
@@ -538,7 +539,7 @@ class SettingsHandler(BaseHandler):
         if not agent_name:
             return None
         name = str(agent_name)
-        if name in {"opencode", "claude", "codex"}:
+        if name in AGENT_BACKENDS:
             return name
         store = getattr(self.controller, "vibe_agent_store", None)
         if store is None:
@@ -554,7 +555,7 @@ class SettingsHandler(BaseHandler):
     def _routing_target_from_row(row: dict) -> tuple[str, str, str, str, str]:
         backend = str(row.get("agent_backend") or "").strip()
         agent_name = str(row.get("agent_name") or "").strip()
-        if not agent_name and backend in {"opencode", "claude", "codex"}:
+        if not agent_name and backend in AGENT_BACKENDS:
             agent_name = backend
         variant = str(row.get("agent_variant") or "").strip()
         if variant == backend and agent_name == backend:

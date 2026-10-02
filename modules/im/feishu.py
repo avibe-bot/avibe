@@ -1,6 +1,7 @@
 """Feishu/Lark implementation of the IM client using lark-oapi SDK."""
 
 import asyncio
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend
 import io
 import json
 import logging
@@ -2103,7 +2104,7 @@ class FeishuBot(BaseIMClient):
         draft: Dict[str, Optional[str]] = {}
         for field_name in fields:
             draft[field_name] = getattr(current_routing, field_name, None) if current_routing else None
-        if selected_backend in {"opencode", "claude", "codex"} and current_routing:
+        if selected_backend in AGENT_BACKENDS and current_routing:
             model = getattr(current_routing, "model", None)
             reasoning_effort = getattr(current_routing, "reasoning_effort", None)
             draft[f"{selected_backend}_model"] = draft.get(f"{selected_backend}_model") or model
@@ -2628,7 +2629,7 @@ class FeishuBot(BaseIMClient):
         for b in registered_backends:
             backend_options.append(
                 {
-                    "text": {"tag": "plain_text", "content": b},
+                    "text": {"tag": "plain_text", "content": display_name_for_backend(b)},
                     "value": b,
                 }
             )
@@ -2995,11 +2996,11 @@ class FeishuBot(BaseIMClient):
             sessions_by_agent = {}
 
         # --- Build agent options (from registered backends or fallback) ---
-        common_agents = ["claude", "codex", "opencode"]
+        common_agents = NATIVE_CLI_BACKENDS
         registered_backends = None
         if getattr(self, "_controller", None) and getattr(self._controller, "agent_service", None):
             registered_backends = list(self._controller.agent_service.agents.keys())
-        allowed_agents = set(registered_backends) if registered_backends else set(common_agents)
+        allowed_agents = set(registered_backends or common_agents) & set(NATIVE_CLI_BACKENDS)
         agent_options = []
         for agent in sorted(allowed_agents):
             agent_options.append({"text": {"tag": "plain_text", "content": agent.capitalize()}, "value": agent})
@@ -3273,7 +3274,7 @@ class FeishuBot(BaseIMClient):
             }
         )
 
-        title = t("modal.question.claudeCode")
+        title = display_name_for_backend("claude")
 
         card = {
             "schema": "2.0",

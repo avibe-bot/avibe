@@ -12,6 +12,7 @@ import errno
 import ipaddress
 import json
 import re
+import runpy
 import shlex
 import shutil
 import socket
@@ -21,6 +22,10 @@ import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
+
+_BACKEND_CATALOG = runpy.run_path(str(Path(__file__).resolve().parents[1] / "modules/agents/catalog.py"))
+AGENT_BACKENDS = _BACKEND_CATALOG["AGENT_BACKENDS"]
+NATIVE_CLI_BACKENDS = _BACKEND_CATALOG["NATIVE_CLI_BACKENDS"]
 
 
 PROJECT_PREFIX = "vr-"
@@ -197,7 +202,7 @@ def yaml_block(value: str, indent: int = 6) -> str:
 
 
 def default_config(spec: TenantSpec) -> dict:
-    enabled = {spec.backend, "opencode", "claude", "codex"}
+    enabled = {spec.backend, *NATIVE_CLI_BACKENDS}
     return {
         "platform": "slack",
         "platforms": {"enabled": ["slack"], "primary": "slack"},
@@ -213,6 +218,7 @@ def default_config(spec: TenantSpec) -> dict:
             "opencode": {"enabled": "opencode" in enabled, "cli_path": "opencode", "error_retry_limit": 1},
             "claude": {"enabled": "claude" in enabled, "cli_path": "claude"},
             "codex": {"enabled": "codex" in enabled, "cli_path": "codex"},
+            "avibe": {"enabled": "avibe" in enabled},
         },
         "gateway": None,
         "ui": {"setup_host": "0.0.0.0", "setup_port": spec.ui_port, "open_browser": False},
@@ -652,7 +658,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Host address for the optional Web UI proxy. Use 0.0.0.0 only behind a firewall or reverse proxy.",
     )
     create.add_argument("--ui-host-port", type=int, help="Optional host port proxy for the tenant Web UI.")
-    create.add_argument("--backend", choices=["opencode", "claude", "codex"], default="opencode", help="Default agent backend.")
+    create.add_argument("--backend", choices=AGENT_BACKENDS, default="opencode", help="Default agent backend.")
     create.add_argument(
         "--install-package-spec",
         help="Optional package spec passed to the avibe installer, e.g. git+https://github.com/avibe-bot/avibe.git@master.",

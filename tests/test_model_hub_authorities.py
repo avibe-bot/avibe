@@ -2,6 +2,7 @@
 
 import ast
 from collections import Counter
+import copy
 import json
 from pathlib import Path
 import subprocess
@@ -140,6 +141,50 @@ def test_new_checks_observe_tracked_edits_and_new_importers(source_repo):
         {"kind": "ownership_cardinality", "domain": "ownership", "path": name, "owners": 0}
         for name in ("consumer.py", "new_lane/untracked.py")
     ]
+
+
+def test_schema_value_exception_is_limited_to_the_declared_file_and_property_path(source_repo):
+    """A valid Source vendor is not retired route policy; no other use is exempt."""
+    root = source_repo
+    registry = _registry(root)
+    registry["schema_absence_checks"] = [{
+        "id": "A3", "source_file": "normative.md", "start_marker": "Forbidden:",
+        "scope_globs": ["**/*.schema.json"],
+        "allowed_property_values": [{
+            "file": "source.schema.json",
+            "property_path": ["allOf", 0, "then", "properties", "vendor"],
+            "values": ["custom"],
+        }],
+    }]
+    _write(root, "docs/plans/model-hub-contracts/mirror-registry.json", json.dumps(registry))
+    _write(root, "normative.md", "Forbidden: `follow | custom`, `retired_value`\n")
+    baseline = {"allOf": [{"then": {"properties": {"vendor": {"const": "custom"}}}}]}
+    _write(root, "source.schema.json", json.dumps(baseline))
+    assert check(root)["ok"]
+
+    for mutation, expected in [
+        ({"properties": {"custom": {"type": "string"}}}, "custom"),
+        ({"properties": {"policy": {"enum": ["custom"]}}}, "custom"),
+        ({"properties": {"policy": {"const": "custom"}}}, "custom"),
+        ({"properties": {"vendor": {"const": "custom"}}}, "custom"),
+        ({"required": ["custom"]}, "custom"),
+        ({"properties": {"policy": {"const": "follow"}}}, "follow"),
+    ]:
+        _write(root, "source.schema.json", json.dumps({**baseline, **mutation}))
+        assert check(root)["findings"] == [{
+            "kind": "retired_schema_token", "domain": "A3", "file": "source.schema.json", "value": expected,
+        }]
+    same_property = copy.deepcopy(baseline)
+    same_property["allOf"][0]["then"]["properties"]["vendor"] = {"enum": ["custom", "retired_value"]}
+    _write(root, "source.schema.json", json.dumps(same_property))
+    assert check(root)["findings"] == [{
+        "kind": "retired_schema_token", "domain": "A3", "file": "source.schema.json", "value": "retired_value",
+    }]
+    _write(root, "source.schema.json", json.dumps(baseline))
+    _write(root, "other.schema.json", json.dumps(baseline))
+    assert check(root)["findings"] == [{
+        "kind": "retired_schema_token", "domain": "A3", "file": "other.schema.json", "value": "custom",
+    }]
 
 
 def test_reuses_first_read_and_consumer_tree_only_within_one_input(source_repo, monkeypatch):

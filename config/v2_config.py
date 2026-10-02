@@ -35,7 +35,7 @@ from config.platform_registry import (
     supported_platform_ids,
     supported_platform_set,
 )
-from modules.agents.catalog import DEFAULT_AGENT_BACKEND
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, AgentBackend, DEFAULT_AGENT_BACKEND
 from modules.im.base import BaseIMConfig
 from vibe.i18n import normalize_language
 from vibe.trace_retention_policy import validate_retention_days
@@ -176,7 +176,7 @@ MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
 DEFAULT_AGENT_PROGRESS_STYLE = "off"
 MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
-MODEL_HUB_BACKENDS = ("claude", "codex", "opencode", "avibe")
+MODEL_HUB_BACKENDS = tuple(sorted(AGENT_BACKENDS, key=lambda name: (name not in NATIVE_CLI_BACKENDS, name)))
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
 _LEGACY_CLAUDE_FAMILY_ALIASES = {
     "opus": "opus",
@@ -203,6 +203,12 @@ def normalize_model_hub_vendor_id(value: object) -> str:
     ):
         raise ValueError("Config 'model_hub.sources.vendor' is invalid")
     return vendor
+
+
+def validate_model_hub_protocol_vendor(vendor: str, protocol: str) -> None:
+    """Keep Google's v12 explicit custom admission consistent across consumers."""
+    if protocol == "google" and vendor != "custom":
+        raise ValueError("Google Sources require the custom vendor")
 
 
 def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
@@ -1140,6 +1146,7 @@ def _reset_recoverable_config_section(
             "opencode": dict(defaults.opencode.__dict__),
             "claude": dict(defaults.claude.__dict__),
             "codex": dict(defaults.codex.__dict__),
+            "avibe": dict(defaults.avibe.__dict__),
             "avault": dict(defaults.avault.__dict__),
         }
         return True
@@ -1998,11 +2005,21 @@ class AVaultConfig:
 
 
 @dataclass
+class AvibeAgentConfig:
+    enabled: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("Config 'agents.avibe.enabled' must be a boolean")
+
+
+@dataclass
 class AgentsConfig:
     default_backend: str = DEFAULT_AGENT_BACKEND
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
+    avibe: AvibeAgentConfig = field(default_factory=AvibeAgentConfig)
     avault: AVaultConfig = field(default_factory=AVaultConfig)
 
 
@@ -2295,7 +2312,7 @@ class ModelHubSourceConfig:
     kind: Literal["subscription", "api_key"]
     vendor: str
     display_name: str
-    protocol: Literal["anthropic", "openai_responses", "openai_chat"]
+    protocol: Literal["anthropic", "openai_responses", "openai_chat", "google"]
     supply_channel: Literal["native_cli", "hub"]
     billing: Literal["monthly", "metered"]
     state: ModelHubSourceStateConfig
@@ -2354,8 +2371,10 @@ class ModelHubSourceConfig:
             "anthropic",
             "openai_responses",
             "openai_chat",
+            "google",
         }:
             raise ValueError("Config 'model_hub.sources.protocol' is invalid")
+        validate_model_hub_protocol_vendor(vendor, protocol)
         if not isinstance(supply_channel, str) or supply_channel not in {"native_cli", "hub"}:
             raise ValueError("Config 'model_hub.sources.supply_channel' is invalid")
         if not isinstance(billing, str) or billing not in {"monthly", "metered"}:
@@ -2791,7 +2810,7 @@ class ModelHubAgentSourcesConfig:
 
 @dataclass
 class ModelHubAgentSupplyConfig:
-    backend: Literal["claude", "codex", "opencode", "avibe"]
+    backend: AgentBackend
     mode: Literal["hub", "direct"]
     menu_kind: Literal["fixed", "open"]
     sources: ModelHubAgentSourcesConfig = field(default_factory=ModelHubAgentSourcesConfig)
@@ -3735,6 +3754,10 @@ class V2Config:
         if not isinstance(codex_payload, dict):
             raise ValueError("Config 'agents.codex' must be an object")
 
+        avibe_payload = agents_payload.get("avibe", {})
+        if not isinstance(avibe_payload, dict):
+            raise ValueError("Config 'agents.avibe' must be an object")
+
         avault_payload = agents_payload.get("avault") or {}
         if not isinstance(avault_payload, dict):
             raise ValueError("Config 'agents.avault' must be an object")
@@ -3742,6 +3765,7 @@ class V2Config:
         opencode = OpenCodeConfig(**_filter_dataclass_fields(OpenCodeConfig, opencode_payload))
         claude = ClaudeConfig(**_filter_dataclass_fields(ClaudeConfig, claude_payload))
         codex = CodexConfig(**_filter_dataclass_fields(CodexConfig, codex_payload))
+        avibe_agent = AvibeAgentConfig(**_filter_dataclass_fields(AvibeAgentConfig, avibe_payload))
         for backend_name, backend_config in (("opencode", opencode), ("claude", claude), ("codex", codex)):
             # Unattended upgrades run on this switch, so ``"false"`` must read as off.
             backend_config.auto_update = _named_bool(
@@ -3753,6 +3777,7 @@ class V2Config:
             opencode=opencode,
             claude=claude,
             codex=codex,
+            avibe=avibe_agent,
             avault=avault,
         )
 
@@ -4063,6 +4088,7 @@ class V2Config:
                 "opencode": self.agents.opencode.__dict__,
                 "claude": self.agents.claude.__dict__,
                 "codex": self.agents.codex.__dict__,
+                "avibe": self.agents.avibe.__dict__,
                 "avault": self.agents.avault.__dict__,
             },
             "model_hub": self.model_hub.to_payload(),

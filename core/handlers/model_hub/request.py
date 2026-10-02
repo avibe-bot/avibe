@@ -77,6 +77,9 @@ def _plain_history(value: Any) -> Any:
         ]
         return {"role": "assistant", "content": texts} if texts else None
     plain = {key: item for key, item in value.items() if key not in _OPAQUE_FIELDS}
+    if plain.get("thought") is True:
+        # Gemini's readable thought text is ordinary history across origins.
+        plain.pop("thought")
     for field in ("content", "parts", "tool_calls"):
         if field in plain:
             plain[field] = _plain_history(plain[field])
@@ -95,7 +98,7 @@ def without_opaque_history(request: Mapping[str, Any]) -> Mapping[str, Any]:
     """Copy a request's history for an unverified/different Avibe hop origin."""
 
     payload = dict(request)
-    for field in ("messages", "input"):
+    for field in ("messages", "input", "contents"):
         if field in payload:
             payload[field] = _plain_history(payload[field])
     if isinstance(request, ModelHubRequest):
