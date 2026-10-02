@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/hop-resolution.schema.json",
+  "title": "HopResolution",
+  "description": "C-6 runtime consumer projection of ModelHubLaunch. Unknown planning metadata remains null; credentials are in-memory only.",
+  "type": "object",
+  "required": ["backend", "requested_model", "protocol", "base_url", "token", "runtime_model", "source_id", "provider", "request_headers", "capabilities"],
+  "additionalProperties": false,
+  "properties": {
+    "backend": { "const": "avibe" },
+    "requested_model": { "type": "string" },
+    "protocol": { "$ref": "source.schema.json#/properties/protocol" },
+    "base_url": { "type": "string", "format": "uri" },
+    "token": { "type": "string" },
+    "runtime_model": { "type": "string" },
+    "source_id": { "type": "string" },
+    "provider": { "type": "string" },
+    "request_headers": { "type": "object", "additionalProperties": { "type": "string" } },
+    "capabilities": {
+      "type": "object",
+      "required": ["context_window", "input_limit", "max_output_tokens", "supports_tools", "supports_images", "supports_reasoning", "reasoning_efforts"],
+      "additionalProperties": false,
+      "properties": {
+        "context_window": { "type": ["integer", "null"], "minimum": 1 },
+        "input_limit": { "type": ["integer", "null"], "minimum": 1 },
+        "max_output_tokens": { "type": ["integer", "null"], "minimum": 1 },
+        "supports_tools": { "type": ["boolean", "null"] },
+        "supports_images": { "type": ["boolean", "null"] },
+        "supports_reasoning": { "type": ["boolean", "null"] },
+        "reasoning_efforts": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

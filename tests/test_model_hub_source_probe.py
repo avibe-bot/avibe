@@ -51,7 +51,8 @@ def test_probe_invokes_selected_source_even_without_agent_routes_and_isolates_fa
     async def scenario():
         result = (await service.create_source(_draft(protocol=protocol)))["source"]
         for agent in store.config.agents.values():
-            agent.mode = "direct"
+            if agent.backend != "avibe":
+                agent.mode = "direct"
             agent.sources.order = []
         source_id = result["id"]
         model_id = result["models"][0]["id"]

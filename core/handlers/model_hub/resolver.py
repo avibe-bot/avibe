@@ -17,7 +17,7 @@ from config.v2_config import (
 )
 
 
-BackendName = Literal["claude", "codex", "opencode"]
+BackendName = Literal["claude", "codex", "opencode", "avibe"]
 ResolutionChannel = Literal["direct", "native_cli", "hub", "unavailable"]
 SupplyStatus = Literal["ok", "degraded", "waiting", "interrupted"]
 RouteOrigin = Literal["automatic", "manual", "passthrough"]

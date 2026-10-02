@@ -7,8 +7,8 @@
   "required": ["contract_version", "backend", "channel", "reachable", "source_id", "model_id", "latency_ms", "error"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 10 },
-    "backend": { "enum": ["claude", "codex", "opencode"] },
+    "contract_version": { "const": 11 },
+    "backend": { "enum": ["claude", "codex", "opencode", "avibe"] },
     "channel": { "enum": ["hub", "native_cli"] },
     "reachable": { "type": "boolean" },
     "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
@@ -32,6 +32,10 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "backend": { "const": "avibe" } }, "required": ["backend"] },
+      "then": { "properties": { "channel": { "const": "hub" } } }
+    },
     {
       "if": { "properties": { "channel": { "const": "hub" }, "reachable": { "const": true } }, "required": ["channel", "reachable"] },
       "then": { "properties": { "latency_ms": { "type": "integer" }, "error": { "type": "null" } } }
@@ -62,10 +66,10 @@
     }
   ],
   "examples": [
-    { "contract_version": 10, "backend": "codex", "channel": "hub", "reachable": true, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": 412, "error": null },
-    { "contract_version": 10, "backend": "claude", "channel": "hub", "reachable": false, "source_id": "src_relay9c1x", "model_id": "glm-5.2", "latency_ms": 287, "error": "models.source.needs_action.balance_exhausted" },
-    { "contract_version": 10, "backend": "codex", "channel": "hub", "reachable": false, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": "models.source.backoff.connection_failed" },
-    { "contract_version": 10, "backend": "codex", "channel": "native_cli", "reachable": true, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": null },
-    { "contract_version": 10, "backend": "codex", "channel": "native_cli", "reachable": false, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": "models.probe.native_cli_unavailable" }
+    { "contract_version": 11, "backend": "codex", "channel": "hub", "reachable": true, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": 412, "error": null },
+    { "contract_version": 11, "backend": "claude", "channel": "hub", "reachable": false, "source_id": "src_relay9c1x", "model_id": "glm-5.2", "latency_ms": 287, "error": "models.source.needs_action.balance_exhausted" },
+    { "contract_version": 11, "backend": "codex", "channel": "hub", "reachable": false, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": "models.source.backoff.connection_failed" },
+    { "contract_version": 11, "backend": "codex", "channel": "native_cli", "reachable": true, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": null },
+    { "contract_version": 11, "backend": "codex", "channel": "native_cli", "reachable": false, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": "models.probe.native_cli_unavailable" }
   ]
 }

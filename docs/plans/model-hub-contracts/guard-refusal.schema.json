@@ -61,7 +61,7 @@
   ],
   "properties": {
     "ok": { "const": false },
-    "contract_version": { "const": 10 },
+    "contract_version": { "const": 11 },
     "error": {
       "enum": [
         "source_last_supplier",
@@ -90,7 +90,7 @@
       "required": ["backend", "menu_model", "source_id", "model_id", "position"],
       "additionalProperties": false,
       "properties": {
-        "backend": { "enum": ["claude", "codex", "opencode"] },
+        "backend": { "enum": ["claude", "codex", "opencode", "avibe"] },
         "menu_model": { "type": "string", "minLength": 1 },
         "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
         "model_id": { "type": "string", "minLength": 1 },
@@ -102,7 +102,7 @@
       "required": ["backend", "model_id", "agents"],
       "additionalProperties": false,
       "properties": {
-        "backend": { "enum": ["claude", "codex", "opencode"] },
+        "backend": { "enum": ["claude", "codex", "opencode", "avibe"] },
         "model_id": { "type": "string", "minLength": 1 },
         "agents": {
           "type": "array",
@@ -116,7 +116,7 @@
   "examples": [
     {
       "ok": false,
-      "contract_version": 10,
+      "contract_version": 11,
       "error": "source_model_in_route_chain",
       "detail": "modelHub.errors.source_model_in_route_chain",
       "would_remove_hops": [

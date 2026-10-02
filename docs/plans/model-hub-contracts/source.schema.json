@@ -452,7 +452,7 @@
         "additionalProperties": false,
         "properties": {
           "backend": {
-            "enum": ["claude", "codex", "opencode"]
+            "enum": ["claude", "codex", "opencode", "avibe"]
           },
           "menu_model": {
             "type": "string",

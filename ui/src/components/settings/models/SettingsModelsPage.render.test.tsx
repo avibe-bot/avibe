@@ -35,6 +35,10 @@ const directAgent = (backend: AgentBackend): AgentSupply => ({
   menu_kind: backend === 'opencode' ? 'open' : 'fixed',
 });
 
+const emptyAvibeAgent: AgentSupply = {
+  backend: 'avibe', cli_present: false, mode: 'hub', menu_kind: 'fixed', catalog_models: [],
+};
+
 // Named separately from `runtime` so it keeps the arm of `RuntimeManifest` it
 // was written as. Reached through `runtime.manifest` it is the whole union, and
 // re-resolving a spread of that lands on the `unresolved` arm, which carries no
@@ -44,7 +48,7 @@ const manifest = {
 } satisfies RuntimeManifest;
 
 const runtime: RuntimeDependency = {
-  contract_version: 10,
+  contract_version: 11,
   manifest,
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
@@ -115,7 +119,7 @@ const takeoverAgent: AgentSupply = {
 };
 
 const takeoverChain: AgentChain = { manual_override: {hops:[{source_id:'src_head',model_id:'gpt-5.6-sol'},{source_id:'src_relay',model_id:'gpt-5.6-sol'}]}, route_origin: "manual" as const,
-  contract_version: 10,
+  contract_version: 11,
   backend: 'codex',
   model_id: 'gpt-5.6-sol',
   current: { source_id: 'src_relay', model_id: 'gpt-5.6-sol' },
@@ -218,7 +222,7 @@ const routedHubAgent: AgentSupply = {
 const routedChain: AgentChain = {
   manual_override: { hops: [{ source_id: retainedSource.id, model_id: routedModelId }] },
   route_origin: 'manual' as const,
-  contract_version: 10,
+  contract_version: 11,
   backend: 'claude',
   model_id: routedModelId,
   current: { source_id: retainedSource.id, model_id: routedModelId },
@@ -263,6 +267,7 @@ const renderPage = (
     directAgent('claude'),
     directAgent('codex'),
     directAgent('opencode'),
+    emptyAvibeAgent,
   ]);
   vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtimeValue);
   vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
@@ -909,6 +914,35 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(toggle);
     expect(stop).not.toHaveBeenCalled();
     expect(await screen.findByText('Retained source')).toBeTruthy();
+  });
+
+  // Upgrades always return an empty Avibe row. Existing native-only responses
+  // missed both the lost Direct landing and the unusable runtime Stop control.
+  it.each([false, true])('MH-AVIBE-003 derives runtime use from Avibe catalog presence: %s', async (configured) => {
+    const catalogModel: BackendModel = {
+      id: 'menu-alias', display_name: null, origin: 'manual', models_dev_id: null,
+      context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
+      supports_tools: null, supports_reasoning: null, reasoning_efforts: [], locked: false, routeable: true,
+    };
+    renderPage([], [
+      directAgent('claude'), directAgent('codex'), directAgent('opencode'),
+      { ...emptyAvibeAgent, catalog_models: configured ? [catalogModel] : [] },
+    ]);
+    const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue({ ...runtime, enabled: false });
+    const toggle = await screen.findByRole('switch', {
+      name: configured ? /Avibe models use|Avibe 的模型通过/i : /Turn model gateway off|关闭模型网关/i,
+    });
+    expect((toggle as HTMLButtonElement).disabled).toBe(configured);
+    if (configured) {
+      expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
+      await userEvent.click(toggle);
+      expect(stop).not.toHaveBeenCalled();
+    } else {
+      expect(await screen.findByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeTruthy();
+      expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
+      await userEvent.click(toggle);
+      await waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    }
   });
 
   it('renders Frame 01 with tabs when retained sources remain under all-direct backends', async () => {

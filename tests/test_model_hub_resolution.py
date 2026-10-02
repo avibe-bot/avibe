@@ -454,7 +454,7 @@ def test_hub_subscription_is_cross_backend_eligible_and_origin_unrestricted():
     config.agents["codex"].sources.order = [source.id]
 
     assert all(ModelHubConfig.source_eligible_for_backend(source, backend) for backend in ("claude", "codex", "opencode"))
-    assert allowed_origins(source) == ("claude", "codex", "opencode")
+    assert allowed_origins(source) == ("claude", "codex", "opencode", "avibe")
     resolution = resolve_model_hub_turn(config, "codex", "shared-model")
     assert resolution.source is source
 
@@ -1033,8 +1033,8 @@ def test_runtime_preserves_reasoning_intent_across_provider_fallback(tmp_path, e
     assert adapter.invocation_requests[1].headers == {"x-test": "preserved"}
     started = [attempt for attempt in observed_attempts if attempt[4] is None]
     assert [attempt[0] for attempt in started] == [first.id, second.id]
-    assert started[0][6:] == ((), ())
-    assert started[1][6:] == ((), ())
+    assert started[0][6:] == ((), (), None)
+    assert started[1][6:] == ((), (), None)
 
 
 @pytest.mark.parametrize("payload", [
@@ -1705,7 +1705,7 @@ def test_service_accepts_authoritative_reachable_adapter_error(tmp_path):
     )
 
     assert result["observation"] == {
-        "contract_version": 10,
+        "contract_version": 11,
         "outcome": "adapter_error",
         "reachable": True,
         "authenticated": "unknown",
@@ -1736,7 +1736,7 @@ def test_unknown_adapter_error_does_not_claim_connection(tmp_path):
     assert exc.value.code == "discovery_failed"
     assert exc.value.detail == "modelHub.errors.adapter_error"
     assert exc.value.data["observation"] == {
-        "contract_version": 10,
+        "contract_version": 11,
         "outcome": "adapter_error",
         "reachable": None,
         "authenticated": "unknown",
