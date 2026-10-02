@@ -146,6 +146,42 @@ def pytest_terminal_summary():
 """
 
 
+# A worker that outlives its test and resolves the home only once that test has
+# torn down -- the incident's Web Push thread, made deterministic: the hook below
+# runs after every fixture of the test is finalized, then lets the worker go.
+_OUTLIVING_WORKER_CONFTEST = """
+import threading
+from pathlib import Path
+
+import pytest
+
+released = threading.Event()
+
+
+def resolve_the_home_after_teardown():
+    released.wait(10)
+    from config import paths
+
+    state = paths.get_state_dir()
+    Path(__OUT__).write_text(f"{Path.home()}\\n{state}\\n")
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "written-after-teardown.txt").write_text("leaked")
+
+
+worker = threading.Thread(target=resolve_the_home_after_teardown, daemon=True)
+
+
+@pytest.fixture
+def outliving_worker():
+    worker.start()
+
+
+def pytest_runtest_logfinish(nodeid):
+    released.set()
+    worker.join(10)
+"""
+
+
 @pytest.fixture
 def stand_in_home(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The inner run's real home: pytester's ``HOME``, seeded like an installed Avibe.
@@ -225,6 +261,28 @@ def test_a_write_after_the_last_test_still_fails_the_run(pytester: pytest.Pytest
     assert result.ret == pytest.ExitCode.TESTS_FAILED, result.stdout.str()
     assert f"open {stand_in_home / '.avibe' / 'late.txt'}" in result.stderr.str()
     assert not (stand_in_home / ".avibe" / "late.txt").exists()
+
+
+def test_work_outliving_its_test_lands_in_the_session_home(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Between isolations the run's home is a throwaway one, never the real one."""
+
+    monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
+    monkeypatch.delenv("AVIBE_HOME")  # the stand-in real home is the default one
+    real_home = pytester.path
+    out = pytester.path / "resolved.txt"
+    pytester.makeconftest(_OUTLIVING_WORKER_CONFTEST.replace("__OUT__", repr(str(out))))
+    pytester.makepyfile(test_inner="def test_starts_a_worker(outliving_worker):\n    pass\n")
+
+    result = pytester.runpytest_subprocess("-p", "tests.conftest", "-p", "no:cacheprovider")
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == pytest.ExitCode.OK, result.stdout.str() + result.stderr.str()
+    resolved_home, resolved_state = out.read_text().splitlines()
+    assert not Path(resolved_home).is_relative_to(real_home), resolved_home
+    assert not Path(resolved_state).is_relative_to(real_home), resolved_state
+    assert not (real_home / ".avibe").exists()
 
 
 def test_reading_the_real_home_does_not_trip_it(pytester: pytest.Pytester, stand_in_home: Path) -> None:

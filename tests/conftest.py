@@ -13,10 +13,13 @@ The post-install bookkeeping in ``vibe.api._run_install_command`` then
 called ``load_config()`` / ``cfg.save()`` against the real config.json and
 persisted the fixture path, surfacing in the UI after the next restart.
 
-Isolation mechanism: we set ``HOME``, XDG config/data/cache/state homes, and
-``AVIBE_HOME`` to a per-test tmp directory, and patch
-``pathlib.Path.home`` to match. This means ``config.paths.get_vibe_remote_dir``
-runs as written — only its env-var-set branch is exercised under isolation, and
+Isolation mechanism: when pytest loads this file, before any product module is
+imported, ``HOME``, the XDG homes, ``AVIBE_HOME``, ``CODEX_HOME``,
+``CLAUDE_CONFIG_DIR`` and ``pathlib.Path.home`` move to a throwaway session home
+for the whole run, and each test then swaps in its own tmp home on top of that.
+The real home is never the ambient one, not even between tests, so work that
+outlives its test lands in the session home. ``config.paths.get_vibe_remote_dir``
+therefore runs as written — only its env-var-set branch is exercised under isolation, and
 the function itself is never replaced, so the suite still catches regressions in
 path-resolution logic while Python helpers, subprocesses, and ``expanduser("~")``
 do not see the developer's real home.
@@ -45,6 +48,7 @@ from __future__ import annotations
 
 import ast
 import errno
+import importlib
 import inspect
 import os
 import re
@@ -53,6 +57,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
 import unittest
@@ -67,11 +72,87 @@ import psutil
 import pytest
 from sqlalchemy.exc import SAWarning
 
-from config.paths import AVIBE_HOME_DIRNAME, AVIBE_HOME_ENV, LEGACY_HOME_DIRNAME
 from tests.fake_pid_helpers import PID_LIMIT
 
 REAL_USER_HOME = Path.home()
 _SQLITE_DEFAULT_STATE_MODULES: dict[Path, bool] = {}
+
+# The variables that name a home, and the caller identity an Agent-launched
+# pytest inherits from the live conversation. Tests must opt in to that context
+# explicitly, or unrelated Harness/session assertions bind themselves to the
+# live Agent session.
+_HOME_ENV = (
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "AVIBE_HOME",
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+)
+_CALLER_ENV = (
+    "AVIBE_SESSION_ID",
+    "AVIBE_CALLER_SESSION_PROOF",
+    "AVIBE_RUN_ID",
+    "AVIBE_NATIVE_SESSION_ID",
+    "AVIBE_CALLER_SOURCE",
+    "AVIBE_CALLER_BACKEND",
+    "AVIBE_CALLER_PLATFORM",
+    "AVIBE_CALLER_USER_ID",
+    "AVIBE_CALLER_CHANNEL_ID",
+    "AVIBE_CALLER_SESSION_KEY",
+    "AVIBE_CALLER_MESSAGE_ID",
+    "AVIBE_CALLER_WORKSPACE_ID",
+    "AVIBE_CALLER_REMOTE",
+    "AVIBE_CALLER_RESOURCE_CONTEXT",
+    "VIBE_INTERNAL_DISPATCH_SOCKET",
+    "VIBE_CURRENT_EXECUTABLE",
+    "AVIBE_SKILL_WORKING_DIR",
+    "AVIBE_SKILL_PROJECT_BASE",
+    "AVIBE_SKILL_HOME",
+    "AVIBE_SKILL_CODEX_HOME",
+    "AVIBE_SKILL_CLAUDE_HOME",
+    "AVIBE_SKILL_CLAUDE_CLI_PATH",
+    "AVIBE_SKILL_XDG_CONFIG_HOME",
+    "AVIBE_BUILTIN_SKILLS_ROOT",
+    "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID",
+    # A pytest started from a desktop Runtime's terminal would otherwise act as
+    # that Runtime, and every stop, restart and start refuses or claims by its id.
+    "AVIBE_DESKTOP_RUNTIME_ID",
+    "AVIBE_DESKTOP_RUNTIME_ROOT",
+)
+# What the run started with, for `uses_real_paths` tests and the tripwire.
+_AMBIENT_ENV = {name: os.environ.get(name) for name in (*_HOME_ENV, *_CALLER_ENV)}
+_REAL_PATH_HOME = Path.__dict__["home"]
+
+
+def _home_env(home: Path) -> dict[str, str]:
+    return {
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_STATE_HOME": str(home / ".local" / "state"),
+        "AVIBE_HOME": str(home / ".avibe"),
+        # Codex and Claude Code keep credentials under these, not under HOME.
+        "CODEX_HOME": str(home / ".codex"),
+        "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+    }
+
+
+# Isolation by construction: from here on the run's own home is a throwaway one,
+# before any product module is imported, through collection, session fixtures
+# and the gaps between tests. Per-test isolation swaps a test's home in and back
+# to this one, never to the real one, so work that outlives its test -- the
+# delayed Web Push thread that once migrated a developer's real database --
+# resolves this home. Only `uses_real_paths` tests see the real values, for their
+# own duration. Removed at `pytest_unconfigure`.
+_SESSION_HOME = Path(tempfile.mkdtemp(prefix="avibe-pytest-home-")).resolve()
+for _name in _CALLER_ENV:
+    os.environ.pop(_name, None)
+os.environ.update(_home_env(_SESSION_HOME))
+Path.home = classmethod(lambda cls: _SESSION_HOME)
 
 
 def pytest_configure(config):
@@ -218,59 +299,22 @@ def sqlite_schema_db_factory(sqlite_db_factory, _sqlite_schema_template_factory)
 @pytest.fixture(autouse=True)
 def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
     if request.node.get_closest_marker("uses_real_paths"):
+        # The real values, for this test only; it must stay read-only.
+        monkeypatch.setattr(Path, "home", _REAL_PATH_HOME)
+        for name, value in _AMBIENT_ENV.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
         return
-    monkeypatch.delenv("AVIBE_HOME", raising=False)
-    # Agent-launched pytest processes inherit the active conversation's caller
-    # identity. Tests must opt in to that context explicitly or unrelated
-    # Harness/session assertions can bind themselves to the live Agent session.
-    for name in (
-        "AVIBE_SESSION_ID",
-        "AVIBE_CALLER_SESSION_PROOF",
-        "AVIBE_RUN_ID",
-        "AVIBE_NATIVE_SESSION_ID",
-        "AVIBE_CALLER_SOURCE",
-        "AVIBE_CALLER_BACKEND",
-        "AVIBE_CALLER_PLATFORM",
-        "AVIBE_CALLER_USER_ID",
-        "AVIBE_CALLER_CHANNEL_ID",
-        "AVIBE_CALLER_SESSION_KEY",
-        "AVIBE_CALLER_MESSAGE_ID",
-        "AVIBE_CALLER_WORKSPACE_ID",
-        "AVIBE_CALLER_REMOTE",
-        "AVIBE_CALLER_RESOURCE_CONTEXT",
-        "VIBE_INTERNAL_DISPATCH_SOCKET",
-        "VIBE_CURRENT_EXECUTABLE",
-        "AVIBE_SKILL_WORKING_DIR",
-        "AVIBE_SKILL_PROJECT_BASE",
-        "AVIBE_SKILL_HOME",
-        "AVIBE_SKILL_CODEX_HOME",
-        "AVIBE_SKILL_CLAUDE_HOME",
-        "AVIBE_SKILL_CLAUDE_CLI_PATH",
-        "AVIBE_SKILL_XDG_CONFIG_HOME",
-        "AVIBE_BUILTIN_SKILLS_ROOT",
-        "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID",
-        # A pytest started from a desktop Runtime's terminal would otherwise
-        # act as that Runtime, and every stop, restart and start refuses or
-        # claims by its id.
-        "AVIBE_DESKTOP_RUNTIME_ID",
-        "AVIBE_DESKTOP_RUNTIME_ROOT",
-    ):
-        monkeypatch.delenv(name, raising=False)
     isolated_home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: isolated_home)
-    monkeypatch.setenv("HOME", str(isolated_home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated_home / ".config"))
-    monkeypatch.setenv("XDG_DATA_HOME", str(isolated_home / ".local" / "share"))
-    monkeypatch.setenv("XDG_CACHE_HOME", str(isolated_home / ".cache"))
-    monkeypatch.setenv("XDG_STATE_HOME", str(isolated_home / ".local" / "state"))
-    monkeypatch.setenv("AVIBE_HOME", str(isolated_home / ".avibe"))
+    # Tests that manage these themselves (e.g. the ``get_codex_home``
+    # env-precedence tests) override them with their own monkeypatch calls,
+    # which run after this fixture.
+    for name, value in _home_env(isolated_home).items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setenv("AVIBE_ALLOW_DEV_STATE_MIGRATION", "1")
-    # Keep Codex / Claude Code credential writes off the developer's real
-    # home. Tests that manage these env vars themselves (e.g. the
-    # ``get_codex_home`` env-precedence tests) override these via their own
-    # monkeypatch calls, which run after this fixture.
-    monkeypatch.setenv("CODEX_HOME", str(isolated_home / ".codex"))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(isolated_home / ".claude"))
 
 
 @pytest.fixture(autouse=True)
@@ -287,6 +331,20 @@ def _reset_latest_version_cache():
     latest_version_cache._MEMORY.clear()  # noqa: SLF001
     yield
     latest_version_cache._MEMORY.clear()  # noqa: SLF001
+
+
+def _module_this_test_can_import(name: str):
+    """``name``, or None where this file's own ``sys.modules`` stubs keep it from importing.
+
+    Several test files replace packages such as ``modules.agents`` with partial
+    stubs at import time; a module that cannot import under them cannot start a
+    background worker in that file either, so there is nothing to stub.
+    """
+
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        return None
 
 
 @pytest.fixture(autouse=True)
@@ -306,8 +364,9 @@ def _no_background_web_push(request: pytest.FixtureRequest, monkeypatch) -> list
 
     if request.node.get_closest_marker("real_web_push_sender"):
         return None
-    from core import web_push_notifications
-
+    web_push_notifications = _module_this_test_can_import("core.web_push_notifications")
+    if web_push_notifications is None:
+        return None
     pushed: list[dict] = []
     monkeypatch.setattr(web_push_notifications, "_send_to_enabled_subscriptions", pushed.append)
     return pushed
@@ -328,10 +387,13 @@ def _no_background_catalog_refresh(request: pytest.FixtureRequest, monkeypatch) 
 
     if request.node.get_closest_marker("real_catalog_refresh"):
         return
-    from vibe import backend_model_catalog, models_dev_catalog
-
-    monkeypatch.setattr(backend_model_catalog, "schedule_remote_catalog_refresh", lambda: False)
-    monkeypatch.setattr(models_dev_catalog, "_refresh_in_background", lambda: False)
+    for name, scheduler in (
+        ("vibe.backend_model_catalog", "schedule_remote_catalog_refresh"),
+        ("vibe.models_dev_catalog", "_refresh_in_background"),
+    ):
+        module = _module_this_test_can_import(name)
+        if module is not None:
+            monkeypatch.setattr(module, scheduler, lambda: False)
 
 
 @pytest.fixture(autouse=True)
@@ -739,9 +801,9 @@ def _foreign_signal_guard(request, tmp_path):
 # resolves exactly these. The SQLite migration guard cannot stand in for this:
 # every test runs with its opt-in flag set and with `Path.home` naming the test's
 # own home, so under pytest neither of its checks can recognise the real database.
-_REAL_STATE_HOMES = [REAL_USER_HOME / AVIBE_HOME_DIRNAME, REAL_USER_HOME / LEGACY_HOME_DIRNAME]
-if os.environ.get(AVIBE_HOME_ENV):
-    _REAL_STATE_HOMES.append(Path(os.path.expanduser(os.environ[AVIBE_HOME_ENV])))
+_REAL_STATE_HOMES = [REAL_USER_HOME / ".avibe", REAL_USER_HOME / ".vibe_remote"]
+if _AMBIENT_ENV["AVIBE_HOME"]:
+    _REAL_STATE_HOMES.append(Path(os.path.expanduser(_AMBIENT_ENV["AVIBE_HOME"])))
 _REAL_STATE_ROOTS = tuple(
     sorted(
         {
@@ -931,6 +993,7 @@ def pytest_unconfigure(config: pytest.Config) -> None:
         pytest.ExitCode.NO_TESTS_COLLECTED,
     ):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+    shutil.rmtree(_SESSION_HOME, ignore_errors=True)
 
 
 @pytest.fixture
