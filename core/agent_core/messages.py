@@ -65,10 +65,13 @@ class ThinkingBlock:
     text: str
     signature: Optional[str] = None
     redacted: bool = False
+    """True for reasoning the provider returned only in opaque form: ``signature`` holds that payload, ``text`` is empty."""
 
     def __post_init__(self) -> None:
         if self.signature is not None and not self.signature:
             raise ValueError("a signature, when present, must not be empty")
+        if self.redacted and (self.signature is None or self.text):
+            raise ValueError("redacted thinking keeps its payload in signature and has empty text")
 
 
 @dataclass(frozen=True)

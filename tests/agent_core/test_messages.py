@@ -102,13 +102,15 @@ def test_assistant_message_exposes_tool_calls_in_order():
         {**TOOL_RESULT, "tool_name": ""},
         {**ASSISTANT, "usage": {**ASSISTANT["usage"], "cache_read_tokens": -1}},
         {**ASSISTANT, "content": [{"type": "tool_call", "id": "t", "name": "bash", "arguments": {}, "signature": ""}]},
+        {**REDACTED, "content": [{"type": "thinking", "text": "", "redacted": True}]},
+        {**REDACTED, "content": [{"type": "thinking", "text": "visible", "signature": "opaque", "redacted": True}]},
     ],
     ids=[
         "unknown-field", "unknown-block-field", "block-not-allowed", "stop-reason", "protocol", "role",
         "unknown-ref-field", "string-flag", "integer-flag", "string-redacted", "string-count", "boolean-count",
         "string-arguments", "number-text", "content-not-list", "null-signature", "null-name", "null-error",
         "null-usage", "explicit-not-redacted", "digest-newline", "empty-call-id", "empty-tool-name", "negative-count",
-        "empty-call-signature",
+        "empty-call-signature", "redacted-without-payload", "redacted-with-text",
     ],
 )
 def test_reader_refuses_shapes_it_does_not_know(payload):
