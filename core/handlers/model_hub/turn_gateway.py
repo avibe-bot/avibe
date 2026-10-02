@@ -110,6 +110,16 @@ def _gateway_utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _response_origin_headers(carrier: ResolvedInvocation | ModelHubError) -> dict[str, str]:
+    """Publish only this response's admitted producer, whichever carrier won.
+
+    Local errors and native callers have no origin. Neither a primary snapshot,
+    mutable config nor a preceding attempt can supply one on their behalf.
+    """
+
+    return carrier.origin.response_headers() if carrier.origin is not None else {}
+
+
 def _rewind_and_measure(payload: BinaryIO) -> int:
     payload.seek(0, 2)
     size = payload.tell()
@@ -999,18 +1009,16 @@ class ModelHubTurnGateway:
                     headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
                 )
                 response[_LOCAL_ENDING] = _RenderedTurnOutcome(RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE)
-                return await self._through_committed_stream(execution, protocol, response)
-            return await self._through_committed_stream(
-                execution,
-                protocol,
-                self._terminal_error_response(
+            else:
+                response = self._terminal_error_response(
                     execution,
                     terminalizer,
                     status=exc.status,
                     code=exc.code,
                     turn_outcome=turn_outcome,
-                ),
-            )
+                )
+            response.headers.update(_response_origin_headers(exc))
+            return await self._through_committed_stream(execution, protocol, response)
 
         if execution.handle is not None:
             # The execution boundary must own cleanup before an awaited health
@@ -1117,7 +1125,7 @@ class ModelHubTurnGateway:
         # Resolution has crossed the engine's first-output barrier or already
         # settled successfully: this request can no longer fail over. The same
         # admitted origin is held by its provenance attempt.
-        origin_headers = resolved.origin.response_headers() if resolved.origin is not None else {}
+        origin_headers = _response_origin_headers(resolved)
         if resolved.outcome is not None:
             # A call that reached the resolver's own hands has already been
             # metered there; its body never becomes this gateway's to forward.

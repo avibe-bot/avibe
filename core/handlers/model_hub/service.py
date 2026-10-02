@@ -366,6 +366,7 @@ class ModelHubError(Exception):
         blockers: Iterable[ExactHopBlocker] = (),
         turn_outcome: TurnOutcomeProjectionInput | None = None,
         local_error_detail: str | None = None,
+        origin: HopOrigin | None = None,
     ):
         detail_key = detail or f"modelHub.errors.{code}"
         super().__init__(detail_key)
@@ -377,6 +378,9 @@ class ModelHubError(Exception):
         self.blockers = tuple(blockers)
         self.turn_outcome = turn_outcome
         self.local_error_detail = local_error_detail
+        # Only surfaced upstream responses carry an admitted, immutable origin.
+        # Local refusals/exhaustion must not inherit the last attempted hop.
+        self.origin = origin
 
 
 def turn_refusal(error: BaseException | None) -> TurnOutcomeProjectionInput | None:
@@ -8445,6 +8449,11 @@ class ModelHubService:
                     )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
+                    origin=(
+                        origin if settlement_generation is not None
+                        and terminal_outcome_category(outcome, decision) != "engine_down"
+                        else None
+                    ),
                     local_error_detail=format_os_errno(outcome.os_errno),
                     status=decision.downstream_status or (
                         outcome.http_status

@@ -36,7 +36,10 @@ def _schema(row):
 
 
 def _fixture(kind):
-    identity = {"source_id": "src_fixture01", "configured_model_id": "fixture-model", "channel": "hub"}
+    identity = {
+        "source_id": "src_fixture01", "configured_model_id": "fixture-model", "channel": "hub",
+        "origin": {"provider": "anthropic", "api": "anthropic", "model": "fixture-model"},
+    }
     if kind == "supply":
         return {"backend": "avibe", "mode": "hub", "menu_kind": "fixed", "cli_present": False}
     if kind == "catalog":

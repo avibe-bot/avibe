@@ -22,8 +22,9 @@ identity), and `source_id`. `base_url` is the loopback gateway's `/avibe/v1` API
 the consumer appends `messages`, `chat/completions`, or `responses` according to
 `protocol`. `runtime_model` is the exact prepared request model; the route credential
 retains the caller's catalog alias through remapping and failover. The token is
-in-memory only and excluded from the launch repr. `request_headers` carries any
-gateway correlation metadata. The caller supplies a Session-specific process scope
+in-memory only and excluded from the launch repr. `request_headers` is a required
+map (empty when unused) carrying any gateway correlation metadata; it is never
+omitted. The caller supplies a Session-specific process scope
 and the current Avibe turn id for durable turn provenance, then retires the scope
 through the existing router lifecycle when the consumer shuts down.
 
@@ -111,7 +112,8 @@ The exact object is `hop-origin.schema.json`. The provider and protocol are
 captured from the Source snapshot used at attempt admission, and the model is the
 configured upstream target of that attempt. The same immutable `HopOrigin` travels
 with `ResolvedInvocation` and the request's `AttemptIdentity`; successful settlement
-stores it as `TurnProvenance.served.origin`. Historical records may omit origin.
+stores it as the required `TurnProvenance.served.origin` for Avibe. Historical and
+native records may omit origin; Avibe has no pre-v11 historical record.
 Failed/canceled attempts can also retain that snapshot, without implying success.
 For a turn making several model requests, each response header names its own
 request's hop; the turn-level `served` retains the last successful attempt under
@@ -138,7 +140,13 @@ are never truncated; persisted config/history loading and native CLI/gateway
 consumers retain their existing identifier rules. Resolving a launch alone does
 not invoke a model and does not enforce this transport-only bound.
 
-Buffered terminal upstream failures retain the admitted origin header as well.
+Buffered and bodyless terminal upstream failures retain the admitted origin
+header as well. A bodyless upstream terminal response leaves resolution through
+`ModelHubError`, which carries the same immutable admitted origin. Both outcome
+carriers use one response-origin header policy. Local engine failures,
+pre-admission refusals, and local exhaustion responses carry no origin even when
+an earlier hop was attempted; the gateway never substitutes the last attempted
+hop or looks up current Source metadata to invent a producer.
 A local delivery failure after admission can report that known producer in the
 header without changing the existing engine-down provenance rule (which leaves
 Source attribution null rather than blaming the upstream for a local failure).
@@ -161,6 +169,11 @@ The header needs no upstream credentials and is never forwarded upstream.
   slow Anthropic resolution, buffered/streamed bodies, and concurrent requests.
 - The same attempt's response header and persisted served origin agree, even if
   Source metadata changes while the response is in flight.
+- One explicit mandatory-field table removes every promised resolution field,
+  capability field, and served identity/origin field from real produced values.
+  Native records from each supported persisted generation still load without an
+  origin. The terminal response table crosses result carrier, body availability,
+  upstream/local cause, primary/fallback hop, and native/Avibe backend.
 - Cross-origin histories are checked at engine admission across all three existing
   frontends, same/different protocol fallback, recovery, and launch-time config
   changes. Same-origin and native histories retain their payloads.

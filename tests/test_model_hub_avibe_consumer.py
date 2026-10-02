@@ -27,7 +27,7 @@ from config.v2_config import (
     ModelHubRouteHopConfig,
 )
 from core.handlers.model_hub.adapter import RawOutcomeKind
-from core.handlers.model_hub.provenance import HopOrigin, SERVED_HOP_HEADER
+from core.handlers.model_hub.provenance import BoundedProvenanceStore, HopOrigin, SERVED_HOP_HEADER
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.service import ModelHubError
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -58,6 +58,29 @@ PROTOCOL_ENDPOINTS = {
     "openai_chat": "chat/completions",
     "openai_responses": "responses",
 }
+# Consumer promises, deliberately independent of the producer schema. Positive
+# payload validation and the channel matrix cannot detect a missing requirement.
+MANDATORY_FIELDS = {
+    "hop-resolution.schema.json": {
+        (): (
+            "backend", "requested_model", "protocol", "base_url", "token",
+            "runtime_model", "source_id", "provider", "request_headers", "capabilities",
+        ),
+        ("capabilities",): (
+            "context_window", "input_limit", "max_output_tokens", "supports_tools",
+            "supports_images", "supports_reasoning", "reasoning_efforts",
+        ),
+    },
+    "turn-provenance.schema.json": {
+        (): (
+            "contract_version", "turn_id", "ts", "agent", "requested_model_id",
+            "outcome", "failed_attempts", "served", "terminal_error", "canceled_attempt",
+            "model_supply_state", "blockers",
+        ),
+        ("served",): ("source_id", "configured_model_id", "channel", "origin"),
+        ("served", "origin"): ("provider", "api", "model"),
+    },
+}
 
 
 def _validate(schema_name, value):
@@ -67,6 +90,21 @@ def _validate(schema_name, value):
         resources[payload.get("$id", path.name)] = Resource.from_contents(payload)
     schema = json.loads((CONTRACTS / schema_name).read_text())
     Draft7Validator(schema, registry=Registry().with_resources(resources.items())).validate(value)
+
+
+def _assert_mandatory_fields(schema_name, payload):
+    for path, fields in MANDATORY_FIELDS[schema_name].items():
+        for field in fields:
+            incomplete = copy.deepcopy(payload)
+            target = incomplete
+            for key in path:
+                target = target[key]
+            target.pop(field)
+            with pytest.raises(ValidationError) as missing:
+                _validate(schema_name, incomplete)
+            assert missing.value.validator == "required"
+            assert list(missing.value.absolute_path) == list(path)
+            assert missing.value.message == f"'{field}' is a required property"
 
 
 def _avibe_service(tmp_path, sources, *, handles=()):
@@ -578,19 +616,7 @@ async def test_hop_resolution_uses_primary_protocol_and_alias_capabilities(tmp_p
             "supports_reasoning": False if known else None,
             "reasoning_efforts": [],
         }
-        # Unknown is an explicit null, never an omitted field. Positive producer
-        # checks alone miss a schema that accepts incomplete future responses.
-        for field in (
-            "context_window", "input_limit", "max_output_tokens", "supports_tools",
-            "supports_images", "supports_reasoning", "reasoning_efforts",
-        ):
-            incomplete = copy.deepcopy(hop)
-            incomplete["capabilities"].pop(field)
-            with pytest.raises(ValidationError) as missing:
-                _validate("hop-resolution.schema.json", incomplete)
-            assert missing.value.validator == "required"
-            assert list(missing.value.absolute_path) == ["capabilities"]
-            assert missing.value.message == f"'{field}' is a required property"
+        _assert_mandatory_fields("hop-resolution.schema.json", hop)
         launch = await router.resolve("avibe", "menu-alias", process_scope="avibe:test", turn_id="turn-hop")
         assert hop["token"] not in repr(launch)
         assert build_claude_hub_env({"PATH": "/fixture"}, launch) == {"PATH": "/fixture"}
@@ -646,6 +672,25 @@ async def test_failover_origin_is_available_before_body_and_matches_served_attem
             await completion
         record = service.provenance.get("turn-fallback")
         _validate("turn-provenance.schema.json", record)
+        _assert_mandatory_fields("turn-provenance.schema.json", record)
+        # The new Avibe promise must not tighten native or released records.
+        # Exercise the persistence reader, not only in-memory schema payloads.
+        history = []
+        for backend in ("claude", "codex", "opencode"):
+            for version in (5, 6, 7, 8, 9, 10, 11):
+                native = copy.deepcopy(record)
+                native.update(agent=backend, contract_version=version, turn_id=f"{backend}-{version}")
+                native["served"].pop("origin")
+                for attempt in native["failed_attempts"]:
+                    attempt.pop("origin", None)
+                history.append(native)
+        history_path = tmp_path / "native-history.json"
+        history_path.write_text(json.dumps(history))
+        history_store = BoundedProvenanceStore(history_path)
+        for native in history:
+            loaded = history_store.get(native["turn_id"])
+            assert loaded == native
+            _validate("turn-provenance.schema.json", loaded)
         assert record["served"]["origin"] == origin
         assert record["served"]["source_id"] == second.id
         assert record["failed_attempts"][0]["source_id"] == first.id
@@ -657,18 +702,75 @@ async def test_failover_origin_is_available_before_body_and_matches_served_attem
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["upstream_terminal", "local_spool"])
-async def test_buffered_failure_retains_the_admitted_origin(tmp_path, monkeypatch, failure):
-    """MH-AVIBE-002: terminal/delivery errors must not lose an already known producer.
+@pytest.mark.parametrize("backend", ["avibe", "claude", "codex", "opencode"])
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize(
+    "failure,carrier,body_available,cause,expected_status,has_producer",
+    [
+        ("upstream_terminal", "resolved", True, "upstream", 400, True),
+        ("local_spool", "resolved", True, "local", 502, True),
+        ("bodyless_terminal", "error", False, "upstream", 400, True),
+        ("bodyless_protocol", "error", False, "upstream", 502, True),
+        ("bodyless_local", "error", False, "local", 502, False),
+        ("exhaustion", "error", False, "local", 503, False),
+        ("pre_admission", "error", False, "local", 502, False),
+    ],
+)
+async def test_terminal_response_origin_follows_its_carrier(
+    tmp_path, monkeypatch, backend, fallback, failure, carrier, body_available, cause,
+    expected_status, has_producer,
+):
+    """MH-AVIBE-002: response origin follows evidence, not the last attempted hop.
 
-    Existing success/stream cases never enter the buffered error-response paths.
+    The old buffered-only test missed the error carrier. The feasible terminal
+    matrix separates upstream errors from local endings, including local delivery
+    failure after acquiring a known producer's body. Native clients stay unchanged.
     """
-    source = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic", model_id="模型/β")
-    outcome = (
-        _outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_request_error", source_id=source.id)
-        if failure == "upstream_terminal" else _outcome(RawOutcomeKind.SUCCESS, source_id=source.id)
+    source = _source(
+        "src_primary01", "Primary", vendor="anthropic", protocol="anthropic",
+        model_id="模型/β" if backend == "avibe" else "shared-model",
     )
-    service = _avibe_service(tmp_path, [source], handles=[LiveInvokeHandle(outcome, (b"{}",))])
+    outcomes = {
+        "upstream_terminal": _outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_request_error", source_id=source.id),
+        "local_spool": _outcome(RawOutcomeKind.SUCCESS, source_id=source.id),
+        "bodyless_terminal": _outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_request_error", source_id=source.id),
+        "bodyless_protocol": _outcome(RawOutcomeKind.PROTOCOL_ERROR, source_id=source.id),
+        "bodyless_local": _outcome(RawOutcomeKind.NETWORK_ERROR, status=502, code="engine_down", source_id=source.id),
+        "exhaustion": _outcome(RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error", source_id=source.id),
+        "pre_admission": _outcome(RawOutcomeKind.NETWORK_ERROR, status=502, code="engine_down", source_id=source.id),
+    }
+    handle = LiveInvokeHandle(outcomes[failure], (b"{}",)) if body_available else InvokeHandle(outcomes[failure])
+    sources, handles = [source], [handle]
+    if fallback:
+        first = _source("src_fallback01", "First", vendor="custom", protocol="openai_chat")
+        sources.insert(0, first)
+        handles.insert(0, InvokeHandle(_outcome(
+            RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error", source_id=first.id,
+        )))
+    service = _avibe_service(tmp_path, sources, handles=handles)
+    observed_carriers = []
+    resolve = service.resolve_with_recovery
+
+    async def observe_carrier(**kwargs):
+        try:
+            result = await resolve(**kwargs)
+        except ModelHubError:
+            observed_carriers.append("error")
+            raise
+        observed_carriers.append("resolved")
+        return result
+
+    monkeypatch.setattr(service, "resolve_with_recovery", observe_carrier)
+    if failure == "pre_admission":
+        invoke = service.adapter.invoke
+
+        async def fail_before_admission(*args, **kwargs):
+            if args[0] == source.id:
+                # Engine-local completion without admitting an upstream call.
+                return InvokeHandle(outcomes[failure])
+            return await invoke(*args, **kwargs)
+
+        monkeypatch.setattr(service.adapter, "invoke", fail_before_admission)
     if failure == "local_spool":
         def unavailable_spool(*args, **kwargs):
             raise OSError("fixture spool unavailable")
@@ -678,33 +780,61 @@ async def test_buffered_failure_retains_the_admitted_origin(tmp_path, monkeypatc
         )
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    turn_id = "turn-terminal-carrier"
     try:
-        hop = await router.resolve_hop("menu-alias", process_scope="avibe:test", turn_id="turn-buffered-failure")
+        launch = await router.resolve(
+            backend, service.store.requested_models[backend], process_scope=f"{backend}:test", turn_id=turn_id,
+        )
+        protocol = "anthropic" if backend in {"avibe", "claude"} else "openai_responses"
+        # Avibe's frontend uses the primary's protocol; fallback can differ.
+        if backend == "avibe":
+            protocol = launch.protocol
+        headers = {"Authorization": f"Bearer {launch.gateway_token}"}
+        if launch.gateway_request_metadata:
+            headers["x-codex-turn-metadata"] = json.dumps(launch.gateway_request_metadata)
         async with aiohttp.ClientSession() as client:
             async with client.post(
-                f'{hop["base_url"]}/messages', headers={"x-api-key": hop["token"]},
-                json={"model": hop["runtime_model"], "stream": False, "messages": []},
+                f"{launch.gateway_base_url}/v1/{PROTOCOL_ENDPOINTS[protocol]}",
+                headers=headers,
+                json={"model": launch.runtime_model, "stream": False, "messages": []},
             ) as response:
-                assert response.status == (400 if failure == "upstream_terminal" else 502)
-                origin = json.loads(response.headers[SERVED_HOP_HEADER])
-                assert origin == {"provider": "anthropic", "api": "anthropic", "model": "模型/β"}
+                assert response.status == expected_status
+                origin = None
+                if backend == "avibe" and has_producer:
+                    origin = json.loads(response.headers[SERVED_HOP_HEADER])
+                    assert origin == {"provider": "anthropic", "api": "anthropic", "model": "模型/β"}
+                else:
+                    assert SERVED_HOP_HEADER not in response.headers
                 assert (await response.json())["error"]
         completion = router.settle_turn(
-            "turn-buffered-failure", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat(),
+            turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat(),
         )
         if completion:
             await completion
-        record = service.provenance.get("turn-buffered-failure")
+        assert observed_carriers == [carrier]
+        assert [entry[0] for entry in service.adapter.invocations] == (
+            ([sources[0].id] if fallback else []) + ([] if failure == "pre_admission" else [source.id])
+        )
+        record = service.provenance.get(turn_id)
+        if backend == "opencode":
+            # The native shared server has no exact turn discriminator.
+            assert record is None
+            return
         _validate("turn-provenance.schema.json", record)
-        assert record["outcome"] == "failed_terminal"
-        if failure == "upstream_terminal":
-            assert record["terminal_error"]["origin"] == origin
+        assert record["outcome"] == ("exhausted" if failure == "exhaustion" else "failed_terminal")
+        if cause == "upstream":
+            assert record["terminal_error"]["source_id"] == source.id
+            if backend == "avibe":
+                assert record["terminal_error"]["origin"] == origin
+            else:
+                assert "origin" not in record["terminal_error"]
+        elif failure == "exhaustion":
+            assert record["terminal_error"] is None
         else:
             # Existing engine-down provenance deliberately does not blame the
             # upstream Source for local delivery failure, despite a known producer.
             assert record["terminal_error"]["reason"] == "engine_down"
             assert record["terminal_error"]["source_id"] is None
-        assert [entry[0] for entry in service.adapter.invocations] == [source.id]
     finally:
         await gateway.close()
 

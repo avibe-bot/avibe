@@ -4,7 +4,7 @@
   "title": "HopResolution",
   "description": "C-6 runtime consumer projection of ModelHubLaunch. Unknown planning metadata remains null; credentials are in-memory only.",
   "type": "object",
-  "required": ["backend", "requested_model", "protocol", "base_url", "token", "runtime_model", "source_id", "provider", "capabilities"],
+  "required": ["backend", "requested_model", "protocol", "base_url", "token", "runtime_model", "source_id", "provider", "request_headers", "capabilities"],
   "additionalProperties": false,
   "properties": {
     "backend": { "const": "avibe" },
