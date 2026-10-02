@@ -71,9 +71,12 @@ class TrackingJobHost:
     def output_path(self, job_id: str) -> str:
         return self.host.output_path(job_id)
 
-    async def kill(self, job_id: str) -> None:
-        await self.host.kill(job_id)
+    async def kill(self, job_id: str, *, reason: str = "killed") -> None:
+        await self.host.kill(job_id, reason=reason)
         self._foreground.pop(job_id, None)
+
+    def stop_reason(self, job_id: str) -> Optional[str]:
+        return self.host.stop_reason(job_id)
 
     async def hand_over(self, job_id: str) -> str:
         task = asyncio.create_task(self.host.hand_over(job_id))
@@ -86,14 +89,16 @@ class TrackingJobHost:
         self._foreground.pop(job_id, None)
         return watch_id
 
-    async def kill_foreground(self, session_id: str, *, tool_call_id: Optional[str] = None) -> None:
+    async def kill_foreground(
+        self, session_id: str, *, tool_call_id: Optional[str] = None, reason: str = "killed"
+    ) -> None:
         failures = []
         for job_id, (owner, call) in list(self._foreground.items()):
             if owner != session_id or (tool_call_id is not None and call != tool_call_id):
                 continue
             try:
                 if self.status(job_id).state == "running":
-                    await self.kill(job_id)
+                    await self.kill(job_id, reason=reason)
                 else:
                     self._foreground.pop(job_id, None)
             except (Exception, asyncio.CancelledError) as error:
