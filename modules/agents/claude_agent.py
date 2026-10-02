@@ -2008,6 +2008,11 @@ class ClaudeAgent(BaseAgent):
             joined_running_client = getattr(client, "_vibe_receiver_attached", False)
             setattr(client, "_vibe_receiver_attached", True)
             turn_origin: str | None = "" if joined_running_client else None
+            # Each Result ends one native response phase. The pending human-path
+            # Assistant text belongs to a phase only if this receiver set it there.
+            response_phase = object()
+            ending_phase = None
+            pending_assistant_phase = None
             while True:
                 settling_ambiguous_primary = False
                 settling_ambiguous_assistant_text = None
@@ -2110,6 +2115,7 @@ class ClaudeAgent(BaseAgent):
                         terminal_steering_generation = None
                     if message_type == "result":
                         turn_origin = None
+                        ending_phase, response_phase = response_phase, object()
                     elif message_type == "assistant" and turn_origin is None:
                         turn_origin = ""
                     if message_type == "user":
@@ -2316,6 +2322,7 @@ class ClaudeAgent(BaseAgent):
                             continue
                         if assistant_text:
                             self._last_assistant_text[composite_key] = assistant_text
+                            pending_assistant_phase = response_phase
 
                         pending_requests = self._pending_requests.get(composite_key) or []
                         pending_request = pending_requests[0] if pending_requests else None
@@ -2345,6 +2352,7 @@ class ClaudeAgent(BaseAgent):
                         if text_parts:
                             formatted_assistant = formatter.format_assistant_message(text_parts)
                             self._pending_assistant_message[composite_key] = formatted_assistant
+                            pending_assistant_phase = response_phase
 
                         # AskUserQuestion handling disabled - SDK cannot respond programmatically
                         # See: https://github.com/anthropics/claude-code/issues/10168
@@ -2468,6 +2476,13 @@ class ClaudeAgent(BaseAgent):
                             )
                             if record is None:
                                 raise RuntimeError("Claude terminal phase has no output owner")
+                            if pending_assistant_phase is ending_phase:
+                                # This phase streamed Assistant text on the human
+                                # path before its Result proved another owner. The
+                                # Result supersedes it, so it must not replay as the
+                                # next turn's narration or terminal text.
+                                self._pending_assistant_message.pop(composite_key, None)
+                                self._last_assistant_text.pop(composite_key, None)
                             self._classify_output_record(
                                 record, context,
                                 text=self._select_detached_result_text(
