@@ -124,6 +124,9 @@ scenarios:
     layer: contract
     test: tests/test_model_hub_avibe_consumer.py::test_failover_origin_is_available_before_body_and_matches_served_attempt
     related_tests:
+      - tests/test_model_hub_avibe_consumer.py::test_buffered_failure_retains_the_admitted_origin
+      - tests/test_model_hub_avibe_consumer.py::test_origin_header_limit_is_checked_before_each_avibe_hop
+      - tests/test_model_hub_avibe_consumer.py::test_served_hop_transport_bound_does_not_restrict_native_clients
       - tests/test_model_hub_avibe_consumer.py::test_slow_anthropic_resolution_waits_to_publish_origin_and_keeps_source_snapshot
       - tests/test_model_hub_avibe_consumer.py::test_concurrent_responses_keep_their_own_origin
   - id: MH-AVIBE-003

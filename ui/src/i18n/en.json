@@ -881,6 +881,7 @@
           "turnOn": "Turn model gateway on",
           "turnOff": "Turn model gateway off",
           "stopBlocked": "Switch {{names}} to Direct before turning the model gateway off",
+          "stopAvibeBlocked": "Avibe models use the model gateway; remove them before turning it off.",
           "stopUnavailable": "Agent routing status is unavailable; the model gateway cannot be turned off yet"
         },
         "closed": {

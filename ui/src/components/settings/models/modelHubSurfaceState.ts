@@ -3,8 +3,12 @@ import type { AgentSupply, Source } from './types';
 
 export type ModelsSurfaceKind = 'direct_empty' | 'gateway';
 
+/** Match runtime_stop: the upgrade-added empty Avibe catalog holds no runtime. */
+export const agentUsesHubRuntime = (agent: AgentSupply): boolean =>
+  agent.mode === 'hub' && (agent.backend !== 'avibe' || (agent.catalog_models?.length ?? 0) > 0);
+
 export const modelsSurfaceKind = (agents: AgentSupply[], sources: Source[]): ModelsSurfaceKind =>
-  agents.every((agent) => agent.mode === 'direct') && sources.length === 0
+  !agents.some(agentUsesHubRuntime) && sources.length === 0
     ? 'direct_empty'
     : 'gateway';
 

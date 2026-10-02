@@ -68,6 +68,22 @@ does not certify a successful response.
 Local errors before a serving hop exists have no origin header; they cannot
 claim an upstream producer.
 
+The exact header value is bounded to **4096 ASCII bytes**, including JSON syntax
+and escapes (excluding the header name and HTTP framing). Every Avibe hop is
+checked against this bound at invocation admission, including fallback and
+credential-refresh attempts. An oversized value is refused with HTTP `422` and
+machine error `served_hop_too_large`, before invoking that hop: no attempt, Source
+health penalty, or served-hop header is fabricated. Earlier failed attempts remain
+recorded. The gateway uses its existing localized generic error copy. Identifiers
+are never truncated; persisted config/history loading and native CLI/gateway
+consumers retain their existing identifier rules. Resolving a launch alone does
+not invoke a model and does not enforce this transport-only bound.
+
+Buffered terminal upstream failures retain the admitted origin header as well.
+A local delivery failure after admission can report that known producer in the
+header without changing the existing engine-down provenance rule (which leaves
+Source attribution null rather than blaming the upstream for a local failure).
+
 Consumers parse this header before committing a response. The wire protocol stays
 the requested frontend protocol; `origin.api != requested protocol` explicitly
 identifies cross-protocol conversion. Consumers record the reported upstream

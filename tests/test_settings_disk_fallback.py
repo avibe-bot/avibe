@@ -35,8 +35,8 @@ def _direct_config(**kwargs):
     from config.v2_config import V2Config
 
     config = V2Config(**kwargs) if kwargs else V2Config.default()
-    for supply in config.model_hub.agents.values():
-        supply.mode = "direct"
+    for backend in ("claude", "codex", "opencode"):
+        config.model_hub.agents[backend].mode = "direct"
     return config
 
 

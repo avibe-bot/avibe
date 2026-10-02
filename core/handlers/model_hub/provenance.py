@@ -46,6 +46,11 @@ ScopeKey = tuple[BackendName, str]
 logger = logging.getLogger(__name__)
 
 SERVED_HOP_HEADER = "x-avibe-served-hop"
+SERVED_HOP_HEADER_MAX_BYTES = 4096
+
+
+class ServedHopHeaderTooLarge(ValueError):
+    """The exact origin cannot be transported in the bounded consumer header."""
 
 
 @dataclass(frozen=True)
@@ -61,7 +66,11 @@ class HopOrigin:
 
     def response_headers(self) -> dict[str, str]:
         # JSON escapes keep arbitrary Unicode model ids safe in HTTP headers.
-        return {SERVED_HOP_HEADER: json.dumps(self.payload(), ensure_ascii=True, separators=(",", ":"))}
+        value = json.dumps(self.payload(), ensure_ascii=True, separators=(",", ":"))
+        # ensure_ascii makes character count equal to wire byte count.
+        if len(value) > SERVED_HOP_HEADER_MAX_BYTES:
+            raise ServedHopHeaderTooLarge("Served-hop header exceeds its transport bound")
+        return {SERVED_HOP_HEADER: value}
 
 
 @dataclass(frozen=True)

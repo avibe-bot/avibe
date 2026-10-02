@@ -1110,13 +1110,15 @@ class ModelHubTurnGateway:
         handle = resolved.handle
         if handle is None or handle.stream is None:
             terminalizer.engine_down()
-            return self._terminal_error_response(
+            response = self._terminal_error_response(
                 execution,
                 terminalizer,
                 status=502,
                 code="engine_down",
                 turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
             )
+            response.headers.update(origin_headers)
+            return response
 
         if not stream:
             try:
@@ -1186,16 +1188,19 @@ class ModelHubTurnGateway:
                     # Do not send a second HTTP response after committed headers.
                     execution.buffered_response.force_close()
                     return execution.buffered_response
+                failure.headers.update(origin_headers)
                 return failure
             rendered = self._commit_and_render_handle_settlement(execution, terminalizer, settlement)
             if response is None:
                 assert settlement.decision is not None
-                return self._outcome_response(
+                response = self._outcome_response(
                     outcome,
                     error_code=settlement.decision.error_code,
                     status_override=settlement.decision.downstream_status,
                     rendered=rendered,
                 )
+                response.headers.update(origin_headers)
+                return response
             if response is execution.buffered_response:
                 await self._downstream_io(response.write_eof())
             return response

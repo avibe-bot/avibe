@@ -277,8 +277,8 @@ def test_unrelated_writer_keeps_upgrade_pending_until_startup(writer, marker, en
 def pending_runtime_service(tmp_path, *, enabled, marker):
     path, _ = legacy_config(enabled=enabled)
     payload = json.loads(path.read_text(encoding="utf-8"))
-    for backend in payload["model_hub"]["agents"].values():
-        backend["mode"] = "direct"
+    for backend in ("claude", "codex", "opencode"):
+        payload["model_hub"]["agents"][backend]["mode"] = "direct"
     if marker is False:
         payload["model_hub"]["runtime_default_applied"] = False
     path.write_text(json.dumps(payload), encoding="utf-8")
