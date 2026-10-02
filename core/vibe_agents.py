@@ -17,6 +17,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
+from modules.agents.catalog import AGENT_BACKENDS
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
@@ -51,7 +52,6 @@ ARCHIVED_AGENT_NAME_PREFIX = "_"
 LEGACY_ARCHIVED_AGENT_NAME_PREFIX = "_archived_"
 ARCHIVED_AGENT_SLUG_LENGTH = 12
 ARCHIVED_AGENT_TOKEN_LENGTH = 4
-SUPPORTED_AGENT_BACKENDS = {"codex", "claude", "opencode"}
 RECOMMENDED_AGENT_MODELS = {
     "claude": "claude-opus-5-5",
     "codex": "gpt-5.6-sol",
@@ -201,14 +201,16 @@ def _validated_public_agent_name(name: str) -> tuple[str, str]:
 
 def validate_agent_backend(backend: str) -> str:
     value = str(backend or "").strip().lower()
-    if value not in SUPPORTED_AGENT_BACKENDS:
-        supported = ", ".join(sorted(SUPPORTED_AGENT_BACKENDS))
+    if value not in AGENT_BACKENDS:
+        supported = ", ".join(sorted(AGENT_BACKENDS))
         raise ValueError(f"unsupported agent backend: {backend}. Supported backends: {supported}")
     return value
 
 
-def recommended_agent_model(backend: str) -> str:
-    return RECOMMENDED_AGENT_MODELS[validate_agent_backend(backend)]
+def recommended_agent_model(backend: str) -> Optional[str]:
+    # In-process backends select only a configured Model Hub route. An empty
+    # catalog has no recommendation; do not invent an upstream model.
+    return RECOMMENDED_AGENT_MODELS.get(validate_agent_backend(backend))
 
 
 def _json_dumps(value: Any) -> str:

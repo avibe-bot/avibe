@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from modules.agents.catalog import NATIVE_CLI_BACKENDS, NativeCliBackend, display_name_for_backend
 from typing import Any, Awaitable, Callable, Collection, Literal, Mapping, Optional, Protocol, cast
 
 from config.v2_config import (
@@ -203,7 +204,7 @@ class NativeManualModel:
 class NativeMigrationItem:
     id: str
     source_id: str
-    backend: Literal["claude", "codex", "opencode"]
+    backend: NativeCliBackend
     kind: MigrationKind
     masked_detail: str
     proposed_action: MigrationAction
@@ -591,7 +592,7 @@ def _blocked_item(
         selected=False, notes_key=f"settings.models.migration.blocked.{reason}",
         vendor={"claude": "anthropic", "codex": "openai", "opencode": "opencode"}[backend],
         protocol="anthropic" if backend == "claude" else "openai_responses",
-        display_name={"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"}[backend],
+        display_name=display_name_for_backend(backend),
         source_paths=source_paths, shell_variables=shell_variables,
         shell_auth_variables=shell_auth_variables, config_blocker=config_blocker,
     )
@@ -2262,7 +2263,7 @@ async def apply_native_migration(
             scan_native_configs, host.store.load(), mask_credential=mask_credential,
             home=host.migration_home,
             validate_base_url=validate_base_url,
-            legacy_auth=_native_auth_snapshot(host, ("claude", "codex", "opencode")),
+            legacy_auth=_native_auth_snapshot(host, tuple(sorted(NATIVE_CLI_BACKENDS))),
             project_roots=host.migration_project_roots(),
             clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
             retained_native_ids=(host.migration_journal.completed() or {}).get("retained_native_ids"),
@@ -2292,7 +2293,7 @@ async def apply_native_migration(
                 item for item in await asyncio.to_thread(
                     scan_native_configs, host.store.load(), mask_credential=mask_credential,
                     home=host.migration_home, validate_base_url=validate_base_url,
-                    legacy_auth=_native_auth_snapshot(host, ("claude", "codex", "opencode")),
+                    legacy_auth=_native_auth_snapshot(host, tuple(sorted(NATIVE_CLI_BACKENDS))),
                     project_roots=host.migration_project_roots(),
                     clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
                 )

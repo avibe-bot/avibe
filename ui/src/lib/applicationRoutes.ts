@@ -1,3 +1,5 @@
+import { AGENT_BACKENDS } from './agentBackends';
+
 // Exact routes declared in App.tsx. Keep this as the shared policy for any
 // feature that must distinguish an AppShell destination from another
 // same-origin path, such as local-file Markdown links and iOS PWA navigation.
@@ -55,9 +57,7 @@ export const APPLICATION_ROUTE_PATHS = [
   '/settings/platforms/users',
   '/settings/remote-access',
   '/settings/backends',
-  '/settings/backends/opencode',
-  '/settings/backends/claude',
-  '/settings/backends/codex',
+  ...AGENT_BACKENDS.map((backend) => backend.settingsRoute),
   '/settings/models',
   '/settings/dependencies',
   '/settings/replies',

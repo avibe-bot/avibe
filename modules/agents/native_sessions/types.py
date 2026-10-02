@@ -5,7 +5,9 @@ from datetime import datetime
 from typing import Any, Literal
 
 
-AgentName = Literal["opencode", "claude", "codex"]
+from modules.agents.catalog import NativeCliBackend
+
+AgentName = NativeCliBackend
 AgentPrefix = Literal["oc", "cc", "cx"]
 
 

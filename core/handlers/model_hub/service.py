@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optiona
 from sqlalchemy import func, select
 
 from config import paths
+from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from config.v2_config import (
     CONFIG_LOCK,
     MODEL_HUB_BACKENDS,
@@ -1735,7 +1736,7 @@ class ModelHubService:
         except (TakeoverStateError, OSError):
             # Unknown recovery state cannot authorize any native credential
             # writer or native launch. Controller recovery preserves this gate.
-            self.migration_blocked_backends.update(("claude", "codex", "opencode"))
+            self.migration_blocked_backends.update(NATIVE_CLI_BACKENDS)
             raise ModelHubError("migration_item_conflict", status=409) from None
         task = self._runtime_resume_task
         if task is None or task.done():
@@ -7309,7 +7310,7 @@ class ModelHubService:
                     clean_native_stores=(self.migration_journal.completed() or {}).get("clean_native_stores"),
                     retained_native_ids=(self.migration_journal.completed() or {}).get("retained_native_ids"),
                     legacy_auth=(
-                        self.store.native_auth_snapshot(("claude", "codex", "opencode"))
+                        self.store.native_auth_snapshot(tuple(sorted(NATIVE_CLI_BACKENDS)))
                         if isinstance(self.store, V2ModelHubConfigStore) else None
                     ),
                 )
@@ -7363,7 +7364,7 @@ class ModelHubService:
             try:
                 pending = self.migration_journal.load()
             except (TakeoverStateError, OSError):
-                self.migration_blocked_backends.update(("claude", "codex", "opencode"))
+                self.migration_blocked_backends.update(NATIVE_CLI_BACKENDS)
                 raise ModelHubError("migration_configuration_blocked", status=409) from None
             if pending is not None and pending["phase"] == "exposed":
                 raise ModelHubError("migration_recovery_pending", status=409) from None

@@ -17,24 +17,15 @@ import { EditorDialog } from '../ui/editor-dialog';
 import { Button } from '../ui/button';
 import { errorMessage } from '@/lib/errorMessage';
 import { useRouteSurfaceWindowEvent } from '@/lib/routeSurfaceActivity';
+import { getBackendUiMeta, type AgentBackendId } from '@/lib/agentBackends';
+import { BACKEND_ORDER, BACKEND_LABEL } from '@/lib/backendAccent';
 
-type BackendKey = 'claude' | 'opencode' | 'codex';
-
-interface BackendOption {
-  key: BackendKey;
-  label: string;
-  publisher: string;
-  color: 'mint' | 'cyan' | 'violet';
-}
-
-const BACKEND_OPTIONS: BackendOption[] = [
-  { key: 'claude', label: 'Claude', publisher: 'Anthropic', color: 'mint' },
-  // OpenCode is the upstream project at opencode.ai (not sst.dev — that
-  // was an older publisher attribution that doesn't match the current
-  // project page).
-  { key: 'opencode', label: 'OpenCode', publisher: 'opencode.ai', color: 'cyan' },
-  { key: 'codex', label: 'Codex', publisher: 'OpenAI', color: 'violet' },
-];
+const BACKEND_OPTIONS = BACKEND_ORDER.map((id) => ({
+  key: id,
+  label: BACKEND_LABEL[id],
+  publisher: getBackendUiMeta(id).publisher,
+  color: getBackendUiMeta(id).accent,
+}));
 
 interface NewAgentDialogProps {
   /** When false the modal renders nothing — controlled by the parent. */
@@ -49,7 +40,7 @@ interface NewAgentDialogProps {
 export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, onCreated }) => {
   const { t } = useTranslation();
   const api = useApi();
-  const [backend, setBackend] = useState<BackendKey>('claude');
+  const [backend, setBackend] = useState<AgentBackendId>('claude');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [model, setModel] = useState('');
@@ -170,7 +161,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     }
   };
 
-  const colorClasses: Record<BackendOption['color'], { border: string; bg: string; text: string }> = {
+  const colorClasses = {
     mint: { border: 'border-mint', bg: 'bg-mint/[0.08]', text: 'text-mint-ink' },
     cyan: { border: 'border-cyan', bg: 'bg-cyan/[0.08]', text: 'text-cyan-ink' },
     violet: { border: 'border-violet', bg: 'bg-violet/[0.08]', text: 'text-violet-ink' },
@@ -205,7 +196,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
           <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
             {t('agents.create.backend')}
           </div>
-          <div className="grid grid-cols-3 gap-2.5">
+          <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
             {BACKEND_OPTIONS.map((opt) => {
               const active = backend === opt.key;
               const cc = colorClasses[opt.color];

@@ -6,7 +6,6 @@ import {
   Save,
   Search,
 } from 'lucide-react';
-import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
 import { Button } from '../../ui/button';
@@ -17,6 +16,7 @@ import { InstallOutcome } from '../../shared/InstallOutcome';
 import { BackendLifecycleChip } from '../BackendLifecycleChip';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import type { BackendRuntimeState, BackendId } from './useBackendRuntime';
+import { getBackendUiMeta, type BackendUiMeta } from '@/lib/agentBackends';
 
 export interface BackendRuntimeCardProps {
   /** Backend id used by ``BackendLifecycleChip`` + ``installAgent``. */
@@ -26,7 +26,7 @@ export interface BackendRuntimeCardProps {
   /** Short description sentence under the name. */
   description: string;
   /** Lucide icon component used in the header tile. */
-  Icon: LucideIcon;
+  Icon: BackendUiMeta['Icon'];
   /**
    * Tailwind class string for the icon tile background, e.g.
    * ``"bg-cyan-soft"`` (Claude) / ``"bg-gold"`` (Codex) /
@@ -81,6 +81,7 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
 }) => {
   const { t } = useTranslation();
   const inputId = `${backend}-cli-path`;
+  const { capabilities } = getBackendUiMeta(backend);
 
   return (
     <Card>
@@ -101,21 +102,21 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <BackendLifecycleChip
+            {capabilities.supports_runtime_refresh && <BackendLifecycleChip
               name={backend}
               enabled={runtime.enabled}
               cliStatus={runtime.cliStatus}
               cliPath={runtime.cliPath}
               onChanged={runtime.handleLifecycleChanged}
               onOperationChange={(busy) => { if (!busy) void runtime.handleLifecycleChanged(null); }}
-            />
+            />}
             {!hideEnableToggle && (
               <ToggleSwitch enabled={runtime.enabled} onClick={runtime.toggleEnabled} />
             )}
           </div>
         </div>
 
-        <div className="flex flex-col gap-2">
+        {capabilities.supports_cli && <div className="flex flex-col gap-2">
           <Label htmlFor={inputId} className="text-xs font-medium uppercase text-muted">
             {t('agentDetection.cliPath')}
           </Label>
@@ -146,9 +147,9 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
             </Button>
           </div>
           <p className="text-[12px] text-muted">{t('settings.backends.cliPathHint')}</p>
-        </div>
+        </div>}
 
-        {runtime.cliStatus === 'missing' && (
+        {capabilities.supports_install && runtime.cliStatus === 'missing' && (
           <div className="space-y-2 rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2.5">
             <p className="text-[12px] text-cyan-ink">{t('agentDetection.installHint')}</p>
             <Button
@@ -174,7 +175,7 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
 
         {extraSlot}
 
-        {runtime.runtimeDirty && (
+        {capabilities.supports_cli && runtime.runtimeDirty && (
           <div className="flex justify-end">
             <Button
               variant="brand"

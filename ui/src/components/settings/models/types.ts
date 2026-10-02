@@ -155,8 +155,9 @@ export type Source = {
 // per-backend subset, carried by `AgentSupply.sources` below.
 
 // ── agent-supply.schema.json ────────────────────────────────────────────
-export type NativeCliBackend = 'claude' | 'codex' | 'opencode';
-export type AgentBackend = NativeCliBackend | 'avibe';
+import type { AgentBackendId, NativeCliBackend } from '@/lib/agentBackends';
+export type { NativeCliBackend } from '@/lib/agentBackends';
+export type AgentBackend = AgentBackendId;
 export type AgentMode = 'hub' | 'direct';
 export type MenuKind = 'fixed' | 'open';
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from config.v2_config import TelegramConfig
+from modules.agents.catalog import display_name_for_backend
 from core import chat_discovery
 from core.message_context import resolve_context_scope_settings_key, resolve_context_thread_id
 from vibe.i18n import get_supported_languages, t as i18n_t
@@ -1799,8 +1800,7 @@ class TelegramBot(BaseIMClient):
             state.message_id = await self.send_message_with_buttons(target_context, text, keyboard)
 
     def _get_backend_label(self, backend: str) -> str:
-        translated = self._t(f"backend.{backend}")
-        return translated if translated != f"backend.{backend}" else backend
+        return display_name_for_backend(backend)
 
     def _option_label(self, value: Optional[str], default_label: Optional[str] = None) -> str:
         if not value:

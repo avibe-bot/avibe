@@ -20,6 +20,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { useLatestRef } from '@/lib/useLatestRef';
 import type { PendingWrite } from './asyncLifetime';
 import {
@@ -757,7 +758,7 @@ export const BackendModelCatalogDialog: React.FC<{
         >
           <DialogHeader className="model-hub-catalog-head shrink-0 justify-center border-b border-border">
             <DialogTitle className="model-hub-catalog-title">
-              {t('settings.models.gateway.catalog.title', { backend: t(`settings.models.backends.${backend}`) })}
+              {t('settings.models.gateway.catalog.title', { backend: getBackendUiMeta(backend).label })}
             </DialogTitle>
             <DialogDescription className="sr-only">{t('settings.models.gateway.catalog.description')}</DialogDescription>
           </DialogHeader>

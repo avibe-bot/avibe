@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy import select, update
+from modules.agents.catalog import AGENT_BACKENDS
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -7431,7 +7432,7 @@ def test_silent_terminal_skips_callback_and_keeps_directed_run(
     ]
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 def test_callback_consumes_only_full_terminal_once_across_backends(
     tmp_path: Path,
     monkeypatch,
