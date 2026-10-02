@@ -12,10 +12,13 @@ from typing import Callable, Mapping, Optional
 
 from core.agent_core.harness.projection import interrupted_result, open_tool_calls
 from core.agent_core.harness.store import ContextEntry, TranscriptStore
-from core.agent_core.messages import ToolCallBlock, ToolResultMessage
+from core.agent_core.messages import ToolCallBlock, ToolResultMessage, text
 from core.agent_core.tools.base import JobHost, JobStatus, ToolResult
 
 RecoveryRenderer = Callable[[ToolCallBlock, str, JobStatus, Optional[str]], ToolResult]
+
+# recovery.md T2: no job evidence can establish whether a file mutation ran.
+UNRECORDED_EFFECT = "[tool call interrupted; it may or may not have completed; re-read the file before continuing]"
 
 
 async def settle_open_calls(
@@ -36,13 +39,18 @@ async def settle_open_calls(
 
     Store writes remain under the caller's single-writer ownership. A concurrent
     second recovery or Agent.run for that Session is not permitted.
+    Without job state, the result explicitly leaves the effect uncertain.
+    The adapter settles the interrupted Turn after this step; no tool or model
+    is invoked and only a new user input starts another Turn (T4).
     """
     committed: list[ContextEntry] = []
     for owner, call in open_tool_calls(await store.load(session_id)):
         job_id = job_ids.get((owner.session_id, call.id))
         message = interrupted_result(call)
         details = {}
-        if job_id is not None:
+        if job_id is None:
+            message = ToolResultMessage(call.id, call.name, (text(UNRECORDED_EFFECT),), is_error=True)
+        else:
             status = jobs.status(job_id)
             details["job_id"] = job_id
             if status.state in {"running", "exited"}:

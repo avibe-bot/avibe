@@ -33,10 +33,23 @@ def renderer(jobs):
     return render
 
 
-@pytest.mark.parametrize("state", ["missing", "never-ran", "running", "exited", "gone"])
-async def test_resume_settles_each_job_state_once_and_projection_never_rechecks_it(state):
+@pytest.mark.parametrize(
+    "tool_name,state",
+    [
+        ("bash", "missing"),
+        ("write", "missing"),
+        ("edit", "missing"),
+        ("bash", "never-ran"),
+        ("bash", "running"),
+        ("bash", "exited"),
+        ("bash", "gone"),
+    ],
+)
+async def test_resume_settles_each_job_state_once_and_projection_never_rechecks_it(tool_name, state):
+    # T2 requires uncertainty, not an implied absence of effects, for calls
+    # without job state. The previous bash-only table missed write/edit wording.
     store, jobs = InMemoryTranscriptStore(), FakeJobHost()
-    call = ToolCallBlock("call", "bash")
+    call = ToolCallBlock("call", tool_name)
     await store.append_response("session", assistant(calls=[call]), final=False)
     job_ids = {}
     if state != "missing":
@@ -51,13 +64,19 @@ async def test_resume_settles_each_job_state_once_and_projection_never_rechecks_
         store=store,
         jobs=jobs,
         job_ids=job_ids,
-        render_result=renderer(jobs),
+        render_result=(
+            renderer(jobs)
+            if state in {"running", "exited"}
+            else lambda *args: pytest.fail("missing/gone jobs must not invoke the renderer")
+        ),
     )
     assert len(committed) == 1
     assert (
         committed[0].message.content[0].text
         == {
-            "missing": INTERRUPTED,
+            "missing": (
+                "[tool call interrupted; it may or may not have completed; re-read the file before continuing]"
+            ),
             "never-ran": INTERRUPTED,
             "gone": INTERRUPTED,
             "running": "still running, now Watch watch_job_1",

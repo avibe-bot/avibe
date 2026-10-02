@@ -101,16 +101,22 @@ The store/adapter owns fork ancestry; the engine does not copy parent rows.
 - Transient retries have an attempt/time budget (at most 3 retries within 120
   seconds; default 2), exponential backoff, and honor Retry-After. An expired
   budget ends with the original error, including when delay or route resolution
-  crosses the deadline. Any streamed event or partial forbids retry. Overflow
-  emits an error and ends as `context_exhausted`.
+  crosses the deadline. Route resolution precedes request admission: expiry is
+  checked before route validation, projection, rehydration or hooks can run.
+  Any streamed event or partial forbids retry. Overflow emits an error and ends
+  as `context_exhausted`.
 - Projection consumes store-resolved ancestry, sorts by sequence, restores hook
   state, and answers orphans with deterministic interrupted text. It has no job
   host or external settler. The caller supplies rebuilt system/state messages.
 - Before resume, the adapter calls `agent.recovery.settle_open_calls` under its
   Session writer lock. It appends a governed result for each open call: exited
-  output, a running job handed to Watch, or synthetic interrupted text. Each
-  committed outcome is skipped on retry. Late settlement rows are projected
-  alongside their original call, and fork cuts only see included outcomes.
+  output, a running job handed to Watch, or synthetic interrupted text.
+  A call without job state (including `write` and `edit`) explicitly warns that
+  it may or may not have completed and instructs the model to re-read the file
+  before continuing. Each committed outcome is skipped on retry. Late settlement
+  rows are projected alongside their original call; fork cuts only see included
+  outcomes. After settlement the adapter marks the old Turn interrupted (T4);
+  recovery never resumes the model or repeats the tool automatically.
 
 `tests/agent_core/agent/` verifies C1, transient C2, C3, C4, C5, resume C6, and
 C9 against the actual requests recorded by `tests/agent_core/fakes.py`.

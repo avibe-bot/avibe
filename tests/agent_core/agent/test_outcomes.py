@@ -6,6 +6,7 @@ cross product or the gap between receiving a terminal and committing it.
 
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -234,35 +235,82 @@ def test_retry_policy_configuration_cannot_weaken_contract(kwargs):
         RetryPolicy(**kwargs)
 
 
-@pytest.mark.parametrize("expiration", ["retry_after", "sleep", "route"])
-async def test_retry_does_not_start_a_provider_attempt_after_deadline(monkeypatch, expiration):
+@pytest.mark.parametrize(
+    "expiration,elapsed",
+    [
+        ("retry_after", 121),
+        ("sleep", 119),
+        ("sleep", 120),
+        ("sleep", 121),
+        ("route", 119),
+        ("route", 120),
+        ("route", 121),
+    ],
+)
+@pytest.mark.parametrize("hook_action", ["end", "raise", "mutate"])
+async def test_retry_deadline_owns_admission_before_rehydration_and_hooks(
+    monkeypatch, expiration, elapsed, hook_action
+):
+    # Provider-count-only assertions missed callbacks and persisted side effects
+    # after a slow route resolution had already exhausted the retry budget.
     now = [0.0]
     sleeps = []
+    hook_times = []
+    rehydration_times = []
     real_sleep = asyncio.sleep
 
     async def sleep(delay):
         sleeps.append(delay)
         if expiration == "sleep":
-            now[0] = 121
+            now[0] = elapsed
         await real_sleep(0)
 
     class Router(FakeModelRouter):
         async def resolve(self):
             result = await super().resolve()
             if expiration == "route" and self.resolutions == 2:
-                now[0] = 121
+                now[0] = elapsed
             return result
 
-    monkeypatch.setattr("core.agent_core.agent.loop.time.monotonic", lambda: now[0])
+    class Hook(Hooks):
+        async def before_model(self, request, ctx):
+            hook_times.append(now[0])
+            if len(hook_times) == 2:
+                ctx.state["retry_hook"] = True
+                if hook_action == "end":
+                    return End()
+                if hook_action == "raise":
+                    raise ValueError("retry hook failure")
+
+    def rehydrate(state):
+        rehydration_times.append(now[0])
+        return ()
+
+    monkeypatch.setattr("core.agent_core.agent.loop.time", SimpleNamespace(monotonic=lambda: now[0]))
     monkeypatch.setattr("core.agent_core.agent.loop.asyncio.sleep", sleep)
     error = ProviderError(
         "rate_limit", "original busy error", True, retry_after_s=121 if expiration == "retry_after" else 1
     )
     provider = ScriptedProvider([[error], [Done(assistant())]])
-    agent = agent_for(provider)
+    agent = agent_for(provider, hooks=[Hook()])
     agent.models = Router(provider)
+    agent.rehydrate = rehydrate
     events = await collect(agent)
-    assert len(provider.requests) == 1
-    assert events[-1].reason == "error"
-    assert [(e.kind, e.message) for e in events if isinstance(e, AgentError)] == [("rate_limit", "original busy error")]
+    expired = expiration == "retry_after" or elapsed >= 120
+    if expired:
+        assert events[-1].reason == "error"
+        assert [(e.kind, e.message) for e in events if isinstance(e, AgentError)] == [
+            ("rate_limit", "original busy error")
+        ]
+        assert hook_times == rehydration_times == [0]
+        assert agent.snapshot().state == {}
+        assert [row.kind for row in await agent.store.load("session")] == ["input"]
+    else:
+        assert hook_times == rehydration_times == [0, elapsed]
+        assert agent.snapshot().state == {"retry_hook": True}
+        assert events[-1].reason == {"end": "ended_by_hook", "raise": "error", "mutate": "completed"}[hook_action]
+        assert [(e.kind, e.message) for e in events if isinstance(e, AgentError)] == (
+            [("ValueError", "retry hook failure")] if hook_action == "raise" else []
+        )
+    assert len(provider.requests) == (2 if not expired and hook_action == "mutate" else 1)
     assert sleeps == ([] if expiration == "retry_after" else [1])

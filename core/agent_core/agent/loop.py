@@ -297,7 +297,8 @@ class Agent:
                 await emit(RunStarted)
                 # Preflight before hooks or input consumption. Reuse the selection
                 # for the first request; later attempts resolve the route afresh.
-                selected = await self._resolve_model()
+                selected = await self._scope.call(self.models.resolve)
+                self._check_model_route(selected)
                 self._rows = list(await self._scope.call(lambda: self.store.load(self.session_id)))
                 projection = project(self._rows)
                 self._ctx.state = deepcopy(dict(projection.state))
@@ -391,17 +392,13 @@ class Agent:
                 self._outcome.diagnostic(type(error).__name__, str(error))
             await self._flush_diagnostics(emit)
 
-    async def _resolve_model(self) -> ModelSelection:
-        selected = await self._scope.call(self.models.resolve)
+    @staticmethod
+    def _check_model_route(selected: ModelSelection) -> None:
         if selected.capabilities.supports_tools is False:
             raise UnsupportedModelRoute("The selected model does not support tools; the agent requires tool support.")
-        return selected
 
-    async def _request(
-        self, system: str, selected: Optional[ModelSelection] = None
-    ) -> tuple[ModelRequest, dict[str, Tool]]:
-        if selected is None:
-            selected = await self._resolve_model()
+    async def _request(self, system: str, selected: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
+        self._check_model_route(selected)
         capabilities = selected.capabilities
         tools = dict(self._run_tools if self._run_tools is not None else self._tools)
         context = project(
@@ -441,6 +438,14 @@ class Agent:
         retry_error: Optional[ProviderError] = None
         while True:
             self._scope.check()
+            if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
+                yield retry_error, {}
+                return
+            if selected is None:
+                selected = await self._scope.call(self.models.resolve)
+            # Resolution is the last async stage before request admission.
+            # Expiry wins before route validation, projection, rehydration or
+            # hooks can replace the original error or persist new side effects.
             if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
                 yield retry_error, {}
                 return
