@@ -15,6 +15,8 @@ from __future__ import annotations
 import codecs
 import re
 
+from core.agent_core.tools.truncate import utf8_len
+
 _ANSI_RE = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC ... BEL or ST
     r"|\x1b[P^_][^\x1b]*\x1b\\"  # DCS, PM, APC ... ST
@@ -22,9 +24,7 @@ _ANSI_RE = re.compile(
     r"|\x1b[ -/]*[0-~]"  # other escape sequences
     r"|\x9b[0-?]*[ -/]*[@-~]"  # 8-bit CSI
 )
-# An escape sequence that may still be incomplete at the end of a chunk.
-_HOLD_BACK_CHARS = 64
-# An open line (no newline yet) is committed once its current segment grows past this.
+# An open line (no newline yet) keeps at most this many characters of its last segment.
 _MAX_OPEN_CHARS = 64 * 1024
 
 
@@ -32,27 +32,23 @@ def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text).replace("\x1b", "")
 
 
-def _collapse(segments: list[str]) -> str:
-    """The last segment that still shows something once escape sequences are gone."""
-    for segment in reversed(segments):
-        visible = strip_ansi(segment)
-        if visible:
-            return visible
-    return ""
-
-
 class OutputNormalizer:
     """Incremental normalizer: feed raw bytes, receive normalized text.
 
-    ``feed`` returns only text that is final (complete lines, or an over-long
-    open line); ``peek`` shows the open line as it would read now.
+    ``feed`` returns only complete lines, which a later carriage return can no
+    longer redraw; ``peek`` shows the open line as it would read now. An open
+    line keeps at most its last ``_MAX_OPEN_CHARS`` characters, so memory stays
+    bounded; if such a line is final, it starts with a marker saying how many
+    bytes were dropped.
     """
 
     def __init__(self) -> None:
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._carry_cr = False
-        self._prev = ""  # last non-empty finished segment of the open line
-        self._cur = ""  # segment after the last carriage return of the open line
+        # The open line: its last segment that still shows something, and the segment after the
+        # last carriage return, each with the UTF-8 bytes dropped from its start.
+        self._prev, self._prev_dropped = "", 0
+        self._cur, self._cur_dropped = "", 0
 
     def feed(self, data: bytes) -> str:
         return self._consume(self._decoder.decode(data))
@@ -62,12 +58,12 @@ class OutputNormalizer:
         if self._carry_cr:
             self._carry_cr = False
             self._open_segments("\r")
-        tail = _collapse([self._prev, self._cur])
-        self._prev = self._cur = ""
+        tail = self._line()
+        self._reset()
         return out + tail
 
     def peek(self) -> str:
-        return _collapse([self._prev, self._cur])
+        return self._line()
 
     def _consume(self, text: str) -> str:
         if self._carry_cr:
@@ -85,31 +81,37 @@ class OutputNormalizer:
             if line.endswith("\r"):
                 line = line[:-1]
             self._open_segments(line)
-            out.append(_collapse([self._prev, self._cur]) + "\n")
-            self._prev = self._cur = ""
+            out.append(self._line() + "\n")
+            self._reset()
         self._open_segments(lines[-1])
-        if len(self._cur) > _MAX_OPEN_CHARS:
-            out.append(self._commit_open())
         return "".join(out)
 
     def _open_segments(self, text: str) -> None:
         segments = (self._cur + text).split("\r")
         if len(segments) > 1:
-            for segment in reversed(segments[:-1]):
-                if strip_ansi(segment):
-                    self._prev = segment
+            # The first piece continues the current segment, so it keeps that segment's drop count.
+            for index in range(len(segments) - 2, -1, -1):
+                if strip_ansi(segments[index]):
+                    self._prev = segments[index]
+                    self._prev_dropped = self._cur_dropped if index == 0 else 0
                     break
+            self._cur_dropped = 0
         self._cur = segments[-1]
+        if len(self._cur) > _MAX_OPEN_CHARS:
+            cut = len(self._cur) - _MAX_OPEN_CHARS
+            self._cur_dropped += utf8_len(self._cur[:cut])
+            self._cur = self._cur[cut:]
 
-    def _commit_open(self) -> str:
-        # Bound memory on a line that never ends; keep a possibly incomplete escape.
-        cut = len(self._cur)
-        escape = self._cur.rfind("\x1b", max(0, cut - _HOLD_BACK_CHARS))
-        if escape != -1 and not _ANSI_RE.match(self._cur, escape):
-            cut = escape
-        committed, self._cur = self._cur[:cut], self._cur[cut:]
-        self._prev = ""
-        return strip_ansi(committed)
+    def _line(self) -> str:
+        for segment, dropped in ((self._cur, self._cur_dropped), (self._prev, self._prev_dropped)):
+            visible = strip_ansi(segment)
+            if visible:
+                return f"[... {dropped} bytes omitted ...]{visible}" if dropped else visible
+        return ""
+
+    def _reset(self) -> None:
+        self._prev, self._prev_dropped = "", 0
+        self._cur, self._cur_dropped = "", 0
 
 
 def normalize_output(data: bytes) -> str:

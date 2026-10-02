@@ -23,6 +23,7 @@ _AM_PM = re.compile(r" (AM|PM)\.", re.IGNORECASE)
 _WINDOWS = os.name == "nt"
 _ENCODED_SEPARATOR = re.compile("%2f", re.IGNORECASE)
 _ENCODED_SEPARATOR_WINDOWS = re.compile("%2f|%5c", re.IGNORECASE)
+_MALFORMED_ESCAPE = re.compile("%(?![0-9a-fA-F]{2})")
 
 
 def expand_path(path: str) -> str:
@@ -49,7 +50,7 @@ def _file_url_to_path(url: str) -> str:
     if _WINDOWS:
         if _ENCODED_SEPARATOR_WINDOWS.search(parsed.path):
             raise ToolInputError("Invalid path: a file URL must not include encoded \\ or / characters")
-        path = unquote(parsed.path).replace("/", "\\")
+        path = _decode_url_path(parsed.path).replace("/", "\\")
         if host:
             return f"\\\\{host}{path}"
         if len(path) >= 3 and path[0] == "\\" and path[1].isascii() and path[1].isalpha() and path[2] == ":":
@@ -59,7 +60,17 @@ def _file_url_to_path(url: str) -> str:
         raise ToolInputError("Invalid path: file URL host must be empty or localhost")
     if _ENCODED_SEPARATOR.search(parsed.path):
         raise ToolInputError("Invalid path: a file URL must not include encoded / characters")
-    return unquote(parsed.path)
+    return _decode_url_path(parsed.path)
+
+
+def _decode_url_path(path: str) -> str:
+    """``decodeURIComponent``: a malformed escape or bytes that are not UTF-8 are an error, never a guess."""
+    if _MALFORMED_ESCAPE.search(path):
+        raise ToolInputError("Invalid path: a file URL must use valid percent-encoded UTF-8")
+    try:
+        return unquote(path, errors="strict")
+    except UnicodeDecodeError:
+        raise ToolInputError("Invalid path: a file URL must use valid percent-encoded UTF-8") from None
 
 
 def resolve_to_cwd(path: str, cwd: str) -> str:

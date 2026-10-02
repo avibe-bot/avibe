@@ -100,6 +100,35 @@ async def test_replace_all_replaces_every_occurrence(tmp_path, make_ctx):
     assert (tmp_path / "f.txt").read_text() == "baz(1)\nqux\nbaz(2)\nbaz(3)\n"
 
 
+async def test_text_copied_from_read_edits_a_file_with_invalid_bytes(tmp_path, make_ctx):
+    """read and edit show undecodable bytes the same way, so a block copied from read matches."""
+    (tmp_path / "f.txt").write_bytes(b"a\xffb\xe2\x82c\nkeep\x80\n")
+    shown = result_text(await ReadTool().execute({"path": "f.txt"}, make_ctx()))
+    first_line = shown.split("\n")[0]
+
+    result = await _edit(make_ctx, "f.txt", {"oldText": first_line, "newText": "fixed"})
+
+    assert not result.is_error, result_text(result)
+    assert (tmp_path / "f.txt").read_bytes() == b"fixed\nkeep\x80\n"
+
+
+async def test_a_planned_result_over_the_limit_is_refused_and_its_diff_skipped(tmp_path, make_ctx, monkeypatch):
+    (tmp_path / "small.txt").write_text("seed\n")
+    monkeypatch.setattr(edit_module, "MAX_EDIT_BYTES", 1000)
+    monkeypatch.setattr(edit_module, "MAX_DIFF_BYTES", 400)
+
+    grown = await _edit(make_ctx, "small.txt", {"oldText": "seed", "newText": "x" * 600})
+    too_big = await _edit(make_ctx, "small.txt", {"oldText": "x" * 600, "newText": "y" * 2000})
+
+    assert grown.details == {"diff_skipped": True}
+    assert too_big.is_error
+    assert result_text(too_big) == (
+        "File small.txt would be 2.0KB after this edit, over the 1000B edit limit. "
+        "Use bash (for example sed or a short script) to change files this large."
+    )
+    assert (tmp_path / "small.txt").read_text() == "x" * 600 + "\n"
+
+
 async def test_files_over_the_edit_limit_are_refused_and_large_diffs_skipped(tmp_path, make_ctx, monkeypatch):
     (tmp_path / "big.log").write_text("line\n" * 100)
     monkeypatch.setattr(edit_module, "MAX_EDIT_BYTES", 400)
@@ -314,6 +343,9 @@ async def test_a_path_no_file_can_have_is_an_error_result(make_ctx, tool, argume
         (False, "file://localhost/tmp/x", "/tmp/x"),
         (False, "file://server/tmp/x", ToolInputError("Invalid path: file URL host must be empty or localhost")),
         (False, "file:///tmp/a%2Fb", ToolInputError("Invalid path: a file URL must not include encoded / characters")),
+        (False, "file:///tmp/%FF", ToolInputError("Invalid path: a file URL must use valid percent-encoded UTF-8")),
+        (False, "file:///tmp/%ZZ", ToolInputError("Invalid path: a file URL must use valid percent-encoded UTF-8")),
+        (True, "file:///C:/%E2%82", ToolInputError("Invalid path: a file URL must use valid percent-encoded UTF-8")),
         (True, "file:///C:/tmp/a%20b.txt", "C:\\tmp\\a b.txt"),
         (True, "file://localhost/C:/x", "C:\\x"),
         (True, "file://server/share/x.txt", "\\\\server\\share\\x.txt"),

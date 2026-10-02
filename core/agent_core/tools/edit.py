@@ -19,6 +19,7 @@ from core.agent_core.tools.args import ToolInputError, error_result, os_error_te
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.edit_diff import Edit, EditError, apply_edits, generate_diff_string, generate_unified_patch
 from core.agent_core.tools.paths import file_mutation_lock, resolve_to_cwd
+from core.agent_core.tools.text import decode_file, encode_file
 from core.agent_core.tools.truncate import format_size
 from core.agent_core.tools.write import write_bytes
 
@@ -124,9 +125,9 @@ def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[bytes, str
     ``surrogateescape`` carries bytes that are not UTF-8 through unchanged; only replaced spans change.
     """
     with open(absolute, "rb") as handle:
-        text = handle.read().decode("utf-8", "surrogateescape")
+        text = decode_file(handle.read())
     new_text, before, after = apply_edits(text, edits, path)
-    return new_text.encode("utf-8", "surrogateescape"), before, after
+    return encode_file(new_text), before, after
 
 
 class EditTool:
@@ -161,6 +162,12 @@ class EditTool:
                         "Use bash (for example sed or a short script) to change files this large."
                     )
                 data, base, new_content = await asyncio.to_thread(_plan_edits, absolute, edits, path)
+                if len(data) > MAX_EDIT_BYTES:
+                    return error_result(
+                        f"File {path} would be {format_size(len(data))} after this edit, over the "
+                        f"{format_size(MAX_EDIT_BYTES)} edit limit. "
+                        "Use bash (for example sed or a short script) to change files this large."
+                    )
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
                 await asyncio.to_thread(write_bytes, absolute, data)
@@ -170,7 +177,7 @@ class EditTool:
                 return error_result(os_error_text(exc))
 
         result = f"Successfully replaced {len(edits)} block(s) in {path}."
-        if size > MAX_DIFF_BYTES:
+        if max(size, len(data)) > MAX_DIFF_BYTES:
             # The diff is for display only, and difflib is superlinear on large inputs.
             return text_result(result, details={"diff_skipped": True})
         diff, first_changed_line = await asyncio.to_thread(generate_diff_string, base, new_content)

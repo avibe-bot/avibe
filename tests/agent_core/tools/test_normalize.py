@@ -27,3 +27,19 @@ def test_chunks_normalize_to_the_final_screen_text(chunks, expected):
     out = "".join(normalizer.feed(chunk) for chunk in chunks) + normalizer.flush()
 
     assert out == expected
+
+
+def test_a_long_open_line_can_still_be_redrawn():
+    normalizer = OutputNormalizer()
+
+    out = normalizer.feed(b"x" * 70_000) + normalizer.feed(b"\rdone\n") + normalizer.flush()
+
+    assert out == "done\n"
+
+
+def test_a_long_final_line_keeps_its_end_and_says_what_was_dropped():
+    normalizer = OutputNormalizer()
+
+    out = "".join(normalizer.feed(b"y" * 10_000) for _ in range(10)) + normalizer.feed(b"\n") + normalizer.flush()
+
+    assert out == f"[... {100_000 - 65_536} bytes omitted ...]" + "y" * 65_536 + "\n"

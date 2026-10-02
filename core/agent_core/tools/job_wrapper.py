@@ -46,21 +46,26 @@ def _write_atomic(path: str, data: bytes) -> None:
     os.replace(tmp, path)
 
 
+def _create_once(path: str, value: str) -> None:
+    """Create ``path`` holding ``value`` unless it exists: ``link(2)`` of a written temp file, as the host does."""
+    tmp = f"{path}.{value}.{os.getpid()}.tmp"
+    with open(tmp, "w") as handle:
+        handle.write(f"{value}\n")
+    try:
+        os.link(tmp, path)
+    except FileExistsError:
+        pass
+    finally:
+        os.unlink(tmp)
+
+
 def _wait_for_decision(job_dir: str, timeout_s: float) -> str:
     decision = os.path.join(job_dir, "decision")
     deadline = time.monotonic() + timeout_s
     delay = 0.001
     while not os.path.exists(decision):
         if time.monotonic() >= deadline:
-            tmp = f"{decision}.abandon.{os.getpid()}.tmp"
-            with open(tmp, "w") as handle:
-                handle.write("abandon\n")
-            try:
-                os.link(tmp, decision)
-            except FileExistsError:
-                pass
-            finally:
-                os.unlink(tmp)
+            _create_once(decision, "abandon")
             break
         time.sleep(delay)
         delay = min(delay * 2, 0.05)
@@ -110,10 +115,8 @@ def _stop_group(job_dir: str, reason: str, proc: Optional[subprocess.Popen]) -> 
     SIGTERM first, which the wrapper ignores for itself; SIGKILL for everything left after 3 s, so
     background children of the command end too.
     """
-    stopped = os.path.join(job_dir, "stopped")
     try:
-        if not os.path.exists(stopped):
-            _write_atomic(stopped, reason.encode() + b"\n")
+        _create_once(os.path.join(job_dir, "stopped"), reason)  # the first stopper's reason wins
     except OSError:
         pass  # the kill matters more than the record
     group = os.getpgrp()
@@ -176,6 +179,9 @@ def main(argv: list[str]) -> int:
         return 0
     proc: Optional[subprocess.Popen] = None
     try:
+        if deadline is not None and time.time() >= deadline:
+            # The deadline passed during the launch: the command must not start at all.
+            _stop_group(job_dir, "timeout", None)
         log = _BoundedLog(job_dir, head_cap, tail_cap)
         proc = subprocess.Popen(
             [shell, "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT

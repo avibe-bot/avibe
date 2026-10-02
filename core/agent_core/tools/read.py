@@ -30,6 +30,7 @@ from core.agent_core.tools.args import (
 )
 from core.agent_core.tools.base import MAX_BYTES, MAX_LINES, ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.paths import resolve_read_path
+from core.agent_core.tools.text import decode_file, shown
 from core.agent_core.tools.truncate import format_size, truncate_head
 
 #: Stores an image for the transcript and returns its media token: ``(data, mime_type, name)``.
@@ -252,7 +253,7 @@ def _scan_lines(
     if collecting and opened != index and index >= start:
         # An empty file: its one line is empty.
         lines.append(bytearray())
-    return [bytes(line).decode("utf-8", "replace") for line in lines], index + 1, first_line_bytes
+    return [shown(decode_file(bytes(line))) for line in lines], index + 1, first_line_bytes
 
 
 def detect_supported_image_mime_type(data: bytes) -> Optional[str]:

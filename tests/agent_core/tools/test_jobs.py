@@ -245,6 +245,39 @@ async def test_a_finished_wrapper_leaves_the_registry(tmp_path):
     assert _wait_until(lambda: job_id not in host._children, timeout_s=5)
 
 
+async def test_the_first_recorded_stop_reason_wins(tmp_path, monkeypatch):
+    """Two stoppers that both saw no reason yet: the second must not overwrite the first."""
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    job_id = await _start(host, tmp_path, "sleep 30")
+    stopped = os.path.join(host.job_dir(job_id), "stopped")
+    with open(stopped, "w") as handle:
+        handle.write("aborted\n")  # the other stopper got there first
+    real_read = jobs_module._read_text
+    monkeypatch.setattr(jobs_module, "_read_text", lambda path: None if path == stopped else real_read(path))
+
+    await host.kill(job_id, reason="timeout")  # it checked before the other one wrote
+    monkeypatch.undo()
+
+    assert host.stop_reason(job_id) == "aborted"
+
+
+async def test_a_deadline_that_passed_during_the_launch_never_starts_the_command(tmp_path, monkeypatch):
+    """The deadline is checked before the shell is spawned: a missing shell is never even tried."""
+    original = LocalJobHost._await_pid
+
+    async def slow_host(self, *args):
+        identity = await original(self, *args)
+        await asyncio.sleep(0.3)  # the job's deadline passes during the handshake
+        return identity
+
+    monkeypatch.setattr(LocalJobHost, "_await_pid", slow_host)
+    host = LocalJobHost(str(tmp_path / "jobs"), shell=str(tmp_path / "no-such-shell"))
+    job_id = await _start(host, tmp_path, "true", timeout_s=0.1)
+
+    assert _wait_until(lambda: _wrapper_gone(host.job_dir(job_id)))
+    assert host.stop_reason(job_id) == "timeout"
+
+
 async def test_job_files_stay_until_the_call_is_settled(tmp_path):
     """J5."""
     host = LocalJobHost(str(tmp_path / "jobs"))

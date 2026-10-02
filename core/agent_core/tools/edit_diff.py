@@ -21,6 +21,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from core.agent_core.tools.text import shown
+
 BOM = "\ufeff"
 
 # JavaScript's String.prototype.trimEnd set, which Pi uses (Python's isspace differs).
@@ -177,7 +179,8 @@ class _Lines:
             pos = match.end()
         self.contents.append(text[pos:])
         self.breaks.append("")
-        self.view = "\n".join(self.contents)
+        # What read showed (one U+FFFD per undecodable byte), one character for one, so offsets map back.
+        self.view = shown("\n".join(self.contents))
         self.view_starts: list[int] = []
         self.starts: list[int] = []
         view_pos, pos = 0, prefix

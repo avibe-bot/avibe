@@ -197,19 +197,27 @@ class LocalJobHost:
 
     # --- decision (J1) ----------------------------------------------------
 
-    def _create_decision(self, job_id: str, value: str) -> str:
-        """Try to decide; return the decision that holds, ours or the wrapper's."""
-        decision = self._path(job_id, "decision")
-        tmp = f"{decision}.{value}.{secrets.token_hex(4)}.tmp"
+    def _create_once(self, job_id: str, name: str, value: str) -> str:
+        """Create ``name`` holding ``value`` unless it exists; return what it holds, ours or the earlier writer's.
+
+        ``link(2)`` of a written temporary file: exclusive, and never visible half-written.
+        """
+        target = self._path(job_id, name)
+        tmp = f"{target}.{value}.{secrets.token_hex(4)}.tmp"
         with open(tmp, "w", encoding="utf-8") as handle:
             handle.write(f"{value}\n")
         try:
-            os.link(tmp, decision)
+            os.link(tmp, target)
         except FileExistsError:
             pass
         finally:
             os.unlink(tmp)
-        return _read_text(decision) or _ABANDON
+        return _read_text(target) or value
+
+    def _create_decision(self, job_id: str, value: str) -> str:
+        """Try to decide; return the decision that holds, ours or the wrapper's."""
+        decision = self._create_once(job_id, "decision", value)
+        return decision if decision in (_GO, _ABANDON) else _ABANDON
 
     def _decision(self, job_id: str) -> str:
         """The job's decision; a job without one is abandoned now, as recovery requires."""
@@ -406,8 +414,7 @@ class LocalJobHost:
             if _group_exists(identity.pid):
                 logger.warning("Job %s process group %s cannot be verified; not signaling", job_id, identity.pid)
             return
-        if _read_text(self._path(job_id, "stopped")) is None:
-            _write_atomic(self._path(job_id, "stopped"), f"{reason}\n")
+        self._create_once(job_id, "stopped", reason)  # the first stopper's reason wins
         if not await asyncio.to_thread(_terminate_group, identity.pid):
             logger.warning("Job %s process group %s survived termination", job_id, identity.pid)
 
