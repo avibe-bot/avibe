@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
-from config.v2_config import ModelHubConfig
+from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig
 from core.os_errors import format_os_errno
 
 from core.run_settlement import (
@@ -36,15 +36,45 @@ from .events import (
     SOURCE_DETAIL_EVENT_REASONS,
     event_reason_label,
 )
-from .resolver import ModelHubTurnResolution, parse_model_hub_timestamp, source_eligible_for_backend
+from .resolver import BackendName, ModelHubTurnResolution, parse_model_hub_timestamp, source_eligible_for_backend
 from .state_file import write_state_document
 
 
-BackendName = Literal["claude", "codex", "opencode"]
 SupplyChannel = Literal["native_cli", "hub"]
 SupplyState = Literal["waiting", "interrupted"]
 ScopeKey = tuple[BackendName, str]
 logger = logging.getLogger(__name__)
+
+SERVED_HOP_HEADER = "x-avibe-served-hop"
+SERVED_HOP_HEADER_MAX_BYTES = 4096
+
+
+class ServedHopHeaderTooLarge(ValueError):
+    """The exact origin cannot be transported in the bounded consumer header."""
+
+
+class PreparedGatewayRouteConflict(ValueError):
+    """An Avibe launch would replace another request's still-owned route."""
+
+
+@dataclass(frozen=True)
+class HopOrigin:
+    """Source identity captured at admission, before mutable config can change."""
+
+    provider: str
+    api: str
+    model: str
+
+    def payload(self) -> dict[str, str]:
+        return {"provider": self.provider, "api": self.api, "model": self.model}
+
+    def response_headers(self) -> dict[str, str]:
+        # JSON escapes keep arbitrary Unicode model ids safe in HTTP headers.
+        value = json.dumps(self.payload(), ensure_ascii=True, separators=(",", ":"))
+        # ensure_ascii makes character count equal to wire byte count.
+        if len(value) > SERVED_HOP_HEADER_MAX_BYTES:
+            raise ServedHopHeaderTooLarge("Served-hop header exceeds its transport bound")
+        return {SERVED_HOP_HEADER: value}
 
 
 @dataclass(frozen=True)
@@ -54,6 +84,7 @@ class AttemptIdentity:
     channel: SupplyChannel
     stripped_reasoning_efforts: tuple[str, ...] = ()
     declared_reasoning_efforts: tuple[str, ...] = ()
+    origin: HopOrigin | None = None
 
     def payload(self) -> dict:
         payload = {
@@ -68,6 +99,8 @@ class AttemptIdentity:
             payload["declared_reasoning_efforts"] = list(
                 self.declared_reasoning_efforts
             )
+        if self.origin is not None:
+            payload["origin"] = self.origin.payload()
         return payload
 
 
@@ -582,6 +615,9 @@ class TurnTrace:
     # is actually awaiting an upstream result, and the loser settles with no
     # record of what served it.
     pending_attempts: dict[str, AttemptIdentity] = field(default_factory=dict)
+    # Attempts can settle before their HTTP request exits, or be absent while
+    # recovery waits. Route replacement must wait for the whole request.
+    gateway_requests: set[str] = field(default_factory=set)
     model_supply_state: Optional[SupplyState] = None
     blockers: list[dict] = field(default_factory=list)
     gateway_source_id: Optional[str] = None
@@ -633,6 +669,7 @@ class PreparedGatewayRoute:
     resolved_model_id: str
     source_id: str
     gateway_request_model_id: str
+    primary_origin: HopOrigin | None = None
 
 
 @dataclass(frozen=True)
@@ -678,6 +715,8 @@ class GatewayTurnTerminalizer:
             request_id=self._request_id,
             request_metadata=self._request_metadata,
         )
+        self._prepared_turn_id = self.turn_id
+        self.primary_origin = registry.gateway_primary_origin(backend=backend, token=token)
         self._stream_started = False
         self._attempt_started = False
         self._downstream_canceled = False
@@ -688,13 +727,16 @@ class GatewayTurnTerminalizer:
         return self
 
     def __exit__(self, exc_type, _exc, _traceback) -> None:
-        if self._downstream_canceled or exc_type is asyncio.CancelledError:
-            return
-        self._registry._terminalize_gateway_exit(
-            self.turn_id,
-            request_id=self._request_id,
-            stream_started=self._stream_started,
-        )
+        try:
+            if self._downstream_canceled or exc_type is asyncio.CancelledError:
+                return
+            self._registry._terminalize_gateway_exit(
+                self.turn_id,
+                request_id=self._request_id,
+                stream_started=self._stream_started,
+            )
+        finally:
+            self._registry.close_gateway_request(self._prepared_turn_id, request_id=self._request_id)
 
     def resolution_model(self, gateway_model_id: str) -> Optional[str]:
         """Return the uniquely prepared caller model for this gateway request."""
@@ -708,6 +750,8 @@ class GatewayTurnTerminalizer:
             request_metadata=self._request_metadata,
         )
         self.turn_id = routing.owner_turn_id
+        if self.turn_id is None:
+            self._registry.close_gateway_request(self._prepared_turn_id, request_id=self._request_id)
         if self.turn_id is None and self.on_attribution_released is not None:
             release, self.on_attribution_released = self.on_attribution_released, None
             release()
@@ -756,6 +800,7 @@ class GatewayTurnTerminalizer:
         via_mapping: bool,
         stripped_reasoning_efforts: tuple[str, ...] = (),
         declared_reasoning_efforts: tuple[str, ...] = (),
+        origin: HopOrigin | None = None,
     ) -> None:
         self._attempt_started = True
         self._registry.begin_attempt(
@@ -766,6 +811,7 @@ class GatewayTurnTerminalizer:
             via_mapping=via_mapping,
             stripped_reasoning_efforts=stripped_reasoning_efforts,
             declared_reasoning_efforts=declared_reasoning_efforts,
+            origin=origin,
             request_id=self._request_id,
         )
 
@@ -1000,7 +1046,7 @@ class TurnCorrelationRegistry:
 
     @staticmethod
     def _scope_key(backend: str, process_scope: str) -> ScopeKey:
-        if backend not in {"claude", "codex", "opencode"}:
+        if backend not in MODEL_HUB_BACKENDS:
             raise ValueError("unsupported backend")
         normalized = str(process_scope or "").strip()
         if not normalized:
@@ -1139,6 +1185,13 @@ class TurnCorrelationRegistry:
                     route=route,
                 )
         return token
+
+    def gateway_primary_origin(self, *, backend: str, token: str) -> HopOrigin | None:
+        """Read the immutable launch origin, independent of live turn ownership."""
+
+        with self._lock:
+            credential = self._credential(backend, token)
+            return credential.route.primary_origin if credential and credential.route else None
 
     def _explicit_route(
         self,
@@ -1375,6 +1428,7 @@ class TurnCorrelationRegistry:
         source_id: str,
         via_mapping: bool,
         gateway_request_model_id: str | None = None,
+        primary_origin: HopOrigin | None = None,
     ) -> str:
         """Register a route and return its legacy credential or explicit handle."""
 
@@ -1393,6 +1447,7 @@ class TurnCorrelationRegistry:
                 resolved_model_id=resolved_model_id,
                 source_id=source_id,
                 gateway_request_model_id=request_model_id,
+                primary_origin=primary_origin,
             )
 
             if scope.request_scoped:
@@ -1421,8 +1476,30 @@ class TurnCorrelationRegistry:
             else:
                 exact = self._exact_turn(backend, token)
                 if exact is None:
+                    if backend == "avibe":
+                        # A consumer launch without a tracked turn still needs
+                        # its alias and primary origin bound to this credential.
+                        return self._route_credential(key, scope, prepared)
                     return token
                 route_turn_id = exact[0]
+            existing = scope.prepared_routes.get(route_turn_id)
+            if backend == "avibe" and existing is not None and existing != prepared:
+                trace = self._readable_trace(route_turn_id, backend)
+                if (
+                    trace is None
+                    or trace.requested_model_id != requested_model_id
+                    or trace.gateway_requests
+                    or trace.pending_attempts
+                    or trace.recovery_requests
+                ):
+                    raise PreparedGatewayRouteConflict("Avibe route is still owned or its alias changed")
+                # Keep the turn's attempt history and outcome. Only the launch
+                # snapshot changes; old credentials can route but cannot claim
+                # this newly prepared identity.
+                scope.prepared_routes.pop(route_turn_id)
+                trace.gateway_source_id = None
+                trace.gateway_request_model_id = None
+                trace.gateway_model_id = None
             launch_token = self._route_credential(key, scope, prepared)
             self._register_prepared_gateway_route(
                 scope=scope,
@@ -1761,12 +1838,26 @@ class TurnCorrelationRegistry:
                 or trace.gateway_model_id is None
             ):
                 return None
+            if backend == "avibe":
+                if credential.route != scope.prepared_routes.get(turn_id):
+                    # A superseded credential must not poison the successor
+                    # even when malformed JSON fails before body attribution.
+                    return None
+                trace.gateway_requests.add(request_id)
             trace.pending_attempts[request_id] = AttemptIdentity(
                 source_id=trace.gateway_source_id,
                 resolved_model_id=trace.gateway_model_id,
                 channel="hub",
             )
             return turn_id
+
+    def close_gateway_request(self, turn_id: str | None, *, request_id: str) -> None:
+        """Release request lifetime independently of its last attempt outcome."""
+
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is not None:
+                trace.gateway_requests.discard(request_id)
 
     def clear_prepared_attempt(
         self,
@@ -1868,6 +1959,8 @@ class TurnCorrelationRegistry:
         resolved_model_id: str,
         via_mapping: bool,
     ) -> None:
+        if backend == "avibe":
+            raise ValueError("avibe attempts require the hub channel")
         token = self.credentials(backend, process_scope, turn_id)
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
@@ -1974,6 +2067,7 @@ class TurnCorrelationRegistry:
         stripped_reasoning_efforts: tuple[str, ...] = (),
         declared_reasoning_efforts: tuple[str, ...] = (),
         request_id: str = TURN_REQUEST,
+        origin: HopOrigin | None = None,
     ) -> None:
         if turn_id is None:
             return
@@ -1981,6 +2075,8 @@ class TurnCorrelationRegistry:
             trace = self._traces.get(turn_id)
             if trace is None or trace.outcome_frozen:
                 return
+            if trace.agent == "avibe" and channel != "hub":
+                raise ValueError("avibe attempts require the hub channel")
             # Admission supersedes earlier supply failures, not their attempt history.
             trace.model_supply_state = None
             trace.blockers = []
@@ -1992,6 +2088,7 @@ class TurnCorrelationRegistry:
                 channel=channel,
                 stripped_reasoning_efforts=stripped_reasoning_efforts,
                 declared_reasoning_efforts=declared_reasoning_efforts,
+                origin=origin,
             )
 
     def fail_native_attempt(
@@ -2236,7 +2333,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 10,
+                    "contract_version": 11,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,

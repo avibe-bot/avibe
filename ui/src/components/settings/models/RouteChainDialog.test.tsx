@@ -57,7 +57,7 @@ const sources: Source[] = [
   },
 ];
 const chain: AgentChain = { manual_override: {hops:[{source_id:"src_a",model_id:"claude-opus-5"},{source_id:"src_b",model_id:"opus-5"}]}, route_origin: "manual" as const,
-  contract_version: 10,
+  contract_version: 11,
   backend: "claude",
   model_id: "opus-5",
   current: { source_id: "src_b", model_id: "opus-5" },

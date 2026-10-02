@@ -61,8 +61,8 @@ def connection(monkeypatch, tmp_path):
     config.agents.claude.enabled = True
     config.agents.codex.enabled = True
     config.agents.opencode.enabled = True
-    for supply in config.model_hub.agents.values():
-        supply.mode = "direct"
+    for backend in ("claude", "codex", "opencode"):
+        config.model_hub.agents[backend].mode = "direct"
     config.save()
     monkeypatch.setattr(api, "load_config", lambda: config)
     monkeypatch.setattr(api, "resolve_cli_path", lambda _: str(tmp_path / "助手 cli"))

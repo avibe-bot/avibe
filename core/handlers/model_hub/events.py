@@ -15,7 +15,7 @@ from vibe.i18n import t as i18n_t
 
 from .state_file import write_state_document
 
-EventAgent = Literal["claude", "codex", "opencode", "system"]
+EventAgent = Literal["claude", "codex", "opencode", "avibe", "system"]
 EventKind = Literal[
     "switch",
     "cooldown",

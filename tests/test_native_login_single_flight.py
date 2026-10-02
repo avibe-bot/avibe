@@ -46,8 +46,8 @@ def _direct_native_auth_config(monkeypatch, tmp_path) -> None:
     home = tmp_path / "avibe-home"
     monkeypatch.setenv("AVIBE_HOME", str(home))
     config = V2Config.default()
-    for agent in config.model_hub.agents.values():
-        agent.mode = "direct"
+    for backend in ("claude", "codex", "opencode"):
+        config.model_hub.agents[backend].mode = "direct"
     config.save(config_path=home / "config" / "config.json")
 
 

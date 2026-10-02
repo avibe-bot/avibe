@@ -176,7 +176,7 @@ MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
 DEFAULT_AGENT_PROGRESS_STYLE = "off"
 MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
-MODEL_HUB_BACKENDS = ("claude", "codex", "opencode")
+MODEL_HUB_BACKENDS = ("claude", "codex", "opencode", "avibe")
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
 _LEGACY_CLAUDE_FAMILY_ALIASES = {
     "opus": "opus",
@@ -2791,7 +2791,7 @@ class ModelHubAgentSourcesConfig:
 
 @dataclass
 class ModelHubAgentSupplyConfig:
-    backend: Literal["claude", "codex", "opencode"]
+    backend: Literal["claude", "codex", "opencode", "avibe"]
     mode: Literal["hub", "direct"]
     menu_kind: Literal["fixed", "open"]
     sources: ModelHubAgentSourcesConfig = field(default_factory=ModelHubAgentSourcesConfig)
@@ -2802,6 +2802,8 @@ class ModelHubAgentSupplyConfig:
 
     @classmethod
     def default(cls, backend: str, *, mode: Literal["hub", "direct"]) -> "ModelHubAgentSupplyConfig":
+        if backend == "avibe":
+            return cls(backend="avibe", mode="hub", menu_kind="fixed")
         if backend == "opencode":
             return cls(
                 backend="opencode",
@@ -2843,12 +2845,14 @@ class ModelHubAgentSupplyConfig:
         backend = expected_backend if raw_backend is None else raw_backend
         mode = payload.get("mode")
         menu_kind = payload.get("menu_kind")
-        if not isinstance(backend, str) or backend not in {"claude", "codex", "opencode"} or (
+        if not isinstance(backend, str) or backend not in MODEL_HUB_BACKENDS or (
             expected_backend is not None and backend != expected_backend
         ):
             raise ValueError("Config 'model_hub.agents.backend' is invalid")
         if not isinstance(mode, str) or mode not in {"hub", "direct"}:
             raise ValueError("Config 'model_hub.agents.mode' is invalid")
+        if backend == "avibe" and mode != "hub":
+            raise ValueError("Config 'model_hub.agents.avibe.mode' must be hub")
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
         if not isinstance(menu_kind, str) or menu_kind != expected_menu_kind:
             raise ValueError("Config 'model_hub.agents.menu_kind' is invalid for backend")
@@ -2989,6 +2993,11 @@ class ModelHubConfig:
     # retain a pending false marker until lock-owning startup commits promotion;
     # an unrelated save must not acknowledge an upgrade it did not perform.
     runtime_default_applied: bool = True
+
+    def __post_init__(self) -> None:
+        # Existing in-process config producers may still supply the released
+        # three-backend shape, just like older on-disk configurations.
+        self.agents.setdefault("avibe", ModelHubAgentSupplyConfig.default("avibe", mode="hub"))
 
     @staticmethod
     def source_eligible_for_backend(

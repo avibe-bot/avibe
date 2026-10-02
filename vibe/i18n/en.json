@@ -910,7 +910,8 @@
     "backends": {
       "claude": "Claude Code",
       "codex": "Codex",
-      "opencode": "OpenCode"
+      "opencode": "OpenCode",
+      "avibe": "Avibe Agent"
     },
     "errors": {
       "source_not_found": "Model source not found.",

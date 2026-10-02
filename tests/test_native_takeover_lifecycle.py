@@ -581,8 +581,8 @@ def auth_service(monkeypatch):
     from config.v2_config import V2Config
 
     config = V2Config.default()
-    for supply in config.model_hub.agents.values():
-        supply.mode = "direct"
+    for backend in ("claude", "codex", "opencode"):
+        config.model_hub.agents[backend].mode = "direct"
     config.save()
     monkeypatch.setattr(AgentAuthService, "_recover_interrupted_claude_oauth_settings_backup", lambda self: None)
     return AgentAuthService(SimpleNamespace(config=SimpleNamespace()))

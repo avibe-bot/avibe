@@ -14,7 +14,7 @@ from typing import Any, Callable, Literal, Mapping, Optional, cast
 
 from config import paths
 from config.atomic_io import write_atomic
-from config.v2_config import ModelHubConfig, ModelHubSourceConfig
+from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig, ModelHubSourceConfig
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import (
     EventAgent,
@@ -26,6 +26,7 @@ from core.handlers.model_hub.identifiers import (
 )
 from core.handlers.model_hub.provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
+    HopOrigin,
     PreparedGatewayRoute,
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
@@ -85,7 +86,7 @@ class ModelHubLaunch:
     runtime_model: str
     source_id: Optional[str] = None
     gateway_base_url: Optional[str] = None
-    gateway_token: Optional[str] = None
+    gateway_token: Optional[str] = field(default=None, repr=False)
     gateway_request_metadata: dict[str, str] = field(default_factory=dict, repr=False)
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
@@ -93,6 +94,40 @@ class ModelHubLaunch:
     supports_reasoning: Optional[bool] = None
     reasoning_efforts: tuple[str, ...] = ()
     settlement_generation: Optional[int] = field(default=None, repr=False)
+    protocol: Optional[str] = None
+    provider: Optional[str] = None
+    input_limit: Optional[int] = None
+    supports_images: Optional[bool] = None
+
+    def to_hop_resolution(self) -> dict[str, Any]:
+        """Project C-6 from the same launch that owns routing and credentials."""
+
+        if (
+            self.backend != "avibe" or self.channel != "hub"
+            or not self.protocol or not self.provider or not self.source_id
+            or not self.gateway_base_url or not self.gateway_token
+        ):
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        return {
+            "backend": self.backend,
+            "requested_model": self.requested_model,
+            "protocol": self.protocol,
+            "base_url": f"{self.gateway_base_url.rstrip('/')}/v1",
+            "token": self.gateway_token,
+            "runtime_model": self.runtime_model,
+            "source_id": self.source_id,
+            "provider": self.provider,
+            "request_headers": dict(self.gateway_request_metadata),
+            "capabilities": {
+                "context_window": self.context_window,
+                "input_limit": self.input_limit,
+                "max_output_tokens": self.max_output_tokens,
+                "supports_tools": self.supports_tools,
+                "supports_images": self.supports_images,
+                "supports_reasoning": self.supports_reasoning,
+                "reasoning_efforts": list(self.reasoning_efforts),
+            },
+        }
 
     @property
     def fingerprint(self) -> str:
@@ -191,8 +226,9 @@ def bind_persisted_launch(context: Any, payload: object) -> ModelHubLaunch | Non
     source_id = payload.get("source_id")
     target_model = payload.get("target_model")
     if (
-        backend not in {"claude", "codex", "opencode"}
+        backend not in MODEL_HUB_BACKENDS
         or channel not in {"native_cli", "hub"}
+        or (backend == "avibe" and channel != "hub")
         or not isinstance(source_id, str)
         or not source_id
         or not isinstance(target_model, str)
@@ -223,7 +259,7 @@ def claude_settings_for_launch(base_settings: str, launch: ModelHubLaunch | None
     keeps the user's own Claude preferences while the Hub owns the connection.
     """
 
-    if launch is None or launch.channel != "hub":
+    if launch is None or launch.backend == "avibe" or launch.channel != "hub":
         return base_settings
     settings = json.loads(base_settings)
     connection_env = build_claude_hub_env({}, launch)
@@ -269,6 +305,8 @@ async def resolve_model_hub_launch(
             )
             _hold_unrunnable_input(context, failure)
             raise failure from None
+    if backend == "avibe":
+        raise ModelHubError("engine_down", status=503, turn_outcome=ENGINE_DOWN_TURN_OUTCOME)
     return ModelHubLaunch(
         backend=backend,
         channel="direct",
@@ -372,7 +410,7 @@ def build_claude_hub_env(
 ) -> dict[str, str]:
     """Return Claude environment overrides for the resolved Hub launch."""
 
-    if launch.channel == "direct":
+    if launch.backend == "avibe" or launch.channel == "direct":
         return dict(base_env)
     if launch.channel == "hub":
         if not launch.gateway_base_url or not launch.gateway_token:
@@ -422,7 +460,7 @@ def build_codex_hub_launch(
 ) -> tuple[list[str], dict[str, str] | None]:
     """Return app-server global overrides and environment for a Hub turn."""
 
-    if launch.channel != "hub" or not launch.gateway_base_url or not launch.gateway_token:
+    if launch.backend == "avibe" or launch.channel != "hub" or not launch.gateway_base_url or not launch.gateway_token:
         return list(base_args), None
     if model_catalog_path is None:
         raise ValueError("Codex Model Hub launches require a provider-safe model catalog")
@@ -518,6 +556,8 @@ class ModelHubRuntimeRouter:
         *,
         verified_oauth: bool = False,
     ) -> bool:
+        if backend == "avibe":
+            return False
         runtime_config = getattr(load_config_or_default().agents, backend)
         cli_path = str(getattr(runtime_config, "cli_path", "") or "").strip()
         if (
@@ -675,6 +715,7 @@ class ModelHubRuntimeRouter:
         source_id: Optional[str] = None,
         via_mapping: bool = False,
         gateway_request_model_id: Optional[str] = None,
+        primary_origin: HopOrigin | None = None,
     ) -> tuple[str, str]:
         if self.turn_gateway is not None:
             return await self.turn_gateway.endpoint(
@@ -687,6 +728,7 @@ class ModelHubRuntimeRouter:
                 via_mapping=via_mapping,
                 gateway_request_model_id=gateway_request_model_id,
                 request_scoped=backend == "codex",
+                **({"primary_origin": primary_origin} if primary_origin is not None else {}),
             )
         await self.service._ensure_engine_synced()
         status = await self.service._engine_call(self.service.adapter.start())
@@ -941,6 +983,12 @@ class ModelHubRuntimeRouter:
     ) -> ModelHubLaunch:
         requested_model = str(requested_model or "").strip()
         config = self.service.store.load()
+        if backend == "avibe" and (
+            config.agents[backend].mode != "hub" or self.turn_gateway is None
+        ):
+            # An in-process consumer requires the routing gateway, including
+            # failover and served-hop attribution; the raw engine is not one.
+            raise ModelHubError("mapping_target_unavailable", status=409)
         config, resolution = await self._resolve_turn(
             config,
             backend,
@@ -1035,6 +1083,10 @@ class ModelHubRuntimeRouter:
                 source_id=source.id,
                 via_mapping=False,
                 gateway_request_model_id=runtime_model,
+                primary_origin=(
+                    HopOrigin(source.vendor, source.protocol, target_model)
+                    if backend == "avibe" else None
+                ),
             )
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
@@ -1066,9 +1118,30 @@ class ModelHubRuntimeRouter:
                 supports_tools=supports_tools,
                 supports_reasoning=supports_reasoning,
                 reasoning_efforts=reasoning_efforts,
+                protocol=source.protocol,
+                provider=source.vendor,
+                supports_images=(
+                    "image" in backend_model.input_modalities
+                    if backend_model is not None and backend_model.input_modalities
+                    else None
+                ),
             )
         self._emit_transition(launch, config)
         return launch
+
+    async def resolve_hop(
+        self,
+        requested_model: str,
+        *,
+        process_scope: str,
+        turn_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Resolve the Avibe Agent endpoint without any native CLI overlay."""
+
+        launch = await self.resolve(
+            "avibe", requested_model, process_scope=process_scope, turn_id=turn_id,
+        )
+        return launch.to_hop_resolution()
 
     async def resolve_opencode_overlay_launch(
         self,
