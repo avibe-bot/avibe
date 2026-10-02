@@ -191,6 +191,110 @@ async def test_primary_outcome_cross_cleanup_keeps_reason_rows_and_event_order(
     project(rows)
 
 
+@pytest.mark.parametrize(
+    "stage,fault",
+    [
+        (stage, fault)
+        for stage in ("before_model", "after_model_text", "after_model_tools", "before_tool", "after_tool")
+        for fault in ("clean", "state_fail", "result_fail", "abort_before", "abort_during", "abort_after")
+        if fault != "result_fail" or stage in {"after_model_tools", "before_tool", "after_tool"}
+    ],
+)
+async def test_hook_end_is_a_directive_until_required_commits_succeed(stage, fault):
+    """Required commit failures precede outcome selection, unlike cleanup.
+
+    The primary/cleanup table above cannot reach this gap: its End hook does
+    not dirty state or require tool results after requesting termination.
+    """
+    has_tools = stage in {"after_model_tools", "before_tool", "after_tool"}
+    hook_outcomes = []
+
+    class Store(InMemoryTranscriptStore):
+        async def append_payload(self, session_id, kind, payload):
+            if fault == "state_fail":
+                raise OSError("required state write failed")
+            if not has_tools and fault == "abort_during":
+                agent.abort("abort during state commit")
+            row = await super().append_payload(session_id, kind, payload)
+            if not has_tools and fault == "abort_after":
+                agent.abort("abort after state commit")
+            return row
+
+        async def append_tool_result(self, session_id, message, *, details):
+            if fault == "result_fail":
+                raise OSError("required tool-result write failed")
+            if fault == "abort_during":
+                agent.abort("abort during result commit")
+            row = await super().append_tool_result(session_id, message, details=details)
+            if fault == "abort_after":
+                agent.abort("abort after result commit")
+            return row
+
+    class Hook(Hooks):
+        def end(self, ctx):
+            ctx.state["ended_at"] = stage
+            if fault == "abort_before":
+                agent.abort("abort before required commit")
+            return End()
+
+        async def before_model(self, request, ctx):
+            if stage == "before_model":
+                return self.end(ctx)
+
+        async def after_model(self, message, ctx):
+            if stage in {"after_model_text", "after_model_tools"}:
+                return self.end(ctx)
+
+        async def before_tool(self, call, ctx):
+            if stage == "before_tool":
+                return self.end(ctx)
+
+        async def after_tool(self, call, result, ctx):
+            if stage == "after_tool":
+                return self.end(ctx)
+
+        async def after_run(self, outcome, ctx):
+            hook_outcomes.append(outcome.reason)
+
+    calls = [ToolCallBlock("a", "echo"), ToolCallBlock("b", "echo")] if has_tools else []
+    provider = ScriptedProvider([[Done(assistant(calls=calls))]])
+    tool = FakeTool()
+    agent = agent_for(provider, hooks=[Hook()], store=Store(), tools=[tool])
+    events = await collect(agent)
+    reason = "ended_by_hook" if fault == "clean" else "aborted" if fault.startswith("abort_") else "error"
+    assert events[-1].reason == reason
+    assert hook_outcomes == [reason]
+    errors = [event for event in events if isinstance(event, AgentError)]
+    if fault in {"state_fail", "result_fail"}:
+        assert errors[0].kind == "OSError"
+        assert (
+            errors[0].message
+            == {"state_fail": "required state write failed", "result_fail": "required tool-result write failed"}[fault]
+        )
+    else:
+        assert errors == []
+    rows = await agent.store.load("session")
+    # Cleanup may save valid dirty state after abort, but it must not commit the
+    # still-unexecuted tool results or report a successful hook-end outcome.
+    expected_rows = ["input"]
+    if stage != "before_model":
+        expected_rows.append("response")
+    if fault != "state_fail":
+        expected_rows.append("agent_state")
+    result_count = 0
+    if has_tools:
+        result_count = 2 if fault == "clean" else 1 if fault in {"abort_during", "abort_after"} else 0
+        expected_rows.extend(["tool_result"] * result_count)
+    assert [row.kind for row in rows] == expected_rows
+    assert agent.snapshot().state == ({} if fault == "state_fail" else {"ended_at": stage})
+    assert [event.event_id for event in events if isinstance(event, ToolFinished)] == [
+        row.row_id for row in rows if row.kind == "tool_result"
+    ]
+    assert len(provider.requests) == (0 if stage == "before_model" else 1)
+    assert len(tool.calls) == (1 if stage == "after_tool" else 0)
+    project(rows)
+
+
 @pytest.mark.parametrize("partial", [False, True])
 @pytest.mark.parametrize("invalid", ["duplicate_calls", "large_ref"])
 async def test_response_admission_matches_projection_and_a_fresh_agent_can_resume(partial, invalid):

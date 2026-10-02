@@ -58,6 +58,12 @@ state rows. Rewrites compose in registration order; the first `Deny` or
 at commit points. A snapshot describes committed context and committed state.
 The store/adapter owns fork ancestry; the engine does not copy parent rows.
 
+`AgentError.kind` is the adapter's stable error discriminator.
+`AgentError.message` is engine/provider diagnostic detail, never display copy.
+The adapter owns Session language, maps kinds to `vibe/i18n` messages, and tests
+English/Chinese rendering at its delivery boundary. Model-facing tool result
+text is separate from localized user-facing error delivery.
+
 ## Invariants and evidence
 
 - Responses are committed before `MessageCommitted`, and tool results before
@@ -76,7 +82,11 @@ The store/adapter owns fork ancestry; the engine does not copy parent rows.
   characters), with a logged traceback; the run continues. `BaseException`,
   including `CancelledError`, retains lifecycle semantics.
 - Hook end commits the current step and records policy error results for
-  unexecuted calls. It makes no further model request.
+  unexecuted calls. `End` is a directive, not a primary outcome in the generic
+  hook helper. The owning request/loop stage selects `ended_by_hook` only after
+  its required state and step writes succeed; a failed required write ends in
+  error, and abort around those writes retains the aborted outcome. Cleanup
+  failures remain diagnostics. It makes no further model request.
 - One explicit `RunScope` owns operation admission and joining on Python 3.10.
   Lazy factories prevent aborted runs from creating callback/store work.
   Abort cancels pending provider/tool/hook/backoff operations and waits for their
@@ -127,6 +137,8 @@ dependency cancellation, consumer closure, tool exceptions, normal completion,
 and cleanup. Separate probes cover failed kills and cancellation during commit.
 A primary-outcome/cleanup table checks reasons, durable rows, event order,
 commit-before-close, tools after close failure, and cleanup diagnostics.
+A hook-stage/required-commit table distinguishes successful end directives
+from failed state/result writes and abort before, during, or after a commit.
 These are in-memory engine checks; production provider/store/Watch integration
 is a later layer.
 

@@ -258,8 +258,8 @@ class Agent:
     async def _hook(self, factory: Callable[[], Awaitable[T]], *, cleanup: bool = False) -> T:
         result = await factory() if cleanup else await self._scope.call(factory)
         state_representation(self._ctx.state)
-        if isinstance(result, End) and not cleanup:
-            self._outcome.primary("ended_by_hook")
+        # End is a directive; its owning stage selects the outcome only after
+        # the required state and step commits have succeeded.
         return result
 
     async def _consume(self, input: AgentInput) -> None:
