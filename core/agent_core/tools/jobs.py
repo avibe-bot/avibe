@@ -464,7 +464,19 @@ class LocalJobHost:
         identity = await _off_loop(self._verify_for_kill, job_id, reason)
         if identity is None:
             return
-        if not await _terminate_group(identity.pid):
+        # Once the first signal is out, the sequence runs to its end: a cancel in the wait before SIGKILL
+        # would leave a group that ignores SIGTERM running. The cancel is re-raised after it.
+        termination = asyncio.ensure_future(_terminate_group(identity.pid))
+        try:
+            stopped = await asyncio.shield(termination)
+        except asyncio.CancelledError:
+            while not termination.done():
+                try:
+                    await asyncio.wait({termination})
+                except asyncio.CancelledError:
+                    pass
+            raise
+        if not stopped:
             logger.warning("Job %s process group %s survived termination", job_id, identity.pid)
 
     def _verify_for_kill(self, job_id: str, reason: str) -> Optional[PersistedProcessIdentity]:

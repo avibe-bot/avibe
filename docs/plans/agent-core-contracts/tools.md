@@ -99,7 +99,8 @@ is true". Logic, from Pi's `edit-diff.ts`:
 1. Read the file inside the per-path mutation lock; strip the BOM; remember the line-ending style; normalize to LF.
 2. For each edit, find `oldText` exactly; if absent, find it after Pi's deterministic normalization (NFKC, trailing
    whitespace per line, smart quotes to ASCII, Unicode dashes to `-`, special spaces to a space). No similarity
-   threshold.
+   threshold. Avibe bound: NFKC can make one character eighteen, so normalization stops once it has grown the file by
+   1 Mi characters, and the not-found error then says that loose matching was not possible (below).
 3. Require exactly one occurrence unless `replaceAll`; reject empty `oldText`; reject overlapping spans, including
    any occurrence matched by a `replaceAll` item.
 4. Apply all edits against the original, restore line endings and BOM, write once. Nothing is written if any edit
@@ -107,7 +108,9 @@ is true". Logic, from Pi's `edit-diff.ts`:
 
 Result: `Successfully replaced {n} block(s) in {path}.`; the diff goes to `details` for display only. Errors:
 
-- `Could not find edits[{i}] in {path}. The oldText must match exactly including all whitespace and newlines.`
+- `Could not find edits[{i}] in {path}. The oldText must match exactly including all whitespace and newlines.`; when
+  the normalization budget was reached, Avibe ends it with `: the file is too large to match it loosely after Unicode
+  normalization.` instead of the period
 - `Found {count} occurrences of edits[{i}] in {path}. Each oldText must be unique. Please provide more context to make it unique.`
 - `edits[{a}] and edits[{b}] overlap in {path}. Merge them into one edit or target disjoint regions.`
 - `edits[{i}].oldText must not be empty in {path}.`

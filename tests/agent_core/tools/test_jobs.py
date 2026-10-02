@@ -489,6 +489,29 @@ async def test_a_kill_signals_at_once_even_when_worker_threads_are_busy(tmp_path
     assert gone_in_time
 
 
+async def test_a_cancelled_kill_still_finishes_the_group(tmp_path):
+    """Once the first signal is sent, the SIGKILL fallback runs even if the caller is cancelled meanwhile."""
+    import sys
+
+    host = LocalJobHost(str(tmp_path / "jobs"), shell=sys.executable)
+    script = (
+        "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"open({str(tmp_path / 'sh.pid')!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    )
+    job_id = await _start(host, tmp_path, script)
+    shell_pid = _pid_written(tmp_path / "sh.pid")
+    os.kill(int(open(os.path.join(host.job_dir(job_id), "pid")).read()), signal.SIGKILL)  # only the host is left
+    assert _wait_until(lambda: _wrapper_gone(host.job_dir(job_id)))
+
+    killing = asyncio.ensure_future(host.kill(job_id, reason="aborted"))
+    await asyncio.sleep(0.5)  # SIGTERM is ignored; the host is waiting before SIGKILL
+    killing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await killing
+
+    assert _wait_until(lambda: _gone(shell_pid), timeout_s=8)
+
+
 async def test_meta_json_is_read_in_a_bound(tmp_path):
     """The job directory is the command's to write: a huge meta.json is refused as corrupt, not loaded."""
     import tracemalloc

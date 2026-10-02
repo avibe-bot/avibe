@@ -380,13 +380,22 @@ async def test_the_foreground_window_hands_over_and_the_command_runs_once(tmp_pa
     assert watches.by_job == {job_id: "wch_1"}
 
 
-async def test_watch_true_returns_at_once(tmp_path, make_ctx):
+async def test_watch_true_returns_at_once(tmp_path, make_ctx, monkeypatch):
+    """At once after the command may run (the 0.5 s grace), however long the launch itself took."""
     host = _host(tmp_path, Watches())
-    started = time.monotonic()
+    may_run_at = []
+    real_start = host.start
+
+    async def start_and_note(*args, **kwargs):
+        job_id = await real_start(*args, **kwargs)
+        may_run_at.append(time.monotonic())
+        return job_id
+
+    monkeypatch.setattr(host, "start", start_and_note)
 
     result = await BashTool(host).execute({"command": "sleep 2; echo late", "watch": True}, make_ctx())
 
-    assert time.monotonic() - started < 1.5
+    assert time.monotonic() - may_run_at[0] < 1.5
     assert result_text(result).startswith("Command is still running and is now Watch wch_1.")
     assert host.status(result.details["job_id"]).state == "running"
     await host.kill(result.details["job_id"])

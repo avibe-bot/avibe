@@ -59,7 +59,38 @@ def normalize_to_lf(text: str) -> str:
 
 def normalize_for_fuzzy_match(text: str) -> str:
     """NFKC, no trailing whitespace per line, ASCII quotes and dashes, plain spaces."""
-    text = unicodedata.normalize("NFKC", text)
+    return _after_nfkc(unicodedata.normalize("NFKC", text))
+
+
+def _bounded_fuzzy_view(view: str) -> Optional[str]:
+    """``normalize_for_fuzzy_match(view)``, or ``None`` once NFKC would grow it by more than
+    ``MAX_FUZZY_GROWTH_CHARS`` (one character can become eighteen, U+FDFA).
+
+    Text already in NFKC is not normalized again. Otherwise it is normalized a chunk of whole lines at a
+    time (NFKC never composes across a line break, so the pieces join to the whole), stopping at the
+    budget; a single line too long to chunk is normalized only if it is already in NFKC.
+    """
+    if unicodedata.is_normalized("NFKC", view):
+        return _after_nfkc(view)
+    budget = len(view) + MAX_FUZZY_GROWTH_CHARS
+    pieces: list[str] = []
+    total = pos = 0
+    while pos < len(view):
+        end = view.find("\n", pos + _NFKC_CHUNK_CHARS)
+        end = len(view) if end == -1 else end + 1
+        chunk = view[pos:end]
+        if len(chunk) > 2 * _NFKC_CHUNK_CHARS and not unicodedata.is_normalized("NFKC", chunk):
+            return None
+        piece = unicodedata.normalize("NFKC", chunk)
+        total += len(piece)
+        if total > budget:
+            return None
+        pieces.append(piece)
+        pos = end
+    return _after_nfkc("".join(pieces))
+
+
+def _after_nfkc(text: str) -> str:
     # rstrip, not a "[...]+$" regex: the regex retries at every space of a run, which is quadratic.
     text = "\n".join(line.rstrip(_TRAILING_SPACE) for line in text.split("\n"))
     text = _SMART_SINGLE.sub("'", text)
@@ -71,9 +102,10 @@ def normalize_for_fuzzy_match(text: str) -> str:
 #: Avibe: replacements one edit call may make. Each costs a few hundred bytes of Python objects in
 #: the process every Session shares, so the budget is structural, not only the file's size.
 MAX_REPLACEMENTS = 10_000
-#: Avibe: NFKC can make one character eighteen (U+FDFA), and Pi normalizes the whole file. A file over
-#: this many characters that is not already in NFKC is matched in the exact tier only.
-MAX_FUZZY_UNNORMALIZED_CHARS = 1024 * 1024
+#: Avibe: NFKC can make one character eighteen (U+FDFA), and Pi normalizes the whole file. Loose
+#: matching stops once normalization has grown the file by this many characters.
+MAX_FUZZY_GROWTH_CHARS = 1024 * 1024
+_NFKC_CHUNK_CHARS = 64 * 1024
 #: Avibe: every edit scans the whole file (``str.count``/``find``, which hold the GIL), so the number of
 #: edits times the file's length is bounded: about a quarter second of scanning.
 MAX_EDIT_SCAN_CHARS = 256 * 1024 * 1024
@@ -114,15 +146,17 @@ def _tier(content: str, normalized: Callable[[], Optional[str]], old_text: str) 
     return True, haystack, fuzzy_old, haystack.count(fuzzy_old)
 
 
-def _not_found(path: str, index: int, total: int) -> EditError:
+def _not_found(path: str, index: int, total: int, *, loose_unavailable: bool = False) -> EditError:
+    # Avibe addition: say when the normalized tier could not be tried, rather than that it found nothing.
+    end = ": the file is too large to match it loosely after Unicode normalization." if loose_unavailable else "."
     if total == 1:
         return EditError(
             f"Could not find the exact text in {path}. The old text must match exactly including all whitespace "
-            "and newlines."
+            f"and newlines{end}"
         )
     return EditError(
         f"Could not find edits[{index}] in {path}. The oldText must match exactly including all whitespace and "
-        "newlines."
+        f"newlines{end}"
     )
 
 
@@ -339,11 +373,9 @@ def apply_edits(
     cache: list[Optional[str]] = []
 
     def normalized() -> Optional[str]:
-        """The normalized view, or ``None`` when NFKC could expand a file this large (no fuzzy tier)."""
+        """The normalized view, or ``None`` when NFKC would grow it past its budget (no loose matching)."""
         if not cache:
-            view = lines.view
-            expandable = len(view) > MAX_FUZZY_UNNORMALIZED_CHARS and not unicodedata.is_normalized("NFKC", view)
-            cache.append(None if expandable else normalize_for_fuzzy_match(view))
+            cache.append(_bounded_fuzzy_view(lines.view))
         return cache[0]
 
     exact: list[_Replacement] = []
@@ -353,7 +385,7 @@ def apply_edits(
     for index, edit in enumerate(edits):
         used_normalized, haystack, needle, count = _tier(lines.view, normalized, edit.old_text)
         if not count:
-            raise _not_found(path, index, total)
+            raise _not_found(path, index, total, loose_unavailable=bool(cache) and cache[0] is None)
         if not edit.replace_all and count > 1:
             raise _duplicate(path, index, total, count)
         replacements_made += count

@@ -498,9 +498,14 @@ async def test_edit_memory_is_bounded_by_its_budgets_not_by_the_file(tmp_path, m
     assert peak < 32 * 1024 * 1024
 
 
-async def test_a_large_file_that_nfkc_would_expand_is_not_normalized(tmp_path, make_ctx):
-    """NFKC can make one character eighteen (U+FDFA); a large unnormalized file is matched exactly only."""
-    (tmp_path / "f.txt").write_text("\ufdfa" * 1_100_000 + "\n\u2019marker\u2019\n")
+@pytest.mark.parametrize(
+    "content",
+    ["\ufdfa" * 1_100_000 + "\n", "".join("\ufdfa" * 1000 + "\n" for _ in range(1100))],
+    ids=["one-long-line", "many-lines"],
+)
+async def test_nfkc_expansion_has_a_budget_and_says_so(tmp_path, make_ctx, content):
+    """NFKC can make one character eighteen (U+FDFA): loose matching stops at a budget and says why."""
+    (tmp_path / "f.txt").write_text(content + "\u2019marker\u2019\n")
     tracemalloc.start()
     started = time.monotonic()
     try:
@@ -512,10 +517,21 @@ async def test_a_large_file_that_nfkc_would_expand_is_not_normalized(tmp_path, m
     assert (result.is_error, result_text(result)) == (
         True,
         "Could not find the exact text in f.txt. The old text must match exactly including all whitespace and "
-        "newlines.",
+        "newlines: the file is too large to match it loosely after Unicode normalization.",
     )
-    assert peak < 32 * 1024 * 1024
-    assert time.monotonic() - started < 2.0
+    assert peak < 48 * 1024 * 1024
+    assert time.monotonic() - started < 3.0
+
+
+async def test_a_large_file_with_a_few_compatibility_characters_still_matches_loosely(tmp_path, make_ctx):
+    """An ellipsis (NFKC "...") in a 2 MiB file costs a few characters of growth, not the fuzzy tier."""
+    body = "".join(f"line {i} \u2026 text\n" for i in range(110_000))  # about 2 MiB, not in NFKC
+    (tmp_path / "f.txt").write_text(body + "say \u2018marker\u2019\n")
+
+    result = await _edit(make_ctx, "f.txt", {"oldText": "say 'marker'", "newText": "said"})
+
+    assert not result.is_error, result_text(result)
+    assert (tmp_path / "f.txt").read_text().endswith("\u2026 text\nsaid\n")
 
 
 async def test_edit_refuses_files_with_more_lines_than_it_plans(tmp_path, make_ctx, monkeypatch):
