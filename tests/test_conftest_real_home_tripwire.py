@@ -15,7 +15,9 @@ takes for the developer's home: nothing here can reach the actual one.
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 from pathlib import Path
 
 import pytest
@@ -71,6 +73,46 @@ def test_rename():
 
 def test_legacy_home():
     _in_a_swallowing_daemon_thread(lambda: (HOME / ".vibe_remote" / "leaked.txt").write_text("leaked"))
+
+
+def test_symlink():
+    _in_a_swallowing_daemon_thread(lambda: os.symlink(HOME / ".avibe", HOME / ".avibe" / "leaked-link"))
+
+
+def test_hard_link():
+    config = HOME / ".avibe" / "config"
+    _in_a_swallowing_daemon_thread(lambda: os.link(config / "config.json", config / "leaked-link.json"))
+
+
+def test_chmod():
+    _in_a_swallowing_daemon_thread(lambda: os.chmod(HOME / ".avibe" / "config" / "config.json", 0o777))
+
+
+def test_cwd_relative_path():
+    previous = os.getcwd()
+    os.chdir(HOME / ".avibe")
+    try:
+        _in_a_swallowing_daemon_thread(lambda: os.mkdir("leaked-relative"))
+    finally:
+        os.chdir(previous)
+
+
+def test_dir_fd_relative_path():
+    state = os.open(HOME / ".avibe" / "state", os.O_RDONLY)
+    try:
+        _in_a_swallowing_daemon_thread(lambda: os.mkdir("leaked-at", dir_fd=state))
+    finally:
+        os.close(state)
+
+
+def test_symlinked_alias():
+    # The alias lives outside the protected homes and names one of them.
+    (HOME / "alias").symlink_to(HOME / ".avibe")
+    _in_a_swallowing_daemon_thread(lambda: (HOME / "alias" / "leaked.txt").write_text("leaked"))
+
+
+def test_custom_home():
+    _in_a_swallowing_daemon_thread(lambda: (HOME / "custom-home" / "leaked.txt").write_text("leaked"))
 """
 
 _READS = """
@@ -106,10 +148,15 @@ def pytest_terminal_summary():
 
 @pytest.fixture
 def stand_in_home(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """The inner run's real home: pytester's ``HOME``, seeded like an installed Avibe."""
+    """The inner run's real home: pytester's ``HOME``, seeded like an installed Avibe.
+
+    The inner run also starts with ``AVIBE_HOME`` naming a custom home beside it.
+    """
 
     monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
     home = pytester.path
+    (home / "custom-home").mkdir()
+    monkeypatch.setenv("AVIBE_HOME", str(home / "custom-home"))
     (home / ".avibe" / "config").mkdir(parents=True)
     (home / ".avibe" / "state").mkdir()
     (home / ".vibe_remote").mkdir()
@@ -126,10 +173,11 @@ def _run(pytester: pytest.Pytester, home: Path, source: str) -> pytest.RunResult
 def test_a_swallowed_background_write_under_the_real_home_fails_the_run(
     pytester: pytest.Pytester, stand_in_home: Path
 ) -> None:
+    seeded_mode = stat.S_IMODE((stand_in_home / ".avibe" / "config" / "config.json").stat().st_mode)
     result = _run(pytester, stand_in_home, _BACKGROUND_WRITES)
 
     # Every inner test passes: only the session-level check can fail this run.
-    result.assert_outcomes(passed=5)
+    result.assert_outcomes(passed=12)
     assert result.ret == pytest.ExitCode.TESTS_FAILED, result.stdout.str()
     output = result.stdout.str()
     for event, path in [
@@ -138,14 +186,33 @@ def test_a_swallowed_background_write_under_the_real_home_fails_the_run(
         ("os.mkdir", ".avibe/leaked"),
         ("os.rename", ".avibe/config/config.json"),
         ("open", ".vibe_remote/leaked.txt"),
+        ("os.symlink", ".avibe/leaked-link"),
+        ("os.link", ".avibe/config/leaked-link.json"),
+        ("os.chmod", ".avibe/config/config.json"),
+        ("os.mkdir", ".avibe/leaked-relative"),
+        ("open", "alias/leaked.txt"),
+        ("open", "custom-home/leaked.txt"),
     ]:
         assert f"{event} {stand_in_home / path}" in output, output
+    # A descriptor names its directory as resolved.
+    assert f"os.mkdir {os.path.realpath(stand_in_home / '.avibe' / 'state')}/leaked-at" in output, output
 
     # Refused, not merely reported: the home is exactly as it was seeded.
-    assert (stand_in_home / ".avibe" / "config" / "config.json").read_text() == "{}"
-    assert not (stand_in_home / ".avibe" / "leaked").exists()
-    assert not (stand_in_home / ".avibe" / "config" / "leaked.json").exists()
-    assert not (stand_in_home / ".vibe_remote" / "leaked.txt").exists()
+    config = stand_in_home / ".avibe" / "config" / "config.json"
+    assert config.read_text() == "{}"
+    assert stat.S_IMODE(config.stat().st_mode) == seeded_mode
+    for leaked in (
+        ".avibe/leaked",
+        ".avibe/config/leaked.json",
+        ".vibe_remote/leaked.txt",
+        ".avibe/leaked-link",
+        ".avibe/config/leaked-link.json",
+        ".avibe/leaked-relative",
+        ".avibe/state/leaked-at",
+        ".avibe/leaked.txt",
+        "custom-home/leaked.txt",
+    ):
+        assert not os.path.lexists(stand_in_home / leaked), leaked
     with sqlite3.connect(f"{(stand_in_home / '.avibe' / 'state' / 'vibe.sqlite').as_uri()}?mode=ro", uri=True) as conn:
         assert conn.execute("select name from sqlite_master").fetchall() == []
 

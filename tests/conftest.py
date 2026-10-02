@@ -67,7 +67,7 @@ import psutil
 import pytest
 from sqlalchemy.exc import SAWarning
 
-from config.paths import AVIBE_HOME_DIRNAME, LEGACY_HOME_DIRNAME
+from config.paths import AVIBE_HOME_DIRNAME, AVIBE_HOME_ENV, LEGACY_HOME_DIRNAME
 from tests.fake_pid_helpers import PID_LIMIT
 
 REAL_USER_HOME = Path.home()
@@ -731,41 +731,92 @@ def _foreign_signal_guard(request, tmp_path):
         pytest.fail("signals and lookups this test may not make were blocked:\n" + "\n".join(guard.violations))
 
 
-# The developer's real Avibe state: both homes under REAL_USER_HOME, spelled as
+# The developer's real Avibe state: both homes under REAL_USER_HOME, plus the
+# custom home AVIBE_HOME names when pytest starts with one, each spelled as
 # written and as resolved, because the legacy name is usually a symlink to the
-# current one. Fixed when pytest loads this file, before any test patches HOME
-# or `Path.home`. The SQLite migration guard cannot stand in for this: every
-# test runs with its opt-in flag set and with `Path.home` naming the test's own
-# home, so under pytest neither of its checks can recognise the real database.
+# current one. Fixed when pytest loads this file, before any test replaces HOME,
+# AVIBE_HOME or `Path.home`; teardown restores them, so work that outlives a test
+# resolves exactly these. The SQLite migration guard cannot stand in for this:
+# every test runs with its opt-in flag set and with `Path.home` naming the test's
+# own home, so under pytest neither of its checks can recognise the real database.
+_REAL_STATE_HOMES = [REAL_USER_HOME / AVIBE_HOME_DIRNAME, REAL_USER_HOME / LEGACY_HOME_DIRNAME]
+if os.environ.get(AVIBE_HOME_ENV):
+    _REAL_STATE_HOMES.append(Path(os.path.expanduser(os.environ[AVIBE_HOME_ENV])))
 _REAL_STATE_ROOTS = tuple(
     sorted(
         {
             spelling
-            for name in (AVIBE_HOME_DIRNAME, LEGACY_HOME_DIRNAME)
-            for spelling in (os.path.abspath(REAL_USER_HOME / name), os.path.realpath(REAL_USER_HOME / name))
+            for home in _REAL_STATE_HOMES
+            for spelling in (os.path.abspath(home), os.path.realpath(home))
         }
     )
 )
 _WRITE_OPEN_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 _REPO_ROOT = str(Path(__file__).resolve().parents[1])
-_TRIPWIRE_EVENTS = frozenset(
-    {"open", "sqlite3.connect", "os.mkdir", "os.rename", "os.remove", "os.rmdir", "shutil.rmtree"}
+# Every path-mutating audit event CPython raises, mapped to the arguments that
+# name a path it writes, each with the index of its dir_fd (None when the event
+# carries none). shutil's copy, move and chown helpers end in these events or in
+# `open`; only rmtree is listed itself, because its fd-based walk names entries
+# relative to descriptors. `open` and `sqlite3.connect` depend on their mode.
+_WRITE_EVENTS = {
+    "os.mkdir": ((0, 2),),
+    "os.rmdir": ((0, 1),),
+    "os.remove": ((0, 1),),
+    "os.rename": ((0, 2), (1, 3)),
+    "os.symlink": ((1, 2),),
+    "os.link": ((1, 3),),
+    "os.chmod": ((0, 2),),
+    "os.chown": ((0, 3),),
+    "os.utime": ((0, 3),),
+    "os.truncate": ((0, None),),
+    "os.chflags": ((0, None),),
+    "os.setxattr": ((0, None),),
+    "os.removexattr": ((0, None),),
+    "shutil.rmtree": ((0, 1),),
+}
+_TRIPWIRE_EVENTS = frozenset({"open", "sqlite3.connect", *_WRITE_EVENTS})
+# Events that act on a final symlink itself rather than on what it names.
+_LINK_LEVEL_EVENTS = frozenset(
+    {"os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.symlink", "os.link", "shutil.rmtree"}
 )
+# What the audit arguments carry for a dir_fd the caller did not pass.
+_NO_DIR_FD = (None, -1)
 # Every refused write in this run, in order. A daemon thread or a broad `except`
 # can swallow the refusal itself; this record is what fails the session.
 _real_home_writes: list[str] = []
 _tripwire_busy = threading.local()
 
 
-def _under_real_state(path, dir_fd=None) -> str | None:
+def _descriptor_path(fd: int) -> str | None:
+    """The directory an open descriptor names, where the platform can say."""
+
+    try:
+        if sys.platform == "darwin":
+            import fcntl
+
+            return os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0])
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except (OSError, AttributeError):
+        return None
+
+
+def _under_real_state(path, dir_fd=None, *, follows: bool = True) -> str | None:
     if isinstance(path, int):
-        return None
+        return None  # a descriptor: its own open was checked by name
     text = os.fsdecode(path)
-    if dir_fd is not None and not os.path.isabs(text):
-        return None
+    if not os.path.isabs(text) and dir_fd not in _NO_DIR_FD:
+        directory = _descriptor_path(dir_fd)
+        if directory is None:
+            return None
+        text = os.path.join(directory, text)
     absolute = os.path.abspath(text)
-    if any(absolute == root or absolute.startswith(root + os.sep) for root in _REAL_STATE_ROOTS):
-        return absolute
+    # Resolved as well, so an alias -- a symlink elsewhere into a protected home --
+    # is recognised; an operation on a link itself resolves only its directory.
+    head, tail = os.path.split(absolute)
+    resolved = os.path.realpath(absolute) if follows else os.path.join(os.path.realpath(head), tail)
+    for spelling in (absolute, resolved):
+        if any(spelling == root or spelling.startswith(root + os.sep) for root in _REAL_STATE_ROOTS):
+            return absolute
     return None
 
 
@@ -790,12 +841,15 @@ def _real_state_writes(event: str, args: tuple) -> list[str]:
         targets = [_under_real_state(path)] if writes else []
     elif event == "sqlite3.connect":
         targets = [_sqlite_write_target(args[0])]
-    elif event == "os.rename":
-        src, dst, src_dir_fd, dst_dir_fd = args
-        targets = [_under_real_state(src, src_dir_fd), _under_real_state(dst, dst_dir_fd)]
     else:
-        # mkdir, remove, rmdir and rmtree: the path first, its dir_fd last when the event carries one.
-        targets = [_under_real_state(args[0], args[-1] if len(args) > 1 else None)]
+        follows = event not in _LINK_LEVEL_EVENTS
+        targets = [
+            # shutil.rmtree carries its dir_fd only from Python 3.12.
+            _under_real_state(
+                args[at], args[fd_at] if fd_at is not None and fd_at < len(args) else None, follows=follows
+            )
+            for at, fd_at in _WRITE_EVENTS[event]
+        ]
     return [target for target in targets if target is not None]
 
 
@@ -819,7 +873,9 @@ def _real_home_tripwire(event: str, args: tuple) -> None:
     window per-test isolation cannot reach. Reads stay allowed, including
     ``uses_real_paths`` tests and read-only SQLite URIs (``mode=ro``,
     ``immutable=1``). Child processes are outside it: each pytest child loads
-    its own copy of this file, and other children inherit the test's home.
+    its own copy of this file, and other children inherit the test's home. The
+    one write it cannot place is ``os.open`` relative to a ``dir_fd``, whose
+    audit event omits the descriptor; creating that directory chain still trips.
     """
 
     if event not in _TRIPWIRE_EVENTS or getattr(_tripwire_busy, "active", False):
