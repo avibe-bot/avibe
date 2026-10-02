@@ -23,7 +23,7 @@ from core.agent_core.tools.args import (
     ToolInputError,
     error_result,
     format_number,
-    optional_number_arg,
+    optional_line_arg,
     os_error_text,
     str_arg,
     text_result,
@@ -53,8 +53,8 @@ READ_SCHEMA: Mapping[str, Any] = {
     "required": ["path"],
     "properties": {
         "path": {"type": "string", "description": "Path to the file to read (relative or absolute)"},
-        "offset": {"type": "number", "description": "Line number to start reading from (1-indexed)"},
-        "limit": {"type": "number", "description": "Maximum number of lines to read"},
+        "offset": {"type": "integer", "minimum": 1, "description": "Line number to start reading from (1-indexed)"},
+        "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of lines to read"},
     },
 }
 
@@ -73,10 +73,8 @@ class ReadTool:
             return error_result("Operation aborted")
         try:
             path = str_arg(arguments, "path")
-            offset = optional_number_arg(arguments, "offset")
-            limit = optional_number_arg(arguments, "limit")
-            if limit is not None and limit < 1:
-                raise ToolInputError("limit must be at least 1")
+            offset = optional_line_arg(arguments, "offset")
+            limit = optional_line_arg(arguments, "limit")
         except ToolInputError as exc:
             return error_result(str(exc))
 
@@ -149,13 +147,13 @@ def _read_bytes(path: str) -> bytes:
 
 
 def _read_text(
-    absolute: str, path: str, offset: Optional[float], limit: Optional[float], cancelled: Callable[[], bool]
+    absolute: str, path: str, offset: Optional[int], limit: Optional[int], cancelled: Callable[[], bool]
 ) -> ToolResult:
-    start_line = max(0, int(offset) - 1) if offset else 0
-    stop_line = start_line + int(limit) if limit is not None else None
+    start_line = offset - 1 if offset is not None else 0
+    stop_line = start_line + limit if limit is not None else None
     collected, total_lines, first_line_bytes = _scan_lines(absolute, start_line, stop_line, cancelled)
     if start_line >= total_lines:
-        raise ToolInputError(f"Offset {format_number(offset or 0)} is beyond end of file ({total_lines} lines total)")
+        raise ToolInputError(f"Offset {offset} is beyond end of file ({total_lines} lines total)")
 
     truncation = truncate_head("\n".join(collected))
     start_display = start_line + 1

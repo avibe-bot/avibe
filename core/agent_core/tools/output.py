@@ -13,6 +13,7 @@ from dataclasses import replace
 from typing import Any, Optional
 
 from core.agent_core.tools.base import MAX_BYTES, MAX_LINES, JobHost
+from core.agent_core.tools import jobs as job_host
 from core.agent_core.tools.normalize import OutputNormalizer
 from core.agent_core.tools.truncate import TruncationResult, format_size, truncate_tail, utf8_len
 
@@ -132,38 +133,42 @@ class JobOutput:
         return self._accumulator.snapshot("" if self._finished else self._normalizer.peek())
 
     def render(self, empty_text: str) -> tuple[str, Optional[TruncationResult]]:
-        """Pi's ``formatOutput``: the tail (or ``empty_text``) and, when truncated, the notice naming the full output."""
+        """Pi's ``formatOutput``: the tail (or ``empty_text``) and, when truncated, the notice naming the full output.
+
+        The truncation is returned whenever a notice was added, which a log bounded on disk always gets.
+        """
         truncation = self.snapshot()
         text = truncation.content or empty_text
-        if not truncation.truncated:
+        if not truncation.truncated and not self._omitted:
             return text, None
-        path = self.path
+        # C-7 section 5: a log bounded on disk (J4) is never called the full output.
+        label = "Full output"
+        if self._omitted:
+            label = f"Output log (middle omitted beyond {format_size(job_host.OUTPUT_HEAD_BYTES + job_host.OUTPUT_TAIL_BYTES)})"
+        where = f"{label}: {self.path}"
         start = truncation.total_lines - truncation.output_lines + 1
         end = truncation.total_lines
-        if truncation.last_line_partial:
+        if not truncation.truncated:
+            notice = f"[{where}]"
+        elif truncation.last_line_partial:
             open_line = "" if self._finished else self._normalizer.peek()
             line_size = format_size(self._accumulator.last_line_bytes(open_line))
             notice = (
-                f"[Showing last {format_size(truncation.output_bytes)} of line {end} (line is {line_size}). "
-                f"Full output: {path}]"
+                f"[Showing last {format_size(truncation.output_bytes)} of line {end} (line is {line_size}). {where}]"
             )
         elif truncation.truncated_by == "lines":
-            notice = f"[Showing lines {start}-{end} of {truncation.total_lines}. Full output: {path}]"
+            notice = f"[Showing lines {start}-{end} of {truncation.total_lines}. {where}]"
         else:
             notice = (
-                f"[Showing lines {start}-{end} of {truncation.total_lines} ({format_size(MAX_BYTES)} limit). "
-                f"Full output: {path}]"
+                f"[Showing lines {start}-{end} of {truncation.total_lines} ({format_size(MAX_BYTES)} limit). {where}]"
             )
         if self._omitted:
             # Only LocalJobHost drops output, and it keeps the end in tail.log next to output.log.
-            notice += (
-                f"\n[{format_size(self._omitted)} from the middle of the output was not kept on disk: "
-                "output.log holds the start, tail.log beside it the end.]"
-            )
+            notice += f"\n[{format_size(self._omitted)} were omitted; the end of the log is in tail.log beside it.]"
         return f"{text}\n\n{notice}", truncation
 
     def details(self, truncation: Optional[TruncationResult]) -> dict[str, Any]:
-        out: dict[str, Any] = {"job_id": self._job_id, "full_output_path": self.path}
+        out: dict[str, Any] = {"job_id": self._job_id, "output_path": self.path}
         if self._omitted:
             out["omitted_bytes"] = self._omitted
         if truncation is not None:

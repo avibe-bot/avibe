@@ -8,6 +8,7 @@ Mario Zechner).
 from __future__ import annotations
 
 import asyncio
+import nturl2path
 import os
 import re
 import unicodedata
@@ -20,6 +21,7 @@ from core.agent_core.tools.args import ToolInputError
 _UNICODE_SPACES = re.compile("[\u00a0\u2000-\u200a\u202f\u205f\u3000]")
 _NARROW_NO_BREAK_SPACE = "\u202f"
 _AM_PM = re.compile(r" (AM|PM)\.", re.IGNORECASE)
+_WINDOWS = os.name == "nt"
 
 
 def expand_path(path: str) -> str:
@@ -30,8 +32,19 @@ def expand_path(path: str) -> str:
     if value == "~" or value.startswith("~/"):
         value = os.path.expanduser(value)
     if value.startswith("file://"):
-        value = unquote(urlparse(value).path)
+        value = _file_url_to_path(value)
     return value
+
+
+def _file_url_to_path(url: str) -> str:
+    """Like Node's ``fileURLToPath``: drive letters and UNC hosts on Windows, the path elsewhere."""
+    parsed = urlparse(url)
+    if not _WINDOWS:
+        return unquote(parsed.path)
+    path = nturl2path.url2pathname(parsed.path)
+    if parsed.netloc and parsed.netloc.lower() != "localhost":
+        return f"\\\\{parsed.netloc}{path}"
+    return path
 
 
 def resolve_to_cwd(path: str, cwd: str) -> str:

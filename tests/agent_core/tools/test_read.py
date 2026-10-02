@@ -58,6 +58,16 @@ async def test_offset_beyond_the_end_is_an_error(tmp_path, make_ctx):
     assert result_text(result) == "Offset 5 is beyond end of file (2 lines total)"
 
 
+@pytest.mark.parametrize(("arguments", "message"), [({"offset": 0}, "offset"), ({"limit": 2.5}, "limit")])
+async def test_offset_and_limit_are_integers_of_at_least_one(tmp_path, make_ctx, arguments, message):
+    (tmp_path / "ten.txt").write_text("a\nb\n")
+
+    result = await _read(make_ctx, path="ten.txt", **arguments)
+
+    assert result.is_error
+    assert result_text(result) == f"{message} must be an integer of at least 1"
+
+
 async def test_an_over_long_first_line_points_at_bash(tmp_path, make_ctx):
     (tmp_path / "big file.txt").write_text("short\n" + "x" * 61_440 + "\nafter\n")
 

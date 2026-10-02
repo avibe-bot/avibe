@@ -7,7 +7,10 @@ Ported from Pi ``packages/coding-agent/src/core/tools/write.ts`` (MIT, Copyright
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import stat
+import tempfile
 from typing import Any, Mapping
 
 from core.agent_core.tools.args import ToolInputError, error_result, os_error_text, str_arg, text_result
@@ -60,6 +63,37 @@ class WriteTool:
 
 
 def write_text(path: str, content: str) -> None:
-    """UTF-8 without newline translation; a lone surrogate (possible from JSON) is replaced."""
+    """UTF-8 without newline translation; a lone surrogate (possible from JSON) is replaced.
+
+    An existing file is replaced only once the new content is completely on disk, so a failed write
+    (a full disk, a quota) leaves the original intact. The replacement goes through symlinks and keeps
+    the file's mode.
+    """
+    target = os.path.realpath(path)
+    try:
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+    except FileNotFoundError:
+        _write_file(target, content)
+        return
+    try:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=f".{os.path.basename(target)}.", suffix=".tmp")
+    except PermissionError:
+        # A writable file in a directory we cannot add to: only an in-place write is possible.
+        _write_file(target, content)
+        return
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
+
+
+def _write_file(path: str, content: str) -> None:
     with open(path, "w", encoding="utf-8", errors="replace", newline="") as handle:
         handle.write(content)

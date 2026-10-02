@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import errno
+import stat
+
 import pytest
+
+import core.agent_core.tools.paths as paths_module
+import core.agent_core.tools.write as write_module
 
 from core.agent_core.tools.edit import EditTool
 from core.agent_core.tools.read import ReadTool
@@ -16,6 +22,34 @@ async def test_write_creates_parent_directories_and_keeps_bytes(tmp_path, make_c
     assert not result.is_error
     assert result_text(result) == "Successfully wrote to a/b/notes.txt"
     assert (tmp_path / "a/b/notes.txt").read_bytes() == "第一行\r\nsecond\n".encode()
+
+
+async def test_a_failed_write_leaves_the_original_intact(tmp_path, make_ctx, monkeypatch):
+    (tmp_path / "f.txt").write_text("original\n")
+
+    def disk_full(fd):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(write_module.os, "fsync", disk_full)
+    result = await WriteTool().execute({"path": "f.txt", "content": "replacement\n"}, make_ctx())
+
+    assert result.is_error
+    assert (tmp_path / "f.txt").read_text() == "original\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["f.txt"]
+
+
+async def test_write_goes_through_a_symlink_and_keeps_the_mode(tmp_path, make_ctx):
+    target = tmp_path / "real.sh"
+    target.write_text("old\n")
+    target.chmod(0o751)
+    (tmp_path / "link.sh").symlink_to(target)
+
+    result = await WriteTool().execute({"path": "link.sh", "content": "new\n"}, make_ctx())
+
+    assert not result.is_error, result_text(result)
+    assert (tmp_path / "link.sh").is_symlink()
+    assert target.read_text() == "new\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o751
 
 
 async def _edit(make_ctx, path, *edits, **extra):
@@ -78,6 +112,56 @@ async def test_an_exact_match_is_unique_even_with_a_normalized_twin(tmp_path, ma
     assert (tmp_path / "f.txt").read_text() == 'say "Hello"\nsay \u201cHi\u201d\n'
 
 
+L, R = "\u201c", "\u201d"  # smart double quotes
+
+
+@pytest.mark.parametrize(
+    ("original", "edits", "expected"),
+    [
+        # An exact replaceAll beside a normalized edit replaces only exact occurrences.
+        (
+            f'say "A"\nsay {L}A{R}\ntitle = {L}T{R}   \n',
+            [
+                {"oldText": 'say "A"', "newText": 'say "B"', "replaceAll": True},
+                {"oldText": 'title = "T"', "newText": 'title = "U"'},
+            ],
+            f'say "B"\nsay {L}A{R}\ntitle = "U"\n',
+        ),
+        # An exact edit stays unique beside a normalized edit, though their normalized forms collide.
+        (
+            f'x = "1"\nx = {L}1{R}\ny = \u20182\u2019  \n',
+            [{"oldText": 'x = "1"', "newText": 'x = "9"'}, {"oldText": "y = '2'", "newText": "y = '3'"}],
+            f"x = \"9\"\nx = {L}1{R}\ny = '3'\n",
+        ),
+        # replaceAll uses the first tier with a match: exact occurrences only.
+        (
+            f'a = {L}q{R}\nc = "q"\n',
+            [{"oldText": '= "q"', "newText": '= "r"', "replaceAll": True}],
+            f'a = {L}q{R}\nc = "r"\n',
+        ),
+        # With no exact occurrence, every normalized occurrence is rewritten, line by line.
+        (
+            f"a = {L}q{R}  \nkeep \u2014 me  \nb = {L}q{R}\n",
+            [{"oldText": '= "q"', "newText": '= "r"', "replaceAll": True}],
+            'a = "r"\nkeep \u2014 me  \nb = "r"\n',
+        ),
+        # Two normalized edits on one line apply together.
+        (
+            f"k = {L}v{R}; j = {L}w{R}\n",
+            [{"oldText": 'k = "v"', "newText": 'k = "1"'}, {"oldText": 'j = "w"', "newText": 'j = "2"'}],
+            'k = "1"; j = "2"\n',
+        ),
+    ],
+)
+async def test_each_edit_matches_in_its_own_tier(tmp_path, make_ctx, original, edits, expected):
+    (tmp_path / "f.txt").write_text(original)
+
+    result = await _edit(make_ctx, "f.txt", *edits)
+
+    assert not result.is_error, result_text(result)
+    assert (tmp_path / "f.txt").read_text() == expected
+
+
 @pytest.mark.parametrize(
     ("edits", "message"),
     [
@@ -116,6 +200,11 @@ async def test_an_exact_match_is_unique_even_with_a_normalized_twin(tmp_path, ma
             "edits[0] and edits[1] overlap in f.txt. Merge them into one edit or target disjoint regions.",
         ),
         (
+            # A normalized edit rewrites its whole line, so an exact edit on that line overlaps it.
+            [{"oldText": "alpha", "newText": "A"}, {"oldText": "beta  ", "newText": "B"}],
+            "edits[0] and edits[1] overlap in f.txt. Merge them into one edit or target disjoint regions.",
+        ),
+        (
             [{"oldText": "alpha", "newText": "A"}, {"oldText": "", "newText": "x"}],
             "edits[1].oldText must not be empty in f.txt.",
         ),
@@ -145,3 +234,13 @@ async def test_a_path_no_file_can_have_is_an_error_result(make_ctx, tool, argume
 
     assert result.is_error
     assert result_text(result) == f"Invalid path: {arguments['path']!r} contains a NUL byte"
+
+
+@pytest.mark.parametrize(
+    ("url", "path"),
+    [("file:///C:/tmp/a%20b.txt", "C:\\tmp\\a b.txt"), ("file://server/share/x.txt", "\\\\server\\share\\x.txt")],
+)
+def test_windows_file_urls_keep_drive_and_share(monkeypatch, url, path):
+    monkeypatch.setattr(paths_module, "_WINDOWS", True)
+
+    assert paths_module.expand_path(url) == path

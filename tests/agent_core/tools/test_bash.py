@@ -10,6 +10,7 @@ import psutil
 
 from core.agent_core.cancel import CancelToken
 from core.agent_core.tools.bash import BashTool, settle_bash_call
+import core.agent_core.tools.jobs as jobs_module
 from core.agent_core.tools.jobs import LocalJobHost
 from tests.agent_core.tools.conftest import result_text
 
@@ -43,10 +44,24 @@ def _process_gone(pid: int, timeout_s: float = 3.0) -> bool:
 async def test_long_output_keeps_the_tail_and_names_the_full_output(tmp_path, make_ctx):
     result = await BashTool(_host(tmp_path)).execute({"command": "seq 1 2500"}, make_ctx())
 
-    path = result.details["full_output_path"]
+    path = result.details["output_path"]
     assert not result.is_error
     assert result_text(result).endswith(f"2499\n2500\n\n[Showing lines 501-2500 of 2500. Full output: {path}]")
     assert open(path).read() == "".join(f"{i}\n" for i in range(1, 2501))
+
+
+async def test_a_log_bounded_on_disk_is_not_called_the_full_output(tmp_path, make_ctx, monkeypatch):
+    """J4: the result says the middle is gone instead of promising a complete file."""
+    monkeypatch.setattr(jobs_module, "OUTPUT_HEAD_BYTES", 1000)
+    monkeypatch.setattr(jobs_module, "OUTPUT_TAIL_BYTES", 2000)
+
+    result = await BashTool(_host(tmp_path)).execute({"command": "seq 1 100000"}, make_ctx())
+
+    text = result_text(result)
+    assert text.startswith("1\n2\n3\n")
+    assert f"100000\n\n\n[Output log (middle omitted beyond 2.9KB): {result.details['output_path']}]" in text
+    assert "Full output" not in text
+    assert result.details["omitted_bytes"] == len("".join(f"{i}\n" for i in range(1, 100001))) - 3000
 
 
 async def test_a_non_zero_exit_is_an_error_result(tmp_path, make_ctx):
@@ -54,6 +69,13 @@ async def test_a_non_zero_exit_is_an_error_result(tmp_path, make_ctx):
 
     assert result.is_error
     assert result_text(result) == "oops\n\n\nCommand exited with code 3"
+
+
+async def test_an_out_of_range_timeout_is_an_error_result(tmp_path, make_ctx):
+    result = await BashTool(_host(tmp_path)).execute({"command": "true", "timeout": 10**400}, make_ctx())
+
+    assert result.is_error
+    assert result_text(result) == "Invalid timeout: must be a finite number of seconds"
 
 
 async def test_stdin_is_closed(tmp_path, make_ctx):

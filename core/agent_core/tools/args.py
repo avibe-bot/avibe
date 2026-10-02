@@ -32,9 +32,27 @@ def optional_number_arg(arguments: Mapping[str, Any], name: str) -> Optional[flo
     value = arguments.get(name)
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ToolInputError(f"{name} must be a number")
-    return float(value)
+    try:
+        number = float(value)  # an integer too large for a float overflows here
+    except OverflowError:
+        raise ToolInputError(f"{name} must be a finite number") from None
+    if not math.isfinite(number):
+        raise ToolInputError(f"{name} must be a finite number")
+    return number
+
+
+def optional_line_arg(arguments: Mapping[str, Any], name: str) -> Optional[int]:
+    """A JSON integer of at least 1 (an integral float such as ``3.0`` is accepted)."""
+    value = arguments.get(name)
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ToolInputError(f"{name} must be an integer of at least 1")
+    return value
 
 
 def optional_bool_arg(arguments: Mapping[str, Any], name: str) -> bool:
