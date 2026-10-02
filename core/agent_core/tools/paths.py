@@ -118,6 +118,44 @@ def target_kind(path: str) -> FileKind:
     return "directory" if stat.S_ISDIR(mode) else "other"
 
 
+class NotRegularFile(OSError):
+    """The descriptor names a directory or a special file; ``kind`` says which."""
+
+    def __init__(self, kind: FileKind) -> None:
+        super().__init__(KIND_REASON[kind])
+        self.kind = kind
+
+
+def open_regular(path: str, flags: int = os.O_RDONLY) -> int:
+    """Open a model-named file once and return the descriptor, which is a regular file.
+
+    ``O_NONBLOCK`` keeps a FIFO swapped in after an earlier check from blocking the open, and the
+    kind is taken from the descriptor (``fstat``), so sizes and contents come from the same file.
+    Raises ``NotRegularFile`` or the ``OSError`` of the open.
+    """
+    fd = os.open(path, flags | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    try:
+        mode = os.fstat(fd).st_mode
+        if not stat.S_ISREG(mode):
+            raise NotRegularFile("directory" if stat.S_ISDIR(mode) else "other")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_at_most(fd: int, limit: int) -> bytes:
+    """Up to ``limit + 1`` bytes from ``fd``, so a caller can tell the file is over ``limit``."""
+    chunks, remaining = [], limit + 1
+    while remaining > 0:
+        chunk = os.read(fd, min(remaining, 1024 * 1024))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def os_reason(error: OSError) -> str:
     """``No such file or directory`` → ``no such file or directory``, for ``Cannot … {path}: {reason}.``"""
     text = error.strerror or str(error) or type(error).__name__

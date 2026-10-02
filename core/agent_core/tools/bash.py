@@ -27,7 +27,7 @@ from core.agent_core.tools.args import (
     text_result,
 )
 from core.agent_core.tools.base import MAX_BYTES, MAX_LINES, JobHost, JobStatus, ToolContext, ToolResult, ToolSpec
-from core.agent_core.tools.jobs import STOP_ABORTED, STOP_TIMEOUT, JobStartError, LocalJobHost
+from core.agent_core.tools.jobs import STOP_ABORTED, STOP_TIMEOUT, JobHandOverUnavailable, JobStartError, LocalJobHost
 from core.agent_core.tools.paths import os_reason
 from core.agent_core.tools.output import JobOutput
 
@@ -231,17 +231,33 @@ class BashTool:
                 await self._jobs.kill(job_id, reason=STOP_TIMEOUT)
                 return stopped_result(output, _timed_out_line(timeout))
             if hand_over:
-                try:
-                    return handover_result(output, await self._jobs.hand_over(job_id))
-                except Exception as exc:  # no Watch here: the command stays in the foreground
-                    logger.info("Job %s stays in the foreground: %s", job_id, exc)
-                    handover_error = exc
-                    continue
+                watch_id, handover_error = await self._hand_over(job_id)
+                if watch_id is not None:
+                    return handover_result(output, watch_id)
+                continue
             if ctx.on_progress is not None and output.poll():
                 tail = output.snapshot().content
                 if tail != last_progress:
                     last_progress = tail
                     ctx.on_progress(tail)
+
+    async def _hand_over(self, job_id: str) -> tuple[Optional[str], Optional[Exception]]:
+        """``(watch_id, None)``, or ``(None, error)`` when no Watch owns the job and it stays in the foreground.
+
+        ``hand_over`` raising means no Watch owns the job, and adopt-or-create is idempotent, so one
+        failed attempt is tried once more; ``JobHandOverUnavailable`` means there is no Watch to try.
+        """
+        error: Optional[Exception] = None
+        for _ in range(2):
+            try:
+                return await self._jobs.hand_over(job_id), None
+            except JobHandOverUnavailable as exc:
+                error = exc
+                break
+            except Exception as exc:
+                error = exc
+        logger.info("Job %s stays in the foreground: %s", job_id, error)
+        return None, error
 
     async def _wait_or_cancel(self, job_id: str, seconds: float, cancel: CancelToken) -> Optional[JobStatus]:
         """The job's status after at most ``seconds``, or ``None`` as soon as ``cancel`` fires."""

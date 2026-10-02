@@ -16,7 +16,8 @@ import inspect
 import os
 import shlex
 import struct
-from typing import Any, Awaitable, Callable, Mapping, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Awaitable, BinaryIO, Callable, Mapping, Optional, Union
 
 from core.agent_core.messages import IMAGE_MIME_TYPES, ImageBlock, TextBlock
 from core.agent_core.tools.args import (
@@ -27,7 +28,14 @@ from core.agent_core.tools.args import (
     text_result,
 )
 from core.agent_core.tools.base import MAX_BYTES, MAX_LINES, ToolContext, ToolResult, ToolSpec
-from core.agent_core.tools.paths import KIND_REASON, os_reason, resolve_read_path, target_kind
+from core.agent_core.tools.paths import (
+    KIND_REASON,
+    NotRegularFile,
+    open_regular,
+    os_reason,
+    resolve_read_path,
+    target_kind,
+)
 from core.agent_core.tools.text import decode_file, shown
 from core.agent_core.tools.truncate import format_size, truncate_head
 
@@ -83,46 +91,40 @@ class ReadTool:
             refusal = await asyncio.to_thread(_refusal, absolute)
             if refusal:
                 return error_result(f"Cannot read {path}: {refusal}.")
-            mime_type = await asyncio.to_thread(_sniff_image, absolute)
-            if mime_type is not None:
-                return await self._read_image(absolute, mime_type)
             # Off the event loop, which every Session and surface shares; the scan stops on cancel.
-            return await asyncio.to_thread(_read_text, absolute, path, offset, limit, lambda: ctx.cancel.cancelled)
+            loaded = await asyncio.to_thread(_load, absolute, path, offset, limit, lambda: ctx.cancel.cancelled)
+            if isinstance(loaded, _Image):
+                return await self._attach(absolute, loaded)
+            return loaded
         except _Aborted:
             return error_result("Operation aborted")
+        except NotRegularFile as exc:
+            return error_result(f"Cannot read {path}: {KIND_REASON[exc.kind]}.")
         except OSError as exc:
             return error_result(f"Cannot read {path}: {os_reason(exc)}.")
         except ToolInputError as exc:
             return error_result(str(exc))
 
-    async def _read_image(self, absolute: str, mime_type: str) -> ToolResult:
-        header = f"Read image file [{mime_type}]"
-        details = {"path": absolute, "mime_type": mime_type}
-        if mime_type not in IMAGE_MIME_TYPES:
-            # Pi converts other formats to PNG; without an image library Avibe cannot.
-            return text_result(
-                f"{header}\n[Image omitted: could not be converted to a supported inline image format.]",
-                details=details,
-            )
-        size = os.path.getsize(absolute)
-        if size > MAX_INLINE_IMAGE_BYTES:
-            # Avibe: no resizing in v1.
-            return text_result(
-                f"{header}\n[Image omitted: the file is {format_size(size)}, over the "
-                f"{format_size(MAX_INLINE_IMAGE_BYTES)} inline image limit. Images are not resized.]",
-                details={**details, "bytes": size},
-            )
+    async def _attach(self, absolute: str, image: "_Image") -> ToolResult:
+        header = f"Read image file [{image.mime_type}]"
+        details = {"path": absolute, "mime_type": image.mime_type, "bytes": image.size}
         if self._image_sink is None:
             return text_result(f"{header}\n[Image omitted: image attachments are not available.]", details=details)
-        data = await asyncio.to_thread(_read_bytes, absolute)
         name = os.path.basename(absolute)
-        token = self._image_sink(data, mime_type, name)
+        token = self._image_sink(image.data, image.mime_type, name)
         if inspect.isawaitable(token):
             token = await token
         return ToolResult(
-            content=(TextBlock(text=header), ImageBlock(mime_type=mime_type, media_token=token, name=name)),
-            details={**details, "bytes": len(data)},
+            content=(TextBlock(text=header), ImageBlock(mime_type=image.mime_type, media_token=token, name=name)),
+            details=details,
         )
+
+
+@dataclass(frozen=True)
+class _Image:
+    mime_type: str
+    data: bytes
+    size: int
 
 
 class _Aborted(Exception):
@@ -142,13 +144,42 @@ def _refusal(absolute: str) -> Optional[str]:
     return None
 
 
-def _sniff_image(path: str) -> Optional[str]:
+def _load(
+    absolute: str, path: str, offset: Optional[int], limit: Optional[int], cancelled: Callable[[], bool]
+) -> Union[ToolResult, _Image]:
+    """Everything read takes from the file, through one descriptor: the kind, the image type, the size,
+    and the bytes. A file swapped or grown after an earlier check by path cannot get past its limits."""
+    with os.fdopen(open_regular(absolute), "rb") as handle:
+        mime_type = _sniff_image(handle)
+        if mime_type is None:
+            return _read_text(handle, absolute, path, offset, limit, cancelled)
+        header = f"Read image file [{mime_type}]"
+        details = {"path": absolute, "mime_type": mime_type}
+        if mime_type not in IMAGE_MIME_TYPES:
+            # Pi converts other formats to PNG; without an image library Avibe cannot.
+            return text_result(
+                f"{header}\n[Image omitted: could not be converted to a supported inline image format.]",
+                details=details,
+            )
+        handle.seek(0)
+        data = handle.read(MAX_INLINE_IMAGE_BYTES + 1)
+        size = max(os.fstat(handle.fileno()).st_size, len(data))
+        if size > MAX_INLINE_IMAGE_BYTES:
+            # Avibe: no resizing in v1.
+            return text_result(
+                f"{header}\n[Image omitted: the file is {format_size(size)}, over the "
+                f"{format_size(MAX_INLINE_IMAGE_BYTES)} inline image limit. Images are not resized.]",
+                details={**details, "bytes": size},
+            )
+        return _Image(mime_type, data, len(data))
+
+
+def _sniff_image(handle: BinaryIO) -> Optional[str]:
     """The image type to attach, or ``None`` for text. A PNG or JPEG Pi cannot send (animated PNG,
     JPEG-LS) keeps its family, so it is omitted rather than decoded as text."""
-    with open(path, "rb") as handle:
-        head = handle.read(_IMAGE_SNIFF_BYTES)
+    head = handle.read(_IMAGE_SNIFF_BYTES)
     supported = detect_supported_image_mime_type(head)
-    if supported == "image/png" and _png_file_is_animated(path):
+    if supported == "image/png" and _png_file_is_animated(handle):
         # acTL may sit past the sniffed prefix, behind large ancillary chunks.
         return "image/apng"
     if supported is not None:
@@ -160,17 +191,17 @@ def _sniff_image(path: str) -> Optional[str]:
     return None
 
 
-def _read_bytes(path: str) -> bytes:
-    with open(path, "rb") as handle:
-        return handle.read()
-
-
 def _read_text(
-    absolute: str, path: str, offset: Optional[int], limit: Optional[int], cancelled: Callable[[], bool]
+    handle: BinaryIO,
+    absolute: str,
+    path: str,
+    offset: Optional[int],
+    limit: Optional[int],
+    cancelled: Callable[[], bool],
 ) -> ToolResult:
     start_line = offset - 1 if offset is not None else 0
     stop_line = start_line + limit if limit is not None else None
-    collected, total_lines, first_line_bytes = _scan_lines(absolute, start_line, stop_line, cancelled)
+    collected, total_lines, first_line_bytes = _scan_lines(handle, start_line, stop_line, cancelled)
     if start_line >= total_lines:
         raise ToolInputError(f"Offset {offset} is beyond end of file ({total_lines} lines total)")
 
@@ -205,7 +236,7 @@ def _read_text(
 
 
 def _scan_lines(
-    path: str, start: int, stop: Optional[int], cancelled: Callable[[], bool] = lambda: False
+    handle: BinaryIO, start: int, stop: Optional[int], cancelled: Callable[[], bool] = lambda: False
 ) -> tuple[list[str], int, int]:
     """Lines ``[start, stop)`` as Pi's ``text.split("\\n")`` gives them, without the ``\\r`` of a CRLF break,
     the file's line count, and the raw size of line ``start``.
@@ -250,31 +281,31 @@ def _scan_lines(
             first_line_bytes += (len(chunk) if newline == -1 else newline) - pos
         index += chunk.count(b"\n", pos)
 
-    with open(path, "rb") as handle:
-        # A UTF-8 BOM is not shown, as edit does not match it, so text read shows can be edited.
-        if handle.read(len(_BOM)) != _BOM:
-            handle.seek(0)
-        while chunk := handle.read(_READ_CHUNK_BYTES):
-            if cancelled():
-                raise _Aborted
-            pos = 0
-            while collecting:
-                newline = chunk.find(b"\n", pos)
-                end = len(chunk) if newline == -1 else newline
-                if stop is not None and index >= stop:
-                    collecting = False
-                    continue
-                if index == start:
-                    first_line_bytes += end - pos
-                if index >= start:
-                    collect(chunk[pos:end], newline != -1)
-                if newline == -1:
-                    pos = len(chunk)
-                    break
-                index += 1
-                pos = newline + 1
-            else:
-                count_rest(chunk, pos)
+    handle.seek(0)
+    # A UTF-8 BOM is not shown, as edit does not match it, so text read shows can be edited.
+    if handle.read(len(_BOM)) != _BOM:
+        handle.seek(0)
+    while chunk := handle.read(_READ_CHUNK_BYTES):
+        if cancelled():
+            raise _Aborted
+        pos = 0
+        while collecting:
+            newline = chunk.find(b"\n", pos)
+            end = len(chunk) if newline == -1 else newline
+            if stop is not None and index >= stop:
+                collecting = False
+                continue
+            if index == start:
+                first_line_bytes += end - pos
+            if index >= start:
+                collect(chunk[pos:end], newline != -1)
+            if newline == -1:
+                pos = len(chunk)
+                break
+            index += 1
+            pos = newline + 1
+        else:
+            count_rest(chunk, pos)
     if collecting and opened != index and index >= start:
         # An empty file: its one line is empty.
         lines.append(bytearray())
@@ -296,22 +327,21 @@ def detect_supported_image_mime_type(data: bytes) -> Optional[str]:
     return None
 
 
-def _png_file_is_animated(path: str) -> bool:
+def _png_file_is_animated(handle: BinaryIO) -> bool:
     """Walk the chunk headers until IDAT or acTL, seeking over chunk bodies; bounded by the file size."""
-    size = os.path.getsize(path)
-    with open(path, "rb") as handle:
-        offset = len(_PNG_SIGNATURE)
-        while offset + 8 <= size:
-            handle.seek(offset)
-            header = handle.read(8)
-            if len(header) < 8:
-                return False
-            length, kind = struct.unpack(">I", header[:4])[0], header[4:]
-            if kind == b"acTL":
-                return True
-            if kind == b"IDAT":
-                return False
-            offset += 12 + length
+    size = os.fstat(handle.fileno()).st_size
+    offset = len(_PNG_SIGNATURE)
+    while offset + 8 <= size:
+        handle.seek(offset)
+        header = handle.read(8)
+        if len(header) < 8:
+            return False
+        length, kind = struct.unpack(">I", header[:4])[0], header[4:]
+        if kind == b"acTL":
+            return True
+        if kind == b"IDAT":
+            return False
+        offset += 12 + length
     return False
 
 

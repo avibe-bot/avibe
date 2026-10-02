@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import random
 import shlex
@@ -134,7 +135,8 @@ async def test_streaming_matches_reading_the_whole_file(tmp_path, monkeypatch):
         start = rng.randint(0, 6)
         stop = None if rng.random() < 0.5 else start + rng.randint(1, 6)
 
-        lines, total, first_line_bytes = read_module._scan_lines(str(path), start, stop)
+        with open(path, "rb") as handle:
+            lines, total, first_line_bytes = read_module._scan_lines(handle, start, stop)
         expected, expected_total = _whole_file_read(data, start, stop)
 
         assert total == expected_total, data
@@ -226,3 +228,36 @@ async def test_images_that_cannot_be_sent_as_they_are_are_omitted(
 
     assert stored == []
     assert result.content == (TextBlock(text=expected.format(size=len(data))),)
+
+
+async def test_read_takes_the_image_size_from_the_file_it_reads(tmp_path, make_ctx, monkeypatch):
+    """The image grew after a check by path: the cap holds on the bytes actually read."""
+    (tmp_path / "pic.png").write_bytes(_png() + b"\0" * 64)
+    monkeypatch.setattr(read_module, "MAX_INLINE_IMAGE_BYTES", 40)
+    monkeypatch.setattr(read_module.os.path, "getsize", lambda path: 10)  # what an earlier check by path saw
+    stored = []
+
+    result = await ReadTool(image_sink=lambda *args: stored.append(args) or "never").execute(
+        {"path": "pic.png"}, make_ctx()
+    )
+
+    assert stored == []
+    assert "[Image omitted: the file is" in result_text(result)
+
+
+async def test_a_fifo_swapped_in_after_the_check_does_not_block_read(tmp_path, make_ctx, monkeypatch):
+    os.mkfifo(tmp_path / "p")
+    monkeypatch.setattr(read_module, "target_kind", lambda path: "regular")  # it was a file when checked
+    task = asyncio.ensure_future(ReadTool().execute({"path": "p"}, make_ctx()))
+    try:
+        result = await asyncio.wait_for(asyncio.shield(task), timeout=5)
+    except asyncio.TimeoutError:
+        while not task.done():
+            try:
+                os.close(os.open(tmp_path / "p", os.O_WRONLY | os.O_NONBLOCK))
+            except OSError:
+                pass
+            await asyncio.sleep(0.05)
+        pytest.fail("read blocked on a FIFO")
+
+    assert (result.is_error, result_text(result)) == (True, "Cannot read p: it is not a regular file.")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import os
 import random
 import re
 import stat
@@ -137,6 +138,57 @@ async def test_text_copied_from_read_edits_the_first_line_of_a_bom_file(tmp_path
     assert shown == "alpha\nbeta\n"
     assert not result.is_error, result_text(result)
     assert (tmp_path / "f.txt").read_bytes() == b"\xef\xbb\xbfALPHA\r\nbeta\r\n"
+
+
+async def test_edit_takes_the_size_from_the_file_it_reads(tmp_path, make_ctx, monkeypatch):
+    """The file grew after a check by path: the limit holds on the descriptor actually read."""
+    (tmp_path / "f.txt").write_text("hello\n" + "x" * 2000)
+    monkeypatch.setattr(edit_module, "MAX_EDIT_BYTES", 1000)
+    monkeypatch.setattr(edit_module.os.path, "getsize", lambda path: 10)  # what an earlier check by path saw
+
+    result = await _edit(make_ctx, "f.txt", {"oldText": "hello", "newText": "bye"})
+
+    assert result.is_error
+    assert result_text(result).startswith("File f.txt is 2.0KB, over the 1000B edit limit.")
+    assert (tmp_path / "f.txt").read_text().startswith("hello")
+
+
+async def test_replacement_contents_stay_private_until_the_rename(tmp_path, make_ctx, monkeypatch):
+    secret = tmp_path / "token"
+    secret.write_text("old\n")
+    secret.chmod(0o600)
+    seen = []
+    real_fsync = write_module.os.fsync
+
+    def watch(fd):
+        seen.append(stat.S_IMODE(os.fstat(fd).st_mode))
+        real_fsync(fd)
+
+    monkeypatch.setattr(write_module.os, "fsync", watch)
+    result = await WriteTool().execute({"path": "token", "content": "new secret\n"}, make_ctx())
+
+    assert not result.is_error, result_text(result)
+    assert seen and all(mode & 0o077 == 0 for mode in seen)
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+    assert secret.read_text() == "new secret\n"
+
+
+async def test_new_files_keep_the_umask_default(tmp_path, make_ctx):
+    umask = os.umask(0)
+    os.umask(umask)
+
+    await WriteTool().execute({"path": "fresh.txt", "content": "x"}, make_ctx())
+
+    assert stat.S_IMODE((tmp_path / "fresh.txt").stat().st_mode) == 0o666 & ~umask
+
+
+async def test_write_and_edit_sanitize_model_text_the_same_way(tmp_path, make_ctx):
+    await WriteTool().execute({"path": "w.txt", "content": "a\ud800b"}, make_ctx())
+    (tmp_path / "e.txt").write_text("a-b")
+    await _edit(make_ctx, "e.txt", {"oldText": "-", "newText": "\udfff"})
+
+    assert (tmp_path / "w.txt").read_bytes() == "a\ufffdb".encode()
+    assert (tmp_path / "e.txt").read_bytes() == "a\ufffdb".encode()
 
 
 async def test_a_planned_result_over_the_limit_is_refused_and_its_diff_skipped(tmp_path, make_ctx, monkeypatch):

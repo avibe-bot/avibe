@@ -67,7 +67,8 @@ from core.process_isolation import (
 logger = logging.getLogger(__name__)
 
 #: Adopt-or-create the once Watch (target kind ``job``) for the job's ``meta.json``; returns the Watch id.
-#: Keyed by ``job_id``, so calling it again after a crash returns the same Watch (J6).
+#: Keyed by ``job_id``, so calling it again after a crash returns the same Watch (J6). The adapter promises
+#: that raising means no Watch owns the job: adopt-or-create is atomic. Once it returns, the Watch owns it.
 HandOver = Callable[[Mapping[str, Any]], Awaitable[str]]
 #: Whether the tool call that owns a job has a durable ``tool_result`` and its Watch, if any, has settled (J5).
 Settled = Callable[[Mapping[str, Any]], bool]
@@ -420,16 +421,26 @@ class LocalJobHost:
             logger.warning("Job %s process group %s survived termination", job_id, identity.pid)
 
     async def hand_over(self, job_id: str) -> str:
-        """Give the job to its Watch: adopt-or-create through ``on_hand_over``, then record the id (J6)."""
+        """Give the job to its Watch: adopt-or-create through ``on_hand_over``, then record the id (J6).
+
+        Raising means no Watch owns the job: it never raises after ``on_hand_over`` returned.
+        """
         meta = self.meta(job_id)
         if meta.get("watch_id"):
             return meta["watch_id"]
         if self._on_hand_over is None:
             raise JobHandOverUnavailable("No Watch is available to take over the command.")
         watch_id = await self._on_hand_over(meta)
-        meta = self.meta(job_id)
-        meta["watch_id"] = watch_id
-        self._write_meta(job_id, meta)
+        # The Watch owns the job from here on, so nothing below may undo the handover: the recorded id
+        # is a cache, and adopt-or-create finds the Watch by job id without it.
+        try:
+            meta = self.meta(job_id)
+            meta["watch_id"] = watch_id
+            self._write_meta(job_id, meta)
+        except (OSError, KeyError, ValueError):
+            logger.warning(
+                "Job %s is Watch %s, but its meta.json could not record that", job_id, watch_id, exc_info=True
+            )
         return watch_id
 
     # --- deadline (J3) and reporting --------------------------------------

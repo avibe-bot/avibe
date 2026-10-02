@@ -9,7 +9,10 @@ sequence; Avibe shows one per invalid byte.)
 
 from __future__ import annotations
 
+import re
+
 _SHOWN = {code: "\ufffd" for code in range(0xDC80, 0xDD00)}
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 
 def decode_file(data: bytes) -> str:
@@ -24,3 +27,11 @@ def shown(text: str) -> str:
 
 def encode_file(text: str) -> bytes:
     return text.encode("utf-8", "surrogateescape")
+
+
+def model_text(text: str) -> str:
+    """Text from the model, writable as UTF-8: a lone surrogate (JSON allows one) becomes U+FFFD.
+
+    The one sanitizer for model-supplied text, used by write's content and edit's oldText/newText.
+    """
+    return _LONE_SURROGATE.sub("\ufffd", text)

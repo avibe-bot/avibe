@@ -11,18 +11,24 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 from typing import Any, Mapping
 
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.edit_diff import Edit, EditError, apply_edits, generate_diff_string, generate_unified_patch
-from core.agent_core.tools.paths import errno_name, file_mutation_lock, resolve_to_cwd, target_kind
-from core.agent_core.tools.text import decode_file, encode_file
+from core.agent_core.tools.paths import (
+    NotRegularFile,
+    errno_name,
+    file_mutation_lock,
+    open_regular,
+    read_at_most,
+    resolve_to_cwd,
+    target_kind,
+)
+from core.agent_core.tools.text import decode_file, encode_file, model_text
 from core.agent_core.tools.truncate import format_size
 from core.agent_core.tools.write import write_bytes
 
-_SURROGATE = re.compile("[\ud800-\udfff]")
 #: Avibe: larger files are refused rather than loaded whole; the display diff stops at a smaller size.
 MAX_EDIT_BYTES = 10 * 1024 * 1024
 MAX_DIFF_BYTES = 1024 * 1024
@@ -114,19 +120,35 @@ def _edits_arg(arguments: Mapping[str, Any]) -> list[Edit]:
         if not isinstance(replace_all, bool):
             raise ToolInputError(f"edits[{index}].replaceAll must be a boolean")
         # A lone surrogate (possible from JSON) cannot be written; it becomes U+FFFD.
-        parsed.append(Edit(_SURROGATE.sub("\ufffd", old_text), _SURROGATE.sub("\ufffd", new_text), replace_all))
+        parsed.append(Edit(model_text(old_text), model_text(new_text), replace_all))
     return parsed
 
 
-def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[bytes, str, str]:
-    """Read the file and compute its new bytes, with the LF views before and after for the diff.
+class _TooLarge(Exception):
+    def __init__(self, size: int) -> None:
+        super().__init__(size)
+        self.size = size
 
-    ``surrogateescape`` carries bytes that are not UTF-8 through unchanged; only replaced spans change.
+
+def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[int, bytes, str, str]:
+    """Read the file and compute its new bytes: ``(size, data, view_before, view_after)``.
+
+    One descriptor gives the size and the contents, read up to the limit, so a file that grew after an
+    earlier check by path cannot get past it. ``surrogateescape`` carries bytes that are not UTF-8
+    through unchanged; only replaced spans change.
     """
-    with open(absolute, "rb") as handle:
-        text = decode_file(handle.read())
-    new_text, before, after = apply_edits(text, edits, path)
-    return encode_file(new_text), before, after
+    fd = open_regular(absolute)
+    try:
+        size = os.fstat(fd).st_size
+        if size > MAX_EDIT_BYTES:
+            raise _TooLarge(size)
+        raw = read_at_most(fd, MAX_EDIT_BYTES)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_EDIT_BYTES:
+        raise _TooLarge(max(size, len(raw)))
+    new_text, before, after = apply_edits(decode_file(raw), edits, path)
+    return len(raw), encode_file(new_text), before, after
 
 
 class EditTool:
@@ -161,14 +183,7 @@ class EditTool:
             if not os.access(absolute, os.R_OK | os.W_OK):
                 return error_result(f"Could not edit file: {path}. Error code: EACCES.")
             try:
-                size = os.path.getsize(absolute)
-                if size > MAX_EDIT_BYTES:
-                    # The whole file and several copies would sit in the process every Session shares.
-                    return error_result(
-                        f"File {path} is {format_size(size)}, over the {format_size(MAX_EDIT_BYTES)} edit limit. "
-                        "Use bash (for example sed or a short script) to change files this large."
-                    )
-                data, base, new_content = await asyncio.to_thread(_plan_edits, absolute, edits, path)
+                size, data, base, new_content = await asyncio.to_thread(_plan_edits, absolute, edits, path)
                 if len(data) > MAX_EDIT_BYTES:
                     return error_result(
                         f"File {path} would be {format_size(len(data))} after this edit, over the "
@@ -178,8 +193,17 @@ class EditTool:
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
                 await asyncio.to_thread(write_bytes, absolute, data)
+            except _TooLarge as exc:
+                # The whole file and several copies would sit in the process every Session shares.
+                return error_result(
+                    f"File {path} is {format_size(exc.size)}, over the {format_size(MAX_EDIT_BYTES)} edit limit. "
+                    "Use bash (for example sed or a short script) to change files this large."
+                )
             except EditError as exc:
                 return error_result(str(exc))
+            except NotRegularFile as exc:
+                detail = "Error code: EISDIR." if exc.kind == "directory" else "It is not a regular file."
+                return error_result(f"Could not edit file: {path}. {detail}")
             except OSError as exc:
                 return error_result(f"Could not edit file: {path}. Error code: {errno_name(exc)}.")
 

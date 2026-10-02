@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import time
 
@@ -222,6 +223,42 @@ async def test_watch_true_keeps_the_result_of_a_command_that_already_ended(tmp_p
     assert result.is_error
     assert result_text(result) == "(no output)\n\nCommand exited with code 3"
     assert watches.by_job == {}
+
+
+async def test_a_recorded_watch_is_a_handover_even_if_caching_its_id_fails(tmp_path, make_ctx, monkeypatch):
+    """hand_over raising means no Watch owns the job; once the Watch exists, the handover stands."""
+    watches = Watches()
+    host = _host(tmp_path, watches)
+    real_write = LocalJobHost._write_meta
+
+    def write_meta(self, job_id, meta):
+        if meta.get("watch_id"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real_write(self, job_id, meta)
+
+    monkeypatch.setattr(LocalJobHost, "_write_meta", write_meta)
+    result = await BashTool(host).execute({"command": "sleep 5", "watch": True}, make_ctx())
+
+    assert result_text(result).startswith("Command is still running and is now Watch wch_1.")
+    assert list(watches.by_job.values()) == ["wch_1"]
+    await host.kill(result.details["job_id"])
+
+
+async def test_a_failing_watch_is_tried_again_before_the_command_stays_in_the_foreground(tmp_path, make_ctx):
+    calls = []
+
+    async def failing(meta):
+        calls.append(meta["job_id"])
+        raise RuntimeError("watch store unavailable")
+
+    result = await BashTool(_host(tmp_path, failing)).execute(
+        {"command": "sleep 1; echo hi", "watch": True}, make_ctx()
+    )
+
+    assert len(calls) == 2 and len(set(calls)) == 1
+    assert result_text(result) == (
+        "hi\n\n\n[Watch unavailable (watch store unavailable); the command ran in the foreground.]"
+    )
 
 
 async def test_without_a_watch_the_command_stays_in_the_foreground(tmp_path, make_ctx):
