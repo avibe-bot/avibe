@@ -488,6 +488,8 @@ def partial_message(
     verified_origin: bool = True,
     stop_reason: str = "aborted",
 ) -> AssistantMessage:
+    if stop_reason in {"aborted", "error"}:
+        content = [block for block in content if not isinstance(block, ToolCallBlock)]
     return assistant_message(
         content,
         origin=origin,

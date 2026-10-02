@@ -120,6 +120,42 @@ def test_transform_keeps_normalized_tool_ids_unique_per_request() -> None:
     assert assistant.tool_calls[1].id == transformed.tool_call_id_map[colliding_safe_id]
 
 
+def test_transform_correlates_reused_tool_ids_by_turn() -> None:
+    origin = Origin("openai", "openai_chat", "model")
+    history = (
+        AssistantMessage(
+            content=(ToolCallBlock("reused", "read", {"turn": 1}),),
+            origin=origin,
+            stop_reason="tool_use",
+        ),
+        ToolResultMessage(
+            tool_call_id="reused",
+            tool_name="read",
+            content=(TextBlock(text="first"),),
+        ),
+        AssistantMessage(
+            content=(ToolCallBlock("reused", "read", {"turn": 2}),),
+            origin=origin,
+            stop_reason="tool_use",
+        ),
+        ToolResultMessage(
+            tool_call_id="reused",
+            tool_name="read",
+            content=(TextBlock(text="second"),),
+        ),
+    )
+
+    transformed = transform_messages(history, Origin("anthropic", "anthropic", "model"))
+    assistants = [message for message in transformed.messages if isinstance(message, AssistantMessage)]
+    results = [message for message in transformed.messages if isinstance(message, ToolResultMessage)]
+
+    assert len(assistants) == 2
+    assert len(results) == 2
+    assert assistants[0].tool_calls[0].id != assistants[1].tool_calls[0].id
+    assert results[0].tool_call_id == assistants[0].tool_calls[0].id
+    assert results[1].tool_call_id == assistants[1].tool_calls[0].id
+
+
 def test_empty_provider_custom_endpoints_have_distinct_origins() -> None:
     left = endpoint_origin(
         ModelEndpoint("openai_chat", "https://one.example/v1", "same-model", "token")

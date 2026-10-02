@@ -79,19 +79,30 @@ def transform_messages(
     id_map: dict[str, str] = {}
     used_tool_ids: set[str] = set()
     tool_id_occurrences: dict[str, int] = {}
+    pending_tool_ids: dict[str, list[str]] = {}
     transformed: list[Message] = []
 
     for message in messages:
         if isinstance(message, UserMessage):
+            pending_tool_ids.clear()
             transformed.append(_transform_user(message, supports_images=supports_images))
             continue
         if isinstance(message, ToolResultMessage):
+            pending = pending_tool_ids.get(message.tool_call_id)
+            if pending:
+                wire_id = pending.pop(0)
+                if not pending:
+                    pending_tool_ids.pop(message.tool_call_id, None)
+            else:
+                wire_id = id_map.get(
+                    message.tool_call_id,
+                    normalize_tool_call_id(message.tool_call_id, target_protocol),
+                )
             transformed.append(
                 _transform_tool_result(
                     message,
-                    id_map=id_map,
+                    tool_call_id=wire_id,
                     supports_images=supports_images,
-                    protocol=target_protocol,
                 )
             )
             continue
@@ -99,8 +110,10 @@ def transform_messages(
             transformed.append(message)
             continue
 
+        pending_tool_ids.clear()
         same_origin = message.origin == target
         content: list[AssistantContent] = []
+        turn_tool_ids: dict[str, list[str]] = {}
         for block in message.content:
             if isinstance(block, ThinkingBlock):
                 if block.redacted:
@@ -125,11 +138,11 @@ def transform_messages(
                     used_tool_ids=used_tool_ids,
                     occurrences=tool_id_occurrences,
                 )
-                # The canonical result map is keyed by the stored id. A
-                # duplicate stored id is not distinguishable in a later
-                # ToolResultMessage, so keep its first deterministic mapping
-                # and synthesize the unmatched duplicate below.
-                id_map.setdefault(block.id, normalized)
+                # Results are correlated to the pending calls in this turn.
+                # Keep the last occurrence in the public map for compatibility
+                # with callers that only have a stored id.
+                id_map[block.id] = normalized
+                turn_tool_ids.setdefault(block.id, []).append(normalized)
                 content.append(
                     ToolCallBlock(
                         id=normalized,
@@ -145,6 +158,8 @@ def transform_messages(
         # An aborted/error response is not a valid provider turn to replay.
         if message.stop_reason in {"aborted", "error"}:
             continue
+        for source_id, wire_ids in turn_tool_ids.items():
+            pending_tool_ids.setdefault(source_id, []).extend(wire_ids)
         transformed.append(
             AssistantMessage(
                 content=tuple(content),
@@ -155,7 +170,6 @@ def transform_messages(
             )
         )
 
-    transformed = _rewrite_result_ids(transformed, id_map)
     transformed = _insert_synthetic_results(transformed)
     return TransformResult(messages=tuple(transformed), tool_call_id_map=dict(id_map))
 
@@ -204,15 +218,11 @@ def _claim_tool_call_id(
 def _transform_tool_result(
     message: ToolResultMessage,
     *,
-    id_map: Mapping[str, str],
+    tool_call_id: str,
     supports_images: bool,
-    protocol: str,
 ) -> ToolResultMessage:
-    del protocol
     return ToolResultMessage(
-        tool_call_id=id_map.get(message.tool_call_id, normalize_tool_call_id(message.tool_call_id, "anthropic"))
-        if message.tool_call_id in id_map
-        else message.tool_call_id,
+        tool_call_id=tool_call_id,
         tool_name=message.tool_name,
         content=message.content if supports_images else _replace_images(message.content, tool=True),
         is_error=message.is_error,
@@ -228,23 +238,6 @@ def _replace_images(content: tuple[Any, ...], *, tool: bool) -> tuple[Any, ...]:
         else:
             result.append(block)
     return tuple(result)
-
-
-def _rewrite_result_ids(messages: list[Message], id_map: Mapping[str, str]) -> list[Message]:
-    result: list[Message] = []
-    for message in messages:
-        if isinstance(message, ToolResultMessage):
-            result.append(
-                ToolResultMessage(
-                    tool_call_id=id_map.get(message.tool_call_id, message.tool_call_id),
-                    tool_name=message.tool_name,
-                    content=message.content,
-                    is_error=message.is_error,
-                )
-            )
-        else:
-            result.append(message)
-    return result
 
 
 def _insert_synthetic_results(messages: list[Message]) -> list[Message]:

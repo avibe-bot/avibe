@@ -147,7 +147,7 @@ async def test_responses_sets_client_side_state_rules_and_keeps_reasoning_item()
         'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"enc"}}\n\n'
         'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1"}}\n\n'
         'data: {"type":"response.output_text.delta","output_index":1,"delta":"done"}\n\n'
-        'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":2,"output_tokens":4,"output_tokens_details":{"reasoning_tokens":1}}}}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","id":"rs_1","encrypted_content":"enc"},{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":2,"output_tokens":4,"output_tokens_details":{"reasoning_tokens":1}}}}\n\n'
     )
     captured: dict[str, Any] = {}
 
@@ -164,6 +164,7 @@ async def test_responses_sets_client_side_state_rules_and_keeps_reasoning_item()
     final = events[-1]
     assert isinstance(final, Done)
     assert final.message.content[0] == ThinkingBlock("plan", json.dumps({"id": "rs_1", "encrypted_content": "enc"}, separators=(",", ":")))
+    assert final.message.content[1] == TextBlock("done")
     assert final.message.usage == Usage(input_tokens=2, output_tokens=4, reasoning_tokens=1)
 
 
@@ -265,6 +266,25 @@ async def test_responses_failed_server_code_is_retryable_before_streaming() -> N
     assert isinstance(error, ProviderError)
     assert error.kind == "server"
     assert error.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_responses_failed_tool_start_is_not_replayed_in_partial() -> None:
+    body = (
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read"}}\n\n'
+        'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"upstream failed"}}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.partial is not None
+    assert error.partial.tool_calls == ()
 
 
 @pytest.mark.asyncio
@@ -425,7 +445,7 @@ async def test_gemini_carries_tool_thought_signature_and_usage() -> None:
     final = events[-1]
     assert isinstance(final, Done)
     assert final.message.tool_calls[0].signature == "opaque"
-    assert final.message.usage == Usage(input_tokens=7, output_tokens=4, reasoning_tokens=2)
+    assert final.message.usage == Usage(input_tokens=7, output_tokens=6, reasoning_tokens=2)
 
 
 @pytest.mark.asyncio
@@ -512,6 +532,26 @@ def test_gemini_merges_consecutive_tool_results_into_one_user_turn() -> None:
     assert len(payload["contents"]) == 1
     assert payload["contents"][0]["role"] == "user"
     assert len(payload["contents"][0]["parts"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_gemini_preserves_text_parts_around_tool_calls() -> None:
+    body = (
+        'data: {"candidates":[{"content":{"parts":[{"text":"before"},{"functionCall":{"name":"read","args":{"path":"x"}}},{"text":"after"}]}}]}\n\n'
+        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(GoogleAdapter(client), _request("google"))
+
+    final = events[-1]
+    assert isinstance(final, Done)
+    assert final.message.content[0] == TextBlock("before")
+    assert isinstance(final.message.content[1], ToolCallBlock)
+    assert final.message.content[2] == TextBlock("after")
 
 
 @pytest.mark.parametrize(

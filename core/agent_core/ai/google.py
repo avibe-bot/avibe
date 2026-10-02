@@ -495,7 +495,8 @@ def _gemini_usage(value: Any) -> Any:
 
     return Usage(
         input_tokens=_nonnegative(value.get("promptTokenCount")),
-        output_tokens=_nonnegative(value.get("candidatesTokenCount")),
+        output_tokens=_nonnegative(value.get("candidatesTokenCount"))
+        + _nonnegative(value.get("thoughtsTokenCount")),
         cache_read_tokens=_nonnegative(value.get("cachedContentTokenCount")),
         cache_write_tokens=0,
         reasoning_tokens=_nonnegative(value.get("thoughtsTokenCount")) if "thoughtsTokenCount" in value else None,
@@ -572,33 +573,33 @@ def _sanitize_schema(value: Any) -> Any:
 
 
 def _append_text(content: list[Any], value: str) -> list[Any]:
-    for index, block in enumerate(content):
-        if isinstance(block, TextBlock):
-            content[index] = TextBlock(text=(block.text or "") + value)
-            return content
+    if content and isinstance(content[-1], TextBlock):
+        content[-1] = TextBlock(text=(content[-1].text or "") + value)
+        return content
     content.append(TextBlock(text=value))
     return content
 
 
 def _append_thinking(content: list[Any], value: str, signature: str | None) -> list[Any]:
-    for index, block in enumerate(content):
-        if isinstance(block, ThinkingBlock):
-            content[index] = ThinkingBlock(text=block.text + value, signature=signature or block.signature)
-            return content
+    if content and isinstance(content[-1], ThinkingBlock):
+        block = content[-1]
+        content[-1] = ThinkingBlock(text=block.text + value, signature=signature or block.signature)
+        return content
     content.append(ThinkingBlock(text=value, signature=signature))
     return content
 
 
 def _set_thinking_signature(content: list[Any], signature: str) -> None:
-    for index, block in enumerate(content):
+    for index in range(len(content) - 1, -1, -1):
+        block = content[index]
         if isinstance(block, ThinkingBlock):
             content[index] = ThinkingBlock(text=block.text, signature=signature)
             return
 
 
 def _find(content: list[Any], kind: type[Any]) -> int:
-    for index, block in enumerate(content):
-        if isinstance(block, kind):
+    for index in range(len(content) - 1, -1, -1):
+        if isinstance(content[index], kind):
             return index
     return 0
 

@@ -693,7 +693,7 @@ def _apply_terminal_output_items(
                     if isinstance(part, Mapping)
                 )
                 state["text"] = text
-                _set_text(content, state["content_index"], text)
+                _replace_text(content, state["content_index"], text)
     return None
 
 
@@ -805,6 +805,11 @@ def _append_text(content: list[Any], value: str) -> list[Any]:
             return content
     content.append(TextBlock(text=value))
     return content
+
+
+def _replace_text(content: list[Any], index: int, value: str) -> None:
+    if 0 <= index < len(content) and isinstance(content[index], TextBlock):
+        content[index] = TextBlock(text=value)
 
 
 def _append_thinking(content: list[Any], value: str, output_index: int, reasoning: Mapping[int, Mapping[str, Any]]) -> list[Any]:
