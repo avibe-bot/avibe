@@ -154,6 +154,30 @@
           "default": false,
           "description": "True for reasoning the provider returned only in opaque form; `text` is empty and `signature` holds the payload."
         }
+      },
+      "if": {
+        "properties": {
+          "redacted": {
+            "const": true
+          }
+        },
+        "required": [
+          "redacted"
+        ]
+      },
+      "then": {
+        "required": [
+          "signature"
+        ],
+        "properties": {
+          "signature": {
+            "type": "string",
+            "minLength": 1
+          },
+          "text": {
+            "const": ""
+          }
+        }
       }
     },
     "ToolCallBlock": {

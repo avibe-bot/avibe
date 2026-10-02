@@ -132,7 +132,9 @@ continue in the background as an Avibe Watch; you get a follow-up message when t
 
 - stdin is closed; stdout and stderr are merged into the job's `output.log`; the tool follows the file for progress.
 - The tail is kept: `[Showing lines {start}-{end} of {total}. Full output: {path}]`, or with ` (50KB limit)` when the
-  byte cap applied, or `[Showing last {size} of line {n} (line is {size}). Full output: {path}]`.
+  byte cap applied, or `[Showing last {size} of line {n} (line is {size}). Full output: {path}]`. When the job's log
+  itself was bounded on disk (J4), `Full output:` becomes `Output log (middle omitted beyond {cap}):`, so no result
+  promises a complete file that does not exist.
 - Exit 0 is a normal result; otherwise an error result ending in `Command exited with code {code}`. `(no output)` when
   empty.
 - `timeout` kills the process tree: `Command timed out after {n} seconds`. Abort kills it: `Command aborted`.

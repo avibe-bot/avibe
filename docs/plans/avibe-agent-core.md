@@ -172,8 +172,9 @@ Rules:
 
 **Draft, not frozen.** The owner deferred the context-management decisions; this section is the working design and
 freezes before P3 together with those decisions. Open points recorded for that freeze: the occupancy baseline
-immediately after a checkpoint or edit, before any response exists; and capabilities of the served hop after a
-failover to a model with smaller limits.
+immediately after a checkpoint or edit, before any response exists; capabilities of the served hop after a failover
+to a model with smaller limits; the summarizer output cap on routes below 16K output tokens; restoring the environment
+block for a request issued right after a checkpoint inside a turn; and image cost in the estimate.
 
 Every rule names its origin in evaluation §4. One pure function, `project(rows, fork_point)`, builds every request,
 resume, fork, and the UI's "model view". Three tiers, cheapest first:
@@ -336,8 +337,9 @@ Properties; the test suites enumerate cases.
 - **A4 Bounded context.** A session with more than 10,000 messages keeps every request under its model's T.
   Compaction and clearing only insert rows. A fork anchored before a checkpoint projects the full original context.
   With a provider that always overflows, one request triggers at most two compactions and then a user-visible stop.
-- **A5 Egress.** With Model Hub configured, the only network destination during a run is the resolved `base_url`;
-  no telemetry, no vendor fallback from inside the agent.
+- **A5 Egress.** With Model Hub configured, every model call goes to the resolved `base_url`: the engine itself sends
+  no telemetry and never contacts a vendor directly. Network use by tools (`bash`, later MCP) is the tools' own and is
+  governed by tool and workspace policy, not by this criterion.
 - **A6 Surfaces.** The same turn produces equivalent user-visible outcomes on Workbench and on every IM platform in
   the Incus regression environment: progress, tool activity, final message, stop, questions, Watch follow-ups.
 - **A7 Registration.** Every backend list in the tree is either the catalog's set or the native-CLI subset defined in

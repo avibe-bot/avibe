@@ -25,7 +25,8 @@ activity panel can pair it with the result).
 ## 2. Writing
 
 - The loop is the only writer of a Session's `context_seq`, under a per-Session lock held across the transaction:
-  `next = max(context_seq of the Session in both tables) + 1`.
+  `next = max(context_seq of the Session in both tables, fork_source_context_seq if the Session is a fork) + 1`, so a
+  fork's first entry follows its inherited prefix.
 - Inputs already exist as rows when they are submitted. The loop sets `context_seq` and `content_json.model` on that
   row when it consumes the input, in the same transaction that commits the previous step if there is one.
 - A response row is inserted at `message_end` with both `content_json.model` and its rendered `content_text`.

@@ -17,6 +17,8 @@ class ModelEndpoint:            # built by the adapter layer from C-6 HopResolut
     token: str                  # never logged, never written to the transcript
     model_id: str               # the runtime model id to send
     request_headers: Mapping[str, str]
+    provider: str               # vendor identity of the hop (HopResolution.provider); with protocol and model it
+                                # forms the target origin for the cross-provider rules
 
 
 @dataclass(frozen=True)
