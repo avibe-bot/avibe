@@ -28,6 +28,20 @@ async def test_write_creates_parent_directories_and_keeps_bytes(tmp_path, make_c
     assert (tmp_path / "a/b/notes.txt").read_bytes() == "第一行\r\nsecond\n".encode()
 
 
+async def test_a_failed_edit_write_leaves_the_original_intact(tmp_path, make_ctx, monkeypatch):
+    (tmp_path / "f.txt").write_text("original\n")
+
+    def disk_full(fd):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(write_module.os, "fsync", disk_full)
+    result = await _edit(make_ctx, "f.txt", {"oldText": "original", "newText": "changed"})
+
+    assert (result.is_error, result_text(result)) == (True, "Could not edit file: f.txt. Error code: ENOSPC.")
+    assert (tmp_path / "f.txt").read_text() == "original\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["f.txt"]
+
+
 @pytest.mark.parametrize("existing", [True, False])
 async def test_a_failed_write_leaves_the_original_intact(tmp_path, make_ctx, monkeypatch, existing):
     if existing:

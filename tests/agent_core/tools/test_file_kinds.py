@@ -34,6 +34,8 @@ KINDS = [
     "dangling",
     "missing",
     "loop",
+    "under_file",
+    "in_locked_dir",
 ]
 NOT_REGULAR = {"fifo", "socket", "device", "link_device"}
 DIRECTORY = {"directory", "link_directory"}
@@ -85,6 +87,16 @@ def place(tmp_path):
             return "l"
         if kind == "missing":
             return "missing/sub/f"
+        if kind == "under_file":
+            (tmp_path / "f").write_text("hello\n")
+            return "f/x"
+        if kind == "in_locked_dir":
+            # A writable file in a directory this user cannot add to.
+            (tmp_path / "ro").mkdir()
+            (tmp_path / "ro" / "f").write_text("hello\n")
+            os.chmod(tmp_path / "ro", 0o555)
+            cleanups.append(lambda: os.chmod(tmp_path / "ro", 0o755))
+            return "ro/f"
         assert kind == "loop"
         (tmp_path / "l").symlink_to(tmp_path / "l2")
         (tmp_path / "l2").symlink_to(tmp_path / "l")
@@ -115,7 +127,7 @@ async def _run(tool, arguments, ctx, tmp_path):
 
 
 def _cases(kinds):
-    return [pytest.param(kind, marks=NOT_ROOT) if kind == "unreadable" else kind for kind in kinds]
+    return [pytest.param(kind, marks=NOT_ROOT) if kind in ("unreadable", "in_locked_dir") else kind for kind in kinds]
 
 
 @pytest.mark.parametrize("kind", _cases(KINDS))
@@ -124,11 +136,12 @@ async def test_read_has_a_defined_result_for_every_kind(tmp_path, make_ctx, plac
 
     result = await _run(ReadTool(), {"path": path}, make_ctx(), tmp_path)
 
-    if kind in ("regular", "read_only", "link_regular"):
+    if kind in ("regular", "read_only", "link_regular", "in_locked_dir"):
         assert (result.is_error, result_text(result)) == (False, "hello\n")
         return
     reason = {
         "unreadable": "permission denied",
+        "under_file": "not a directory",
         "loop": "too many levels of symbolic links",
         **dict.fromkeys(DIRECTORY, "it is a directory"),
         **dict.fromkeys(NOT_REGULAR, "it is not a regular file"),
@@ -140,13 +153,23 @@ async def test_read_has_a_defined_result_for_every_kind(tmp_path, make_ctx, plac
 @pytest.mark.parametrize("kind", _cases(KINDS))
 async def test_write_has_a_defined_result_for_every_kind(tmp_path, make_ctx, place, kind):
     path = place(kind)
-    before = os.lstat(path if os.path.isabs(path) else tmp_path / path).st_mode if kind not in ABSENT else None
+    before = (
+        os.lstat(path if os.path.isabs(path) else tmp_path / path).st_mode
+        if kind not in ABSENT | {"under_file"}
+        else None
+    )
 
     result = await _run(WriteTool(), {"path": path, "content": "new\n"}, make_ctx(), tmp_path)
 
-    if kind in ("regular", "link_regular", "dangling", "missing"):
+    if kind in ("regular", "link_regular", "dangling", "missing", "in_locked_dir"):
         assert (result.is_error, result_text(result)) == (False, f"Successfully wrote to {path}")
-        target = {"regular": "f", "link_regular": "f", "dangling": "missing/f", "missing": "missing/sub/f"}[kind]
+        target = {
+            "regular": "f",
+            "link_regular": "f",
+            "dangling": "missing/f",
+            "missing": "missing/sub/f",
+            "in_locked_dir": "ro/f",  # written in place: the only non-atomic case
+        }[kind]
         assert (tmp_path / target).read_text() == "new\n"
         if kind in ("link_regular", "dangling"):
             assert (tmp_path / path).is_symlink()
@@ -154,13 +177,15 @@ async def test_write_has_a_defined_result_for_every_kind(tmp_path, make_ctx, pla
     reason = {
         "read_only": "permission denied",
         "unreadable": "permission denied",
+        "under_file": "not a directory",
         "loop": "too many levels of symbolic links",
         **dict.fromkeys(DIRECTORY, "it is a directory"),
         **dict.fromkeys(NOT_REGULAR, "it is not a regular file"),
     }[kind]
     assert (result.is_error, result_text(result)) == (True, f"Cannot write {path}: {reason}.")
     # Nothing that is not a writable regular file is ever replaced.
-    assert os.lstat(path if os.path.isabs(path) else tmp_path / path).st_mode == before
+    if before is not None:
+        assert os.lstat(path if os.path.isabs(path) else tmp_path / path).st_mode == before
     if kind == "read_only":
         assert (tmp_path / "f").read_text() == "hello\n"
 
@@ -172,15 +197,16 @@ async def test_edit_has_a_defined_result_for_every_kind(tmp_path, make_ctx, plac
 
     result = await _run(EditTool(), arguments, make_ctx(), tmp_path)
 
-    if kind in ("regular", "link_regular"):
+    if kind in ("regular", "link_regular", "in_locked_dir"):
         assert (result.is_error, result_text(result)) == (False, f"Successfully replaced 1 block(s) in {path}.")
-        assert (tmp_path / "f").read_text() == "bye\n"
+        assert (tmp_path / ("ro/f" if kind == "in_locked_dir" else "f")).read_text() == "bye\n"
         assert (tmp_path / path).is_symlink() == (kind == "link_regular")
         return
     detail = {
         "read_only": "Error code: EACCES.",
         "unreadable": "Error code: EACCES.",
         "loop": "Error code: ELOOP.",
+        "under_file": "Error code: ENOTDIR.",
         **dict.fromkeys(DIRECTORY, "Error code: EISDIR."),
         **dict.fromkeys(NOT_REGULAR, "It is not a regular file."),
         **dict.fromkeys(ABSENT, "Error code: ENOENT."),
