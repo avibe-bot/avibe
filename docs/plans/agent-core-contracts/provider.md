@@ -32,14 +32,17 @@ class ModelRequest:
 
 `stream` yields `ProviderEvent`s (`provider-event.schema.json`) and always ends with exactly one `done` or one
 `error`. `done.message` is the complete canonical `AssistantMessage`; its `origin` comes from the served-hop report
-(C-6), falling back to the endpoint only when no report exists.
+(C-6). On the direct channel (no gateway) the endpoint is the served hop. When a gateway response carries no
+served-hop report, the origin is unverified: the adapter commits the message with every thinking `signature` set to
+`null` and redacted thinking dropped, keeping the endpoint as `origin`, so no opaque payload of an unknown vendor can
+ever be replayed. A thinking block without a signature is always sent as plain text (`cross-provider.md`).
 
 Error classification is part of the contract because the loop branches on it:
 
 | `kind` | Meaning | Loop action |
 | --- | --- | --- |
 | `overflow` | the request exceeded the model's context (Pi's overflow patterns, HTTP 413, `context_length_exceeded`) | overflow recovery (plan §5.2) |
-| `rate_limit`, `overloaded`, `network`, `server` | transient | retry with backoff, honoring `retry_after_s` |
+| `rate_limit`, `overloaded`, `network`, `server` | transient | retry with backoff, honoring `retry_after_s`, only when nothing was streamed (no deltas, no `partial`); after streamed output the error is terminal for the request, matching Model Hub's first-byte rule |
 | `auth`, `invalid_request` | not retryable | end the run with the error |
 | `aborted` | cancelled by the caller | end the run as aborted |
 | `unknown` | anything else | end the run with the error |

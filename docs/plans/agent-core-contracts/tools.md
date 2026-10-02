@@ -164,9 +164,19 @@ first steps are usually no-ops; for the future `pty` backend they are required.
 | `hand_over(job_id)` → `watch_id` | yes | register a once Watch with target kind `job` |
 | `send(job_id, keys)`, `screen(job_id)`, `resize(job_id, cols, rows)`, `attach_info(job_id)` | reserved | `pty` backend (plan §5.4) |
 
-Job directory: `<state>/agent_core/jobs/<job_id>/` with `meta.json`, `output.log`, and `exit` (written by the wrapper
-through a temporary file and rename). Metadata is written before the spawn, so a crash can never leave a running job
-that no record names. Directories of finished jobs whose Watch, if any, has settled are removed after 7 days.
+Job directory: `<state>/agent_core/jobs/<job_id>/` with `meta.json`, `pid`, `output.log`, and `exit`. Order of
+writes, so a crash at any point leaves a recoverable state:
+
+1. `meta.json` (without process identity) before the spawn.
+2. The wrapper's first action, before it runs the command: write its own pid (equal to the job's process group) to
+   `pid` through a temporary file and rename. The command starts only after `pid` is durable.
+3. `exit` through a temporary file and rename when the command ends.
+
+Recovery reads them in reverse: `exit` present → exited; `pid` present and that process alive with a matching
+identity (pid plus process start time, as `core/process_isolation.py` verifies) → running; `pid` present but no live
+matching process and no `exit` → gone; no `pid` → the command never ran, so the tool call gets the synthetic
+interrupted result. `meta.json.process` caches the identity once observed. Directories of finished jobs whose Watch, if
+any, has settled are removed after 7 days.
 
 ## 8. Environment section
 

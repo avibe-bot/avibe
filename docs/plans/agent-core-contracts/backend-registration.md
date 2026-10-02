@@ -34,5 +34,9 @@ classifies every hit.
 
 ## 4. Test
 
-One contract test: every backend list in the tree is exactly one of the two sets from the catalog. A new literal list
+One contract test over declarations that stand for a whole universe: each must equal one of the two catalog sets.
+Capability-specific sets that are legitimately different, such as `core/handlers/model_hub/events.py`'s
+`EventAgent` (agent backends plus `system`) or the two-vendor credential set in
+`core/handlers/model_hub/migration.py`, are listed in the test with their classification (subset or superset of which
+set, and why); they are checked for staying inside that relation, not for equality. An unclassified new literal list
 fails the test until it imports a set or is classified.

@@ -155,8 +155,9 @@ Rules:
   interrupted result.
 - Write path: the adapter commits the context row first, then hands that row to the dispatcher for delivery; the
   dispatcher must not persist it again. Display rendering (media rewrite, quick replies, citations) fills
-  `content_text` and display keys of the same row.
-- Fork reuses the existing fork metadata (`source_session_id`, `source_message_id`). The child's context is the parent
+  `content_text` and display keys of the same row. The row carries a pending delivery state committed with it, so a
+  crash between commit and delivery re-delivers instead of losing or regenerating the reply (C-5).
+- Fork reuses the existing fork metadata (`fork_source_session_id`, `fork_source_message_id`). The child's context is the parent
   chain's rows with `context_seq` up to the anchor's, then the child's own rows. Nothing is copied. Scopes with
   history are dismissed, never deleted, so a parent's prefix cannot disappear from under a child.
 - Compaction and clearing append rows; they never rewrite or delete. A fork anchored before a checkpoint sees the
@@ -252,8 +253,9 @@ the normalized edit tier, and streaming, bounded output with spill.
 owners after it starts, so every command gets a portable handle from its first moment and never has to move.
 
 - **Job handle.** Every `bash` call starts a job: a one-line `sh` wrapper in its own session runs the command,
-  stdout and stderr go to `<state>/agent_core/jobs/<job_id>/output.log`, and the exit code is written atomically to
-  `exit`. `meta.json` holds the process identity, command, cwd, and start time (`job.schema.json`). No process holds a
+  stdout and stderr go to `<state>/agent_core/jobs/<job_id>/output.log`, the wrapper records its own pid before it
+  runs the command, and the exit code is written atomically to `exit`. `meta.json` holds the command, cwd, and cached
+  process identity (`job.schema.json`; write order in C-7). No process holds a
   pipe to the job, so any holder of the id can read it, wait on it, or kill it. Prototype results: evaluation §5.
 - **Foreground** waits on the handle: the tool tails `output.log` for live progress and Pi's truncation, and
   returns when `exit` appears.

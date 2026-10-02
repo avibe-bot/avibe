@@ -25,15 +25,20 @@ is C-7.
 
 ```text
 commit input → loop:
-    before_model hooks → provider stream (events out) → commit assistant message
-    if the message has tool calls:
+    before_model hooks → provider stream (events out)
+    if the response has tool calls:
+        commit it as `assistant`
         for each call, in order: before_tool → execute → after_tool → commit tool result
         drain steers (commit each) → continue loop
-    else:
-        drain steers; if any were committed → continue loop
-        if a follow-up is queued → commit it → continue loop
-        end
+    else, holding the queue lock:
+        if a steer or follow-up is pending: commit the response as `assistant`, commit the pending inputs,
+            release the lock → continue loop
+        else: commit the response as `result` (final) and close the queues for this run, release the lock → end
 ```
+
+Finality is decided before the response row is inserted, so a `result` row is always the run's last response. A
+steer that arrives after the queues closed is refused by the running Turn, and Avibe's delivery falls back to the P3
+queue, which starts the next run.
 
 Tool calls in one response execute sequentially in call order in v1; results are always committed in call order.
 

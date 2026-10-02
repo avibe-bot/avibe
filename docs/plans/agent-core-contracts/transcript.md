@@ -33,6 +33,11 @@ activity panel can pair it with the result).
   `context_seq`.
 - Each commit is one SQLite transaction. The adapter delivers a row to surfaces only after it commits; the
   dispatcher does not persist it again.
+- **Output outbox.** An `assistant` or `result` row is committed with `metadata_json.delivery = {"state":
+  "pending"}` in the same transaction. After the surface accepts it, the adapter sets `{"state": "delivered"}` with
+  the platform receipt (`native_message_id` where the platform returns one). At startup, and before a Session
+  resumes, the adapter re-delivers its `pending` rows in `context_seq` order; delivery is idempotent per row id, so a
+  crash between commit and dispatch neither loses nor regenerates the response.
 
 ## 3. Projection
 
@@ -50,7 +55,9 @@ activity panel can pair it with the result).
 
 ## 4. Fork
 
-The child Session's `metadata.fork` already records `source_session_id` and `source_message_id`.
+The child Session's metadata already records its parent as top-level keys `fork_source_session_id` and
+`fork_source_message_id` (written by `reserve_forked_session`, read by `fork_metadata_from_session_metadata` in
+`core/services/session_fork.py`); C-5 reads those keys and adds no new fork shape.
 
 - `anchor_seq` = the largest `context_seq` in the source Session among rows at or before the anchor message in
   transcript order (the anchor itself may be a display-only row).

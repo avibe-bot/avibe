@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "agent-core/job.schema.json",
   "title": "JobMeta",
-  "description": "C-7 `meta.json` of a job handle (tools.md section 7). Written by the adapter's JobHost before the spawn and updated once with the process identity after it; read by the tool, Watch target kind `job`, projection (to settle open tool calls), and `vibe stop`. Persisted shape.",
+  "description": "C-7 `meta.json` of a job handle (tools.md section 7). Written by the adapter's JobHost before the spawn. The authoritative proof that the command may have started is the `pid` file the wrapper writes before running it; `process` caches the identity derived from it. Read by the tool, Watch target kind `job`, projection (to settle open tool calls), and `vibe stop`. Persisted shape.",
   "type": "object",
   "required": [
     "version",
@@ -62,7 +62,7 @@
         "object",
         "null"
       ],
-      "description": "Null until the wrapper is spawned. Mirrors PersistedProcessIdentity (core/process_isolation.py) plus the process group, so termination can verify the pid was not recycled.",
+      "description": "Null until observed. Derived from the wrapper's `pid` file and the process start time, mirroring PersistedProcessIdentity (core/process_isolation.py) plus the process group, so termination can verify the pid was not recycled.",
       "required": [
         "pid",
         "pgid",
