@@ -213,14 +213,23 @@ def _end_by_archive(store: ManagedWatchStore, watch_id: str) -> None:
     _archive_session()
 
 
+def _end_by_new(store: ManagedWatchStore, watch_id: str) -> None:
+    # ``/new``'s hard delete: the Session's Watches are paused and its row removed, in one transaction.
+    with SQLiteBackgroundTaskStore().engine.begin() as conn:
+        reclaim_bound_definitions(conn, SESSION_ID, mode="pause")
+        conn.execute(agent_sessions.delete().where(agent_sessions.c.id == SESSION_ID))
+    watches_module._publish_watch_definitions_updated()
+
+
 @pytest.mark.parametrize(
     ("end", "reason"),
     [
         (_end_by_remove, "watch_removed"),
         (_end_by_pause, "watch_disabled"),
         (_end_by_archive, "session_archived"),
+        (_end_by_new, "watch_disabled"),
     ],
-    ids=["remove", "pause", "archive"],
+    ids=["remove", "pause", "archive", "new"],
 )
 def test_ending_ownership_kills_the_job_process_tree(tmp_path: Path, end, reason: str) -> None:
     child_pid_file = tmp_path / "child.pid"
