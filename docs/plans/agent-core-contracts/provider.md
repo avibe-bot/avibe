@@ -20,6 +20,21 @@ class ModelEndpoint:            # built by the adapter layer from C-6 HopResolut
 
 
 @dataclass(frozen=True)
+class ModelCapabilities:      # from C-6 HopResolution; None means Model Hub does not know
+    context_window: int | None
+    input_limit: int | None
+    max_output_tokens: int | None
+    supports_tools: bool | None
+    supports_images: bool | None
+    supports_reasoning: bool | None
+    reasoning_efforts: tuple[str, ...]
+
+
+class MediaLoader(Protocol):   # supplied by the adapter; reads media_objects
+    async def load(self, media_token: str) -> tuple[bytes, str]: ...   # bytes, mime type
+
+
+@dataclass(frozen=True)
 class ModelRequest:
     endpoint: ModelEndpoint
     system: str
@@ -28,11 +43,17 @@ class ModelRequest:
     max_tokens: int
     reasoning_effort: str | None         # one of the hop's declared efforts, or None
     cache: Literal["default", "none"]    # "none" for the compaction summarizer
+    supports_images: bool                # resolved by the loop; unknown capability counts as False
 ```
+
+The loop's `ModelRouter` returns the `ModelEndpoint` together with its `ModelCapabilities`; the loop uses them for
+the request (`max_tokens`, `supports_images`) and context management (C-9). Adapters are constructed with a
+`MediaLoader` and resolve each `ImageBlock`'s bytes at request time; the canonical message never carries bytes.
 
 `stream` yields `ProviderEvent`s (`provider-event.schema.json`) and always ends with exactly one `done` or one
 `error`. `done.message` is the complete canonical `AssistantMessage`; its `origin` comes from the served-hop report
-(C-6). On the direct channel (no gateway) the endpoint is the served hop. When a gateway response carries no
+(C-6), which the gateway sends as the `x-avibe-served-hop` response header: compact JSON with exactly `provider`,
+`api`, `model`, before the first model byte. On the direct channel (no gateway) the endpoint is the served hop. When a gateway response carries no
 served-hop report, the origin is unverified: the adapter commits the message with every thinking `signature` set to
 `null` and redacted thinking dropped, keeping the endpoint as `origin`, so no opaque payload of an unknown vendor can
 ever be replayed. A thinking block without a signature is always sent as plain text (`cross-provider.md`).

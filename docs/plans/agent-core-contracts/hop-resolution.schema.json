@@ -4,31 +4,116 @@
   "title": "HopResolution",
   "description": "C-6 answer to 'how should the avibe backend call model M now'. Produced by Model Hub; consumed by the adapter, which builds C-2 ModelEndpoint from it. The token is in-memory only.",
   "type": "object",
-  "required": ["backend", "requested_model", "protocol", "base_url", "token", "runtime_model", "source_id", "provider", "capabilities"],
+  "required": [
+    "backend",
+    "requested_model",
+    "protocol",
+    "base_url",
+    "token",
+    "runtime_model",
+    "source_id",
+    "provider",
+    "capabilities"
+  ],
   "additionalProperties": false,
   "properties": {
-    "backend": { "const": "avibe" },
-    "requested_model": { "type": "string", "description": "Caller-facing model id from the Avibe Agent settings." },
-    "protocol": { "$ref": "message.schema.json#/definitions/Protocol", "description": "Native protocol of the primary hop." },
-    "base_url": { "type": "string", "format": "uri", "description": "Gateway frontend for `protocol`." },
-    "token": { "type": "string" },
-    "runtime_model": { "type": "string", "description": "Model id to put in the request." },
-    "source_id": { "type": "string" },
-    "provider": { "type": "string", "description": "Vendor identity of the primary hop; becomes `origin.provider` unless the served-hop report differs." },
-    "request_headers": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Correlation metadata the gateway needs (today's gateway_request_metadata)." },
+    "backend": {
+      "const": "avibe"
+    },
+    "requested_model": {
+      "type": "string",
+      "description": "Caller-facing model id from the Avibe Agent settings."
+    },
+    "protocol": {
+      "$ref": "message.schema.json#/definitions/Protocol",
+      "description": "Native protocol of the primary hop."
+    },
+    "base_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Gateway frontend for `protocol`."
+    },
+    "token": {
+      "type": "string"
+    },
+    "runtime_model": {
+      "type": "string",
+      "description": "Model id to put in the request."
+    },
+    "source_id": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string",
+      "description": "Vendor identity of the primary hop; becomes `origin.provider` unless the served-hop report differs."
+    },
+    "request_headers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Correlation metadata the gateway needs (today's gateway_request_metadata)."
+    },
     "capabilities": {
       "type": "object",
-      "required": ["context_window", "max_output_tokens", "supports_tools", "supports_images", "supports_reasoning", "reasoning_efforts"],
+      "required": [
+        "context_window",
+        "max_output_tokens",
+        "supports_tools",
+        "supports_images",
+        "supports_reasoning",
+        "reasoning_efforts"
+      ],
       "additionalProperties": false,
       "properties": {
-        "context_window": { "type": "integer", "minimum": 1 },
-        "input_limit": { "type": ["integer", "null"], "minimum": 1, "description": "When the provider caps input separately from the window." },
-        "max_output_tokens": { "type": "integer", "minimum": 1 },
-        "supports_tools": { "type": "boolean" },
-        "supports_images": { "type": "boolean" },
-        "supports_reasoning": { "type": "boolean" },
-        "reasoning_efforts": { "type": "array", "items": { "type": "string" } }
-      }
+        "context_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "input_limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "When the provider caps input separately from the window."
+        },
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "supports_tools": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "supports_images": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "supports_reasoning": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reasoning_efforts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "Null means Model Hub does not know the value; it never guesses. supports_images is null when the model declares no input modalities."
     }
   },
   "examples": [
@@ -49,7 +134,12 @@
         "supports_tools": true,
         "supports_images": true,
         "supports_reasoning": true,
-        "reasoning_efforts": ["low", "medium", "high", "xhigh"]
+        "reasoning_efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
       }
     }
   ]

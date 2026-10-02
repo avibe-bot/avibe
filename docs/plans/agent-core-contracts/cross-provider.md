@@ -10,7 +10,7 @@ cross-provider history tests (MIT).
 | Thinking block with `signature` | replayed verbatim with its signature | converted to plain assistant text; the signature is dropped |
 | Thinking block, `redacted: true` | replayed verbatim | dropped |
 | Thinking block without `signature` (unverified origin, C-2) | sent as plain assistant text | sent as plain assistant text |
-| Tool call | kept; `id` as stored | kept; `id` normalized to the target's rules (below) |
+| Tool call | kept; `id` and `signature` as stored | kept without `signature`; `id` normalized to the target's rules (below) |
 | Tool result | kept | `tool_call_id` rewritten through the same id map |
 | Image in a user or tool-result message | kept | kept if the target model accepts images, else `[image: <name or mime>]` |
 

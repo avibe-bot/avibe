@@ -36,8 +36,8 @@ activity panel can pair it with the result).
 - **Output outbox.** An `assistant` or `result` row is committed with `metadata_json.delivery = {"state":
   "pending"}` in the same transaction. After the surface accepts it, the adapter sets `{"state": "delivered"}` with
   the platform receipt (`native_message_id` where the platform returns one). At startup, and before a Session
-  resumes, the adapter re-delivers its `pending` rows in `context_seq` order; delivery is idempotent per row id, so a
-  crash between commit and dispatch neither loses nor regenerates the response.
+  resumes, the adapter re-delivers its `pending` rows in `context_seq` order. Nothing is lost or regenerated;
+  duplicates are possible on IM in one window ([`recovery.md`](recovery.md) §Delivery).
 
 ## 3. Projection
 
@@ -46,11 +46,12 @@ activity panel can pair it with the result).
 1. Collect the context rows: the Session's own, plus its fork ancestry (§4).
 2. Order by `context_seq`.
 3. If a `context_compaction` row exists, take the latest; the context becomes its checkpoint message followed by the
-   rows with `context_seq >= first_kept_seq`, excluding older checkpoints and `agent_state` rows.
+   rows with `context_seq >= first_kept_seq`, excluding every `context_compaction` row (including the selected one)
+   and `agent_state` rows.
 4. Apply `context_edit` rows: the latest edit per target replaces that tool result's content with its placeholder.
-5. Settle tool calls without a result: if the call's job exists (C-7), its current status becomes the result
-   ("still running, now Watch …" or its final output); otherwise the synthetic interrupted result from
-   `cross-provider.md`.
+5. Answer any tool call that still has no committed result with the synthetic interrupted result from
+   `cross-provider.md`. Projection never consults a live job; resume settles open calls durably first
+   ([`recovery.md`](recovery.md)).
 6. Prepend the rebuilt system prompt and rehydrated state (plan §5.2); these are not rows.
 
 ## 4. Fork

@@ -10,7 +10,7 @@ class Agent:
     def __init__(self, *, models: ModelRouter, tools: Sequence[Tool], hooks: Sequence[Hooks],
                  store: TranscriptStore, jobs: JobHost) -> None: ...
 
-    def run(self, input: Message) -> AsyncIterator[AgentEvent]: ...   # one Avibe Turn
+    def run(self, input: Input, *, turn_id: str) -> AsyncIterator[AgentEvent]: ...   # one Avibe Turn
     def steer(self, message: Message) -> None: ...
     def follow_up(self, message: Message) -> None: ...
     def abort(self, reason: str) -> None: ...
@@ -18,8 +18,10 @@ class Agent:
     def snapshot(self) -> Snapshot: ...
 ```
 
-`ModelRouter` returns the `ModelEndpoint` for the next call (C-6 via the adapter); `TranscriptStore` is C-5; `JobHost`
-is C-7.
+`Input` pairs a `UserMessage` with its `messages.id` row. `ModelRouter` returns the `ModelEndpoint` and
+`ModelCapabilities` for the next call (C-2, C-6 via the adapter); `TranscriptStore` is C-5; `JobHost` is C-7. The loop
+wraps the given `JobHost` (`Agent.jobs`) to track foreground jobs for `abort`; tools are constructed with that
+wrapper.
 
 ## 2. One run
 
@@ -77,7 +79,7 @@ sent with that request gets the error result `Tool <name> is not available.`
 
 ## 6. Agent events (C-4)
 
-`run()` yields `agent-event.schema.json` events. The adapter maps them onto existing Avibe concepts; no new UI nouns.
+`run()` yields `agent-event.schema.json` events, keyed by `turn_id`. The adapter maps them onto existing Avibe concepts; no new UI nouns.
 
 | Event | Avibe effect |
 | --- | --- |

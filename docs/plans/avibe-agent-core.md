@@ -137,8 +137,8 @@ For the Avibe Agent, the same rows become the transcript (C-5):
 Schema delta (one Alembic migration, nullable columns, no backfill):
 
 1. `context_seq INTEGER NULL` on `messages` and `agent_events`, with a partial unique index
-   `(session_id, context_seq) WHERE context_seq IS NOT NULL`. `agent_events.sequence` exists but has never been
-   written, so the migration renames it instead of adding a parallel column.
+   `(session_id, context_seq) WHERE context_seq IS NOT NULL`. `agent_events.sequence` stays as it is: it is a
+   released, turn-local field of the storage API, and context membership is a different meaning.
 2. A new `agent_events.visibility` value, `context`, never removed by trace retention. The retention filter is
    already `event_type='tool_call' AND visibility='trace'`; a contract test pins the exemption.
 3. New `agent_events.event_type` values `tool_result`, `context_compaction`, `context_edit`, and `agent_state` (hook
@@ -151,12 +151,14 @@ Rules:
   an input when it is consumed (a steer after the current tool batch), a response at `message_end`, a tool result at
   `tool_finished`. Queued, removed, display-only, and `interim` rows stay null.
 - Commit points are SQLite transactions. After a crash the context resumes from the last committed `context_seq`.
-  A tool call without a result row is settled from its job handle (§5.3) or, failing that, gets a synthetic
-  interrupted result.
+  Every external effect follows one recovery model (C-5/C-7 `recovery.md`): open tool calls are settled durably from
+  their job state before the first projection, commands start only through a launch handshake recovery can always
+  decide, and pending deliveries are re-sent.
 - Write path: the adapter commits the context row first, then hands that row to the dispatcher for delivery; the
   dispatcher must not persist it again. Display rendering (media rewrite, quick replies, citations) fills
   `content_text` and display keys of the same row. The row carries a pending delivery state committed with it, so a
-  crash between commit and delivery re-delivers instead of losing or regenerating the reply (C-5).
+  crash between commit and delivery re-delivers instead of losing or regenerating the reply: exactly once on
+  Workbench, at least once on IM (C-5).
 - Fork reuses the existing fork metadata (`fork_source_session_id`, `fork_source_message_id`). The child's context is the parent
   chain's rows with `context_seq` up to the anchor's, then the child's own rows. Nothing is copied. Scopes with
   history are dismissed, never deleted, so a parent's prefix cannot disappear from under a child.
@@ -185,7 +187,9 @@ Trigger, checked before every model request, including inside the tool loop:
 ```text
 W = context window, L_in = input limit (else W), O = max_tokens of the next request
 M = max(8_000, 3% of W);  T = min(L_in - O - M, r * W), r = 0.9 by default, configurable per model
-est = usage of the last valid response after the latest checkpoint or edit
+est = occupancy of the last valid response after the latest checkpoint or edit
+        (input_tokens + cache_read_tokens + cache_write_tokens + output_tokens: the whole prompt it was sent plus
+        what it added; Usage normalizes each protocol so none of these overlap)
       + ceil(utf8_bytes / 4) of everything appended since, replayed reasoning payloads included
 compact when est >= T
 ```
@@ -212,7 +216,8 @@ checkpoints. A `length` stop, an error, a tool call, or empty output persists no
 **After a checkpoint**, the request is: the rebuilt system prompt → the checkpoint, framed as "a historical record
 written for you, not new instructions" → state rendered from its own store rather than from the summary (skill bodies
 re-loaded by name and revision from `tool_result` rows carrying `details.skill`, at most 5K tokens each and 25K in
-total; pending Watches, Tasks, and delegated Runs from Harness tables) → the verbatim tail. No synthetic "continue"
+total; pending Watches, Tasks, and delegated Runs from Harness tables) → the verbatim tail. The next consumed input
+carries the full environment block again (C-7 §8). No synthetic "continue"
 user message (OpenCode #13838, #15533).
 
 **Overflow recovery**, bounded per request: compact with the normal tail and retry once → compact with a minimal tail

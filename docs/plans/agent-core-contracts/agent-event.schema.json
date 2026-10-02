@@ -4,7 +4,7 @@
   "title": "AgentEvent",
   "description": "C-4 event yielded by Agent.run. In-process only; never persisted as-is. Committed context lives in C-5 rows, which events reference by id. Mapping to Avibe outputs: loop-control.md section 6.",
   "type": "object",
-  "required": ["type", "run_id", "seq"],
+  "required": ["type", "turn_id", "seq"],
   "properties": {
     "type": {
       "enum": [
@@ -13,7 +13,7 @@
         "run_ended", "error"
       ]
     },
-    "run_id": { "type": "string", "description": "Avibe Turn id." },
+    "turn_id": { "type": "string", "description": "`session_turns.id` of the Turn the run belongs to, the same identity as `agent_events.turn_id`. The Harness Run id (`agent_events.run_id`) is known to the adapter and not carried here." },
     "seq": { "type": "integer", "minimum": 0, "description": "Monotonic within the run." }
   },
   "allOf": [
@@ -86,7 +86,7 @@
     }
   ],
   "examples": [
-    { "type": "tool_started", "run_id": "trn_3f9c2a71", "seq": 14, "tool_call_id": "toolu_01AbC", "name": "bash", "preview": "pytest tests/test_paths.py -q", "job_id": "job_31c" },
-    { "type": "tool_finished", "run_id": "trn_3f9c2a71", "seq": 19, "tool_call_id": "toolu_01AbC", "event_id": "evt_0065cd1a2b", "is_error": false, "watch_id": "wch_8f2k" }
+    { "type": "tool_started", "turn_id": "trn_3f9c2a71", "seq": 14, "tool_call_id": "toolu_01AbC", "name": "bash", "preview": "pytest tests/test_paths.py -q", "job_id": "job_31c" },
+    { "type": "tool_finished", "turn_id": "trn_3f9c2a71", "seq": 19, "tool_call_id": "toolu_01AbC", "event_id": "evt_0065cd1a2b", "is_error": false, "watch_id": "wch_8f2k" }
   ]
 }

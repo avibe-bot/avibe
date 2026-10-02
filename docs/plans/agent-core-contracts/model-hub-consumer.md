@@ -18,14 +18,16 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
 1. **`google` protocol.** Gemini `generateContent` / `streamGenerateContent` joins the protocol vocabulary and gets a
    gateway frontend under the backend prefix.
 2. **Backend id `avibe`** in every Model Hub enum that lists backends (C-8).
-3. **Hop resolution** for the `avibe` backend returns `HopResolution` (`hop-resolution.schema.json`): the primary
-   hop's protocol, the gateway URL for that protocol, the token, the runtime model, and capabilities including the
-   input limit and image support. The agent resolves once per run and again after a retryable error.
-4. **Served-hop report.** For every response, the agent learns which hop actually served it (`provider`, `api`,
-   `model`) before it commits the response. It records that as the message `origin` (C-1), so a signature is never
-   replayed into a different vendor after a failover. The report comes from the same attempt Model Hub records as
-   `TurnProvenance.served`. Delivery options, chosen by the Model Hub lane: response headers sent with the first
-   output byte, or a lookup of the request's served attempt through the internal API by its correlation metadata.
+3. **Hop resolution** for the `avibe` backend returns `HopResolution` (`hop-resolution.schema.json`) through the Model
+   Hub runtime router: the primary hop's protocol, the gateway URL for that protocol, the token, the runtime model,
+   and capabilities. A capability Model Hub does not know is `null`, never guessed; `input_limit` is `null` until Model
+   Hub stores one. The agent treats unknown values conservatively (C-2). It resolves once per run and again after a
+   retryable error.
+4. **Served-hop report.** Every gateway response for `avibe` carries `x-avibe-served-hop`: compact, ASCII-escaped JSON
+   with exactly `provider`, `api`, `model`, taken from the winning attempt (Source vendor, Source protocol, upstream
+   target) and sent before the first model byte. The gateway does not commit early keepalive headers for `avibe`;
+   other backends are unchanged. The same origin is recorded on `TurnProvenance.served`. An `api` different from the
+   frontend protocol means the gateway converted. The agent records it as the message `origin` (C-1).
 5. **Conversion stays a fallback.** The agent speaks the primary hop's protocol. When failover reaches a hop with
    another protocol, the gateway converts (degraded, not broken) and the served-hop report says so.
 

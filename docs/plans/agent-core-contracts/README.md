@@ -14,6 +14,7 @@ on it fork; after that, a change needs orchestrator approval and lands here firs
 | C-6 | Model Hub consumer extension | Model Hub → adapter | [`model-hub-consumer.md`](model-hub-consumer.md), [`hop-resolution.schema.json`](hop-resolution.schema.json) | P1 |
 | C-7 | Tools, output governance, job handle | `tools` → `agent`, adapter | [`tools.md`](tools.md), [`job.schema.json`](job.schema.json) | P1 |
 | C-8 | Backend registration | catalog → every backend list | [`backend-registration.md`](backend-registration.md) | P2 |
+| C-5, C-7 | Recovery model: intents, outcomes, launch handshake, settlement, delivery | adapter, `tools`, `harness` | [`recovery.md`](recovery.md) | P1 |
 | C-9 | Context management | `harness` → `agent`, adapter | plan §5.2; rows in [`transcript-rows.schema.json`](transcript-rows.schema.json) | P3 |
 
 Conventions:
@@ -23,5 +24,7 @@ Conventions:
 - Persisted shapes carry `"version": 1`. Readers accept every released version (persisted-shape rule).
 - Field names are `snake_case`, except the tool parameters in C-7, which keep Pi's names (`oldText`, `newText`,
   `replaceAll`).
+- Every statement about existing code names its file and was checked against `master`; fields that already exist
+  keep their meaning (a new meaning gets a new field).
 - Protocol names use Model Hub's vocabulary, extended by C-6: `anthropic`, `openai_chat`, `openai_responses`,
   `google`.

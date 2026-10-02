@@ -158,31 +158,25 @@ first steps are usually no-ops; for the future `pty` backend they are required.
 | --- | --- | --- |
 | `start(command, cwd, env, timeout)` → `job_id` | yes | create the job directory and metadata, then spawn the wrapper in its own session |
 | `status(job_id)` | yes | `running`, `exited{code}`, or `gone` (ended without an exit code) |
-| `wait(job_id, until)` | yes | until exit or a deadline |
+| `wait(job_id, deadline_s)` | yes | until exit, or at most `deadline_s` seconds from now (`None`: until exit) |
+| `output_path(job_id)` | yes | absolute path of `output.log`, named in truncated and handover results |
 | `output(job_id, since)` | yes | normalized output after a byte offset |
 | `kill(job_id)` | yes | terminate the process tree, verified by process identity |
 | `hand_over(job_id)` → `watch_id` | yes | register a once Watch with target kind `job` |
 | `send(job_id, keys)`, `screen(job_id)`, `resize(job_id, cols, rows)`, `attach_info(job_id)` | reserved | `pty` backend (plan §5.4) |
 
-Job directory: `<state>/agent_core/jobs/<job_id>/` with `meta.json`, `pid`, `output.log`, and `exit`. Order of
-writes, so a crash at any point leaves a recoverable state:
-
-1. `meta.json` (without process identity) before the spawn.
-2. The wrapper's first action, before it runs the command: write its own pid (equal to the job's process group) to
-   `pid` through a temporary file and rename. The command starts only after `pid` is durable.
-3. `exit` through a temporary file and rename when the command ends.
-
-Recovery reads them in reverse: `exit` present → exited; `pid` present and that process alive with a matching
-identity (pid plus process start time, as `core/process_isolation.py` verifies) → running; `pid` present but no live
-matching process and no `exit` → gone; no `pid` → the command never ran, so the tool call gets the synthetic
-interrupted result. `meta.json.process` caches the identity once observed. Directories of finished jobs whose Watch, if
-any, has settled are removed after 7 days.
+Job directory: `<state>/agent_core/jobs/<job_id>/` with `meta.json`, `pid`, `decision`, `output.log`, and `exit`.
+The launch handshake and recovery rules are in [`recovery.md`](recovery.md): the command starts only after the
+exclusively created `decision` file says `go`, so recovery can always tell whether it may have run. Process identity
+is the pid plus the process start time, as `core/process_isolation.py` verifies; `meta.json.process` caches it once
+observed. Directories of finished jobs whose Watch, if any, has settled are removed after 7 days.
 
 ## 8. Environment section
 
 Changing facts do not go into the system prompt, which stays stable and cacheable. When the loop consumes an input
 (C-5 `ModelInput`), it renders an environment block into that message with the fields that changed since the previous
-input (all fields on the first input), so the stored transcript still equals what the model saw:
+input (all fields on the first input), so the stored transcript still equals what the model saw. The first input after a checkpoint carries all fields
+again, because the inputs that carried the earlier values may be summarized away:
 
 ```text
 <environment>
