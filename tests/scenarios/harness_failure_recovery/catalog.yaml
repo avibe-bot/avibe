@@ -3879,9 +3879,9 @@ scenarios:
     backend: claude
     # A transport write only queues input, while Claude may merge several inputs
     # into one response. Avibe enables the CLI's replay-user-messages protocol so
-    # each consumed input produces a native top-level UserMessage echo in FIFO
-    # order. A Result before the echo stays nonterminal; a Result after every echo
-    # can settle the shared Turn.
+    # consumed input produces a native top-level UserMessage echo in FIFO order;
+    # inputs dequeued together share one echo (HFR-487). A Result before the echo
+    # stays nonterminal; a Result after every echo can settle the shared Turn.
     test: tests/test_claude_agent_sessions.py::test_user_echo_allows_one_result_to_own_primary_and_steer
   - id: HFR-436
     name: Watch waiter health is independent from downstream event processing
@@ -4399,6 +4399,17 @@ scenarios:
     test: tests/test_background_command_caller_context.py::test_hfr_486_watch_child_vault_callback_uses_only_current_binding
     # Real argv/shell children with clean/contaminated parents, bound/unbound
     # targets, isolated Vault expiry, retargeting, and remote snapshot transport.
+  - id: HFR-487
+    name: one coalesced Claude input echo releases every queued steer
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: claude
+    # Claude dequeues every input queued behind a running response together and
+    # replays them as one newline-joined UserMessage. That echo acknowledges the
+    # whole FIFO run; a human-origin echo matching no receipt still releases the
+    # pending receipts, while injected turns such as task notifications do not.
+    test: tests/test_claude_agent_sessions.py::test_coalesced_or_unrecognized_human_echo_releases_queued_steers
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

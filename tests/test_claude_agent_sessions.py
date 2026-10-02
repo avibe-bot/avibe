@@ -1608,6 +1608,97 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(composite_key, agent._pending_requests)
         self.assertNotIn(composite_key, agent._native_input_receipts)
 
+    async def test_coalesced_or_unrecognized_human_echo_releases_queued_steers(self):
+        """HFR-487: one native echo may acknowledge every queued input."""
+
+        cases = (
+            # Claude dequeues inputs queued behind a response together and
+            # replays them as one newline-joined user message.
+            ("coalesced", "first steer\nsecond steer", None, True),
+            ("unrecognized human", "first steer, rewritten", {"kind": "human"}, True),
+            ("injected notification", "<task-notification>", {"kind": "task-notification"}, False),
+        )
+        for name, echo, origin, settles in cases:
+            with self.subTest(name):
+                controller = _StubController()
+                controller._get_session_key = lambda _context: "session-1"
+                controller.emit_agent_message = AsyncMock()
+                controller.session_handler.mark_session_idle = lambda _key: None
+                controller.session_handler.handle_session_error = AsyncMock()
+                agent = ClaudeAgent(controller)
+                agent.emit_result_message = AsyncMock()
+                agent._get_formatter = lambda _context: SimpleNamespace(
+                    format_assistant_message=lambda parts: "\n\n".join(parts),
+                )
+                composite_key = "session-coalesced-steer:/tmp/work"
+                context = SimpleNamespace(
+                    user_id="U1",
+                    channel_id="C1",
+                    platform_specific={"turn_token": "T1"},
+                )
+                pending_request = SimpleNamespace(
+                    context=context,
+                    started_at=None,
+                    ack_reaction_message_id=None,
+                    ack_reaction_emoji=None,
+                )
+                agent._pending_requests[composite_key] = [pending_request]
+                for text in ("first steer", "second steer"):
+                    receipt = agent._register_native_input(
+                        composite_key,
+                        text,
+                        kind="steer",
+                    )
+                    receipt.state = "accepted"
+                    agent._advance_steering_generation(composite_key)
+
+                class _Client:
+                    def receive_messages(self):
+                        async def _iterate():
+                            yield type(
+                                "ResultMessage",
+                                (),
+                                {
+                                    "subtype": "success",
+                                    "result": "primary result",
+                                    "duration_ms": 1,
+                                },
+                            )()
+                            yield UserMessage(echo, origin=origin)
+                            yield type(
+                                "ResultMessage",
+                                (),
+                                {
+                                    "subtype": "success",
+                                    "result": "steered result",
+                                    "duration_ms": 2,
+                                },
+                            )()
+
+                        return _iterate()
+
+                await agent._receive_messages(
+                    _Client(),
+                    "session-coalesced-steer",
+                    "/tmp/work",
+                    context,
+                    composite_key=composite_key,
+                )
+
+                if settles:
+                    agent.emit_result_message.assert_awaited_once_with(
+                        context,
+                        "steered result",
+                        subtype="success",
+                        duration_ms=2,
+                        parse_mode="markdown",
+                        request=pending_request,
+                    )
+                    self.assertNotIn(composite_key, agent._native_input_receipts)
+                else:
+                    # Injected turns are not Avibe input; the Turn stays open.
+                    agent.emit_result_message.assert_not_awaited()
+
     async def test_ambiguous_results_emit_each_answer_in_order(self):
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"
