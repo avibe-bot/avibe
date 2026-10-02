@@ -41,9 +41,9 @@ class WriteTool:
         try:
             path = str_arg(arguments, "path")
             content = str_arg(arguments, "content")
+            absolute = resolve_to_cwd(path, ctx.cwd)
         except ToolInputError as exc:
             return error_result(str(exc))
-        absolute = resolve_to_cwd(path, ctx.cwd)
         async with file_mutation_lock(absolute):
             # Checked before each step, never in the middle of one, so the lock is held until
             # the filesystem operation in progress has finished.

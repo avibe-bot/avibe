@@ -15,6 +15,8 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 from urllib.parse import unquote, urlparse
 
+from core.agent_core.tools.args import ToolInputError
+
 _UNICODE_SPACES = re.compile("[\u00a0\u2000-\u200a\u202f\u205f\u3000]")
 _NARROW_NO_BREAK_SPACE = "\u202f"
 _AM_PM = re.compile(r" (AM|PM)\.", re.IGNORECASE)
@@ -33,7 +35,10 @@ def expand_path(path: str) -> str:
 
 
 def resolve_to_cwd(path: str, cwd: str) -> str:
+    """The absolute path; raises ``ToolInputError`` for a path no file can have (a NUL byte, possibly from ``%00``)."""
     expanded = expand_path(path)
+    if "\x00" in expanded:
+        raise ToolInputError(f"Invalid path: {path!r} contains a NUL byte")
     if os.path.isabs(expanded):
         return os.path.normpath(expanded)
     return os.path.normpath(os.path.join(cwd, expanded))

@@ -9,6 +9,7 @@ import zlib
 import pytest
 
 import core.agent_core.tools.read as read_module
+from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import ImageBlock, TextBlock
 from core.agent_core.tools.read import ReadTool
 from core.agent_core.tools.truncate import truncate_head
@@ -58,11 +59,34 @@ async def test_offset_beyond_the_end_is_an_error(tmp_path, make_ctx):
 
 
 async def test_an_over_long_first_line_points_at_bash(tmp_path, make_ctx):
-    (tmp_path / "big.txt").write_text("short\n" + "x" * 61_440 + "\nafter\n")
+    (tmp_path / "big file.txt").write_text("short\n" + "x" * 61_440 + "\nafter\n")
 
-    text = result_text(await _read(make_ctx, path="big.txt", offset=2))
+    text = result_text(await _read(make_ctx, path="big file.txt", offset=2))
 
-    assert text == "[Line 2 is 60.0KB, exceeds 50.0KB limit. Use bash: sed -n '2p' big.txt | head -c 51200]"
+    assert text == "[Line 2 is 60.0KB, exceeds 50.0KB limit. Use bash: sed -n '2p' 'big file.txt' | head -c 51200]"
+
+
+class _CancelledAfter(CancelToken):
+    """A cancel that lands after the scan has read a few chunks."""
+
+    def __init__(self, reads: int) -> None:
+        super().__init__()
+        self._reads_left = reads
+
+    @property
+    def cancelled(self) -> bool:
+        self._reads_left -= 1
+        return self._reads_left < 0
+
+
+async def test_cancel_stops_a_long_scan(tmp_path, make_ctx, monkeypatch):
+    monkeypatch.setattr(read_module, "_READ_CHUNK_BYTES", 1024)
+    (tmp_path / "long.txt").write_bytes(b"x\n" * 500_000)
+
+    result = await ReadTool().execute({"path": "long.txt"}, make_ctx(cancel=_CancelledAfter(reads=10)))
+
+    assert result.is_error
+    assert result_text(result) == "Operation aborted"
 
 
 def _whole_file_read(data: bytes, start: int, stop):
@@ -102,14 +126,15 @@ async def test_streaming_matches_reading_the_whole_file(tmp_path, monkeypatch):
             assert first_line_bytes == len(data.split(b"\n")[start])
 
 
-def _png() -> bytes:
-    def chunk(kind: bytes, body: bytes) -> bytes:
-        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+def _chunk(kind: bytes, body: bytes) -> bytes:
+    return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
 
-    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-    return (
-        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(b"\0\xff\0\0")) + chunk(b"IEND", b"")
-    )
+
+def _png(*, animated: bool = False) -> bytes:
+    ihdr = _chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+    actl = _chunk(b"acTL", struct.pack(">II", 1, 0)) if animated else b""
+    idat = _chunk(b"IDAT", zlib.compress(b"\0\xff\0\0"))
+    return b"\x89PNG\r\n\x1a\n" + ihdr + actl + idat + _chunk(b"IEND", b"")
 
 
 async def test_an_image_is_stored_through_the_sink_and_attached(tmp_path, make_ctx):
@@ -137,6 +162,13 @@ async def test_an_image_is_stored_through_the_sink_and_attached(tmp_path, make_c
             struct.pack("<2sIHHIIiiHH", b"BM", 58, 0, 0, 54, 40, 1, 1, 1, 24) + bytes(28),
             None,
             "Read image file [image/bmp]\n[Image omitted: could not be converted to a supported inline image format.]",
+        ),
+        (
+            # Recognized but not sendable as it is: omitted, never decoded as text.
+            "anim.png",
+            _png(animated=True),
+            None,
+            "Read image file [image/apng]\n[Image omitted: could not be converted to a supported inline image format.]",
         ),
         (
             "pic.png",

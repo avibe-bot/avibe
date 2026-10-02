@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from core.agent_core.tools.edit import EditTool
+from core.agent_core.tools.read import ReadTool
 from core.agent_core.tools.write import WriteTool
 from tests.agent_core.tools.conftest import result_text
 
@@ -58,13 +59,23 @@ async def test_replace_all_replaces_every_occurrence(tmp_path, make_ctx):
     assert (tmp_path / "f.txt").read_text() == "baz(1)\nqux\nbaz(2)\nbaz(3)\n"
 
 
-async def test_bom_and_crlf_are_preserved(tmp_path, make_ctx):
-    (tmp_path / "win.txt").write_bytes("\ufeffone\r\ntwo\r\nthree\r\n".encode())
+@pytest.mark.parametrize("ending", ["\r\n", "\r"])
+async def test_bom_and_line_endings_are_preserved(tmp_path, make_ctx, ending):
+    (tmp_path / "f.txt").write_bytes(f"\ufeffone{ending}two{ending}three{ending}".encode())
 
-    result = await _edit(make_ctx, "win.txt", {"oldText": "two\nthree", "newText": "2\n3"})
+    result = await _edit(make_ctx, "f.txt", {"oldText": "two\nthree", "newText": "2\n3"})
 
     assert not result.is_error, result_text(result)
-    assert (tmp_path / "win.txt").read_bytes() == "\ufeffone\r\n2\r\n3\r\n".encode()
+    assert (tmp_path / "f.txt").read_bytes() == f"\ufeffone{ending}2{ending}3{ending}".encode()
+
+
+async def test_an_exact_match_is_unique_even_with_a_normalized_twin(tmp_path, make_ctx):
+    (tmp_path / "f.txt").write_text('say "Hi"\nsay \u201cHi\u201d\n')
+
+    result = await _edit(make_ctx, "f.txt", {"oldText": 'say "Hi"', "newText": 'say "Hello"'})
+
+    assert not result.is_error, result_text(result)
+    assert (tmp_path / "f.txt").read_text() == 'say "Hello"\nsay \u201cHi\u201d\n'
 
 
 @pytest.mark.parametrize(
@@ -72,6 +83,12 @@ async def test_bom_and_crlf_are_preserved(tmp_path, make_ctx):
     [
         (
             [{"oldText": "missing", "newText": "x"}],
+            "Could not find the exact text in f.txt. The old text must match exactly including all whitespace and "
+            "newlines.",
+        ),
+        (
+            # Absent whitespace normalizes to nothing, which must not match everywhere.
+            [{"oldText": "\t", "newText": "x"}],
             "Could not find the exact text in f.txt. The old text must match exactly including all whitespace and "
             "newlines.",
         ),
@@ -113,3 +130,18 @@ async def test_a_failing_edit_writes_nothing(tmp_path, make_ctx, edits, message)
     assert result.is_error
     assert result_text(result) == message
     assert (tmp_path / "f.txt").read_text() == original
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (ReadTool(), {"path": "a\x00b"}),
+        (WriteTool(), {"path": "a\x00b", "content": "x"}),
+        (EditTool(), {"path": "file:///tmp/a%00b", "edits": [{"oldText": "a", "newText": "b"}]}),
+    ],
+)
+async def test_a_path_no_file_can_have_is_an_error_result(make_ctx, tool, arguments):
+    result = await tool.execute(arguments, make_ctx())
+
+    assert result.is_error
+    assert result_text(result) == f"Invalid path: {arguments['path']!r} contains a NUL byte"

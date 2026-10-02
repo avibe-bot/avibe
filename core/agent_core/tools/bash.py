@@ -37,6 +37,7 @@ _MAX_TIMEOUT_S = 2_147_483.647
 _PROGRESS_INTERVAL_S = 0.1  # Pi's BASH_UPDATE_THROTTLE_MS
 # A job found gone this close to its timeout was killed for it, by this tool or by the job host.
 _DEADLINE_SLACK_S = 1.0
+_WATCH_GRACE_S = 0.5
 
 BASH_SCHEMA: Mapping[str, Any] = {
     "type": "object",
@@ -188,22 +189,19 @@ class BashTool:
             return error_result(f"Could not start the command: {exc}")
 
         output = JobOutput(self._jobs, job_id)
+        # watch=true still lets a command that ends at once report its own result instead of becoming a Watch.
+        handover_at = min(self._window_s, _WATCH_GRACE_S) if watch else self._window_s
         handover_error: Optional[Exception] = None
         last_progress = ""
         while True:
             elapsed = time.monotonic() - started
-            if handover_error is None and (watch or elapsed >= self._window_s):
-                try:
-                    return handover_result(output, await self._jobs.hand_over(job_id))
-                except Exception as exc:  # no Watch here: the command stays in the foreground
-                    logger.info("Job %s stays in the foreground: %s", job_id, exc)
-                    handover_error = exc
-
-            slice_s = _PROGRESS_INTERVAL_S
+            hand_over = handover_error is None and elapsed >= handover_at
+            # A handover is decided only after a fresh status: a command that already ended keeps its own result.
+            slice_s = 0.0 if hand_over else _PROGRESS_INTERVAL_S
             if timeout is not None:
                 slice_s = min(slice_s, max(0.0, timeout - elapsed))
             if handover_error is None:
-                slice_s = min(slice_s, max(0.0, self._window_s - elapsed))
+                slice_s = min(slice_s, max(0.0, handover_at - elapsed))
             status = await self._wait_or_cancel(job_id, slice_s, ctx.cancel)
 
             if status is not None and status.state == "gone" and timeout is not None:
@@ -221,6 +219,13 @@ class BashTool:
             if timeout is not None and time.monotonic() - started >= timeout:
                 await self._jobs.kill(job_id)
                 return stopped_result(output, _timed_out_line(timeout))
+            if hand_over:
+                try:
+                    return handover_result(output, await self._jobs.hand_over(job_id))
+                except Exception as exc:  # no Watch here: the command stays in the foreground
+                    logger.info("Job %s stays in the foreground: %s", job_id, exc)
+                    handover_error = exc
+                    continue
             if ctx.on_progress is not None and output.poll():
                 tail = output.snapshot().content
                 if tail != last_progress:

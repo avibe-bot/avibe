@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import shlex
 import struct
 from typing import Any, Awaitable, Callable, Mapping, Optional, Union
 
@@ -38,6 +39,7 @@ ImageSink = Callable[[bytes, str, str], Union[str, Awaitable[str]]]
 # resize, so the cap applies to the file as it is.
 MAX_INLINE_IMAGE_BYTES = int(4.5 * 1024 * 1024) * 3 // 4
 _IMAGE_SNIFF_BYTES = 4100
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _READ_CHUNK_BYTES = 1024 * 1024
 
 READ_DESCRIPTION = (
@@ -78,13 +80,15 @@ class ReadTool:
         except ToolInputError as exc:
             return error_result(str(exc))
 
-        absolute = resolve_read_path(path, ctx.cwd)
         try:
+            absolute = resolve_read_path(path, ctx.cwd)
             mime_type = await asyncio.to_thread(_sniff_image, absolute)
             if mime_type is not None:
                 return await self._read_image(absolute, mime_type)
-            # Off the event loop, which every Session and surface shares.
-            return await asyncio.to_thread(_read_text, absolute, path, offset, limit)
+            # Off the event loop, which every Session and surface shares; the scan stops on cancel.
+            return await asyncio.to_thread(_read_text, absolute, path, offset, limit, lambda: ctx.cancel.cancelled)
+        except _Aborted:
+            return error_result("Operation aborted")
         except OSError as exc:
             return error_result(os_error_text(exc))
         except ToolInputError as exc:
@@ -120,9 +124,23 @@ class ReadTool:
         )
 
 
+class _Aborted(Exception):
+    pass
+
+
 def _sniff_image(path: str) -> Optional[str]:
+    """The image type to attach, or ``None`` for text. A PNG or JPEG Pi cannot send (animated PNG,
+    JPEG-LS) keeps its family, so it is omitted rather than decoded as text."""
     with open(path, "rb") as handle:
-        return detect_supported_image_mime_type(handle.read(_IMAGE_SNIFF_BYTES))
+        head = handle.read(_IMAGE_SNIFF_BYTES)
+    supported = detect_supported_image_mime_type(head)
+    if supported is not None:
+        return supported
+    if head.startswith(_PNG_SIGNATURE):
+        return "image/apng" if _is_png(head) else None
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jls"
+    return None
 
 
 def _read_bytes(path: str) -> bytes:
@@ -130,10 +148,12 @@ def _read_bytes(path: str) -> bytes:
         return handle.read()
 
 
-def _read_text(absolute: str, path: str, offset: Optional[float], limit: Optional[float]) -> ToolResult:
+def _read_text(
+    absolute: str, path: str, offset: Optional[float], limit: Optional[float], cancelled: Callable[[], bool]
+) -> ToolResult:
     start_line = max(0, int(offset) - 1) if offset else 0
     stop_line = start_line + int(limit) if limit is not None else None
-    collected, total_lines, first_line_bytes = _scan_lines(absolute, start_line, stop_line)
+    collected, total_lines, first_line_bytes = _scan_lines(absolute, start_line, stop_line, cancelled)
     if start_line >= total_lines:
         raise ToolInputError(f"Offset {format_number(offset or 0)} is beyond end of file ({total_lines} lines total)")
 
@@ -143,7 +163,7 @@ def _read_text(absolute: str, path: str, offset: Optional[float], limit: Optiona
     if truncation.first_line_exceeds_limit:
         text = (
             f"[Line {start_display} is {format_size(first_line_bytes)}, exceeds {format_size(MAX_BYTES)} limit. "
-            f"Use bash: sed -n '{start_display}p' {path} | head -c {MAX_BYTES}]"
+            f"Use bash: sed -n '{start_display}p' {shlex.quote(path)} | head -c {MAX_BYTES}]"
         )
         details["truncation"] = truncation.to_details()
     elif truncation.truncated:
@@ -167,7 +187,9 @@ def _read_text(absolute: str, path: str, offset: Optional[float], limit: Optiona
     return text_result(text, details=details)
 
 
-def _scan_lines(path: str, start: int, stop: Optional[int]) -> tuple[list[str], int, int]:
+def _scan_lines(
+    path: str, start: int, stop: Optional[int], cancelled: Callable[[], bool] = lambda: False
+) -> tuple[list[str], int, int]:
     """Lines ``[start, stop)`` as Pi's ``text.split("\\n")`` gives them, the file's line count, and the
     raw size of line ``start``.
 
@@ -206,6 +228,8 @@ def _scan_lines(path: str, start: int, stop: Optional[int]) -> tuple[list[str], 
 
     with open(path, "rb") as handle:
         while chunk := handle.read(_READ_CHUNK_BYTES):
+            if cancelled():
+                raise _Aborted
             pos = 0
             while collecting:
                 newline = chunk.find(b"\n", pos)
@@ -234,7 +258,7 @@ def detect_supported_image_mime_type(data: bytes) -> Optional[str]:
     """Pi's content sniffing: JPEG, static PNG, GIF, WebP, and BMP."""
     if data.startswith(b"\xff\xd8\xff"):
         return None if len(data) > 3 and data[3] == 0xF7 else "image/jpeg"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+    if data.startswith(_PNG_SIGNATURE):
         return "image/png" if _is_png(data) and not _is_animated_png(data) else None
     if data.startswith((b"GIF87a", b"GIF89a")):
         return "image/gif"

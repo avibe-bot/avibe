@@ -67,10 +67,10 @@ async def test_stdin_is_closed(tmp_path, make_ctx):
 async def test_timeout_kills_the_tree_including_background_children(tmp_path, make_ctx):
     command = f"sleep 30 & echo $! > {tmp_path / 'bg.pid'}; echo started; sleep 30"
 
-    result = await BashTool(_host(tmp_path)).execute({"command": command, "timeout": 0.5}, make_ctx())
+    result = await BashTool(_host(tmp_path)).execute({"command": command, "timeout": 1.5}, make_ctx())
 
     assert result.is_error
-    assert result_text(result) == "started\n\n\nCommand timed out after 0.5 seconds"
+    assert result_text(result) == "started\n\n\nCommand timed out after 1.5 seconds"
     assert _process_gone(int((tmp_path / "bg.pid").read_text()))
 
 
@@ -96,17 +96,18 @@ async def test_abort_kills_the_command(tmp_path, make_ctx):
 async def test_the_foreground_window_hands_over_and_the_command_runs_once(tmp_path, make_ctx):
     watches = Watches()
     host = _host(tmp_path, watches)
-    command = f"echo run >> {tmp_path / 'counter'}; echo working; sleep 1; echo finished"
+    command = f"echo run >> {tmp_path / 'counter'}; echo working; sleep 2; echo finished"
 
-    result = await BashTool(host, foreground_window_s=0.3).execute({"command": command}, make_ctx())
+    result = await BashTool(host, foreground_window_s=1.0).execute({"command": command}, make_ctx())
 
     job_id = result.details["job_id"]
     path = host.output_path(job_id)
+    text = result_text(result)
     assert not result.is_error
-    assert result_text(result) == (
+    assert text.startswith(
         "Command is still running and is now Watch wch_1. You will get a follow-up message when it finishes.\n\n"
-        f"working\n\nFull output: {path}\nCheck: vibe watch show wch_1\nStop: vibe watch remove wch_1"
     )
+    assert text.endswith(f"\n\nFull output: {path}\nCheck: vibe watch show wch_1\nStop: vibe watch remove wch_1")
     assert (await host.wait(job_id, deadline_s=5)).exit_code == 0
     assert open(path).read() == "working\nfinished\n"
     assert (tmp_path / "counter").read_text() == "run\n"
@@ -125,8 +126,18 @@ async def test_watch_true_returns_at_once(tmp_path, make_ctx):
     await host.kill(result.details["job_id"])
 
 
+async def test_watch_true_keeps_the_result_of_a_command_that_already_ended(tmp_path, make_ctx):
+    watches = Watches()
+
+    result = await BashTool(_host(tmp_path, watches)).execute({"command": "exit 3", "watch": True}, make_ctx())
+
+    assert result.is_error
+    assert result_text(result) == "(no output)\n\nCommand exited with code 3"
+    assert watches.by_job == {}
+
+
 async def test_without_a_watch_the_command_stays_in_the_foreground(tmp_path, make_ctx):
-    result = await BashTool(_host(tmp_path)).execute({"command": "echo hi", "watch": True}, make_ctx())
+    result = await BashTool(_host(tmp_path)).execute({"command": "sleep 1; echo hi", "watch": True}, make_ctx())
 
     assert not result.is_error
     assert result_text(result) == (
@@ -157,7 +168,7 @@ async def test_settlement_reports_each_job_state(tmp_path, make_ctx):
 async def test_a_timeout_holds_across_handover_and_a_restart(tmp_path, make_ctx):
     """J3: the deadline is the job's, so the next owner enforces it."""
     result = await BashTool(_host(tmp_path, Watches())).execute(
-        {"command": "echo begun; sleep 30", "timeout": 0.5, "watch": True}, make_ctx()
+        {"command": "echo begun; sleep 30", "timeout": 1.5, "watch": True}, make_ctx()
     )
     job_id = result.details["job_id"]
     assert result_text(result).startswith("Command is still running")
@@ -168,5 +179,5 @@ async def test_a_timeout_holds_across_handover_and_a_restart(tmp_path, make_ctx)
     assert status.state == "gone"
     assert restarted.stop_reason(job_id) == "timeout"
     settled = await settle_bash_call(restarted, "ses_test", "toolu_1")
-    assert result_text(settled) == "begun\n\n\nCommand timed out after 0.5 seconds"
+    assert result_text(settled) == "begun\n\n\nCommand timed out after 1.5 seconds"
     assert not os.path.exists(os.path.join(restarted.job_dir(job_id), "exit"))

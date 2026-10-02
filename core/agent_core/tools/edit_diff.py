@@ -5,7 +5,9 @@ Copyright (c) 2025 Mario Zechner): exact match first, then Pi's deterministic
 normalized match with no similarity threshold, every edit matched against the
 original, overlapping edits rejected. Avibe adds ``replaceAll`` (from Claude
 Code and OpenCode): every occurrence in the tier that matched, each one a span
-for the overlap check.
+for the overlap check. Two Avibe departures from Pi: uniqueness is counted in
+the tier that matched (Pi always counts normalized text), and classic Mac CR
+line endings are restored like CRLF.
 """
 
 from __future__ import annotations
@@ -51,11 +53,11 @@ def split_bom(content: str) -> tuple[str, str]:
 
 
 def detect_line_ending(content: str) -> str:
-    crlf = content.find("\r\n")
-    lf = content.find("\n")
-    if lf == -1 or crlf == -1:
+    """The style of the first line break. Pi knows CRLF and LF; Avibe also keeps classic Mac CR."""
+    cr, lf = content.find("\r"), content.find("\n")
+    if cr == -1 or (lf != -1 and lf < cr):
         return "\n"
-    return "\r\n" if crlf < lf else "\n"
+    return "\r\n" if cr + 1 == lf else "\r"
 
 
 def normalize_to_lf(text: str) -> str:
@@ -63,7 +65,7 @@ def normalize_to_lf(text: str) -> str:
 
 
 def restore_line_endings(text: str, ending: str) -> str:
-    return text.replace("\n", "\r\n") if ending == "\r\n" else text
+    return text if ending == "\n" else text.replace("\n", ending)
 
 
 def normalize_for_fuzzy_match(text: str) -> str:
@@ -87,16 +89,23 @@ def _find_all(content: str, needle: str) -> list[int]:
     return found
 
 
-def _find(content: str, old_text: str) -> Optional[tuple[int, int, bool]]:
-    """``(index, length, used_fuzzy)`` of the first match, exact before normalized."""
+def _find(content: str, old_text: str) -> Optional[tuple[int, int, int, bool]]:
+    """``(index, length, occurrences, used_fuzzy)`` of the first match, exact before normalized.
+
+    Occurrences are counted in the tier that matched.
+    """
     exact = content.find(old_text)
     if exact != -1:
-        return exact, len(old_text), False
+        return exact, len(old_text), content.count(old_text), False
     fuzzy_old = normalize_for_fuzzy_match(old_text)
-    fuzzy = normalize_for_fuzzy_match(content).find(fuzzy_old)
+    if not fuzzy_old:
+        # Whitespace that normalizes away would match everywhere, length zero.
+        return None
+    fuzzy_content = normalize_for_fuzzy_match(content)
+    fuzzy = fuzzy_content.find(fuzzy_old)
     if fuzzy == -1:
         return None
-    return fuzzy, len(fuzzy_old), True
+    return fuzzy, len(fuzzy_old), fuzzy_content.count(fuzzy_old), True
 
 
 def _find_every(content: str, old_text: str) -> list[tuple[int, int]]:
@@ -106,14 +115,6 @@ def _find_every(content: str, old_text: str) -> list[tuple[int, int]]:
         return [(index, len(old_text)) for index in exact]
     fuzzy_old = normalize_for_fuzzy_match(old_text)
     return [(index, len(fuzzy_old)) for index in _find_all(normalize_for_fuzzy_match(content), fuzzy_old)]
-
-
-def _count_occurrences(content: str, old_text: str) -> int:
-    fuzzy_old = normalize_for_fuzzy_match(old_text)
-    if not fuzzy_old:
-        # Whitespace-only text normalizes to nothing; count it as written.
-        return content.count(old_text)
-    return normalize_for_fuzzy_match(content).count(fuzzy_old)
 
 
 def _not_found(path: str, index: int, total: int) -> EditError:
@@ -226,7 +227,7 @@ def apply_edits_to_normalized_content(content: str, edits: list[Edit], path: str
         if not edit.old_text:
             raise _empty(path, index, total)
 
-    used_fuzzy = any(m is not None and m[2] for m in (_find(content, e.old_text) for e in edits))
+    used_fuzzy = any(m is not None and m[3] for m in (_find(content, e.old_text) for e in edits))
     base = normalize_for_fuzzy_match(content) if used_fuzzy else content
 
     replacements: list[_Replacement] = []
@@ -240,9 +241,8 @@ def apply_edits_to_normalized_content(content: str, edits: list[Edit], path: str
         match = _find(base, edit.old_text)
         if match is None:
             raise _not_found(path, index, total)
-        occurrences = _count_occurrences(base, edit.old_text)
-        if occurrences > 1:
-            raise _duplicate(path, index, total, occurrences)
+        if match[2] > 1:
+            raise _duplicate(path, index, total, match[2])
         replacements.append(_Replacement(index, match[0], match[1], edit.new_text))
 
     replacements.sort(key=lambda r: r.index)

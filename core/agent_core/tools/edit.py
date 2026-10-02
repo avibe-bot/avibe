@@ -143,9 +143,9 @@ class EditTool:
             arguments = prepare_edit_arguments(arguments)
             path = str_arg(arguments, "path")
             edits = _edits_arg(arguments)
+            absolute = resolve_to_cwd(path, ctx.cwd)
         except ToolInputError as exc:
             return error_result(str(exc))
-        absolute = resolve_to_cwd(path, ctx.cwd)
 
         async with file_mutation_lock(absolute):
             if ctx.cancel.cancelled:
