@@ -53,7 +53,8 @@ TOOL_ORDER = ("read", "bash", "edit", "write")
 
 def coding_prompt(tool_names: Iterable[str]) -> str:
     """Pi's preamble, tool list, and rules for the tools actually offered."""
-    names = [name for name in TOOL_ORDER if name in set(tool_names)]
+    offered = set(tool_names)
+    names = [name for name in TOOL_ORDER if name in offered]
     tools = "\n".join(f"- {name}: {TOOL_SNIPPETS[name]}" for name in names) or "(none)"
     rules: list[str] = []
     if "bash" in names:

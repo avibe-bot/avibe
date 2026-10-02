@@ -43,7 +43,11 @@ surface-specific rewrite (the Workbench media proxy) lands with the row. The
 display copy is never part of the context.
 
 Outbox. A response row commits with ``delivery = {"state": "pending",
-"parts": []}``. The adapter records a receipt for each part a surface splits it
+"parts": []}``. A renderer may also return the row's delivery plan: every part
+each surface will send, decided once at commit. It is stored as
+``delivery.plan``, part receipts are counted against it, and re-delivery
+replays it instead of recomputing it. Facts that depend on the run's outcome
+(the result footer) are written by ``settle_delivery`` before delivery. The adapter records a receipt for each part a surface splits it
 into; the row becomes ``delivered`` only when every part has one
 (``recovery.md`` D1). A response whose display text is blank (only thinking or
 tool calls) has no part on any surface and commits ``delivered``.
@@ -98,10 +102,15 @@ MODEL_KEY = "model"
 
 @dataclass(frozen=True)
 class RenderedDisplay:
-    """A response row's display copy: ``content_text`` plus display keys of ``content_json``."""
+    """A response row's display copy, and optionally its delivery plan.
+
+    ``text`` is ``content_text``; ``content`` holds display keys of ``content_json``;
+    ``delivery`` is the plan (``{"parts": [...], ...}``), committed with the row.
+    """
 
     text: str
     content: Mapping[str, Any] = field(default_factory=dict)
+    delivery: Optional[Mapping[str, Any]] = None
 
 
 class DisplayRenderer(Protocol):
@@ -144,6 +153,10 @@ class PendingDelivery:
     message: AssistantMessage
     parts: tuple[Optional[Mapping[str, Any]], ...] = ()
     """Receipts by part index from an earlier attempt; ``None`` marks a part still to send."""
+    plan: Optional[Mapping[str, Any]] = None
+    """The delivery plan committed with the row, when its renderer produced one."""
+    footer: Optional[str] = None
+    """The result footer written at settlement, when the run settled before delivery."""
 
 
 @dataclass(frozen=True)
@@ -235,7 +248,7 @@ class SQLiteTranscriptStore:
                 message_type="result" if final else "assistant",
                 text=display.text,
                 content={**display.content, MODEL_KEY: model},
-                metadata={"delivery": {"state": "pending" if display.text.strip() else "delivered", "parts": []}},
+                metadata={"delivery": _initial_delivery(display)},
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
             return ContextEntry(session_id, seq, "response", row["id"], message=message, payload=model)
@@ -268,6 +281,25 @@ class SQLiteTranscriptStore:
     async def pending_deliveries(self, session_id: str) -> list[PendingDelivery]:
         """The Session's committed responses not yet delivered, in ``context_seq`` order."""
         return await asyncio.to_thread(self._pending_deliveries, session_id)
+
+    async def delivery(self, session_id: str, row_id: str) -> Optional[PendingDelivery]:
+        """The row's pending delivery, or ``None`` once it is delivered."""
+        found = await asyncio.to_thread(self._pending_deliveries, session_id, row_id)
+        return found[0] if found else None
+
+    async def settle_delivery(
+        self, session_id: str, row_id: str, *, footer: Optional[str], display: Mapping[str, Any]
+    ) -> None:
+        """Record what the run's outcome adds to a pending row before it is delivered.
+
+        ``footer`` is the result footer every surface shows; ``display`` holds the
+        display keys of ``content_json`` it implies (``model`` is reserved). The
+        context content of the row is unchanged.
+        """
+        if MODEL_KEY in display:
+            raise TranscriptError(f"display content must not set the reserved {MODEL_KEY!r} key")
+        data = _canonical(dict(display), "display content")
+        await asyncio.to_thread(self._settle_delivery, session_id, row_id, footer, data)
 
     async def record_delivery_part(
         self,
@@ -346,7 +378,8 @@ class SQLiteTranscriptStore:
                 )
         return entries
 
-    def _pending_deliveries(self, session_id: str) -> list[PendingDelivery]:
+    def _pending_deliveries(self, session_id: str, row_id: Optional[str] = None) -> list[PendingDelivery]:
+        only = [messages.c.id == row_id] if row_id is not None else []
         with self._engine.connect() as conn:
             rows = conn.execute(
                 select(
@@ -362,6 +395,7 @@ class SQLiteTranscriptStore:
                     messages.c.context_seq.is_not(None),
                     messages.c.type.in_(RESPONSE_TYPES),
                     func.json_extract(messages.c.metadata_json, "$.delivery.state") == "pending",
+                    *only,
                 )
                 .order_by(messages.c.context_seq)
             ).mappings().all()
@@ -369,6 +403,7 @@ class SQLiteTranscriptStore:
         for row in rows:
             entry = _message_entry(session_id, row)
             assert isinstance(entry.message, AssistantMessage)
+            delivery = _delivery(row["metadata_json"], entry.row_id)
             deliveries.append(
                 PendingDelivery(
                     session_id=session_id,
@@ -377,10 +412,43 @@ class SQLiteTranscriptStore:
                     final=row["type"] == "result",
                     text=row["content_text"] or "",
                     message=entry.message,
-                    parts=tuple(_delivery(row["metadata_json"], entry.row_id)["parts"]),
+                    parts=tuple(delivery["parts"]),
+                    plan=delivery.get("plan"),
+                    footer=delivery.get("footer"),
                 )
             )
         return deliveries
+
+    def _settle_delivery(self, session_id: str, row_id: str, footer: Optional[str], display: dict[str, Any]) -> None:
+        with self._engine.begin() as conn:
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(messages.c.metadata_json, messages.c.content_json).where(
+                    messages.c.id == row_id,
+                    messages.c.session_id == session_id,
+                    messages.c.context_seq.is_not(None),
+                    messages.c.type.in_(RESPONSE_TYPES),
+                )
+            ).first()
+            if row is None:
+                raise TranscriptError(f"{row_id} is not a response of Session {session_id}")
+            metadata = _json_object(row.metadata_json, row_id)
+            delivery = _delivery(row.metadata_json, row_id)
+            if delivery["state"] != "pending" or any(part is not None for part in delivery["parts"]):
+                # Settlement precedes the first part; a started delivery keeps what it began with.
+                return
+            if footer:
+                delivery["footer"] = footer
+            content = {**_json_object(row.content_json, row_id), **display}
+            conn.execute(
+                messages.update()
+                .where(messages.c.id == row_id)
+                .values(
+                    metadata_json=json.dumps({**metadata, "delivery": delivery}),
+                    content_json=json.dumps(content),
+                    updated_at=_utc_now(),
+                )
+            )
 
     def _record_delivery_part(
         self, session_id: str, row_id: str, index: int, count: int, native_message_id: Optional[str]
@@ -401,6 +469,10 @@ class SQLiteTranscriptStore:
             delivery = _delivery(raw, row_id)
             if delivery["state"] == "delivered":
                 return True
+            plan = delivery.get("plan")
+            planned = len(plan["parts"]) if plan is not None else None
+            if planned is not None and planned != count:
+                raise TranscriptError(f"{row_id} plans {planned} part(s), not {count}")
             parts = delivery["parts"] or [None] * count
             if len(parts) != count:
                 raise TranscriptError(f"{row_id} was split into {len(parts)} part(s), not {count}")
@@ -415,7 +487,7 @@ class SQLiteTranscriptStore:
                     messages.update()
                     .where(messages.c.id == row_id)
                     .values(
-                        metadata_json=json.dumps({**metadata, "delivery": {"state": state, "parts": parts}}),
+                        metadata_json=json.dumps({**metadata, "delivery": {**delivery, "state": state, "parts": parts}}),
                         updated_at=now,
                     )
                 )
@@ -650,7 +722,25 @@ def _delivery(raw_metadata: Any, row_id: str) -> dict[str, Any]:
         or any(part is not None and not isinstance(part, dict) for part in parts)
     ):
         raise TranscriptError(f"response {row_id} has no readable delivery state")
-    return {"state": delivery["state"], "parts": list(parts)}
+    result: dict[str, Any] = {"state": delivery["state"], "parts": list(parts)}
+    plan = delivery.get("plan")
+    if plan is not None:
+        if not isinstance(plan, dict) or not isinstance(plan.get("parts"), list):
+            raise TranscriptError(f"response {row_id} has an unreadable delivery plan")
+        result["plan"] = plan
+    if isinstance(delivery.get("footer"), str):
+        result["footer"] = delivery["footer"]
+    return result
+
+
+def _initial_delivery(display: RenderedDisplay) -> dict[str, Any]:
+    """The outbox state a response commits with: pending while anything is left to send."""
+    if display.delivery is None:
+        return {"state": "pending" if display.text.strip() else "delivered", "parts": []}
+    plan = dict(display.delivery)
+    if not isinstance(plan.get("parts"), list):
+        raise TranscriptError("a delivery plan needs a list of parts")
+    return {"state": "pending" if plan["parts"] else "delivered", "parts": [], "plan": plan}
 
 
 def _json_object(raw: Any, row_id: str) -> dict[str, Any]:
@@ -670,7 +760,8 @@ def _display(rendered: Union[str, RenderedDisplay]) -> RenderedDisplay:
         raise TypeError("a display renderer returns a str or a RenderedDisplay")
     if MODEL_KEY in rendered.content:
         raise TranscriptError(f"display content must not set the reserved {MODEL_KEY!r} key")
-    return RenderedDisplay(rendered.text, _canonical(dict(rendered.content), "display content"))
+    delivery = None if rendered.delivery is None else _canonical(dict(rendered.delivery), "delivery plan")
+    return RenderedDisplay(rendered.text, _canonical(dict(rendered.content), "display content"), delivery)
 
 
 def _canonical(value: dict[str, Any], what: str) -> dict[str, Any]:

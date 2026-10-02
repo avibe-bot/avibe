@@ -78,18 +78,25 @@ class _Formatter:
     def format_toolcall_label(self, name: str, arguments: Optional[dict] = None) -> str:
         return f"🔧 {name}"
 
-    def format_result_footer(self, *_args: Any, **_kwargs: Any) -> str:
-        return ""
+    def format_result_footer(self, subtype: str, *_args: Any, **_kwargs: Any) -> str:
+        return "❌ failed" if subtype == "error" else "✅ done"
 
 
 class _IMClient:
-    """Records every send; ``fail_sends`` names 1-based send attempts the platform rejects."""
+    """Records every send; ``fail_sends`` names 1-based send attempts the platform rejects.
+
+    ``routes`` records ``(channel, route, text)``: ``reply`` for the result path
+    (native Markdown sender), ``message`` for a plain send such as the process log.
+    """
 
     def __init__(self) -> None:
         self.formatter = _Formatter()
         self.sent: list[str] = []
+        self.routes: list[tuple[str, str, str]] = []
+        self.uploads: list[str] = []
         self.attempts = 0
         self.fail_sends: set[int] = set()
+        self.fail_uploads = 0
 
     def should_use_thread_for_reply(self) -> bool:
         return False
@@ -97,12 +104,23 @@ class _IMClient:
     def supports_message_editing(self, context=None) -> bool:
         return context is not None and context.platform != "wechat"
 
-    async def send_message(self, context, text, parse_mode=None, reply_to=None, subtext=None):
+    async def send_message(self, context, text, parse_mode=None, reply_to=None, subtext=None, *, _route="message"):
         self.attempts += 1
         if self.attempts in self.fail_sends:
             raise RuntimeError("the platform rejected this part")
         self.sent.append(text)
+        self.routes.append((context.channel_id, _route, text))
         return f"im-{self.attempts}"
+
+    async def send_markdown_message(self, context, text, keyboard=None, subtext=None):
+        return await self.send_message(context, text, subtext=subtext, _route="reply")
+
+    async def upload_file_from_path(self, context, file_path, title=None):
+        if self.fail_uploads:
+            self.fail_uploads -= 1
+            raise RuntimeError("the platform rejected the upload")
+        self.uploads.append(file_path)
+        return f"file-{len(self.uploads)}"
 
     async def send_message_with_buttons(self, context, text, keyboard, parse_mode=None, subtext=None):
         return await self.send_message(context, text, parse_mode=parse_mode)
@@ -702,3 +720,140 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(engine, s
     assert harness.controller.im_client.sent == [f"❌ {i18n_t('avibeAgent.error.generic', 'en')}"]
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [True]
 
+
+
+# --- a committed row is delivered from its persisted plan (recovery.md D1/D2) ---------------
+
+
+async def _crash_after_commit(harness: _Harness, body: str, *messages: AssistantMessage, finals=None) -> list:
+    """The first process commits rows for a Turn and dies before delivering any of them."""
+    request = harness.request(body)
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        harness.session_id, request.context.platform_specific["delivery_id"], UserMessage((text(body),))
+    )
+    rows = []
+    for index, message in enumerate(messages):
+        final = (finals or [False] * len(messages))[index]
+        rows.append(await harness.agent.store.append_response(harness.session_id, message, final=final))
+    return rows
+
+
+async def test_recovered_narration_stays_process_output(engine, session, tmp_path, published) -> None:
+    harness = _Harness(engine, tmp_path, "telegram", [])
+    call = ToolCallBlock(id="call_1", name="echo", arguments={})
+    await _crash_after_commit(harness, "go", assistant("Checking the files first.", calls=(call,)))
+
+    harness.new_agent()
+    assert await harness.agent.restore_pending_deliveries({"telegram"}) == 1
+
+    assert harness.controller.im_client.routes == [("C1", "message", "Checking the files first.")]
+    assert await harness.agent.store.pending_deliveries(SESSION) == []
+
+
+async def test_a_recovered_reply_goes_to_the_scheduled_override_target(engine, session, tmp_path, published) -> None:
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("report ready"))]])
+    request = harness.request("scheduled report")
+    request.context.platform_specific["delivery_override"] = {
+        "platform": "telegram", "channel_id": "C-report", "user_id": "u-report",
+    }
+    harness.controller.im_client.fail_sends = {1}
+
+    await harness.agent.handle_message(request)
+    harness.new_agent()
+    await harness.agent.restore_pending_deliveries({"telegram"})
+
+    replies = [(channel, text) for channel, route, text in harness.controller.im_client.routes if route == "reply"]
+    assert replies == [("C-report", "report ready")]
+    assert await harness.agent.store.pending_deliveries(SESSION) == []
+
+
+async def test_recovery_resends_the_persisted_split_after_a_limit_change(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    long_reply = "你" * 1000  # 3,000 bytes: two WeChat parts at today's limit
+    harness = _Harness(engine, tmp_path, "wechat", [[Done(assistant(long_reply))]])
+    harness.controller.im_client.fail_sends = {2}
+    await harness.agent.handle_message(harness.request("write a long answer"))
+    first_part = harness.controller.im_client.sent[0]
+    # A later release splits WeChat replies differently.
+    monkeypatch.setattr(ConsolidatedMessageDispatcher, "_get_result_max_bytes", lambda self, context: 900)
+
+    harness.new_agent()
+    await harness.agent.restore_pending_deliveries({"wechat"})
+
+    sent = harness.controller.im_client.sent
+    assert sent.count(first_part) == 1 and first_part + sent[-1] == long_reply
+    assert await harness.agent.store.pending_deliveries(SESSION) == []
+
+
+async def test_an_attachment_is_acknowledged_only_after_its_upload(engine, session, tmp_path, published) -> None:
+    report = tmp_path / "report.txt"
+    report.write_text("numbers", encoding="utf-8")
+    reply = f"Here is the report: [report](file://{report})"
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant(reply))]])
+    harness.controller.im_client.fail_uploads = 1
+
+    await harness.agent.handle_message(harness.request("send me the report"))
+    [pending] = await harness.agent.store.pending_deliveries(SESSION)
+    assert harness.controller.im_client.uploads == []
+
+    harness.new_agent()
+    await harness.agent.restore_pending_deliveries({"telegram"})
+
+    assert harness.controller.im_client.uploads == [str(report)]
+    assert [text for _channel, route, text in harness.controller.im_client.routes if route == "reply"] == [
+        "Here is the report: report"
+    ]
+    assert await harness.agent.store.pending_deliveries(SESSION) == []
+
+
+async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_path, published) -> None:
+    class _LeakyJobs(FakeJobHost):
+        async def kill(self, job_id, *, reason="killed") -> None:
+            raise RuntimeError("the job's process group cannot be signalled")
+
+    jobs = _LeakyJobs()
+
+    def tools(tracking, sink):
+        async def start_and_leave(arguments, ctx):
+            await tracking.start("sleep 600", cwd=ctx.cwd, env={}, timeout_s=None, session_id=ctx.session_id,
+                                 tool_call_id=ctx.tool_call_id)
+            return ToolResult((text("started"),))
+
+        return [FakeTool("echo", execute=start_and_leave)]
+
+    suite = ToolSuite(jobs=jobs, create_tools=tools, render_recovered=lambda *a: None, find_job=lambda *a: None)
+    harness = _Harness(engine, tmp_path, "avibe", _tool_turn(), suite=suite)
+    harness.controller.config.show_duration = True
+
+    await harness.agent.handle_message(harness.request("start it"))
+
+    # The reply committed before cleanup failed, so only settlement knows the run failed.
+    [result] = harness.rows("result")
+    assert json.loads(result["content_json"])["result_footer"] == "❌ failed"
+    assert harness.controller.terminals[-1]["is_error"] is True
+
+
+async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session, tmp_path, published) -> None:
+    harness = _Harness(
+        engine, tmp_path, "avibe", [[Done(assistant("ok"))]],
+        tools=[FakeTool(name) for name in ("read", "bash", "edit", "write")],
+    )
+
+    await harness.agent.handle_message(harness.request("hi"))
+
+    system = harness.provider.requests[0].system
+    assert all(f"- {name}: " in system for name in ("read", "bash", "edit", "write"))
+    assert "Use edit for precise changes" in system
+
+
+async def test_an_idle_session_holds_no_adapter_state(engine, session, tmp_path, published) -> None:
+    harness = _Harness(engine, tmp_path, "avibe", _tool_turn() + [[Done(assistant("again"))]])
+
+    await harness.agent.handle_message(harness.request("first"))
+    await harness.agent.handle_message(harness.request("second"))
+
+    assert harness.agent._runtimes == {}
+    assert harness.agent.store._env_state == {}
+    assert not getattr(harness.agent.store, "_responses", {})

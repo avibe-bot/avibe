@@ -6,8 +6,9 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
   written, so a refused route fails like any backend that never started;
 * marks native acceptance, which materializes the input's ``messages`` row, and
   then runs the loop, whose rows *are* the transcript (C-5);
-* delivers every committed response from its row (the dispatcher's committed
-  path, part by part on IM) and settles the Turn from the run's outcome;
+* renders each committed response's delivery plan inside its commit (target,
+  finality, parts), delivers every row by replaying that plan - live and after
+  a crash alike - and writes the outcome footer when the run settles;
 * steers the running loop with P1 deliveries and lets a refused steer fall back
   to the P3 queue; Stop aborts the run;
 * before any run of a Session in this process, under the Session writer lock,
@@ -21,9 +22,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, AsyncIterator, Optional, Sequence
 
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Engine
@@ -74,6 +76,7 @@ from storage import message_deliveries as delivery_store
 from storage import messages_service
 from storage.agent_transcript import (
     INPUT_TYPES,
+    PendingDelivery,
     RenderedDisplay,
     SQLiteTranscriptStore,
     render_text,
@@ -111,11 +114,14 @@ class _Run:
 
 @dataclass
 class _SessionRuntime:
+    """A Session's writer lock and run while some caller holds it; retired when idle."""
+
     session_id: str
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     recovered: bool = False
     run: Optional[_Run] = None
     cwd: str = ""
+    holders: int = 0
 
 
 class AvibeAgent(BaseAgent):
@@ -142,10 +148,13 @@ class AvibeAgent(BaseAgent):
             SQLiteTranscriptStore(self._engine, render=self._render_display),
             self._engine,
             environment=self._environment,
+            on_response=self._on_response,
         )
         self._providers = providers or registry_providers(media_loader=self.media)
         self._tool_suite = tool_suite
         self._watch_jobs = watch_jobs
+        # Per-Session state lives only while a caller holds the Session (``_held``);
+        # the last holder retires it, together with the store's per-Session state.
         self._runtimes: dict[str, _SessionRuntime] = {}
 
     # --- BaseAgent -----------------------------------------------------------
@@ -159,8 +168,7 @@ class AvibeAgent(BaseAgent):
         if not session_id or not turn_id or not input_id:
             await self._fail(request, "generic", "Avibe Agent turn has no Session, Turn, or input identity.")
             return
-        runtime = self._runtime(session_id)
-        async with runtime.lock:
+        async with self._held(session_id) as runtime:
             try:
                 await self._resume(runtime)
             except Exception as error:
@@ -211,8 +219,6 @@ class AvibeAgent(BaseAgent):
                 run.stop_requested = True
                 run.agent.abort("session cleared")
                 cleared += 1
-            elif run is None:
-                self.store.forget(runtime.session_id)
         return cleared
 
     def runtime_turn_keys(self) -> set[str]:
@@ -233,8 +239,7 @@ class AvibeAgent(BaseAgent):
         """
         session_ids = await asyncio.to_thread(self._sessions_with_pending_rows, platforms)
         for session_id in session_ids:
-            runtime = self._runtime(session_id)
-            async with runtime.lock:
+            async with self._held(session_id) as runtime:
                 try:
                     await self._resume(runtime)
                 except Exception:
@@ -246,7 +251,6 @@ class AvibeAgent(BaseAgent):
         for runtime in list(self._runtimes.values()):
             if runtime.run is not None:
                 runtime.run.agent.abort("backend disabled")
-        self._runtimes.clear()
 
     async def prepare_resume_binding(self, *, base_session_id: str, session_key: str, working_path: str) -> None:
         """Nothing to prepare: the transcript is the Session's own rows, read at the next run."""
@@ -342,20 +346,18 @@ class AvibeAgent(BaseAgent):
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
         tools = tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id)))
         agent.set_tools(tools)
-        agent.system = system_prompt((tool.spec.name for tool in tools), self._avibe_sections(request, cwd))
+        agent.system = system_prompt([tool.spec.name for tool in tools], self._avibe_sections(request, cwd))
         return _Run(agent, router, request, session_id, turn_id, cwd)
 
     async def _on_event(self, run: _Run, event: AgentEvent) -> None:
         if isinstance(event, MessageCommitted):
-            message = self.store.response(event.message_id)
-            if message is not None:
-                run.tool_calls.update({call.id: call for call in message.tool_calls})
-                self._note_tokens(run, message)
             if event.final:
                 # Delivered at the end of the run, which decides how the Turn settles.
                 run.final_row = event.message_id
             else:
-                await self._deliver(run.request.context, run.session_id, event.message_id, final=False)
+                pending = await self.store.delivery(run.session_id, event.message_id)
+                if pending is not None:
+                    await self._deliver(run.request.context, pending, output=None)
         elif isinstance(event, ToolStarted):
             await self._emit_tool_started(run, event)
         elif isinstance(event, AgentError):
@@ -373,18 +375,18 @@ class AvibeAgent(BaseAgent):
                 context, "result", "", level="silent", output=stop_output_for(request)
             )
             return
-        final = self.store.response(run.final_row) if run.final_row else None
-        if final is not None and strip_silent_blocks(self._display_source(final, final=True)).strip():
+        pending = await self.store.delivery(run.session_id, run.final_row) if run.final_row else None
+        if pending is not None:
+            # The outcome is known only now: record its footer, then deliver the planned parts.
             # A refusal or safety stop without text already shows its explanation as the reply.
-            await self._deliver(
-                context,
-                run.session_id,
-                run.final_row,
-                final=True,
-                is_error=reason not in _COMPLETED,
-                result_footer=self._result_footer(run, is_error=reason not in _COMPLETED),
-                output=terminal_output_for(request),
-            )
+            is_error = reason not in _COMPLETED
+            footer = self._result_footer(run, is_error=is_error)
+            if footer:
+                await self.store.settle_delivery(
+                    run.session_id, run.final_row, footer=footer, display={"result_footer": footer}
+                )
+                pending = await self.store.delivery(run.session_id, run.final_row) or pending
+            await self._deliver(context, pending, output=terminal_output_for(request), is_error=is_error)
             return
         if reason in _COMPLETED and kind is None:
             await self.controller.emit_agent_message(
@@ -410,44 +412,44 @@ class AvibeAgent(BaseAgent):
     async def _deliver(
         self,
         context: Any,
-        session_id: str,
-        row_id: str,
+        pending: PendingDelivery,
         *,
-        final: bool,
+        output: Optional[MessageOutput],
         is_error: bool = False,
-        result_footer: Optional[str] = None,
-        output: Optional[MessageOutput] = None,
-        message: Optional[AssistantMessage] = None,
-        delivered_parts: tuple[bool, ...] = (),
     ) -> None:
-        message = message or self.store.response(row_id)
-        if message is None:
+        """Deliver one committed row by replaying the plan committed with it."""
+        if pending.plan is None:
+            logger.error("Avibe Agent row %s has no delivery plan", pending.row_id)
             return
-        source = self._display_source(message, final=final)
-        if not source.strip():
-            return
+        session_id, row_id = pending.session_id, pending.row_id
 
         async def acknowledge(index: int, count: int, native_message_id: Optional[str]) -> bool:
             return await self.store.record_delivery_part(
                 session_id, row_id, index=index, count=count, native_message_id=native_message_id
             )
 
-        committed = CommittedOutput(row_id=row_id, acknowledge=acknowledge, delivered_parts=delivered_parts)
+        committed = CommittedOutput(
+            row_id=row_id,
+            plan=pending.plan,
+            acknowledge=acknowledge,
+            delivered_parts=tuple(part is not None for part in pending.parts),
+            footer=pending.footer,
+        )
+        output = output or MessageOutput(completes_turn=False, completes_run=False)
         dispatcher = self.controller.message_dispatcher
         try:
             await dispatcher.emit_agent_message(
                 context=context,
-                message_type="result" if final else "assistant",
-                text=source,
+                message_type="result" if pending.final else "assistant",
+                text=self._display_source(pending.message, final=pending.final),
                 is_error=is_error,
-                result_footer=result_footer,
-                output=output or MessageOutput(completes_turn=False, completes_run=False),
+                output=output,
                 committed=committed,
             )
         except Exception:
             # The row stays pending and is re-delivered before the Session's next run.
             logger.exception("Avibe Agent delivery of %s failed", row_id)
-            if output is not None and output.completes_turn and not output.detached:
+            if output.completes_turn and not output.detached:
                 await self.controller.emit_agent_message(
                     context, "result", "", level="silent", is_error=True, output=output
                 )
@@ -458,46 +460,19 @@ class AvibeAgent(BaseAgent):
                 complete(context)
 
     async def _redeliver_pending(self, session_id: str) -> None:
-        """Deliver every committed row whose delivery a crash or failure left pending (D1/D2)."""
+        """Deliver every committed row whose delivery a crash or failure left pending (D1/D2).
+
+        Each row replays its own plan, with its own target and finality; a detached
+        output never settles a Turn, old or current.
+        """
         for item in await self.store.pending_deliveries(session_id):
-            context = await asyncio.to_thread(self._redelivery_context, session_id, item.row_id)
-            if context is None:
-                logger.warning("Avibe Agent cannot re-deliver %s: its channel is not this Session's", item.row_id)
+            if item.plan is None:
+                logger.warning("Avibe Agent cannot re-deliver %s: it has no delivery plan", item.row_id)
                 continue
-            # Detached: a re-delivered row never settles a Turn, old or current.
+            target = CommittedOutput(item.row_id, item.plan, _no_acknowledgement).target()
             await self._deliver(
-                context,
-                session_id,
-                item.row_id,
-                final=True,
-                output=MessageOutput(completes_turn=False, completes_run=False, detached=True),
-                message=item.message,
-                delivered_parts=tuple(part is not None for part in item.parts),
+                target, item, output=MessageOutput(completes_turn=False, completes_run=False, detached=True)
             )
-
-    def _redelivery_context(self, session_id: str, row_id: str) -> Any:
-        from modules.im import MessageContext
-
-        with self._engine.connect() as conn:
-            row = messages_service.get_message(conn, row_id, session_id=session_id)
-        if row is None:
-            return None
-        platform = row.get("platform")
-        if platform == "avibe":
-            # The row is the Workbench message; announcing it needs only the Session.
-            return MessageContext(
-                user_id="workbench",
-                channel_id=session_id,
-                platform="avibe",
-                platform_specific={
-                    "agent_session_id": session_id,
-                    "workbench_session_id": session_id,
-                    "platform": "avibe",
-                },
-            )
-        builder = getattr(getattr(self.controller, "session_turns", None), "_build_context", None)
-        context = builder(session_id) if callable(builder) else None
-        return context if context is not None and context.platform == platform else None
 
     # --- resume (recovery.md T2, T3, D1) ---------------------------------------
 
@@ -636,10 +611,17 @@ class AvibeAgent(BaseAgent):
         scope_id: Optional[str],
         session_id: str,
     ) -> RenderedDisplay:
-        """The row's display copy, as ``persist_agent_message`` would have written it, in its transaction."""
+        """The row's display copy and delivery plan, decided once inside its commit transaction.
+
+        The display copy is what ``persist_agent_message`` would have written; the
+        plan (``plan_committed_delivery``) is everything each surface will send.
+        """
         source = self._display_source(message, final=final)
+        plan = self.controller.message_dispatcher.plan_committed_delivery(
+            self._plan_context(session_id, platform), source, final=final
+        )
         if not final:
-            return RenderedDisplay(strip_silent_blocks(source), {"kind": "assistant"})
+            return RenderedDisplay(strip_silent_blocks(source), {"kind": "assistant"}, plan)
         capabilities = get_platform_descriptor(platform).capabilities
         enhanced = process_reply(
             source,
@@ -655,11 +637,25 @@ class AvibeAgent(BaseAgent):
             display = rewrite_agent_media(conn, scope_id=scope_id, session_id=session_id, text=display)
             if enhanced.buttons:
                 content["quick_replies"] = [button.text for button in enhanced.buttons]
-            run = self._run_for(session_id, None)
-            footer = self._result_footer(run, is_error=False) if run is not None else None
-            if footer:
-                content["result_footer"] = footer
-        return RenderedDisplay(display, content)
+        return RenderedDisplay(display, content, plan)
+
+    def _plan_context(self, session_id: str, platform: str) -> Any:
+        """The context a response is delivered from: its run's Turn, else the Session's own channel."""
+        from modules.im import MessageContext
+
+        run = self._run_for(session_id, None)
+        if run is not None:
+            return run.request.context
+        builder = getattr(getattr(self.controller, "session_turns", None), "_build_context", None)
+        context = builder(session_id) if callable(builder) and platform != "avibe" else None
+        if context is not None and context.platform == platform:
+            return context
+        return MessageContext(
+            user_id="workbench",
+            channel_id=session_id,
+            platform=platform,
+            platform_specific={"agent_session_id": session_id, "workbench_session_id": session_id, "platform": platform},
+        )
 
     def _avibe_sections(self, request: AgentRequest, cwd: str) -> str:
         from core.managed_skills import managed_skill_claude_cli_path, managed_skill_project_base
@@ -718,6 +714,14 @@ class AvibeAgent(BaseAgent):
             )
         except Exception:
             logger.exception("Avibe Agent could not show tool %s", event.name)
+
+    def _on_response(self, session_id: str, row_id: str, message: AssistantMessage) -> None:
+        """A response committed for the Session's run: keep what its tool events need."""
+        run = self._run_for(session_id, None)
+        if run is None:
+            return
+        run.tool_calls.update({call.id: call for call in message.tool_calls})
+        self._note_tokens(run, message)
 
     def _note_tokens(self, run: _Run, message: AssistantMessage) -> None:
         usage = message.usage
@@ -794,11 +798,21 @@ class AvibeAgent(BaseAgent):
             self._tool_suite = local_tool_suite(str(self._state_dir / "jobs"), watches=self._watch_jobs)
         return self._tool_suite
 
-    def _runtime(self, session_id: str) -> _SessionRuntime:
+    @asynccontextmanager
+    async def _held(self, session_id: str) -> AsyncIterator[_SessionRuntime]:
+        """Hold the Session's writer lock; the last holder retires its in-memory state."""
         runtime = self._runtimes.get(session_id)
         if runtime is None:
             runtime = self._runtimes[session_id] = _SessionRuntime(session_id)
-        return runtime
+        runtime.holders += 1
+        try:
+            async with runtime.lock:
+                yield runtime
+        finally:
+            runtime.holders -= 1
+            if runtime.holders == 0 and runtime.run is None and self._runtimes.get(session_id) is runtime:
+                del self._runtimes[session_id]
+                self.store.forget(session_id)
 
     def _run_for(self, session_id: Optional[str], turn_id: Optional[str]) -> Optional[_Run]:
         runtime = self._runtimes.get(session_id or "")
@@ -851,6 +865,10 @@ class AvibeAgent(BaseAgent):
                 select(agent_sessions.c.workdir).where(agent_sessions.c.id == session_id)
             ).scalar_one_or_none()
         return str(workdir or "")
+
+
+async def _no_acknowledgement(_index: int, _count: int, _native_message_id: Optional[str]) -> bool:
+    return False
 
 
 def _json_object(raw: Any) -> dict[str, Any]:

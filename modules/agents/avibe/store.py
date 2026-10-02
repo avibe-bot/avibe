@@ -9,8 +9,8 @@ Two adapter rules live at this boundary, where the loop consumes an input:
   after the backend accepts the steer. The loop can reach that input first, so
   consumption waits, bounded, for the row to exist.
 
-Committed responses are remembered by row id so the adapter can deliver and
-describe them without reading them back.
+Each committed response is handed to ``on_response`` once, for the run that
+owns it; nothing here keeps responses after that.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from storage.agent_transcript import PendingDelivery, SQLiteTranscriptStore
 from storage.models import messages
 
 EnvironmentSource = Callable[[str], Mapping[str, str]]
+ResponseObserver = Callable[[str, str, AssistantMessage], None]
 
 #: How long consumption waits for an accepted steer's row before failing the run.
 INPUT_ROW_TIMEOUT_S = 10.0
@@ -45,24 +46,20 @@ class AdapterTranscriptStore:
         engine: Engine,
         *,
         environment: EnvironmentSource,
+        on_response: ResponseObserver,
         input_row_timeout_s: float = INPUT_ROW_TIMEOUT_S,
     ) -> None:
         self._store = store
         self._engine = engine
         self._environment = environment
+        self._on_response = on_response
         self._input_row_timeout_s = input_row_timeout_s
+        # Per Session, the environment the context last recorded; evicted by ``forget``
+        # when the adapter retires the Session's runtime.
         self._env_state: dict[str, dict[str, str]] = {}
-        self._responses: dict[str, AssistantMessage] = {}
-
-    @property
-    def sqlite(self) -> SQLiteTranscriptStore:
-        return self._store
-
-    def response(self, row_id: str) -> Optional[AssistantMessage]:
-        return self._responses.get(row_id)
 
     def forget(self, session_id: str) -> None:
-        """Drop per-Session caches; the next consumption reads the environment from the rows again."""
+        """Drop per-Session state; the next consumption reads the environment from the rows again."""
         self._env_state.pop(session_id, None)
 
     # --- TranscriptStore -----------------------------------------------------
@@ -83,7 +80,7 @@ class AdapterTranscriptStore:
 
     async def append_response(self, session_id: str, message: AssistantMessage, *, final: bool) -> ContextEntry:
         entry = await self._store.append_response(session_id, message, final=final)
-        self._responses[entry.row_id] = message
+        self._on_response(session_id, entry.row_id, message)
         return entry
 
     async def append_tool_result(
@@ -100,6 +97,14 @@ class AdapterTranscriptStore:
 
     async def pending_deliveries(self, session_id: str) -> list[PendingDelivery]:
         return await self._store.pending_deliveries(session_id)
+
+    async def delivery(self, session_id: str, row_id: str) -> Optional[PendingDelivery]:
+        return await self._store.delivery(session_id, row_id)
+
+    async def settle_delivery(
+        self, session_id: str, row_id: str, *, footer: Optional[str], display: Mapping[str, Any]
+    ) -> None:
+        await self._store.settle_delivery(session_id, row_id, footer=footer, display=display)
 
     async def record_delivery_part(
         self, session_id: str, row_id: str, *, index: int, count: int, native_message_id: Optional[str] = None

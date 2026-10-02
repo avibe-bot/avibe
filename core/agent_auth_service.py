@@ -2305,6 +2305,9 @@ class AgentAuthService:
         elif backend == "avibe":
             from modules.agents.avibe import AvibeAgent
 
+            if not getattr(runtime_config, "enabled", True):
+                return False
+
             self.controller.config.avibe = runtime_config
             agent_service.register(AvibeAgent(self.controller))
         else:

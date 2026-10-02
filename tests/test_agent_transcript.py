@@ -499,3 +499,41 @@ async def test_the_display_copy_commits_with_its_row_and_never_reaches_the_conte
             "ses_main", _assistant("again"), final=True
         )
     assert [entry.row_id for entry in await store.load("ses_main")][-1] == reply.row_id
+
+
+async def test_a_delivery_plan_commits_with_its_row_and_bounds_its_receipts(engine) -> None:
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "go")
+    plan = {"version": 1, "final": True, "parts": [{"kind": "text", "text": "a"}, {"kind": "file", "path": "/r"}]}
+
+    def render(message, *, final, **_attribution):
+        parts = plan["parts"] if final else []
+        return RenderedDisplay(text="shown", delivery={**plan, "final": final, "parts": parts})
+
+    store = SQLiteTranscriptStore(engine, render=render)
+    await store.consume_input("ses_main", consumed, _user("go"))
+    # A response whose plan has nothing to send is delivered as it commits.
+    narration = await store.append_response("ses_main", _assistant("step", call_id="call_1"), final=False)
+    await store.append_tool_result("ses_main", _tool_result("call_1", "ok"), details={})
+    reply = await store.append_response("ses_main", _assistant("answer"), final=True)
+    assert await store.delivery("ses_main", narration.row_id) is None
+
+    pending = await store.delivery("ses_main", reply.row_id)
+    assert pending.plan == plan and pending.footer is None
+    await store.settle_delivery("ses_main", reply.row_id, footer="✅ done", display={"result_footer": "✅ done"})
+    with pytest.raises(TranscriptError):
+        await store.record_delivery_part("ses_main", reply.row_id, index=0, count=3)
+    assert await store.record_delivery_part("ses_main", reply.row_id, index=0, count=2, native_message_id="m1") is False
+    # Once a part is out, settlement no longer changes what the remaining parts show.
+    await store.settle_delivery("ses_main", reply.row_id, footer="❌ failed", display={"result_footer": "❌ failed"})
+    pending = await store.delivery("ses_main", reply.row_id)
+    assert (pending.footer, [part is not None for part in pending.parts]) == ("✅ done", [True, False])
+    assert await store.record_delivery_part("ses_main", reply.row_id, index=1, count=2) is True
+    assert await store.delivery("ses_main", reply.row_id) is None
+    with engine.connect() as conn:
+        content = json.loads(conn.execute(select(messages.c.content_json).where(messages.c.id == reply.row_id)).scalar())
+    assert content["result_footer"] == "✅ done" and "model" in content
+    with pytest.raises(TranscriptError):
+        await store.settle_delivery("ses_main", reply.row_id, footer=None, display={"model": {}})
