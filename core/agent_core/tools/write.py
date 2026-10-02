@@ -11,6 +11,7 @@ import contextlib
 import os
 import secrets
 import stat
+from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
@@ -103,13 +104,41 @@ def write_text(path: str, content: str) -> None:
     write_bytes(path, model_text(content).encode("utf-8"))
 
 
-def write_bytes(path: str, data: bytes) -> None:
+class FileChanged(Exception):
+    """The file is no longer the one a read-modify-write read; nothing was written."""
+
+
+@dataclass(frozen=True)
+class FileIdentity:
+    """The file a read-modify-write read, so its result is published only over that same file."""
+
+    path: str  # the realpath that was read
+    dev: int
+    ino: int
+    size: int
+    mtime_ns: int
+
+    @classmethod
+    def of(cls, path: str, st: os.stat_result) -> "FileIdentity":
+        return cls(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _require(expected: Optional[FileIdentity], path: str, st: os.stat_result) -> None:
+    if expected is not None and FileIdentity.of(path, st) != expected:
+        raise FileChanged()
+
+
+def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None) -> None:
     """Create or replace ``path`` only once ``data`` is completely on disk.
 
     A failed write (a full disk, a quota) leaves the original, or its absence, as it was. The temp
     file sits beside the real target (through symlinks) and is private (0600) while it holds the new
     contents; once they are fsynced it takes the existing file's mode, or the umask default for a new
     file, and replaces the target with ``os.replace``.
+
+    With ``expected``, the file must still be the one that was read: checked once, right before the
+    rename, or with ``fstat`` on the descriptor an in-place write goes through. POSIX has no
+    compare-and-rename, so a change between that check and the rename is not seen.
     """
     target = os.path.realpath(path)
     try:
@@ -124,6 +153,7 @@ def write_bytes(path: str, data: bytes) -> None:
             raise
         # An existing, writable file in a directory we cannot add to: only an in-place write is possible.
         with os.fdopen(open_regular(target, os.O_WRONLY), "wb") as handle:
+            _require(expected, target, os.fstat(handle.fileno()))
             handle.truncate(0)
             handle.write(data)
         return
@@ -133,6 +163,12 @@ def write_bytes(path: str, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
             os.fchmod(handle.fileno(), mode if mode is not None else 0o666 & ~_UMASK)
+        if expected is not None:
+            current = os.path.realpath(path)
+            try:
+                _require(expected, current, os.stat(current))
+            except FileNotFoundError:
+                raise FileChanged() from None
         os.replace(tmp, target)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):

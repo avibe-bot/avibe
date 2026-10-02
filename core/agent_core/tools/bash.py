@@ -180,8 +180,8 @@ class BashTool:
         if ctx.cancel.cancelled:
             return error_result("Command aborted")
 
-        # Measured from before the start, so this deadline passes no later than the job's recorded one and
-        # the foreground reports the timeout itself.
+        # The job host enforces the timeout (its wrapper decides timeout versus exit); bash only reports
+        # the recorded reason. This clock times the handover.
         started = time.monotonic()
         try:
             job_id = await self._jobs.start(
@@ -208,8 +208,6 @@ class BashTool:
             hand_over = handover_error is None and elapsed >= handover_at
             # A handover is decided only after a fresh status: a command that already ended keeps its own result.
             slice_s = 0.0 if hand_over else _PROGRESS_INTERVAL_S
-            if timeout is not None:
-                slice_s = min(slice_s, max(0.0, timeout - elapsed))
             if handover_error is None:
                 slice_s = min(slice_s, max(0.0, handover_at - elapsed))
             status = await self._wait_or_cancel(job_id, slice_s, ctx.cancel)
@@ -227,9 +225,6 @@ class BashTool:
             if ctx.cancel.cancelled:
                 await self._jobs.kill(job_id, reason=STOP_ABORTED)
                 return stopped_result(output, "Command aborted")
-            if timeout is not None and time.monotonic() - started >= timeout:
-                await self._jobs.kill(job_id, reason=STOP_TIMEOUT)
-                return stopped_result(output, _timed_out_line(timeout))
             if hand_over:
                 watch_id, handover_error = await self._hand_over(job_id)
                 if watch_id is not None:

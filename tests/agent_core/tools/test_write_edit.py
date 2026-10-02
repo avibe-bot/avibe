@@ -233,6 +233,44 @@ async def test_a_cancelled_write_lands_before_the_next_writer_takes_the_lock(
     assert (tmp_path / "f.txt").read_text() == "second\n"
 
 
+@pytest.mark.parametrize("change", ["replaced", "retargeted", "rewritten", "rewritten-in-place"])
+async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, monkeypatch, change):
+    """Another writer (bash, an editor) changed the file after edit read it: nothing is written over it."""
+    (tmp_path / "d").mkdir()
+    real, other, link = tmp_path / "d" / "a.txt", tmp_path / "d" / "b.txt", tmp_path / "d" / "f.txt"
+    real.write_text("alpha\n")
+    other.write_text("other\n")
+    link.symlink_to(real)
+    real_plan = edit_module._plan_edits
+
+    def plan_then_change(*args):
+        planned = real_plan(*args)
+        if change == "replaced":
+            (tmp_path / "d" / "new").write_text("unrelated text\n")
+            os.replace(tmp_path / "d" / "new", real)
+        elif change == "retargeted":
+            link.unlink()
+            link.symlink_to(other)
+        else:
+            real.write_text("unrelated text\n")
+        return planned
+
+    monkeypatch.setattr(edit_module, "_plan_edits", plan_then_change)
+    if change == "rewritten-in-place":
+        (tmp_path / "d").chmod(0o555)  # no temp file can be created beside it
+    try:
+        result = await _edit(make_ctx, "d/f.txt", {"oldText": "alpha", "newText": "beta"})
+    finally:
+        (tmp_path / "d").chmod(0o755)
+
+    assert (result.is_error, result_text(result)) == (
+        True,
+        "Could not edit file: d/f.txt. It changed while the edit was being applied; read it again.",
+    )
+    expected = {"retargeted": ("alpha\n", "other\n")}.get(change, ("unrelated text\n", "other\n"))
+    assert (real.read_text(), other.read_text()) == expected
+
+
 async def test_new_files_keep_the_umask_default(tmp_path, make_ctx):
     umask = os.umask(0)
     os.umask(umask)
@@ -559,10 +597,20 @@ async def test_a_path_no_file_can_have_is_an_error_result(make_ctx, tool, argume
     assert result_text(result) == f"Invalid path: {arguments['path']!r} contains a NUL byte"
 
 
+# Expected values are Node's fileURLToPath (WHATWG URL parsing), which Pi uses.
 @pytest.mark.parametrize(
     ("windows", "url", "expected"),
     [
         (False, "file:///tmp/a%20b.txt", "/tmp/a b.txt"),
+        # The WHATWG URL parser's steps: a backslash is a separator, C0 controls and spaces at the ends go.
+        (False, "file:///tmp\\x", "/tmp/x"),
+        (False, "file:///tmp/a ", "/tmp/a"),
+        (False, "file:///tmp/a\x1f \x00", "/tmp/a"),
+        (False, "file:///tmp/a%20", "/tmp/a "),
+        (True, "file:///C:\\tmp\\x", "C:\\tmp\\x"),
+        (True, "file://localhost\\C:\\x", "C:\\x"),
+        # Pi's gate is case-sensitive: this is a relative path in Pi too.
+        (False, "FILE:///tmp/a", "FILE:///tmp/a"),
         (False, "file://localhost/tmp/x", "/tmp/x"),
         (False, "file://server/tmp/x", ToolInputError("Invalid path: file URL host must be empty or localhost")),
         (False, "file:///tmp/a%2Fb", ToolInputError("Invalid path: a file URL must not include encoded / characters")),

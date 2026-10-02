@@ -143,9 +143,11 @@ def _run(job_dir: str, proc: subprocess.Popen, log: _BoundedLog, deadline: Optio
         _write_atomic(os.path.join(job_dir, "exit"), b"%d\n" % (code if code >= 0 else 128 - code))
 
     def enforce_deadline() -> None:
-        # J3: the deadline holds even when no host is there to enforce it.
-        if not exit_written and deadline is not None and time.time() >= deadline:
-            _stop_group(job_dir, "timeout", proc)
+        # J3: the deadline holds even when no host is there to enforce it. The wrapper alone decides
+        # timeout versus exit, and it looks at the shell first: one that has exited is never a timeout.
+        if exit_written or deadline is None or time.time() < deadline or proc.poll() is not None:
+            return
+        _stop_group(job_dir, "timeout", proc)
 
     while not eof:
         enforce_deadline()

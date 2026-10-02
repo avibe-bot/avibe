@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import functools
 import os
+import signal
 import time
 
 import psutil
@@ -68,6 +70,18 @@ async def test_a_log_bounded_on_disk_is_not_called_the_full_output(tmp_path, mak
     assert f"100000\n\n\n[Output log (middle omitted beyond 2.9KB): {result.details['output_path']}]" in text
     assert "Full output" not in text
     assert result.details["omitted_bytes"] == len("".join(f"{i}\n" for i in range(1, 100001))) - 3000
+
+
+async def test_a_completed_overlong_line_reports_its_size(tmp_path, make_ctx):
+    """Avibe fix to Pi: the partial-line notice names the size of the last line even once it is complete."""
+    command = "head -c 60000 /dev/zero | tr '\\0' x; echo"
+
+    result = await BashTool(_host(tmp_path)).execute({"command": command}, make_ctx())
+
+    path = result.details["output_path"]
+    assert result_text(result).endswith(
+        f"\n\n[Showing last 50.0KB of line 1 (line is 58.6KB). Output log (middle omitted beyond 3.0MB): {path}]"
+    )
 
 
 async def test_a_non_zero_exit_is_an_error_result(tmp_path, make_ctx):
@@ -199,6 +213,50 @@ async def test_stops_are_reported_through_the_agents_job_host(tmp_path, make_ctx
     result = await BashTool(TrackingJobHost(_host(tmp_path))).execute(arguments, ctx)
 
     assert (result.is_error, result_text(result)) == (True, expected)
+
+
+@pytest.mark.parametrize("caller", ["host", "bash"])
+async def test_only_a_live_wrapper_decides_at_the_deadline(tmp_path, make_ctx, monkeypatch, caller):
+    """Only the wrapper sees the shell exit; the host and bash leave a live wrapper a grace, then stop the job."""
+    monkeypatch.setattr(jobs_module, "_WRAPPER_DECIDES_S", 0.6)
+    quick_kill = functools.partial(jobs_module._terminate_group, timeout_s=0.3)
+    monkeypatch.setattr(jobs_module, "_terminate_group", quick_kill)
+    host = _host(tmp_path)
+    command = f"echo $$ > {tmp_path / 'sh.pid'}; sleep 30"
+    started = time.monotonic()
+    if caller == "bash":
+        running = asyncio.ensure_future(BashTool(host).execute({"command": command, "timeout": 1.0}, make_ctx()))
+        job_id = None
+        while job_id is None:
+            await asyncio.sleep(0.01)
+            job_id = host.find_job("ses_test", "toolu_1")
+    else:
+        job_id = await host.start(
+            command,
+            cwd=str(tmp_path),
+            env={"PATH": os.environ["PATH"]},
+            timeout_s=1.0,
+            session_id="ses_test",
+            tool_call_id="toolu_1",
+        )
+        running = asyncio.ensure_future(host.wait(job_id, deadline_s=None))
+    wrapper_pid = os.path.join(host.job_dir(job_id), "pid")
+    while not (os.path.exists(wrapper_pid) and (tmp_path / "sh.pid").exists()):
+        await asyncio.sleep(0.01)
+    os.kill(int(open(wrapper_pid).read()), signal.SIGSTOP)  # the wrapper can no longer decide
+    shell_pid = int((tmp_path / "sh.pid").read_text())
+
+    await asyncio.sleep(max(0.0, started + 1.3 - time.monotonic()))  # past the deadline, inside the grace
+    alive_in_grace = psutil.pid_exists(shell_pid) and psutil.Process(shell_pid).status() != psutil.STATUS_ZOMBIE
+    outcome = await asyncio.wait_for(running, timeout=10)
+
+    assert alive_in_grace
+    assert host.stop_reason(job_id) == "timeout"
+    if caller == "bash":
+        assert result_text(outcome).endswith("Command timed out after 1 seconds")
+    else:
+        assert outcome.state == "gone"
+    assert _process_gone(shell_pid)
 
 
 async def test_the_foreground_window_hands_over_and_the_command_runs_once(tmp_path, make_ctx):

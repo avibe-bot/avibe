@@ -87,6 +87,9 @@ STOP_TIMEOUT = "timeout"
 STOP_ABORTED = "aborted"
 
 _WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "job_wrapper.py")
+#: How long past the deadline the host leaves a live wrapper to decide (its poll interval, its
+#: 0.5 s drain, and margin) before stopping the job itself.
+_WRAPPER_DECIDES_S = 1.0
 _JOB_ID = re.compile(r"^job_[a-z0-9]+$")
 _GO = "go"
 _ABANDON = "abandon"
@@ -416,7 +419,11 @@ class LocalJobHost:
             if _group_exists(identity.pid):
                 logger.warning("Job %s process group %s cannot be verified; not signaling", job_id, identity.pid)
             return
-        self._create_once(job_id, "stopped", reason)  # the first stopper's reason wins
+        try:
+            self._create_once(job_id, "stopped", reason)  # the first stopper's reason wins
+        except OSError:
+            # Recording is best effort at every stopper: the kill matters more than the record.
+            logger.warning("Could not record why job %s was stopped", job_id, exc_info=True)
         if not await asyncio.to_thread(_terminate_group, identity.pid):
             logger.warning("Job %s process group %s survived termination", job_id, identity.pid)
 
@@ -446,11 +453,17 @@ class LocalJobHost:
     # --- deadline (J3) and reporting --------------------------------------
 
     async def enforce_deadline(self, job_id: str) -> bool:
-        """Kill the job if its ``deadline_at`` has passed while it runs; ``True`` if it was killed."""
+        """Kill the job if its ``deadline_at`` has passed while it runs; ``True`` if it was killed.
+
+        Only the wrapper sees the shell exit, and it publishes the exit after draining the output, so a
+        running job may already have ended on time: a live wrapper decides timeout versus exit. The
+        host stops the job as the second owner once the wrapper has not, ``_WRAPPER_DECIDES_S`` late.
+        """
         deadline_at = self.meta(job_id).get("deadline_at")
-        if not deadline_at or datetime.now(timezone.utc) < _parse_iso(deadline_at):
+        if not deadline_at:
             return False
-        if self.status(job_id).state != "running":
+        late = (datetime.now(timezone.utc) - _parse_iso(deadline_at)).total_seconds()
+        if late < _WRAPPER_DECIDES_S or self.status(job_id).state != "running":
             return False
         await self.kill(job_id, reason=STOP_TIMEOUT)
         return True

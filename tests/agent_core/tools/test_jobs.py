@@ -295,6 +295,51 @@ async def test_the_deadline_holds_after_the_command_closes_its_output(tmp_path):
     assert restarted.stop_reason(job_id) == "timeout"
 
 
+async def test_a_kill_whose_reason_cannot_be_recorded_still_stops_the_command(tmp_path, monkeypatch):
+    """Recording why is best effort at every stopper: a full disk must not leave the command running."""
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    job_id = await _start(host, tmp_path, f"echo $$ > {tmp_path / 'sh.pid'}; sleep 30")
+    assert _wait_until(lambda: (tmp_path / "sh.pid").exists())
+    shell_pid = int((tmp_path / "sh.pid").read_text())
+    real_create = host._create_once
+
+    def full_disk(job_id, name, value):
+        if name == "stopped":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_create(job_id, name, value)
+
+    monkeypatch.setattr(host, "_create_once", full_disk)
+    try:
+        await host.kill(job_id, reason="aborted")
+        stopped = _wait_until(
+            lambda: not psutil.pid_exists(shell_pid) or psutil.Process(shell_pid).status() == psutil.STATUS_ZOMBIE
+        )
+    finally:
+        monkeypatch.undo()
+        await host.kill(job_id)
+
+    assert stopped
+    assert host.stop_reason(job_id) is None
+
+
+def test_a_shell_that_exited_by_the_deadline_check_is_not_a_timeout(tmp_path, monkeypatch):
+    """The wrapper alone decides timeout versus exit, and it looks at the shell before the clock."""
+    import core.agent_core.tools.job_wrapper as wrapper
+
+    stops = []
+    monkeypatch.setattr(wrapper, "_stop_group", lambda job_dir, reason, proc: stops.append(reason))
+    proc = subprocess.Popen(["/bin/sh", "-c", "exit 3"], stdout=subprocess.PIPE)
+    proc.wait()  # it exited before the deadline was checked
+    log = wrapper._BoundedLog(str(tmp_path), 1024, 1024)
+    try:
+        wrapper._run(str(tmp_path), proc, log, time.time() - 1)
+    finally:
+        proc.stdout.close()
+
+    assert stops == []
+    assert (tmp_path / "exit").read_text() == "3\n"
+
+
 def test_the_wrapper_stops_its_group_even_when_its_diagnostics_fail(tmp_path, monkeypatch):
     """The wrapper's own failure handler must stop the command even if writing the traceback fails (ENOSPC)."""
     import core.agent_core.tools.job_wrapper as wrapper

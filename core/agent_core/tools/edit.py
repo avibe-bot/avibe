@@ -28,7 +28,7 @@ from core.agent_core.tools.paths import (
 )
 from core.agent_core.tools.text import decode_file, encode_file, model_text
 from core.agent_core.tools.truncate import format_size
-from core.agent_core.tools.write import write_bytes
+from core.agent_core.tools.write import FileChanged, FileIdentity, write_bytes
 
 #: Avibe: larger files are refused rather than loaded whole; the display diff stops at a smaller size.
 MAX_EDIT_BYTES = 10 * 1024 * 1024
@@ -131,16 +131,19 @@ class _TooLarge(Exception):
         self.size = size
 
 
-def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[int, bytes, str, str]:
-    """Read the file and compute its new bytes: ``(size, data, view_before, view_after)``.
+def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[int, bytes, str, str, FileIdentity]:
+    """Read the file and compute its new bytes: ``(size, data, view_before, view_after, identity)``.
 
     One descriptor gives the size and the contents, read up to the limit, so a file that grew after an
     earlier check by path cannot get past it. ``surrogateescape`` carries bytes that are not UTF-8
-    through unchanged; only replaced spans change.
+    through unchanged; only replaced spans change. ``identity`` is the file that was read, so the
+    result is published only over it.
     """
-    fd = open_regular(absolute)
+    real = os.path.realpath(absolute)
+    fd = open_regular(real)
     try:
-        size = os.fstat(fd).st_size
+        st = os.fstat(fd)
+        size = st.st_size
         if size > MAX_EDIT_BYTES:
             raise _TooLarge(size)
         raw = read_at_most(fd, MAX_EDIT_BYTES)
@@ -149,7 +152,7 @@ def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[int, bytes
     if len(raw) > MAX_EDIT_BYTES:
         raise _TooLarge(max(size, len(raw)))
     new_text, before, after = apply_edits(decode_file(raw), edits, path)
-    return len(raw), encode_file(new_text), before, after
+    return len(raw), encode_file(new_text), before, after, FileIdentity.of(real, st)
 
 
 class EditTool:
@@ -184,7 +187,7 @@ class EditTool:
             if not os.access(absolute, os.R_OK | os.W_OK):
                 return error_result(f"Could not edit file: {path}. Error code: EACCES.")
             try:
-                size, data, base, new_content = await to_thread_joined(_plan_edits, absolute, edits, path)
+                size, data, base, new_content, identity = await to_thread_joined(_plan_edits, absolute, edits, path)
                 if len(data) > MAX_EDIT_BYTES:
                     return error_result(
                         f"File {path} would be {format_size(len(data))} after this edit, over the "
@@ -193,7 +196,7 @@ class EditTool:
                     )
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
-                await to_thread_joined(write_bytes, absolute, data)
+                await to_thread_joined(write_bytes, absolute, data, identity)
             except _TooLarge as exc:
                 # The whole file and several copies would sit in the process every Session shares.
                 return error_result(
@@ -202,6 +205,11 @@ class EditTool:
                 )
             except EditError as exc:
                 return error_result(str(exc))
+            except FileChanged:
+                # Another writer (bash, an editor) changed it after it was read: the edit would overwrite that.
+                return error_result(
+                    f"Could not edit file: {path}. It changed while the edit was being applied; read it again."
+                )
             except NotRegularFile as exc:
                 detail = "Error code: EISDIR." if exc.kind == "directory" else "It is not a regular file."
                 return error_result(f"Could not edit file: {path}. {detail}")

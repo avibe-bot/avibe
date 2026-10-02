@@ -30,7 +30,8 @@ class OutputAccumulator:
         self._tail_starts_at_line_boundary = True
         self._total_bytes = 0
         self._completed_lines = 0
-        self._current_line_bytes = 0
+        # The size of the last line, open or completed: what the partial-line notice names.
+        self._last_line_bytes = 0
         self._has_open_line = False
 
     def append(self, text: str) -> None:
@@ -43,14 +44,21 @@ class OutputAccumulator:
         if self._tail_bytes > self._max_rolling * 2:
             self._trim()
         newlines = text.count("\n")
+        carried = self._last_line_bytes if self._has_open_line else 0
         if newlines == 0:
-            self._current_line_bytes += size
+            self._last_line_bytes = carried + size
             self._has_open_line = True
+            return
+        self._completed_lines += newlines
+        last = text.rindex("\n")
+        rest = text[last + 1 :]
+        if rest:
+            self._last_line_bytes = utf8_len(rest)
         else:
-            self._completed_lines += newlines
-            rest = text[text.rindex("\n") + 1 :]
-            self._current_line_bytes = utf8_len(rest)
-            self._has_open_line = bool(rest)
+            # Avibe fix to Pi, whose count drops to 0 here: a completed last line keeps its size.
+            previous = text.rfind("\n", 0, last)
+            self._last_line_bytes = (carried if previous == -1 else 0) + utf8_len(text[previous + 1 : last])
+        self._has_open_line = bool(rest)
 
     def snapshot(self, open_line: str = "") -> TruncationResult:
         """The tail as the model would see it, with ``open_line`` (not yet final) appended."""
@@ -67,7 +75,10 @@ class OutputAccumulator:
         )
 
     def last_line_bytes(self, open_line: str = "") -> int:
-        return (self._current_line_bytes if self._has_open_line else 0) + utf8_len(open_line)
+        """Bytes of the last line: the open one plus ``open_line`` (not yet final), else the last completed one."""
+        if open_line:
+            return (self._last_line_bytes if self._has_open_line else 0) + utf8_len(open_line)
+        return self._last_line_bytes
 
     def _trim(self) -> None:
         data = self._tail.encode("utf-8", "surrogatepass")
