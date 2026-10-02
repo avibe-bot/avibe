@@ -98,8 +98,10 @@ class AdapterTranscriptStore:
     async def pending_deliveries(self, session_id: str) -> list[PendingDelivery]:
         return await self._store.pending_deliveries(session_id)
 
-    async def delivery(self, session_id: str, row_id: str) -> Optional[PendingDelivery]:
-        return await self._store.delivery(session_id, row_id)
+    async def delivery(
+        self, session_id: str, row_id: str, *, include_delivered: bool = False
+    ) -> Optional[PendingDelivery]:
+        return await self._store.delivery(session_id, row_id, include_delivered=include_delivered)
 
     async def settle_delivery(
         self, session_id: str, row_id: str, *, footer: Optional[str], display: Mapping[str, Any]
@@ -107,10 +109,17 @@ class AdapterTranscriptStore:
         await self._store.settle_delivery(session_id, row_id, footer=footer, display=display)
 
     async def record_delivery_part(
-        self, session_id: str, row_id: str, *, index: int, count: int, native_message_id: Optional[str] = None
+        self,
+        session_id: str,
+        row_id: str,
+        *,
+        index: int,
+        count: int,
+        native_message_id: Optional[str] = None,
+        skipped: Optional[str] = None,
     ) -> bool:
         return await self._store.record_delivery_part(
-            session_id, row_id, index=index, count=count, native_message_id=native_message_id
+            session_id, row_id, index=index, count=count, native_message_id=native_message_id, skipped=skipped
         )
 
     # --- implementation ------------------------------------------------------

@@ -31,6 +31,7 @@ from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
     persist_silent_terminal,
+    load_committed_agent_message,
     publish_committed_agent_message,
 )
 from core.message_output import (
@@ -173,15 +174,18 @@ class CommittedOutput:
     delivery decided when the row committed (``plan_committed_delivery``): its
     target and every part. Delivery replays the plan and recomputes nothing;
     each part is acknowledged through ``acknowledge(index, count,
-    native_message_id)`` before the next is sent, and a failed part stops the
-    delivery so the row stays pending for re-delivery (``recovery.md`` D1/D2).
+    native_message_id, skipped=None)`` before the next is sent, only with evidence
+    of its effect (a message id, a persisted row, an upload) or an explicit
+    ``skipped`` reason decided before sending. A failed part is never
+    acknowledged and stops the delivery, so the row stays pending for
+    re-delivery (``recovery.md`` D1/D2).
     ``delivered_parts`` holds the receipts of an earlier attempt by part index;
     ``footer`` is the result footer written when the run settled.
     """
 
     row_id: str
     plan: Mapping[str, Any]
-    acknowledge: Callable[[int, int, Optional[str]], Awaitable[Any]]
+    acknowledge: Callable[..., Awaitable[Any]]
     delivered_parts: tuple[bool, ...] = ()
     footer: Optional[str] = None
 
@@ -3294,8 +3298,9 @@ class ConsolidatedMessageDispatcher:
 
                 # Deliver the result as a NEW message: inline / split / summarized.
                 committed_row = None
+                committed_incomplete = False
                 if committed is not None:
-                    primary_message_id, committed_row = await self._deliver_committed_parts(
+                    complete, first_sent_id, committed_row = await self._deliver_committed_parts(
                         context,
                         target_context,
                         committed,
@@ -3304,9 +3309,9 @@ class ConsolidatedMessageDispatcher:
                         settings_manager=settings_manager,
                         settings_key=settings_key,
                     )
-                    scheduled_anchor_message_id = (
-                        primary_message_id if target_context.platform != "avibe" else None
-                    )
+                    primary_message_id = first_sent_id or (committed.row_id if complete else None)
+                    committed_incomplete = not complete
+                    scheduled_anchor_message_id = first_sent_id if target_context.platform != "avibe" else None
                 elif self._result_within_limit(context, display_text):
                     try:
                         primary_message_id = await self._send_result_inline(
@@ -3418,7 +3423,8 @@ class ConsolidatedMessageDispatcher:
                 try:
                     if delivered_as_attachment:
                         notice = self._t("info.resultDeliveredAsAttachment")
-                    elif primary_message_id is None and display_text:
+                    elif (primary_message_id is None and display_text) or committed_incomplete:
+                        # A committed row stays pending and is retried; the user is told this attempt failed.
                         notice = self._t("error.resultDeliveryFailed")
                     else:
                         notice = None
@@ -3510,9 +3516,12 @@ class ConsolidatedMessageDispatcher:
                 # recorded, matching the old outbound mirror's success-only rule.
                 persisted_output = None
                 if committed is not None:
-                    # The committed row is the persisted output; Workbench announced it as a part.
-                    persisted_output = committed_row or publish_committed_agent_message(
-                        target_context, committed.row_id
+                    # The committed row is the persisted output. Workbench announced it as a
+                    # part; a background Session's row is local history and is not announced.
+                    persisted_output = committed_row or (
+                        load_committed_agent_message(committed.row_id)
+                        if committed.plan.get("suppressed")
+                        else publish_committed_agent_message(target_context, committed.row_id)
                     )
                 elif persists_without_delivery or primary_message_id is not None:
                     # A failed terminal result persists as type='error' so it shows in
@@ -3690,7 +3699,7 @@ class ConsolidatedMessageDispatcher:
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
         if committed is not None:
-            delivered_id, _row = await self._deliver_committed_parts(
+            _complete, delivered_id, _row = await self._deliver_committed_parts(
                 context,
                 target_context,
                 committed,
@@ -3994,6 +4003,8 @@ class ConsolidatedMessageDispatcher:
         plan: dict[str, Any] = {
             "version": 1,
             "final": final,
+            # The Turn this row answers: its committed final is that Turn's outcome.
+            "turn_id": str((context.platform_specific or {}).get("turn_token") or "") or None,
             "target": {
                 "platform": target.platform,
                 "channel_id": target.channel_id,
@@ -4016,7 +4027,7 @@ class ConsolidatedMessageDispatcher:
         visible = strip_silent_blocks(text)
         if target.platform == "avibe":
             # The row is the Workbench message; long narration also gets its transcript copy.
-            if final or visible.strip():
+            if visible.strip():
                 plan["parts"].append({"kind": "row"})
             if not final and self._is_interim_worthy(visible):
                 plan["parts"].append({"kind": "interim", "text": visible})
@@ -4065,12 +4076,14 @@ class ConsolidatedMessageDispatcher:
         live_footer: Optional[str],
         settings_manager,
         settings_key: str,
-    ) -> tuple[Optional[str], Optional[dict]]:
+    ) -> tuple[bool, Optional[str], Optional[dict]]:
         """Send a committed row's planned parts that have no receipt, in order.
 
-        Each part is acknowledged before the next is sent; a failed part stops the
-        delivery and returns no message id, leaving the row pending. Returns the
-        first message id sent and the announced Workbench row.
+        Returns whether every part now has a receipt, the first platform message id
+        sent, and the announced Workbench row. A part is acknowledged only with
+        evidence of its effect or an explicit skipped reason; a failed part is not
+        acknowledged and stops the delivery, so later parts wait behind it and the
+        row stays pending.
         """
         plan = committed.plan
         parts = list(plan.get("parts") or [])
@@ -4087,32 +4100,29 @@ class ConsolidatedMessageDispatcher:
                 continue
             kind = part.get("kind")
             native_id: Optional[str] = None
+            skipped: Optional[str] = None
             if kind == "row":
                 announced = publish_committed_agent_message(target_context, committed.row_id)
                 if announced is None:
-                    return None, None
+                    return False, first_id, announced
                 native_id = committed.row_id
             elif kind == "interim":
-                persist_agent_message(target_context, "interim", part["text"])
+                if not self._persist_committed_interim(target_context, committed.row_id, part["text"]):
+                    return False, first_id, announced
             elif kind == "log":
-                if detached:
-                    # A recovered narration is shown as plain process output, never as a
-                    # status bubble no Turn will retire.
-                    if not settings_manager.is_message_type_hidden(settings_key, "assistant"):
-                        native_id = await self._send_unconsolidated_log_message(
-                            im_client, target_context, strip_file_links(part["text"]).strip()
-                        )
-                else:
-                    native_id = await self._deliver_process_log(
-                        im_client,
-                        context,
-                        target_context,
-                        "assistant",
-                        part["text"],
-                        status_label=None,
-                        settings_manager=settings_manager,
-                        settings_key=settings_key,
-                    )
+                outcome, native_id = await self._deliver_committed_log(
+                    im_client,
+                    context,
+                    target_context,
+                    part["text"],
+                    detached=detached,
+                    settings_manager=settings_manager,
+                    settings_key=settings_key,
+                )
+                if outcome == "failed":
+                    return False, first_id, announced
+                if outcome != "sent":
+                    skipped = outcome
             elif kind == "text":
                 body = part["text"]
                 subtext = None
@@ -4126,21 +4136,108 @@ class ConsolidatedMessageDispatcher:
                     im_client, target_context, body, buttons, parse_mode, subtext=subtext
                 )
                 if native_id is None:
-                    return None, announced
+                    # The live path's fallback rung for rejected content: the part as a document.
+                    native_id = await self._upload_result_document(im_client, target_context, body)
+                if native_id is None:
+                    return False, first_id, announced
             elif kind == "document":
                 native_id = await self._upload_result_document(im_client, target_context, part["text"])
                 if native_id is None:
-                    return None, announced
+                    return False, first_id, announced
             elif kind == "file":
                 link = FileLink(label=part.get("label") or "", path=part["path"], is_image=bool(part.get("is_image")))
-                if await self._upload_file_link(im_client, target_context, link) == "failed":
-                    return None, announced
+                outcome = await self._upload_file_link(im_client, target_context, link)
+                if outcome == "failed":
+                    return False, first_id, announced
+                if outcome != "uploaded":
+                    skipped = "file_missing" if outcome == "skipped" else "uploads_unsupported"
             else:
                 logger.error("Committed row %s has an unknown delivery part %r", committed.row_id, kind)
-                return None, announced
-            await committed.acknowledge(index, count, str(native_id) if native_id is not None else None)
-            first_id = first_id or (str(native_id) if native_id is not None else None)
-        return first_id or committed.row_id, announced
+                return False, first_id, announced
+            await committed.acknowledge(
+                index, count, str(native_id) if native_id is not None else None, skipped=skipped
+            )
+            if native_id is not None and kind != "row":
+                first_id = first_id or str(native_id)
+        return True, first_id, announced
+
+    def _persist_committed_interim(self, target_context: MessageContext, row_id: str, text: str) -> bool:
+        """Write a narration's Workbench transcript copy once; ``True`` once it exists."""
+        native_id = f"interim:{row_id}"
+        if persist_agent_message(target_context, "interim", text, native_message_id=native_id) is not None:
+            return True
+        # A duplicate write is refused by its native id: the copy from an earlier attempt is the receipt.
+        return agent_message_exists(target_context, native_id) is not None
+
+    async def _deliver_committed_log(
+        self,
+        im_client,
+        context: MessageContext,
+        target_context: MessageContext,
+        text: str,
+        *,
+        detached: bool,
+        settings_manager,
+        settings_key: str,
+    ) -> tuple[str, Optional[str]]:
+        """Show one committed narration; ``("sent", id)``, ``("failed", None)``, or ``(<skip reason>, None)``.
+
+        Whether the channel shows it at all is decided before anything is sent,
+        from the same settings the process log applies; a send failure is never a skip.
+        """
+        chunk = strip_file_links(text).strip()
+        if not chunk:
+            return "empty", None
+        if detached:
+            # No live Turn: shown as plain process output, never as a status bubble
+            # that no Turn would retire.
+            if settings_manager.is_message_type_hidden(settings_key, "assistant"):
+                return "hidden", None
+            sent = await self._send_log_strictly(im_client, target_context, chunk)
+            return ("sent", sent) if sent is not None else ("failed", None)
+        style = self._concise_progress_style(context)
+        if style == "concise":
+            if not to_status_label(chunk):
+                return "no_status_label", None
+            if self._get_consolidated_message_key(context) in self._status_finalized:
+                return "status_finalized", None
+            sent = await self._render_concise_status(im_client, context, chunk)
+            return ("sent", sent) if sent is not None else ("failed", None)
+        if settings_manager.is_message_type_hidden(settings_key, "assistant"):
+            return "hidden", None
+        if not self._supports_message_editing(im_client, context):
+            sent = await self._send_log_strictly(im_client, target_context, chunk)
+            return ("sent", sent) if sent is not None else ("failed", None)
+        if style == "off":
+            return "progress_off", None
+        sent = await self._deliver_process_log(
+            im_client,
+            context,
+            target_context,
+            "assistant",
+            text,
+            status_label=None,
+            settings_manager=settings_manager,
+            settings_key=settings_key,
+        )
+        return ("sent", sent) if sent is not None else ("failed", None)
+
+    async def _send_log_strictly(self, im_client, context: MessageContext, text: str) -> Optional[str]:
+        """Send a narration as fresh messages; ``None`` unless every chunk went out."""
+        plan = self._plan_result_split_by_bytes(text, self._get_consolidated_max_bytes(context))
+        if not plan.links_whole:
+            return await self._upload_result_document(im_client, context, text)
+        first: Optional[str] = None
+        for chunk in plan.chunks:
+            try:
+                message_id = await im_client.send_message(context, chunk, parse_mode="markdown")
+            except Exception as err:
+                logger.warning("Failed to send a committed narration: %s", err)
+                return None
+            if message_id is None:
+                return None
+            first = first or str(message_id)
+        return first
 
     async def _send_committed_text(
         self, im_client, context: MessageContext, text: str, buttons, parse_mode, *, subtext: Optional[str]

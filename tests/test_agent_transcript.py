@@ -530,8 +530,10 @@ async def test_a_delivery_plan_commits_with_its_row_and_bounds_its_receipts(engi
     await store.settle_delivery("ses_main", reply.row_id, footer="❌ failed", display={"result_footer": "❌ failed"})
     pending = await store.delivery("ses_main", reply.row_id)
     assert (pending.footer, [part is not None for part in pending.parts]) == ("✅ done", [True, False])
-    assert await store.record_delivery_part("ses_main", reply.row_id, index=1, count=2) is True
+    assert await store.record_delivery_part("ses_main", reply.row_id, index=1, count=2, skipped="file_missing") is True
     assert await store.delivery("ses_main", reply.row_id) is None
+    settled = await store.delivery("ses_main", reply.row_id, include_delivered=True)
+    assert settled.parts[1]["skipped"] == "file_missing" and settled.plan == plan
     with engine.connect() as conn:
         content = json.loads(conn.execute(select(messages.c.content_json).where(messages.c.id == reply.row_id)).scalar())
     assert content["result_footer"] == "✅ done" and "model" in content

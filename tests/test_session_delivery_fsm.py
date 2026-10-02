@@ -4264,6 +4264,47 @@ def _capture_lost_turn_report(manager: SessionTurnManager) -> tuple[list, list]:
     return emitted, stamped
 
 
+def test_an_accepted_turn_whose_final_row_committed_completes_from_that_row(managers) -> None:
+    # The Avibe Agent commits its final reply before delivering it. A restart in
+    # between leaves the durable Turn active with the answer already in storage:
+    # recovery settles the Turn from that row, without an interruption notice, and
+    # the backend's outbox delivers the row afterwards.
+    first, restarted, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(first, text="answer before restart"))
+    with engine.begin() as conn:
+        conn.execute(update(session_turns).where(session_turns.c.id == turn_id).values(backend="avibe"))
+        conn.execute(
+            messages.insert().values(
+                id="msg_committed_final",
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="agent",
+                type="result",
+                source="agent",
+                content_text="the committed answer",
+                content_json="{}",
+                metadata_json=json.dumps(
+                    {"delivery": {"state": "pending", "parts": [], "plan": {"turn_id": turn_id, "parts": [{"kind": "row"}]}}}
+                ),
+                context_seq=2,
+                created_at="2026-10-02T00:00:00.000000Z",
+                updated_at="2026-10-02T00:00:00.000000Z",
+            )
+        )
+    emitted, _stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    with engine.connect() as conn:
+        settled = delivery_store.get_turn(conn, turn_id)
+    assert settled["state"] == "terminal" and settled["terminal_outcome"] == "completed"
+    assert settled["terminal_evidence_kind"] == "committed_final"
+    assert json.loads(settled["terminal_evidence_json"])["result_text"] == "the committed answer"
+    assert emitted == []
+
+
 def test_lost_im_turn_without_run_reports_interruption(managers) -> None:
     # An IM turn owns no agent_runs row, so the Harness interruption lane cannot
     # reach it: without this report the thread just stops, which is

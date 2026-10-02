@@ -575,6 +575,16 @@ def persist_agent_message(
         return None
 
 
+def load_committed_agent_message(row_id: str) -> Optional[dict]:
+    """The payload of an agent ``messages`` row its backend committed, without announcing it."""
+    try:
+        with get_cached_sqlite_engine().connect() as conn:
+            return messages_service.get_message(conn, row_id, include_local_error_detail=True)
+    except Exception:
+        logger.exception("load_committed_agent_message: failure for row %s", row_id)
+        return None
+
+
 def publish_committed_agent_message(context: MessageContext, row_id: str) -> Optional[dict]:
     """Announce an agent ``messages`` row its backend committed itself.
 

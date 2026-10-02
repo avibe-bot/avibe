@@ -155,6 +155,8 @@ class PendingDelivery:
     """Receipts by part index from an earlier attempt; ``None`` marks a part still to send."""
     plan: Optional[Mapping[str, Any]] = None
     """The delivery plan committed with the row, when its renderer produced one."""
+    state: str = "pending"
+    """``pending`` or ``delivered``; only reads with ``include_delivered`` see the latter."""
     footer: Optional[str] = None
     """The result footer written at settlement, when the run settled before delivery."""
 
@@ -282,9 +284,11 @@ class SQLiteTranscriptStore:
         """The Session's committed responses not yet delivered, in ``context_seq`` order."""
         return await asyncio.to_thread(self._pending_deliveries, session_id)
 
-    async def delivery(self, session_id: str, row_id: str) -> Optional[PendingDelivery]:
-        """The row's pending delivery, or ``None`` once it is delivered."""
-        found = await asyncio.to_thread(self._pending_deliveries, session_id, row_id)
+    async def delivery(
+        self, session_id: str, row_id: str, *, include_delivered: bool = False
+    ) -> Optional[PendingDelivery]:
+        """The row's delivery: ``None`` once it is delivered, unless ``include_delivered``."""
+        found = await asyncio.to_thread(self._pending_deliveries, session_id, row_id, include_delivered)
         return found[0] if found else None
 
     async def settle_delivery(
@@ -309,15 +313,20 @@ class SQLiteTranscriptStore:
         index: int,
         count: int,
         native_message_id: Optional[str] = None,
+        skipped: Optional[str] = None,
     ) -> bool:
         """Record the receipt of part ``index`` of ``count``; True once every part has one.
 
-        A part that already has a receipt keeps its first one, so a retried send is
-        recorded once.
+        A receipt is evidence of the part's effect: the platform's message id, or
+        ``skipped`` naming why the part was deliberately not sent (a channel setting,
+        a file that no longer exists). A part that already has a receipt keeps its
+        first one, so a retried send is recorded once.
         """
         if not 0 <= index < count:
             raise ValueError(f"part {index} is outside a delivery of {count} part(s)")
-        return await asyncio.to_thread(self._record_delivery_part, session_id, row_id, index, count, native_message_id)
+        return await asyncio.to_thread(
+            self._record_delivery_part, session_id, row_id, index, count, native_message_id, skipped
+        )
 
     # --- implementation -------------------------------------------------------
 
@@ -378,8 +387,12 @@ class SQLiteTranscriptStore:
                 )
         return entries
 
-    def _pending_deliveries(self, session_id: str, row_id: Optional[str] = None) -> list[PendingDelivery]:
+    def _pending_deliveries(
+        self, session_id: str, row_id: Optional[str] = None, include_delivered: bool = False
+    ) -> list[PendingDelivery]:
         only = [messages.c.id == row_id] if row_id is not None else []
+        if not include_delivered:
+            only.append(func.json_extract(messages.c.metadata_json, "$.delivery.state") == "pending")
         with self._engine.connect() as conn:
             rows = conn.execute(
                 select(
@@ -394,7 +407,6 @@ class SQLiteTranscriptStore:
                     messages.c.session_id == session_id,
                     messages.c.context_seq.is_not(None),
                     messages.c.type.in_(RESPONSE_TYPES),
-                    func.json_extract(messages.c.metadata_json, "$.delivery.state") == "pending",
                     *only,
                 )
                 .order_by(messages.c.context_seq)
@@ -415,6 +427,7 @@ class SQLiteTranscriptStore:
                     parts=tuple(delivery["parts"]),
                     plan=delivery.get("plan"),
                     footer=delivery.get("footer"),
+                    state=delivery["state"],
                 )
             )
         return deliveries
@@ -451,7 +464,13 @@ class SQLiteTranscriptStore:
             )
 
     def _record_delivery_part(
-        self, session_id: str, row_id: str, index: int, count: int, native_message_id: Optional[str]
+        self,
+        session_id: str,
+        row_id: str,
+        index: int,
+        count: int,
+        native_message_id: Optional[str],
+        skipped: Optional[str],
     ) -> bool:
         with self._engine.begin() as conn:
             reserve_write_lock(conn)
@@ -481,6 +500,8 @@ class SQLiteTranscriptStore:
                 receipt: dict[str, Any] = {"delivered_at": now}
                 if native_message_id:
                     receipt["native_message_id"] = native_message_id
+                if skipped:
+                    receipt["skipped"] = skipped
                 parts[index] = receipt
                 state = "delivered" if all(part is not None for part in parts) else "pending"
                 conn.execute(
@@ -505,6 +526,41 @@ async def _settle(task: asyncio.Future[Any]) -> None:
         # The cancelled caller does not see this outcome; retrieve it so a failed
         # commit is not reported as an unhandled task exception.
         task.exception()
+
+
+# --- Turn outcome ----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CommittedFinal:
+    """A Turn's committed final response: the Turn's outcome, whatever its delivery state."""
+
+    row_id: str
+    session_id: str
+    text: str
+
+
+def committed_final_for_turn(conn: Connection, turn_id: str) -> Optional[CommittedFinal]:
+    """The final response a run committed for ``turn_id``, read from the delivery plan's ``turn_id``.
+
+    Storage only: the Turn owner reads it at startup recovery, before any backend is
+    constructed, to settle a Turn whose answer committed before the process died.
+    """
+    if not turn_id:
+        return None
+    row = conn.execute(
+        select(messages.c.id, messages.c.session_id, messages.c.content_text)
+        .where(
+            messages.c.type == "result",
+            messages.c.context_seq.is_not(None),
+            func.json_extract(messages.c.metadata_json, "$.delivery.plan.turn_id") == turn_id,
+        )
+        .order_by(messages.c.context_seq.desc())
+        .limit(1)
+    ).first()
+    if row is None:
+        return None
+    return CommittedFinal(row_id=row.id, session_id=row.session_id, text=row.content_text or "")
 
 
 # --- allocation and attribution ----------------------------------------------

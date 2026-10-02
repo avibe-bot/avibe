@@ -65,6 +65,7 @@ from core.services.agent_steering import (
 from storage import messages_service
 from storage import message_deliveries as delivery_store
 from storage.agent_session_rows import reserve_write_lock
+from storage.agent_transcript import committed_final_for_turn
 from storage.db import get_cached_sqlite_engine
 from storage.background import (
     OWED_FAILURE_NOTICE_KEY,
@@ -6710,6 +6711,30 @@ class SessionTurnManager:
                     )
 
         for target_session, turn_id, attempt_id, backend in lost_active_turns:
+            # A Turn whose final response committed before the process died has its
+            # outcome in storage: it completed, and the backend's outbox delivers the
+            # row. Storage only, so this holds before any backend is registered.
+            with self._sqlite_engine().connect() as conn:
+                committed_final = committed_final_for_turn(conn, turn_id)
+            if committed_final is not None:
+                terminal = self._terminalize_durable_turn(
+                    turn_id,
+                    "completed",
+                    settled_by=SETTLED_BY_TERMINAL_RESULT,
+                    evidence_kind="committed_final",
+                    evidence={
+                        "message_id": committed_final.row_id,
+                        "result_text": committed_final.text,
+                        "settles_run": True,
+                    },
+                    expected_start_attempt_id=attempt_id,
+                )
+                if terminal.get("changed"):
+                    recovered.append(target_session)
+                    successor_turn_id = str(terminal.get("successor_turn_id") or "")
+                    if successor_turn_id:
+                        await self._start_persisted_turn(successor_turn_id)
+                continue
             # Read Run attribution BEFORE terminalizing: the notice below is owed
             # only to a turn that has none, and terminalization retires the
             # deliveries the attribution is derived from.

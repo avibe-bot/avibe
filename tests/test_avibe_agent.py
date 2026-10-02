@@ -130,11 +130,14 @@ class _IMClient:
 
 
 class _SettingsManager:
+    def __init__(self) -> None:
+        self.hidden: set[str] = set()
+
     def _canonicalize_message_type(self, message_type: str) -> str:
         return message_type
 
     def is_message_type_hidden(self, settings_key: str, canonical_type: str) -> bool:
-        return False
+        return canonical_type in self.hidden
 
 
 class _Controller:
@@ -156,6 +159,7 @@ class _Controller:
         self.sessions = SimpleNamespace(bind_agent_session_by_id=lambda session_id, *_args, **_kwargs: session_id)
         self.session_handler = SimpleNamespace(finalize_scheduled_delivery=lambda *_args: None)
         self.terminals: list[dict] = []
+        self.terminal_texts: list[Optional[str]] = []
         self.released: list[str] = []
         self.started: list[Optional[str]] = []
         self.hub_calls: list[str] = []
@@ -194,6 +198,7 @@ class _Controller:
 
     def _terminal(self, context, *, is_error, settled_by, terminal_evidence) -> None:
         self.terminals.append({"turn": _turn(context), "is_error": is_error, "settled_by": settled_by})
+        self.terminal_texts.append(terminal_evidence.get("result_text"))
 
     async def _resolve(self, backend, requested_model, *, process_scope=None, turn_id=None) -> ModelHubLaunch:
         self.hub_calls.append(requested_model)
@@ -566,6 +571,7 @@ async def test_an_im_reply_resends_only_its_unconfirmed_parts(engine, session, t
     long_reply = "你" * 1000  # 3,000 bytes: two WeChat parts
     harness = _Harness(engine, tmp_path, "wechat", [[Done(assistant(long_reply))], [Done(assistant("ok"))]])
     harness.controller.im_client.fail_sends = {2}
+    harness.controller.im_client.fail_uploads = 1  # and the document fallback fails too
 
     await harness.agent.handle_message(harness.request("write a long answer"))
 
@@ -578,8 +584,10 @@ async def test_an_im_reply_resends_only_its_unconfirmed_parts(engine, session, t
 
     sent = harness.controller.im_client.sent
     # The first attempt sent part one and a delivery-failure notice; resume sends part two only.
-    assert sent.count(first_part) == 1
-    assert first_part + sent[2] == long_reply
+    # The first attempt sent part one, then the existing delivery-failure notice; resume sends part two only.
+    rest = long_reply[len(first_part):]
+    assert sent.count(first_part) == 1 and sent.count(rest) == 1
+    assert sent[1] == i18n_t("error.resultDeliveryFailed", "en")
     assert await harness.agent.store.pending_deliveries(SESSION) == []
     with engine.connect() as conn:
         delivery = json.loads(
@@ -758,6 +766,7 @@ async def test_a_recovered_reply_goes_to_the_scheduled_override_target(engine, s
         "platform": "telegram", "channel_id": "C-report", "user_id": "u-report",
     }
     harness.controller.im_client.fail_sends = {1}
+    harness.controller.im_client.fail_uploads = 1  # and the document fallback fails too
 
     await harness.agent.handle_message(request)
     harness.new_agent()
@@ -774,6 +783,7 @@ async def test_recovery_resends_the_persisted_split_after_a_limit_change(
     long_reply = "你" * 1000  # 3,000 bytes: two WeChat parts at today's limit
     harness = _Harness(engine, tmp_path, "wechat", [[Done(assistant(long_reply))]])
     harness.controller.im_client.fail_sends = {2}
+    harness.controller.im_client.fail_uploads = 1  # and the document fallback fails too
     await harness.agent.handle_message(harness.request("write a long answer"))
     first_part = harness.controller.im_client.sent[0]
     # A later release splits WeChat replies differently.
@@ -857,3 +867,137 @@ async def test_an_idle_session_holds_no_adapter_state(engine, session, tmp_path,
     assert harness.agent._runtimes == {}
     assert harness.agent.store._env_state == {}
     assert not getattr(harness.agent.store, "_responses", {})
+
+
+# --- round 2: receipts are evidence, recovery reads only the plan, the final row owns the outcome ---
+
+
+def _receipts(engine, row_id: str) -> dict:
+    with engine.connect() as conn:
+        return json.loads(conn.execute(select(messages.c.metadata_json).where(messages.c.id == row_id)).scalar_one())[
+            "delivery"
+        ]
+
+
+async def test_recovery_waits_for_the_planned_target_transport(engine, session, tmp_path, published) -> None:
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("report ready"))]])
+    request = harness.request("scheduled report")
+    request.context.platform_specific["delivery_override"] = {
+        "platform": "wechat", "channel_id": "W-report", "user_id": "u-report",
+    }
+    harness.controller.im_client.fail_sends = {1}  # the override target is not reachable yet
+    harness.controller.im_client.fail_uploads = 1  # and the document fallback fails too
+    await harness.agent.handle_message(request)
+
+    harness.new_agent()
+    # The source transport becoming ready does not deliver a row planned for another target.
+    assert await harness.agent.restore_pending_deliveries({"telegram"}) == 0
+    assert await harness.agent.restore_pending_deliveries({"wechat"}) == 1
+    assert [(channel, text) for channel, route, text in harness.controller.im_client.routes if route == "reply"] == [
+        ("W-report", "report ready")
+    ]
+    assert await harness.agent.store.pending_deliveries(SESSION) == []
+
+
+async def test_an_interim_copy_is_acknowledged_only_once_it_is_persisted(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    import core.message_dispatcher as dispatcher_module
+
+    narration = "Reading the configuration and the tests before changing anything. " * 4  # interim-worthy
+    call = ToolCallBlock(id="call_1", name="echo", arguments={})
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant(narration, calls=(call,)))], [Done(assistant("ok"))]])
+    real_persist = dispatcher_module.persist_agent_message
+    failures = {"interim": 1}
+
+    def flaky_persist(context, canonical_type, text, **kwargs):
+        if failures.get(canonical_type):
+            failures[canonical_type] -= 1
+            return None  # persist_agent_message reports a failed write as None
+        return real_persist(context, canonical_type, text, **kwargs)
+
+    monkeypatch.setattr(dispatcher_module, "persist_agent_message", flaky_persist)
+    await harness.agent.handle_message(harness.request("look around"))
+
+    [pending] = await harness.agent.store.pending_deliveries(SESSION)
+    harness.new_agent()
+    await harness.agent.restore_pending_deliveries({"avibe"})
+    await harness.agent.restore_pending_deliveries({"avibe"})
+
+    assert await harness.agent.store.pending_deliveries(SESSION) == []
+    assert len(harness.rows("interim")) == 1
+    assert pending.row_id in {row["id"] for row in harness.rows("assistant")}
+
+
+async def test_narration_receipts_say_what_happened(engine, session, tmp_path, published) -> None:
+    call = ToolCallBlock(id="call_1", name="echo", arguments={})
+    script = [[Done(assistant("First look.", calls=(call,)))], [Done(assistant("done"))]]
+    hidden = _Harness(engine, tmp_path, "telegram", script)
+    hidden.controller.settings_manager.hidden = {"assistant"}
+    await hidden.agent.handle_message(hidden.request("go"))
+    [narration] = hidden.rows("assistant")
+    receipt = _receipts(engine, narration["id"])
+    # Hidden by the channel's settings: an explicit skipped receipt, decided before sending.
+    assert receipt["state"] == "delivered" and receipt["parts"][0]["skipped"] == "hidden"
+    assert "First look." not in hidden.controller.im_client.sent
+
+    failing = _Harness(engine, tmp_path, "telegram", [[Done(assistant("Second look.", calls=(call,)))], [Done(assistant("ok"))]])
+    failing.controller.im_client.fail_sends = {1}
+    await failing.agent.handle_message(failing.request("again"))
+    [still_pending] = await failing.agent.store.pending_deliveries(SESSION)
+    # A send failure never acknowledges.
+    assert _receipts(engine, still_pending.row_id)["parts"] == []
+
+
+async def test_a_background_final_settles_with_its_committed_text(engine, session, tmp_path, published) -> None:
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("the nightly summary"))]])
+    request = harness.request("summarize the night")
+    request.context.platform_specific["suppress_delivery"] = True
+
+    await harness.agent.handle_message(request)
+
+    assert harness.controller.im_client.sent == []
+    assert harness.controller.terminal_texts == ["the nightly summary"]
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_a_stop_after_the_final_reply_committed_loses_the_race(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    import modules.agents.avibe.agent as agent_module
+    from core.agent_core.agent.events import MessageCommitted, RunEnded
+    from core.agent_core.agent.loop import Agent
+
+    stopped = asyncio.Event()
+
+    class _FinalThenStop(Agent):
+        """The loop's event order when Stop lands after the final commit but before the run ends."""
+
+        async def run(self, input, *, turn_id):
+            await self.store.consume_input(self.session_id, input.message_id, input.message)
+            row = await self.store.append_response(self.session_id, assistant("the answer"), final=True)
+            yield MessageCommitted(turn_id, 0, row.row_id, row.context_seq, True)
+            await stopped.wait()
+            yield RunEnded(turn_id, 1, "aborted")
+
+        def abort(self, reason: str = "aborted") -> None:
+            stopped.set()
+
+        async def take_pending_inputs(self):
+            return ()
+
+    monkeypatch.setattr(agent_module, "Agent", _FinalThenStop)
+    harness = _Harness(engine, tmp_path, "telegram", [])
+    request = harness.request("answer me")
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    while not harness.rows("result"):
+        await asyncio.sleep(0.01)
+
+    assert await harness.agent.handle_stop(AgentRequest(**{**request.__dict__, "message": "stop"})) is True
+    await running
+
+    assert harness.controller.im_client.sent.count("the answer") == 1
+    assert harness.controller.terminals[-1] == {
+        "turn": _turn(request.context), "is_error": False, "settled_by": "terminal_result"
+    }
+    assert await harness.agent.store.pending_deliveries(SESSION) == []

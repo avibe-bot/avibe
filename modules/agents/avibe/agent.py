@@ -366,27 +366,38 @@ class AvibeAgent(BaseAgent):
             run.reason = event.reason
 
     async def _settle(self, run: _Run) -> None:
-        """Settle the Turn from the run's outcome (loop-control.md section 6)."""
+        """Settle the Turn from the run's outcome (loop-control.md section 6).
+
+        A committed final row is the Turn's outcome and result text, whatever its
+        delivery state; the outbox only delivers it. A Stop that arrives after that
+        row committed loses the race, as it does for the Codex backend.
+        """
         request, context = run.request, run.request.context
         reason = run.reason or "error"
         kind, diagnostic = run.errors[0] if run.errors else (None, reason)
+        final = (
+            await self.store.delivery(run.session_id, run.final_row, include_delivered=True)
+            if run.final_row
+            else None
+        )
+        visible = final is not None and strip_silent_blocks(self._display_source(final.message, final=True)).strip()
+        if visible:
+            if run.stop_requested and reason == "aborted":
+                reason = "completed"
+            is_error = reason not in _COMPLETED
+            footer = self._result_footer(run, is_error=is_error)
+            if footer and final.state == "pending":
+                # Written before the first part goes out; a started delivery keeps its footer.
+                await self.store.settle_delivery(
+                    run.session_id, run.final_row, footer=footer, display={"result_footer": footer}
+                )
+                final = await self.store.delivery(run.session_id, run.final_row, include_delivered=True) or final
+            await self._deliver(context, final, output=terminal_output_for(request), is_error=is_error)
+            return
         if run.stop_requested and reason == "aborted":
             await self.controller.emit_agent_message(
                 context, "result", "", level="silent", output=stop_output_for(request)
             )
-            return
-        pending = await self.store.delivery(run.session_id, run.final_row) if run.final_row else None
-        if pending is not None:
-            # The outcome is known only now: record its footer, then deliver the planned parts.
-            # A refusal or safety stop without text already shows its explanation as the reply.
-            is_error = reason not in _COMPLETED
-            footer = self._result_footer(run, is_error=is_error)
-            if footer:
-                await self.store.settle_delivery(
-                    run.session_id, run.final_row, footer=footer, display={"result_footer": footer}
-                )
-                pending = await self.store.delivery(run.session_id, run.final_row) or pending
-            await self._deliver(context, pending, output=terminal_output_for(request), is_error=is_error)
             return
         if reason in _COMPLETED and kind is None:
             await self.controller.emit_agent_message(
@@ -423,9 +434,11 @@ class AvibeAgent(BaseAgent):
             return
         session_id, row_id = pending.session_id, pending.row_id
 
-        async def acknowledge(index: int, count: int, native_message_id: Optional[str]) -> bool:
+        async def acknowledge(
+            index: int, count: int, native_message_id: Optional[str], *, skipped: Optional[str] = None
+        ) -> bool:
             return await self.store.record_delivery_part(
-                session_id, row_id, index=index, count=count, native_message_id=native_message_id
+                session_id, row_id, index=index, count=count, native_message_id=native_message_id, skipped=skipped
             )
 
         committed = CommittedOutput(
@@ -852,7 +865,11 @@ class AvibeAgent(BaseAgent):
                     .where(
                         agent_sessions.c.agent_backend == BACKEND,
                         messages.c.context_seq.is_not(None),
-                        messages.c.platform.in_(sorted(platforms - {""})),
+                        # The plan's target is the only recovery selector: a row waits for
+                        # the transport it will be sent through, not its source channel.
+                        func.json_extract(messages.c.metadata_json, "$.delivery.plan.target.platform").in_(
+                            sorted(platforms - {""})
+                        ),
                         func.json_extract(messages.c.metadata_json, "$.delivery.state") == "pending",
                     )
                     .group_by(messages.c.session_id)
@@ -867,7 +884,9 @@ class AvibeAgent(BaseAgent):
         return str(workdir or "")
 
 
-async def _no_acknowledgement(_index: int, _count: int, _native_message_id: Optional[str]) -> bool:
+async def _no_acknowledgement(
+    _index: int, _count: int, _native_message_id: Optional[str], *, skipped: Optional[str] = None
+) -> bool:
     return False
 
 
