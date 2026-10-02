@@ -750,6 +750,13 @@ class Controller:
                 self.agent_service.register(OpenCodeAgent(self, self.config.opencode))
             except Exception as e:
                 logger.error(f"Failed to initialize OpenCode agent: {e}")
+        if getattr(self.config, "avibe", None):
+            try:
+                from modules.agents.avibe import AvibeAgent
+
+                self.agent_service.register(AvibeAgent(self))
+            except Exception as e:
+                logger.error(f"Failed to initialize Avibe Agent: {e}")
 
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
@@ -1007,6 +1014,17 @@ class Controller:
             except Exception as e:
                 logger.error(f"Failed to restore active polls: {e}", exc_info=True)
 
+    async def _restore_avibe_agent_deliveries(self, platforms: set[str]) -> None:
+        """Re-deliver Avibe Agent replies a crash committed but never delivered, once they can be."""
+        avibe_agent = getattr(getattr(self, "agent_service", None), "agents", {}).get("avibe")
+        restore = getattr(avibe_agent, "restore_pending_deliveries", None)
+        if not callable(restore):
+            return
+        try:
+            await restore(platforms)
+        except Exception:
+            logger.exception("Failed to restore Avibe Agent deliveries for %s", ",".join(sorted(platforms)))
+
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)
@@ -1029,6 +1047,7 @@ class Controller:
                     )
             except Exception:
                 logger.exception("Failed to report interrupted turns for %s", platform)
+        await self._restore_avibe_agent_deliveries(platforms)
         self.scheduled_task_service.notify_transport_ready(platform)
         notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
         if callable(notify_update_checker):
@@ -1084,6 +1103,7 @@ class Controller:
         # A no-op in any process that does not hold the service lock, so the
         # embedded and test paths that run a controller are unaffected.
         self._publish_readiness_unless_im_runtime_failed()
+        await self._restore_avibe_agent_deliveries(workbench_platforms)
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:

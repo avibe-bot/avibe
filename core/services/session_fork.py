@@ -362,6 +362,8 @@ def reserve_forked_session(
             metadata.pop("fork_opencode_message_id", None)
             metadata.pop("fork_opencode_fork_empty_history", None)
             metadata.pop("fork_opencode_boundary_from_active_run", None)
+            # A source that is itself a fork carries its own anchor; the child's is resolved below.
+            metadata.pop("fork_source_context_seq", None)
             metadata.update(
                 {
                     "created_via": "session_fork",
@@ -375,6 +377,12 @@ def reserve_forked_session(
                     "fork_created_at": now,
                 }
             )
+            if source_backend == "avibe":
+                # The Avibe Agent's context is the source's rows up to this anchor,
+                # resolved once now so later rows never enter the prefix (C-5 section 4).
+                from storage.agent_transcript import resolve_fork_anchor_seq
+
+                metadata["fork_source_context_seq"] = resolve_fork_anchor_seq(conn, str(row["id"]), source_message_id)
             if opencode_fork_message_id:
                 metadata["fork_opencode_message_id"] = opencode_fork_message_id
             if opencode_fork_empty_history:

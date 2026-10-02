@@ -575,6 +575,58 @@ def persist_agent_message(
         return None
 
 
+def publish_committed_agent_message(context: MessageContext, row_id: str) -> Optional[dict]:
+    """Announce an agent ``messages`` row its backend committed itself.
+
+    The Avibe Agent's transcript rows are its messages (agent-core C-5), so they
+    are never written here. This publishes what ``persist_agent_message``
+    publishes after its insert - the activity rank, ``message.new`` for an open
+    Chat page, the inbox card - for the committed row, and returns its payload.
+    """
+    spec = context.platform_specific or {}
+    suppress_delivery = bool(spec.get("suppress_delivery"))
+    try:
+        engine = get_cached_sqlite_engine()
+        inbox_row = None
+        activity_ranked = False
+        with engine.begin() as conn:
+            row = messages_service.get_message(conn, row_id, include_local_error_detail=True)
+            if row is None:
+                return None
+            session_id = row.get("session_id")
+            if session_id:
+                activity_ranked = workbench_sessions_service.touch_session_agent_activity(conn, session_id)
+            if context.platform == "avibe" and session_id and not suppress_delivery:
+                inbox_row = messages_service.get_inbox_session(conn, session_id)
+        message_type = row.get("type")
+        if activity_ranked and context.platform == "avibe":
+            from core.inbox_events import bus
+
+            bus.publish(
+                "session.activity",
+                {"session_id": session_id, "scope_id": row.get("scope_id"), "event": "agent_activity"},
+            )
+        if context.platform == "avibe" and not suppress_delivery and (
+            message_type in messages_service.TRANSCRIPT_TYPES
+            or (spec_for(message_type)["activityRole"] == "activity" and _activity_streaming_enabled())
+        ):
+            _publish_session_message(row)
+        if inbox_row is not None:
+            from core.inbox_events import bus
+
+            bus.publish("inbox.session.updated", inbox_row)
+            try:
+                from core.web_push_notifications import maybe_notify_inbox_message
+
+                maybe_notify_inbox_message(row, inbox_row)
+            except Exception:
+                logger.debug("web push notification scheduling failed", exc_info=True)
+        return row
+    except Exception:
+        logger.exception("publish_committed_agent_message: failure for row %s", row_id)
+        return None
+
+
 def persist_silent_terminal(
     context: MessageContext,
     *,

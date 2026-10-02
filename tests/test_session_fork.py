@@ -559,9 +559,12 @@ def test_reserve_forked_opencode_running_first_turn_records_user_boundary(
     assert "fork_opencode_fork_empty_history" not in metadata
 
 
-def test_reserve_forked_session_clears_stale_opencode_active_run_boundary(
+def test_reserve_forked_session_clears_stale_fork_boundaries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A source that is itself a fork carries its own boundaries; the child must
+    # never inherit them as its own (OpenCode's native point, the Avibe Agent's
+    # ``fork_source_context_seq`` context anchor).
     db_path = tmp_path / "vibe.sqlite"
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
@@ -583,6 +586,7 @@ def test_reserve_forked_session_clears_stale_opencode_active_run_boundary(
                             "fork_opencode_message_id": "stale-oc-msg",
                             "fork_opencode_fork_empty_history": True,
                             "fork_opencode_boundary_from_active_run": True,
+                            "fork_source_context_seq": 7,
                         }
                     ),
                 )
@@ -605,6 +609,7 @@ def test_reserve_forked_session_clears_stale_opencode_active_run_boundary(
     assert "fork_opencode_message_id" not in metadata
     assert "fork_opencode_fork_empty_history" not in metadata
     assert "fork_opencode_boundary_from_active_run" not in metadata
+    assert "fork_source_context_seq" not in metadata
 
 
 def test_reserve_forked_opencode_missing_boundary_preserves_trim_intent(

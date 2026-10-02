@@ -35,6 +35,13 @@ never move into or out of the prefix. A fork without that key (a released fork,
 or one from another backend) inherits nothing. The child's own rows continue
 from ``anchor_seq + 1``.
 
+Display. The adapter's renderer writes a response row's display copy inside
+the commit transaction: ``content_text`` and, optionally, display keys of
+``content_json`` next to the reserved ``model`` key (``RenderedDisplay``). It
+receives the transaction's connection and the row's attribution, so a
+surface-specific rewrite (the Workbench media proxy) lands with the row. The
+display copy is never part of the context.
+
 Outbox. A response row commits with ``delivery = {"state": "pending",
 "parts": []}``. The adapter records a receipt for each part a surface splits it
 into; the row becomes ``delivered`` only when every part has one
@@ -50,9 +57,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
+from typing import Any, Callable, Literal, Mapping, Optional, Protocol, Sequence, TypeVar, Union
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.engine import Connection, Engine
@@ -84,11 +91,38 @@ _EVENT_TYPE_BY_KIND: dict[str, str] = {
 }
 _KIND_BY_EVENT_TYPE = {event_type: kind for kind, event_type in _EVENT_TYPE_BY_KIND.items()}
 
-DisplayRenderer = Callable[[AssistantMessage], str]
 _T = TypeVar("_T")
+MODEL_KEY = "model"
 
 
-def render_text(message: AssistantMessage) -> str:
+@dataclass(frozen=True)
+class RenderedDisplay:
+    """A response row's display copy: ``content_text`` plus display keys of ``content_json``."""
+
+    text: str
+    content: Mapping[str, Any] = field(default_factory=dict)
+
+
+class DisplayRenderer(Protocol):
+    """Renders a response row inside its commit transaction.
+
+    ``platform`` and ``scope_id`` are the row's attribution (the Turn's channel).
+    Returning a ``str`` sets only ``content_text``.
+    """
+
+    def __call__(
+        self,
+        message: AssistantMessage,
+        *,
+        final: bool,
+        conn: Connection,
+        platform: str,
+        scope_id: Optional[str],
+        session_id: str,
+    ) -> Union[str, RenderedDisplay]: ...
+
+
+def render_text(message: AssistantMessage, **_attribution: Any) -> str:
     """Default display copy of a response: its text blocks, verbatim, in order."""
     return "\n\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
 
@@ -123,8 +157,9 @@ class _TurnOrigin:
 class SQLiteTranscriptStore:
     """``TranscriptStore`` over Avibe's tables, plus the output outbox helpers.
 
-    ``render`` produces a response row's ``content_text``; the adapter supplies
-    its display rendering, the default keeps the text blocks.
+    ``render`` produces a response row's display copy inside its commit
+    transaction; the adapter supplies its display rendering, the default keeps
+    the text blocks.
     """
 
     def __init__(self, engine: Engine, *, render: DisplayRenderer = render_text) -> None:
@@ -174,10 +209,19 @@ class SQLiteTranscriptStore:
         if not isinstance(message, AssistantMessage):
             raise TypeError("append_response takes an AssistantMessage")
         model = _canonical({"version": PAYLOAD_VERSION, "message": message_to_dict(message)})
-        display_text = self._render(message)
 
         def work(conn: Connection) -> ContextEntry:
             origin = _turn_origin(conn, session_id)
+            display = _display(
+                self._render(
+                    message,
+                    final=final,
+                    conn=conn,
+                    platform=origin.platform,
+                    scope_id=origin.scope_id,
+                    session_id=session_id,
+                )
+            )
             seq = _next_context_seq(conn, session_id)
             row = messages_service.append(
                 conn,
@@ -188,9 +232,9 @@ class SQLiteTranscriptStore:
                 source="agent",
                 author_name=origin.agent_name,
                 message_type="result" if final else "assistant",
-                text=display_text,
-                content={"model": model},
-                metadata={"delivery": {"state": "pending" if display_text.strip() else "delivered", "parts": []}},
+                text=display.text,
+                content={**display.content, MODEL_KEY: model},
+                metadata={"delivery": {"state": "pending" if display.text.strip() else "delivered", "parts": []}},
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
             return ContextEntry(session_id, seq, "response", row["id"], message=message, payload=model)
@@ -616,6 +660,16 @@ def _json_object(raw: Any, row_id: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TranscriptError(f"row {row_id} holds a JSON {type(value).__name__}, not an object")
     return value
+
+
+def _display(rendered: Union[str, RenderedDisplay]) -> RenderedDisplay:
+    if isinstance(rendered, str):
+        return RenderedDisplay(rendered)
+    if not isinstance(rendered, RenderedDisplay) or not isinstance(rendered.text, str):
+        raise TypeError("a display renderer returns a str or a RenderedDisplay")
+    if MODEL_KEY in rendered.content:
+        raise TranscriptError(f"display content must not set the reserved {MODEL_KEY!r} key")
+    return RenderedDisplay(rendered.text, _canonical(dict(rendered.content)))
 
 
 def _canonical(value: dict[str, Any]) -> dict[str, Any]:

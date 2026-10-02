@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 from urllib.parse import urljoin
 
 from config.platform_registry import get_platform_descriptor
@@ -31,6 +31,7 @@ from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
     persist_silent_terminal,
+    publish_committed_agent_message,
 )
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -157,6 +158,26 @@ class ActivityOutputDeliveryError(RuntimeError):
         self.durable = durable
         self.message_id = message_id
         self.cause = cause
+
+
+@dataclass(frozen=True)
+class CommittedOutput:
+    """An agent output whose ``messages`` row its backend committed before delivery.
+
+    The Avibe Agent's transcript rows are the messages (agent-core C-5): the
+    dispatcher delivers such a row and never persists it again. Each part a
+    surface sends is acknowledged through ``acknowledge(index, count,
+    native_message_id)`` before the next is sent, and a failed part stops the
+    delivery so the row stays pending for re-delivery (``recovery.md`` D1/D2).
+    ``delivered_parts`` holds the receipts of an earlier attempt by part index.
+    """
+
+    row_id: str
+    acknowledge: Callable[[int, int, Optional[str]], Awaitable[Any]]
+    delivered_parts: tuple[bool, ...] = ()
+
+    def part_delivered(self, index: int, count: int) -> bool:
+        return len(self.delivered_parts) == count and self.delivered_parts[index]
 
 
 def _owned_agent_run_ids(payload: dict[str, Any]) -> list[str]:
@@ -2582,6 +2603,7 @@ class ConsolidatedMessageDispatcher:
         terminal_error: Optional[str] = None,
         delivery: DeliveryEvidence | None = None,
         citations: Optional[CitationBundle] = None,
+        committed: CommittedOutput | None = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -2634,6 +2656,10 @@ class ConsolidatedMessageDispatcher:
         that also gets the sidecar, bound to the body it was measured in, so the
         Web transcript can render compact badges while every other surface keeps
         the plain Markdown links.
+
+        ``committed`` names the already-persisted row of a backend that writes
+        its own transcript (see ``CommittedOutput``): it is delivered from that
+        row, part by part, and never persisted here.
         """
         settings_manager = self.controller.get_settings_manager_for_context(context)
         im_client = self._get_im_client(context)
@@ -2752,6 +2778,9 @@ class ConsolidatedMessageDispatcher:
         # body (e.g. a ``<silent>`` directive reduced to nothing) is silent too.
         if level == "silent" or not text or not text.strip():
             try:
+                if committed is not None:
+                    # Nothing visible to send on any surface: the row is delivered.
+                    await committed.acknowledge(0, 1, None)
                 if activity_local_settlement_only:
                     settlement_complete = self._settle_activity_output_claims(
                         output_semantics,
@@ -3007,7 +3036,11 @@ class ConsolidatedMessageDispatcher:
             try:
                 recorded_text = self._fold_footer(persist_text, result_footer)
                 persisted_output = None
-                if visible_output_type:
+                if committed is not None:
+                    # The committed row already is the local history.
+                    persisted_output = publish_committed_agent_message(target_context, committed.row_id)
+                    await committed.acknowledge(0, 1, None)
+                elif visible_output_type:
                     if target_context.platform == "avibe":
                         background_enhanced = process_reply(
                             raw_text,
@@ -3244,7 +3277,20 @@ class ConsolidatedMessageDispatcher:
                 footer_kwargs = {"subtext": done_footer} if done_footer else {}
 
                 # Deliver the result as a NEW message: inline / split / summarized.
-                if self._result_within_limit(context, display_text):
+                if committed is not None:
+                    primary_message_id = await self._deliver_committed_result(
+                        im_client,
+                        target_context,
+                        display_text,
+                        delivery_buttons,
+                        parse_mode,
+                        subtext=done_footer,
+                        committed=committed,
+                    )
+                    scheduled_anchor_message_id = (
+                        primary_message_id if target_context.platform != "avibe" else None
+                    )
+                elif self._result_within_limit(context, display_text):
                     try:
                         primary_message_id = await self._send_result_inline(
                             im_client,
@@ -3318,7 +3364,8 @@ class ConsolidatedMessageDispatcher:
                             )
 
                 # --- Fallback: card content rejected (e.g. table over limit) ---
-                if primary_message_id is None and display_text:
+                # A committed row keeps its own part layout; it is re-delivered instead.
+                if primary_message_id is None and display_text and committed is None:
                     logger.warning("All direct result sends failed; attempting fallback delivery")
                     file_uploaded = False
 
@@ -3364,7 +3411,7 @@ class ConsolidatedMessageDispatcher:
                     logger.error("Failed to send delivery status notification")
 
                 # Upload extracted file attachments
-                if enhanced and enhanced.files:
+                if enhanced and enhanced.files and (committed is None or primary_message_id is not None):
                     await self._upload_file_links(
                         im_client, target_context, _written_files(enhanced.files, citations)
                     )
@@ -3445,7 +3492,12 @@ class ConsolidatedMessageDispatcher:
                 # failed every send/upload (primary_message_id is None) is NOT
                 # recorded, matching the old outbound mirror's success-only rule.
                 persisted_output = None
-                if persists_without_delivery or primary_message_id is not None:
+                if committed is not None:
+                    persisted_output = publish_committed_agent_message(target_context, committed.row_id)
+                    if target_context.platform == "avibe":
+                        # The row is the Workbench message: announcing it delivers it.
+                        await committed.acknowledge(0, 1, None)
+                elif persists_without_delivery or primary_message_id is not None:
                     # A failed terminal result persists as type='error' so it shows in
                     # the transcript/inbox like any terminal message but is NOT counted
                     # as an unread agent reply (unread queries are result-only). Codex P2.
@@ -3620,7 +3672,10 @@ class ConsolidatedMessageDispatcher:
         # Persist the intermediate log row BEFORE the mute filter so muted
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
-        persist_agent_message(target_context, canonical_type, persist_text, citations=citations)
+        if committed is None:
+            persist_agent_message(target_context, canonical_type, persist_text, citations=citations)
+        else:
+            publish_committed_agent_message(target_context, committed.row_id)
         # Web only: the same text additionally lands as a transcript-visible
         # ``interim`` row. Every backend emits ``assistant`` only once later output
         # has proved the text is not the Turn's final answer, so this never
@@ -3639,7 +3694,35 @@ class ConsolidatedMessageDispatcher:
         # status line, the consolidated log, the hidden-type log preview - so write
         # the citations into ``text`` once here rather than at each of them.
         text = materialize_citations(text, citations)
+        delivered_id = await self._deliver_process_log(
+            im_client,
+            context,
+            target_context,
+            canonical_type,
+            text,
+            status_label=status_label,
+            settings_manager=settings_manager,
+            settings_key=settings_key,
+        )
+        if committed is not None:
+            # Process narration is shown, hidden, or folded into the editable log
+            # by the channel's own settings; once that path ran, the row is delivered.
+            await committed.acknowledge(0, 1, delivered_id)
+        return delivered_id
 
+    async def _deliver_process_log(
+        self,
+        im_client,
+        context: MessageContext,
+        target_context: MessageContext,
+        canonical_type: str,
+        text: str,
+        *,
+        status_label: Optional[str],
+        settings_manager,
+        settings_key: str,
+    ) -> Optional[str]:
+        """Show one intermediate message per the channel's progress style and visibility."""
         # Target platform toolcall-delivery gate stays in FRONT of the concise
         # shortcut: when a turn is routed via ``delivery_override`` to a target
         # that cannot deliver toolcalls (e.g. the WeChat override flow), the
@@ -3875,6 +3958,69 @@ class ConsolidatedMessageDispatcher:
             )
 
         return await im_client.send_message(context, text, parse_mode=parse_mode, **footer)
+
+    async def _deliver_committed_result(
+        self,
+        im_client,
+        context: MessageContext,
+        text: str,
+        buttons,
+        parse_mode,
+        *,
+        subtext: Optional[str],
+        committed: CommittedOutput,
+    ) -> Optional[str]:
+        """Deliver a committed result part by part (``recovery.md`` D1/D2).
+
+        On Workbench the row is the message, so nothing is sent. On IM the split
+        is a pure function of the text and the target, so a retry resends exactly
+        the parts without a receipt. Each part is acknowledged before the next is
+        sent; a failed part stops delivery and returns ``None``, which leaves the
+        row pending instead of recording a partial delivery as complete.
+        """
+        if context.platform == "avibe":
+            return committed.row_id
+        if self._result_within_limit(context, text):
+            parts = [text]
+        else:
+            plan = self._plan_result_split_for_context(context, text)
+            parts = plan.chunks if plan.links_whole and plan.chunks else []
+        if not parts:
+            # No split keeps every link whole: the whole result is one document part.
+            if committed.part_delivered(0, 1):
+                return committed.row_id
+            message_id = await self._upload_result_document(im_client, context, text)
+            if message_id is None:
+                return None
+            await committed.acknowledge(0, 1, str(message_id))
+            return str(message_id)
+        first_message_id: Optional[str] = None
+        count = len(parts)
+        for index, part in enumerate(parts):
+            if committed.part_delivered(index, count):
+                continue
+            is_last = index == count - 1
+            message_id = None
+            for part_buttons in ((buttons, []) if is_last and buttons else ([],)):
+                try:
+                    message_id = await self._send_result_inline(
+                        im_client,
+                        context,
+                        part,
+                        part_buttons,
+                        parse_mode,
+                        subtext=subtext if is_last else None,
+                    )
+                except Exception as err:
+                    logger.warning("Failed to send committed result part %d/%d: %s", index + 1, count, err)
+                    message_id = None
+                if message_id is not None:
+                    break
+            if message_id is None:
+                return None
+            await committed.acknowledge(index, count, str(message_id))
+            first_message_id = first_message_id or str(message_id)
+        return first_message_id or committed.row_id
 
     async def _send_split_result_messages(
         self,

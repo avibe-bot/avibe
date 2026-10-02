@@ -20,6 +20,7 @@ from core.agent_core.messages import (
     AssistantMessage,
     ImageBlock,
     Origin,
+    TextBlock,
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
@@ -29,7 +30,7 @@ from core.agent_core.messages import (
 )
 from config.paths import get_sqlite_state_path
 from storage import message_deliveries, messages_service
-from storage.agent_transcript import SQLiteTranscriptStore, TranscriptError, resolve_fork_anchor_seq
+from storage.agent_transcript import RenderedDisplay, SQLiteTranscriptStore, TranscriptError, resolve_fork_anchor_seq
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, messages
@@ -430,3 +431,51 @@ async def test_a_cancelled_write_raises_only_after_its_commit_settled(engine) ->
     finally:
         release.join()
         holder.close()
+
+
+async def test_the_display_copy_commits_with_its_row_and_never_reaches_the_context(engine) -> None:
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "go")
+    seen: list[tuple] = []
+
+    def render(message, *, final, conn, platform, scope_id, session_id):
+        # A rewrite inside the transaction sees the row's own attribution and connection.
+        seen.append((final, platform, scope_id, session_id, conn.in_transaction()))
+        body = "\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
+        if not final:
+            return body.upper()
+        return RenderedDisplay(text=f"{body} (shown)", content={"kind": "result", "quick_replies": ["继续"]})
+
+    store = SQLiteTranscriptStore(engine, render=render)
+    await store.consume_input("ses_main", consumed, _user("go"))
+    narration = await store.append_response("ses_main", _assistant("step", call_id="call_1"), final=False)
+    await store.append_tool_result("ses_main", _tool_result("call_1", "ok"), details={})
+    reply = await store.append_response("ses_main", _assistant("答案"), final=True)
+
+    assert seen == [(False, "slack", home, "ses_main", True), (True, "slack", home, "ses_main", True)]
+    with engine.connect() as conn:
+        rows = {
+            row["id"]: row
+            for row in conn.execute(select(messages).where(messages.c.id.in_([narration.row_id, reply.row_id])))
+            .mappings()
+        }
+    assert rows[narration.row_id]["content_text"] == "STEP"
+    assert rows[reply.row_id]["content_text"] == "答案 (shown)"
+    reply_content = json.loads(rows[reply.row_id]["content_json"])
+    assert (reply_content["kind"], reply_content["quick_replies"]) == ("result", ["继续"])
+    # The model copy is the response verbatim; the display copy is not context.
+    assert [entry.message for entry in await store.load("ses_main") if entry.kind == "response"] == [
+        narration.message,
+        reply.message,
+    ]
+
+    def overwrite_model(message, **_attribution):
+        return RenderedDisplay(text="x", content={"model": {"version": 1}})
+
+    with pytest.raises(TranscriptError):
+        await SQLiteTranscriptStore(engine, render=overwrite_model).append_response(
+            "ses_main", _assistant("again"), final=True
+        )
+    assert [entry.row_id for entry in await store.load("ses_main")][-1] == reply.row_id

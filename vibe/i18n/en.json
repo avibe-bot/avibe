@@ -1520,5 +1520,24 @@
       "busy": "Another retention run is active; try again later.",
       "cancelled": "Retention stopped at a batch boundary; no completion was recorded."
     }
+  },
+  "avibeAgent": {
+    "error": {
+      "refusal": "The model declined to answer this request.",
+      "safety": "The model stopped this reply for safety reasons.",
+      "emptyResponse": "The model returned an empty reply. Try again or rephrase the request.",
+      "interrupted": "The Avibe Agent run was interrupted before it finished.",
+      "contextExhausted": "This conversation no longer fits in the model's context window. Start a new session, or fork from an earlier message.",
+      "rateLimit": "The model provider is rate-limiting requests. Try again in a moment.",
+      "overloaded": "The model provider is overloaded. Try again in a moment.",
+      "network": "The model provider could not be reached. Check the network and the Model Hub source.",
+      "server": "The model provider returned a server error. Try again in a moment.",
+      "auth": "The model provider rejected the credentials of this route. Check the Model Hub source.",
+      "invalidRequest": "The model provider rejected the request.",
+      "modelError": "The model stopped with an error.",
+      "toolsUnsupported": "The selected model does not support tools, which the Avibe Agent needs. Choose another model.",
+      "providerProtocol": "The model provider sent a reply the Avibe Agent cannot use.",
+      "generic": "The Avibe Agent run failed."
+    }
   }
 }
