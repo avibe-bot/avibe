@@ -19,13 +19,6 @@ from tests.test_ui_session_stream import _accepted_dispatch, _make_session, isol
 from tests.ui_server_test_helpers import csrf_headers
 
 
-@pytest.fixture(autouse=True)
-def _isolate_web_push(monkeypatch):
-    # Real notice persistence is in scope; asynchronous external push delivery
-    # is not. Do not let its worker outlive a test's temporary state directory.
-    monkeypatch.setattr("core.web_push_notifications.maybe_notify_inbox_message", lambda *_args: None)
-
-
 def _restart_failure_notice(tmp_path, *, backend, delivery="ready"):
     """Recover an accepted Turn through the real notice dispatcher and storage."""
     from core.message_dispatcher import ConsolidatedMessageDispatcher

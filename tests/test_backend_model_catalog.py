@@ -1093,6 +1093,7 @@ def test_an_explicitly_listed_remote_row_can_revive_a_retired_model():
     assert "claude-opus-4" in {entry["id"] for entry in merged}
 
 
+@pytest.mark.real_catalog_refresh
 def test_snapshot_returns_immediately_while_remote_refresh_runs(monkeypatch, tmp_path):
     refresh_started = threading.Event()
     release_refresh = threading.Event()

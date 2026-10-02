@@ -169,6 +169,8 @@ markers = [
     "uses_real_paths: opt out of the autouse home/config isolation so the test can exercise real path resolvers (must remain read-only)",
     "no_sqlite_template: opt out of the pre-migrated SQLite template for migration/bootstrap tests",
     "allow_foreign_signals(reason): opt out of the autouse guard that refuses os.kill/os.killpg to processes the test did not start (state the reason)",
+    "real_web_push_sender: opt out of the autouse stub that keeps the delayed Web Push sender from outliving a test, for tests that drive the sender directly",
+    "real_catalog_refresh: opt out of the autouse stub that keeps the remote model catalog and models.dev refreshes from outliving a test, for tests that drive a refresh directly",
 ]
 
 [dependency-groups]
