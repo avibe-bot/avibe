@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agent-core/agent-event.schema.json",
+  "title": "AgentEvent",
+  "description": "C-4 event yielded by Agent.run. In-process only; never persisted as-is. Committed context lives in C-5 rows, which events reference by id. Mapping to Avibe outputs: loop-control.md section 6.",
+  "type": "object",
+  "required": ["type", "run_id", "seq"],
+  "properties": {
+    "type": {
+      "enum": [
+        "run_started", "text_delta", "thinking_delta", "message_committed", "tool_started", "tool_progress",
+        "tool_finished", "steer_applied", "compaction_started", "compaction_finished", "compaction_failed",
+        "run_ended", "error"
+      ]
+    },
+    "run_id": { "type": "string", "description": "Avibe Turn id." },
+    "seq": { "type": "integer", "minimum": 0, "description": "Monotonic within the run." }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "enum": ["text_delta", "thinking_delta"] } } },
+      "then": { "required": ["delta"], "properties": { "delta": { "type": "string" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "message_committed" } } },
+      "then": {
+        "required": ["message_id", "context_seq", "final"],
+        "properties": {
+          "message_id": { "type": "string", "description": "`messages.id` of the committed assistant row." },
+          "context_seq": { "type": "integer" },
+          "final": { "type": "boolean", "description": "True for the run's final response (`result` row)." }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool_started" } } },
+      "then": {
+        "required": ["tool_call_id", "name", "preview"],
+        "properties": {
+          "tool_call_id": { "type": "string" },
+          "name": { "type": "string" },
+          "preview": { "type": "string", "maxLength": 500, "description": "Display preview of the arguments." },
+          "job_id": { "type": "string" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool_progress" } } },
+      "then": { "required": ["tool_call_id", "tail"], "properties": { "tool_call_id": { "type": "string" }, "tail": { "type": "string", "description": "Latest output lines, normalized." } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool_finished" } } },
+      "then": {
+        "required": ["tool_call_id", "event_id", "is_error"],
+        "properties": {
+          "tool_call_id": { "type": "string" },
+          "event_id": { "type": "string", "description": "`agent_events.id` of the committed tool_result row." },
+          "is_error": { "type": "boolean" },
+          "watch_id": { "type": "string", "description": "Present when the job was handed to Watch." }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "steer_applied" } } },
+      "then": { "required": ["message_id"], "properties": { "message_id": { "type": "string" } } }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["compaction_finished", "compaction_failed"] } } },
+      "then": {
+        "properties": {
+          "event_id": { "type": "string" },
+          "reason": { "enum": ["manual", "threshold", "overflow"] },
+          "tokens_before": { "type": "integer" },
+          "tokens_after_estimate": { "type": "integer" },
+          "error": { "type": "string" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "run_ended" } } },
+      "then": { "required": ["reason"], "properties": { "reason": { "enum": ["completed", "aborted", "error", "ended_by_hook", "context_exhausted"] } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "error" } } },
+      "then": { "required": ["kind", "message"], "properties": { "kind": { "type": "string" }, "message": { "type": "string" } } }
+    }
+  ],
+  "examples": [
+    { "type": "tool_started", "run_id": "trn_3f9c2a71", "seq": 14, "tool_call_id": "toolu_01AbC", "name": "bash", "preview": "pytest tests/test_paths.py -q", "job_id": "job_31c" },
+    { "type": "tool_finished", "run_id": "trn_3f9c2a71", "seq": 19, "tool_call_id": "toolu_01AbC", "event_id": "evt_0065cd1a2b", "is_error": false, "watch_id": "wch_8f2k" }
+  ]
+}

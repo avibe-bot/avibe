@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agent-core/job.schema.json",
+  "title": "JobMeta",
+  "description": "C-7 `meta.json` of a job handle (tools.md section 7). Written by the adapter's JobHost before the spawn and updated once with the process identity after it; read by the tool, Watch target kind `job`, projection (to settle open tool calls), and `vibe stop`. Persisted shape.",
+  "type": "object",
+  "required": [
+    "version",
+    "job_id",
+    "session_id",
+    "tool_call_id",
+    "backend",
+    "command",
+    "cwd",
+    "created_at",
+    "state_dir"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "job_id": {
+      "type": "string",
+      "pattern": "^job_[a-z0-9]+$"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tool_call_id": {
+      "type": "string"
+    },
+    "backend": {
+      "enum": [
+        "pipe",
+        "pty"
+      ],
+      "description": "v1 writes `pipe` only."
+    },
+    "command": {
+      "type": "string"
+    },
+    "cwd": {
+      "type": "string"
+    },
+    "timeout_s": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "state_dir": {
+      "type": "string",
+      "description": "Absolute job directory holding output.log and exit."
+    },
+    "process": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Null until the wrapper is spawned. Mirrors PersistedProcessIdentity (core/process_isolation.py) plus the process group, so termination can verify the pid was not recycled.",
+      "required": [
+        "pid",
+        "pgid",
+        "create_time",
+        "worker_fingerprint"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "pid": {
+          "type": "integer"
+        },
+        "pgid": {
+          "type": "integer"
+        },
+        "create_time": {
+          "type": "number"
+        },
+        "worker_fingerprint": {
+          "type": "string"
+        }
+      }
+    },
+    "terminal": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Reserved for the `pty` backend; null for `pipe`.",
+      "properties": {
+        "socket": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      }
+    },
+    "watch_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Set at handover."
+    }
+  },
+  "examples": [
+    {
+      "version": 1,
+      "job_id": "job_31c",
+      "session_id": "ses7k2m9p4q1x",
+      "tool_call_id": "toolu_01AbC",
+      "backend": "pipe",
+      "command": "pytest -q",
+      "cwd": "/work/repo",
+      "timeout_s": null,
+      "created_at": "2026-10-02T04:12:09.512Z",
+      "state_dir": "/home/u/.avibe/state/agent_core/jobs/job_31c",
+      "process": {
+        "pid": 48211,
+        "pgid": 48211,
+        "create_time": 1790914329.51,
+        "worker_fingerprint": "sha256:5f1c…"
+      },
+      "terminal": null,
+      "watch_id": "wch_8f2k"
+    }
+  ]
+}
