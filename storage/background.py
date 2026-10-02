@@ -1929,6 +1929,22 @@ class JobWatchResumeRefused(RuntimeError):
         super().__init__("a Watch on a running command cannot be resumed once it is paused or finished")
 
 
+def _job_watch_id(conn: Any, job_id: Any) -> Optional[str]:
+    """The one lookup of a job's Watch (J6): live and removed rows, the oldest first."""
+
+    if not isinstance(job_id, str) or not job_id:
+        return None
+    existing = conn.execute(
+        select(run_definitions.c.id)
+        .where(run_definitions.c.definition_type == "watch")
+        .where(_watch_target_sql("kind") == WATCH_TARGET_KIND_JOB)
+        .where(_watch_target_sql("job_id") == job_id)
+        .order_by(run_definitions.c.created_at, run_definitions.c.id)
+        .limit(1)
+    ).scalar_one_or_none()
+    return str(existing) if existing is not None else None
+
+
 def watch_metadata_after_resume(
     metadata: dict[str, Any],
     *,
@@ -3699,16 +3715,9 @@ class SQLiteBackgroundTaskStore:
         values = self._watch_values(payload)
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
-            existing = conn.execute(
-                select(run_definitions.c.id)
-                .where(run_definitions.c.definition_type == "watch")
-                .where(_watch_target_sql("kind") == WATCH_TARGET_KIND_JOB)
-                .where(_watch_target_sql("job_id") == target["job_id"])
-                .order_by(run_definitions.c.created_at, run_definitions.c.id)
-                .limit(1)
-            ).scalar_one_or_none()
+            existing = _job_watch_id(conn, target["job_id"])
             if existing is not None:
-                return str(existing)
+                return existing
             session_status = conn.execute(
                 select(agent_sessions.c.status)
                 .where(agent_sessions.c.id == values["session_id"])
@@ -3722,6 +3731,12 @@ class SQLiteBackgroundTaskStore:
                 values["deleted_at"] = _utc_now_iso()
             upsert_definition_in_connection(conn, values, expect=None, definition_type="watch")
         return str(values["id"])
+
+    def find_job_watch(self, job_id: str) -> Optional[str]:
+        """The id of the Watch that owns or owned ``job_id``, removed rows included."""
+
+        with self.engine.connect() as conn:
+            return _job_watch_id(conn, job_id)
 
     def list_job_watch_targets(self) -> list[dict[str, Any]]:
         """Every job Watch whose job may still need its owner: live, paused, and removed rows not yet released.

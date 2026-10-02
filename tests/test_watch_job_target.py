@@ -613,6 +613,65 @@ def test_hand_over_returns_the_watch_that_already_owns_the_job(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
+    "retry",
+    [
+        {"user_context": {}},  # the caller has lost Editor access since the first hand-over
+        {"agent_name": "no-such-agent", "user_context": {}},
+        {"drop": "command"},  # a job record that could no longer create a Watch
+    ],
+    ids=["access-revoked", "agent-gone", "record-incomplete"],
+)
+def test_a_repeated_hand_over_returns_the_owner_whatever_creation_would_now_refuse(tmp_path: Path, retry: dict) -> None:
+    async def run() -> tuple[LocalJobHost, str, str, str]:
+        store = ManagedWatchStore()
+        host = _host(tmp_path, store)
+        job_id = await _start_job(host, tmp_path, "sleep 60")
+        # The first hand-over committed its Watch; a crash lost meta.json's record of it.
+        watch_id = await hand_over_job(host.meta(job_id), store=store)
+        meta = host.meta(job_id)
+        if "drop" in retry:
+            meta.pop(retry["drop"])
+        route = {key: value for key, value in retry.items() if key != "drop"}
+        again = await hand_over_job(meta, store=ManagedWatchStore(), **route)
+        await host.kill(job_id)
+        return host, job_id, watch_id, again
+
+    _host_, _job, watch_id, again = asyncio.run(run())
+
+    assert again == watch_id
+
+
+def test_a_hand_over_that_loses_its_creation_check_to_a_concurrent_owner_returns_that_owner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from storage import resource_access_service
+
+    async def run() -> tuple[str, str]:
+        store = ManagedWatchStore()
+        host = _host(tmp_path, store)
+        job_id = await _start_job(host, tmp_path, "sleep 60")
+        meta = host.meta(job_id)
+        concurrent: list[str] = []
+        original = resource_access_service.ensure_harness_definition_write
+
+        def lose_the_race(user_context=None):
+            # Another hand-over of this job commits its Watch after this one looked, and
+            # this one's access check then fails.
+            monkeypatch.setattr(resource_access_service, "ensure_harness_definition_write", original)
+            concurrent.append(ManagedWatchStore().adopt_or_create_job_watch(meta))
+            raise resource_access_service.ResourceAccessError(resource_access_service.HARNESS_ACCESS_FORBIDDEN_CODE)
+
+        monkeypatch.setattr(resource_access_service, "ensure_harness_definition_write", lose_the_race)
+        watch_id = await hand_over_job(meta, store=store)
+        await host.kill(job_id)
+        return watch_id, concurrent[0]
+
+    watch_id, concurrent_id = asyncio.run(run())
+
+    assert watch_id == concurrent_id
+
+
+@pytest.mark.parametrize(
     ("exit_code", "detail"),
     [(0, "normal"), (64, "error"), (75, "error"), (124, "error")],
 )

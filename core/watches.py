@@ -773,10 +773,50 @@ class ManagedWatchStore:
         ``once`` Watch on the job's Session, delivered through Watch's existing
         follow-up path; its cycle waits on the job and never runs anything.
 
-        Raising means no Watch owns the job. Once the row is committed this returns its
-        id: a failed mirror refresh afterwards is logged, never raised.
+        Raising means no Watch owns the job, so it raises only once a lookup has
+        confirmed that: the owner is looked up before anything that could refuse a new
+        Watch (the caller's access, the Agent, the job record's shape), and again
+        before a refusal escapes, in case a concurrent hand-over created it meanwhile.
+        Once the row is committed this returns its id: a failed mirror refresh
+        afterwards is logged, never raised.
         """
 
+        job_id = job.get("job_id")
+        owner = self.find_job_watch(job_id)
+        if owner is not None:
+            return owner
+        try:
+            return self._create_job_watch(
+                job,
+                agent_name=agent_name,
+                session_key=session_key,
+                post_to=post_to,
+                deliver_key=deliver_key,
+                message=message,
+                metadata=metadata,
+                user_context=user_context,
+            )
+        except Exception:
+            try:
+                owner = self.find_job_watch(job_id)
+            except Exception:
+                owner = None
+            if owner is not None:
+                return owner
+            raise
+
+    def _create_job_watch(
+        self,
+        job: Mapping[str, Any],
+        *,
+        agent_name: Optional[str],
+        session_key: str,
+        post_to: Optional[str],
+        deliver_key: Optional[str],
+        message: Optional[str],
+        metadata: Optional[dict[str, Any]],
+        user_context: Any,
+    ) -> str:
         from core.vibe_agents import ensure_agent_name_access
         from storage.resource_access_service import (
             ensure_harness_definition_write,
@@ -822,10 +862,9 @@ class ManagedWatchStore:
                 )
         else:
             with self._mirror_lock:
-                for existing in self._watches.values():
-                    existing_target = existing.job_target
-                    if existing_target is not None and existing_target["job_id"] == target["job_id"]:
-                        return existing.id
+                owner = self.find_job_watch(target["job_id"])
+                if owner is not None:
+                    return owner
                 self._watches[watch.id] = watch
                 try:
                     self._save()
@@ -835,6 +874,18 @@ class ManagedWatchStore:
             watch_id = watch.id
         _publish_watch_definitions_updated()
         return watch_id
+
+    def find_job_watch(self, job_id: Any) -> Optional[str]:
+        """The id of the Watch that owns or owned ``job_id`` (J6), or ``None``."""
+
+        if self._sqlite is not None:
+            return self._sqlite.find_job_watch(job_id)
+        with self._mirror_lock:
+            for watch in self._watches.values():
+                target = watch.job_target
+                if target is not None and target["job_id"] == job_id:
+                    return watch.id
+        return None
 
     def list_job_watch_targets(self) -> list[dict[str, Any]]:
         """Job Watches whose job may still need its owner (``SQLiteBackgroundTaskStore.list_job_watch_targets``).
