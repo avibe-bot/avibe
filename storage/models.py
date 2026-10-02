@@ -490,6 +490,10 @@ agent_events = Table(
     Column("event_type", String, nullable=False),
     Column("visibility", String, nullable=False, server_default="trace"),
     Column("sequence", Integer, nullable=True),
+    # C-5 model-context order (agent-core-contracts/transcript.md), shared with
+    # ``messages.context_seq``: non-null exactly for rows in a Session's context.
+    # Unrelated to the turn-local ``sequence``.
+    Column("context_seq", Integer, nullable=True),
     Column("content_text", Text, nullable=True),
     Column("content_json", Text, nullable=False),
     Column("metadata_json", Text, nullable=False),
@@ -500,6 +504,13 @@ agent_events = Table(
     Index("ix_agent_events_session_type_created_id", "session_id", "event_type", "created_at", "id"),
     Index("ix_agent_events_scope_created_id", "scope_id", "created_at", "id"),
     Index("ix_agent_events_turn_sequence_id", "turn_id", "sequence", "id"),
+    Index(
+        "uq_agent_events_session_context_seq",
+        "session_id",
+        "context_seq",
+        unique=True,
+        sqlite_where=text("context_seq is not null"),
+    ),
     Index(
         "ix_agent_events_skill_created_id",
         "created_at",
@@ -658,6 +669,10 @@ messages = Table(
     Column("updated_at", String, nullable=False),
     Column("delivered_at", String, nullable=True),
     Column("read_at", String, nullable=True),
+    # C-5 model-context order, unique per Session across this table and
+    # ``agent_events``. Null for display-only rows and for inputs the Avibe Agent
+    # loop has not consumed.
+    Column("context_seq", Integer, nullable=True),
     Index(
         "uq_messages_platform_scope_native",
         "platform",
@@ -672,6 +687,13 @@ messages = Table(
         "native_message_id",
         unique=True,
         sqlite_where=text("scope_id is null and native_message_id is not null"),
+    ),
+    Index(
+        "uq_messages_session_context_seq",
+        "session_id",
+        "context_seq",
+        unique=True,
+        sqlite_where=text("context_seq is not null"),
     ),
     Index("ix_messages_session_created", "session_id", "created_at"),
     Index("ix_messages_session_created_id", "session_id", "created_at", "id"),

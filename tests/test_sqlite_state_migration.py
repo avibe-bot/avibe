@@ -38,7 +38,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260923_0062"
+HEAD_REVISION = "20261002_0063"
 # ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and
 # Alembic cannot re-emit them when batch mode recreates a table. Every migration that
 # rebuilds one therefore passes this convention; the rebuild simulated below has to pass
@@ -1582,6 +1582,9 @@ def test_scoped_native_message_identity_upgrade_preserves_accepted_delivery(
     engine = create_sqlite_engine(db_path)
     now = "2026-08-02T00:00:00Z"
     with engine.begin() as conn:
+        # The fixture is written by today's delivery code, which selects the
+        # current Message columns; 20261002_0063 accepts the column already present.
+        conn.exec_driver_sql("alter table messages add column context_seq integer")
         scope_id = upsert_scope(
             conn,
             platform="telegram",
@@ -3197,9 +3200,10 @@ def test_show_annotation_migration_changes_only_the_user_send_index(
                 ),
             )
         conn.commit()
-        original_rows = conn.execute(
-            "select * from messages order by id"
-        ).fetchall()
+        cursor = conn.execute("select * from messages order by id")
+        original_rows = cursor.fetchall()
+        # Later revisions may add nullable columns; the released ones must not change.
+        original_columns = ", ".join(column[0] for column in cursor.description)
         original_index = _index_sql(conn, "ix_messages_inbox_user_send")
 
     migration = import_module(
@@ -3211,7 +3215,7 @@ def test_show_annotation_migration_changes_only_the_user_send_index(
 
     with sqlite3.connect(db_path) as conn:
         upgraded_rows = conn.execute(
-            "select * from messages order by id"
+            f"select {original_columns} from messages order by id"
         ).fetchall()
         user_send_index = _index_sql(conn, "ix_messages_inbox_user_send")
         version = conn.execute("select version_num from alembic_version").fetchone()
@@ -3230,7 +3234,7 @@ def test_show_annotation_migration_changes_only_the_user_send_index(
 
     with sqlite3.connect(db_path) as conn:
         downgraded_rows = conn.execute(
-            "select * from messages order by id"
+            f"select {original_columns} from messages order by id"
         ).fetchall()
         user_send_index = _index_sql(conn, "ix_messages_inbox_user_send")
         versions = {

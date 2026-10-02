@@ -1,9 +1,12 @@
 """Append-only trace events emitted by agent runtimes.
 
 ``agent_events`` is intentionally separate from ``messages``: rows here are
-debug/trace material, not transcript content. The first writer is tool-call
+debug/trace material, not chat/inbox messages. The first writer is tool-call
 output from backend SDK streams, which should be retained for diagnosis without
-ever becoming a chat/inbox message.
+ever becoming a chat/inbox message. The Avibe Agent's tool results and context
+checkpoints also live here with ``visibility='context'`` and a ``context_seq``;
+``storage/agent_transcript.py`` is their only writer, and trace retention never
+removes them.
 """
 
 from __future__ import annotations
@@ -51,6 +54,7 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         "event_type": row.get("event_type"),
         "visibility": row.get("visibility"),
         "sequence": row.get("sequence"),
+        "context_seq": row.get("context_seq"),
         "text": row.get("content_text") or content.get("text") or "",
         "content": content,
         "metadata": metadata,
@@ -77,6 +81,7 @@ def append(
     visibility: str = "trace",
     source: Optional[str] = "agent",
     sequence: Optional[int] = None,
+    context_seq: Optional[int] = None,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {}
     if content:
@@ -98,6 +103,7 @@ def append(
         "event_type": event_type,
         "visibility": visibility,
         "sequence": sequence,
+        "context_seq": context_seq,
         "content_text": plain,
         "content_json": json.dumps(body),
         "metadata_json": json.dumps(metadata or {}),
