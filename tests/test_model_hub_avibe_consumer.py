@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import aiohttp
 import pytest
-from jsonschema import Draft7Validator
+from jsonschema import Draft7Validator, ValidationError
 from referencing import Registry, Resource
 
 from config.v2_config import (
@@ -194,6 +194,19 @@ async def test_hop_resolution_uses_primary_protocol_and_alias_capabilities(tmp_p
             "supports_reasoning": False if known else None,
             "reasoning_efforts": [],
         }
+        # Unknown is an explicit null, never an omitted field. Positive producer
+        # checks alone miss a schema that accepts incomplete future responses.
+        for field in (
+            "context_window", "input_limit", "max_output_tokens", "supports_tools",
+            "supports_images", "supports_reasoning", "reasoning_efforts",
+        ):
+            incomplete = copy.deepcopy(hop)
+            incomplete["capabilities"].pop(field)
+            with pytest.raises(ValidationError) as missing:
+                _validate("hop-resolution.schema.json", incomplete)
+            assert missing.value.validator == "required"
+            assert list(missing.value.absolute_path) == ["capabilities"]
+            assert missing.value.message == f"'{field}' is a required property"
         launch = await router.resolve("avibe", "menu-alias", process_scope="avibe:test", turn_id="turn-hop")
         assert hop["token"] not in repr(launch)
         assert build_claude_hub_env({"PATH": "/fixture"}, launch) == {"PATH": "/fixture"}

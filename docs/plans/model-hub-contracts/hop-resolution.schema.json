@@ -18,7 +18,7 @@
     "request_headers": { "type": "object", "additionalProperties": { "type": "string" } },
     "capabilities": {
       "type": "object",
-      "required": ["context_window", "max_output_tokens", "supports_tools", "supports_images", "supports_reasoning", "reasoning_efforts"],
+      "required": ["context_window", "input_limit", "max_output_tokens", "supports_tools", "supports_images", "supports_reasoning", "reasoning_efforts"],
       "additionalProperties": false,
       "properties": {
         "context_window": { "type": ["integer", "null"], "minimum": 1 },

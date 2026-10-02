@@ -31,7 +31,9 @@ Planning capabilities retain the requested catalog row's authority, including fo
 aliases. Unknown `context_window`, `max_output_tokens`, `supports_tools`, and
 `supports_reasoning` remain null. A nonempty input modality list yields
 `supports_images = ("image" in input_modalities)`; an empty list yields null.
-There is currently no separate stored input cap, so `input_limit` is null.
+All capability fields are required in the response, even when their value is
+unknown. There is currently no separate stored input cap, so `input_limit` is
+present with value null, never omitted.
 `reasoning_efforts` remains the configured list, or empty when reasoning is
 explicitly disabled. No upstream limit or capability is guessed from a model name,
 a different hop, or a native CLI default.
