@@ -5952,6 +5952,19 @@ def _task_schedule_retired_response(exc):
     )
 
 
+def _job_watch_resume_refused_response(exc, watch_id: str):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    return _coded_error_response(
+        exc.code,
+        t("error.jobWatchResumeRefused.message", lang),
+        409,
+        hint=t("error.jobWatchResumeRefused.hint", lang, id=watch_id),
+        details={"watch_id": watch_id},
+    )
+
+
 def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     if code == "resource_access_forbidden":
@@ -12741,10 +12754,15 @@ def harness_watch_patch(watch_id: str):
     if "enabled" not in payload:
         return jsonify({"ok": False, "code": "invalid_payload", "message": "missing 'enabled'"}), 400
     enabled = bool(payload["enabled"])
+    from storage.background import JobWatchResumeRefused
+
     with _harness_store() as store:
         if not store.get_watch(watch_id):
             return jsonify({"ok": False, "code": "watch_not_found"}), 404
-        store.set_definition_enabled(watch_id, enabled, definition_type="watch")
+        try:
+            store.set_definition_enabled(watch_id, enabled, definition_type="watch")
+        except JobWatchResumeRefused as exc:
+            return _job_watch_resume_refused_response(exc, watch_id)
         watch = store.get_watch(watch_id)
     from core.inbox_events import publish_definitions_updated
 

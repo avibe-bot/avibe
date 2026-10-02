@@ -11,6 +11,10 @@ from storage.settings_service import upsert_scope
 from vibe import remote_access
 from vibe.authorization import AuthorizationContext, context_from_session_payload
 
+# These tests call the sender synchronously and stub `threading.Thread` wherever
+# they schedule it, so no delayed thread outlives them.
+pytestmark = pytest.mark.real_web_push_sender
+
 
 @pytest.fixture(autouse=True)
 def _clear_recent_delivery_dispositions():
