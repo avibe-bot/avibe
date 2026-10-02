@@ -97,6 +97,19 @@ afterEach(() => {
 });
 
 describe('NewAgentDialog', () => {
+  it('creates an Avibe Agent through the existing backend and model pickers', async () => {
+    modelCatalog = { models: ['avibe-model'], reasoningOptions: { 'avibe-model': [] } };
+    const { createVibeAgent } = renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: /Avibe Agent/ }));
+    fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'local-helper' } });
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.click(screen.getByRole('option', { name: 'avibe-model' }));
+    submit();
+    await waitFor(() => expect(createVibeAgent).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'local-helper', backend: 'avibe', model: 'avibe-model', reasoning_effort: null,
+    })));
+  });
+
   it("keeps the form while the user adds a model in the Model Hub catalog", async () => {
     // Settings hides the page this dialog sits in; closing it would clear the
     // Agent the user was halfway through defining.

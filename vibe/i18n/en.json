@@ -468,6 +468,9 @@
     "routingUpdateNeedsNewSession": "Use /new to create a new session for this setting change to take effect. The new session will replace the current session."
   },
   "settings": {
+    "backends": {
+      "avibeDescription": "Avibe's built-in agent, powered by models configured in Model Hub."
+    },
     "personalizationTitle": "Personalization Settings",
     "personalizationDesc": "Configure how {agent} messages appear in your Slack workspace.",
     "visibilityTitle": "Settings - Message Visibility",

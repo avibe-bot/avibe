@@ -35,6 +35,7 @@ from sqlalchemy import select
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 from core.scheduled_tasks import (
     AGENT_RUN_CLOSE_AFTER_METADATA_KEY,
     AGENT_RUN_DELIVERY_QUEUE,
@@ -5791,7 +5792,7 @@ def cmd_agent_import(args):
                 raise TaskCliError(
                     "--backend is required when importing an arbitrary file",
                     code="missing_agent_backend",
-                    hint="Pass --backend codex, --backend claude, or --backend opencode.",
+                    hint=f"Pass --backend with one of: {', '.join(AGENT_BACKENDS)}.",
                 )
             candidates.append(parse_agent_file(Path(args.file), backend=args.backend))
         else:
@@ -16926,7 +16927,7 @@ def build_parser():
 
     agent_list_parser = agent_subparsers.add_parser("list", help="List Avibe Agents")
     agent_list_parser.add_argument("--brief", action="store_true", help=argparse.SUPPRESS)
-    agent_list_parser.add_argument("--backend", choices=("codex", "claude", "opencode"), help="Filter by backend")
+    agent_list_parser.add_argument("--backend", choices=AGENT_BACKENDS, help="Filter by backend")
     agent_list_parser.add_argument(
         "--include-disabled",
         action="store_true",
@@ -16959,7 +16960,7 @@ def build_parser():
         "name", nargs="?", help="Agent name. Omit and pass --backend to query a backend directly."
     )
     agent_models_parser.add_argument(
-        "--backend", choices=("codex", "claude", "opencode"), help="Query a backend directly instead of an Agent."
+        "--backend", choices=AGENT_BACKENDS, help="Query a backend directly instead of an Agent."
     )
     agent_models_parser.add_argument(
         "--provider", help="Filter to one OpenCode provider id (OpenCode backend only)."
@@ -16970,7 +16971,7 @@ def build_parser():
 
     agent_create_parser = agent_subparsers.add_parser("create", help="Create an Avibe Agent")
     agent_create_parser.add_argument("name", help="Globally unique Agent name")
-    agent_create_parser.add_argument("--backend", required=True, choices=("codex", "claude", "opencode"))
+    agent_create_parser.add_argument("--backend", required=True, choices=AGENT_BACKENDS)
     agent_create_parser.add_argument("--description")
     agent_create_parser.add_argument("--model")
     agent_create_parser.add_argument("--reasoning-effort")
@@ -17016,8 +17017,8 @@ def build_parser():
     agent_import_parser = agent_subparsers.add_parser("import", help="Import global or file-based Agents")
     import_source_group = agent_import_parser.add_mutually_exclusive_group(required=True)
     import_source_group.add_argument("--file", help="Import one markdown Agent file")
-    import_source_group.add_argument("--from", dest="from_source", choices=("claude", "codex", "opencode"))
-    agent_import_parser.add_argument("--backend", choices=("codex", "claude", "opencode"), help="Backend for --file imports")
+    import_source_group.add_argument("--from", dest="from_source", choices=NATIVE_CLI_BACKENDS)
+    agent_import_parser.add_argument("--backend", choices=AGENT_BACKENDS, help="Backend for --file imports")
     agent_import_parser.add_argument("--name", help="Import one named global Agent from --from source")
     agent_import_parser.add_argument("--all", action="store_true", help="Import all global Agents from --from source")
     _add_json_noop(agent_import_parser)
@@ -17114,7 +17115,7 @@ def build_parser():
     runs_list_parser.add_argument("--status", help="Filter by run status")
     runs_list_parser.add_argument("--type", help="Filter by run type")
     runs_list_parser.add_argument("--agent", help="Filter by Avibe Agent name")
-    runs_list_parser.add_argument("--backend", choices=("codex", "claude", "opencode"), help="Filter by backend")
+    runs_list_parser.add_argument("--backend", choices=AGENT_BACKENDS, help="Filter by backend")
     runs_list_parser.add_argument("--session-id", help="Filter by Agent Session ID")
     runs_list_parser.add_argument("--current-session", action="store_true", help="Filter to this current Agent Session")
     runs_list_parser.add_argument("--definition-id", help="Filter by task or watch definition ID")

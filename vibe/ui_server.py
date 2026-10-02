@@ -72,7 +72,7 @@ from core.show_session_events import (
     show_event_requests_dispatch,
 )
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
-from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.runtime import get_ui_dist_path, get_working_dir
@@ -8105,7 +8105,7 @@ def codex_models():
 @app.route("/api/agent/<name>/install", methods=["POST"])
 def agent_install(name):
     """Install an agent CLI tool (opencode, claude, codex)."""
-    if name not in _ALLOWED_BACKENDS:
+    if name not in NATIVE_CLI_BACKENDS:
         return jsonify({"ok": False, "message": f"Unknown agent: {name}"}), 400
 
     from vibe import api
@@ -8117,7 +8117,7 @@ def agent_install(name):
 @app.route("/api/agent/<name>/install/<job_id>", methods=["GET"])
 def agent_install_status(name, job_id):
     """Poll a background agent CLI install/upgrade job."""
-    if name not in _ALLOWED_BACKENDS:
+    if name not in NATIVE_CLI_BACKENDS:
         return jsonify({"ok": False, "message": f"Unknown agent: {name}"}), 400
 
     from vibe import api
@@ -8147,7 +8147,7 @@ async def backend_connection(name: str, starlette_request: FastAPIRequest):
 @app.route("/api/backend/<name>/runtime")
 def backend_runtime(name):
     """Return lifecycle info (version, update, process status) for a backend."""
-    if name not in _ALLOWED_BACKENDS:
+    if name not in NATIVE_CLI_BACKENDS:
         return jsonify({"ok": False, "error": f"Unknown backend: {name}"}), 400
 
     from vibe import api

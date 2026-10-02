@@ -5,16 +5,17 @@ import { useApi, type InstallResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { setConfigField } from '@/lib/configMutations';
 import { errorMessage } from '@/lib/errorMessage';
+import { getBackendUiMeta, type AgentBackendId } from '@/lib/agentBackends';
 
 export type CliStatus = 'unknown' | 'ok' | 'missing';
 
-export type BackendId = 'claude' | 'codex' | 'opencode';
+export type BackendId = AgentBackendId;
 
 export interface UseBackendRuntimeOptions {
   /** Backend identifier used in V2Config keys and install_agent dispatch. */
   backend: BackendId;
   /** Fallback CLI binary name when V2Config carries no override. */
-  defaultCli: string;
+  defaultCli?: string | null;
 }
 
 export interface BackendRuntimeState {
@@ -99,15 +100,18 @@ const assertBackendRuntimeApplied = (
  */
 export function useBackendRuntime({
   backend,
-  defaultCli,
+  defaultCli: cliOverride,
 }: UseBackendRuntimeOptions): BackendRuntimeState {
   const api = useApi();
   const { showToast } = useToast();
   const { t } = useTranslation();
+  const { capabilities, defaultEnabled, defaultCli: catalogCli } = getBackendUiMeta(backend);
+  const defaultCli = cliOverride ?? catalogCli ?? '';
+  const { supports_cli: supportsCli, supports_install: supportsInstall } = capabilities;
 
   const [loaded, setLoaded] = useState(false);
   const [configError, setConfigError] = useState(false);
-  const [enabled, setEnabled] = useState(true);
+  const [enabled, setEnabled] = useState(defaultEnabled);
   const [cliPath, setCliPath] = useState(defaultCli);
   const [savedCliPath, setSavedCliPath] = useState(defaultCli);
   const [cliStatus, setCliStatus] = useState<CliStatus>('unknown');
@@ -130,6 +134,7 @@ export function useBackendRuntime({
 
   const detect = useCallback(
     async (binary?: string) => {
+      if (!supportsCli) return;
       const token = ++detectionToken.current;
       const intent = pathIntent.current;
       setDetecting(true);
@@ -147,7 +152,7 @@ export function useBackendRuntime({
         if (mounted.current && detectionToken.current === token) setDetecting(false);
       }
     },
-    [api, cliPath, defaultCli, showToast, t],
+    [api, cliPath, defaultCli, showToast, supportsCli, t],
   );
 
   // Initial load: read V2Config for ``enabled`` + ``cli_path`` and then
@@ -160,14 +165,14 @@ export function useBackendRuntime({
       .then((config) => {
         if (cancelled) return;
         const agent = config?.agents?.[backend];
-        const initialEnabled = typeof agent?.enabled === 'boolean' ? agent.enabled : true;
-        const initialPath = agent?.cli_path || defaultCli;
+        const initialEnabled = typeof agent?.enabled === 'boolean' ? agent.enabled : defaultEnabled;
+        const initialPath = supportsCli ? agent?.cli_path || defaultCli : '';
         setEnabled(initialEnabled);
         setCliPath(initialPath);
         setSavedCliPath(initialPath);
         setConfigError(false);
         setLoaded(true);
-        void detect(initialPath);
+        if (supportsCli) void detect(initialPath);
       })
       .catch((e: any) => {
         if (cancelled) return;
@@ -185,9 +190,10 @@ export function useBackendRuntime({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, backend, defaultCli]);
+  }, [api, backend, defaultCli, defaultEnabled, supportsCli]);
 
   const install = useCallback(async () => {
+    if (!supportsInstall) return;
     const intent = pathIntent.current;
     setInstalling(true);
     setInstallResult(null);
@@ -217,9 +223,10 @@ export function useBackendRuntime({
         setInstalling(false);
       }
     }
-  }, [api, backend, cliPath, detect, showToast, t]);
+  }, [api, backend, cliPath, detect, showToast, supportsInstall, t]);
 
   const onSaveRuntime = useCallback(async () => {
+    if (!supportsCli) return;
     setSavingRuntime(true);
     const path = cliPath || defaultCli;
     // Save edits only the CLI field. Enablement has its own serialized toggle;
@@ -242,7 +249,7 @@ export function useBackendRuntime({
     });
     mutationQueue.current = operation;
     await operation;
-  }, [api, backend, cliPath, defaultCli, showToast, t]);
+  }, [api, backend, cliPath, defaultCli, showToast, supportsCli, t]);
 
   const toggleEnabled = useCallback(() => {
     const next = !enabled;
@@ -296,7 +303,7 @@ export function useBackendRuntime({
     [detect],
   );
 
-  const runtimeDirty = cliPath !== savedCliPath;
+  const runtimeDirty = supportsCli && cliPath !== savedCliPath;
 
   return {
     loaded,

@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useMemo, useRef } from 're
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
 import type { AgentSupply } from '../components/settings/models/types';
+import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/agentBackends';
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
@@ -581,7 +582,7 @@ export type ApiContextType = {
   installAgent: (name: string) => Promise<InstallResult>;
   listDependencies: (options?: DependencyReadOptions) => Promise<DependenciesResult>;
   installDependency: (dep: string) => Promise<InstallResult>;
-  getBackendConnection: (name: 'claude' | 'codex' | 'opencode') => Promise<BackendConnectionState>;
+  getBackendConnection: (name: AgentBackendId) => Promise<BackendConnectionState>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
   getCodexAuth: () => Promise<CodexAuthState>;
@@ -594,16 +595,16 @@ export type ApiContextType = {
     forceReset?: boolean,
   ) => Promise<OAuthWebStartResult>;
   getOAuthWebStatus: (
-    backend: 'claude' | 'codex' | 'opencode',
+    backend: WebOAuthBackend,
     flowId: string,
   ) => Promise<OAuthWebStatus>;
   submitOAuthWebCode: (
-    backend: 'claude' | 'codex' | 'opencode',
+    backend: WebOAuthBackend,
     flowId: string,
     code: string,
   ) => Promise<OAuthWebMutationResult>;
   cancelOAuthWeb: (
-    backend: 'claude' | 'codex' | 'opencode',
+    backend: WebOAuthBackend,
     flowId: string,
   ) => Promise<OAuthWebMutationResult>;
   removeBackendAuth: (backend: 'claude' | 'codex') => Promise<OAuthWebMutationResult>;
@@ -835,7 +836,7 @@ export type ApiContextType = {
   signVaultDigest: (payload: Record<string, unknown>) => Promise<{ ok: boolean; signature?: Record<string, unknown>; request?: VaultRequest; code?: string; message?: string }>;
   pinVaultPubkey: (payload: Record<string, unknown>) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   getVaultAudit: (params?: { secret?: string; limit?: number }) => Promise<{ ok: boolean; events: VaultAuditEvent[] }>;
-  importVibeAgents: (payload: { from?: 'claude' | 'codex' | 'opencode'; name?: string; all?: boolean; file?: string; backend?: string }) => Promise<{ ok: boolean; imported?: any[]; skipped?: any[]; error?: string; code?: string; message?: string }>;
+  importVibeAgents: (payload: { from?: NativeCliBackend; name?: string; all?: boolean; file?: string; backend?: string }) => Promise<{ ok: boolean; imported?: any[]; skipped?: any[]; error?: string; code?: string; message?: string }>;
   // Agent Skills — thin shells over the askill CLI (see /api/skills*).
   listSkills: (params?: { scope?: SkillScope | 'all'; projectId?: string; backends?: string[] }) => Promise<SkillsListResult>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;
@@ -1930,7 +1931,7 @@ export type DependencyReadOptions = { ids?: readonly string[]; signal?: AbortSig
 
 export type BackendConnectionState = {
   ok: boolean;
-  backend: 'claude' | 'codex' | 'opencode';
+  backend: AgentBackendId;
   installed: boolean;
   enabled: boolean;
   auth: 'subscription' | 'api_key' | 'none' | 'unknown';
@@ -2111,7 +2112,7 @@ export type OAuthWebState =
 export type OAuthWebStartResult = {
   ok: boolean;
   flow_id?: string;
-  backend?: 'claude' | 'codex' | 'opencode';
+  backend?: WebOAuthBackend;
   state?: OAuthWebState;
   url?: string | null;
   device_code?: string | null;
@@ -2125,7 +2126,7 @@ export type OAuthWebStartResult = {
 export type OAuthWebStatus = {
   ok: boolean;
   flow_id?: string;
-  backend?: 'claude' | 'codex' | 'opencode';
+  backend?: WebOAuthBackend;
   state?: OAuthWebState;
   url?: string | null;
   device_code?: string | null;

@@ -1,4 +1,5 @@
 import asyncio
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend
 import hashlib
 import json
 import logging
@@ -3305,11 +3306,11 @@ class SlackBot(BaseIMClient):
         self._ensure_clients()
 
         # Build agent options limited to enabled backends when available
-        common_agents = ["claude", "codex", "opencode"]
+        common_agents = NATIVE_CLI_BACKENDS
         registered_backends = None
         if getattr(self, "_controller", None) and getattr(self._controller, "agent_service", None):
             registered_backends = list(self._controller.agent_service.agents.keys())
-        allowed_agents = set(registered_backends) if registered_backends else set(common_agents)
+        allowed_agents = set(registered_backends or common_agents) & set(NATIVE_CLI_BACKENDS)
         agent_keys = allowed_agents
         agent_options = []
         for agent in sorted(agent_keys):
@@ -3541,9 +3542,7 @@ class SlackBot(BaseIMClient):
         """Build modal view for agent/model routing settings."""
         # Build backend options
         backend_display_names = {
-            "claude": "ClaudeCode",
-            "codex": "Codex",
-            "opencode": "OpenCode",
+            backend: display_name_for_backend(backend) for backend in AGENT_BACKENDS
         }
         backend_options = []
         for backend in registered_backends:

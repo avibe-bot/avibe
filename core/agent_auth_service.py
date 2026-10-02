@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Coroutine, Optional
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 
 from core.backend_failure import terminal_backend_failure_output
 from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError, finish_native_operation
@@ -905,7 +906,7 @@ class AgentAuthService:
                 await self._send_message(context, f"❌ {self._t('command.setup.claudeMethodUsage')}")
                 return
 
-        if backend_hint and backend_hint not in {"claude", "codex", "opencode"}:
+        if backend_hint and backend_hint not in NATIVE_CLI_BACKENDS:
             await self._send_message(context, f"❌ {self._t('command.setup.unsupportedBackend', backend=backend_hint)}")
             return
 
@@ -934,7 +935,7 @@ class AgentAuthService:
     ) -> None:
         """Start an auth flow for the resolved backend."""
         resolved_backend = backend or self.controller.resolve_agent_for_context(context)
-        if resolved_backend not in {"claude", "codex", "opencode"}:
+        if resolved_backend not in NATIVE_CLI_BACKENDS:
             await self._send_message(
                 context,
                 f"❌ {self._t('command.setup.unsupportedBackend', backend=resolved_backend)}",
@@ -2241,7 +2242,7 @@ class AgentAuthService:
 
         return [
             backend
-            for backend in ("opencode", "claude", "codex")
+            for backend in AGENT_BACKENDS
             if bool(getattr(getattr(agent_config, backend, None), "enabled", False))
         ]
 
@@ -2862,7 +2863,7 @@ class AgentAuthService:
         return {"ok": True}
 
     async def test_web_auth(self, backend: str, **kwargs: Any) -> dict[str, Any]:
-        if backend not in {"claude", "codex", "opencode"}:
+        if backend not in NATIVE_CLI_BACKENDS:
             return {"ok": False, "error": "unsupported_backend"}
         lease = self._acquire_native_lease(backend)
         try:

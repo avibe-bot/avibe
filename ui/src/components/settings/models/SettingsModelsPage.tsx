@@ -73,7 +73,8 @@ import { groupMigrationCandidates } from './migrationGrouping';
 import { SUBSCRIPTION_MENU_ROWS } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { backendVisual } from './vendorMeta';
-import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentMode, type AgentSupply, type NativeCliBackend, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
+import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentMode, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
@@ -346,7 +347,7 @@ const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ t
 };
 
 const DirectHome: React.FC<{
-  agents: (AgentSupply & { backend: NativeCliBackend })[];
+  agents: AgentSupply[];
   switchFailures: ReadonlySet<string>;
   connectingBackend: string | null;
   onSwitch: (agent: AgentSupply) => void;
@@ -1156,7 +1157,7 @@ export const SettingsModelsPage: React.FC = () => {
     : supplyRead;
   const directEmpty = modelsSurfaceKindFromReads(supplyDisplayRead, sourcesDisplayRead) === 'direct_empty';
   const installedAgents = agents.filter(
-    (agent): agent is AgentSupply & { backend: NativeCliBackend } => agent.backend !== 'avibe' && agent.cli_present,
+    (agent) => !getBackendUiMeta(agent.backend).capabilities.supports_cli || agent.cli_present,
   );
   const hubBackends = agents.filter(agentUsesHubRuntime).map((agent) => agent.backend);
   const activeBackends = supplyRead.kind === 'ready' ? new Set(hubBackends) : undefined;
@@ -1172,7 +1173,7 @@ export const SettingsModelsPage: React.FC = () => {
     || stopBlocked;
   const runtimeSwitchLabel = stopBlocked
     ? supplyRead.kind === 'ready'
-      ? hubBackends.includes('avibe')
+      ? hubBackends.some((backend) => !getBackendUiMeta(backend).capabilities.supports_cli)
         ? t('settings.models.shell.toggle.stopAvibeBlocked')
         : t('settings.models.shell.toggle.stopBlocked', { names: hubBackends.join(', ') })
       : t('settings.models.shell.toggle.stopUnavailable')

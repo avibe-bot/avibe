@@ -6,6 +6,7 @@ from config.v2_config import (
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS,
     DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
+    AvibeAgentConfig,
     V2Config,
     SlackConfig,
     DiscordConfig,
@@ -78,6 +79,7 @@ class AppCompatConfig:
     wechat: Optional[WeChatConfig] = None
     codex: Optional[CodexCompatConfig] = None
     opencode: Optional[OpenCodeCompatConfig] = None
+    avibe: AvibeAgentConfig = field(default_factory=AvibeAgentConfig)
     show_duration: bool = False
     include_time_info: bool = True
     include_user_info: bool = True
@@ -202,6 +204,7 @@ def to_app_config(
         claude=claude,
         codex=codex,
         opencode=opencode,
+        avibe=AvibeAgentConfig(enabled=v2.agents.avibe.enabled),
         log_level=v2.runtime.log_level,
         ack_mode=v2.ack_mode,
         language=v2.language,

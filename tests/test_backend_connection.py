@@ -433,6 +433,33 @@ def _store_hub_credential(source):
     return store
 
 
+def test_avibe_connection_uses_hub_supply_without_any_native_probe(hub_connection, monkeypatch):
+    """The new backend has no CLI; the existing native cases cannot protect that boundary."""
+    from core import backend_restart
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Avibe connection inspected a native CLI or takeover journal")
+
+    monkeypatch.setattr(api, "resolve_cli_path", forbidden)
+    monkeypatch.setattr(backend_restart, "pending_native_backends", forbidden)
+    hub_connection.config.agents.avibe.enabled = True
+    hub_connection.config.save()
+    empty = asyncio.run(api.get_backend_connection("avibe"))
+    assert empty["installed"] and empty["enabled"]
+    assert empty["auth"] == "none" and not empty["ready"]
+
+    _place_hub_source(hub_connection, "avibe", _hub_source())
+    response = ui_server.app.test_client().get("/api/backend/avibe/connection")
+    assert response.status_code == 200
+    state = response.get_json()
+    assert state["ready"] and state["entry_eligible"]
+    assert state["supply_mode"] == "hub" and state["auth"] == "api_key"
+    hub_connection.native_read.assert_not_called()
+    hub_connection.config.agents.avibe.enabled = False
+    hub_connection.config.save()
+    assert not asyncio.run(api.get_backend_connection("avibe"))["ready"]
+
+
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
 @pytest.mark.parametrize("kind", ["api_key", "subscription"])
 def test_hub_takeover_connection_uses_current_source_not_cleared_native_store(hub_connection, backend, kind):

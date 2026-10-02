@@ -15,6 +15,7 @@ import { gatewayRouteStatus } from './supply';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { currentChainLink, isTakeoverChain } from './takeover';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import type { AgentSupply, Source } from './types';
 
 const sourceName = (sources: Source[], id: string): string => sources.find((source) => source.id === id)?.display_name ?? id;
@@ -292,7 +293,7 @@ const AgentModelCard: React.FC<{
                   </span>
                   <Check className="model-hub-ink-mint mt-0.5 size-4 shrink-0" aria-hidden="true" />
                 </button>
-                <button
+                {getBackendUiMeta(agent.backend).capabilities.supports_cli && <button
                   type="button"
                   aria-pressed="false"
                   disabled={pending}
@@ -307,7 +308,7 @@ const AgentModelCard: React.FC<{
                     <span className="block text-[12px] font-bold text-foreground">{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToDirect')}</span>
                     <span className="mt-0.5 block text-[10.5px] leading-[15px] text-muted">{t('settings.models.gateway.modeMenu.directDescription', { backend: t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend }) })}</span>
                   </span>
-                </button>
+                </button>}
               </div>
             </ResponsiveMenu>
           )}

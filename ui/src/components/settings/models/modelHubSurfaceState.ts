@@ -1,14 +1,17 @@
 import { foldRegionRead, type RegionRead } from './regionRead';
 import type { AgentSupply, Source } from './types';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 
 export type ModelsSurfaceKind = 'direct_empty' | 'gateway';
 
 /** Match runtime_stop: the upgrade-added empty Avibe catalog holds no runtime. */
 export const agentUsesHubRuntime = (agent: AgentSupply): boolean =>
-  agent.mode === 'hub' && (agent.backend !== 'avibe' || (agent.catalog_models?.length ?? 0) > 0);
+  agent.mode === 'hub' && (getBackendUiMeta(agent.backend).capabilities.supports_cli || (agent.catalog_models?.length ?? 0) > 0);
 
 export const modelsSurfaceKind = (agents: AgentSupply[], sources: Source[]): ModelsSurfaceKind =>
-  !agents.some(agentUsesHubRuntime) && sources.length === 0
+  // An empty in-process catalog still needs the gateway card's model editor.
+  // Whether it currently holds the runtime is a separate question above.
+  !agents.some((agent) => agent.mode === 'hub') && sources.length === 0
     ? 'direct_empty'
     : 'gateway';
 

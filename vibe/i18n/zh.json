@@ -468,6 +468,9 @@
     "routingUpdateNeedsNewSession": "请使用 /new 命令创建新会话，以使设置变更生效。新会话创建后将覆盖当前会话。"
   },
   "settings": {
+    "backends": {
+      "avibeDescription": "Avibe 内置智能体，使用 Model Hub 中配置的模型。"
+    },
     "personalizationTitle": "个性化设置",
     "personalizationDesc": "配置 {agent} 的消息在你的 Slack 工作区中的展示方式。",
     "visibilityTitle": "设置 - 消息可见性",

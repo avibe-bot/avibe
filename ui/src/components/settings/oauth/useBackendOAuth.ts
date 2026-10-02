@@ -4,8 +4,9 @@ import { useApi, type OAuthWebStartResult, type OAuthWebState } from '@/context/
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
 import { isNativeAuthHubOwned } from '@/lib/nativeAuthOwnership';
+import type { WebOAuthBackend } from '@/lib/agentBackends';
 
-export type OAuthBackend = 'claude' | 'codex' | 'opencode';
+export type OAuthBackend = WebOAuthBackend;
 const POLL_INTERVAL_MS = 2000;
 const POLL_DEADLINE_MS = 16 * 60 * 1000;
 
