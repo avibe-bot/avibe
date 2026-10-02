@@ -38,7 +38,12 @@ from ``anchor_seq + 1``.
 Outbox. A response row commits with ``delivery = {"state": "pending",
 "parts": []}``. The adapter records a receipt for each part a surface splits it
 into; the row becomes ``delivered`` only when every part has one
-(``recovery.md`` D1).
+(``recovery.md`` D1). A response whose display text is blank (only thinking or
+tool calls) has no part on any surface and commits ``delivered``.
+
+Cancellation. A worker thread cannot be interrupted, so a cancelled write keeps
+the Session's lock until its transaction settles and only then raises: when a
+write call returns or raises, the rows already show whether it committed.
 """
 
 from __future__ import annotations
@@ -185,7 +190,7 @@ class SQLiteTranscriptStore:
                 message_type="result" if final else "assistant",
                 text=display_text,
                 content={"model": model},
-                metadata={"delivery": {"state": "pending", "parts": []}},
+                metadata={"delivery": {"state": "pending" if display_text.strip() else "delivered", "parts": []}},
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
             return ContextEntry(session_id, seq, "response", row["id"], message=message, payload=model)
@@ -242,7 +247,12 @@ class SQLiteTranscriptStore:
     async def _write(self, session_id: str, work: Callable[[Connection], _T]) -> _T:
         lock = self._locks.setdefault(session_id, asyncio.Lock())
         async with lock:
-            return await asyncio.to_thread(self._commit, work)
+            commit = asyncio.ensure_future(asyncio.to_thread(self._commit, work))
+            try:
+                return await asyncio.shield(commit)
+            except asyncio.CancelledError:
+                await _settle(commit)
+                raise
 
     def _commit(self, work: Callable[[Connection], _T]) -> _T:
         with self._engine.begin() as conn:
@@ -365,6 +375,19 @@ class SQLiteTranscriptStore:
                     )
                 )
             return all(part is not None for part in parts)
+
+
+async def _settle(task: asyncio.Future[Any]) -> None:
+    """Wait for ``task`` to finish, whatever cancellations arrive meanwhile."""
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError:
+            pass
+    if not task.cancelled():
+        # The cancelled caller does not see this outcome; retrieve it so a failed
+        # commit is not reported as an unhandled task exception.
+        task.exception()
 
 
 # --- allocation and attribution ----------------------------------------------

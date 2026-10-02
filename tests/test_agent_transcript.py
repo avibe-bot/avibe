@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
+import threading
 
 import pytest
 from sqlalchemy import select
@@ -25,6 +27,7 @@ from core.agent_core.messages import (
     UserMessage,
     text,
 )
+from config.paths import get_sqlite_state_path
 from storage import message_deliveries, messages_service
 from storage.agent_transcript import SQLiteTranscriptStore, TranscriptError, resolve_fork_anchor_seq
 from storage.db import create_sqlite_engine
@@ -364,16 +367,20 @@ async def test_outbox_replays_pending_responses_until_every_part_is_confirmed(en
         home = _scope(conn, "C-home")
         _session(conn, "ses_main", home)
         consumed = _row(conn, "ses_main", home, "go")
-    store = SQLiteTranscriptStore(engine, render=lambda message: "rendered")
+    store = SQLiteTranscriptStore(engine)
     await store.consume_input("ses_main", consumed, _user("go"))
     narration = await store.append_response("ses_main", _assistant("step", call_id="call_1"), final=False)
     await store.append_tool_result("ses_main", _tool_result("call_1", "ok"), details={})
+    # A response with nothing to display has no part on any surface.
+    silent = AssistantMessage(content=(ToolCallBlock(id="call_2", name="bash"),), origin=ORIGIN, stop_reason="tool_use")
+    await store.append_response("ses_main", silent, final=False)
+    await store.append_tool_result("ses_main", _tool_result("call_2", "ok"), details={})
     reply = await store.append_response("ses_main", _assistant("answer"), final=True)
 
     pending = await store.pending_deliveries("ses_main")
     assert [(item.row_id, item.context_seq, item.final, item.text, item.parts) for item in pending] == [
-        (narration.row_id, 2, False, "rendered", ()),
-        (reply.row_id, 4, True, "rendered", ()),
+        (narration.row_id, 2, False, "step", ()),
+        (reply.row_id, 6, True, "answer", ()),
     ]
     assert pending[1].message == reply.message
 
@@ -398,3 +405,28 @@ async def test_outbox_replays_pending_responses_until_every_part_is_confirmed(en
     assert [part["native_message_id"] for part in delivery["parts"]] == ["a", "b"]
     with pytest.raises(TranscriptError):
         await store.record_delivery_part("ses_main", consumed, index=0, count=1)
+
+
+async def test_a_cancelled_write_raises_only_after_its_commit_settled(engine) -> None:
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "go")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_main", consumed, _user("go"))
+    # Another writer holds SQLite's lock, so the append waits inside its thread.
+    holder = sqlite3.connect(get_sqlite_state_path(), isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+    release = threading.Timer(0.5, holder.execute, ("COMMIT",))
+    append = asyncio.create_task(store.append_tool_result("ses_main", _tool_result("call_1", "ok"), details={}))
+    await asyncio.sleep(0.1)
+    release.start()
+    append.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await append
+        # Recovery after the cancellation already sees the commit, so it cannot append it again.
+        assert [entry.kind for entry in await store.load("ses_main")] == ["input", "tool_result"]
+    finally:
+        release.join()
+        holder.close()
