@@ -793,7 +793,7 @@ async def test_dependency_cancelled_error_emits_a_terminal_event_and_preserves_c
     agent = make_agent(ScriptedProvider([stream]), hooks=[CancelHook()], tools=[FakeTool(execute=execute)])
     events = await collect(agent)
     assert isinstance(events[-1], RunEnded)
-    assert events[-1].reason == "aborted"
+    assert events[-1].reason == ("completed" if source == "after_run" else "aborted")
     assert any(isinstance(event, AgentError) and event.kind == "dependency_cancelled" for event in events)
 
 
@@ -911,6 +911,7 @@ async def test_partial_response_commit_failure_still_emits_a_terminal_error():
         ("dependency", "aborted"),
         ("consumer", "aborted"),
         ("tool_exception", "completed"),
+        ("tool_overflow", "completed"),
         ("completed", "completed"),
         ("cleanup", "completed"),
     ],
@@ -982,6 +983,8 @@ async def test_run_lifecycle_owns_admission_and_releases_every_foreground_job(ph
             raise asyncio.CancelledError()
         if phase == "tool_exception":
             raise ValueError("output parsing failed")
+        if phase == "tool_overflow":
+            raise OverflowError("tool argument too large")
         if phase in {"tool", "consumer"}:
             entered.set()
             ctx.on_progress("working")
@@ -1070,7 +1073,7 @@ async def test_hook_state_representation_distinguishes_bool_int_and_survives_res
     assert len([row for row in await agent.store.load("session") if row.kind == "agent_state"]) == 2
 
 
-async def test_invalid_cleanup_hook_state_is_an_error_even_after_abort():
+async def test_invalid_cleanup_hook_state_is_diagnostic_without_overwriting_abort():
     class InvalidCleanup(Hooks):
         async def before_model(self, request, ctx):
             ctx.cancel.cancel()
@@ -1080,7 +1083,7 @@ async def test_invalid_cleanup_hook_state_is_an_error_even_after_abort():
 
     agent = make_agent(ScriptedProvider([]), hooks=[InvalidCleanup()])
     events = await collect(agent)
-    assert events[-1].reason == "error"
+    assert events[-1].reason == "aborted"
     assert any(isinstance(event, AgentError) and event.kind == "HookStateError" for event in events)
     assert agent.snapshot().state == {}
 
@@ -1106,7 +1109,8 @@ async def test_request_headers_are_detached_from_router_selection_across_turns()
     assert endpoint.request_headers == {"X-Base": "stable"}
 
 
-async def test_failed_foreground_kill_is_reported_and_does_not_skip_other_handles():
+@pytest.mark.parametrize("cause", ["tool_error", "dependency", "abort"])
+async def test_failed_foreground_kill_is_reported_and_does_not_skip_other_handles(cause):
     class Host(FakeJobHost):
         def __init__(self):
             super().__init__()
@@ -1119,7 +1123,7 @@ async def test_failed_foreground_kill_is_reported_and_does_not_skip_other_handle
             await super().kill(job_id)
 
     host = Host()
-    provider = ScriptedProvider([[Done(assistant(calls=[ToolCallBlock("a", "bash")]))]])
+    provider = ScriptedProvider([[Done(assistant(calls=[ToolCallBlock("a", "bash")]))], [Done(assistant())]])
     agent = make_agent(provider, jobs=host)
 
     async def execute(arguments, ctx):
@@ -1134,11 +1138,16 @@ async def test_failed_foreground_kill_is_reported_and_does_not_skip_other_handle
             )
             if index == 0:
                 await agent.jobs.hand_over(job)
+        if cause == "dependency":
+            raise asyncio.CancelledError()
+        if cause == "abort":
+            agent.abort()
+            await asyncio.Event().wait()
         raise ValueError("tool failed")
 
     agent.set_tools([FakeTool("bash", execute=execute)])
     events = await collect(agent)
-    assert events[-1].reason == "error"
+    assert events[-1].reason == ("error" if cause == "tool_error" else "aborted")
     assert any(
         isinstance(event, AgentError) and event.kind == "ForegroundCleanupError" and "kill denied" in event.message
         for event in events
@@ -1146,7 +1155,10 @@ async def test_failed_foreground_kill_is_reported_and_does_not_skip_other_handle
     assert host.attempts == ["job_2", "job_3", "job_2"]
     assert host.status("job_1").state == host.status("job_2").state == "running"
     assert host.status("job_3").state == "gone"
-    assert len(provider.requests) == 1
+    assert len(provider.requests) == (2 if cause == "tool_error" else 1)
+    if cause == "dependency":
+        errors = [event.kind for event in events if isinstance(event, AgentError)]
+        assert errors[0] == "dependency_cancelled"
 
 
 @pytest.mark.parametrize("phase", ["abort", "consumer"])

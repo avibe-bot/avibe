@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from collections import deque
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional, Sequence, TypeVar
@@ -43,6 +45,7 @@ from core.agent_core.agent.hooks import (
 from core.agent_core.agent.jobs import TrackingJobHost
 from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import DEFAULT_MAX_OUTPUT_TOKENS, ModelRouter, ModelSelection, RetryPolicy
+from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
 from core.agent_core.ai.provider import (
     Done,
@@ -52,22 +55,21 @@ from core.agent_core.ai.provider import (
     ThinkingDelta,
 )
 from core.agent_core.cancel import CancelToken
-from core.agent_core.harness.projection import project
+from core.agent_core.harness.projection import ProjectionError, project
 from core.agent_core.harness.store import ContextEntry, TranscriptStore
 from core.agent_core.messages import AssistantMessage, Message, TextBlock, ToolCallBlock, ToolResultMessage, text
 from core.agent_core.tools.base import JobHost, Tool, ToolContext, ToolResult
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 
 class _Ended(Exception):
     pass
 
 
-class _ProviderFailed(Exception):
-    def __init__(self, error: ProviderError) -> None:
-        self.error = error
-        super().__init__(error.message)
+class ProviderProtocolViolation(ValueError):
+    """A model response cannot be admitted to the canonical transcript."""
 
 
 class UnsupportedModelRoute(ValueError):
@@ -123,6 +125,7 @@ class Agent:
         self._consumer_closed = False
         self._ctx = RunContext(session_id, "", CancelToken())
         self._scope = RunScope(self._ctx.cancel)
+        self._outcome = OutcomeOwner()
         self._rows: list[ContextEntry] = []
         self._committed_state: dict[str, Any] = {}
         self._committed_state_json = "{}"
@@ -167,6 +170,7 @@ class Agent:
 
     def abort(self, reason: str = "aborted") -> None:
         if self._running:
+            self._outcome.primary("aborted")
             self._ctx.cancel.cancel(reason)
 
     def snapshot(self) -> Snapshot:
@@ -184,6 +188,7 @@ class Agent:
             self._consumer_closed = False
             self._ctx = RunContext(self.session_id, turn_id, CancelToken())
             self._scope = RunScope(self._ctx.cancel)
+            self._outcome = OutcomeOwner()
             self._seq = 0
 
         # Bounded delivery applies backpressure to provider streaming. No emit
@@ -253,6 +258,8 @@ class Agent:
     async def _hook(self, factory: Callable[[], Awaitable[T]], *, cleanup: bool = False) -> T:
         result = await factory() if cleanup else await self._scope.call(factory)
         state_representation(self._ctx.state)
+        if isinstance(result, End) and not cleanup:
+            self._outcome.primary("ended_by_hook")
         return result
 
     async def _consume(self, input: AgentInput) -> None:
@@ -263,7 +270,18 @@ class Agent:
         )
         self._rows.append(row)
 
+    def _validate_response(self, message: AssistantMessage) -> None:
+        seq = self._rows[-1].context_seq + 1 if self._rows else 1
+        candidate = ContextEntry(self.session_id, seq, "response", "uncommitted-response", message)
+        try:
+            # Use the projector itself, not a second approximation of its
+            # invariants. A malformed provider row never enters durable state.
+            project([*self._rows, candidate])
+        except ProjectionError as error:
+            raise ProviderProtocolViolation(f"Provider protocol violation: {error}") from error
+
     async def _response(self, message: AssistantMessage, *, final: bool) -> ContextEntry:
+        self._validate_response(message)
         await self._save_state()
         row = await self._scope.call(
             lambda: self.store.append_response(self.session_id, deepcopy(message), final=final),
@@ -273,7 +291,6 @@ class Agent:
         return row
 
     async def _drive(self, input: AgentInput, emit: Callable[..., Awaitable[None]]) -> None:
-        reason: RunEndReason = "error"
         loaded = False
         try:
             try:
@@ -300,72 +317,79 @@ class Agent:
                                 raise ValueError("tool names must be unique")
                             self._run_tools = dict(zip(names, setup.tools))
                 await self._consume(input)
-                reason = await self._loop(system, emit, selected)
+                self._outcome.primary(await self._loop(system, emit, selected))
             except _Ended:
-                reason = "ended_by_hook"
+                self._outcome.primary("ended_by_hook")
             except _Aborted:
-                reason = "aborted"
+                self._outcome.primary("aborted")
             except asyncio.CancelledError:
-                reason = "aborted"
+                self._outcome.primary("aborted")
                 self._ctx.cancel.cancel("event consumer closed" if self._consumer_closed else "dependency cancelled")
                 if not self._consumer_closed:
                     await emit(AgentError, kind="dependency_cancelled", message="An agent dependency was cancelled.")
             except Exception as error:
+                self._outcome.primary("error")
                 if isinstance(error, HookStateError):
                     self._ctx.state = deepcopy(self._committed_state)
                 await emit(AgentError, kind=type(error).__name__, message=str(error))
         finally:
+            # If an external cancellation interrupted an exception handler,
+            # admission still records its first cause before cleanup starts.
+            self._outcome.primary("aborted" if self._ctx.cancel.cancelled else "error")
             self._scope.stop()
             # Cleanup is a separate joined task, outside cancelled admission.
             # Consumer closure cannot interrupt commit/job ownership release.
-            cleanup = asyncio.create_task(self._finish(reason, loaded, emit))
+            cleanup = asyncio.create_task(self._finish(loaded, emit))
             try:
-                reason = await asyncio.shield(cleanup)
+                await asyncio.shield(cleanup)
             except asyncio.CancelledError:
-                reason = await cleanup
+                await cleanup
         if self._consumer_closed:
             raise asyncio.CancelledError()
-        await emit(RunEnded, reason=reason)
+        await emit(RunEnded, reason=self._outcome.reason)
 
-    async def _finish(self, reason: RunEndReason, loaded: bool, emit: Callable[..., Awaitable[None]]) -> RunEndReason:
+    async def _flush_diagnostics(self, emit: Callable[..., Awaitable[None]]) -> None:
+        while self._outcome.diagnostics:
+            kind, message = self._outcome.diagnostics[0]
+            await emit(AgentError, kind=kind, message=message)
+            self._outcome.diagnostics.popleft()
+
+    async def _cleanup(self, factory: Callable[[], Awaitable[Any]], *, stream: bool = False) -> None:
+        try:
+            await factory()
+        except (Exception, asyncio.CancelledError) as error:
+            if isinstance(error, HookStateError):
+                self._ctx.state = deepcopy(self._committed_state)
+            kind = (
+                "stream_cleanup"
+                if stream
+                else ("dependency_cancelled" if isinstance(error, asyncio.CancelledError) else type(error).__name__)
+            )
+            self._outcome.diagnostic(kind, f"Cleanup failed: {type(error).__name__}: {error}")
+
+    async def _finish(self, loaded: bool, emit: Callable[..., Awaitable[None]]) -> None:
         async with self._lock:
             self._open = False
         await self._scope.close()
-        if self._ctx.cancel.cancelled and reason != "error":
-            reason = "aborted"
+        await self._flush_diagnostics(emit)
         try:
             if loaded:
-                await self._save_state(cleanup=True)
-                outcome = RunOutcome(self._ctx.turn_id, reason, self.snapshot())
+                await self._cleanup(lambda: self._save_state(cleanup=True))
+                outcome = RunOutcome(self._ctx.turn_id, self._outcome.reason, self.snapshot())
                 for hook in self.hooks:
-                    await self._hook(lambda: hook.after_run(outcome, self._ctx), cleanup=True)
-                await self._save_state(cleanup=True)
-        except asyncio.CancelledError:
-            if not self._consumer_closed:
-                self._ctx.cancel.cancel("dependency cancelled")
-                reason = "aborted"
-                await emit(
-                    AgentError, kind="dependency_cancelled", message="An agent cleanup dependency was cancelled."
-                )
-        except Exception as error:
-            if isinstance(error, HookStateError):
-                self._ctx.state = deepcopy(self._committed_state)
-            if self._consumer_closed:
-                raise
-            await emit(AgentError, kind=type(error).__name__, message=str(error))
-            if isinstance(error, HookStateError) or reason != "aborted":
-                reason = "error"
+                    await self._cleanup(lambda: self._hook(lambda: hook.after_run(outcome, self._ctx), cleanup=True))
+                await self._cleanup(lambda: self._save_state(cleanup=True))
         finally:
             # Sweep on every terminal path, including failed tool cleanup and
             # cleanup hooks. Handed-over handles are no longer foreground.
             try:
                 await self.jobs.kill_foreground(self.session_id)
             except Exception as error:
+                self._outcome.foreground_leaked()
                 if self._consumer_closed:
                     raise
-                await emit(AgentError, kind=type(error).__name__, message=str(error))
-                reason = "error"
-        return "aborted" if self._ctx.cancel.cancelled and reason != "error" else reason
+                self._outcome.diagnostic(type(error).__name__, str(error))
+            await self._flush_diagnostics(emit)
 
     async def _resolve_model(self) -> ModelSelection:
         selected = await self._scope.call(self.models.resolve)
@@ -408,14 +432,23 @@ class Agent:
         allowed = {spec.name for spec in request.tools}
         return request, {name: tool for name, tool in tools.items() if name in allowed}
 
+    @asynccontextmanager
     async def _model(
         self, system: str, emit: Callable[..., Awaitable[None]], selected: Optional[ModelSelection] = None
-    ) -> tuple[AssistantMessage, dict[str, Tool]]:
+    ) -> AsyncIterator[tuple[Done | ProviderError, dict[str, Tool]]]:
         retries = 0
+        started = time.monotonic()
+        retry_error: Optional[ProviderError] = None
         while True:
             self._scope.check()
+            if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
+                yield retry_error, {}
+                return
             request, tools = await self._request(system, selected)
             selected = None
+            if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
+                yield retry_error, tools
+                return
             self._scope.check()
             stream = self.models.provider_for(request.endpoint.protocol).stream(request, self._ctx.cancel)
             streamed = False
@@ -434,65 +467,103 @@ class Agent:
                         await emit(AssistantTextDelta, delta=event.delta)
                     elif isinstance(event, ThinkingDelta):
                         await emit(AssistantThinkingDelta, delta=event.delta)
+                if terminal is None:
+                    terminal = ProviderError("unknown", "Provider stream ended without a terminal event.", False)
+                delay = (
+                    self.retry.delay(terminal, retries=retries, streamed=streamed, elapsed_s=time.monotonic() - started)
+                    if isinstance(terminal, ProviderError)
+                    else None
+                )
+                if delay is None:
+                    # The caller admits and commits this terminal inside the
+                    # scope, BEFORE aclose. Never retry an accepted terminal.
+                    yield terminal, tools
+                    return
             finally:
                 close = getattr(stream, "aclose", None)
                 if close is not None:
-                    await close()
-            if isinstance(terminal, Done):
-                return terminal.message, tools
-            if terminal is None:
-                terminal = ProviderError("unknown", "Provider stream ended without a terminal event.", False)
-            delay = self.retry.delay(terminal, retries=retries, streamed=streamed)
-            if delay is None:
-                raise _ProviderFailed(terminal)
+                    await self._cleanup(close, stream=True)
+            retry_error = terminal
             retries += 1
             await self._scope.call(lambda: asyncio.sleep(delay))
+
+    async def _commit_model_message(self, message: AssistantMessage, emit: Callable[..., Awaitable[None]]) -> bool:
+        """Finality and queued-input admission share one lock with the commit."""
+        pending: list[tuple[AgentInput, bool]] = []
+        consumed: list[tuple[AgentInput, bool]] = []
+        failed = message.stop_reason in {"error", "aborted"}
+        row = None
+        try:
+            async with self._lock:
+                if not message.tool_calls and not failed:
+                    pending = [(item, True) for item in self._steers]
+                    if not pending:
+                        pending = [(item, False) for item in self._follow_ups]
+                final = not message.tool_calls and not pending and not failed
+                if final or failed:
+                    self._open = False
+                row = await self._response(message, final=final)
+                for item, is_steer in pending:
+                    await self._consume(item)
+                    (self._steers if is_steer else self._follow_ups).popleft()
+                    consumed.append((item, is_steer))
+        finally:
+            if row is not None and not self._consumer_closed:
+                await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=final)
+                for item, is_steer in consumed:
+                    if is_steer:
+                        await emit(SteerApplied, message_id=item.message_id)
+        return final
 
     async def _loop(self, system: str, emit: Callable[..., Awaitable[None]], selected: ModelSelection) -> RunEndReason:
         first_selection: Optional[ModelSelection] = selected
         while True:
-            try:
-                message, tools = await self._model(system, emit, first_selection)
+            async with self._model(system, emit, first_selection) as (terminal, tools):
                 first_selection = None
-            except _ProviderFailed as failure:
-                error = failure.error
-                if error.partial is not None:
-                    row = await self._response(error.partial, final=False)
-                    await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
-                await emit(AgentError, kind=error.kind, message=error.message)
-                return (
-                    "context_exhausted"
-                    if error.kind == "overflow"
-                    else "aborted"
-                    if error.kind == "aborted"
-                    else "error"
+                if isinstance(terminal, ProviderError):
+                    if terminal.partial is not None:
+                        self._validate_response(terminal.partial)
+                    reason = (
+                        "context_exhausted"
+                        if terminal.kind == "overflow"
+                        else "aborted"
+                        if terminal.kind == "aborted"
+                        else "error"
+                    )
+                    self._outcome.primary(reason)
+                    await emit(AgentError, kind=terminal.kind, message=terminal.message)
+                    if terminal.partial is not None:
+                        row = await self._response(terminal.partial, final=False)
+                        await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
+                    return reason
+                message = terminal.message
+                self._validate_response(message)
+                failed = message.stop_reason in {"error", "aborted"}
+                if failed:
+                    self._outcome.primary("aborted" if message.stop_reason == "aborted" else "error")
+                    await emit(
+                        AgentError,
+                        kind=message.stop_reason,
+                        message=message.error_message or f"Model stopped with {message.stop_reason}.",
+                    )
+                final = await self._commit_model_message(message, emit)
+                empty_refusal = (
+                    final
+                    and message.stop_reason in {"refusal", "safety"}
+                    and not any(
+                        isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content
+                    )
                 )
-            self._scope.check()
-            pending: list[tuple[AgentInput, bool]] = []
-            consumed: list[tuple[AgentInput, bool]] = []
-            failed = message.stop_reason in {"error", "aborted"}
-            row = None
-            try:
-                async with self._lock:
-                    if not message.tool_calls and not failed:
-                        pending = [(item, True) for item in self._steers]
-                        if not pending:
-                            pending = [(item, False) for item in self._follow_ups]
-                    final = not message.tool_calls and not pending and not failed
-                    if final or failed:
-                        self._open = False
-                    row = await self._response(message, final=final)
-                    for item, is_steer in pending:
-                        await self._consume(item)
-                        (self._steers if is_steer else self._follow_ups).popleft()
-                        consumed.append((item, is_steer))
-            finally:
-                if row is not None and not self._consumer_closed:
-                    await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=final)
-                    for item, is_steer in consumed:
-                        if is_steer:
-                            await emit(SteerApplied, message_id=item.message_id)
-
+                if empty_refusal:
+                    self._outcome.primary("error")
+                    await emit(
+                        AgentError,
+                        kind=message.stop_reason,
+                        message=message.error_message or f"Model stopped with {message.stop_reason} without a reply.",
+                    )
+            # aclose failures are diagnostics, never a reason to discard the
+            # committed response or skip its tools. Primary errors precede them.
+            await self._flush_diagnostics(emit)
             end, skip = False, False
             for hook in self.hooks:
                 decision = await self._hook(lambda: hook.after_model(deepcopy(message), self._ctx))
@@ -501,26 +572,10 @@ class Agent:
                     break
                 skip = skip or isinstance(decision, SkipTools)
             if failed:
-                await emit(
-                    AgentError,
-                    kind=message.stop_reason,
-                    message=message.error_message or f"Model stopped with {message.stop_reason}.",
-                )
                 return "aborted" if message.stop_reason == "aborted" else "error"
             if not message.tool_calls:
                 await self._save_state()
-                if (
-                    final
-                    and message.stop_reason in {"refusal", "safety"}
-                    and not any(
-                        isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content
-                    )
-                ):
-                    await emit(
-                        AgentError,
-                        kind=message.stop_reason,
-                        message=message.error_message or f"Model stopped with {message.stop_reason} without a reply.",
-                    )
+                if empty_refusal:
                     return "error"
                 if end:
                     return "ended_by_hook"
@@ -645,10 +700,14 @@ class Agent:
         except Exception as error:
             # Tools are an explicit failure boundary; preserve the error as a
             # model-visible result so the next call can correct its arguments.
-            return ToolResult((text(str(error)),), is_error=True)
+            logger.exception("Tool execution failed: %s", call.name)
+            message = str(error) or f"{type(error).__name__}: tool execution failed."
+            return ToolResult((text(message[:500]),), is_error=True)
         finally:
             for task in (update, execution):
                 if task is not None and not task.done():
                     task.cancel()
             await asyncio.gather(*(task for task in (update, execution) if task is not None), return_exceptions=True)
-            await self.jobs.kill_foreground(self.session_id, tool_call_id=call.id)
+            # Release failure is supplementary to a tool's cancellation or
+            # result. The final sweep alone arbitrates a still-leaked process.
+            await self._cleanup(lambda: self.jobs.kill_foreground(self.session_id, tool_call_id=call.id))

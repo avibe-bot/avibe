@@ -72,6 +72,9 @@ The store/adapter owns fork ancestry; the engine does not copy parent rows.
 - A tool batch runs sequentially and commits results in call order. Steers
   enter after the whole batch. Follow-ups enter at natural termination after
   steers have been consumed. A terminating tool still finishes its batch.
+  An `Exception` from `Tool.execute` becomes an error result (at most 500
+  characters), with a logged traceback; the run continues. `BaseException`,
+  including `CancelledError`, retains lifecycle semantics.
 - Hook end commits the current step and records policy error results for
   unexecuted calls. It makes no further model request.
 - One explicit `RunScope` owns operation admission and joining on Python 3.10.
@@ -83,13 +86,22 @@ The store/adapter owns fork ancestry; the engine does not copy parent rows.
   Closing the event iterator also cleans up its worker.
   A dependency that independently raises cancellation produces an error and a
   terminal aborted event; it is not mistaken for a closed iterator.
+- One outcome owner records the first primary cause. Stream closure, cleanup
+  hooks and cleanup cancellation add diagnostics without overwriting that cause.
+  The only exception is a foreground job that still cannot be killed, which
+  upgrades completed to error. A received terminal is admitted and committed
+  before closing its stream; close failure does not retry it or skip its tools.
+  Every response, including a partial, passes the projector's actual invariants
+  before persistence. Invalid provider output cannot poison resume.
 - Every tool execution exit releases that `(Session, tool call)`'s remaining
   foreground handles, including success and failure. Final cleanup sweeps all
   remaining Session-owned handles on every terminal path. Handed-over jobs are
   never touched. Failed kills remain owned, other handles are still attempted,
   and an explicit cleanup error prevents a silently successful run.
-- Transient retries have a fixed attempt budget, exponential backoff, and honor
-  Retry-After. Any streamed event or partial response forbids retry. Overflow
+- Transient retries have an attempt/time budget (at most 3 retries within 120
+  seconds; default 2), exponential backoff, and honor Retry-After. An expired
+  budget ends with the original error, including when delay or route resolution
+  crosses the deadline. Any streamed event or partial forbids retry. Overflow
   emits an error and ends as `context_exhausted`.
 - Projection consumes store-resolved ancestry, sorts by sequence, restores hook
   state, and answers orphans with deterministic interrupted text. It has no job
@@ -107,6 +119,8 @@ job ownership transitions, settlement crash/retry windows, and event consumer
 closure. One lifecycle table covers pre-start/storage abort, model/tool abort,
 dependency cancellation, consumer closure, tool exceptions, normal completion,
 and cleanup. Separate probes cover failed kills and cancellation during commit.
+A primary-outcome/cleanup table checks reasons, durable rows, event order,
+commit-before-close, tools after close failure, and cleanup diagnostics.
 These are in-memory engine checks; production provider/store/Watch integration
 is a later layer.
 
