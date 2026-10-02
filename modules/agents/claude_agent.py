@@ -2008,6 +2008,11 @@ class ClaudeAgent(BaseAgent):
             joined_running_client = getattr(client, "_vibe_receiver_attached", False)
             setattr(client, "_vibe_receiver_attached", True)
             turn_origin: str | None = "" if joined_running_client else None
+            # Each Result ends one native response phase. The pending human-path
+            # Assistant text belongs to a phase only if this receiver set it there.
+            response_phase = object()
+            ending_phase = None
+            pending_assistant_phase = None
             while True:
                 settling_ambiguous_primary = False
                 settling_ambiguous_assistant_text = None
@@ -2110,6 +2115,7 @@ class ClaudeAgent(BaseAgent):
                         terminal_steering_generation = None
                     if message_type == "result":
                         turn_origin = None
+                        ending_phase, response_phase = response_phase, object()
                     elif message_type == "assistant" and turn_origin is None:
                         turn_origin = ""
                     if message_type == "user":
@@ -2316,6 +2322,7 @@ class ClaudeAgent(BaseAgent):
                             continue
                         if assistant_text:
                             self._last_assistant_text[composite_key] = assistant_text
+                            pending_assistant_phase = response_phase
 
                         pending_requests = self._pending_requests.get(composite_key) or []
                         pending_request = pending_requests[0] if pending_requests else None
@@ -2348,6 +2355,7 @@ class ClaudeAgent(BaseAgent):
                             self._pending_assistant_message[composite_key] = "\n\n".join(
                                 text_parts
                             )
+                            pending_assistant_phase = response_phase
 
                         # AskUserQuestion handling disabled - SDK cannot respond programmatically
                         # See: https://github.com/anthropics/claude-code/issues/10168
@@ -2447,6 +2455,10 @@ class ClaudeAgent(BaseAgent):
                         continue
 
                     if message_type == "result":
+                        replay_baseline = (
+                            self._pending_assistant_message.get(composite_key),
+                            self._last_assistant_text.get(composite_key),
+                        )
                         if await self._flush_buffered_assistant_messages(
                             composite_key,
                             context,
@@ -2461,6 +2473,19 @@ class ClaudeAgent(BaseAgent):
                                 reason="assistant_auth_failure",
                             )
                             return
+                        # Replayed frames belong to the phase this Result ends.
+                        # Each write stores a fresh object, so identity shows one.
+                        if any(
+                            current is not None and current is not before
+                            for current, before in zip(
+                                (
+                                    self._pending_assistant_message.get(composite_key),
+                                    self._last_assistant_text.get(composite_key),
+                                ),
+                                replay_baseline,
+                            )
+                        ):
+                            pending_assistant_phase = ending_phase
                         raw_result_text = getattr(message, "result", None)
                         result_text = raw_result_text
                         if output_mode in {"activity", "detached"}:
@@ -2471,10 +2496,23 @@ class ClaudeAgent(BaseAgent):
                             )
                             if record is None:
                                 raise RuntimeError("Claude terminal phase has no output owner")
+                            phase_text = None
+                            if pending_assistant_phase is ending_phase:
+                                # This phase streamed Assistant text on the human
+                                # path before its Result proved another owner. The
+                                # record takes it over, so it never replays as the
+                                # next turn's narration or terminal text.
+                                self._pending_assistant_message.pop(composite_key, None)
+                                phase_text = self._last_assistant_text.pop(composite_key, None)
                             self._classify_output_record(
                                 record, context,
                                 text=self._select_detached_result_text(
-                                    composite_key, message, raw_result_text, record.text,
+                                    composite_key,
+                                    message,
+                                    raw_result_text,
+                                    # The phase text stands in only for an empty body.
+                                    record.text
+                                    or (None if str(raw_result_text or "").strip() else phase_text),
                                 ),
                                 message=message,
                             )

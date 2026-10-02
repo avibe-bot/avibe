@@ -4399,6 +4399,17 @@ scenarios:
     test: tests/test_background_command_caller_context.py::test_hfr_486_watch_child_vault_callback_uses_only_current_binding
     # Real argv/shell children with clean/contaminated parents, bound/unbound
     # targets, isolated Vault expiry, retargeting, and remote snapshot transport.
+  - id: HFR-488
+    name: an injected Claude turn's reply is never replayed as the next turn's narration
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: claude
+    # A peer or wakeup turn without an Activity streams its Assistant text on the
+    # human path (inline or buffered replay), then its Result proves a detached
+    # owner. The detached record takes that phase's text, even when the Result body
+    # is empty, so it never replays later; text another phase set is untouched.
+    test: tests/test_claude_result_provenance.py::test_injected_turn_result_retires_its_unbuffered_assistant_text
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
