@@ -92,6 +92,35 @@ def test_run_deletes_only_old_tool_call_traces(state) -> None:
     assert remaining == {"boundary", "new-trace", "old-visible", "old-other-type"}
 
 
+def test_context_rows_are_never_selected_by_any_retention_pass(state) -> None:
+    """C-5: the Avibe Agent's context rows outlive every trace and Skill window.
+
+    Context membership is the visibility, so even event types that retention
+    owns under ``trace`` survive with ``visibility='context'``.
+    """
+    engine = state
+    old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    event_types = (
+        "tool_result",
+        "context_compaction",
+        "context_edit",
+        "agent_state",
+        "tool_call",
+        "skill.catalog_result",
+        "skill.load_result",
+    )
+    for event_type in event_types:
+        _seed_event(engine, event_id=f"ctx-{event_type}", event_type=event_type, visibility="context", created_at=old)
+
+    with engine.connect() as conn:
+        assert agent_events_retention.plan(conn, retention_days=30, now=_NOW)["eligible_count"] == 0
+    assert agent_events_retention.run_retention(engine, retention_days=30, now=_NOW)["deleted_rows"] == 0
+    assert agent_events_retention.run_skill_retention(engine, now=_NOW)["events"] == 0
+    with engine.connect() as conn:
+        remaining = {row[0] for row in conn.execute(select(agent_events.c.id))}
+    assert remaining == {f"ctx-{event_type}" for event_type in event_types}
+
+
 def test_cutoff_rejects_oversized_window() -> None:
     with pytest.raises(ValueError, match="between"):
         agent_events_retention.cutoff_iso(1_000_000, now=_NOW)
