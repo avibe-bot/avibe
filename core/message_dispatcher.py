@@ -4081,10 +4081,11 @@ class ConsolidatedMessageDispatcher:
         """Send a committed row's planned parts that have no receipt, in order.
 
         Returns whether every part now has a receipt, the first platform message id
-        sent, and the announced Workbench row. A part is acknowledged only with
-        evidence of its effect or an explicit skipped reason; a failed part is not
-        acknowledged and stops the delivery, so later parts wait behind it and the
-        row stays pending.
+        sent, and the announced Workbench row. Every platform call goes through
+        ``_committed_call``, the one evidence rule; a part is acknowledged with that
+        evidence or with an explicit skipped reason decided before sending. A part
+        without evidence is not acknowledged and stops the delivery, so later parts
+        wait behind it and the row stays pending.
         """
         plan = committed.plan
         parts = list(plan.get("parts") or [])
@@ -4095,35 +4096,38 @@ class ConsolidatedMessageDispatcher:
         last_text = text_indexes[-1] if text_indexes else None
         parse_mode = plan.get("parse_mode") or "markdown"
         first_id: Optional[str] = None
-        announced: Optional[dict] = None
+        announced: list[dict] = []
         for index, part in enumerate(parts):
             if committed.part_delivered(index, count):
                 continue
             kind = part.get("kind")
-            native_id: Optional[str] = None
+            evidence: Optional[str] = None
             skipped: Optional[str] = None
             if kind == "row":
-                announced = publish_committed_agent_message(target_context, committed.row_id)
-                if announced is None:
-                    return False, first_id, announced
-                native_id = committed.row_id
+
+                async def announce() -> Optional[str]:
+                    row = publish_committed_agent_message(target_context, committed.row_id)
+                    if row is not None:
+                        announced.append(row)
+                    return row.get("id") if row else None
+
+                evidence = await self._committed_call("Workbench row", announce)
             elif kind == "interim":
-                if not self._persist_committed_interim(target_context, committed.row_id, part["text"]):
-                    return False, first_id, announced
-            elif kind == "log":
-                outcome, native_id = await self._deliver_committed_log(
-                    im_client,
-                    context,
-                    target_context,
-                    part["text"],
-                    detached=detached,
-                    settings_manager=settings_manager,
-                    settings_key=settings_key,
+                evidence = await self._committed_call(
+                    "interim copy", lambda: self._committed_interim(target_context, committed.row_id, part["text"])
                 )
-                if outcome == "failed":
-                    return False, first_id, announced
-                if outcome != "sent":
-                    skipped = outcome
+            elif kind == "log":
+                skipped = self._committed_log_skip(context, settings_manager, settings_key, part["text"], detached)
+                if skipped is None:
+                    evidence = await self._deliver_committed_log(
+                        im_client,
+                        context,
+                        target_context,
+                        part["text"],
+                        detached=detached,
+                        settings_manager=settings_manager,
+                        settings_key=settings_key,
+                    )
             elif kind == "text":
                 body = part["text"]
                 subtext = None
@@ -4133,42 +4137,89 @@ class ConsolidatedMessageDispatcher:
                     else:
                         body = self._fold_footer(body, footer)
                 buttons = [QuickReplyButton(text=label) for label in part.get("buttons") or []]
-                native_id = await self._send_committed_text(
-                    im_client, target_context, body, buttons, parse_mode, subtext=subtext
-                )
-                if native_id is None:
+                for part_buttons in ((buttons, []) if buttons else ([],)):
+                    evidence = await self._committed_call(
+                        "result part",
+                        lambda part_buttons=part_buttons: self._send_result_inline(
+                            im_client, target_context, body, part_buttons, parse_mode, subtext=subtext
+                        ),
+                    )
+                    if evidence is not None:
+                        break
+                if evidence is None:
                     # The live path's fallback rung for rejected content: the part as a document.
-                    native_id = await self._upload_result_document(im_client, target_context, body)
-                if native_id is None:
-                    return False, first_id, announced
+                    evidence = await self._committed_call(
+                        "result part as a document",
+                        lambda: self._upload_result_document(im_client, target_context, body),
+                    )
             elif kind == "document":
-                native_id = await self._upload_result_document(im_client, target_context, part["text"])
-                if native_id is None:
-                    return False, first_id, announced
+                evidence = await self._committed_call(
+                    "result document", lambda: self._upload_result_document(im_client, target_context, part["text"])
+                )
             elif kind == "file":
                 link = FileLink(label=part.get("label") or "", path=part["path"], is_image=bool(part.get("is_image")))
-                outcome = await self._upload_file_link(im_client, target_context, link)
-                if outcome == "failed":
-                    return False, first_id, announced
-                if outcome != "uploaded":
-                    skipped = "file_missing" if outcome == "skipped" else "uploads_unsupported"
+                skipped, resolved, title = self._file_link_upload(im_client, link)
+                if skipped is None:
+                    evidence = await self._committed_file_upload(
+                        im_client, target_context, resolved, title, is_image=link.is_image
+                    )
             else:
                 logger.error("Committed row %s has an unknown delivery part %r", committed.row_id, kind)
-                return False, first_id, announced
-            await committed.acknowledge(
-                index, count, str(native_id) if native_id is not None else None, skipped=skipped
-            )
-            if native_id is not None and kind != "row":
-                first_id = first_id or str(native_id)
-        return True, first_id, announced
+            if evidence is None and skipped is None:
+                return False, first_id, announced[0] if announced else None
+            await committed.acknowledge(index, count, evidence, skipped=skipped)
+            if evidence is not None and kind not in ("row", "interim"):
+                first_id = first_id or evidence
+        return True, first_id, announced[0] if announced else None
 
-    def _persist_committed_interim(self, target_context: MessageContext, row_id: str, text: str) -> bool:
-        """Write a narration's Workbench transcript copy once; ``True`` once it exists."""
+    async def _committed_call(self, label: str, call: Callable[[], Awaitable[Any]]) -> Optional[str]:
+        """The one evidence rule of committed delivery: a truthy platform id, or nothing.
+
+        Every platform call a committed part makes goes through here. ``None``,
+        ``""``, ``False``, any other non-id result, and a raise are failures, and no
+        part is acknowledged on them (``recovery.md`` D1). No call site interprets
+        a result itself.
+        """
+        try:
+            result = await call()
+        except Exception as err:
+            logger.warning("Committed delivery: %s failed: %s", label, err)
+            return None
+        if isinstance(result, bool) or not isinstance(result, (str, int)) or not str(result):
+            logger.warning("Committed delivery: %s returned no evidence (%r)", label, result)
+            return None
+        return str(result)
+
+    async def _committed_interim(self, target_context: MessageContext, row_id: str, text: str) -> Optional[str]:
+        """Write a narration's Workbench transcript copy once; the copy's id, ours or an earlier attempt's."""
         native_id = f"interim:{row_id}"
-        if persist_agent_message(target_context, "interim", text, native_message_id=native_id) is not None:
-            return True
-        # A duplicate write is refused by its native id: the copy from an earlier attempt is the receipt.
-        return agent_message_exists(target_context, native_id) is not None
+        row = persist_agent_message(target_context, "interim", text, native_message_id=native_id)
+        if row is None:
+            # A duplicate write is refused by its native id: the earlier attempt's copy is the receipt.
+            row = agent_message_exists(target_context, native_id)
+        return row.get("id") if row else None
+
+    def _committed_log_skip(
+        self, context: MessageContext, settings_manager, settings_key: str, text: str, detached: bool
+    ) -> Optional[str]:
+        """Why the channel does not show this narration at all, decided before anything is sent."""
+        chunk = strip_file_links(text).strip()
+        if not chunk:
+            return "empty"
+        if detached:
+            return "hidden" if settings_manager.is_message_type_hidden(settings_key, "assistant") else None
+        style = self._concise_progress_style(context)
+        if style == "concise":
+            if not to_status_label(chunk):
+                return "no_status_label"
+            if self._get_consolidated_message_key(context) in self._status_finalized:
+                return "status_finalized"
+            return None
+        if settings_manager.is_message_type_hidden(settings_key, "assistant"):
+            return "hidden"
+        if style == "off" and self._supports_message_editing(self._get_im_client(context), context):
+            return "progress_off"
+        return None
 
     async def _deliver_committed_log(
         self,
@@ -4180,81 +4231,64 @@ class ConsolidatedMessageDispatcher:
         detached: bool,
         settings_manager,
         settings_key: str,
-    ) -> tuple[str, Optional[str]]:
-        """Show one committed narration; ``("sent", id)``, ``("failed", None)``, or ``(<skip reason>, None)``.
-
-        Whether the channel shows it at all is decided before anything is sent,
-        from the same settings the process log applies; a send failure is never a skip.
-        """
+    ) -> Optional[str]:
+        """Show one committed narration the channel shows; evidence of it, or ``None``."""
         chunk = strip_file_links(text).strip()
-        if not chunk:
-            return "empty", None
-        if detached:
-            # No live Turn: shown as plain process output, never as a status bubble
-            # that no Turn would retire.
-            if settings_manager.is_message_type_hidden(settings_key, "assistant"):
-                return "hidden", None
-            sent = await self._send_log_strictly(im_client, target_context, chunk)
-            return ("sent", sent) if sent is not None else ("failed", None)
-        style = self._concise_progress_style(context)
-        if style == "concise":
-            if not to_status_label(chunk):
-                return "no_status_label", None
-            if self._get_consolidated_message_key(context) in self._status_finalized:
-                return "status_finalized", None
-            sent = await self._render_concise_status(im_client, context, chunk)
-            return ("sent", sent) if sent is not None else ("failed", None)
-        if settings_manager.is_message_type_hidden(settings_key, "assistant"):
-            return "hidden", None
-        if not self._supports_message_editing(im_client, context):
-            sent = await self._send_log_strictly(im_client, target_context, chunk)
-            return ("sent", sent) if sent is not None else ("failed", None)
-        if style == "off":
-            return "progress_off", None
-        sent = await self._deliver_process_log(
-            im_client,
-            context,
-            target_context,
-            "assistant",
-            text,
-            status_label=None,
-            settings_manager=settings_manager,
-            settings_key=settings_key,
+        if detached or not self._supports_message_editing(im_client, context):
+            # No live Turn, or no editable log: fresh messages, every chunk proven.
+            return await self._send_log_strictly(im_client, target_context, chunk)
+        if self._concise_progress_style(context) == "concise":
+            return await self._committed_call(
+                "status bubble", lambda: self._render_concise_status(im_client, context, chunk)
+            )
+        return await self._committed_call(
+            "process log",
+            lambda: self._deliver_process_log(
+                im_client,
+                context,
+                target_context,
+                "assistant",
+                text,
+                status_label=None,
+                settings_manager=settings_manager,
+                settings_key=settings_key,
+            ),
         )
-        return ("sent", sent) if sent is not None else ("failed", None)
 
     async def _send_log_strictly(self, im_client, context: MessageContext, text: str) -> Optional[str]:
-        """Send a narration as fresh messages; ``None`` unless every chunk went out."""
+        """Send a narration as fresh messages; evidence only once every chunk went out."""
         plan = self._plan_result_split_by_bytes(text, self._get_consolidated_max_bytes(context))
         if not plan.links_whole:
-            return await self._upload_result_document(im_client, context, text)
+            return await self._committed_call(
+                "narration document", lambda: self._upload_result_document(im_client, context, text)
+            )
         first: Optional[str] = None
         for chunk in plan.chunks:
-            try:
-                message_id = await im_client.send_message(context, chunk, parse_mode="markdown")
-            except Exception as err:
-                logger.warning("Failed to send a committed narration: %s", err)
+            sent = await self._committed_call(
+                "narration", lambda chunk=chunk: im_client.send_message(context, chunk, parse_mode="markdown")
+            )
+            if sent is None:
                 return None
-            if message_id is None:
-                return None
-            first = first or str(message_id)
+            first = first or sent
         return first
 
-    async def _send_committed_text(
-        self, im_client, context: MessageContext, text: str, buttons, parse_mode, *, subtext: Optional[str]
+    async def _committed_file_upload(
+        self, im_client, context: MessageContext, path: str, title: str, *, is_image: bool
     ) -> Optional[str]:
-        """One planned text part; quick replies fall back to a plain send. ``None`` when not delivered."""
-        for part_buttons in ((buttons, []) if buttons else ([],)):
-            try:
-                message_id = await self._send_result_inline(
-                    im_client, context, text, part_buttons, parse_mode, subtext=subtext
-                )
-            except Exception as err:
-                logger.warning("Failed to send a committed result part: %s", err)
-                message_id = None
-            if message_id is not None:
-                return str(message_id)
-        return None
+        """Upload one planned file; an image falls back to a file upload, as on the live path."""
+        if self._is_video_path(path):
+            return await self._committed_call(
+                "video upload", lambda: im_client.upload_video_from_path(context, file_path=path, title=title)
+            )
+        if is_image:
+            uploaded = await self._committed_call(
+                "image upload", lambda: im_client.upload_image_from_path(context, file_path=path, title=title)
+            )
+            if uploaded is not None:
+                return uploaded
+        return await self._committed_call(
+            "file upload", lambda: im_client.upload_file_from_path(context, file_path=path, title=title)
+        )
 
     async def _send_split_result_messages(
         self,
@@ -4401,31 +4435,46 @@ class ConsolidatedMessageDispatcher:
             if await self._upload_file_link(im_client, context, fl) == "unsupported":
                 return
 
-    async def _upload_file_link(self, im_client, context: MessageContext, fl) -> str:
-        """Upload one ``file://`` link: ``uploaded``, ``skipped`` (no such file), ``unsupported``, or ``failed``."""
+    def _file_link_upload(self, im_client, fl) -> tuple[Optional[str], str, str]:
+        """``(skip reason, resolved path, upload title)`` for one ``file://`` link.
+
+        The skip reason is ``uploads_unsupported`` for a client without file uploads
+        and ``file_missing`` for a path that is not a file; ``None`` means upload it.
+        """
         import os
         from pathlib import Path
 
-        if not hasattr(im_client, "upload_file_from_path"):
-            return "unsupported"
-        notify_wechat_failure = self._is_wechat_context(context)
+        from modules.im.base import BaseIMClient
+
+        upload = getattr(type(im_client), "upload_file_from_path", None)
+        if upload is None or upload is BaseIMClient.upload_file_from_path:
+            return "uploads_unsupported", "", ""
         if not os.path.isfile(fl.path):
             logger.warning("File not found, skipping upload: %s", fl.path)
-            return "skipped"
-
+            return "file_missing", "", ""
         try:
             resolved = Path(fl.path).resolve(strict=True)
         except (OSError, ValueError):
             logger.warning("Cannot resolve file path, skipping: %s", fl.path)
-            return "skipped"
-
+            return "file_missing", "", ""
         # Use link label as title, but preserve file extension so users can
         # download/open files correctly on all platforms.
         upload_title = (fl.label or "").strip() or os.path.basename(fl.path)
-        src_ext = resolved.suffix
-        if src_ext and not Path(upload_title).suffix:
-            upload_title = f"{upload_title}{src_ext}"
+        if resolved.suffix and not Path(upload_title).suffix:
+            upload_title = f"{upload_title}{resolved.suffix}"
+        return None, str(resolved), upload_title
 
+    async def _upload_file_link(self, im_client, context: MessageContext, fl) -> str:
+        """Upload one ``file://`` link on the live path: ``uploaded``, ``skipped``, or ``unsupported``."""
+        skip, resolved_path, upload_title = self._file_link_upload(im_client, fl)
+        if skip == "uploads_unsupported":
+            return "unsupported"
+        if skip is not None:
+            return "skipped"
+        from pathlib import Path
+
+        resolved = Path(resolved_path)
+        notify_wechat_failure = self._is_wechat_context(context)
         try:
             upload_result = None
             if self._is_video_path(str(resolved)):

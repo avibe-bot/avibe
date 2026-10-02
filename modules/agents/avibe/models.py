@@ -10,12 +10,15 @@ the provider adapter registered for the hop's protocol.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ProviderAdapter
 from core.agent_core.messages import PROTOCOLS, Origin, ProtocolName
 from core.handlers.model_hub.provenance import SERVED_HOP_HEADER, SERVED_HOP_HEADER_MAX_BYTES
+
+logger = logging.getLogger(__name__)
 
 HopResolver = Callable[[], Awaitable[Mapping[str, Any]]]
 ProviderFactory = Callable[[ProtocolName], ProviderAdapter]
@@ -133,11 +136,16 @@ class HubModelRouter:
         return adapter
 
     async def aclose(self) -> None:
-        for adapter in self._adapters.values():
+        """Close every adapter, best effort: run cleanup never changes the Turn's outcome."""
+        adapters, self._adapters = list(self._adapters.items()), {}
+        for protocol, adapter in adapters:
             close = getattr(adapter, "aclose", None)
-            if close is not None:
+            if close is None:
+                continue
+            try:
                 await close()
-        self._adapters.clear()
+            except Exception:
+                logger.warning("Avibe Agent could not close its %s provider adapter", protocol, exc_info=True)
 
 
 def registry_providers(*, media_loader: Any, client: Any = None) -> ProviderFactory:

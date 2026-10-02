@@ -77,12 +77,13 @@ from storage import messages_service
 from storage.agent_transcript import (
     INPUT_TYPES,
     PendingDelivery,
+    final_outcome,
     RenderedDisplay,
     SQLiteTranscriptStore,
     render_text,
 )
 from storage.db import get_cached_sqlite_engine
-from storage.models import agent_sessions, message_deliveries, messages, session_turns
+from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,7 @@ class AvibeAgent(BaseAgent):
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.
         self._runtimes: dict[str, _SessionRuntime] = {}
+        self._open_calls_recovered = False
 
     # --- BaseAgent -----------------------------------------------------------
 
@@ -237,6 +239,7 @@ class AvibeAgent(BaseAgent):
         Resume settles open tool calls, admits unconsumed inputs, and re-delivers
         pending outbox rows (recovery.md T2, T3, D1); it never runs the model.
         """
+        await self._recover_open_tool_calls_once()
         session_ids = await asyncio.to_thread(self._sessions_with_pending_rows, platforms)
         for session_id in session_ids:
             async with self._held(session_id) as runtime:
@@ -245,6 +248,24 @@ class AvibeAgent(BaseAgent):
                 except Exception:
                     logger.exception("Avibe Agent startup resume failed for Session %s", session_id)
         return len(session_ids)
+
+    async def _recover_open_tool_calls_once(self) -> None:
+        """At startup, settle every Session's open tool calls before any run (recovery.md T2).
+
+        Eager, not at the Session's next message: a running foreground job is handed to
+        its Watch now (J6), so no command outlives its Turn without an owner. Runs once
+        per process and never calls the model; T3 and outbox re-delivery stay with each
+        Session's resume.
+        """
+        if self._open_calls_recovered:
+            return
+        self._open_calls_recovered = True
+        for session_id in await asyncio.to_thread(self._sessions_with_open_tail):
+            async with self._held(session_id) as runtime:
+                try:
+                    await self._settle_open_calls(runtime)
+                except Exception:
+                    logger.exception("Avibe Agent startup tool-call recovery failed for Session %s", session_id)
 
     async def shutdown_runtime(self) -> None:
         """Disabling the backend ends its runs; the rolling refresh drains Turns before this."""
@@ -369,8 +390,10 @@ class AvibeAgent(BaseAgent):
         """Settle the Turn from the run's outcome (loop-control.md section 6).
 
         A committed final row is the Turn's outcome and result text, whatever its
-        delivery state; the outbox only delivers it. A Stop that arrives after that
-        row committed loses the race, as it does for the Codex backend.
+        delivery state; the outbox only delivers it. The row's own outcome is
+        ``final_outcome`` (shared with startup recovery); the live run adds only the
+        failures it alone can observe after the commit. A Stop that arrives after the
+        final row committed loses the race, as it does for the Codex backend.
         """
         request, context = run.request, run.request.context
         reason = run.reason or "error"
@@ -380,19 +403,27 @@ class AvibeAgent(BaseAgent):
             if run.final_row
             else None
         )
-        visible = final is not None and strip_silent_blocks(self._display_source(final.message, final=True)).strip()
-        if visible:
+        if final is not None:
             if run.stop_requested and reason == "aborted":
                 reason = "completed"
-            is_error = reason not in _COMPLETED
-            footer = self._result_footer(run, is_error=is_error)
-            if footer and final.state == "pending":
-                # Written before the first part goes out; a started delivery keeps its footer.
-                await self.store.settle_delivery(
-                    run.session_id, run.final_row, footer=footer, display={"result_footer": footer}
+            run_failed_after_commit = reason not in _COMPLETED
+            failed = final_outcome(final.message) == "failed" or run_failed_after_commit
+            if strip_silent_blocks(self._display_source(final.message, final=True)).strip():
+                footer = self._result_footer(run, is_error=failed)
+                if footer and final.state == "pending":
+                    # Written before the first part goes out; a started delivery keeps its footer.
+                    await self.store.settle_delivery(
+                        run.session_id, run.final_row, footer=footer, display={"result_footer": footer}
+                    )
+                    final = await self.store.delivery(run.session_id, run.final_row, include_delivered=True) or final
+                await self._deliver(context, final, output=terminal_output_for(request), is_error=failed)
+            elif failed:
+                await self._fail(request, kind or "empty_response", diagnostic, reason=reason)
+            else:
+                # A reply the model chose to keep silent.
+                await self.controller.emit_agent_message(
+                    context, "result", "", level="silent", output=terminal_output_for(request)
                 )
-                final = await self.store.delivery(run.session_id, run.final_row, include_delivered=True) or final
-            await self._deliver(context, final, output=terminal_output_for(request), is_error=is_error)
             return
         if run.stop_requested and reason == "aborted":
             await self.controller.emit_agent_message(
@@ -400,6 +431,7 @@ class AvibeAgent(BaseAgent):
             )
             return
         if reason in _COMPLETED and kind is None:
+            # The run ended without a final reply by design (a terminating tool, a hook end).
             await self.controller.emit_agent_message(
                 context, "result", "", level="silent", output=terminal_output_for(request)
             )
@@ -492,28 +524,33 @@ class AvibeAgent(BaseAgent):
     async def _resume(self, runtime: _SessionRuntime) -> None:
         session_id = runtime.session_id
         if not runtime.recovered:
-            rows = await self.store.load(session_id)
-            open_calls = open_tool_calls(rows)
-            if open_calls:
-                suite = self._tools()
-                job_ids = {}
-                for owner, call in open_calls:
-                    job_id = suite.find_job(owner.session_id, call.id)
-                    if job_id is not None:
-                        job_ids[(owner.session_id, call.id)] = job_id
-                await settle_open_calls(
-                    session_id=session_id,
-                    store=self.store,
-                    jobs=suite.jobs,
-                    job_ids=job_ids,
-                    render_result=suite.render_recovered,
-                )
+            await self._settle_open_calls(runtime)
             runtime.cwd = runtime.cwd or await asyncio.to_thread(self._session_workdir, session_id)
             runtime.recovered = True
         for message_id, text_value, files, metadata in await asyncio.to_thread(self._unconsumed_inputs, session_id):
             message = await self._render_input(session_id, text_value, files, metadata)
             await self.store.consume_input(session_id, message_id, message)
         await self._redeliver_pending(session_id)
+
+    async def _settle_open_calls(self, runtime: _SessionRuntime) -> None:
+        """T2: one committed result for every open tool call, chosen from its job's state."""
+        session_id = runtime.session_id
+        open_calls = open_tool_calls(await self.store.load(session_id))
+        if not open_calls:
+            return
+        suite = self._tools()
+        job_ids = {}
+        for owner, call in open_calls:
+            job_id = suite.find_job(owner.session_id, call.id)
+            if job_id is not None:
+                job_ids[(owner.session_id, call.id)] = job_id
+        await settle_open_calls(
+            session_id=session_id,
+            store=self.store,
+            jobs=suite.jobs,
+            job_ids=job_ids,
+            render_result=suite.render_recovered,
+        )
 
     def _unconsumed_inputs(self, session_id: str) -> list[tuple[str, str, list[FileAttachment], AgentInputMetadata]]:
         """Inputs accepted into an ``avibe`` Turn but never consumed, in acceptance order.
@@ -853,6 +890,37 @@ class AvibeAgent(BaseAgent):
         with self._engine.connect() as conn:
             seq = conn.execute(select(messages.c.context_seq).where(messages.c.id == message_id)).scalar()
         return seq is not None
+
+    def _sessions_with_open_tail(self) -> list[str]:
+        """Avibe Sessions whose context does not end with a final reply: only these can hold an open call.
+
+        Every run settles earlier open calls before it starts and commits its own results
+        before its next model call, so a context ending in a ``result`` row has none.
+        """
+        from sqlalchemy import func
+
+        own = select(agent_sessions.c.id).where(agent_sessions.c.agent_backend == BACKEND).subquery()
+        with self._engine.connect() as conn:
+            last: dict[str, int] = {}
+            for table in (messages, agent_events):
+                for session_id, seq in conn.execute(
+                    select(table.c.session_id, func.max(table.c.context_seq))
+                    .where(table.c.session_id.in_(select(own.c.id)), table.c.context_seq.is_not(None))
+                    .group_by(table.c.session_id)
+                ):
+                    last[session_id] = max(seq, last.get(session_id, 0))
+            finals = dict(
+                conn.execute(
+                    select(messages.c.session_id, func.max(messages.c.context_seq))
+                    .where(
+                        messages.c.session_id.in_(select(own.c.id)),
+                        messages.c.context_seq.is_not(None),
+                        messages.c.type == "result",
+                    )
+                    .group_by(messages.c.session_id)
+                ).all()
+            )
+        return sorted(session_id for session_id, seq in last.items() if finals.get(session_id) != seq)
 
     def _sessions_with_pending_rows(self, platforms: set[str]) -> list[str]:
         from sqlalchemy import func

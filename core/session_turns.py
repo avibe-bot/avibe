@@ -6712,14 +6712,15 @@ class SessionTurnManager:
 
         for target_session, turn_id, attempt_id, backend in lost_active_turns:
             # A Turn whose final response committed before the process died has its
-            # outcome in storage: it completed, and the backend's outbox delivers the
-            # row. Storage only, so this holds before any backend is registered.
+            # outcome in storage (``final_outcome`` of that row), and the backend's
+            # outbox delivers the row. Storage only, so this holds before any backend
+            # is registered.
             with self._sqlite_engine().connect() as conn:
                 committed_final = committed_final_for_turn(conn, turn_id)
             if committed_final is not None:
                 terminal = self._terminalize_durable_turn(
                     turn_id,
-                    "completed",
+                    committed_final.outcome,
                     settled_by=SETTLED_BY_TERMINAL_RESULT,
                     evidence_kind="committed_final",
                     evidence={

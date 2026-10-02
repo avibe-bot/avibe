@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Protocol, Sequence, TypeVar, Union
@@ -98,6 +99,7 @@ _KIND_BY_EVENT_TYPE = {event_type: kind for kind, event_type in _EVENT_TYPE_BY_K
 
 _T = TypeVar("_T")
 MODEL_KEY = "model"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,23 @@ class DisplayRenderer(Protocol):
         scope_id: Optional[str],
         session_id: str,
     ) -> Union[str, RenderedDisplay]: ...
+
+
+FinalOutcome = Literal["completed", "failed"]
+
+
+def final_outcome(message: AssistantMessage) -> FinalOutcome:
+    """The Turn outcome a committed final response determines by itself.
+
+    The one rule, shared by live settlement and startup recovery: a final reply
+    without text of its own (an unexplained refusal or safety stop, or an empty
+    answer) failed; any other final completed. It is the loop's own empty-reply
+    test (loop-control.md section 2). Failures only a live run can observe after
+    the commit (a foreground job that could not be stopped) are applied by the
+    live caller and are unknowable after a crash.
+    """
+    has_text = any(isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content)
+    return "completed" if has_text else "failed"
 
 
 def render_text(message: AssistantMessage, **_attribution: Any) -> str:
@@ -538,6 +557,7 @@ class CommittedFinal:
     row_id: str
     session_id: str
     text: str
+    outcome: FinalOutcome
 
 
 def committed_final_for_turn(conn: Connection, turn_id: str) -> Optional[CommittedFinal]:
@@ -549,7 +569,7 @@ def committed_final_for_turn(conn: Connection, turn_id: str) -> Optional[Committ
     if not turn_id:
         return None
     row = conn.execute(
-        select(messages.c.id, messages.c.session_id, messages.c.content_text)
+        select(messages.c.id, messages.c.session_id, messages.c.content_text, messages.c.content_json)
         .where(
             messages.c.type == "result",
             messages.c.context_seq.is_not(None),
@@ -560,7 +580,14 @@ def committed_final_for_turn(conn: Connection, turn_id: str) -> Optional[Committ
     ).first()
     if row is None:
         return None
-    return CommittedFinal(row_id=row.id, session_id=row.session_id, text=row.content_text or "")
+    try:
+        payload = _versioned(_json_object(row.content_json, row.id).get(MODEL_KEY), row.id)
+        outcome = final_outcome(_message(payload.get("message"), AssistantMessage, row.id))
+    except TranscriptError:
+        # The row exists but cannot show it succeeded.
+        logger.warning("Committed final %s of Turn %s is unreadable; recording it as failed", row.id, turn_id)
+        outcome = "failed"
+    return CommittedFinal(row_id=row.id, session_id=row.session_id, text=row.content_text or "", outcome=outcome)
 
 
 # --- allocation and attribution ----------------------------------------------

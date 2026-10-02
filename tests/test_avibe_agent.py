@@ -97,6 +97,9 @@ class _IMClient:
         self.attempts = 0
         self.fail_sends: set[int] = set()
         self.fail_uploads = 0
+        # 1-based attempts whose send "succeeds" without evidence, and uploads that return this.
+        self.send_results: dict[int, Any] = {}
+        self.upload_results: list[Any] = []
 
     def should_use_thread_for_reply(self) -> bool:
         return False
@@ -108,6 +111,8 @@ class _IMClient:
         self.attempts += 1
         if self.attempts in self.fail_sends:
             raise RuntimeError("the platform rejected this part")
+        if self.attempts in self.send_results:
+            return self.send_results[self.attempts]
         self.sent.append(text)
         self.routes.append((context.channel_id, _route, text))
         return f"im-{self.attempts}"
@@ -119,6 +124,8 @@ class _IMClient:
         if self.fail_uploads:
             self.fail_uploads -= 1
             raise RuntimeError("the platform rejected the upload")
+        if self.upload_results:
+            return self.upload_results.pop(0)
         self.uploads.append(file_path)
         return f"file-{len(self.uploads)}"
 
@@ -260,7 +267,8 @@ def _context(platform: str, session_id: str, *, turn_id: str, delivery_id: str) 
 
 class _Harness:
     def __init__(
-        self, engine, tmp_path: Path, platform: str, scripts, *, tools=None, suite=None, language="en", session_id=SESSION
+        self, engine, tmp_path: Path, platform: str, scripts, *, tools=None, suite=None, language="en", session_id=SESSION,
+        providers=None,
     ):
         self.session_id = session_id
         self.engine = engine
@@ -268,6 +276,7 @@ class _Harness:
         self.tmp_path = tmp_path
         self.controller = _Controller(engine, platform, language=language)
         self.provider = ScriptedProvider(scripts)
+        self.providers = providers or (lambda protocol: self.provider)
         self.jobs = FakeJobHost()
         self.tools = list(tools or [FakeTool("echo")])
         self.suite = suite or ToolSuite(
@@ -284,7 +293,7 @@ class _Harness:
         agent = AvibeAgent(
             self.controller,
             engine=self.engine,
-            providers=lambda protocol: self.provider,
+            providers=self.providers,
             tool_suite=self.suite,
             state_dir=self.tmp_path / "agent_core",
         )
@@ -1031,3 +1040,193 @@ async def test_the_config_refresh_registers_and_retires_the_backend(engine) -> N
         controller.config = to_app_config(config)
         await owner._apply_backend_runtime_refresh("avibe")
         assert isinstance(agents.get("avibe"), AvibeAgent) is enabled
+
+
+async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, session, tmp_path, published) -> None:
+    jobs = FakeJobHost()
+    rendered: list[tuple] = []
+
+    def render(call, job_id, status, watch_id):
+        rendered.append((call.id, job_id, watch_id))
+        return ToolResult((text(f"Command is still running and is now Watch {watch_id}."),))
+
+    suite = ToolSuite(
+        jobs=jobs,
+        create_tools=lambda jobs_, sink: [FakeTool("bash")],
+        render_recovered=render,
+        find_job=lambda session_id, call_id: "job_1" if (session_id, call_id) == (SESSION, "call_bash") else None,
+    )
+    harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
+    # The crashed process left a running foreground command; its tool-call response had
+    # nothing to show, so no outbox row is pending for this Session.
+    request = harness.request("run the slow suite")
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run the slow suite"),))
+    )
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "pytest -q"})
+    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    jobs.states["job_1"] = JobStatus("running")
+    assert await harness.agent.store.pending_deliveries(SESSION) == []
+
+    for _ in range(2):
+        harness.new_agent()
+        await harness.agent.restore_pending_deliveries({"telegram"})
+
+    rows = await harness.context_rows()
+    assert rows[-1].kind == "tool_result" and "now Watch watch_job_1" in rows[-1].message.content[0].text
+    assert rendered == [("call_bash", "job_1", "watch_job_1")] and jobs.watches == {"job_1": "watch_job_1"}
+    assert harness.provider.requests == []
+
+
+# --- round 3: one evidence rule, one outcome rule, every recovery trigger ------------------
+
+
+@pytest.mark.parametrize(
+    "part, failure",
+    [
+        ("text", ""),
+        ("text", None),
+        ("text", False),
+        ("text", "raise"),
+        ("file", ""),
+        ("file", None),
+        ("file", "raise"),
+    ],
+)
+async def test_a_part_without_evidence_is_never_acknowledged(
+    engine, session, tmp_path, published, part, failure
+) -> None:
+    report = tmp_path / "report.txt"
+    report.write_text("numbers", encoding="utf-8")
+    reply = f"Here is the report: [report](file://{report})"
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant(reply))]])
+    client = harness.controller.im_client
+    if part == "text":
+        # The send and the live path's document fallback both come back without evidence.
+        if failure == "raise":
+            client.fail_sends, client.fail_uploads = {1}, 1
+        else:
+            client.send_results, client.upload_results = {1: failure}, [failure]
+    elif failure == "raise":
+        client.fail_uploads = 1
+    else:
+        client.upload_results = [failure]
+
+    await harness.agent.handle_message(harness.request("send me the report"))
+    [pending] = await harness.agent.store.pending_deliveries(SESSION)
+    index = 0 if part == "text" else 1
+    assert pending.parts == () or pending.parts[index] is None
+
+    harness.new_agent()
+    await harness.agent.restore_pending_deliveries({"telegram"})
+    assert await harness.agent.store.pending_deliveries(SESSION) == []
+    assert client.uploads == [str(report)]
+
+
+async def test_recovery_records_an_unexplained_refusal_as_failed(engine, session, tmp_path, published) -> None:
+    from core.session_turns import SessionTurnManager
+
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(AssistantMessage((), ORIGIN, "refusal"))]], language="zh")
+    request = harness.request("say something unsafe")
+    turn_id = _turn(request.context)
+
+    class _Crash(BaseException):
+        pass
+
+    async def crash_before_settlement(_run) -> None:
+        raise _Crash()
+
+    # The process dies after the run committed an empty refusal, before settling the Turn.
+    harness.agent._settle = crash_before_settlement
+    with pytest.raises(_Crash):
+        await harness.agent.handle_message(request)
+    with engine.connect() as conn:
+        plan = json.loads(conn.execute(select(messages.c.metadata_json).where(messages.c.type == "result")).scalar())
+    assert plan["delivery"]["plan"]["turn_id"] == turn_id
+
+    manager = SessionTurnManager(harness.controller, build_context=lambda sid: request.context)
+    manager._engine = engine
+    notices: list[str] = []
+
+    async def emit(_context, kind, body, **_kwargs):
+        notices.append(kind)
+        return "msg"
+
+    manager.controller = SimpleNamespace(**{**vars(harness.controller), "emit_agent_message": emit})
+    manager._active_identity = lambda *_args: None
+    await manager.recover_durable_delivery_state(SESSION, service_restart=True)
+
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+    assert (turn["terminal_outcome"], turn["settled_by"], turn["terminal_evidence_kind"]) == (
+        "failed", "terminal_result", "committed_final"
+    )
+    assert json.loads(turn["terminal_evidence_json"])["result_text"] == i18n_t("avibeAgent.error.refusal", "zh")
+    assert notices == []
+
+
+async def test_enabling_the_backend_live_delivers_rows_left_pending(engine, session, tmp_path, published) -> None:
+    from config.v2_config import V2Config
+    from core.agent_auth_service import AgentAuthService
+
+    harness = _Harness(engine, tmp_path, "telegram", [])
+    # The previous process committed a reply and stopped before delivering it; avibe then
+    # started disabled, so no readiness callback could restore it.
+    await _crash_after_commit(harness, "go", assistant("the answer"), finals=[True])
+    controller = harness.controller
+    agents: dict[str, Any] = {}
+
+    async def refresh_runtime_config(_name, _runtime_config) -> bool:
+        return False
+
+    controller.agent_service.agents = agents
+    controller.agent_service.register = lambda agent: agents.__setitem__(agent.name, agent)
+    controller.agent_service.refresh_runtime_config = refresh_runtime_config
+    controller.agent_service.runtime_turn_tokens_for_backend = lambda _backend: {}
+    controller.agent_service.release_runtime_turn_tokens = lambda _tokens: None
+    controller.im_clients = {"telegram": controller.im_client}
+    controller.is_im_transport_ready = lambda platform: True
+    config = V2Config.default()
+    config.agents.avibe.enabled = True
+    config.save()
+
+    await AgentAuthService(controller)._apply_backend_runtime_refresh("avibe")
+
+    assert isinstance(agents.get("avibe"), AvibeAgent)
+    assert controller.im_client.sent.count("the answer") == 1
+    assert await harness.agent.store.pending_deliveries(SESSION) == []
+
+
+async def test_a_provider_that_fails_to_close_does_not_fail_a_delivered_turn(
+    engine, session, tmp_path, published
+) -> None:
+    closed: list[str] = []
+
+    class _Provider(ScriptedProvider):
+        def __init__(self, scripts, name: str, *, fails: bool) -> None:
+            super().__init__(scripts)
+            self.name, self.fails = name, fails
+
+        async def aclose(self) -> None:
+            closed.append(self.name)
+            if self.fails:
+                raise RuntimeError("the connection pool would not close")
+
+    provider = _Provider([[Done(assistant("done"))]], "anthropic", fails=True)
+    harness = _Harness(engine, tmp_path, "telegram", [], providers=lambda protocol: provider)
+
+    await harness.agent.handle_message(harness.request("hi"))
+
+    assert harness.controller.im_client.sent == ["done"]
+    assert harness.controller.terminals[-1]["is_error"] is False
+    assert closed == ["anthropic"]
+    # Every adapter is closed even when an earlier one fails to close.
+    from modules.agents.avibe.models import HubModelRouter
+
+    adapters = {"anthropic": _Provider([], "anthropic", fails=True), "google": _Provider([], "google", fails=False)}
+    router = HubModelRouter(lambda: None, lambda protocol: adapters[protocol])
+    router.provider_for("anthropic"), router.provider_for("google")
+    closed.clear()
+    await router.aclose()
+    assert closed == ["anthropic", "google"]

@@ -2319,6 +2319,27 @@ class AgentAuthService:
         logger.info("Registered %s backend after runtime config refresh", backend)
         return True
 
+    async def _restore_after_live_registration(self, backend: str) -> None:
+        """A backend registered after startup missed the readiness callbacks of surfaces already up.
+
+        Run its re-delivery sweep for them now: the Workbench and every IM transport
+        that is ready. Only backends that keep an outbox expose the sweep.
+        """
+        agent = getattr(getattr(self.controller, "agent_service", None), "agents", {}).get(backend)
+        restore = getattr(agent, "restore_pending_deliveries", None)
+        if not callable(restore):
+            return
+        ready = getattr(self.controller, "is_im_transport_ready", None)
+        platforms = {"avibe"} | {
+            platform
+            for platform in getattr(self.controller, "im_clients", {}) or {}
+            if platform != "avibe" and callable(ready) and ready(platform)
+        }
+        try:
+            await restore(platforms)
+        except Exception:
+            logger.exception("Failed to restore %s deliveries after live registration", backend)
+
     async def _refresh_backend_runtime(self, backend: str) -> None:
         coordinator = getattr(self.controller, "backend_restart_coordinator", None)
         if coordinator is not None:
@@ -2344,6 +2365,7 @@ class AgentAuthService:
                     backend,
                     runtime_config,
                 ):
+                    await self._restore_after_live_registration(backend)
                     return
                 if force and backend == "opencode":
                     agent = getattr(agent_service, "agents", {}).get(backend)

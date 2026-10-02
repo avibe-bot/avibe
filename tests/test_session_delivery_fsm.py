@@ -4283,7 +4283,19 @@ def test_an_accepted_turn_whose_final_row_committed_completes_from_that_row(mana
                 type="result",
                 source="agent",
                 content_text="the committed answer",
-                content_json="{}",
+                content_json=json.dumps(
+                    {
+                        "model": {
+                            "version": 1,
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "the committed answer"}],
+                                "origin": {"provider": "test", "api": "anthropic", "model": "m"},
+                                "stop_reason": "stop",
+                            },
+                        }
+                    }
+                ),
                 metadata_json=json.dumps(
                     {"delivery": {"state": "pending", "parts": [], "plan": {"turn_id": turn_id, "parts": [{"kind": "row"}]}}}
                 ),
