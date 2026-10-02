@@ -381,3 +381,22 @@ breaker, review gates, and close-out follow the `pr-delivery-loop` skill.
 | Database growth from inline tool output | output governance bounds each row; the reserved reference form allows moving it out without a schema change |
 | Scope creep toward the tension system or interactive terminals | §2 non-goals; §5.4 ships only the shape in v1 |
 | Python 3.10 floor versus ported code | port with `TypeAlias`; CI already covers 3.10 |
+
+## 9. Open review notes
+
+Codex findings on this PR are advisory by owner decision (2026-10-02) because it is a spec-only PR; the lanes'
+code reviews carry the precision. These notes from the last review round are kept for the next revision of the
+contracts and checked against the implementing lane's code before they are closed.
+
+| Priority | File | Note |
+| --- | --- | --- |
+| P1 | `model-hub-consumer.md` | Apply the full target transform during failover |
+| P2 | `transcript.md` | Give display-only outbox rows an ordering key |
+| P2 | `message.schema.json` | Preserve malformed-argument state on tool calls |
+| P2 | `tools.md` | Reject nonpositive bash timeouts |
+| P1 | `job.schema.json` | Require process state in every persisted job record |
+| P2 | `loop-control.md` | Define the terminating tool-result field |
+| P2 | `avibe-agent-core.md` | Scope portability to the current projected context |
+| P1 | `avibe-agent-core.md` | Keep background descendants inside the job lifecycle |
+| P2 | `loop-control.md` | Avoid delivering refusal errors twice |
+| P2 | `message.schema.json` | Require content in canonical tool results |
