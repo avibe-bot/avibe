@@ -4410,6 +4410,17 @@ scenarios:
     # whole FIFO run. Injected turns such as task notifications never consume
     # receipts, even when their text matches; an unmatched human echo is logged.
     test: tests/test_claude_agent_sessions.py::test_coalesced_echo_acknowledges_its_whole_queued_run
+  - id: HFR-488
+    name: an injected Claude turn's reply is never replayed as the next turn's narration
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: claude
+    # A peer or wakeup turn without an Activity streams its Assistant text on the
+    # human path (inline or buffered replay), then its Result proves a detached
+    # owner. The detached record takes that phase's text, even when the Result body
+    # is empty, so it never replays later; text another phase set is untouched.
+    test: tests/test_claude_result_provenance.py::test_injected_turn_result_retires_its_unbuffered_assistant_text
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

@@ -2271,6 +2271,43 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(next_token)
         service.release_runtime_turn(next_context)
 
+    async def test_injected_turn_result_retires_its_unbuffered_assistant_text(self):
+        """HFR-488: a peer turn's reply is delivered once, never replayed as narration."""
+
+        reply = "Reply to the peer.\n\n---\n[Check] | [Skip]"
+        # An empty Result body still delivers the phase's Assistant text.
+        for result_body in (reply, ""):
+            with self.subTest(result_body=result_body):
+                key = "session-injected-reply:/tmp/work"
+                agent, service = _build_agent()
+                agent._get_formatter = lambda _context: _ToolcallFormatter()
+                context = _context(key)
+                agent.emit_result_message = _dispatcher_owned_emit(service)
+
+                await agent._receive_messages(
+                    _client(
+                        [
+                            UserMessage("peer message", origin={"kind": "peer"}),
+                            AssistantMessage(_block(TextBlock, text=reply)),
+                            ResultMessage(result_body, origin={"kind": "peer"}),
+                            UserMessage("second peer message", origin={"kind": "peer"}),
+                            AssistantMessage(_block(TextBlock, text="second reply")),
+                            ResultMessage("second reply", origin={"kind": "peer"}),
+                        ]
+                    ),
+                    "sess-injected-reply",
+                    "/tmp/work",
+                    context,
+                    composite_key=key,
+                )
+
+                self.assertEqual(
+                    [call.args[1] for call in agent.emit_result_message.await_args_list],
+                    [reply, "second reply"],
+                )
+                self.assertNotIn(("assistant", reply), _visible_emits(agent))
+                self.assertNotIn(key, agent._last_assistant_text)
+
     async def test_detached_synthetic_delivery_retries_with_same_output_identity(self):
         key = "session-synthetic-detached-retry:/tmp/work"
         agent, service = _build_agent()
