@@ -13,7 +13,7 @@ from core.agent_core.ai.anthropic import AnthropicAdapter
 from core.agent_core.ai._common import read_response_body
 from core.agent_core.ai.google import GoogleAdapter, build_google_payload
 from core.agent_core.ai.openai_chat import OpenAIChatAdapter, build_chat_payload
-from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter
+from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter, build_responses_payload
 from core.agent_core.ai.provider import BlockEnd, Done, MediaLoader, ModelEndpoint, ModelRequest, ProviderError
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -123,12 +123,30 @@ async def test_anthropic_replays_redacted_thinking_payload_verbatim() -> None:
 
 
 @pytest.mark.asyncio
+async def test_anthropic_ignores_unknown_content_block_types_like_pi() -> None:
+    body = (
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"future_block"}}\n\n'
+        'data: {"type":"message_stop"}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(AnthropicAdapter(client), _request("anthropic"))
+
+    assert isinstance(events[-1], Done)
+    assert events[-1].message.content == ()
+
+
+@pytest.mark.asyncio
 async def test_responses_sets_client_side_state_rules_and_keeps_reasoning_item() -> None:
     body = (
         'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'
         'data: {"type":"response.reasoning_text.delta","output_index":0,"delta":"plan"}\n\n'
         'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"enc"}}\n\n'
-        'data: {"type":"response.output_text.delta","delta":"done"}\n\n'
+        'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1"}}\n\n'
+        'data: {"type":"response.output_text.delta","output_index":1,"delta":"done"}\n\n'
         'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":2,"output_tokens":4,"output_tokens_details":{"reasoning_tokens":1}}}}\n\n'
     )
     captured: dict[str, Any] = {}
@@ -147,6 +165,47 @@ async def test_responses_sets_client_side_state_rules_and_keeps_reasoning_item()
     assert isinstance(final, Done)
     assert final.message.content[0] == ThinkingBlock("plan", json.dumps({"id": "rs_1", "encrypted_content": "enc"}, separators=(",", ":")))
     assert final.message.usage == Usage(input_tokens=2, output_tokens=4, reasoning_tokens=1)
+
+
+@pytest.mark.asyncio
+async def test_responses_ignores_unknown_reasoning_summary_lifecycle_events() -> None:
+    body = (
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'
+        'data: {"type":"response.reasoning_summary_part.added","output_index":0}\n\n'
+        'data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"plan"}\n\n'
+        'data: {"type":"response.reasoning_summary_part.done","output_index":0}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    assert isinstance(events[-1], Done)
+    assert events[-1].message.content == (ThinkingBlock("plan", None),)
+
+
+def test_responses_replay_preserves_output_item_order() -> None:
+    history = (
+        AssistantMessage(
+            content=(
+                ThinkingBlock("plan", json.dumps({"id": "rs_1", "encrypted_content": "enc"}, separators=(",", ":"))),
+                TextBlock(text="answer"),
+            ),
+            origin=Origin("openai", "openai_responses", "model-x"),
+            stop_reason="stop",
+        ),
+    )
+
+    payload = build_responses_payload(
+        _request("openai_responses", messages=history),
+        history,
+    )
+
+    assert payload["input"][0]["type"] == "reasoning"
+    assert payload["input"][1]["role"] == "assistant"
 
 
 @pytest.mark.asyncio
@@ -174,6 +233,7 @@ async def test_responses_uses_item_id_for_parallel_argument_deltas_and_incomplet
 @pytest.mark.asyncio
 async def test_responses_refusal_is_not_normalized_to_stop() -> None:
     body = (
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\n'
         'data: {"type":"response.refusal.delta","delta":"cannot help"}\n\n'
         'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
     )
@@ -226,6 +286,70 @@ async def test_chat_completions_reassembles_parallel_calls() -> None:
     assert isinstance(final, Done)
     assert final.message.stop_reason == "tool_use"
     assert [call.arguments for call in final.message.tool_calls] == [{"path": "a"}, {"path": "b"}]
+
+
+@pytest.mark.asyncio
+async def test_chat_reuses_tool_id_received_before_function_name() -> None:
+    body = (
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"provider-call"}]}}]}\n\n'
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read","arguments":"{\\"path\\":\\"x\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    assert isinstance(events[-1], Done)
+    assert events[-1].message.tool_calls[0].id == "provider-call"
+
+
+@pytest.mark.asyncio
+async def test_chat_accumulates_reasoning_details_across_deltas() -> None:
+    body = (
+        'data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"a"}]}}]}\n\n'
+        'data: {"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"b"}]},"finish_reason":"stop"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    assert isinstance(events[-1], Done)
+    assert events[-1].message.content == (
+        ThinkingBlock(
+            "",
+            json.dumps([{"type": "reasoning.text", "text": "ab"}], separators=(",", ":")),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_anthropic_abort_after_message_start_keeps_usage_in_partial() -> None:
+    stream = _StalledStream(
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":7}}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+    cancel = CancelToken()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        task = asyncio.create_task(_events(AnthropicAdapter(client), _request("anthropic"), cancel))
+        await stream.started.wait()
+        await asyncio.sleep(0.05)
+        cancel.cancel("cancelled after usage")
+        events = await asyncio.wait_for(task, timeout=1)
+
+    assert isinstance(events[-1], ProviderError)
+    assert events[-1].partial is not None
+    assert events[-1].partial.content == ()
+    assert events[-1].partial.usage == Usage(input_tokens=7)
 
 
 def test_chat_reasoning_models_use_completion_token_limit() -> None:
@@ -593,6 +717,7 @@ class _StalledStream(httpx.AsyncByteStream):
     def __init__(self, first_chunk: bytes | None = None) -> None:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.closed = asyncio.Event()
         self.first_chunk = first_chunk or b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
 
     async def __aiter__(self):
@@ -600,16 +725,23 @@ class _StalledStream(httpx.AsyncByteStream):
         yield self.first_chunk
         await self.release.wait()
 
+    async def aclose(self) -> None:
+        self.closed.set()
+
 
 class _StalledErrorBody(httpx.AsyncByteStream):
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.closed = asyncio.Event()
 
     async def __aiter__(self):
         self.started.set()
         await self.release.wait()
         yield b'{"error":{"message":"late"}}'
+
+    async def aclose(self) -> None:
+        self.closed.set()
 
 
 class _StalledLoader(MediaLoader):
@@ -715,6 +847,10 @@ async def test_all_adapters_cancel_at_every_http_lifecycle_phase(
 
     assert isinstance(events[-1], ProviderError)
     assert events[-1].kind == "aborted"
+    if phase == "stream":
+        assert stalled_stream.closed.is_set()
+    elif phase == "error_body":
+        assert stalled_body.closed.is_set()
 
 
 @pytest.mark.asyncio
@@ -1047,7 +1183,8 @@ async def test_cancellation_during_stream_open_ends_with_aborted_error() -> None
         (
             OpenAIResponsesAdapter,
             "openai_responses",
-            'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\n'
+            'data: {"type":"response.output_text.delta","output_index":0,"delta":"partial"}\n\n',
         ),
         (
             GoogleAdapter,

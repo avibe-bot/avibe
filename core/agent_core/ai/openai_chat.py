@@ -22,6 +22,7 @@ from core.agent_core.ai._common import (
     iter_sse_events,
     json_object,
     open_stream,
+    partial_message,
     parsed_arguments,
     prepare_messages,
     read_response_body,
@@ -220,6 +221,7 @@ class OpenAIChatAdapter(ProviderAdapter):
                                 return
                             index = _int(raw.get("index"), len(tools))
                             state = tools.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                            raw_id = _string(raw.get("id"))
                             function = raw.get("function")
                             if isinstance(function, Mapping):
                                 name = _string(function.get("name"))
@@ -231,16 +233,19 @@ class OpenAIChatAdapter(ProviderAdapter):
                                     return
                                 if name and not state["name"]:
                                     state["name"] = name
+                                    existing_id = state["id"]
+                                    call_id = raw_id or existing_id or f"call_{index}"
                                     content.append(
                                         ToolCallBlock(
-                                            id=_string(raw.get("id")) or f"call_{index}",
-                                            native_id=_string(raw.get("id")) or None,
+                                            id=call_id,
+                                            native_id=call_id,
                                             name=name,
                                             arguments={},
                                         )
                                     )
                                     state["content_index"] = len(content) - 1
-                                    state["id"] = _string(raw.get("id")) or f"call_{index}"
+                                    state["id"] = call_id
+                                    state["id_provisional"] = not bool(raw_id or existing_id)
                                     streamed = True
                                     yield ToolCallStart(index=state["content_index"], id=state["id"], name=name)
                                 arguments = _string(function.get("arguments"))
@@ -251,9 +256,20 @@ class OpenAIChatAdapter(ProviderAdapter):
                                         index=_int(state.get("content_index"), 0),
                                         arguments_delta=arguments,
                                     )
-                            raw_id = _string(raw.get("id"))
-                            if raw_id and not state["id"]:
+                            if raw_id and (not state["id"] or state.get("id_provisional")):
                                 state["id"] = raw_id
+                                state["id_provisional"] = False
+                                content_index = state.get("content_index")
+                                if isinstance(content_index, int) and content_index < len(content):
+                                    block = content[content_index]
+                                    if isinstance(block, ToolCallBlock):
+                                        content[content_index] = ToolCallBlock(
+                                            id=raw_id,
+                                            native_id=raw_id,
+                                            name=block.name,
+                                            arguments=dict(block.arguments),
+                                            signature=block.signature,
+                                        )
                     legacy_function = delta.get("function_call")
                     if legacy_function is not None:
                         if not isinstance(legacy_function, Mapping):
@@ -319,8 +335,14 @@ class OpenAIChatAdapter(ProviderAdapter):
                 exc=exc,
                 streamed=streamed,
                 partial=(
-                    assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
-                    if streamed
+                    partial_message(
+                        content,
+                        origin=origin,
+                        stop_reason="error",
+                        usage=usage,
+                        verified_origin=verified,
+                    )
+                    if streamed or usage is not None
                     else None
                 ),
             )
@@ -517,7 +539,37 @@ def _apply_reasoning_details(content: list[Any], details: list[Any]) -> list[Any
     valid = [detail for detail in details if isinstance(detail, Mapping)]
     if not valid:
         return content
-    signature = json.dumps(valid, ensure_ascii=False, separators=(",", ":"))
+    accumulated: list[dict[str, Any]] = []
+    for index, block in enumerate(content):
+        if isinstance(block, ThinkingBlock):
+            if block.signature:
+                try:
+                    previous = json.loads(block.signature)
+                except (TypeError, ValueError):
+                    previous = []
+                if isinstance(previous, list):
+                    accumulated.extend(
+                        item for item in previous if isinstance(item, Mapping)
+                    )
+            break
+    for detail in valid:
+        item = dict(detail)
+        previous = accumulated[-1] if accumulated else None
+        if (
+            isinstance(previous, dict)
+            and previous.get("type") == item.get("type")
+            and item.get("type") in {"reasoning.text", "reasoning.summary"}
+        ):
+            field = "text" if item["type"] == "reasoning.text" else "summary"
+            if isinstance(previous.get(field), str) and isinstance(item.get(field), str):
+                previous[field] += item[field]
+                for key in ("id", "format", "index", "signature"):
+                    if key not in previous or previous[key] in (None, ""):
+                        if key in item:
+                            previous[key] = item[key]
+                continue
+        accumulated.append(item)
+    signature = json.dumps(accumulated, ensure_ascii=False, separators=(",", ":"))
     for index, block in enumerate(content):
         if isinstance(block, ThinkingBlock):
             content[index] = ThinkingBlock(text=block.text, signature=signature, redacted=block.redacted)
@@ -577,11 +629,17 @@ def _error(
         body=message,
         code=code,
         streamed=streamed,
-        partial=(
-            assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
-            if streamed
-            else None
-        ),
+            partial=(
+                partial_message(
+                    content,
+                    origin=origin,
+                    stop_reason="error",
+                    usage=usage,
+                    verified_origin=verified,
+                )
+                if streamed or usage is not None
+                else None
+            ),
     )
 
 
@@ -600,8 +658,13 @@ def _aborted(reason: str | None, origin: Any, content: list[Any] | None = None, 
         message=reason or "provider request aborted",
         retryable=False,
         partial=(
-            assistant_message(content, origin=origin, stop_reason="aborted", usage=usage, verified_origin=verified)
-            if content
+            partial_message(
+                content,
+                origin=origin,
+                usage=usage,
+                verified_origin=verified,
+            )
+            if content or usage is not None
             else None
         ),
     )

@@ -77,6 +77,8 @@ def transform_messages(
 
     target_protocol = protocol or target.api
     id_map: dict[str, str] = {}
+    used_tool_ids: set[str] = set()
+    tool_id_occurrences: dict[str, int] = {}
     transformed: list[Message] = []
 
     for message in messages:
@@ -117,8 +119,17 @@ def transform_messages(
                 content.append(block)
                 continue
             if isinstance(block, ToolCallBlock):
-                normalized = normalize_tool_call_id(block.id, target_protocol)
-                id_map[block.id] = normalized
+                normalized = _claim_tool_call_id(
+                    block.id,
+                    normalize_tool_call_id(block.id, target_protocol),
+                    used_tool_ids=used_tool_ids,
+                    occurrences=tool_id_occurrences,
+                )
+                # The canonical result map is keyed by the stored id. A
+                # duplicate stored id is not distinguishable in a later
+                # ToolResultMessage, so keep its first deterministic mapping
+                # and synthesize the unmatched duplicate below.
+                id_map.setdefault(block.id, normalized)
                 content.append(
                     ToolCallBlock(
                         id=normalized,
@@ -167,6 +178,27 @@ def _transform_user(message: UserMessage, *, supports_images: bool) -> UserMessa
     if supports_images:
         return message
     return UserMessage(content=_replace_images(message.content, tool=False))
+
+
+def _claim_tool_call_id(
+    source_id: str,
+    base_id: str,
+    *,
+    used_tool_ids: set[str],
+    occurrences: dict[str, int],
+) -> str:
+    occurrence = occurrences.get(source_id, 0)
+    occurrences[source_id] = occurrence + 1
+    candidate = base_id
+    if candidate in used_tool_ids:
+        salt = occurrence
+        while candidate in used_tool_ids:
+            digest = hashlib.sha256(f"{source_id}\x00{salt}".encode("utf-8")).hexdigest()[:16]
+            prefix = base_id[: max(1, 64 - len(digest) - 1)]
+            candidate = f"{prefix}_{digest}"
+            salt += 1
+    used_tool_ids.add(candidate)
+    return candidate
 
 
 def _transform_tool_result(

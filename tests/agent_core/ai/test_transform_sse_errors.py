@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import httpx
@@ -97,6 +98,28 @@ def test_cross_provider_transform_drops_opaque_payload_and_answers_orphaned_call
     assert synthetic.is_error is True  # type: ignore[attr-defined]
 
 
+def test_transform_keeps_normalized_tool_ids_unique_per_request() -> None:
+    unsafe_id = "bad:id"
+    colliding_safe_id = "call_" + hashlib.sha256(unsafe_id.encode()).hexdigest()[:24]
+    history = (
+        AssistantMessage(
+            content=(
+                ToolCallBlock(unsafe_id, "first", {"n": 1}),
+                ToolCallBlock(colliding_safe_id, "second", {"n": 2}),
+            ),
+            origin=Origin("google", "google", "model"),
+            stop_reason="tool_use",
+        ),
+    )
+
+    transformed = transform_messages(history, Origin("anthropic", "anthropic", "model"))
+    assistant = transformed.messages[0]
+    assert isinstance(assistant, AssistantMessage)
+    assert len({call.id for call in assistant.tool_calls}) == 2
+    assert assistant.tool_calls[0].id == transformed.tool_call_id_map[unsafe_id]
+    assert assistant.tool_calls[1].id == transformed.tool_call_id_map[colliding_safe_id]
+
+
 def test_empty_provider_custom_endpoints_have_distinct_origins() -> None:
     left = endpoint_origin(
         ModelEndpoint("openai_chat", "https://one.example/v1", "same-model", "token")
@@ -139,6 +162,14 @@ def test_auth_statuses_are_not_retryable(status: int) -> None:
 def test_network_errors_are_retryable_before_any_streamed_output() -> None:
     error = classify_error(exc=httpx.ConnectError("connection failed"))
     assert error.kind == "network"
+    assert error.retryable is True
+
+
+@pytest.mark.parametrize("code", ["UNAVAILABLE", "DEADLINE_EXCEEDED"])
+def test_google_transient_status_codes_are_retryable(code: str) -> None:
+    error = classify_error(code=code, body="transient upstream failure")
+
+    assert error.kind == "server"
     assert error.retryable is True
 
 

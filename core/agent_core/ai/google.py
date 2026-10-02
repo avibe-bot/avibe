@@ -22,6 +22,7 @@ from core.agent_core.ai._common import (
     iter_sse_events,
     json_object,
     open_stream,
+    partial_message,
     parsed_arguments,
     prepare_messages,
     read_response_body,
@@ -315,8 +316,14 @@ class GoogleAdapter(ProviderAdapter):
                 exc=exc,
                 streamed=streamed,
                 partial=(
-                    assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
-                    if streamed
+                    partial_message(
+                        content,
+                        origin=origin,
+                        stop_reason="error",
+                        usage=usage,
+                        verified_origin=verified,
+                    )
+                    if streamed or usage is not None
                     else None
                 ),
             )
@@ -611,11 +618,17 @@ def _error(
         body=message,
         code=code,
         streamed=streamed,
-        partial=(
-            assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
-            if streamed or include_partial
-            else None
-        ),
+            partial=(
+                partial_message(
+                    content,
+                    origin=origin,
+                    stop_reason="error",
+                    usage=usage,
+                    verified_origin=verified,
+                )
+                if streamed or include_partial or usage is not None
+                else None
+            ),
     )
 
 
@@ -629,8 +642,13 @@ def _aborted(reason: str | None, origin: Any, content: list[Any] | None = None, 
         message=reason or "provider request aborted",
         retryable=False,
         partial=(
-            assistant_message(content, origin=origin, stop_reason="aborted", usage=usage, verified_origin=verified)
-            if content
+            partial_message(
+                content,
+                origin=origin,
+                usage=usage,
+                verified_origin=verified,
+            )
+            if content or usage is not None
             else None
         ),
     )

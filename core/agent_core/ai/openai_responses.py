@@ -25,6 +25,7 @@ from core.agent_core.ai._common import (
     iter_sse_events,
     json_object,
     open_stream,
+    partial_message,
     parsed_arguments,
     prepare_messages,
     read_response_body,
@@ -105,6 +106,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         calls: dict[int, dict[str, Any]] = {}
         call_indexes_by_item: dict[str, int] = {}
         reasoning: dict[int, dict[str, Any]] = {}
+        text_slots: dict[int, dict[str, Any]] = {}
         usage = None
         status: str | None = None
         incomplete_reason: str | None = None
@@ -180,25 +182,46 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     elif event_type == "response.output_text.delta":
                         value = _string(chunk.get("delta"))
                         if value:
-                            content = _append_text(content, value)
+                            output_index = _int(chunk.get("output_index"), 0)
+                            state = text_slots.get(output_index)
+                            if state is None:
+                                # Pi creates output slots only from
+                                # response.output_item.added. Deltas for an
+                                # unknown slot are ignored, preserving
+                                # arrival order and avoiding invented blocks.
+                                continue
+                            content_index = state.get("content_index")
+                            if not isinstance(content_index, int):
+                                continue
+                            _set_text(content, content_index, value)
                             streamed = True
-                            yield TextDelta(index=_find(content, TextBlock), delta=value)
+                            yield TextDelta(index=content_index, delta=value)
                     elif event_type == "response.refusal.delta":
                         value = _string(chunk.get("delta"))
                         if value:
-                            content = _append_text(content, value)
                             refusal = True
+                            output_index = _int(chunk.get("output_index"), 0)
+                            state = text_slots.get(output_index)
+                            if state is None:
+                                continue
+                            content_index = state.get("content_index")
+                            if not isinstance(content_index, int):
+                                continue
+                            _set_text(content, content_index, value)
                             streamed = True
-                            yield TextDelta(index=_find(content, TextBlock), delta=value)
+                            yield TextDelta(index=content_index, delta=value)
                     elif event_type in {"response.reasoning_summary_text.delta", "response.reasoning_text.delta"}:
                         value = _string(chunk.get("delta"))
                         if value:
                             output_index = _int(chunk.get("output_index"), 0)
                             state = reasoning.setdefault(output_index, {"id": "", "encrypted_content": ""})
-                            content = _append_thinking(content, value, output_index, reasoning)
+                            content_index = state.get("content_index")
+                            if not isinstance(content_index, int):
+                                continue
+                            _set_thinking_text(content, content_index, value)
                             state["text"] = f"{state.get('text', '')}{value}"
                             streamed = True
-                            yield ThinkingDelta(index=_find(content, ThinkingBlock), delta=value)
+                            yield ThinkingDelta(index=content_index, delta=value)
                     elif event_type == "response.output_item.added":
                         item = chunk.get("item")
                         output_index = _int(chunk.get("output_index"), len(calls) + len(reasoning))
@@ -250,19 +273,22 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 )
                             if item_id:
                                 call_indexes_by_item[item_id] = output_index
+                            streamed = True
                             yield ToolCallStart(index=state["content_index"], id=call_id, name=name)
                         elif item_type == "reasoning":
                             state = reasoning.setdefault(output_index, {"id": "", "encrypted_content": "", "text": ""})
                             state["id"] = _string(item.get("id"))
                             state["encrypted_content"] = _string(item.get("encrypted_content"))
+                            if "content_index" not in state:
+                                state["content_index"] = len(content)
+                                content.append(ThinkingBlock(text="", signature=None))
                             if state["encrypted_content"]:
                                 _set_thinking_signature(content, output_index, state)
-                        elif item_type not in {"message", "output_text", "refusal"}:
-                            yield terminal_event(
-                                response,
-                                _invalid_tool_metadata(f"unsupported Responses output item: {item_type!r}"),
-                            )
-                            return
+                        elif item_type == "message":
+                            state = text_slots.setdefault(output_index, {"text": ""})
+                            if "content_index" not in state:
+                                state["content_index"] = len(content)
+                                content.append(TextBlock(text=""))
                     elif event_type == "response.reasoning_summary_text.done":
                         continue
                     elif event_type == "response.function_call_arguments.delta":
@@ -270,11 +296,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         state = calls.setdefault(output_index, {"id": "", "name": "", "arguments": ""})
                         value = _string(chunk.get("delta"))
                         if "content_index" not in state:
-                            yield terminal_event(
-                                response,
-                                _invalid_tool_metadata("function-call arguments arrived before output_item.added"),
-                            )
-                            return
+                            continue
                         state["arguments"] += value
                         streamed = streamed or bool(value)
                         yield ToolCallDelta(index=_int(state.get("content_index"), 0), arguments_delta=value)
@@ -311,6 +333,9 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 state = reasoning.setdefault(output_index, {"id": "", "encrypted_content": "", "text": ""})
                                 state["id"] = _string(item.get("id")) or state.get("id", "")
                                 state["encrypted_content"] = _string(item.get("encrypted_content")) or state.get("encrypted_content", "")
+                                if "content_index" not in state:
+                                    state["content_index"] = len(content)
+                                    content.append(ThinkingBlock(text="", signature=None))
                                 if state["encrypted_content"]:
                                     _set_thinking_signature(content, output_index, state)
                             elif item.get("type") == "function_call":
@@ -334,14 +359,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                     )
                                     return
                                 state["arguments"] = raw_arguments or state.get("arguments", "")
-                            elif item.get("type") not in {"message", "output_text", "refusal"}:
-                                yield terminal_event(
-                                    response,
-                                    _invalid_tool_metadata(
-                                        f"unsupported Responses output item: {item.get('type')!r}"
-                                    ),
-                                )
-                                return
+                            elif item.get("type") == "message":
+                                state = text_slots.setdefault(output_index, {"text": ""})
+                                if "content_index" not in state:
+                                    state["content_index"] = len(content)
+                                    content.append(TextBlock(text=""))
                     elif event_type in {"response.completed", "response.incomplete"}:
                         response_body = chunk.get("response")
                         if not isinstance(response_body, Mapping):
@@ -363,6 +385,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             content,
                             calls,
                             reasoning,
+                            text_slots,
                             call_indexes_by_item,
                         )
                         if terminal_output_error is not None:
@@ -448,11 +471,10 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     }:
                         continue
                     else:
-                        yield terminal_event(
-                            response,
-                            _invalid_tool_metadata(f"unsupported Responses stream event: {event_type!r}"),
-                        )
-                        return
+                        # Pi ignores response event types it does not know,
+                        # including newly added reasoning-summary lifecycle
+                        # events. Unknown frames must not kill a valid stream.
+                        continue
                 if cancel.cancelled:
                     yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
                     return
@@ -472,8 +494,14 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 exc=exc,
                 streamed=streamed,
                 partial=(
-                    assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
-                    if streamed
+                    partial_message(
+                        content,
+                        origin=origin,
+                        stop_reason="error",
+                        usage=usage,
+                        verified_origin=verified,
+                    )
+                    if streamed or usage is not None
                     else None
                 ),
             )
@@ -522,17 +550,26 @@ def _message_to_response(
         return [{"role": "user", "content": _response_content(message.content, supports_images, input_text=True, loaded_images=loaded_images)}]
     if isinstance(message, AssistantMessage):
         items: list[dict[str, Any]] = []
-        text_parts: list[dict[str, Any]] = []
         for block in message.content:
             if isinstance(block, TextBlock) and block.text:
-                text_parts.append({"type": "output_text", "text": block.text})
+                items.append(
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": block.text}],
+                    }
+                )
             elif isinstance(block, ThinkingBlock):
                 if block.signature is not None:
                     details = _reasoning_signature(block.signature)
                     if details is not None:
                         items.append({"type": "reasoning", **details})
                 elif block.text:
-                    text_parts.append({"type": "output_text", "text": block.text})
+                    items.append(
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": block.text}],
+                        }
+                    )
             elif isinstance(block, ToolCallBlock):
                 items.append(
                     {
@@ -543,8 +580,6 @@ def _message_to_response(
                         "arguments": json.dumps(dict(block.arguments), ensure_ascii=False),
                     }
                 )
-        if text_parts:
-            items.insert(0, {"role": "assistant", "content": text_parts})
         return items or [{"role": "assistant", "content": ""}]
     if isinstance(message, ToolResultMessage):
         values = content_parts(message.content, include_images=supports_images, loaded_images=loaded_images)
@@ -602,6 +637,7 @@ def _apply_terminal_output_items(
     content: list[Any],
     calls: dict[int, dict[str, Any]],
     reasoning: dict[int, dict[str, Any]],
+    text_slots: dict[int, dict[str, Any]],
     call_indexes_by_item: dict[str, int],
 ) -> ProviderError | None:
     if not isinstance(items, list):
@@ -613,6 +649,9 @@ def _apply_terminal_output_items(
             state = reasoning.setdefault(index, {"id": "", "encrypted_content": "", "text": ""})
             state["id"] = _string(item.get("id")) or state.get("id", "")
             state["encrypted_content"] = _string(item.get("encrypted_content")) or state.get("encrypted_content", "")
+            if "content_index" not in state:
+                state["content_index"] = len(content)
+                content.append(ThinkingBlock(text="", signature=None))
             if state["encrypted_content"]:
                 _set_thinking_signature(content, index, state)
         elif item.get("type") == "function_call":
@@ -641,6 +680,20 @@ def _apply_terminal_output_items(
                     )
                 )
             state["arguments"] = raw_arguments or state.get("arguments", "")
+        elif item.get("type") == "message":
+            state = text_slots.setdefault(index, {"text": ""})
+            if "content_index" not in state:
+                state["content_index"] = len(content)
+                content.append(TextBlock(text=""))
+            value = item.get("content")
+            if isinstance(value, list):
+                text = "".join(
+                    _string(part.get("text")) or _string(part.get("refusal"))
+                    for part in value
+                    if isinstance(part, Mapping)
+                )
+                state["text"] = text
+                _set_text(content, state["content_index"], text)
     return None
 
 
@@ -720,11 +773,29 @@ def _set_thinking_signature(content: list[Any], output_index: int, state: Mappin
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    for index, block in enumerate(content):
+    content_index = state.get("content_index")
+    if isinstance(content_index, int) and content_index < len(content):
+        block = content[content_index]
         if isinstance(block, ThinkingBlock):
-            content[index] = ThinkingBlock(text=block.text, signature=signature, redacted=False)
+            content[content_index] = ThinkingBlock(text=block.text, signature=signature, redacted=False)
             return
     content.append(ThinkingBlock(text=str(state.get("text", "")), signature=signature))
+
+
+def _set_text(content: list[Any], index: int, value: str) -> None:
+    if index >= len(content):
+        return
+    block = content[index]
+    if isinstance(block, TextBlock):
+        content[index] = TextBlock(text=(block.text or "") + value)
+
+
+def _set_thinking_text(content: list[Any], index: int, value: str) -> None:
+    if index >= len(content):
+        return
+    block = content[index]
+    if isinstance(block, ThinkingBlock):
+        content[index] = ThinkingBlock(text=block.text + value, signature=block.signature)
 
 
 def _append_text(content: list[Any], value: str) -> list[Any]:
@@ -791,11 +862,17 @@ def _error(
         body=message,
         code=code,
         streamed=streamed,
-        partial=(
-            assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
-            if streamed or include_partial
-            else None
-        ),
+            partial=(
+                partial_message(
+                    content,
+                    origin=origin,
+                    stop_reason="error",
+                    usage=usage,
+                    verified_origin=verified,
+                )
+                if streamed or include_partial or usage is not None
+                else None
+            ),
     )
 
 
@@ -809,8 +886,13 @@ def _aborted(reason: str | None, origin: Any, content: list[Any] | None = None, 
         message=reason or "provider request aborted",
         retryable=False,
         partial=(
-            assistant_message(content, origin=origin, stop_reason="aborted", usage=usage, verified_origin=verified)
-            if content
+            partial_message(
+                content,
+                origin=origin,
+                usage=usage,
+                verified_origin=verified,
+            )
+            if content or usage is not None
             else None
         ),
     )

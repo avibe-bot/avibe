@@ -166,7 +166,10 @@ async def open_stream(
     finally:
         if response is not None:
             try:
-                await _await_network(response.aclose(), cancel)
+                # Cleanup must still run after the caller has cancelled. Use the
+                # same await owner with a fresh token so cancellation interrupts
+                # opening/reads but never leaks an already-open response.
+                await _await_network(response.aclose(), CancelToken())
             except Exception as exc:
                 if response.extensions.get("avibe_terminal_event"):
                     return
@@ -307,14 +310,14 @@ def incomplete_stream_error(
         body=f"{protocol} stream ended before terminal event",
         streamed=streamed,
         partial=(
-            assistant_message(
-                content,
-                origin=origin,
-                stop_reason="error",
-                usage=usage,
-                verified_origin=verified_origin,
-            )
-            if streamed
+                partial_message(
+                    content,
+                    origin=origin,
+                    usage=usage,
+                    verified_origin=verified_origin,
+                    stop_reason="error",
+                )
+            if streamed or usage is not None
             else None
         ),
     )
@@ -483,11 +486,12 @@ def partial_message(
     origin: Origin,
     usage: Any = None,
     verified_origin: bool = True,
+    stop_reason: str = "aborted",
 ) -> AssistantMessage:
     return assistant_message(
         content,
         origin=origin,
-        stop_reason="aborted",
+        stop_reason=stop_reason,
         usage=usage,
         verified_origin=verified_origin,
     )

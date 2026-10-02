@@ -189,6 +189,9 @@ def _classify_kind(
         "service_unavailable",
         "internal",
         "api_error",
+        "unavailable",
+        "deadline_exceeded",
+        "aborted",
     }:
         return "server"
     if normalized_code in {"context_length_exceeded", "request_too_large"}:

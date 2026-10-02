@@ -23,6 +23,7 @@ from core.agent_core.ai._common import (
     iter_sse_events,
     json_object,
     open_stream,
+    partial_message,
     parsed_arguments,
     prepare_messages,
     read_response_body,
@@ -259,8 +260,15 @@ class AnthropicAdapter(ProviderAdapter):
                         if not isinstance(delta, Mapping):
                             continue
                         delta_type = delta.get("type")
-                        state = block_state.setdefault(index, {"kind": "text", "text": ""})
-                        content_index = content_indices.get(index, index)
+                        state = block_state.get(index)
+                        if state is None:
+                            # Pi ignores content deltas for block kinds it
+                            # does not know yet; preserve that forward-
+                            # compatible policy instead of inventing text.
+                            continue
+                        content_index = content_indices.get(index)
+                        if content_index is None:
+                            continue
                         if delta_type == "text_delta":
                             value = _string(delta.get("text"))
                             if value:
@@ -293,7 +301,8 @@ class AnthropicAdapter(ProviderAdapter):
                             return
                     elif event_type == "content_block_stop":
                         index = _int(chunk.get("index"), 0)
-                        yield BlockEnd(index=content_indices.get(index, index))
+                        if index in content_indices:
+                            yield BlockEnd(index=content_indices[index])
                     elif event_type == "message_delta":
                         delta = chunk.get("delta")
                         if isinstance(delta, Mapping):
@@ -383,7 +392,11 @@ class AnthropicAdapter(ProviderAdapter):
             yield classify_error(
                 exc=exc,
                 streamed=streamed,
-                partial=_partial(content, served_origin, usage, verified_origin) if streamed else None,
+                partial=(
+                    _partial(content, served_origin, usage, verified_origin)
+                    if streamed or usage is not None
+                    else None
+                ),
             )
 
 
@@ -566,7 +579,13 @@ def _final_message(
 
 
 def _partial(content: list[Any], origin: Any, usage: Any, verified: bool) -> AssistantMessage:
-    return assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
+    return partial_message(
+        content,
+        origin=origin,
+        usage=usage,
+        verified_origin=verified,
+        stop_reason="error",
+    )
 
 
 def _stream_error(
@@ -584,7 +603,11 @@ def _stream_error(
         body=message,
         code=code,
         streamed=streamed,
-        partial=_partial(content, origin, usage, verified_origin) if streamed or include_partial else None,
+        partial=(
+            _partial(content, origin, usage, verified_origin)
+            if streamed or include_partial or usage is not None
+            else None
+        ),
     )
 
 
@@ -608,7 +631,7 @@ def _aborted_error(
         kind="aborted",
         message=reason or "provider request aborted",
         retryable=False,
-        partial=_partial(content, origin, usage, verified) if content else None,
+        partial=_partial(content, origin, usage, verified) if content or usage is not None else None,
     )
 
 
