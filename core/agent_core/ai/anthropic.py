@@ -25,6 +25,7 @@ from core.agent_core.ai._common import (
     open_stream,
     parsed_arguments,
     prepare_messages,
+    read_response_body,
     resolve_served_origin,
     text_from_content,
 )
@@ -135,7 +136,10 @@ class AnthropicAdapter(ProviderAdapter):
                     gateway=self._gateway,
                 )
                 if response.status_code >= 400:
-                    body = (await response.aread()).decode("utf-8", errors="replace")
+                    body = await read_response_body(response, cancel)
+                    if body is None:
+                        yield _aborted_error(cancel.reason, served_origin, content, usage, verified_origin)
+                        return
                     yield classify_error(
                         status=response.status_code,
                         body=body,
@@ -277,7 +281,10 @@ class AnthropicAdapter(ProviderAdapter):
                             usage=usage,
                             verified_origin=verified_origin,
                         )
-                        yield Done(final)
+                        if isinstance(final, ProviderError):
+                            yield final
+                        else:
+                            yield Done(final)
                         return
                 if cancel.cancelled:
                     yield _aborted_error(cancel.reason, served_origin, content, usage, verified_origin)
@@ -300,7 +307,10 @@ class AnthropicAdapter(ProviderAdapter):
                     usage=usage,
                     verified_origin=verified_origin,
                 )
-                yield Done(final)
+                if isinstance(final, ProviderError):
+                    yield final
+                else:
+                    yield Done(final)
         except httpx.HTTPError as exc:
             yield classify_error(
                 exc=exc,
@@ -451,7 +461,7 @@ def _final_message(
     stop_reason: str,
     usage: Any,
     verified_origin: bool,
-) -> AssistantMessage:
+) -> AssistantMessage | ProviderError:
     final: list[Any] = []
     for block in content:
         if isinstance(block, TextBlock):
@@ -467,7 +477,9 @@ def _final_message(
                 ),
                 {},
             )
-            args = parsed_arguments(str(state.get("arguments", "")))
+            args = parsed_arguments(str(state.get("arguments", "")), tool_name=block.name)
+            if isinstance(args, ProviderError):
+                return args
             final.append(
                 ToolCallBlock(
                     id=block.id,

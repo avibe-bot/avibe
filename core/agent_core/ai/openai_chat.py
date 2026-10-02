@@ -24,6 +24,7 @@ from core.agent_core.ai._common import (
     open_stream,
     parsed_arguments,
     prepare_messages,
+    read_response_body,
     resolve_served_origin,
 )
 from core.agent_core.ai.errors import classify_error
@@ -127,7 +128,10 @@ class OpenAIChatAdapter(ProviderAdapter):
                     gateway=self._gateway,
                 )
                 if response.status_code >= 400:
-                    body = (await response.aread()).decode("utf-8", errors="replace")
+                    body = await read_response_body(response, cancel)
+                    if body is None:
+                        yield _aborted(cancel.reason, origin, content, usage, verified)
+                        return
                     yield classify_error(status=response.status_code, body=body, headers=response.headers)
                     return
                 async for event in iter_sse_events(response, cancel):
@@ -161,9 +165,9 @@ class OpenAIChatAdapter(ProviderAdapter):
                         content = _append_text(content, value)
                         streamed = True
                         yield TextDelta(index=_find_block_index(content, TextBlock), delta=value)
-                    reasoning = _first_reasoning_delta(delta)
+                    reasoning_field, reasoning = _first_reasoning_delta(delta)
                     if reasoning:
-                        content = _append_thinking(content, reasoning)
+                        content = _append_thinking(content, reasoning, reasoning_field)
                         streamed = True
                         yield ThinkingDelta(index=_find_block_index(content, ThinkingBlock), delta=reasoning)
                     refusal = _string(delta.get("refusal"))
@@ -226,7 +230,10 @@ class OpenAIChatAdapter(ProviderAdapter):
                 for index in range(len(content)):
                     yield BlockEnd(index=index)
                 final = _final_message(content, tools, origin, finish_reason, usage, verified)
-                yield Done(final)
+                if isinstance(final, ProviderError):
+                    yield final
+                else:
+                    yield Done(final)
         except httpx.HTTPError as exc:
             yield classify_error(
                 exc=exc,
@@ -347,7 +354,7 @@ def _final_message(
     finish_reason: str | None,
     usage: Any,
     verified: bool,
-) -> AssistantMessage:
+) -> AssistantMessage | ProviderError:
     final: list[Any] = []
     for block in content:
         if isinstance(block, ToolCallBlock):
@@ -359,12 +366,15 @@ def _final_message(
                 ),
                 {},
             )
+            arguments = parsed_arguments(str(state.get("arguments", "")), tool_name=block.name)
+            if isinstance(arguments, ProviderError):
+                return arguments
             final.append(
                 ToolCallBlock(
                     id=block.id,
                     native_id=block.native_id,
                     name=block.name,
-                    arguments=parsed_arguments(str(state.get("arguments", ""))),
+                    arguments=arguments,
                 )
             )
         else:
@@ -409,12 +419,12 @@ def _openai_usage(value: Mapping[str, Any]) -> Any:
     )
 
 
-def _first_reasoning_delta(delta: Mapping[str, Any]) -> str:
+def _first_reasoning_delta(delta: Mapping[str, Any]) -> tuple[str | None, str]:
     for key in ("reasoning_content", "reasoning", "reasoning_text"):
         value = delta.get(key)
         if isinstance(value, str) and value:
-            return value
-    return ""
+            return key, value
+    return None, ""
 
 
 def _apply_reasoning_details(content: list[Any], details: list[Any]) -> list[Any]:
@@ -447,12 +457,16 @@ def _append_text(content: list[Any], value: str) -> list[Any]:
     return content
 
 
-def _append_thinking(content: list[Any], value: str) -> list[Any]:
+def _append_thinking(content: list[Any], value: str, marker: str | None = None) -> list[Any]:
     for index, block in enumerate(content):
         if isinstance(block, ThinkingBlock):
-            content[index] = ThinkingBlock(text=block.text + value, signature=block.signature, redacted=block.redacted)
+            content[index] = ThinkingBlock(
+                text=block.text + value,
+                signature=block.signature or marker,
+                redacted=block.redacted,
+            )
             return content
-    content.append(ThinkingBlock(text=value))
+    content.append(ThinkingBlock(text=value, signature=marker))
     return content
 
 

@@ -38,6 +38,7 @@ class SSEParser:
         self._event: str | None = None
         self._event_id: str | None = None
         self._retry: int | None = None
+        self._at_stream_start = True
 
     def feed(self, chunk: bytes | bytearray | memoryview | str) -> list[SSEEvent]:
         """Consume an arbitrary chunk and return complete events."""
@@ -79,11 +80,15 @@ class SSEParser:
 
     def _decode(self, chunk: bytes | bytearray | memoryview | str) -> str:
         if isinstance(chunk, (bytes, bytearray, memoryview)):
-            return self._decoder.decode(bytes(chunk), final=False)
-        pending, _ = self._decoder.getstate()
-        if pending:
-            return self._decoder.decode(b"", final=True) + chunk
-        return chunk
+            text = self._decoder.decode(bytes(chunk), final=False)
+        else:
+            pending, _ = self._decoder.getstate()
+            text = self._decoder.decode(b"", final=True) + chunk if pending else chunk
+        if self._at_stream_start and text:
+            self._at_stream_start = False
+            if text.startswith("\ufeff"):
+                text = text[1:]
+        return text
 
     def _take_line(self) -> str | None:
         for index, character in enumerate(self._buffer):

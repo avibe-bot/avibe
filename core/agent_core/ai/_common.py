@@ -6,9 +6,9 @@ import asyncio
 import base64
 import json
 from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import replace
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import unquote_to_bytes
 
 import httpx
@@ -30,6 +30,7 @@ from core.agent_core.messages import (
 from core.agent_core.ai.provider import MediaLoader, ModelEndpoint, ProviderError
 
 ServedHopResolver = Callable[[Mapping[str, str]], Origin | None]
+_T = TypeVar("_T")
 
 
 def endpoint_origin(endpoint: ModelEndpoint) -> Origin:
@@ -110,29 +111,14 @@ async def iter_sse_events(
     while True:
         if cancel.cancelled:
             return
-        read_task = asyncio.create_task(iterator.__anext__())
-        cancel_task = asyncio.create_task(cancel.wait())
         try:
-            done, _ = await asyncio.wait({read_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED)
-            if cancel_task in done and cancel.cancelled:
-                read_task.cancel()
-                with _suppress_cancelled():
-                    await read_task
-                return
-            cancel_task.cancel()
-            with _suppress_cancelled():
-                await cancel_task
-            try:
-                chunk = read_task.result()
-            except StopAsyncIteration:
-                break
-            for event in parser.feed(chunk):
-                yield event
-        finally:
-            if not read_task.done():
-                read_task.cancel()
-            if not cancel_task.done():
-                cancel_task.cancel()
+            chunk = await _await_network(iterator.__anext__(), cancel)
+        except StopAsyncIteration:
+            break
+        if chunk is None:
+            return
+        for event in parser.feed(chunk):
+            yield event
     for event in parser.finish():
         yield event
 
@@ -153,38 +139,73 @@ async def open_stream(
         yield None
         return
     request = client.build_request(method, url, json=json_body, headers=headers)
-    send_task = asyncio.create_task(client.send(request, stream=True))
-    cancel_task = asyncio.create_task(cancel.wait())
     response: httpx.Response | None = None
     try:
-        done, _ = await asyncio.wait(
-            {send_task, cancel_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if cancel_task in done and cancel.cancelled:
-            if not send_task.done():
-                send_task.cancel()
-                with _suppress_cancelled():
-                    await send_task
-            else:
-                with _suppress_cancelled():
-                    response = send_task.result()
-            if response is not None:
-                await response.aclose()
+        response = await _await_network(client.send(request, stream=True), cancel)
+        if response is None:
             yield None
             return
-        cancel_task.cancel()
-        with _suppress_cancelled():
-            await cancel_task
-        response = send_task.result()
         yield response
     finally:
-        if not cancel_task.done():
-            cancel_task.cancel()
-            with _suppress_cancelled():
-                await cancel_task
         if response is not None:
             await response.aclose()
+
+
+async def _await_network(awaitable: Awaitable[_T], cancel: CancelToken) -> _T | None:
+    """Own one cancellable network await for opening, reads, and body reads."""
+
+    if cancel.cancelled:
+        close = getattr(awaitable, "close", None)
+        if close is not None:
+            close()
+        return None
+    operation = asyncio.ensure_future(awaitable)
+    cancellation = asyncio.create_task(cancel.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {operation, cancellation},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancellation in done and cancel.cancelled:
+            operation.cancel()
+            with _suppress_base_exceptions():
+                await operation
+            return None
+        return operation.result()
+    finally:
+        if not cancellation.done():
+            cancellation.cancel()
+            with _suppress_cancelled():
+                await cancellation
+
+
+async def read_response_body(
+    response: httpx.Response,
+    cancel: CancelToken,
+    *,
+    max_bytes: int = 64 * 1024,
+) -> str | None:
+    """Read an error body through the shared cancellation owner with a byte cap."""
+
+    iterator = response.aiter_bytes().__aiter__()
+    chunks: list[bytes] = []
+    size = 0
+    while size < max_bytes:
+        try:
+            chunk = await _await_network(iterator.__anext__(), cancel)
+        except StopAsyncIteration:
+            break
+        if chunk is None:
+            return None
+        if not chunk:
+            continue
+        remaining = max_bytes - size
+        piece = bytes(chunk[:remaining])
+        chunks.append(piece)
+        size += len(piece)
+        if len(piece) < len(chunk):
+            break
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 async def prepare_messages(
@@ -246,6 +267,14 @@ class _suppress_cancelled:
 
     def __exit__(self, exception_type: type[BaseException] | None, exception: BaseException | None, traceback: Any) -> bool:
         return exception_type is asyncio.CancelledError
+
+
+class _suppress_base_exceptions:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exception_type: type[BaseException] | None, exception: BaseException | None, traceback: Any) -> bool:
+        return exception_type is not None
 
 
 def json_object(data: str) -> dict[str, Any] | None:
@@ -330,9 +359,25 @@ def tool_schema(tool: Any) -> dict[str, Any]:
     }
 
 
-def parsed_arguments(raw: str) -> dict[str, Any]:
-    value = json_object(raw)
-    return value if value is not None else {}
+def parsed_arguments(raw: str, *, tool_name: str = "") -> dict[str, Any] | ProviderError:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return _malformed_arguments(tool_name)
+    if not isinstance(value, dict):
+        return _malformed_arguments(tool_name)
+    return value
+
+
+def _malformed_arguments(tool_name: str) -> ProviderError:
+    suffix = f" for tool {tool_name}" if tool_name else ""
+    return ProviderError(
+        kind="invalid_request",
+        message=f"malformed tool arguments{suffix}: expected a JSON object",
+        retryable=False,
+    )
 
 
 def assistant_message(

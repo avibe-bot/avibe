@@ -55,6 +55,14 @@ def test_sse_parser_flushes_a_final_cr_line_ending() -> None:
     assert parser.finish()[0].data == "final"
 
 
+def test_sse_parser_strips_one_utf8_bom_at_stream_start() -> None:
+    parser = SSEParser()
+    events = parser.feed(b"\xef\xbb\xbfdata: first\n\n")
+    events.extend(parser.feed("data: second\n\n"))
+
+    assert [event.data for event in events] == ["first", "second"]
+
+
 def test_cross_provider_transform_drops_opaque_payload_and_answers_orphaned_calls() -> None:
     source = Origin("google", "google", "gemini-test")
     target = Origin("anthropic", "anthropic", "claude-test")
@@ -117,6 +125,14 @@ def test_network_errors_are_retryable_before_any_streamed_output() -> None:
     error = classify_error(exc=httpx.ConnectError("connection failed"))
     assert error.kind == "network"
     assert error.retryable is True
+
+
+def test_error_json_without_message_redacts_sensitive_values() -> None:
+    error = classify_error(body='{"token":"secret-token","api_key":"sk-secret"}')
+
+    assert "secret-token" not in error.message
+    assert "sk-secret" not in error.message
+    assert "[redacted]" in error.message
 
 
 @pytest.mark.parametrize("source", _PROTOCOL_ORIGINS)

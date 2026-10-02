@@ -24,6 +24,7 @@ from core.agent_core.ai._common import (
     open_stream,
     parsed_arguments,
     prepare_messages,
+    read_response_body,
     resolve_served_origin,
 )
 from core.agent_core.ai.errors import classify_error
@@ -126,7 +127,10 @@ class GoogleAdapter(ProviderAdapter):
                     gateway=self._gateway,
                 )
                 if response.status_code >= 400:
-                    body = (await response.aread()).decode("utf-8", errors="replace")
+                    body = await read_response_body(response, cancel)
+                    if body is None:
+                        yield _aborted(cancel.reason, origin, content, usage, verified)
+                        return
                     yield classify_error(status=response.status_code, body=body, headers=response.headers)
                     return
                 async for event in iter_sse_events(response, cancel):
@@ -247,7 +251,10 @@ class GoogleAdapter(ProviderAdapter):
                 for index in range(len(content)):
                     yield BlockEnd(index=index)
                 final = _final(content, calls, origin, finish_reason or ("tool_use" if calls else "stop"), usage, verified)
-                yield Done(final)
+                if isinstance(final, ProviderError):
+                    yield final
+                else:
+                    yield Done(final)
         except httpx.HTTPError as exc:
             yield classify_error(
                 exc=exc,
@@ -271,16 +278,12 @@ def build_google_payload(
     if thinking is not None:
         config["thinkingConfig"] = thinking
     payload: dict[str, Any] = {
-        "contents": [
-            part
-            for message in messages
-            for part in _message_to_google(
-                message,
-                model=request.endpoint.model_id,
-                supports_images=request.supports_images,
-                loaded_images=loaded_images,
-            )
-        ],
+        "contents": _google_contents(
+            messages,
+            model=request.endpoint.model_id,
+            supports_images=request.supports_images,
+            loaded_images=loaded_images,
+        ),
     }
     if request.system:
         payload["systemInstruction"] = {"parts": [{"text": request.system}]}
@@ -353,6 +356,30 @@ def _message_to_google(
     raise TypeError(f"unsupported message {type(message).__name__}")
 
 
+def _google_contents(
+    messages: tuple[Any, ...],
+    *,
+    model: str,
+    supports_images: bool,
+    loaded_images: Mapping[str, tuple[str, str]] | None,
+) -> list[dict[str, Any]]:
+    contents: list[dict[str, Any]] = []
+    last_was_tool_result = False
+    for message in messages:
+        converted = _message_to_google(
+            message,
+            model=model,
+            supports_images=supports_images,
+            loaded_images=loaded_images,
+        )
+        if isinstance(message, ToolResultMessage) and last_was_tool_result and contents:
+            contents[-1]["parts"].extend(converted[0]["parts"])
+        else:
+            contents.extend(converted)
+        last_was_tool_result = isinstance(message, ToolResultMessage)
+    return contents
+
+
 def _google_parts(
     content: tuple[Any, ...],
     supports_images: bool,
@@ -367,18 +394,28 @@ def _google_parts(
     return result or [{"text": "(no content)"}]
 
 
-def _final(content: list[Any], calls: list[Mapping[str, Any]], origin: Any, reason: str, usage: Any, verified: bool) -> AssistantMessage:
+def _final(
+    content: list[Any],
+    calls: list[Mapping[str, Any]],
+    origin: Any,
+    reason: str,
+    usage: Any,
+    verified: bool,
+) -> AssistantMessage | ProviderError:
     final: list[Any] = []
     call_index = 0
     for block in content:
         if isinstance(block, ToolCallBlock):
             state = calls[call_index] if call_index < len(calls) else {}
+            arguments = parsed_arguments(str(state.get("arguments", "")), tool_name=block.name)
+            if isinstance(arguments, ProviderError):
+                return arguments
             final.append(
                 ToolCallBlock(
                     id=block.id,
                     native_id=block.native_id,
                     name=block.name,
-                    arguments=parsed_arguments(str(state.get("arguments", ""))),
+                    arguments=arguments,
                     signature=state.get("signature") or block.signature,
                 )
             )
@@ -407,28 +444,51 @@ def _thinking_config(model: str, effort: str | None) -> dict[str, Any] | None:
     if effort is None:
         return None
     normalized = effort.lower()
-    if normalized in {"none", "off", "disabled"}:
-        if "gemini-3" in model.lower() or "gemma-4" in model.lower():
+    normalized_model = model.lower()
+    if "gemini-3" in normalized_model or "gemma-4" in normalized_model:
+        if normalized in {"none", "off", "disabled"}:
             return {"includeThoughts": True, "thinkingLevel": "MINIMAL"}
-        return {"thinkingBudget": 0}
-    if "gemini-3" in model.lower() or "gemma-4" in model.lower():
-        return {"includeThoughts": True, "thinkingLevel": {"minimal": "MINIMAL", "low": "LOW", "medium": "MEDIUM", "high": "HIGH", "xhigh": "HIGH"}.get(normalized, "HIGH")}
+        return {
+            "includeThoughts": True,
+            "thinkingLevel": {
+                "minimal": "MINIMAL",
+                "low": "LOW",
+                "medium": "MEDIUM",
+                "high": "HIGH",
+                "xhigh": "HIGH",
+            }.get(normalized, "HIGH"),
+        }
     budgets = {
         "gemini-2.5-pro": {"minimal": 128, "low": 2048, "medium": 8192, "high": 32768, "xhigh": 32768},
         "gemini-2.5-flash": {"minimal": 128, "low": 2048, "medium": 8192, "high": 24576, "xhigh": 24576},
     }
     for prefix, values in budgets.items():
-        if prefix in model.lower():
+        if prefix in normalized_model:
+            if normalized in {"none", "off", "disabled"}:
+                return {"includeThoughts": True, "thinkingBudget": values["minimal"]}
             return {"includeThoughts": True, "thinkingBudget": values.get(normalized, values["medium"])}
-    return {"includeThoughts": True, "thinkingLevel": normalized.upper()}
+    return None
 
 
 def _normalize_stop(reason: str | None, has_tools: bool) -> str:
     if reason in {"MAX_TOKENS", "LENGTH"}:
         return "length"
-    if reason in {"SAFETY", "IMAGE_SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "RECITATION"}:
+    if reason in {
+        "SAFETY",
+        "IMAGE_SAFETY",
+        "BLOCKLIST",
+        "PROHIBITED_CONTENT",
+        "IMAGE_PROHIBITED_CONTENT",
+        "RECITATION",
+        "SPII",
+    }:
         return "safety"
-    if reason in {"MALFORMED_FUNCTION_CALL", "OTHER_ERROR"}:
+    if reason in {
+        "MALFORMED_FUNCTION_CALL",
+        "UNEXPECTED_TOOL_CALL",
+        "TOO_MANY_TOOL_CALLS",
+        "OTHER_ERROR",
+    }:
         return "error"
     return "tool_use" if has_tools else "stop"
 

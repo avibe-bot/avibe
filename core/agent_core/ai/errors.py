@@ -57,6 +57,18 @@ _NAMED_SECRET_RE = re.compile(
     r"(?i)\b(?:authorization|api[_-]?key|x-api-key|token|secret)\s*([:=])\s*([^\s,;\"']+)"
 )
 _QUERY_SECRET_RE = re.compile(r"(?i)([?&](?:key|token|api[_-]?key)=)[^&\s]+")
+_SENSITIVE_KEYS = {
+    "authorization",
+    "api_key",
+    "apikey",
+    "x-api-key",
+    "x_api_key",
+    "token",
+    "secret",
+    "password",
+    "access_token",
+    "refresh_token",
+}
 
 
 def classify_error(
@@ -67,12 +79,13 @@ def classify_error(
     streamed: bool = False,
     partial: AssistantMessage | None = None,
     exc: BaseException | None = None,
+    code: str | None = None,
 ) -> ProviderError:
     """Classify one HTTP, provider-body, or network failure."""
 
     message = _error_message(body, exc)
     retry_after = parse_retry_after(_header_value(headers, "retry-after"))
-    kind = _classify_kind(status=status, message=f"{body}\n{message}", exc=exc)
+    kind = _classify_kind(status=status, message=f"{body}\n{message}", exc=exc, code=code)
     retryable = kind in {"rate_limit", "overloaded", "network", "server"} and not streamed
     return ProviderError(
         kind=kind,
@@ -134,7 +147,13 @@ def is_overflow_message(message: str, *, status: int | None = None) -> bool:
     return any(pattern.search(message) for pattern in _OVERFLOW_RE)
 
 
-def _classify_kind(*, status: int | None, message: str, exc: BaseException | None) -> str:
+def _classify_kind(
+    *,
+    status: int | None,
+    message: str,
+    exc: BaseException | None,
+    code: str | None = None,
+) -> str:
     if status == 413:
         return "overflow"
     if status in {401, 403}:
@@ -146,6 +165,13 @@ def _classify_kind(*, status: int | None, message: str, exc: BaseException | Non
             return "overloaded"
         return "server"
     if status in {408, 409, 425}:
+        return "server"
+    normalized_code = (code or "").lower()
+    if normalized_code in {"rate_limit", "rate_limited", "too_many_requests"}:
+        return "rate_limit"
+    if normalized_code in {"overloaded", "overload"}:
+        return "overloaded"
+    if normalized_code in {"server_error", "internal_server_error", "bad_gateway", "service_unavailable"}:
         return "server"
     if is_overflow_message(message, status=status):
         return "overflow"
@@ -176,7 +202,7 @@ def _error_message(body: str, exc: BaseException | None) -> str:
         extracted = _extract_message(value)
         if extracted:
             return _redact(extracted)
-        return _redact(body.strip())
+        return _redact(json.dumps(_redact_json(value), ensure_ascii=False, separators=(",", ":")))
     if exc is not None:
         return _redact(str(exc) or type(exc).__name__)
     return "provider request failed"
@@ -204,6 +230,16 @@ def _extract_message(value: Any) -> str | None:
             if nested:
                 return nested
     return None
+
+
+def _redact_json(value: Any, *, key: str | None = None) -> Any:
+    if key is not None and key.lower().replace("-", "_") in _SENSITIVE_KEYS:
+        return "[redacted]"
+    if isinstance(value, Mapping):
+        return {str(item_key): _redact_json(item_value, key=str(item_key)) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [_redact_json(item) for item in value]
+    return value
 
 
 def _header_value(headers: Mapping[str, str] | None, name: str) -> str | None:

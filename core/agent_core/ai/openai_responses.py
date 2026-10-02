@@ -27,6 +27,7 @@ from core.agent_core.ai._common import (
     open_stream,
     parsed_arguments,
     prepare_messages,
+    read_response_body,
     resolve_served_origin,
 )
 from core.agent_core.ai.errors import classify_error
@@ -132,7 +133,10 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     gateway=self._gateway,
                 )
                 if response.status_code >= 400:
-                    body = (await response.aread()).decode("utf-8", errors="replace")
+                    body = await read_response_body(response, cancel)
+                    if body is None:
+                        yield _aborted(cancel.reason, origin, content, usage, verified)
+                        return
                     yield classify_error(status=response.status_code, body=body, headers=response.headers)
                     return
                 async for event in iter_sse_events(response, cancel):
@@ -268,13 +272,17 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         final = _final(content, calls, origin, status, incomplete_reason, usage, verified, refusal=refusal)
                         for index in range(len(content)):
                             yield BlockEnd(index=index)
-                        yield Done(final)
+                        if isinstance(final, ProviderError):
+                            yield final
+                        else:
+                            yield Done(final)
                         return
                     elif event_type == "response.failed":
                         response_body = chunk.get("response")
                         error = response_body.get("error") if isinstance(response_body, Mapping) else chunk.get("error")
                         message = _string(error.get("message")) if isinstance(error, Mapping) else json.dumps(dict(chunk), ensure_ascii=False)
-                        yield _error(message, streamed, content, origin, usage, verified)
+                        code = _string(error.get("code")) if isinstance(error, Mapping) else ""
+                        yield _error(message, streamed, content, origin, usage, verified, code=code or None)
                         return
                     elif event_type == "error":
                         yield _error(_string(chunk.get("message")) or json.dumps(dict(chunk), ensure_ascii=False), streamed, content, origin, usage, verified)
@@ -470,17 +478,20 @@ def _final(
     verified: bool,
     *,
     refusal: bool = False,
-) -> AssistantMessage:
+) -> AssistantMessage | ProviderError:
     final: list[Any] = []
     for block in content:
         if isinstance(block, ToolCallBlock):
             state = next((candidate for candidate in calls.values() if candidate.get("id") == block.id), {})
+            arguments = parsed_arguments(str(state.get("arguments", "")), tool_name=block.name)
+            if isinstance(arguments, ProviderError):
+                return arguments
             final.append(
                 ToolCallBlock(
                     id=block.id,
                     native_id=block.native_id,
                     name=block.name,
-                    arguments=parsed_arguments(str(state.get("arguments", ""))),
+                    arguments=arguments,
                 )
             )
         else:
@@ -576,9 +587,19 @@ def _resolve_call_index(
     return 0
 
 
-def _error(message: str, streamed: bool, content: list[Any], origin: Any, usage: Any, verified: bool) -> ProviderError:
+def _error(
+    message: str,
+    streamed: bool,
+    content: list[Any],
+    origin: Any,
+    usage: Any,
+    verified: bool,
+    *,
+    code: str | None = None,
+) -> ProviderError:
     return classify_error(
         body=message,
+        code=code,
         streamed=streamed,
         partial=(
             assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
