@@ -363,7 +363,7 @@ Properties; the test suites enumerate cases.
 | P0 | docs | this plan, the evaluation, and the contract drafts | owner approval; `pr-delivery-loop` gates |
 | P1 | Model Hub extension: `core/handlers/model_hub/`, Model Hub contracts, UI types · `ai`: `core/agent_core/ai/` · `agent`: `core/agent_core/agent/` · `tools`: `core/agent_core/tools/` | C-1, C-2, C-3, C-6, C-7 frozen on `master` first | each lane in its own worktree and PR; the control points it owns pass |
 | P2 | adapter: `modules/agents/avibe/`, catalog, config, and UI registration (i18n strings; any new UI element needs an approved `design.pen` frame first) · transcript and Watch `job` target: `core/agent_core/harness/`, `storage/`, `core/watches.py` | C-4, C-5, C-8 frozen | A1, A3, A7, A10, A11; Incus smoke on one platform |
-| P3 | context management as the main v1 investment; skills rehydration; MCP client; permissions through the question UI | C-9 frozen | A4; A12 baseline recorded |
+| P3 | context management as the main v1 investment; skills rehydration; MCP client; permissions through the question UI (pending questions live in the controller process while Workbench answers arrive through `vibe/ui_server.py`, so this needs the controller IPC path, not the in-memory `QuestionUIHandler` alone) | C-9 frozen | A4; A12 baseline recorded |
 | P4 | regression and acceptance | Incus four-platform regression; owner checklist | A6; default-agent decision |
 
 Before P1, a few live calls through one Model Hub Source the owner names confirm the stub's fidelity. Circuit

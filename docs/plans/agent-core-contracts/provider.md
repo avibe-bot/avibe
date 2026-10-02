@@ -14,7 +14,7 @@ class ProviderAdapter(Protocol):
 class ModelEndpoint:            # built by the adapter layer from C-6 HopResolution
     protocol: str
     base_url: str
-    token: str                  # never logged, never written to the transcript
+    token: str                  # field(repr=False): never logged or rendered, never written to the transcript
     model_id: str               # the runtime model id to send
     request_headers: Mapping[str, str]
     provider: str               # vendor identity of the hop (HopResolution.provider); with protocol and model it
@@ -75,7 +75,7 @@ Error classification is part of the contract because the loop branches on it:
 | `kind` | Meaning | Loop action |
 | --- | --- | --- |
 | `overflow` | the request exceeded the model's context (Pi's overflow patterns, HTTP 413, `context_length_exceeded`) | overflow recovery (plan §5.2) |
-| `rate_limit`, `overloaded`, `network`, `server` | transient | retry with backoff, honoring `retry_after_s`, only when nothing was streamed (no deltas, no `partial`); after streamed output the error is terminal for the request, matching Model Hub's first-byte rule |
+| `rate_limit`, `overloaded`, `network`, `server` | transient | retry with backoff, honoring `retry_after_s`, only when nothing was streamed (no deltas, no `partial`), at most 3 retries within 120 s; then the run ends with that error. After streamed output the error is terminal for the request, matching Model Hub's first-byte rule |
 | `auth`, `invalid_request` | not retryable | end the run with the error |
 | `aborted` | cancelled by the caller | end the run as aborted |
 | `unknown` | anything else | end the run with the error |

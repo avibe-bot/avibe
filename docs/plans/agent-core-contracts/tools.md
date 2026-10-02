@@ -25,8 +25,8 @@ for large files. When you need the full file, continue with offset until complet
   "required": ["path"],
   "properties": {
     "path": { "type": "string", "description": "Path to the file to read (relative or absolute)" },
-    "offset": { "type": "number", "description": "Line number to start reading from (1-indexed)" },
-    "limit": { "type": "number", "description": "Maximum number of lines to read" }
+    "offset": { "type": "integer", "minimum": 1, "description": "Line number to start reading from (1-indexed)" },
+    "limit": { "type": "integer", "minimum": 1, "description": "Maximum number of lines to read" }
   }
 }
 ```
@@ -36,7 +36,8 @@ Raw text, no line numbers, head kept. Model-facing suffixes:
 - `[Showing lines {start}-{end} of {total}. Use offset={next} to continue.]`
 - `[Showing lines {start}-{end} of {total} (50KB limit). Use offset={next} to continue.]`
 - `[{remaining} more lines in file. Use offset={next} to continue.]` (an explicit `limit` stopped before the end)
-- `[Line {n} is {size}, exceeds 50KB limit. Use bash: sed -n '{n}p' {path} | head -c 51200]`
+- `[Line {n} is {size}, exceeds 50KB limit. Use bash: sed -n '{n}p' {quoted_path} | head -c 51200]`, where
+  `{quoted_path}` is the path shell-quoted (Avibe change to Pi's text, so the suggested command is always safe to run)
 - Error: `Offset {offset} is beyond end of file ({total} lines total)`
 
 Images are attached as `ImageBlock`s (C-1) after resizing; for a model without image input the result says so and
@@ -164,7 +165,7 @@ backend they are required.
 | `status(job_id)` | yes | `running`, `exited{code}`, or `gone` (ended without an exit code) |
 | `wait(job_id, deadline_s)` | yes | until exit, or at most `deadline_s` seconds from now (`None`: until exit) |
 | `output_path(job_id)` | yes | absolute path of `output.log`, named in truncated and handover results |
-| `output(job_id, since)` | yes | normalized output after a byte offset |
+| `output(job_id, since)` | yes | output after a logical offset into everything the command has produced (not a file position), plus the new offset; bytes dropped by the on-disk bound are reported as omitted, never silently skipped |
 | `kill(job_id)` | yes | terminate the process tree, verified by process identity |
 | `hand_over(job_id)` → `watch_id` | yes | register a once Watch with target kind `job` |
 | `send(job_id, keys)`, `screen(job_id)`, `resize(job_id, cols, rows)`, `attach_info(job_id)` | reserved | `pty` backend (plan §5.4) |

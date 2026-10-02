@@ -31,6 +31,10 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    refused before invocation with a controlled local error (no model call, no header). Identifiers are never truncated.
 5. **Conversion stays a fallback.** The agent speaks the primary hop's protocol. When failover reaches a hop with
    another protocol, the gateway converts (degraded, not broken) and the served-hop report says so.
+6. **No opaque payload crosses origins at failover.** The agent builds the request for the primary hop's origin, so it
+   may carry that origin's opaque payloads (C-1: any block's signature, redacted thinking). When the gateway fails
+   over to a hop whose origin `(provider, api, model)` differs from the primary's, it removes every such payload
+   before sending, applying the same rule as `cross-provider.md`, whether or not it converts protocols.
 
 ## 3. Not required
 
