@@ -82,19 +82,20 @@ def test_auto_detect_asks_for_responses_before_chat():
     labelled by the older surface it also still serves. Elimination consumes
     this sequence pairwise, so the relative position is a contract rather than
     an accident of how the tuple was typed: asserting it here makes a reorder a
-    deliberate change instead of a silent one. The whole vocabulary is asserted
-    to stay in the sequence so a protocol cannot drop out of detection either.
+    deliberate change instead of a silent one. Google is explicitly declared:
+    there is no model-free Gemini inference endpoint to add to this sequence.
     """
 
     auto_sequence = ModelHubService._observation_protocols("custom", {})
-    assert set(auto_sequence) == set(SOURCE_PROTOCOLS)
+    assert set(auto_sequence) == set(SOURCE_PROTOCOLS) - {"google"}
+    assert ModelHubService._observation_protocols("custom", {"protocol": "google"}) == ("google",)
     assert len(auto_sequence) == len(set(auto_sequence))
     assert auto_sequence.index("openai_responses") < auto_sequence.index("openai_chat")
 
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
     schema = _schema("observation-result.schema.json")
-    assert schema["properties"]["contract_version"]["const"] == 11
+    assert schema["properties"]["contract_version"]["const"] == 12
     assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
         member.value for member in ObservationOutcome
     )
@@ -118,7 +119,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
     def payload(observation: SourceObservation) -> dict:
         return {
-            "contract_version": 11,
+            "contract_version": 12,
             "outcome": observation.outcome.value,
             "reachable": observation.reachable,
             "authenticated": (
@@ -698,7 +699,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
 
     route_refusal = {
         "ok": False,
-        "contract_version": 11,
+        "contract_version": 12,
         "error": "source_in_route_chain",
         "detail": "modelHub.errors.source_in_route_chain",
         "would_remove_hops": [hop],
@@ -714,7 +715,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
     }
     candidate_refusal = {
         "ok": False,
-        "contract_version": 11,
+        "contract_version": 12,
         "error": "candidate_suppliers_changed",
         "detail": "modelHub.errors.candidate_suppliers_changed",
         "changed": {
@@ -798,7 +799,7 @@ def test_v8_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 11
+    assert registry["contract_version"] == 12
     ids = [entry["id"] for entry in registry["entries"]]
     assert ids
     assert len(ids) == len(set(ids))
@@ -935,8 +936,8 @@ def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeyp
         "kind": "contract_version_schema_drift",
         "domain": "V1",
         "file": "docs/plans/model-hub-contracts/turn-provenance.schema.json",
-        "values": [6, 7, 8, 9, 10, 11],
-        "expected": [5, 6, 7, 8, 9, 10, 11],
+        "values": [6, 7, 8, 9, 10, 11, 12],
+        "expected": [5, 6, 7, 8, 9, 10, 11, 12],
     } in result["findings"]
 
 
@@ -1247,7 +1248,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         with pytest.raises(ValidationError):
             chain_validator.validate(interrupted)
     exact_hop = {
-        "contract_version": 11,
+        "contract_version": 12,
         "backend": "claude",
         "model_id": "claude-opus-4-6",
         "manual_override": None,
