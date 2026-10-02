@@ -1001,3 +1001,33 @@ async def test_a_stop_after_the_final_reply_committed_loses_the_race(
         "turn": _turn(request.context), "is_error": False, "settled_by": "terminal_result"
     }
     assert await harness.agent.store.pending_deliveries(SESSION) == []
+
+
+async def test_the_config_refresh_registers_and_retires_the_backend(engine) -> None:
+    from config.v2_compat import to_app_config
+    from config.v2_config import V2Config
+    from core.agent_auth_service import AgentAuthService
+
+    agents: dict[str, Any] = {}
+
+    async def refresh_runtime_config(name, runtime_config) -> bool:
+        return False
+
+    service = SimpleNamespace(
+        agents=agents,
+        register=lambda agent: agents.__setitem__(agent.name, agent),
+        refresh_runtime_config=refresh_runtime_config,
+        runtime_turn_tokens_for_backend=lambda _backend: {},
+        release_runtime_turn_tokens=lambda _tokens: None,
+    )
+    config = V2Config.default()
+    controller = SimpleNamespace(
+        agent_service=service, im_client=_IMClient(), settings_manager=_SettingsManager(), config=None
+    )
+    owner = AgentAuthService(controller)
+    for enabled in (True, False, True):
+        config.agents.avibe.enabled = enabled
+        config.save()
+        controller.config = to_app_config(config)
+        await owner._apply_backend_runtime_refresh("avibe")
+        assert isinstance(agents.get("avibe"), AvibeAgent) is enabled

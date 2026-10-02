@@ -201,6 +201,39 @@ def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path)
     assert metadata["fork_trim_latest_running_turn"] is False
 
 
+def test_reserve_forked_avibe_session_records_its_context_anchor(tmp_path: Path) -> None:
+    # The Avibe Agent's context is the source's rows up to the anchor (C-5 section 4):
+    # resolved once at reservation, so rows the source commits later never enter the prefix.
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path, backend="avibe")
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            for seq, (author, text) in enumerate((("user", "first question"), ("agent", "first answer")), start=1):
+                row = messages_service.append(
+                    conn, scope_id=scope_id, session_id=source_id, platform="avibe", author=author,
+                    source=author, message_type="user" if author == "user" else "result", text=text,
+                )
+                conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == result.session_id)).mappings().one()
+    finally:
+        engine.dispose()
+    metadata = json.loads(row["metadata_json"])
+    assert result.fork.source_backend == "avibe"
+    assert metadata["fork_source_context_seq"] == 2
+
+
 def test_reserve_forked_codex_running_fork_marks_trim(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     source_id = _seed_source_session(db_path, tmp_path)
