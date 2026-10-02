@@ -8,6 +8,7 @@ rows, so the field names here are a shipped surface.
 
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Union
@@ -97,7 +98,7 @@ class ThinkingBlock:
 class ToolCallBlock:
     id: str
     name: str
-    arguments: Mapping[str, Any] = field(default_factory=dict)
+    arguments: dict[str, Any] = field(default_factory=dict)
     native_id: Optional[str] = None
     signature: Optional[str] = None
     """Opaque provider payload on the call itself (Gemini ``thoughtSignature``); same rules as a thinking signature."""
@@ -105,7 +106,10 @@ class ToolCallBlock:
     def __post_init__(self) -> None:
         _require(self.id, str, "tool call id")
         _require(self.name, str, "tool name")
-        _require(self.arguments, Mapping, "arguments")
+        _require(self.arguments, dict, "arguments")
+        require_json_value(self.arguments, "arguments")
+        # Detach from the caller's object so later mutation of the input cannot reach this block.
+        object.__setattr__(self, "arguments", copy.deepcopy(self.arguments))
         _require(self.native_id, str, "native_id", optional=True)
         _require(self.signature, str, "signature", optional=True)
         if not self.id or not self.name:
@@ -114,6 +118,31 @@ class ToolCallBlock:
             raise ValueError("a native id, when present, must not be empty")
         if self.signature is not None and not self.signature:
             raise ValueError("a signature, when present, must not be empty")
+
+
+def require_json_value(value: Any, what: str) -> None:
+    """Refuse anything that would not survive a JSON round trip unchanged.
+
+    Allowed: dict with str keys, list, str, int, finite float, bool, None. A tuple,
+    bytes, a non-str key, or NaN would be coerced or rejected on persistence.
+    """
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError(f"{what} must be a finite number")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            require_json_value(item, f"{what}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{what} keys must be strings")
+            require_json_value(item, f"{what}.{key}")
+        return
+    raise ValueError(f"{what} must be JSON (got {type(value).__name__})")
 
 
 def _require_blocks(content: Any, allowed: tuple[type, ...], what: str) -> None:
@@ -280,7 +309,9 @@ def _block_to_dict(block: Any) -> dict[str, Any]:
             out["redacted"] = True
         return out
     if isinstance(block, ToolCallBlock):
-        out = {"type": "tool_call", "id": block.id, "name": block.name, "arguments": dict(block.arguments)}
+        # Arguments are a mutable dict on a frozen block; check again at the write boundary.
+        require_json_value(block.arguments, "arguments")
+        out = {"type": "tool_call", "id": block.id, "name": block.name, "arguments": copy.deepcopy(block.arguments)}
         _put(out, "native_id", block.native_id)
         _put(out, "signature", block.signature)
         return out
