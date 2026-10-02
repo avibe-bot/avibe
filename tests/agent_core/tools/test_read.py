@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import time
 import shlex
 import struct
 import zlib
@@ -261,3 +262,17 @@ async def test_a_fifo_swapped_in_after_the_check_does_not_block_read(tmp_path, m
         pytest.fail("read blocked on a FIFO")
 
     assert (result.is_error, result_text(result)) == (True, "Cannot read p: it is not a regular file.")
+
+
+async def test_a_huge_png_shaped_file_is_classified_without_walking_it(tmp_path, make_ctx):
+    """A sparse file of empty PNG chunks: image work is bounded by the cap, not by the file."""
+    path = tmp_path / "huge.png"
+    with open(path, "wb") as handle:
+        handle.write(_png()[:33])  # signature and IHDR, then nothing but zero bytes
+        handle.truncate(64 * 1024 * 1024)
+    started = time.monotonic()
+
+    result = await ReadTool().execute({"path": "huge.png"}, make_ctx())
+
+    assert time.monotonic() - started < 1.0
+    assert result_text(result).startswith("Read image file [image/png]\n[Image omitted: the file is 64.0MB")

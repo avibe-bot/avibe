@@ -164,10 +164,12 @@ class JobOutput:
         return f"{text}\n\n{notice}", truncation
 
     def where(self) -> str:
-        """Where the log is. ``Full output`` only for a finished job whose log was never bounded on disk (J4):
-        a running job's log may still pass the cap."""
-        if self._finished and not self._omitted:
-            return f"Full output: {self.path}"
+        """Where the log is, in one wording for every state (C-7 section 5).
+
+        The log keeps everything up to the cap and drops the middle beyond it, and a job can keep
+        appending after its result was built (a background child holding the pipe), so the label states
+        that policy rather than the log's current state: it can never become untrue.
+        """
         cap = format_size(job_host.OUTPUT_HEAD_BYTES + job_host.OUTPUT_TAIL_BYTES)
         return f"Output log (middle omitted beyond {cap}): {self.path}"
 

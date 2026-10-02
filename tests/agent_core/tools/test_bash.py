@@ -48,7 +48,10 @@ async def test_long_output_keeps_the_tail_and_names_the_full_output(tmp_path, ma
 
     path = result.details["output_path"]
     assert not result.is_error
-    assert result_text(result).endswith(f"2499\n2500\n\n[Showing lines 501-2500 of 2500. Full output: {path}]")
+    # One label in every state: the log keeps everything up to the cap, so it is never promised as complete.
+    assert result_text(result).endswith(
+        f"2499\n2500\n\n[Showing lines 501-2500 of 2500. Output log (middle omitted beyond 3.0MB): {path}]"
+    )
     assert open(path).read() == "".join(f"{i}\n" for i in range(1, 2501))
 
 

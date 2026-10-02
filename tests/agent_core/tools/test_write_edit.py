@@ -7,6 +7,7 @@ import os
 import random
 import re
 import stat
+import time
 
 import pytest
 
@@ -189,6 +190,34 @@ async def test_write_and_edit_sanitize_model_text_the_same_way(tmp_path, make_ct
 
     assert (tmp_path / "w.txt").read_bytes() == "a\ufffdb".encode()
     assert (tmp_path / "e.txt").read_bytes() == "a\ufffdb".encode()
+
+
+async def test_the_display_diff_is_bounded_by_lines_not_only_bytes(tmp_path, make_ctx):
+    """Repetitive lines made difflib quadratic (Codex measured over 22 s); the changed middle is all it sees."""
+    (tmp_path / "rep.txt").write_text("x\n" * 5000 + "target\n" + "x\n" * 5000)
+    started = time.monotonic()
+
+    result = await _edit(make_ctx, "rep.txt", {"oldText": "target", "newText": "changed"})
+
+    assert time.monotonic() - started < 2.0
+    assert not result.is_error, result_text(result)
+    # Pi pads line numbers to the widest one (five digits here).
+    assert "- 5001 target\n+ 5001 changed" in result.details["diff"]
+    assert "@@ -4997,9 +4997,9 @@" in result.details["patch"]
+
+
+async def test_a_large_changed_middle_skips_the_display_diff(tmp_path, make_ctx):
+    (tmp_path / "f.txt").write_text("".join(f"line {i}\n" for i in range(3000)))
+
+    result = await _edit(
+        make_ctx,
+        "f.txt",
+        {"oldText": "line 0\n", "newText": "first\n"},
+        {"oldText": "line 2999\n", "newText": "last\n"},
+    )
+
+    assert not result.is_error, result_text(result)
+    assert result.details == {"diff_skipped": True}
 
 
 async def test_a_planned_result_over_the_limit_is_refused_and_its_diff_skipped(tmp_path, make_ctx, monkeypatch):

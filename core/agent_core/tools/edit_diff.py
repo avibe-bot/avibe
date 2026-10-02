@@ -308,20 +308,80 @@ def apply_edits(text: str, edits: list[Edit], path: str) -> tuple[str, str, str]
     return new_text, lines.view, _Lines(new_text).view
 
 
-def generate_unified_patch(path: str, old: str, new: str, context: int = 4) -> str:
-    lines = difflib.unified_diff(
-        old.splitlines(keepends=True), new.splitlines(keepends=True), fromfile=path, tofile=path, n=context
-    )
-    return "".join(lines)
+#: The display diff runs difflib only on the changed middle, and skips it when either side is longer.
+DIFF_MAX_LINES = 1000
 
 
-def generate_diff_string(old: str, new: str, context: int = 4) -> tuple[str, Optional[int]]:
+class _FixedOpcodes(difflib.SequenceMatcher):
+    """difflib's hunk grouping over opcodes computed elsewhere."""
+
+    def __init__(self, a: list[str], b: list[str], opcodes: list[tuple[str, int, int, int, int]]) -> None:
+        super().__init__(None, a, b)
+        self._fixed = opcodes
+
+    def get_opcodes(self) -> list[tuple[str, int, int, int, int]]:  # type: ignore[override]
+        return self._fixed
+
+
+def display_diff(path: str, old: str, new: str, context: int = 4) -> Optional[tuple[str, Optional[int], str]]:
+    """``(diff, first_changed_line, patch)`` for display, or ``None`` when the change is too large to show.
+
+    The common leading and trailing lines are trimmed in linear time, and difflib (whose worst case
+    is quadratic, for example on repetitive lines) sees only the changed middle, at most
+    ``DIFF_MAX_LINES`` lines on each side.
+    """
+    a, b = old.splitlines(keepends=True), new.splitlines(keepends=True)
+    shortest = min(len(a), len(b))
+    prefix = 0
+    while prefix < shortest and a[prefix] == b[prefix]:
+        prefix += 1
+    suffix = 0
+    while suffix < shortest - prefix and a[len(a) - 1 - suffix] == b[len(b) - 1 - suffix]:
+        suffix += 1
+    a_end, b_end = len(a) - suffix, len(b) - suffix
+    if a_end - prefix > DIFF_MAX_LINES or b_end - prefix > DIFF_MAX_LINES:
+        return None
+    middle = difflib.SequenceMatcher(None, a[prefix:a_end], b[prefix:b_end]).get_opcodes()
+    opcodes = [("equal", 0, prefix, 0, prefix)] if prefix else []
+    opcodes += [(tag, i1 + prefix, i2 + prefix, j1 + prefix, j2 + prefix) for tag, i1, i2, j1, j2 in middle]
+    if suffix:
+        opcodes.append(("equal", a_end, len(a), b_end, len(b)))
+    diff, first_changed_line = _render_diff(a, b, opcodes, context)
+    return diff, first_changed_line, _unified_patch(path, a, b, opcodes, context)
+
+
+def _unified_range(start: int, stop: int) -> str:
+    length = stop - start
+    if length == 1:
+        return str(start + 1)
+    return f"{start + 1 if length else start},{length}"
+
+
+def _unified_patch(path: str, a: list[str], b: list[str], opcodes: list, context: int) -> str:
+    """``difflib.unified_diff``'s output, from the given opcodes."""
+    groups = list(_FixedOpcodes(a, b, opcodes).get_grouped_opcodes(context))
+    if not groups:
+        return ""
+    out = [f"--- {path}\n", f"+++ {path}\n"]
+    for group in groups:
+        first, last = group[0], group[-1]
+        out.append(f"@@ -{_unified_range(first[1], last[2])} +{_unified_range(first[3], last[4])} @@\n")
+        for tag, i1, i2, j1, j2 in group:
+            if tag == "equal":
+                out.extend(" " + line for line in a[i1:i2])
+                continue
+            out.extend("-" + line for line in a[i1:i2])
+            out.extend("+" + line for line in b[j1:j2])
+    return "".join(out)
+
+
+def _render_diff(a: list[str], b: list[str], opcodes: list, context: int) -> tuple[str, Optional[int]]:
     """Pi's display diff: numbered ``+``/``-``/context lines and the first changed line of the new file."""
-    old_lines, new_lines = old.split("\n"), new.split("\n")
-    width = len(str(max(len(old_lines), len(new_lines))))
+    a = [line.rstrip("\r\n") for line in a]
+    b = [line.rstrip("\r\n") for line in b]
+    width = len(str(max(len(a), len(b)) + 1))
     parts: list[tuple[str, list[str]]] = []
-    a, b = old.splitlines(), new.splitlines()
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+    for tag, i1, i2, j1, j2 in opcodes:
         if tag == "equal":
             parts.append((" ", a[i1:i2]))
             continue

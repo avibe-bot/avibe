@@ -15,7 +15,7 @@ from typing import Any, Mapping
 
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
-from core.agent_core.tools.edit_diff import Edit, EditError, apply_edits, generate_diff_string, generate_unified_patch
+from core.agent_core.tools.edit_diff import Edit, EditError, apply_edits, display_diff
 from core.agent_core.tools.paths import (
     NotRegularFile,
     errno_name,
@@ -211,6 +211,8 @@ class EditTool:
         if max(size, len(data)) > MAX_DIFF_BYTES:
             # The diff is for display only, and difflib is superlinear on large inputs.
             return text_result(result, details={"diff_skipped": True})
-        diff, first_changed_line = await asyncio.to_thread(generate_diff_string, base, new_content)
-        patch = await asyncio.to_thread(generate_unified_patch, path, base, new_content)
+        shown_diff = await asyncio.to_thread(display_diff, path, base, new_content)
+        if shown_diff is None:
+            return text_result(result, details={"diff_skipped": True})
+        diff, first_changed_line, patch = shown_diff
         return text_result(result, details={"diff": diff, "patch": patch, "first_changed_line": first_changed_line})

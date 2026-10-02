@@ -148,40 +148,39 @@ def _load(
     absolute: str, path: str, offset: Optional[int], limit: Optional[int], cancelled: Callable[[], bool]
 ) -> Union[ToolResult, _Image]:
     """Everything read takes from the file, through one descriptor: the kind, the image type, the size,
-    and the bytes. A file swapped or grown after an earlier check by path cannot get past its limits."""
+    and the bytes. A file swapped or grown after an earlier check by path cannot get past its limits,
+    and image work never looks past the bytes the cap allows."""
     with os.fdopen(open_regular(absolute), "rb") as handle:
-        mime_type = _sniff_image(handle)
+        head = handle.read(_IMAGE_SNIFF_BYTES)
+        mime_type = _sniff_image(head)
         if mime_type is None:
             return _read_text(handle, absolute, path, offset, limit, cancelled)
-        header = f"Read image file [{mime_type}]"
-        details = {"path": absolute, "mime_type": mime_type}
-        if mime_type not in IMAGE_MIME_TYPES:
-            # Pi converts other formats to PNG; without an image library Avibe cannot.
-            return text_result(
-                f"{header}\n[Image omitted: could not be converted to a supported inline image format.]",
-                details=details,
-            )
-        handle.seek(0)
-        data = handle.read(MAX_INLINE_IMAGE_BYTES + 1)
-        size = max(os.fstat(handle.fileno()).st_size, len(data))
-        if size > MAX_INLINE_IMAGE_BYTES:
-            # Avibe: no resizing in v1.
-            return text_result(
-                f"{header}\n[Image omitted: the file is {format_size(size)}, over the "
-                f"{format_size(MAX_INLINE_IMAGE_BYTES)} inline image limit. Images are not resized.]",
-                details={**details, "bytes": size},
-            )
-        return _Image(mime_type, data, len(data))
+        if mime_type in IMAGE_MIME_TYPES:
+            data = head + handle.read(max(0, MAX_INLINE_IMAGE_BYTES + 1 - len(head)))
+            size = max(os.fstat(handle.fileno()).st_size, len(data))
+            if size > MAX_INLINE_IMAGE_BYTES:
+                # Avibe: no resizing in v1.
+                return text_result(
+                    f"Read image file [{mime_type}]\n[Image omitted: the file is {format_size(size)}, over the "
+                    f"{format_size(MAX_INLINE_IMAGE_BYTES)} inline image limit. Images are not resized.]",
+                    details={"path": absolute, "mime_type": mime_type, "bytes": size},
+                )
+            if mime_type == "image/png" and _png_is_animated(data):
+                # acTL may sit past the sniffed prefix, behind large ancillary chunks.
+                mime_type = "image/apng"
+            else:
+                return _Image(mime_type, data, len(data))
+        # Pi converts other formats to PNG; without an image library Avibe cannot.
+        return text_result(
+            f"Read image file [{mime_type}]\n[Image omitted: could not be converted to a supported inline image format.]",
+            details={"path": absolute, "mime_type": mime_type},
+        )
 
 
-def _sniff_image(handle: BinaryIO) -> Optional[str]:
-    """The image type to attach, or ``None`` for text. A PNG or JPEG Pi cannot send (animated PNG,
+def _sniff_image(head: bytes) -> Optional[str]:
+    """The image type ``head`` shows, or ``None`` for text. A PNG or JPEG Pi cannot send (animated PNG,
     JPEG-LS) keeps its family, so it is omitted rather than decoded as text."""
-    head = handle.read(_IMAGE_SNIFF_BYTES)
     supported = detect_supported_image_mime_type(head)
-    if supported == "image/png" and _png_file_is_animated(handle):
-        # acTL may sit past the sniffed prefix, behind large ancillary chunks.
-        return "image/apng"
     if supported is not None:
         return supported
     if head.startswith(_PNG_SIGNATURE):
@@ -189,6 +188,19 @@ def _sniff_image(handle: BinaryIO) -> Optional[str]:
     if head.startswith(b"\xff\xd8\xff"):
         return "image/jls"
     return None
+
+
+def _png_is_animated(data: bytes) -> bool:
+    """Walk the chunk headers of ``data`` (at most the image cap, already read) until IDAT or acTL."""
+    offset = len(_PNG_SIGNATURE)
+    while offset + 8 <= len(data):
+        length, kind = struct.unpack(">I", data[offset : offset + 4])[0], data[offset + 4 : offset + 8]
+        if kind == b"acTL":
+            return True
+        if kind == b"IDAT":
+            return False
+        offset += 12 + length
+    return False
 
 
 def _read_text(
@@ -325,24 +337,6 @@ def detect_supported_image_mime_type(data: bytes) -> Optional[str]:
     if data.startswith(b"BM") and _is_bmp(data):
         return "image/bmp"
     return None
-
-
-def _png_file_is_animated(handle: BinaryIO) -> bool:
-    """Walk the chunk headers until IDAT or acTL, seeking over chunk bodies; bounded by the file size."""
-    size = os.fstat(handle.fileno()).st_size
-    offset = len(_PNG_SIGNATURE)
-    while offset + 8 <= size:
-        handle.seek(offset)
-        header = handle.read(8)
-        if len(header) < 8:
-            return False
-        length, kind = struct.unpack(">I", header[:4])[0], header[4:]
-        if kind == b"acTL":
-            return True
-        if kind == b"IDAT":
-            return False
-        offset += 12 + length
-    return False
 
 
 def _is_png(data: bytes) -> bool:
