@@ -1,4 +1,4 @@
-"""Model Hub EngineAdapter interface. FINAL CONTRACT v11 (2026-10-02).
+"""Model Hub EngineAdapter interface. FINAL CONTRACT v12 (2026-10-02).
 
 This file is the canonical adapter boundary and must remain byte-identical to
 ``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:
@@ -19,7 +19,7 @@ from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protoc
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 
 ENGINE_TRANSPORT_TIMEOUT_SECONDS: Final = 60.0
-SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat")
+SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat", "google")
 OBSERVATION_OUTCOMES = (
     "observed",
     "ambiguous",
@@ -76,7 +76,7 @@ class SourceBinding:
 
     source_id: str
     vendor: str
-    protocol: str  # "anthropic" | "openai_responses" | "openai_chat"
+    protocol: str  # "anthropic" | "openai_responses" | "openai_chat" | "google"
     base_url: str | None  # None => vendor official default
     credential_ref: str  # opaque handle; never secret material
     allowed_origins: tuple[str, ...]  # agent names allowed to draw on this

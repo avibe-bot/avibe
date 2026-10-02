@@ -8,11 +8,11 @@ credential redaction and supply-impact confirmation rules still apply; unknown
 API siblings retain the Owner default.
 
 
-Status: **Normative, `contract_version` 11** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
+Status: **Normative, `contract_version` 12** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
-Success envelope: `{ok: true, contract_version: 11, ...}`.
+Success envelope: `{ok: true, contract_version: 12, ...}`.
 Failure envelope:
-`{ok: false, contract_version: 11, error: <machine_code>, detail?: <i18n_key>}`.
+`{ok: false, contract_version: 12, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
 Guarded mutation refusals specialize that envelope through
 `guard-refusal.schema.json`; both report arrays are required and together form the plan
@@ -24,7 +24,7 @@ table. The contract guard requires the two endpoint sets to be identical, requir
 exercised HTTP response for every registry entry, and validates that response against
 the route's named schema.
 
-The shared envelope and every versioned nested contract carry `contract_version` 11, the
+The shared envelope and every versioned nested contract carry `contract_version` 12, the
 terminal value. Supported persisted config shapes and historical TurnProvenance
 remain readable; ephemeral envelopes use only the terminal version.
 
@@ -78,7 +78,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Applies one grouped, server-owned custody transaction. It validates selected items before withdrawal, upgrades an existing native Source in place when present, commits Source/Routes/backend mode atomically, and removes only replaced native material. Pre-exposure failure is reversible; post-exposure recovery is forward-only and keeps the backend blocked until terminalized. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 11 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 12 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent; runtime availability has no separate enable-confirmation step. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 | POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any native backend is configured for Hub mode or Avibe has catalog models, so disabling the shared runtime cannot strand a configured route. An empty Avibe catalog does not keep the runtime open. |
@@ -167,8 +167,11 @@ create request:
 
 `base_url` may be null for an official vendor endpoint. `protocol`, when present,
 restricts observation to exactly that interface; omitting it selects the shipped vendor
-pin when one exists, otherwise on `custom` it probes the authoritative three-value
-order. Auto-detect on `custom` still requires a matching protocol-shaped upstream
+pin when one exists, otherwise on `custom` it probes the three existing interfaces
+in `anthropic`, `openai_responses`, `openai_chat` order. Google requires an explicit
+`protocol: "google"` declaration and uses credential-gated native model listing,
+without a model-free inference probe; see [`google-protocol.md`](google-protocol.md).
+Auto-detect on `custom` still requires a matching protocol-shaped upstream
 response. A supplied protocol is established when authentication succeeds and either
 `vendor` has a shipped catalog pin, the client declared that protocol on `custom`, or
 a matching protocol-shaped response proves it. The protocol probe is deliberately
@@ -616,7 +619,7 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
 ```json
 {
   "ok": true,
-  "contract_version": 11,
+  "contract_version": 12,
   "source": {
     "id": "src_anthkey01",
     "kind": "api_key",
@@ -726,7 +729,7 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the c
 ```json
 {
   "ok": false,
-  "contract_version": 11,
+  "contract_version": 12,
   "error": "source_last_supplier",
   "would_remove_hops": [],
   "would_interrupt": [
@@ -862,7 +865,7 @@ API-key success:
 ```json
 {
   "ok": true,
-  "contract_version": 11,
+  "contract_version": 12,
   "source": {
     "id": "src_relay9c1x",
     "kind": "api_key",
@@ -953,7 +956,7 @@ Status and submit return the same terminal shape:
 ```json
 {
   "ok": true,
-  "contract_version": 11,
+  "contract_version": 12,
   "flow": {
     "flow_id": "oaf_claude01",
     "client_nonce": "ofn_01j5w8z7p4n6q2rt",
@@ -1026,9 +1029,9 @@ a valid `interrupted` chain.
 ```json
 {
   "ok": true,
-  "contract_version": 11,
+  "contract_version": 12,
   "chain": {
-    "contract_version": 11,
+    "contract_version": 12,
     "backend": "codex",
     "model_id": "gpt-5.6",
     "manual_override": null,
@@ -1055,7 +1058,7 @@ In Direct mode both chain and probe refuse with:
 ```json
 {
   "ok": false,
-  "contract_version": 11,
+  "contract_version": 12,
   "error": "direct_mode",
   "detail": "models.hub.direct_mode"
 }
@@ -1069,9 +1072,9 @@ A successful probe nests its result:
 ```json
 {
   "ok": true,
-  "contract_version": 11,
+  "contract_version": 12,
   "probe": {
-    "contract_version": 11,
+    "contract_version": 12,
     "backend": "claude",
     "channel": "hub",
     "reachable": false,
@@ -1094,7 +1097,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 11,
+  "contract_version": 12,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": true,
@@ -1107,7 +1110,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 11,
+  "contract_version": 12,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": false,
@@ -1123,7 +1126,7 @@ No candidate is an API error with a typed model-scoped state:
 ```json
 {
   "ok": false,
-  "contract_version": 11,
+  "contract_version": 12,
   "error": "probe_no_candidate",
   "detail": "models.probe.no_candidate.waiting",
   "supply": {
@@ -1304,7 +1307,7 @@ The store retains at most 500 exactly attributed settled turns with its existing
 writes. Ambiguous attribution remains excluded; this is not a log of every upstream
 request. Null means no matching retained record, including eviction. A newer served,
 canceled or other record without a terminal error supersedes older error display.
-Success uses exactly `{ok: true, contract_version: 11, provenance: TurnProvenance | null}`;
+Success uses exactly `{ok: true, contract_version: 12, provenance: TurnProvenance | null}`;
 there is no `success` field or envelope exception.
 
 Local `engine_down` records may also contain `local_error_detail`, an OS-generated
@@ -1362,7 +1365,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 11,
+  "contract_version": 12,
   "error": "provenance_unavailable",
   "detail": "models.provenance.direct_mode"
 }
@@ -1371,7 +1374,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 11,
+  "contract_version": 12,
   "error": "provenance_unavailable",
   "detail": "models.provenance.attribution_ambiguous"
 }
@@ -1705,7 +1708,7 @@ contract harness and API-boundary tests enforce:
 <!-- authority-consumer: turn.served turn.exhausted turn.request_nonfallback turn.engine_down turn.streamed_fallback turn.no_candidate.unconfigured turn.no_candidate.unlisted turn.no_candidate.blocked turn.canceled -->
 <!-- authority-consumer: mutation.source_metadata mutation.credential_replace mutation.source_refresh mutation.model_create mutation.model_efforts mutation.model_delete mutation.source_delete mutation.route_replace mutation.route_restore mutation.default_sources -->
 <!-- authority-consumer: import.keep_native import.copy_key import.reauth import.controlled -->
-<!-- authority-consumer: protocol anthropic openai_responses openai_chat -->
+<!-- authority-consumer: protocol anthropic openai_responses openai_chat google -->
 <!-- authority-consumer: observation.outcome observed ambiguous unreachable authentication_failed adapter_error timeout -->
 <!-- authority-consumer: observation.discovery succeeded failed not_attempted -->
 <!-- authority-consumer: runtime.health ok degraded down not_installed installing not_started -->

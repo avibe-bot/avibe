@@ -46,7 +46,11 @@ from core.handlers.model_hub.stream_wire import (
     ProtocolUsageReport,
     observe_buffered_protocol_response,
 )
-from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_urls, validate_api_key_auth_scheme
+from vibe.model_hub_runtime.api_key_vendors import (
+    google_api_base_url,
+    official_api_key_base_urls,
+    validate_api_key_auth_scheme,
+)
 from vibe.model_hub_runtime.state import SourceRecord
 
 
@@ -426,11 +430,21 @@ class EngineClient:
         on_request_sent: Callable[[], None] | None = None,
     ) -> EngineInvokeHandle:
         request_protocol = request_protocol or source.protocol
-        endpoint = _endpoint_for_protocol(request_protocol)
         body = dict(request)
         routed_model = f"{source.prefix}/{model_id}"
-        body["model"] = routed_model
-        body["stream"] = stream
+        if request_protocol == "google":
+            # CPA (MIT), sdk/api/handlers/gemini/gemini_handlers.go at
+            # c404af96: model/action live in the path; alt=sse selects framing.
+            action = "streamGenerateContent" if stream else "generateContent"
+            endpoint = f"/v1beta/models/{urllib.parse.quote(routed_model, safe='/')}:{action}"
+            if stream:
+                endpoint += "?alt=sse"
+            body.pop("model", None)
+            body.pop("stream", None)
+        else:
+            endpoint = _endpoint_for_protocol(request_protocol)
+            body["model"] = routed_model
+            body["stream"] = stream
         headers = {
             key.lower(): value for key, value in (request_headers or {}).items() if key.lower() in FORWARDED_CALLER_HEADERS
         }
@@ -856,6 +870,8 @@ async def probe_models(
     root = base_url or _OFFICIAL_BASE_URLS.get(normalized_vendor)
     if not root:
         raise EngineClientError("source requires a base URL for model discovery")
+    if protocol == "google":
+        return await _probe_google_models(root, secret=secret, timeout=timeout)
     try:
         url = upstream_api_url(root, "/v1/models")
     except (TypeError, ValueError):
@@ -908,6 +924,98 @@ async def probe_models(
     if not fallback_seen or not fallback_is_array:
         raise EngineClientError("model discovery returned an invalid payload")
     return tuple(fallback_models)
+
+
+def _project_google_inventory(reader: BinaryIO) -> tuple[tuple[DiscoveredModel, ...], str | None]:
+    """Project routing identities and the continuation token, never model limits."""
+    names: dict[JSONScope, str] = {}
+    objects: set[JSONScope] = set()
+    valid_root = False
+    valid_models = False
+    page_token: str | None = None
+    valid_token = True
+
+    def visit(path: JSONPath, event: JSONEvent, value: object, scope: JSONScope) -> None:
+        nonlocal valid_root, valid_models, page_token, valid_token
+        if path == () and event == "start_map":
+            valid_root = True
+        elif path == ("models",):
+            if event == "replace":
+                names.clear()
+                objects.clear()
+                valid_models = False
+            elif event != "nonempty":
+                valid_models = event == "start_array"
+        elif path == ("models", "*"):
+            if event == "replace":
+                names.pop(scope, None)
+            elif event in {"start_map", "scalar", "start_array"}:
+                objects.add(scope)
+        elif path == ("models", "*", "name"):
+            if event == "replace":
+                names.pop(scope, None)
+            elif event == "scalar" and isinstance(value, str) and value.startswith("models/") and value[7:]:
+                names[scope] = value[7:]
+        elif path == ("nextPageToken",):
+            if event == "replace":
+                page_token, valid_token = None, True
+            elif event != "nonempty":
+                valid_token = event == "scalar" and isinstance(value, str)
+                page_token = (value or None) if valid_token else None
+
+    parsed = project_json_reader(
+        reader, {(), ("models",), ("models", "*"), ("models", "*", "name"), ("nextPageToken",)}, visit,
+        lossless_string_paths={("models", "*", "name"), ("nextPageToken",)},
+    )
+    if not parsed or not valid_root or not valid_models or not valid_token or objects != names.keys():
+        raise EngineClientError("model discovery returned an invalid Google payload")
+    return tuple(DiscoveredModel(id=name) for name in dict.fromkeys(names.values())), page_token
+
+
+async def _probe_google_models(root: str, *, secret: str | None, timeout: float) -> tuple[DiscoveredModel, ...]:
+    """Follow only page tokens on the same declared, credential-gated endpoint."""
+    try:
+        url = google_api_base_url(root) + "/v1beta/models"
+    except (TypeError, ValueError):
+        raise EngineClientError("source base URL is invalid") from None
+    headers = {"Accept": "application/json"}
+    if secret is not None:
+        headers["x-goog-api-key"] = secret
+    deadline = time.monotonic() + timeout
+    models: dict[str, DiscoveredModel] = {}
+    seen_tokens: set[str] = set()
+    page_token: str | None = None
+    try:
+        async with aiohttp.ClientSession(trust_env=False) as session:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                async with session.get(
+                    url, headers=headers, params={"pageToken": page_token} if page_token else {},
+                    allow_redirects=False, timeout=aiohttp.ClientTimeout(total=remaining),
+                ) as response:
+                    if response.status >= 300:
+                        raise EngineClientError(
+                            f"model discovery returned HTTP {response.status}", status_code=response.status,
+                        )
+                    with tempfile.SpooledTemporaryFile(max_size=_PRELUDE_MEMORY_BYTES) as body:
+                        while chunk := await response.content.read(_STREAM_CHUNK_BYTES):
+                            await run_owned_in_thread(body.write, chunk)
+                        await run_owned_in_thread(body.seek, 0)
+                        page, page_token = await run_owned_in_thread(
+                            _project_before_deadline, body, _project_google_inventory, deadline=deadline,
+                        )
+                models.update((model.id, model) for model in page)
+                if page_token is None:
+                    return tuple(models.values())
+                if page_token in seen_tokens:
+                    raise EngineClientError("model discovery repeated a Google page token")
+                seen_tokens.add(page_token)
+    except asyncio.TimeoutError:
+        raise EngineClientError("model discovery timed out", error_type="timeout") from None
+    except (aiohttp.ClientError, OSError):
+        raise EngineClientError("model discovery failed", error_type="network_error") from None
 
 
 def _project_model_inventory(

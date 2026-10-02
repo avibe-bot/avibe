@@ -131,6 +131,7 @@ from .oauth import (
 from .pricing import VALUE_WINDOW_DAYS, PriceTable, load_price_table, quota_values
 from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
+    REQUEST_NONFALLBACK_TURN_OUTCOME,
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
     ExactHopBlocker,
@@ -171,7 +172,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 11
+CONTRACT_VERSION = 12
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -273,8 +274,8 @@ _MODELS_DEV_CANDIDATE_FIELDS = (
 )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 11
-PROBE_RESULT_CONTRACT_VERSION = 11
+AGENT_CHAIN_CONTRACT_VERSION = 12
+PROBE_RESULT_CONTRACT_VERSION = 12
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 _REORDER_ORDER_UNSET = object()
@@ -614,6 +615,12 @@ class _InvocationPlanChanged(Exception):
     """No transport was admitted; recompute the remaining effective route."""
 
 
+class _InvocationUnsupported(_InvocationPlanChanged):
+    """A request-specific transport limitation, not a Source health failure."""
+
+    reason = "google_stream_responses_unsupported"
+
+
 class _RecoveryWindowClosed(Exception):
     """The request may finish its admitted inference, but cannot start another."""
 
@@ -926,7 +933,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 11,
+        "contract_version": 12,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1902,7 +1909,10 @@ class ModelHubService:
             if pinned_protocol is not None:
                 return (pinned_protocol,)
             if vendor == "custom":
-                return SOURCE_PROTOCOLS
+                # Google is explicit API/config admission in v12, not a new
+                # automatic probe or picker option. Its generation path needs
+                # a model, which non-inference observation must not invent.
+                return tuple(protocol for protocol in SOURCE_PROTOCOLS if protocol != "google")
             raise ModelHubError("discovery_failed")
         requested = payload.get("protocol")
         if not isinstance(requested, str) or requested not in SOURCE_PROTOCOLS:
@@ -3497,7 +3507,7 @@ class ModelHubService:
                     vendor=vendor,
                     display_name=display_name,
                     protocol=cast(
-                        Literal["anthropic", "openai_responses", "openai_chat"],
+                        Literal["anthropic", "openai_responses", "openai_chat", "google"],
                         protocol_order[0],
                     ),
                     base_url=base_url,
@@ -3556,7 +3566,7 @@ class ModelHubService:
                 self._mark_source_unverified(source)
             if observation is not None:
                 source.protocol = cast(
-                    Literal["anthropic", "openai_responses", "openai_chat"],
+                    Literal["anthropic", "openai_responses", "openai_chat", "google"],
                     observation.protocol,
                 )
             if observation is not None and observation.discovery is ObservationDiscovery.SUCCEEDED:
@@ -6197,6 +6207,11 @@ class ModelHubService:
                 "max_output_tokens": output_tokens,
                 "input": "ping",
             }
+        elif request_protocol == "google":
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+                "generationConfig": {"maxOutputTokens": output_tokens},
+            }
         else:
             payload = {
                 "model": model_id,
@@ -7871,6 +7886,11 @@ class ModelHubService:
                     raise _InvocationPlanChanged
                 attempt_request = request
                 if backend == "avibe":
+                    if stream and getattr(request, "protocol", None) == "google" and source.protocol == "openai_responses":
+                        # Pinned CPA c404af96 omits finishReason on its
+                        # Responses -> Gemini response.completed conversion.
+                        # Never infer success from usage or a transport EOF.
+                        raise _InvocationUnsupported
                     # Validate the exact rechecked admission snapshot for every
                     # hop, including fallback/refresh. Persisted ids stay intact;
                     # refusal must precede a transport, attempt, or recovery slot.
@@ -8213,6 +8233,7 @@ class ModelHubService:
         window_closed = False
         non_retryable_failure = False
         globally_blocked_source_ids: set[str] = set()
+        unsupported_reason: str | None = None
         while True:
             async with self._mutation_lock:
                 if recovery_request is not None and recovery_request.expired:
@@ -8289,6 +8310,14 @@ class ModelHubService:
                     on_admitted=admitted,
                     recovery_request=recovery_request,
                 )
+            except _InvocationUnsupported as skipped:
+                unsupported_reason = skipped.reason
+                globally_blocked_source_ids.add(source.id)
+                logger.info(
+                    "Model Hub skipped unsupported hop: %s", skipped.reason,
+                    extra={"reason": skipped.reason, "source_id": source.id, "model_id": target_model},
+                )
+                continue
             except _InvocationPlanChanged:
                 continue
             except _RecoveryWindowClosed:
@@ -8492,6 +8521,12 @@ class ModelHubService:
                 status=502,
                 turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
                 local_error_detail=format_os_errno(outcome.os_errno),
+            )
+        if unsupported_reason is not None and failed_source is None:
+            # No upstream attempt exists. Exhaustion would invent a failed
+            # attempt (and a retryable supply state) for a local limitation.
+            raise ModelHubError(
+                unsupported_reason, status=422, turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
         final_config, final_resolution = self._inspect_terminal_chain(
             backend=cast(BackendName, backend),

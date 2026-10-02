@@ -1,6 +1,6 @@
 # OpenCode overlay contract (v4, 2026-09-04)
 
-<!-- authority-consumer: protocol anthropic openai_responses openai_chat -->
+<!-- authority-consumer: protocol anthropic openai_responses openai_chat google -->
 
 How Avibe generates the OpenCode runtime config overlay in Gateway mode. Owner-locked
 identifier rules (spec §4.8 v4) restated as testable requirements. Supersedes the 07-23

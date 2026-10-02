@@ -2295,7 +2295,7 @@ class ModelHubSourceConfig:
     kind: Literal["subscription", "api_key"]
     vendor: str
     display_name: str
-    protocol: Literal["anthropic", "openai_responses", "openai_chat"]
+    protocol: Literal["anthropic", "openai_responses", "openai_chat", "google"]
     supply_channel: Literal["native_cli", "hub"]
     billing: Literal["monthly", "metered"]
     state: ModelHubSourceStateConfig
@@ -2354,6 +2354,7 @@ class ModelHubSourceConfig:
             "anthropic",
             "openai_responses",
             "openai_chat",
+            "google",
         }:
             raise ValueError("Config 'model_hub.sources.protocol' is invalid")
         if not isinstance(supply_channel, str) or supply_channel not in {"native_cli", "hub"}:

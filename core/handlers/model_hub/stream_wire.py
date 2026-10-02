@@ -366,6 +366,10 @@ def _chat_terminal_event(
     }
 
 
+def _google_terminal_event(key: str, message: str, _next_sequence_number: int) -> dict[str, object]:
+    return {"error": {"code": 500, "status": "INTERNAL", "message": message, "details": [{"reason": key}]}}
+
+
 StreamTerminalOutcome = Literal["served", "failed_terminal"]
 ProtocolObservationOutcome = Literal["served", "failed_terminal", "protocol_error"]
 ErrorEnvelopePath = tuple[str, ...]
@@ -474,6 +478,7 @@ class ProtocolTerminalEnvelope:
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
     required_error_path: ErrorEnvelopePath | None = None
     required_error_code_path: ErrorEnvelopePath | None = None
+    require_nonempty: bool = False
 
 
 @dataclass(frozen=True)
@@ -521,6 +526,37 @@ class ProtocolStreamTaxonomy:
 
 
 PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
+    "google": ProtocolStreamTaxonomy(
+        terminal_envelopes=(
+            ProtocolTerminalEnvelope(None, ("error",), None, "failed_terminal", (("error",),)),
+            ProtocolTerminalEnvelope("error", ("error",), None, "failed_terminal", (("error",),)),
+            ProtocolTerminalEnvelope(
+                None, ("candidates", "*", "finishReason"), None, "served", require_nonempty=True,
+            ),
+            ProtocolTerminalEnvelope(
+                None, ("promptFeedback", "blockReason"), None, "served", require_nonempty=True,
+            ),
+        ),
+        model_output_envelopes=(
+            ProtocolModelOutputEnvelope(
+                None, ("candidates", "*", "content", "parts"), None, require_nonempty=True,
+            ),
+        ),
+        success_literal=None,
+        sequence_number_path=None,
+        buffered_error_envelope_paths=(("error",),),
+        buffered_output_array_path=("candidates",),
+        terminal_event_name=None,
+        render_terminal_event=_google_terminal_event,
+        usage=ProtocolUsageTaxonomy(
+            # Gemini GenerateContentResponse. Prompt count includes cache;
+            # thoughtsTokenCount is separate from candidatesTokenCount.
+            container_paths=(("usageMetadata",),),
+            input_paths=(("promptTokenCount",),),
+            cached_input_paths=(("cachedContentTokenCount",),),
+            output_paths=(("candidatesTokenCount",), ("thoughtsTokenCount",)),
+        ),
+    ),
     "anthropic": ProtocolStreamTaxonomy(
         terminal_envelopes=(
             ProtocolTerminalEnvelope(
@@ -926,7 +962,7 @@ def _buffered_recovery_verified(
     """Recognize a completed native result without validating every body field."""
 
     return (
-        bool(taxonomy.buffered_success_selectors)
+        taxonomy.buffered_output_array_path is not None
         and taxonomy.buffered_output_array_path in arrays
         and all(scalars.get(path) in values for path, values in taxonomy.buffered_success_selectors)
     )
@@ -1175,6 +1211,16 @@ class ProtocolFactProjector:
         candidates: list[str] = []
         for error_path in error_paths:
             value = self._scalars.get((*error_path, field))
+            if self.protocol == "google" and field == "code" and type(value) is int:
+                # Gemini error.code carries an HTTP status even inside SSE.
+                # Normalize only shaped native errors; classification retains
+                # sole ownership of retry/health policy.
+                value = {
+                    400: "invalid_request_error", 401: "authentication_error",
+                    403: "permission_error", 404: "not_found_error",
+                    429: "rate_limit_error", 500: "server_error",
+                    502: "server_error", 503: "server_error", 504: "server_error",
+                }.get(value)
             if not isinstance(value, str):
                 continue
             if self.machine_error_codes and value not in self.machine_error_codes:
@@ -1297,6 +1343,7 @@ def observe_protocol_response(
             payload,
             selector_path=envelope.selector_path,
             selector_value=envelope.selector_value,
+            require_nonempty=envelope.require_nonempty,
         ):
             continue
         if envelope.required_error_path is not None and not any(
@@ -1386,9 +1433,14 @@ class ProtocolSSEState:
         return self.terminal_outcome == "served" or self.model_output_started
 
     def _observe_frame(self, frame: SSEObservedFrame) -> None:
-        if self.terminal_outcome is not None:
-            return
         observation = frame.observation
+        if self.terminal_outcome is not None:
+            # Google's finishReason completes model output, but the pinned
+            # Chat -> Gemini translator can send billing in a following frame.
+            # Preserve terminal truth; only that protocol's usage may advance.
+            if self.protocol == "google" and self.terminal_outcome == "served" and observation.usage is not None:
+                self.usage = observation.usage if self.usage is None else self.usage.merge(observation.usage)
+            return
         if observation.model_output_started:
             self.model_output_started = True
         if observation.usage is not None:

@@ -1,8 +1,9 @@
 # Model Hub contracts
 
-Status: **contract_version 11**, 2026-10-02: Avibe Agent Hub-only consumer, primary-hop
-resolution, and response origin linked to the served attempt. See
-[`avibe-consumer.md`](avibe-consumer.md). The approved routing contract is
+Status: **contract_version 12**, 2026-10-02: Google protocol vocabulary and Gemini
+gateway frontend, with API/config-only Source admission. See
+[`google-protocol.md`](google-protocol.md) and [`avibe-consumer.md`](avibe-consumer.md).
+The approved routing contract is
 `../model-hub-routing-modes.md`, including the owner-approved Empty Route Inheritance
 correction `352486374`; API-key-only scope remains unchanged.
 
@@ -44,9 +45,10 @@ commit is not evidence that the complete final protocol has landed.
   inherited routing through the same Restore/Undo/Save flow, never empty Manual.
 - A hop whose upstream `model_id` differs from its menu model is an explicit configured
   mapping. There is no separate mapping object or runtime mapping event.
-- The protocol vocabulary is exactly `anthropic | openai_responses | openai_chat`.
-  `base_url` already distinguishes official endpoints from relays and self-hosted
-  gateways; no fourth protocol value is defined.
+- The protocol vocabulary is exactly `anthropic | openai_responses | openai_chat | google`.
+  `base_url` distinguishes official endpoints from relays and self-hosted gateways.
+  Google is explicitly declared through API/config; the three-option UI picker and
+  custom Auto-detection set remain unchanged.
 - Source health is global and changes only from shaped explicit upstream classifications.
   Native CLI availability, exact-hop integrity, and bounded pre-first-byte connection
   backoff are live execution facts and never silently rewrite stored configuration.
@@ -179,7 +181,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 11 must coexist in all registered version locations on the same tested head:
+`contract_version` 12 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`
@@ -215,7 +217,7 @@ persisted-shape rule that governs config files. It therefore accepts the release
 as a set ending at the terminal one, and nothing branches on which member a record
 carries.
 
-The three-value protocol closure includes `source.schema.json`, `adapter-interface.py`,
+The four-value protocol closure includes `source.schema.json`, `adapter-interface.py`,
 and the byte-identical `core/handlers/model_hub/adapter.py` on the same tested head.
 
 After implementation lands, these contracts are read-only for downstream lanes. An
@@ -226,7 +228,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 
 | File | Authority and consumer role |
 | --- | --- |
-| `source.schema.json` | Source identity, channel, three protocols, state, usage, inventory, credential reference, and audit metadata. |
+| `source.schema.json` | Source identity, channel, four protocols, state, usage, inventory, credential reference, and audit metadata. |
 | `source-create.schema.json` | API-key Source creation request, transient credential boundary, optional single-protocol constraint, and lost-response correlation. |
 | `agent-supply.schema.json` | Backend mode, default Source membership/order and sparse manual intent, configuration eligibility, model-supply and backend-health projections. |
 | `backend-model.schema.json` | Backend Agent model identity, editable capability metadata, and server-owned lock/routeability projection. |
@@ -248,6 +250,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `adapter-interface.py` | Adapter protocol, observation, credential, discovery, invocation, cleanup, and classification boundary. |
 | `mirror-registry.json` | Executable authority/mirror registry and terminal contract version. |
 | `avibe-consumer.md` | C-6 launch projection, capability authority, served-hop response headers, and delivery boundaries. |
+| `google-protocol.md` | Google API/config admission, native gateway paths, discovery, stream facts, and pinned-engine translation boundary. |
 | `avibe-boundary-matrix.json` | Executable Avibe backend/channel audit: all declared schema shapes, runtime admission owners, and Hub-only refusal cases. |
 | `hop-resolution.schema.json` | Ephemeral in-process Avibe consumer result, including gateway-only credentials and nullable capabilities. |
 | `hop-origin.schema.json` | Non-secret response origin shared by the HTTP response header and provenance attempt. |

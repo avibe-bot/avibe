@@ -69,7 +69,8 @@
       "enum": [
         "anthropic",
         "openai_responses",
-        "openai_chat"
+        "openai_chat",
+        "google"
       ]
     },
     "base_url": {

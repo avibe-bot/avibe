@@ -1,5 +1,5 @@
 {
-  "contract_version": 11,
+  "contract_version": 12,
   "input_generation": {
     "mode": "same_run_live_files",
     "external_snapshot": "content_fingerprint_required"
@@ -571,6 +571,11 @@
         },
         {
           "kind": "python_string_assignment",
+          "file": "vibe/model_hub_runtime/api_key_vendors.py",
+          "name": "_SUPPORTED_PROTOCOLS"
+        },
+        {
+          "kind": "python_string_assignment",
           "file": "docs/plans/model-hub-contracts/adapter-interface.py",
           "name": "SOURCE_PROTOCOLS"
         },
@@ -588,6 +593,17 @@
           "kind": "schema_vocabulary",
           "schema": "source-create.schema.json",
           "paths": ["/properties/protocol"]
+        },
+        {
+          "kind": "schema_vocabulary",
+          "schema": "source-probe-result.schema.json",
+          "paths": ["/properties/protocol"]
+        },
+        {
+          "kind": "schema_vocabulary",
+          "schema": "observation-result.schema.json",
+          "paths": ["/properties/protocol"],
+          "exclude": [null]
         }
       ]
     },
