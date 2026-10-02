@@ -8,6 +8,10 @@ from typing import Mapping, Optional
 from core.agent_core.tools.base import JobHost, JobStatus
 
 
+class ForegroundCleanupError(RuntimeError):
+    """Every owned handle was attempted, but some could not be released."""
+
+
 class TrackingJobHost:
     """Pass this same host to job-backed tools and their owning Agent.
 
@@ -82,11 +86,19 @@ class TrackingJobHost:
         self._foreground.pop(job_id, None)
         return watch_id
 
-    async def kill_foreground(self, session_id: str) -> None:
-        for job_id, (owner, _) in list(self._foreground.items()):
-            if owner != session_id:
+    async def kill_foreground(self, session_id: str, *, tool_call_id: Optional[str] = None) -> None:
+        failures = []
+        for job_id, (owner, call) in list(self._foreground.items()):
+            if owner != session_id or (tool_call_id is not None and call != tool_call_id):
                 continue
-            if self.status(job_id).state == "running":
-                await self.kill(job_id)
-            else:
-                self._foreground.pop(job_id, None)
+            try:
+                if self.status(job_id).state == "running":
+                    await self.kill(job_id)
+                else:
+                    self._foreground.pop(job_id, None)
+            except (Exception, asyncio.CancelledError) as error:
+                # Keep failed handles owned for the final run sweep, and do
+                # not let one failed kill prevent release of the other jobs.
+                failures.append(f"{job_id}: {type(error).__name__}: {error}")
+        if failures:
+            raise ForegroundCleanupError("Failed to release foreground jobs: " + "; ".join(failures))

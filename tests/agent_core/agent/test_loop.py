@@ -899,3 +899,291 @@ async def test_partial_response_commit_failure_still_emits_a_terminal_error():
     assert any(
         isinstance(event, AgentError) and event.message == "response persistence unavailable" for event in events
     )
+
+
+@pytest.mark.parametrize(
+    "phase,reason",
+    [
+        ("before_start", "aborted"),
+        ("before_store", "aborted"),
+        ("model", "aborted"),
+        ("tool", "aborted"),
+        ("dependency", "aborted"),
+        ("consumer", "aborted"),
+        ("tool_exception", "completed"),
+        ("completed", "completed"),
+        ("cleanup", "completed"),
+    ],
+)
+async def test_run_lifecycle_owns_admission_and_releases_every_foreground_job(phase, reason):
+    """A single lifecycle table covers admission, cancellation and release.
+
+    Earlier tests checked cancellation outcomes individually but missed work
+    admitted after abort and jobs abandoned on non-abort execution exits.
+    """
+    entered, release = asyncio.Event(), asyncio.Event()
+    host = FakeJobHost()
+    hook_calls, outcomes, events, store_writes = [], [], [], []
+
+    class Store(InMemoryTranscriptStore):
+        async def load(self, session_id):
+            if phase == "before_start":
+                entered.set()
+                await release.wait()
+            return await super().load(session_id)
+
+        async def consume_input(self, *args):
+            store_writes.append("input")
+            return await super().consume_input(*args)
+
+    class Observe(Hooks):
+        async def before_run(self, input, ctx):
+            hook_calls.append("before_run")
+            if phase == "before_store":
+                ctx.cancel.cancel("abort before storage")
+
+        async def after_run(self, outcome, ctx):
+            outcomes.append(outcome.reason)
+            if phase == "cleanup":
+                await agent.jobs.start(
+                    "cleanup",
+                    cwd="/test-owned",
+                    env={},
+                    timeout_s=None,
+                    session_id=ctx.session_id,
+                    tool_call_id="cleanup",
+                )
+
+    async def stream(request, cancel):
+        if phase == "model":
+            entered.set()
+            await release.wait()
+        yield Done(assistant(calls=[ToolCallBlock("a", "bash")]))
+
+    async def execute(arguments, ctx):
+        watched = await agent.jobs.start(
+            "watched",
+            cwd=ctx.cwd,
+            env=ctx.env,
+            timeout_s=None,
+            session_id=ctx.session_id,
+            tool_call_id=ctx.tool_call_id,
+        )
+        await agent.jobs.hand_over(watched)
+        await agent.jobs.start(
+            "foreground",
+            cwd=ctx.cwd,
+            env=ctx.env,
+            timeout_s=None,
+            session_id=ctx.session_id,
+            tool_call_id=ctx.tool_call_id,
+        )
+        if phase == "dependency":
+            raise asyncio.CancelledError()
+        if phase == "tool_exception":
+            raise ValueError("output parsing failed")
+        if phase in {"tool", "consumer"}:
+            entered.set()
+            ctx.on_progress("working")
+            await release.wait()
+        return ToolResult((text("done"),))
+
+    provider = ScriptedProvider([stream, [Done(assistant())]])
+    agent = make_agent(provider, store=Store(), hooks=[Observe()], tools=[FakeTool("bash", execute=execute)], jobs=host)
+    iterator = agent.run(input_row("input", "hello"), turn_id="turn")
+
+    async def consume():
+        try:
+            async for event in iterator:
+                events.append(event)
+                if phase == "consumer" and isinstance(event, ToolProgress):
+                    break
+        finally:
+            await iterator.aclose()
+
+    run = asyncio.create_task(consume())
+    if phase in {"before_start", "model", "tool"}:
+        await asyncio.wait_for(entered.wait(), 1)
+        agent.abort("test cancellation")
+        release.set()
+    await asyncio.wait_for(run, 1)
+    if phase == "consumer":
+        assert not any(isinstance(event, RunEnded) for event in events)
+        assert outcomes == [reason]
+    else:
+        assert isinstance(events[-1], RunEnded)
+        assert events[-1].reason == reason
+    if phase == "before_start":
+        assert hook_calls == []
+    if phase in {"before_start", "before_store"}:
+        assert provider.requests == []
+        assert store_writes == []
+    for job_id in host.states:
+        assert host.status(job_id).state == ("running" if job_id in host.watches else "gone")
+    assert not set(host.killed) & host.watches.keys()
+    assert await agent.steer(input_row("late", "late")) is False
+
+
+@pytest.mark.parametrize("bad_state", [{1: "value"}, {"value": ("item",)}, {"value": float("nan")}, {"value": {1}}])
+async def test_hook_state_rejects_non_json_shapes_without_coercion(bad_state):
+    class Invalid(Hooks):
+        async def before_run(self, input, ctx):
+            ctx.state = bad_state
+
+    agent = make_agent(ScriptedProvider([[Done(assistant())]]), hooks=[Invalid()])
+    events = await collect(agent)
+    assert events[-1].reason == "error"
+    assert any(isinstance(event, AgentError) and event.kind == "HookStateError" for event in events)
+    assert await agent.store.load("session") == []
+    assert agent.snapshot().state == {}
+
+
+async def test_hook_state_representation_distinguishes_bool_int_and_survives_resume():
+    seen = []
+
+    class Update(Hooks):
+        async def before_run(self, input, ctx):
+            ctx.state["value"] = 1
+
+        async def after_model(self, message, ctx):
+            ctx.state["value"] = True
+
+        async def after_run(self, outcome, ctx):
+            seen.append(ctx.state.copy())
+
+    agent = make_agent(ScriptedProvider([[Done(assistant())]]), hooks=[Update()])
+    await collect(agent)
+    assert type(agent.snapshot().state["value"]) is bool
+    rows = await agent.store.load("session")
+    states = [row.payload["state"] for row in rows if row.kind == "agent_state"]
+    assert len(states) == 2
+    assert type(states[0]["value"]) is int
+    assert type(states[1]["value"]) is bool
+
+    class Resume(Hooks):
+        async def before_run(self, input, ctx):
+            seen.append(ctx.state.copy())
+
+    resumed = make_agent(ScriptedProvider([[Done(assistant())]]), store=agent.store, hooks=[Resume()])
+    await collect(resumed, "next")
+    assert all(type(state["value"]) is bool for state in seen)
+    assert len([row for row in await agent.store.load("session") if row.kind == "agent_state"]) == 2
+
+
+async def test_invalid_cleanup_hook_state_is_an_error_even_after_abort():
+    class InvalidCleanup(Hooks):
+        async def before_model(self, request, ctx):
+            ctx.cancel.cancel()
+
+        async def after_run(self, outcome, ctx):
+            ctx.state["invalid"] = ("tuple",)
+
+    agent = make_agent(ScriptedProvider([]), hooks=[InvalidCleanup()])
+    events = await collect(agent)
+    assert events[-1].reason == "error"
+    assert any(isinstance(event, AgentError) and event.kind == "HookStateError" for event in events)
+    assert agent.snapshot().state == {}
+
+
+async def test_request_headers_are_detached_from_router_selection_across_turns():
+    class Rewrite(Hooks):
+        first = True
+
+        async def before_model(self, request, ctx):
+            if self.first:
+                request.endpoint.request_headers["X-Transient"] = "only this request"
+                self.first = False
+
+    endpoint = replace(ENDPOINT, request_headers={"X-Base": "stable"})
+    selection = ModelSelection(endpoint, ModelCapabilities())
+    provider = ScriptedProvider([[Done(assistant())], [Done(assistant())]])
+    agent = make_agent(provider, hooks=[Rewrite()])
+    agent.models = FakeModelRouter(provider, [selection])
+    await collect(agent)
+    await collect(agent, "next")
+    assert provider.requests[0].endpoint.request_headers == {"X-Base": "stable", "X-Transient": "only this request"}
+    assert provider.requests[1].endpoint.request_headers == {"X-Base": "stable"}
+    assert endpoint.request_headers == {"X-Base": "stable"}
+
+
+async def test_failed_foreground_kill_is_reported_and_does_not_skip_other_handles():
+    class Host(FakeJobHost):
+        def __init__(self):
+            super().__init__()
+            self.attempts = []
+
+        async def kill(self, job_id):
+            self.attempts.append(job_id)
+            if job_id == "job_2":
+                raise OSError("kill denied")
+            await super().kill(job_id)
+
+    host = Host()
+    provider = ScriptedProvider([[Done(assistant(calls=[ToolCallBlock("a", "bash")]))]])
+    agent = make_agent(provider, jobs=host)
+
+    async def execute(arguments, ctx):
+        for index in range(3):
+            job = await agent.jobs.start(
+                "fake",
+                cwd=ctx.cwd,
+                env=ctx.env,
+                timeout_s=None,
+                session_id=ctx.session_id,
+                tool_call_id=ctx.tool_call_id,
+            )
+            if index == 0:
+                await agent.jobs.hand_over(job)
+        raise ValueError("tool failed")
+
+    agent.set_tools([FakeTool("bash", execute=execute)])
+    events = await collect(agent)
+    assert events[-1].reason == "error"
+    assert any(
+        isinstance(event, AgentError) and event.kind == "ForegroundCleanupError" and "kill denied" in event.message
+        for event in events
+    )
+    assert host.attempts == ["job_2", "job_3", "job_2"]
+    assert host.status("job_1").state == host.status("job_2").state == "running"
+    assert host.status("job_3").state == "gone"
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.parametrize("phase", ["abort", "consumer"])
+async def test_admitted_commit_finishes_before_cancellation_releases_run_ownership(phase):
+    entered, release = asyncio.Event(), asyncio.Event()
+    interrupted = []
+
+    class Store(InMemoryTranscriptStore):
+        async def append_response(self, *args, **kwargs):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                interrupted.append(True)
+                raise
+            return await super().append_response(*args, **kwargs)
+
+    agent = make_agent(ScriptedProvider([[Done(assistant())]]), store=Store())
+    task = asyncio.create_task(collect(agent))
+    await entered.wait()
+    if phase == "abort":
+        agent.abort()
+    else:
+        task.cancel()
+        # Let generator closure reach its worker; no wall-clock timing.
+        for _ in range(3):
+            await asyncio.sleep(0)
+    release.set()
+    if phase == "consumer":
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        events = await task
+        assert events[-1].reason == "aborted"
+        assert any(isinstance(event, MessageCommitted) for event in events)
+    assert interrupted == []
+    rows = await agent.store.load("session")
+    assert rows[-1].kind == "response"
+    assert agent.snapshot().context_seq == rows[-1].context_seq
+    assert await agent.steer(input_row("late", "late")) is False

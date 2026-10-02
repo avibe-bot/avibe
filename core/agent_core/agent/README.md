@@ -43,13 +43,17 @@ The configured output budget defaults to 8,192 and is capped by the provider's
 maximum (8,192 when unknown). `ModelSelection.context_window` exposes the C-9
 budget (128,000 when unknown); context management itself remains P3.
 The shared nullable source capabilities are not changed into guessed values.
-Before-model rewrites affect a detached request only. Tools execute against the
+Before-model rewrites affect a detached request only, including endpoint headers.
+The router's cached selection is never mutated. Tools execute against the
 registry captured for that request, restricted to its advertised names.
 A before-run setup affects that run only; `set_tools` changes the configured
 set as well as the next request of an active run.
 
 Hooks subclass `Hooks`, override async methods, and mutate `RunContext.state`
-with JSON data. Rewrites compose in registration order; the first `Deny` or
+with exact JSON data (string-keyed dicts, lists, JSON scalars, finite numbers).
+Non-JSON Python values are hook errors, never silently coerced. Representation
+comparison distinguishes booleans, integers and floats and avoids duplicate
+state rows. Rewrites compose in registration order; the first `Deny` or
 `End` stops that hook chain. State changes append versioned `agent_state` rows
 at commit points. A snapshot describes committed context and committed state.
 The store/adapter owns fork ancestry; the engine does not copy parent rows.
@@ -70,11 +74,20 @@ The store/adapter owns fork ancestry; the engine does not copy parent rows.
   steers have been consumed. A terminating tool still finishes its batch.
 - Hook end commits the current step and records policy error results for
   unexecuted calls. It makes no further model request.
-- Abort cancels the pending provider/tool/hook/backoff operation, waits for its
-  cleanup, and kills tracked foreground jobs through `JobHost.kill`. Jobs
-  handed to Watch survive. Closing the event iterator also cleans up its worker.
+- One explicit `RunScope` owns operation admission and joining on Python 3.10.
+  Lazy factories prevent aborted runs from creating callback/store work.
+  Abort cancels pending provider/tool/hook/backoff operations and waits for their
+  cleanup. Admitted store commits finish before ownership is released; connected
+  consumers still receive the committed-row event, and the run ends aborted.
+  Cleanup runs in a separately joined task outside cancelled admission.
+  Closing the event iterator also cleans up its worker.
   A dependency that independently raises cancellation produces an error and a
   terminal aborted event; it is not mistaken for a closed iterator.
+- Every tool execution exit releases that `(Session, tool call)`'s remaining
+  foreground handles, including success and failure. Final cleanup sweeps all
+  remaining Session-owned handles on every terminal path. Handed-over jobs are
+  never touched. Failed kills remain owned, other handles are still attempted,
+  and an explicit cleanup error prevents a silently successful run.
 - Transient retries have a fixed attempt budget, exponential backoff, and honor
   Retry-After. Any streamed event or partial response forbids retry. Overflow
   emits an error and ends as `context_exhausted`.
@@ -91,8 +104,11 @@ The store/adapter owns fork ancestry; the engine does not copy parent rows.
 C9 against the actual requests recorded by `tests/agent_core/fakes.py`.
 It also covers each orphan job state, retry classification, cancellation during
 job ownership transitions, settlement crash/retry windows, and event consumer
-closure. These are in-memory
-engine checks; production provider/store/Watch integration is a later layer.
+closure. One lifecycle table covers pre-start/storage abort, model/tool abort,
+dependency cancellation, consumer closure, tool exceptions, normal completion,
+and cleanup. Separate probes cover failed kills and cancellation during commit.
+These are in-memory engine checks; production provider/store/Watch integration
+is a later layer.
 
 ## Known by design
 

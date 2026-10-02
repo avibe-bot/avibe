@@ -41,7 +41,9 @@ from core.agent_core.agent.hooks import (
     Snapshot,
 )
 from core.agent_core.agent.jobs import TrackingJobHost
+from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import DEFAULT_MAX_OUTPUT_TOKENS, ModelRouter, ModelSelection, RetryPolicy
+from core.agent_core.agent.state import HookStateError, state_representation
 from core.agent_core.ai.provider import (
     Done,
     ModelRequest,
@@ -56,10 +58,6 @@ from core.agent_core.messages import AssistantMessage, Message, TextBlock, ToolC
 from core.agent_core.tools.base import JobHost, Tool, ToolContext, ToolResult
 
 T = TypeVar("T")
-
-
-class _Aborted(Exception):
-    pass
 
 
 class _Ended(Exception):
@@ -124,8 +122,10 @@ class Agent:
         self._open = False
         self._consumer_closed = False
         self._ctx = RunContext(session_id, "", CancelToken())
+        self._scope = RunScope(self._ctx.cancel)
         self._rows: list[ContextEntry] = []
         self._committed_state: dict[str, Any] = {}
+        self._committed_state_json = "{}"
         self._seq = 0
 
     def set_tools(self, tools: Sequence[Tool]) -> None:
@@ -183,6 +183,7 @@ class Agent:
             self._running = self._open = True
             self._consumer_closed = False
             self._ctx = RunContext(self.session_id, turn_id, CancelToken())
+            self._scope = RunScope(self._ctx.cancel)
             self._seq = 0
 
         # Bounded delivery applies backpressure to provider streaming. No emit
@@ -190,6 +191,8 @@ class Agent:
         events: asyncio.Queue[AgentEvent] = asyncio.Queue(maxsize=64)
 
         async def emit(event_type: Any, **fields: Any) -> None:
+            if self._consumer_closed:
+                return
             event = event_type(turn_id=turn_id, seq=self._seq, **fields)
             self._seq += 1
             await events.put(event)
@@ -233,43 +236,39 @@ class Agent:
                     self._running = self._open = False
                     self._run_tools = None
 
-    async def _cancellable(self, awaitable: Awaitable[T]) -> T:
-        operation = asyncio.ensure_future(awaitable)
-        cancelled = asyncio.create_task(self._ctx.cancel.wait())
-        try:
-            ready, _ = await asyncio.wait({operation, cancelled}, return_when=asyncio.FIRST_COMPLETED)
-            if cancelled in ready:
-                raise _Aborted()
-            return await operation
-        finally:
-            for task in (operation, cancelled):
-                if not task.done():
-                    task.cancel()
-            # Await cleanup: a cancelled job start may still need to record its
-            # handle before the run can kill it.
-            await asyncio.gather(operation, cancelled, return_exceptions=True)
-
-    def _check_abort(self) -> None:
-        if self._ctx.cancel.cancelled:
-            raise _Aborted()
-
-    async def _save_state(self) -> None:
-        if self._ctx.state == self._committed_state:
+    async def _save_state(self, *, cleanup: bool = False) -> None:
+        representation = state_representation(self._ctx.state)
+        if representation == self._committed_state_json:
             return
-        # Reject non-JSON state at the writer boundary, before it reaches a store.
-        state = json.loads(json.dumps(self._ctx.state, allow_nan=False))
-        row = await self.store.append_payload(self.session_id, "agent_state", {"version": 1, "state": state})
+        state = deepcopy(self._ctx.state)
+
+        async def persist() -> ContextEntry:
+            return await self.store.append_payload(self.session_id, "agent_state", {"version": 1, "state": state})
+
+        row = await persist() if cleanup else await self._scope.call(persist, interruptible=False)
         self._rows.append(row)
         self._committed_state = deepcopy(state)
+        self._committed_state_json = representation
+
+    async def _hook(self, factory: Callable[[], Awaitable[T]], *, cleanup: bool = False) -> T:
+        result = await factory() if cleanup else await self._scope.call(factory)
+        state_representation(self._ctx.state)
+        return result
 
     async def _consume(self, input: AgentInput) -> None:
         await self._save_state()
-        row = await self.store.consume_input(self.session_id, input.message_id, deepcopy(input.message))
+        row = await self._scope.call(
+            lambda: self.store.consume_input(self.session_id, input.message_id, deepcopy(input.message)),
+            interruptible=False,
+        )
         self._rows.append(row)
 
     async def _response(self, message: AssistantMessage, *, final: bool) -> ContextEntry:
         await self._save_state()
-        row = await self.store.append_response(self.session_id, deepcopy(message), final=final)
+        row = await self._scope.call(
+            lambda: self.store.append_response(self.session_id, deepcopy(message), final=final),
+            interruptible=False,
+        )
         self._rows.append(row)
         return row
 
@@ -277,54 +276,70 @@ class Agent:
         reason: RunEndReason = "error"
         loaded = False
         try:
-            await emit(RunStarted)
-            # Preflight before hooks or input consumption. Reuse the selection
-            # for the first request; later attempts resolve the route afresh.
-            selected = await self._resolve_model()
-            self._rows = list(await self.store.load(self.session_id))
-            projection = project(self._rows)
-            self._ctx.state = deepcopy(dict(projection.state))
-            self._committed_state = deepcopy(self._ctx.state)
-            loaded = True
-            system = self.system
-            self._run_tools = dict(self._tools)
-            for hook in self.hooks:
-                setup = await self._cancellable(hook.before_run(deepcopy(input), self._ctx))
-                if setup is not None:
-                    if setup.system is not None:
-                        system = setup.system
-                    if setup.tools is not None:
-                        names = [tool.spec.name for tool in setup.tools]
-                        if len(names) != len(set(names)):
-                            raise ValueError("tool names must be unique")
-                        self._run_tools = dict(zip(names, setup.tools))
-            self._check_abort()
-            await self._consume(input)
-            reason = await self._loop(system, emit, selected)
-        except _Ended:
-            reason = "ended_by_hook"
-        except _Aborted:
-            reason = "aborted"
-        except asyncio.CancelledError:
-            reason = "aborted"
-            self._ctx.cancel.cancel("event consumer closed" if self._consumer_closed else "dependency cancelled")
-            if not self._consumer_closed:
-                await emit(AgentError, kind="dependency_cancelled", message="An agent dependency was cancelled.")
-        except Exception as error:
-            await emit(AgentError, kind=type(error).__name__, message=str(error))
+            try:
+                await emit(RunStarted)
+                # Preflight before hooks or input consumption. Reuse the selection
+                # for the first request; later attempts resolve the route afresh.
+                selected = await self._resolve_model()
+                self._rows = list(await self._scope.call(lambda: self.store.load(self.session_id)))
+                projection = project(self._rows)
+                self._ctx.state = deepcopy(dict(projection.state))
+                self._committed_state_json = state_representation(self._ctx.state)
+                self._committed_state = deepcopy(self._ctx.state)
+                loaded = True
+                system = self.system
+                self._run_tools = dict(self._tools)
+                for hook in self.hooks:
+                    setup = await self._hook(lambda: hook.before_run(deepcopy(input), self._ctx))
+                    if setup is not None:
+                        if setup.system is not None:
+                            system = setup.system
+                        if setup.tools is not None:
+                            names = [tool.spec.name for tool in setup.tools]
+                            if len(names) != len(set(names)):
+                                raise ValueError("tool names must be unique")
+                            self._run_tools = dict(zip(names, setup.tools))
+                await self._consume(input)
+                reason = await self._loop(system, emit, selected)
+            except _Ended:
+                reason = "ended_by_hook"
+            except _Aborted:
+                reason = "aborted"
+            except asyncio.CancelledError:
+                reason = "aborted"
+                self._ctx.cancel.cancel("event consumer closed" if self._consumer_closed else "dependency cancelled")
+                if not self._consumer_closed:
+                    await emit(AgentError, kind="dependency_cancelled", message="An agent dependency was cancelled.")
+            except Exception as error:
+                if isinstance(error, HookStateError):
+                    self._ctx.state = deepcopy(self._committed_state)
+                await emit(AgentError, kind=type(error).__name__, message=str(error))
         finally:
-            async with self._lock:
-                self._open = False
+            self._scope.stop()
+            # Cleanup is a separate joined task, outside cancelled admission.
+            # Consumer closure cannot interrupt commit/job ownership release.
+            cleanup = asyncio.create_task(self._finish(reason, loaded, emit))
+            try:
+                reason = await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                reason = await cleanup
+        if self._consumer_closed:
+            raise asyncio.CancelledError()
+        await emit(RunEnded, reason=reason)
 
+    async def _finish(self, reason: RunEndReason, loaded: bool, emit: Callable[..., Awaitable[None]]) -> RunEndReason:
+        async with self._lock:
+            self._open = False
+        await self._scope.close()
+        if self._ctx.cancel.cancelled and reason != "error":
+            reason = "aborted"
         try:
-            if self._ctx.cancel.cancelled or reason == "aborted":
-                await self.jobs.kill_foreground(self.session_id)
             if loaded:
-                await self._save_state()
+                await self._save_state(cleanup=True)
                 outcome = RunOutcome(self._ctx.turn_id, reason, self.snapshot())
                 for hook in self.hooks:
-                    await hook.after_run(outcome, self._ctx)
-                await self._save_state()
+                    await self._hook(lambda: hook.after_run(outcome, self._ctx), cleanup=True)
+                await self._save_state(cleanup=True)
         except asyncio.CancelledError:
             if not self._consumer_closed:
                 self._ctx.cancel.cancel("dependency cancelled")
@@ -333,17 +348,27 @@ class Agent:
                     AgentError, kind="dependency_cancelled", message="An agent cleanup dependency was cancelled."
                 )
         except Exception as error:
+            if isinstance(error, HookStateError):
+                self._ctx.state = deepcopy(self._committed_state)
             if self._consumer_closed:
                 raise
             await emit(AgentError, kind=type(error).__name__, message=str(error))
-            if reason != "aborted":
+            if isinstance(error, HookStateError) or reason != "aborted":
                 reason = "error"
-        if self._consumer_closed:
-            raise asyncio.CancelledError()
-        await emit(RunEnded, reason=reason)
+        finally:
+            # Sweep on every terminal path, including failed tool cleanup and
+            # cleanup hooks. Handed-over handles are no longer foreground.
+            try:
+                await self.jobs.kill_foreground(self.session_id)
+            except Exception as error:
+                if self._consumer_closed:
+                    raise
+                await emit(AgentError, kind=type(error).__name__, message=str(error))
+                reason = "error"
+        return "aborted" if self._ctx.cancel.cancelled and reason != "error" else reason
 
     async def _resolve_model(self) -> ModelSelection:
-        selected = await self._cancellable(self.models.resolve())
+        selected = await self._scope.call(self.models.resolve)
         if selected.capabilities.supports_tools is False:
             raise UnsupportedModelRoute("The selected model does not support tools; the agent requires tool support.")
         return selected
@@ -361,7 +386,7 @@ class Agent:
             rehydrated=self.rehydrate(deepcopy(self._ctx.state)) if self.rehydrate else (),
         )
         request = ModelRequest(
-            endpoint=selected.endpoint,
+            endpoint=deepcopy(selected.endpoint),
             system=context.system,
             messages=context.messages,
             tools=tuple(deepcopy(tool.spec) for tool in tools.values()),
@@ -374,7 +399,7 @@ class Agent:
             supports_images=capabilities.supports_images is True,
         )
         for hook in self.hooks:
-            decision = await self._cancellable(hook.before_model(request, self._ctx))
+            decision = await self._hook(lambda: hook.before_model(request, self._ctx))
             if isinstance(decision, End):
                 await self._save_state()
                 raise _Ended()
@@ -388,16 +413,17 @@ class Agent:
     ) -> tuple[AssistantMessage, dict[str, Tool]]:
         retries = 0
         while True:
-            self._check_abort()
+            self._scope.check()
             request, tools = await self._request(system, selected)
             selected = None
+            self._scope.check()
             stream = self.models.provider_for(request.endpoint.protocol).stream(request, self._ctx.cancel)
             streamed = False
             terminal = None
             try:
                 while True:
                     try:
-                        event = await self._cancellable(anext(stream))
+                        event = await self._scope.call(lambda: anext(stream))
                     except StopAsyncIteration:
                         break
                     if isinstance(event, (Done, ProviderError)):
@@ -420,7 +446,7 @@ class Agent:
             if delay is None:
                 raise _ProviderFailed(terminal)
             retries += 1
-            await self._cancellable(asyncio.sleep(delay))
+            await self._scope.call(lambda: asyncio.sleep(delay))
 
     async def _loop(self, system: str, emit: Callable[..., Awaitable[None]], selected: ModelSelection) -> RunEndReason:
         first_selection: Optional[ModelSelection] = selected
@@ -441,7 +467,7 @@ class Agent:
                     if error.kind == "aborted"
                     else "error"
                 )
-            self._check_abort()
+            self._scope.check()
             pending: list[tuple[AgentInput, bool]] = []
             consumed: list[tuple[AgentInput, bool]] = []
             failed = message.stop_reason in {"error", "aborted"}
@@ -469,7 +495,7 @@ class Agent:
 
             end, skip = False, False
             for hook in self.hooks:
-                decision = await self._cancellable(hook.after_model(deepcopy(message), self._ctx))
+                decision = await self._hook(lambda: hook.after_model(deepcopy(message), self._ctx))
                 if isinstance(decision, End):
                     end = True
                     break
@@ -504,7 +530,7 @@ class Agent:
 
             terminate = False
             for call in message.tool_calls:
-                self._check_abort()
+                self._scope.check()
                 result, step_end = await self._tool(call, tools, skip or end, emit)
                 terminate = terminate or result.terminate
                 end = end or step_end
@@ -539,7 +565,7 @@ class Agent:
             result = ToolResult((text("[skipped by policy]"),), is_error=True)
         else:
             for hook in self.hooks:
-                decision = await self._cancellable(hook.before_tool(call, self._ctx))
+                decision = await self._hook(lambda: hook.before_tool(call, self._ctx))
                 if isinstance(decision, Deny):
                     result = ToolResult((text(decision.reason),), is_error=True)
                     break
@@ -563,7 +589,7 @@ class Agent:
                 result = await self._execute(tool, call, emit)
         if not end and not skip:
             for hook in self.hooks:
-                decision = await self._cancellable(hook.after_tool(call, result, self._ctx))
+                decision = await self._hook(lambda: hook.after_tool(call, result, self._ctx))
                 if isinstance(decision, End):
                     end = True
                     break
@@ -571,7 +597,10 @@ class Agent:
                     result = decision.result
         message = ToolResultMessage(call.id, call.name, result.content, result.is_error)
         await self._save_state()
-        row = await self.store.append_tool_result(self.session_id, deepcopy(message), details=deepcopy(result.details))
+        row = await self._scope.call(
+            lambda: self.store.append_tool_result(self.session_id, deepcopy(message), details=deepcopy(result.details)),
+            interruptible=False,
+        )
         self._rows.append(row)
         await emit(
             ToolFinished,
@@ -599,7 +628,7 @@ class Agent:
             self._ctx.cancel,
             on_progress=progress,
         )
-        execution = asyncio.create_task(self._cancellable(tool.execute(call.arguments, ctx)))
+        execution = asyncio.create_task(self._scope.call(lambda: tool.execute(call.arguments, ctx)))
         update = None
         try:
             while not execution.done() or not updates.empty():
@@ -622,3 +651,4 @@ class Agent:
                 if task is not None and not task.done():
                     task.cancel()
             await asyncio.gather(*(task for task in (update, execution) if task is not None), return_exceptions=True)
+            await self.jobs.kill_foreground(self.session_id, tool_call_id=call.id)

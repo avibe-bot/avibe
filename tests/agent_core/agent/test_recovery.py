@@ -200,3 +200,19 @@ async def test_tracking_host_forwards_the_full_output_path_and_relative_deadline
     tracked = TrackingJobHost(host)
     assert tracked.output_path("job_a") == "/test-owned/jobs/job_a/output.log"
     assert await tracked.wait("job_a", deadline_s=0.25) == JobStatus("running")
+
+
+async def test_foreground_release_is_scoped_to_call_then_session_and_never_watch():
+    # A single Agent's sequential batch cannot reach shared-host cross-Session
+    # ownership; protect that distinct boundary directly on the real wrapper.
+    host = FakeJobHost()
+    tracked = TrackingJobHost(host)
+    for session, call in [("one", "a"), ("one", "b"), ("two", "a"), ("one", "a")]:
+        await tracked.start("fake", cwd="/test-owned", env={}, timeout_s=None, session_id=session, tool_call_id=call)
+    await tracked.hand_over("job_4")
+    await tracked.kill_foreground("one", tool_call_id="a")
+    assert host.killed == ["job_1"]
+    assert host.status("job_2").state == host.status("job_3").state == host.status("job_4").state == "running"
+    await tracked.kill_foreground("one")
+    assert host.killed == ["job_1", "job_2"]
+    assert host.status("job_3").state == host.status("job_4").state == "running"
