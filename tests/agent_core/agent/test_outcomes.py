@@ -146,7 +146,7 @@ async def test_primary_outcome_cross_cleanup_keeps_reason_rows_and_event_order(
     agent = agent_for(provider, store=store, hooks=[Observe()], tools=[tool])
 
     class UnkillableHost(FakeJobHost):
-        async def kill(self, job_id):
+        async def kill(self, job_id, *, reason="killed"):
             raise OSError("kill failed")
 
     if cleanup == "kill":
