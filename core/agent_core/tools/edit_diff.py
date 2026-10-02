@@ -27,7 +27,7 @@ BOM = "\ufeff"
 
 # JavaScript's String.prototype.trimEnd set, which Pi uses (Python's isspace differs).
 _BREAK = re.compile(r"\r\n|\r|\n")
-_TRAILING_SPACE = re.compile("[ \t\v\f\r\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+$")
+_TRAILING_SPACE = " \t\v\f\r\u00a0\u1680" + "".join(map(chr, range(0x2000, 0x200B))) + "\u2028\u2029\u202f\u205f\u3000\ufeff"
 _SMART_SINGLE = re.compile("[\u2018\u2019\u201a\u201b]")
 _SMART_DOUBLE = re.compile("[\u201c\u201d\u201e\u201f]")
 _DASHES = re.compile("[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]")
@@ -60,7 +60,8 @@ def normalize_to_lf(text: str) -> str:
 def normalize_for_fuzzy_match(text: str) -> str:
     """NFKC, no trailing whitespace per line, ASCII quotes and dashes, plain spaces."""
     text = unicodedata.normalize("NFKC", text)
-    text = "\n".join(_TRAILING_SPACE.sub("", line) for line in text.split("\n"))
+    # rstrip, not a "[...]+$" regex: the regex retries at every space of a run, which is quadratic.
+    text = "\n".join(line.rstrip(_TRAILING_SPACE) for line in text.split("\n"))
     text = _SMART_SINGLE.sub("'", text)
     text = _SMART_DOUBLE.sub('"', text)
     text = _DASHES.sub("-", text)
@@ -131,11 +132,15 @@ def _no_change(path: str, total: int) -> EditError:
 
 
 def _apply(content: str, replacements: list[_Replacement], offset: int = 0) -> str:
-    result = content
-    for replacement in sorted(replacements, key=lambda r: r.index, reverse=True):
+    """``content`` with disjoint ``replacements`` applied, in one pass (``replaceAll`` can make thousands)."""
+    pieces: list[str] = []
+    pos = 0
+    for replacement in sorted(replacements, key=lambda r: r.index):
         start = replacement.index - offset
-        result = result[:start] + replacement.new_text + result[start + replacement.length :]
-    return result
+        pieces += (content[pos:start], replacement.new_text)
+        pos = start + replacement.length
+    pieces.append(content[pos:])
+    return "".join(pieces)
 
 
 def _line_starts(text: str) -> list[int]:
@@ -179,6 +184,7 @@ class _Lines:
             pos = match.end()
         self.contents.append(text[pos:])
         self.breaks.append("")
+        self.first_break = next((brk for brk in self.breaks if brk), "\n")
         # What read showed (one U+FFFD per undecodable byte), one character for one, so offsets map back.
         self.view = shown("\n".join(self.contents))
         self.view_starts: list[int] = []
@@ -198,20 +204,17 @@ class _Lines:
         """Original offset just past ``line`` and its break."""
         return self.starts[line + 1] if line + 1 < len(self.starts) else len(self.text)
 
-    def break_for(self, lo: int, hi: int) -> str:
-        """The break new text uses in ``[lo, hi)``: one inside it, else the next one, else the file's first."""
-        inside = _BREAK.search(self.text, lo, hi)
-        if inside:
-            return inside.group()
-        following = _BREAK.search(self.text, hi)
-        if following:
-            return following.group()
-        return next((brk for brk in self.breaks if brk), "\n")
+    def break_for(self, lo: int) -> str:
+        """The break new text uses for a span starting at ``lo``: the first break at or after it (inside the
+        span, else the one after it), which is the break of ``lo``'s line, else the file's first."""
+        return self.breaks[bisect.bisect_right(self.starts, lo) - 1] or self.first_break
 
-    def with_breaks(self, lf_text: str, lo: int, hi: int, own: Optional[list[str]] = None) -> str:
-        """``lf_text`` with each ``\\n`` turned into ``own``'s next break, then the span's break."""
+    def with_breaks(self, lf_text: str, lo: int, own: Optional[list[str]] = None) -> str:
+        """``lf_text`` with each ``\\n`` turned into ``own``'s next break, then the break of the span at ``lo``."""
+        if "\n" not in lf_text:
+            return lf_text
         pieces = lf_text.split("\n")
-        fallback = self.break_for(lo, hi)
+        fallback = self.break_for(lo)
         out = [pieces[0]]
         for index, piece in enumerate(pieces[1:]):
             brk = own[index] if own is not None and index < len(own) and own[index] else fallback
@@ -223,7 +226,7 @@ def _exact_replacements(lines: _Lines, matches: list[_Replacement]) -> list[_Rep
     out = []
     for match in matches:
         lo, hi = lines.to_original(match.index), lines.to_original(match.index + match.length)
-        out.append(_Replacement(match.edit_index, lo, hi - lo, lines.with_breaks(match.new_text, lo, hi)))
+        out.append(_Replacement(match.edit_index, lo, hi - lo, lines.with_breaks(match.new_text, lo)))
     return out
 
 
@@ -257,7 +260,7 @@ def _line_groups(lines: _Lines, normalized: str, matches: list[_Replacement]) ->
         hi = normalized_starts[last + 1] if last + 1 < len(normalized_starts) else len(normalized)
         rewritten = _apply(normalized[lo:hi], members, lo)
         original_lo, original_hi = lines.starts[first], lines.line_end(last)
-        text = lines.with_breaks(rewritten, original_lo, original_hi, lines.breaks[first : last + 1])
+        text = lines.with_breaks(rewritten, original_lo, lines.breaks[first : last + 1])
         out.append(_Replacement(members[0].edit_index, original_lo, original_hi - original_lo, text))
     return out
 

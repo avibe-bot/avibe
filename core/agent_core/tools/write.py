@@ -25,11 +25,6 @@ from core.agent_core.tools.paths import (
     target_kind,
     to_thread_joined,
 )
-from core.agent_core.tools.text import model_text
-
-# The process umask, read once: new files get 0o666 under it, as open() would give them.
-_UMASK = os.umask(0)
-os.umask(_UMASK)
 
 WRITE_DESCRIPTION = (
     "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates "
@@ -100,8 +95,8 @@ def _prepare_target(absolute: str) -> Optional[str]:
 
 
 def write_text(path: str, content: str) -> None:
-    """UTF-8 without newline translation, after the one sanitizer for model text."""
-    write_bytes(path, model_text(content).encode("utf-8"))
+    """UTF-8 without newline translation; ``content`` came through the one sanitizer for model text."""
+    write_bytes(path, content.encode("utf-8"))
 
 
 class FileChanged(Exception):
@@ -132,9 +127,10 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
     """Create or replace ``path`` only once ``data`` is completely on disk.
 
     A failed write (a full disk, a quota) leaves the original, or its absence, as it was. The temp
-    file sits beside the real target (through symlinks) and is private (0600) while it holds the new
-    contents; once they are fsynced it takes the existing file's mode, or the umask default for a new
-    file, and replaces the target with ``os.replace``.
+    file sits beside the real target (through symlinks). Replacing a file, it is private (0600) while
+    it receives the new contents and takes the file's mode once they are fsynced; a new file's temp is
+    created with the umask default it keeps, so the process umask is never read or changed. Then
+    ``os.replace`` puts it in place.
 
     With ``expected``, the file must still be the one that was read: checked once, right before the
     rename, or with ``fstat`` on the descriptor an in-place write goes through. POSIX has no
@@ -147,7 +143,7 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
         mode = None
     tmp = os.path.join(os.path.dirname(target), f".{os.path.basename(target)}.{secrets.token_hex(4)}.tmp")
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if mode is not None else 0o666)
     except PermissionError:
         if mode is None:
             raise
@@ -162,7 +158,8 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-            os.fchmod(handle.fileno(), mode if mode is not None else 0o666 & ~_UMASK)
+            if mode is not None:
+                os.fchmod(handle.fileno(), mode)
         if expected is not None:
             current = os.path.realpath(path)
             try:

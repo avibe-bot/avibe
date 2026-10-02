@@ -10,6 +10,7 @@ Copyright (c) 2025 Mario Zechner).
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, Optional
 
 from core.agent_core.tools.base import MAX_BYTES, MAX_LINES
@@ -45,11 +46,16 @@ def utf8_len(value: str) -> int:
 
 
 def format_size(size: int) -> str:
+    """Pi's ``formatSize``; ``toFixed(1)`` rounds an exact tie up (1280 bytes is ``1.3KB``), unlike ``%.1f``."""
     if size < 1024:
         return f"{size}B"
     if size < 1024 * 1024:
-        return f"{size / 1024:.1f}KB"
-    return f"{size / (1024 * 1024):.1f}MB"
+        return f"{_to_fixed_1(size / 1024)}KB"
+    return f"{_to_fixed_1(size / (1024 * 1024))}MB"
+
+
+def _to_fixed_1(value: float) -> str:
+    return str(Decimal(value).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
 
 
 def split_lines_for_counting(content: str) -> list[str]:

@@ -19,6 +19,8 @@ import core.agent_core.tools.jobs as jobs_module
 from core.agent_core.tools.jobs import LocalJobHost
 from tests.agent_core.tools.conftest import result_text
 
+LABEL = "Output log (first 1.0MB, then the last 2.0MB in tail.log beside it)"
+
 
 class Watches:
     """Adopt-or-create keyed by job id, as the adapter's Watch target is."""
@@ -53,7 +55,7 @@ async def test_long_output_keeps_the_tail_and_names_the_full_output(tmp_path, ma
     assert not result.is_error
     # One label in every state: the log keeps everything up to the cap, so it is never promised as complete.
     assert result_text(result).endswith(
-        f"2499\n2500\n\n[Showing lines 501-2500 of 2500. Output log (middle omitted beyond 3.0MB): {path}]"
+        f"2499\n2500\n\n[Showing lines 501-2500 of 2500. Output log (first 1.0MB, then the last 2.0MB in tail.log beside it): {path}]"
     )
     assert open(path).read() == "".join(f"{i}\n" for i in range(1, 2501))
 
@@ -67,7 +69,8 @@ async def test_a_log_bounded_on_disk_is_not_called_the_full_output(tmp_path, mak
 
     text = result_text(result)
     assert text.startswith("1\n2\n3\n")
-    assert f"100000\n\n\n[Output log (middle omitted beyond 2.9KB): {result.details['output_path']}]" in text
+    path = result.details["output_path"]
+    assert f"100000\n\n\n[Output log (first 1000B, then the last 2.0KB in tail.log beside it): {path}]" in text
     assert "Full output" not in text
     assert result.details["omitted_bytes"] == len("".join(f"{i}\n" for i in range(1, 100001))) - 3000
 
@@ -80,8 +83,35 @@ async def test_a_completed_overlong_line_reports_its_size(tmp_path, make_ctx):
 
     path = result.details["output_path"]
     assert result_text(result).endswith(
-        f"\n\n[Showing last 50.0KB of line 1 (line is 58.6KB). Output log (middle omitted beyond 3.0MB): {path}]"
+        f"\n\n[Showing last 50.0KB of line 1 (line is 58.6KB). Output log (first 1.0MB, then the last 2.0MB in tail.log beside it): {path}]"
     )
+
+
+async def test_a_line_longer_than_the_normalizer_keeps_reports_its_whole_size(tmp_path, make_ctx):
+    command = "head -c 900000 /dev/zero | tr '\\0' x; echo"
+
+    result = await BashTool(_host(tmp_path)).execute({"command": command}, make_ctx())
+
+    assert "[Showing last 50.0KB of line 1 (line is 878.9KB). " in result_text(result)
+
+
+async def test_output_past_the_head_names_where_its_end_is(tmp_path, make_ctx):
+    """Between the 1 MiB head and the 3 MiB bound nothing is dropped, but the end is only in tail.log."""
+    result = await BashTool(_host(tmp_path)).execute({"command": "seq 1 200000"}, make_ctx())
+
+    path = result.details["output_path"]
+    assert result_text(result).endswith(f"[Showing lines 198001-200000 of 200000. {LABEL}: {path}]")
+    with open(os.path.join(os.path.dirname(path), "tail.log"), encoding="utf-8") as handle:
+        header, rest = handle.read().split("\n", 1)
+    assert header == f"[output from byte {os.path.getsize(path)}]"
+    assert rest.endswith("199999\n200000\n")
+
+
+@pytest.mark.parametrize(("arguments", "expected"), [({"command": "printf '%s' \ud800"}, "\ufffd")])
+async def test_a_lone_surrogate_in_the_command_is_sanitized(tmp_path, make_ctx, arguments, expected):
+    result = await BashTool(_host(tmp_path)).execute(arguments, make_ctx())
+
+    assert (result.is_error, result_text(result)) == (False, expected)
 
 
 async def test_a_non_zero_exit_is_an_error_result(tmp_path, make_ctx):
@@ -275,7 +305,7 @@ async def test_the_foreground_window_hands_over_and_the_command_runs_once(tmp_pa
     )
     # A running job's log may still pass the on-disk cap, so it is never called the full output (J4).
     assert text.endswith(
-        f"\n\nOutput log (middle omitted beyond 3.0MB): {path}\nCheck: vibe watch show wch_1\nStop: vibe watch remove wch_1"
+        f"\n\nOutput log (first 1.0MB, then the last 2.0MB in tail.log beside it): {path}\nCheck: vibe watch show wch_1\nStop: vibe watch remove wch_1"
     )
     assert (await host.wait(job_id, deadline_s=5)).exit_code == 0
     assert open(path).read() == "working\nfinished\n"

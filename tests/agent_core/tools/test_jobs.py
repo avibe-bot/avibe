@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
+import signal
 import subprocess
 import time
 
@@ -50,6 +51,13 @@ def _wrapper_gone(job_dir):
         pid = int(open(os.path.join(job_dir, "pid")).read())
     except (FileNotFoundError, ValueError):
         return False
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+def _gone(pid):
     try:
         return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
     except psutil.NoSuchProcess:
@@ -187,7 +195,7 @@ async def test_output_on_disk_keeps_the_head_and_tail_of_a_long_command(tmp_path
 
     job_dir = host.job_dir(job_id)
     assert os.path.getsize(os.path.join(job_dir, "output.log")) == 1000
-    assert os.path.getsize(os.path.join(job_dir, "tail.log")) <= 2000 + 16
+    assert os.path.getsize(os.path.join(job_dir, "tail.log")) <= 2000 + 32
 
     chunks, offset, skipped = [], 0, 0
     while True:
@@ -319,7 +327,8 @@ async def test_a_kill_whose_reason_cannot_be_recorded_still_stops_the_command(tm
         await host.kill(job_id)
 
     assert stopped
-    assert host.stop_reason(job_id) is None
+    # The host could not record "aborted"; its SIGTERM reached the wrapper, which recorded what it saw.
+    assert host.stop_reason(job_id) == "killed"
 
 
 def test_a_shell_that_exited_by_the_deadline_check_is_not_a_timeout(tmp_path, monkeypatch):
@@ -338,6 +347,89 @@ def test_a_shell_that_exited_by_the_deadline_check_is_not_a_timeout(tmp_path, mo
 
     assert stops == []
     assert (tmp_path / "exit").read_text() == "3\n"
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP, signal.SIGUSR1])
+async def test_a_signal_to_the_wrapper_alone_stops_its_command(tmp_path, sig):
+    """``pkill -f python`` reaches the wrapper but not its shell: the wrapper must take the group with it."""
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    job_id = await _start(host, tmp_path, f"echo $$ > {tmp_path / 'sh.pid'}; sleep 30", timeout_s=60)
+    assert _wait_until(lambda: (tmp_path / "sh.pid").exists())
+    shell_pid = int((tmp_path / "sh.pid").read_text())
+
+    os.kill(int(open(os.path.join(host.job_dir(job_id), "pid")).read()), sig)
+
+    try:
+        assert _wait_until(lambda: _gone(shell_pid), timeout_s=6)
+    finally:
+        await host.kill(job_id)
+    assert host.stop_reason(job_id) == "killed"
+
+
+async def test_a_command_outliving_a_killed_wrapper_is_still_running_and_held_to_its_deadline(tmp_path, monkeypatch):
+    """SIGKILL to the wrapper alone: the group carries the job's marker, so it is not gone (J2, J3)."""
+    import sys
+
+    monkeypatch.setattr(jobs_module, "_WRAPPER_DECIDES_S", 0.2)
+    # Python as the shell: its environment, and so the marker, is readable on macOS too.
+    host = LocalJobHost(str(tmp_path / "jobs"), shell=sys.executable)
+    script = f"import os, time; open({str(tmp_path / 'sh.pid')!r}, 'w').write(str(os.getpid())); time.sleep(30)"
+    job_id = await _start(host, tmp_path, script, timeout_s=1.0)
+    assert _wait_until(lambda: (tmp_path / "sh.pid").exists() and (tmp_path / "sh.pid").read_text())
+    shell_pid = int((tmp_path / "sh.pid").read_text())
+    os.kill(int(open(os.path.join(host.job_dir(job_id), "pid")).read()), signal.SIGKILL)
+    assert _wait_until(lambda: _wrapper_gone(host.job_dir(job_id)))
+
+    try:
+        assert host.status(job_id).state == "running"
+        status = await asyncio.wait_for(host.wait(job_id, deadline_s=None), timeout=10)
+        assert (status.state, host.stop_reason(job_id)) == ("gone", "timeout")
+        assert _wait_until(lambda: _gone(shell_pid))
+    finally:
+        await host.kill(job_id)
+
+
+async def test_start_reports_a_go_it_made_durable_even_if_reading_it_back_fails(tmp_path, monkeypatch):
+    """Once ``go`` is linked, the command runs: start must not report that it could not start."""
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    real_read = jobs_module._read_text
+
+    def read_fails_for_decision(path):
+        if path.endswith(os.sep + "decision"):
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_read(path)
+
+    monkeypatch.setattr(jobs_module, "_read_text", read_fails_for_decision)
+    job_id = await _start(host, tmp_path, f"echo ran > {tmp_path / 'ran'}")
+    monkeypatch.undo()
+
+    assert (await host.wait(job_id, deadline_s=5)).state == "exited"
+    assert (tmp_path / "ran").read_text() == "ran\n"
+
+
+async def test_prune_keeps_an_exited_job_whose_wrapper_still_drains_children(tmp_path):
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    # The shell exits at once; a background child keeps the pipe, so the wrapper keeps the log.
+    job_id = await _start(host, tmp_path, "sleep 2 &")
+    assert (await host.wait(job_id, deadline_s=5)).state == "exited"
+
+    removed = host.prune(lambda meta: True, older_than_s=-60)
+
+    assert removed == []
+    assert os.path.isdir(host.job_dir(job_id))
+
+
+async def test_hosts_over_different_spellings_of_the_jobs_directory_see_the_same_job(tmp_path):
+    """A legacy alias (``~/.vibe_remote`` -> ``~/.avibe``, ``/tmp`` -> ``/private/tmp``) names the same jobs."""
+    (tmp_path / "real").mkdir()
+    (tmp_path / "alias").symlink_to(tmp_path / "real")
+    host = LocalJobHost(str(tmp_path / "alias" / "jobs"))
+    job_id = await _start(host, tmp_path, "sleep 30")
+    try:
+        other = LocalJobHost(str(tmp_path / "real" / "jobs"))
+        assert other.status(job_id).state == "running"
+    finally:
+        await host.kill(job_id)
 
 
 def test_the_wrapper_stops_its_group_even_when_its_diagnostics_fail(tmp_path, monkeypatch):

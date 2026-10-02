@@ -12,14 +12,17 @@ skips site-packages.
    stderr into one pipe.
 4. Keep the output bounded on disk: the first ``head_cap`` bytes are appended
    to ``output.log`` as they arrive; after that, the last ``tail_cap`` bytes are
-   kept in ``tail.log`` (a ``<offset>\\n`` header, then the bytes from that
-   offset of the whole stream), replaced atomically a few times a second.
+   kept in ``tail.log`` (a ``[output from byte <offset>]\\n`` header, readable by
+   anyone who opens the file, then the bytes from that offset of the whole
+   stream), replaced atomically a few times a second.
 5. When the shell exits, read what it wrote, then write ``exit`` (temporary
    file, rename). Keep reading until every holder of the pipe closes it, so
    background children are not killed by ``SIGPIPE``.
-6. If the deadline passes before the shell exits, or the wrapper itself fails,
-   write ``stopped`` (``timeout`` or ``wrapper_error``) and end the whole
-   process group: SIGTERM, then SIGKILL after 3 s.
+6. If the deadline passes before the shell exits, the wrapper itself fails, or
+   a catchable signal reaches the wrapper alone (``pkill -f python``), write
+   ``stopped`` (``timeout``, ``wrapper_error``, or ``killed``) and end the whole
+   process group: SIGTERM, then SIGKILL after 3 s. The wrapper decides timeout
+   versus exit, and it looks at the shell first.
 
 Every wait is bounded or watches the deadline: the decision wait (30 s), the
 check just before the shell is spawned, the read loop, the wait after the
@@ -41,6 +44,14 @@ from typing import Optional
 _SNAPSHOT_INTERVAL_S = 0.25
 _DRAIN_LIMIT_S = 0.5
 _TERMINATE_GRACE_S = 3.0
+# Catchable signals that would otherwise end the wrapper alone and leave its command running
+# (``pkill -f python``, a hangup; SIGINT would surface as a failure). Each stops the whole group as
+# "killed" instead. Python already ignores SIGPIPE and SIGXFSZ; SIGKILL cannot be caught.
+_STOP_SIGNALS = tuple(
+    getattr(signal, name)
+    for name in "SIGTERM SIGHUP SIGINT SIGQUIT SIGUSR1 SIGUSR2 SIGALRM SIGVTALRM SIGPROF SIGXCPU SIGPWR SIGIO".split()
+    if hasattr(signal, name)
+)
 
 
 def _write_atomic(path: str, data: bytes) -> None:
@@ -108,7 +119,7 @@ class _BoundedLog:
         if not self._dirty or (not force and now - self._last_snapshot < _SNAPSHOT_INTERVAL_S):
             return
         kept = bytes(self._tail[-self._tail_cap :])
-        _write_atomic(self._tail_path, b"%d\n" % (self._total - len(kept)) + kept)
+        _write_atomic(self._tail_path, b"[output from byte %d]\n" % (self._total - len(kept)) + kept)
         self._dirty = False
         self._last_snapshot = now
 
@@ -119,12 +130,13 @@ def _stop_group(job_dir: str, reason: str, proc: Optional[subprocess.Popen]) -> 
     SIGTERM first, which the wrapper ignores for itself; SIGKILL for everything left after 3 s, so
     background children of the command end too.
     """
+    for signum in _STOP_SIGNALS:
+        signal.signal(signum, signal.SIG_IGN)  # nothing interrupts the stop, and SIGTERM to the group spares us
     try:
         _create_once(os.path.join(job_dir, "stopped"), reason)  # the first stopper's reason wins
     except OSError:
         pass  # the kill matters more than the record
     group = os.getpgrp()
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     with contextlib.suppress(OSError):
         os.killpg(group, signal.SIGTERM)
     deadline = time.monotonic() + _TERMINATE_GRACE_S
@@ -186,10 +198,16 @@ def main(argv: list[str]) -> int:
     job_dir, shell, command = argv[2], argv[3], argv[4]
     decision_timeout_s, head_cap, tail_cap = float(argv[5]), int(argv[6]), int(argv[7])
     deadline = None if argv[8] == "-" else float(argv[8])
+    proc: Optional[subprocess.Popen] = None
+
+    def stop_on_signal(signum: int, frame: object) -> None:
+        _stop_group(job_dir, "killed", proc)
+
+    for signum in _STOP_SIGNALS:
+        signal.signal(signum, stop_on_signal)
     _write_atomic(os.path.join(job_dir, "pid"), b"%d\n" % os.getpid())
     if _wait_for_decision(job_dir, decision_timeout_s) != "go":
         return 0
-    proc: Optional[subprocess.Popen] = None
     try:
         if deadline is not None and time.time() >= deadline:
             # The deadline passed during the launch: the command must not start at all.

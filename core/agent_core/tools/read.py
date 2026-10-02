@@ -12,6 +12,7 @@ loop shares with the rest of Avibe. The result is the same as Pi's.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import inspect
 import os
 import shlex
@@ -37,7 +38,7 @@ from core.agent_core.tools.paths import (
     target_kind,
 )
 from core.agent_core.tools.text import decode_file, shown
-from core.agent_core.tools.truncate import format_size, truncate_head
+from core.agent_core.tools.truncate import format_size, truncate_head, utf8_len
 
 #: Stores an image for the transcript and returns its media token: ``(data, mime_type, name)``.
 ImageSink = Callable[[bytes, str, str], Union[str, Awaitable[str]]]
@@ -251,10 +252,11 @@ def _scan_lines(
     handle: BinaryIO, start: int, stop: Optional[int], cancelled: Callable[[], bool] = lambda: False
 ) -> tuple[list[str], int, int]:
     """Lines ``[start, stop)`` as Pi's ``text.split("\\n")`` gives them, without the ``\\r`` of a CRLF break,
-    the file's line count, and the raw size of line ``start``.
+    the file's line count, and the size of line ``start`` as it is shown.
 
     Avibe drops the ``\\r`` (as tau does; Pi shows it) so read's text is edit's matching view: a copied line
-    can no longer end in a bare ``\\r`` that edit would read as a line break.
+    can no longer end in a bare ``\\r`` that edit would read as a line break. A line ending in more than
+    one ``\\r`` keeps them all: edit reads ``\\r\\r\\n`` as two breaks, and so does the copied text.
 
     Collection stops once the kept lines pass either cap, so the kept prefix exceeds a cap exactly when
     the whole selection does: decoding with replacement never makes text shorter than its bytes, and
@@ -264,8 +266,18 @@ def _scan_lines(
     kept = 0  # raw bytes of "\\n".join(lines)
     opened = -1  # file line index of lines[-1]
     index = 0  # file line index of the bytes being read
-    first_line_bytes = 0
+    first_line_bytes = 0  # UTF-8 bytes of line ``start`` as shown
+    first_decoder = codecs.getincrementaldecoder("utf-8")("surrogateescape")
+    first_line_tail = b""  # its last two bytes, for the dropped "\r"
     collecting = stop is None or start < stop
+
+    def measure(segment: bytes, ends_line: bool) -> None:
+        """Add a piece of line ``start`` to its shown size; ``ends_line`` once its ``\\n`` is reached."""
+        nonlocal first_line_bytes, first_line_tail
+        first_line_bytes += utf8_len(shown(first_decoder.decode(segment, final=ends_line)))
+        first_line_tail = (first_line_tail + segment)[-2:]
+        if ends_line and first_line_tail.endswith(b"\r") and not first_line_tail.endswith(b"\r\r"):
+            first_line_bytes -= 1
 
     def collect(segment: bytes, ends_line: bool) -> None:
         nonlocal kept, opened, collecting
@@ -279,7 +291,7 @@ def _scan_lines(
         if room > 0:
             lines[-1] += segment[:room]
             kept += min(len(segment), room)
-            if ends_line and len(segment) <= room and lines[-1].endswith(b"\r"):
+            if ends_line and len(segment) <= room and lines[-1].endswith(b"\r") and not lines[-1].endswith(b"\r\r"):
                 del lines[-1][-1]
                 kept -= 1
         # One line beyond the cap: a final empty piece does not count as a line.
@@ -287,10 +299,10 @@ def _scan_lines(
             collecting = False
 
     def count_rest(chunk: bytes, pos: int) -> None:
-        nonlocal index, first_line_bytes
+        nonlocal index
         if index == start:
             newline = chunk.find(b"\n", pos)
-            first_line_bytes += (len(chunk) if newline == -1 else newline) - pos
+            measure(chunk[pos : len(chunk) if newline == -1 else newline], newline != -1)
         index += chunk.count(b"\n", pos)
 
     handle.seek(0)
@@ -308,7 +320,7 @@ def _scan_lines(
                 collecting = False
                 continue
             if index == start:
-                first_line_bytes += end - pos
+                measure(chunk[pos:end], newline != -1)
             if index >= start:
                 collect(chunk[pos:end], newline != -1)
             if newline == -1:
@@ -318,6 +330,9 @@ def _scan_lines(
             pos = newline + 1
         else:
             count_rest(chunk, pos)
+    if index == start:
+        # Line ``start`` is the last line and has no "\n": what the decoder still holds is shown too.
+        first_line_bytes += utf8_len(shown(first_decoder.decode(b"", final=True)))
     if collecting and opened != index and index >= start:
         # An empty file: its one line is empty.
         lines.append(bytearray())

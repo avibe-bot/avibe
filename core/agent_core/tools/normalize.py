@@ -49,6 +49,8 @@ class OutputNormalizer:
         # last carriage return, each with the UTF-8 bytes dropped from its start.
         self._prev, self._prev_dropped = "", 0
         self._cur, self._cur_dropped = "", 0
+        # UTF-8 bytes of the last finished line, counting what was dropped from its start.
+        self._finished_line_bytes = 0
 
     def feed(self, data: bytes) -> str:
         return self._consume(self._decoder.decode(data))
@@ -58,12 +60,23 @@ class OutputNormalizer:
         if self._carry_cr:
             self._carry_cr = False
             self._open_segments("\r")
-        tail = self._line()
+        tail, size = self._line_and_size()
+        if tail:
+            self._finished_line_bytes = size
         self._reset()
         return out + tail
 
     def peek(self) -> str:
         return self._line()
+
+    def last_line_bytes(self) -> int:
+        """UTF-8 bytes of the last line: the open one if it shows anything, else the last finished one.
+
+        Bytes dropped from the start of a long line count (before ANSI stripping), so the size is the
+        line's, not the kept part's.
+        """
+        _, size = self._line_and_size()
+        return size or self._finished_line_bytes
 
     def _consume(self, text: str) -> str:
         if self._carry_cr:
@@ -81,7 +94,8 @@ class OutputNormalizer:
             if line.endswith("\r"):
                 line = line[:-1]
             self._open_segments(line)
-            out.append(self._line() + "\n")
+            text, self._finished_line_bytes = self._line_and_size()
+            out.append(text + "\n")
             self._reset()
         self._open_segments(lines[-1])
         return "".join(out)
@@ -103,11 +117,15 @@ class OutputNormalizer:
             self._cur = self._cur[cut:]
 
     def _line(self) -> str:
+        return self._line_and_size()[0]
+
+    def _line_and_size(self) -> tuple[str, int]:
         for segment, dropped in ((self._cur, self._cur_dropped), (self._prev, self._prev_dropped)):
             visible = strip_ansi(segment)
             if visible:
-                return f"[... {dropped} bytes omitted ...]{visible}" if dropped else visible
-        return ""
+                text = f"[... {dropped} bytes omitted ...]{visible}" if dropped else visible
+                return text, dropped + utf8_len(visible)
+        return "", 0
 
     def _reset(self) -> None:
         self._prev, self._prev_dropped = "", 0

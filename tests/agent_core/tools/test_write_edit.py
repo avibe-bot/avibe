@@ -130,6 +130,19 @@ async def test_text_copied_from_read_edits_a_file_with_invalid_bytes(tmp_path, m
     assert (tmp_path / "f.txt").read_bytes() == b"fixed\nkeep\x80\n"
 
 
+@pytest.mark.parametrize("data", [b"alpha\r\r\nbeta\nkeep\n", b"alpha\r\nbeta\nkeep\n", b"a\rlpha\r\r\r\nbeta\nkeep\n"])
+async def test_lines_copied_from_read_edit_the_file_whatever_their_carriage_returns(tmp_path, make_ctx, data):
+    """read's view is edit's matching view: two lines copied from read are found, ``\\r\\r\\n`` included."""
+    (tmp_path / "f.txt").write_bytes(data)
+    shown = result_text(await ReadTool().execute({"path": "f.txt"}, make_ctx()))
+    first_two = shown.split("\nkeep")[0]
+
+    result = await _edit(make_ctx, "f.txt", {"oldText": first_two, "newText": "fixed"})
+
+    assert not result.is_error, result_text(result)
+    assert (tmp_path / "f.txt").read_bytes() == b"fixed\nkeep\n"
+
+
 async def test_text_copied_from_read_edits_the_first_line_of_a_bom_file(tmp_path, make_ctx):
     """read does not show the BOM, edit does not match it, and the BOM survives."""
     (tmp_path / "f.txt").write_bytes(b"\xef\xbb\xbfalpha\r\nbeta\r\n")
@@ -359,6 +372,25 @@ async def test_the_display_diff_and_patch_are_pis(tmp_path, make_ctx, original, 
     }
 
 
+@pytest.mark.parametrize(
+    ("content", "edit"),
+    [
+        # Normalized matching strips trailing whitespace per line; a long run must not be quadratic.
+        ("x" + " " * 60_000 + "y\n", {"oldText": "\u201cmissing\u201d", "newText": "z"}),
+        # replaceAll over one long line: tens of thousands of occurrences.
+        ("a," * 40_000 + "\n", {"oldText": "a", "newText": "b", "replaceAll": True}),
+    ],
+    ids=["whitespace-run", "replace-all"],
+)
+async def test_edit_work_stays_linear_on_adversarial_files(tmp_path, make_ctx, content, edit):
+    (tmp_path / "f.txt").write_text(content)
+    started = time.monotonic()
+
+    await _edit(make_ctx, "f.txt", edit)
+
+    assert time.monotonic() - started < 1.0
+
+
 async def test_a_large_changed_middle_skips_the_display_diff(tmp_path, make_ctx):
     (tmp_path / "f.txt").write_text("".join(f"line {i}\n" for i in range(3000)))
 
@@ -583,6 +615,19 @@ async def test_a_failing_edit_writes_nothing(tmp_path, make_ctx, edits, message)
 
 
 @pytest.mark.parametrize(
+    ("tool", "arguments", "expected"),
+    [
+        (ReadTool(), {"path": "a\ud800"}, "Cannot read a\ufffd: no such file or directory."),
+        (WriteTool(), {"path": "a\udfff", "content": "x"}, "Successfully wrote to a\ufffd"),
+    ],
+)
+async def test_lone_surrogates_in_a_path_are_sanitized(tmp_path, make_ctx, tool, arguments, expected):
+    result = await tool.execute(arguments, make_ctx())
+
+    assert result_text(result) == expected
+
+
+@pytest.mark.parametrize(
     ("tool", "arguments"),
     [
         (ReadTool(), {"path": "a\x00b"}),
@@ -595,6 +640,25 @@ async def test_a_path_no_file_can_have_is_an_error_result(make_ctx, tool, argume
 
     assert result.is_error
     assert result_text(result) == f"Invalid path: {arguments['path']!r} contains a NUL byte"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file://h%C3%A9/x",  # Node: \\\\hé\\x, through IDNA processing Python does not have
+        "file://xn--9ca/x",  # the same host, spelled in punycode
+        "file://127.1/x",  # Node: \\\\127.0.0.1\\x, after WHATWG's IPv4 parsing
+        "file://[::ffff:1.2.3.4]/x",  # Node: \\\\[::ffff:102:304]\\x
+    ],
+)
+def test_unc_hosts_that_need_idna_or_address_parsing_are_refused(monkeypatch, url):
+    """Refused rather than guessed, so a URL never names a share Node would not."""
+    monkeypatch.setattr(paths_module, "_WINDOWS", True)
+
+    with pytest.raises(ToolInputError) as raised:
+        paths_module.expand_path(url)
+
+    assert str(raised.value) == "Invalid path: a file URL must have a valid host"
 
 
 # Expected values are Node's fileURLToPath (WHATWG URL parsing), which Pi uses.
@@ -611,6 +675,12 @@ async def test_a_path_no_file_can_have_is_an_error_result(make_ctx, tool, argume
         (True, "file://localhost\\C:\\x", "C:\\x"),
         # Pi's gate is case-sensitive: this is a relative path in Pi too.
         (False, "FILE:///tmp/a", "FILE:///tmp/a"),
+        # IDNA maps a soft hyphen to nothing; Node fails a host with a zero-width joiner.
+        (False, "file://local\u00adhost/x", "/x"),
+        (False, "file://local\u200dhost/etc/passwd", ToolInputError("Invalid path: a file URL must have a valid host")),
+        (True, "file://Server/Share/x", "\\\\server\\Share\\x"),
+        (True, "file://192.168.1.5/x", "\\\\192.168.1.5\\x"),
+        (True, "file://[::1]/x", "\\\\[::1]\\x"),
         (False, "file://localhost/tmp/x", "/tmp/x"),
         (False, "file://server/tmp/x", ToolInputError("Invalid path: file URL host must be empty or localhost")),
         (False, "file:///tmp/a%2Fb", ToolInputError("Invalid path: a file URL must not include encoded / characters")),

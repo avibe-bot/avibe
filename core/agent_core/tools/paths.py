@@ -8,7 +8,9 @@ Mario Zechner).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
+import ipaddress
 import os
 import re
 import stat
@@ -34,6 +36,8 @@ _QUERY_OR_FRAGMENT = re.compile("[?#]")
 _DRIVE = re.compile(r"[A-Za-z][:|]\Z")
 _NORMALIZED_DRIVE = re.compile(r"[A-Za-z]:\Z")
 _FORBIDDEN_HOST = re.compile(r"[\x00-\x20#%/:<>?@\[\\\]^|\x7f]")
+_IDNA_JOINERS = re.compile("[\u1806\u200c\u200d]")
+_NUMERIC_LABEL = re.compile(r"(?:[0-9]+|0[xX][0-9a-fA-F]*)\Z")
 _SINGLE_DOT = {".", "%2e"}
 _DOUBLE_DOT = {"..", ".%2e", "%2e.", "%2e%2e"}
 
@@ -84,22 +88,51 @@ def _file_url_to_path(url: str) -> str:
 
 
 def _url_host(authority: str) -> str:
-    """The WHATWG host of a file URL: percent-decoded, lowercased, and empty for ``localhost``."""
+    """The WHATWG host of a file URL, lowercased, and empty for ``localhost``.
+
+    Only hosts whose WHATWG form is the text itself are kept: ASCII names, dotted-quad IPv4, and
+    IPv6 in its compressed form. A host that needs IDNA processing or address parsing to reach
+    Node's form is refused rather than guessed (Python has IDNA 2003, Node UTS #46), unless it maps
+    to ``localhost``, so a URL never names a share or a file Node would not.
+    """
     if not authority:
         return ""
     try:
         host = unquote(authority, errors="strict")
-        if host.startswith("[") and host.endswith("]"):
-            host = host.lower()  # an IPv6 literal
-        else:
-            if not host.isascii() or "xn--" in host.lower():
-                host = host.encode("idna").decode("idna")
-            host = host.lower()
-            if _FORBIDDEN_HOST.search(host):
+    except UnicodeError:
+        raise _invalid_host() from None
+    if host.startswith("[") and host.endswith("]"):
+        try:
+            canonical = ipaddress.IPv6Address(host[1:-1]).compressed
+        except ValueError:
+            raise _invalid_host() from None
+        if "." in host or canonical != host[1:-1].lower():
+            raise _invalid_host()
+        return f"[{canonical}]"
+    if not host.isascii() or "xn--" in host.lower():
+        # Node fails a zero-width joiner or non-joiner where Python's IDNA quietly drops it.
+        if not _IDNA_JOINERS.search(host):
+            with contextlib.suppress(UnicodeError):
+                if host.encode("idna").decode("ascii").lower() == "localhost":
+                    return ""
+        raise _invalid_host()
+    host = host.lower()
+    if _FORBIDDEN_HOST.search(host):
+        raise _invalid_host()
+    labels = host.split(".")
+    last = labels[-1] or (labels[-2] if len(labels) > 1 else "")
+    if _NUMERIC_LABEL.match(last):
+        # WHATWG parses it as IPv4 and prints it as a dotted quad; only that form is the text itself.
+        try:
+            if str(ipaddress.IPv4Address(host)) != host:
                 raise ValueError(host)
-    except (UnicodeError, ValueError):
-        raise ToolInputError("Invalid path: a file URL must have a valid host") from None
+        except ValueError:
+            raise _invalid_host() from None
     return "" if host == "localhost" else host
+
+
+def _invalid_host() -> ToolInputError:
+    return ToolInputError("Invalid path: a file URL must have a valid host")
 
 
 def _url_pathname(path: str) -> str:
