@@ -18,10 +18,12 @@ from core.agent_core.ai._common import (
     auth_headers,
     content_parts,
     endpoint_origin,
+    incomplete_stream_error,
     iter_sse_events,
     json_object,
-    load_images,
+    open_stream,
     parsed_arguments,
+    prepare_messages,
     resolve_served_origin,
 )
 from core.agent_core.ai.errors import classify_error
@@ -37,7 +39,6 @@ from core.agent_core.ai.provider import (
     ToolCallDelta,
     ToolCallStart,
 )
-from core.agent_core.ai.transform import transform_messages
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
@@ -80,29 +81,44 @@ class GoogleAdapter(ProviderAdapter):
         if cancel.cancelled:
             yield _aborted(cancel.reason, target)
             return
-        transformed = transform_messages(
+        prepared = await prepare_messages(
             request.messages,
             target=target,
             supports_images=request.supports_images,
             protocol=self.protocol,
+            media_loader=self._media_loader,
         )
-        loaded_images = await load_images(transformed.messages, self._media_loader)
+        if isinstance(prepared, ProviderError):
+            yield prepared
+            return
+        transformed_messages, loaded_images = prepared
         if cancel.cancelled:
             yield _aborted(cancel.reason, target)
             return
-        payload = build_google_payload(request, transformed.messages, loaded_images=loaded_images)
-        headers = auth_headers(request.endpoint, provider="google", gateway=self._gateway)
-        headers.setdefault("content-type", "application/json")
-        url = _google_url(request.endpoint.base_url, request.endpoint.model_id)
         content: list[Any] = []
         calls: list[dict[str, Any]] = []
         usage = None
         finish_reason: str | None = None
         streamed = False
+        terminal_seen = False
         origin = target
         verified = not self._gateway
         try:
-            async with self._client.stream("POST", url, json=payload, headers=headers) as response:
+            payload = build_google_payload(request, transformed_messages, loaded_images=loaded_images)
+            headers = auth_headers(request.endpoint, provider="google", gateway=self._gateway)
+            headers.setdefault("content-type", "application/json")
+            url = _google_url(request.endpoint.base_url, request.endpoint.model_id)
+            async with open_stream(
+                self._client,
+                method="POST",
+                url=url,
+                json_body=payload,
+                headers=headers,
+                cancel=cancel,
+            ) as response:
+                if response is None:
+                    yield _aborted(cancel.reason, origin, content, usage, verified)
+                    return
                 origin, verified = resolve_served_origin(
                     request.endpoint,
                     response.headers,
@@ -129,6 +145,8 @@ class GoogleAdapter(ProviderAdapter):
                         feedback = chunk.get("promptFeedback")
                         if isinstance(feedback, Mapping) and feedback.get("blockReason"):
                             finish_reason = "SAFETY"
+                            terminal_seen = True
+                            break
                         continue
                     candidate = candidates[0]
                     if not isinstance(candidate, Mapping):
@@ -136,91 +154,98 @@ class GoogleAdapter(ProviderAdapter):
                     if isinstance(candidate.get("finishReason"), str):
                         finish_reason = candidate["finishReason"]
                     candidate_content = candidate.get("content")
-                    if not isinstance(candidate_content, Mapping):
-                        continue
-                    parts = candidate_content.get("parts")
-                    if not isinstance(parts, list):
-                        continue
-                    for part in parts:
-                        if not isinstance(part, Mapping):
-                            continue
-                        signature = _string(part.get("thoughtSignature"))
-                        value = _string(part.get("text"))
-                        if value:
-                            if part.get("thought") is True:
-                                content = _append_thinking(content, value, signature or None)
-                                streamed = True
-                                yield ThinkingDelta(index=_find(content, ThinkingBlock), delta=value)
-                            else:
-                                content = _append_text(content, value)
-                                streamed = True
-                                yield TextDelta(index=_find(content, TextBlock), delta=value)
-                            if signature:
-                                _set_thinking_signature(content, signature)
-                        function_call = part.get("functionCall")
-                        if isinstance(function_call, Mapping):
-                            explicit_id = _string(function_call.get("id"))
-                            name = _string(function_call.get("name"))
-                            arguments = function_call.get("args")
-                            raw_args = (
-                                json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
-                                if isinstance(arguments, Mapping)
-                                else _string(arguments)
-                            )
-                            state = (
-                                next((item for item in calls if item["id"] == explicit_id), None)
-                                if explicit_id
-                                else (calls[-1] if calls and calls[-1]["name"] == name else None)
-                            )
-                            if state is None:
-                                call_id = explicit_id or f"call_{len(calls)}"
-                                state = {
-                                    "id": call_id,
-                                    "name": name,
-                                    "arguments": raw_args,
-                                    "arguments_obj": dict(arguments) if isinstance(arguments, Mapping) else None,
-                                    "signature": signature or None,
-                                }
-                                calls.append(state)
-                                content.append(
-                                    ToolCallBlock(
-                                        id=call_id,
-                                        native_id=call_id,
-                                        name=name,
-                                        arguments={},
-                                        signature=state["signature"],
-                                    )
-                                )
-                                state["content_index"] = len(content) - 1
-                                streamed = True
-                                yield ToolCallStart(index=state["content_index"], id=call_id, name=name)
-                            else:
-                                if isinstance(arguments, Mapping):
-                                    existing = state.get("arguments_obj")
-                                    if isinstance(existing, dict):
-                                        existing.update(arguments)
-                                        state["arguments"] = json.dumps(existing, ensure_ascii=False, separators=(",", ":"))
+                    if isinstance(candidate_content, Mapping):
+                        parts = candidate_content.get("parts")
+                        if isinstance(parts, list):
+                            for part in parts:
+                                if not isinstance(part, Mapping):
+                                    continue
+                                signature = _string(part.get("thoughtSignature"))
+                                value = _string(part.get("text"))
+                                if value:
+                                    if part.get("thought") is True:
+                                        content = _append_thinking(content, value, signature or None)
+                                        streamed = True
+                                        yield ThinkingDelta(index=_find(content, ThinkingBlock), delta=value)
                                     else:
-                                        state["arguments"] += raw_args
-                                else:
-                                    state["arguments"] += raw_args
-                                if signature:
-                                    state["signature"] = signature
-                            if raw_args:
-                                streamed = True
-                                yield ToolCallDelta(
-                                    index=_nonnegative(state.get("content_index")),
-                                    arguments_delta=raw_args,
-                                )
+                                        content = _append_text(content, value)
+                                        streamed = True
+                                        yield TextDelta(index=_find(content, TextBlock), delta=value)
+                                    if signature:
+                                        _set_thinking_signature(content, signature)
+                                function_call = part.get("functionCall")
+                                if isinstance(function_call, Mapping):
+                                    explicit_id = _string(function_call.get("id"))
+                                    name = _string(function_call.get("name"))
+                                    arguments = function_call.get("args")
+                                    raw_args = (
+                                        json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+                                        if isinstance(arguments, Mapping)
+                                        else _string(arguments)
+                                    )
+                                    state = (
+                                        next((item for item in calls if item["id"] == explicit_id), None)
+                                        if explicit_id
+                                        else None
+                                    )
+                                    if state is None:
+                                        call_id = explicit_id or f"call_{len(calls)}"
+                                        state = {
+                                            "id": call_id,
+                                            "name": name,
+                                            "arguments": raw_args,
+                                            "arguments_obj": dict(arguments) if isinstance(arguments, Mapping) else None,
+                                            "signature": signature or None,
+                                        }
+                                        calls.append(state)
+                                        content.append(
+                                            ToolCallBlock(
+                                                id=call_id,
+                                                native_id=call_id,
+                                                name=name,
+                                                arguments={},
+                                                signature=state["signature"],
+                                            )
+                                        )
+                                        state["content_index"] = len(content) - 1
+                                        streamed = True
+                                        yield ToolCallStart(index=state["content_index"], id=call_id, name=name)
+                                    else:
+                                        if isinstance(arguments, Mapping):
+                                            existing = state.get("arguments_obj")
+                                            if isinstance(existing, dict):
+                                                existing.update(arguments)
+                                                state["arguments"] = json.dumps(existing, ensure_ascii=False, separators=(",", ":"))
+                                            else:
+                                                state["arguments"] += raw_args
+                                        else:
+                                            state["arguments"] += raw_args
+                                        if signature:
+                                            state["signature"] = signature
+                                    if raw_args:
+                                        streamed = True
+                                        yield ToolCallDelta(
+                                            index=_nonnegative(state.get("content_index")),
+                                            arguments_delta=raw_args,
+                                        )
                     if finish_reason:
-                        for index in range(len(content)):
-                            yield BlockEnd(index=index)
-                        final = _final(content, calls, origin, finish_reason, usage, verified)
-                        yield Done(final)
-                        return
+                        terminal_seen = True
+                        break
                 if cancel.cancelled:
                     yield _aborted(cancel.reason, origin, content, usage, verified)
                     return
+                if not terminal_seen:
+                    yield incomplete_stream_error(
+                        content,
+                        origin=origin,
+                        usage=usage,
+                        streamed=streamed,
+                        verified_origin=verified,
+                        protocol=self.protocol,
+                    )
+                    return
+                for index in range(len(content)):
+                    yield BlockEnd(index=index)
                 final = _final(content, calls, origin, finish_reason or ("tool_use" if calls else "stop"), usage, verified)
                 yield Done(final)
         except httpx.HTTPError as exc:

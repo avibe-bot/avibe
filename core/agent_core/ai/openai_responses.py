@@ -21,10 +21,12 @@ from core.agent_core.ai._common import (
     auth_headers,
     content_parts,
     endpoint_origin,
+    incomplete_stream_error,
     iter_sse_events,
     json_object,
-    load_images,
+    open_stream,
     parsed_arguments,
+    prepare_messages,
     resolve_served_origin,
 )
 from core.agent_core.ai.errors import classify_error
@@ -40,7 +42,6 @@ from core.agent_core.ai.provider import (
     ToolCallStart,
     MediaLoader,
 )
-from core.agent_core.ai.transform import transform_messages
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
@@ -83,20 +84,20 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         if cancel.cancelled:
             yield _aborted(cancel.reason, target)
             return
-        transformed = transform_messages(
+        prepared = await prepare_messages(
             request.messages,
             target=target,
             supports_images=request.supports_images,
             protocol=self.protocol,
+            media_loader=self._media_loader,
         )
-        loaded_images = await load_images(transformed.messages, self._media_loader)
+        if isinstance(prepared, ProviderError):
+            yield prepared
+            return
+        transformed_messages, loaded_images = prepared
         if cancel.cancelled:
             yield _aborted(cancel.reason, target)
             return
-        payload = build_responses_payload(request, transformed.messages, loaded_images=loaded_images)
-        headers = auth_headers(request.endpoint, provider="openai", gateway=self._gateway)
-        headers.setdefault("content-type", "application/json")
-        url = _endpoint_url(request.endpoint.base_url, "/responses")
         content: list[Any] = []
         calls: dict[int, dict[str, Any]] = {}
         call_indexes_by_item: dict[str, int] = {}
@@ -109,7 +110,21 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         origin = target
         verified = not self._gateway
         try:
-            async with self._client.stream("POST", url, json=payload, headers=headers) as response:
+            payload = build_responses_payload(request, transformed_messages, loaded_images=loaded_images)
+            headers = auth_headers(request.endpoint, provider="openai", gateway=self._gateway)
+            headers.setdefault("content-type", "application/json")
+            url = _endpoint_url(request.endpoint.base_url, "/responses")
+            async with open_stream(
+                self._client,
+                method="POST",
+                url=url,
+                json_body=payload,
+                headers=headers,
+                cancel=cancel,
+            ) as response:
+                if response is None:
+                    yield _aborted(cancel.reason, origin, content, usage, verified)
+                    return
                 origin, verified = resolve_served_origin(
                     request.endpoint,
                     response.headers,
@@ -196,6 +211,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 state = reasoning.setdefault(output_index, {"id": "", "encrypted_content": "", "text": ""})
                                 state["id"] = _string(item.get("id"))
                                 state["encrypted_content"] = _string(item.get("encrypted_content"))
+                                streamed = True
                                 if state["encrypted_content"]:
                                     _set_thinking_signature(content, output_index, state)
                     elif event_type == "response.reasoning_summary_text.done":
@@ -266,9 +282,14 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 if cancel.cancelled:
                     yield _aborted(cancel.reason, origin, content, usage, verified)
                     return
-                for index in range(len(content)):
-                    yield BlockEnd(index=index)
-                yield Done(_final(content, calls, origin, status, incomplete_reason, usage, verified))
+                yield incomplete_stream_error(
+                    content,
+                    origin=origin,
+                    usage=usage,
+                    streamed=streamed,
+                    verified_origin=verified,
+                    protocol=self.protocol,
+                )
         except httpx.HTTPError as exc:
             yield classify_error(
                 exc=exc,
@@ -311,6 +332,7 @@ def build_responses_payload(
         ]
     if request.reasoning_effort and request.reasoning_effort.lower() not in {"none", "off", "disabled"}:
         payload["reasoning"] = {"effort": _openai_effort(request.reasoning_effort), "summary": "auto"}
+        payload["include"] = ["reasoning.encrypted_content"]
     return payload
 
 

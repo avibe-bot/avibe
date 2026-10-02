@@ -19,10 +19,12 @@ from core.agent_core.ai._common import (
     auth_headers,
     content_parts,
     endpoint_origin,
+    incomplete_stream_error,
     iter_sse_events,
     json_object,
-    load_images,
+    open_stream,
     parsed_arguments,
+    prepare_messages,
     resolve_served_origin,
     text_from_content,
 )
@@ -39,7 +41,6 @@ from core.agent_core.ai.provider import (
     ToolCallStart,
     MediaLoader,
 )
-from core.agent_core.ai.transform import transform_messages
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
@@ -88,30 +89,45 @@ class AnthropicAdapter(ProviderAdapter):
             yield _aborted_error(cancel.reason, origin)
             return
         target = origin
-        transformed = transform_messages(
+        prepared = await prepare_messages(
             request.messages,
             target=target,
             supports_images=request.supports_images,
             protocol=self.protocol,
+            media_loader=self._media_loader,
         )
-        loaded_images = await load_images(transformed.messages, self._media_loader)
+        if isinstance(prepared, ProviderError):
+            yield prepared
+            return
+        transformed_messages, loaded_images = prepared
         if cancel.cancelled:
             yield _aborted_error(cancel.reason, origin)
             return
-        payload = build_messages_payload(request, transformed.messages, loaded_images=loaded_images)
-        headers = auth_headers(request.endpoint, provider="anthropic", gateway=self._gateway)
-        headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
-        url = _endpoint_url(request.endpoint.base_url, "/messages")
         content: list[Any] = []
         block_state: dict[int, dict[str, Any]] = {}
         content_indices: dict[int, int] = {}
         usage = None
         stop_reason: str | None = None
         streamed = False
+        terminal_seen = False
         verified_origin = not self._gateway
         served_origin = origin
         try:
-            async with self._client.stream("POST", url, json=payload, headers=headers) as response:
+            payload = build_messages_payload(request, transformed_messages, loaded_images=loaded_images)
+            headers = auth_headers(request.endpoint, provider="anthropic", gateway=self._gateway)
+            headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
+            url = _endpoint_url(request.endpoint.base_url, "/messages")
+            async with open_stream(
+                self._client,
+                method="POST",
+                url=url,
+                json_body=payload,
+                headers=headers,
+                cancel=cancel,
+            ) as response:
+                if response is None:
+                    yield _aborted_error(cancel.reason, served_origin, content, usage, verified_origin)
+                    return
                 served_origin, verified_origin = resolve_served_origin(
                     request.endpoint,
                     response.headers,
@@ -252,6 +268,7 @@ class AnthropicAdapter(ProviderAdapter):
                         )
                         return
                     elif event_type == "message_stop":
+                        terminal_seen = True
                         final = _final_message(
                             content,
                             block_state,
@@ -264,6 +281,16 @@ class AnthropicAdapter(ProviderAdapter):
                         return
                 if cancel.cancelled:
                     yield _aborted_error(cancel.reason, served_origin, content, usage, verified_origin)
+                    return
+                if not terminal_seen:
+                    yield incomplete_stream_error(
+                        content,
+                        origin=served_origin,
+                        usage=usage,
+                        streamed=streamed,
+                        verified_origin=verified_origin,
+                        protocol=self.protocol,
+                    )
                     return
                 final = _final_message(
                     content,
@@ -490,8 +517,13 @@ def _anthropic_usage(value: Any) -> Any:
         return None
     cache_creation = value.get("cache_creation")
     cache_write = value.get("cache_creation_input_tokens", 0)
-    if isinstance(cache_creation, Mapping):
-        cache_write = cache_creation.get("ephemeral_1h_input_tokens", cache_write)
+    if not isinstance(cache_write, int) or isinstance(cache_write, bool) or cache_write < 0:
+        cache_write = 0
+        if isinstance(cache_creation, Mapping):
+            cache_write = sum(
+                _nonnegative(cache_creation.get(key))
+                for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+            )
     return _usage(
         _nonnegative(value.get("input_tokens")),
         _nonnegative(value.get("output_tokens")),

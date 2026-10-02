@@ -18,10 +18,12 @@ from core.agent_core.ai._common import (
     auth_headers,
     content_parts,
     endpoint_origin,
+    incomplete_stream_error,
     iter_sse_events,
     json_object,
-    load_images,
+    open_stream,
     parsed_arguments,
+    prepare_messages,
     resolve_served_origin,
 )
 from core.agent_core.ai.errors import classify_error
@@ -37,7 +39,6 @@ from core.agent_core.ai.provider import (
     ToolCallStart,
     MediaLoader,
 )
-from core.agent_core.ai.transform import transform_messages
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
@@ -81,29 +82,44 @@ class OpenAIChatAdapter(ProviderAdapter):
         if cancel.cancelled:
             yield _aborted(cancel.reason, target)
             return
-        transformed = transform_messages(
+        prepared = await prepare_messages(
             request.messages,
             target=target,
             supports_images=request.supports_images,
             protocol=self.protocol,
+            media_loader=self._media_loader,
         )
-        loaded_images = await load_images(transformed.messages, self._media_loader)
+        if isinstance(prepared, ProviderError):
+            yield prepared
+            return
+        transformed_messages, loaded_images = prepared
         if cancel.cancelled:
             yield _aborted(cancel.reason, target)
             return
-        payload = build_chat_payload(request, transformed.messages, loaded_images=loaded_images)
-        headers = auth_headers(request.endpoint, provider="openai", gateway=self._gateway)
-        headers.setdefault("content-type", "application/json")
-        url = _endpoint_url(request.endpoint.base_url, "/chat/completions")
         content: list[Any] = []
         tools: dict[int, dict[str, Any]] = {}
         usage = None
         finish_reason: str | None = None
         streamed = False
+        terminal_seen = False
         verified = not self._gateway
         origin = target
         try:
-            async with self._client.stream("POST", url, json=payload, headers=headers) as response:
+            payload = build_chat_payload(request, transformed_messages, loaded_images=loaded_images)
+            headers = auth_headers(request.endpoint, provider="openai", gateway=self._gateway)
+            headers.setdefault("content-type", "application/json")
+            url = _endpoint_url(request.endpoint.base_url, "/chat/completions")
+            async with open_stream(
+                self._client,
+                method="POST",
+                url=url,
+                json_body=payload,
+                headers=headers,
+                cancel=cancel,
+            ) as response:
+                if response is None:
+                    yield _aborted(cancel.reason, origin, content, usage, verified)
+                    return
                 origin, verified = resolve_served_origin(
                     request.endpoint,
                     response.headers,
@@ -118,8 +134,11 @@ class OpenAIChatAdapter(ProviderAdapter):
                     if cancel.cancelled:
                         yield _aborted(cancel.reason, origin, content, usage, verified)
                         return
-                    if not event.data or event.data == "[DONE]":
+                    if not event.data:
                         continue
+                    if event.data == "[DONE]":
+                        terminal_seen = True
+                        break
                     chunk = json_object(event.data)
                     if chunk is None:
                         yield _error("Provider returned invalid OpenAI Chat JSON", streamed, content, origin, usage, verified)
@@ -194,6 +213,16 @@ class OpenAIChatAdapter(ProviderAdapter):
                 if cancel.cancelled:
                     yield _aborted(cancel.reason, origin, content, usage, verified)
                     return
+                if not terminal_seen:
+                    yield incomplete_stream_error(
+                        content,
+                        origin=origin,
+                        usage=usage,
+                        streamed=streamed,
+                        verified_origin=verified,
+                        protocol=self.protocol,
+                    )
+                    return
                 for index in range(len(content)):
                     yield BlockEnd(index=index)
                 final = _final_message(content, tools, origin, finish_reason, usage, verified)
@@ -223,8 +252,11 @@ def build_chat_payload(
         "messages": payload_messages,
         "stream": True,
         "stream_options": {"include_usage": True},
-        "max_tokens": request.max_tokens,
     }
+    if _uses_completion_tokens(request.endpoint.model_id, request.reasoning_effort):
+        payload["max_completion_tokens"] = request.max_tokens
+    else:
+        payload["max_tokens"] = request.max_tokens
     if request.tools:
         payload["tools"] = [
             {
@@ -280,10 +312,10 @@ def _message_to_chat(
             output["content"] = ""
         return output
     if isinstance(message, ToolResultMessage):
+        values = content_parts(message.content, include_images=supports_images, loaded_images=loaded_images)
         text = "\n".join(
-            block["text"]
-            for block in _chat_content(message.content, supports_images, loaded_images)
-            if block["type"] == "text"
+            part["text"] if part["type"] == "text" else f"[image: {part['media_token']}]"
+            for part in values
         )
         return {"role": "tool", "tool_call_id": message.tool_call_id, "content": text or "(no tool output)"}
     raise TypeError(f"unsupported message {type(message).__name__}")
@@ -463,6 +495,13 @@ def _endpoint_url(base_url: str, suffix: str) -> str:
 
 def _openai_effort(value: str) -> str:
     return {"xhigh": "high", "max": "high"}.get(value.lower(), value.lower())
+
+
+def _uses_completion_tokens(model: str, effort: str | None) -> bool:
+    normalized = model.lower()
+    if any(normalized.startswith(prefix) for prefix in ("o1", "o3", "o4", "gpt-5")):
+        return True
+    return effort is not None and effort.lower() not in {"none", "off", "disabled"} and "reasoning" in normalized
 
 
 def _string(value: Any) -> str:

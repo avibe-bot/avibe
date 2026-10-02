@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import replace
 from typing import Any
@@ -26,8 +27,7 @@ from core.agent_core.messages import (
     ToolResultMessage,
     UserContent,
 )
-from core.agent_core.ai.provider import ModelEndpoint
-from core.agent_core.ai.provider import MediaLoader
+from core.agent_core.ai.provider import MediaLoader, ModelEndpoint, ProviderError
 
 ServedHopResolver = Callable[[Mapping[str, str]], Origin | None]
 
@@ -135,6 +135,109 @@ async def iter_sse_events(
                 cancel_task.cancel()
     for event in parser.finish():
         yield event
+
+
+@asynccontextmanager
+async def open_stream(
+    client: httpx.AsyncClient,
+    *,
+    method: str,
+    url: str,
+    json_body: Any,
+    headers: Mapping[str, str],
+    cancel: CancelToken,
+) -> AsyncIterator[httpx.Response | None]:
+    """Open and close a streaming response while racing the request against cancellation."""
+
+    if cancel.cancelled:
+        yield None
+        return
+    request = client.build_request(method, url, json=json_body, headers=headers)
+    send_task = asyncio.create_task(client.send(request, stream=True))
+    cancel_task = asyncio.create_task(cancel.wait())
+    response: httpx.Response | None = None
+    try:
+        done, _ = await asyncio.wait(
+            {send_task, cancel_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancel_task in done and cancel.cancelled:
+            if not send_task.done():
+                send_task.cancel()
+                with _suppress_cancelled():
+                    await send_task
+            else:
+                with _suppress_cancelled():
+                    response = send_task.result()
+            if response is not None:
+                await response.aclose()
+            yield None
+            return
+        cancel_task.cancel()
+        with _suppress_cancelled():
+            await cancel_task
+        response = send_task.result()
+        yield response
+    finally:
+        if not cancel_task.done():
+            cancel_task.cancel()
+            with _suppress_cancelled():
+                await cancel_task
+        if response is not None:
+            await response.aclose()
+
+
+async def prepare_messages(
+    messages: tuple[Any, ...],
+    *,
+    target: Any,
+    supports_images: bool,
+    protocol: str,
+    media_loader: MediaLoader | None,
+) -> tuple[tuple[Any, ...], dict[str, tuple[str, str]]] | ProviderError:
+    """Transform history and resolve immutable media snapshots as one safe boundary."""
+
+    try:
+        from core.agent_core.ai.transform import transform_messages
+
+        transformed = transform_messages(
+            messages,
+            target=target,
+            supports_images=supports_images,
+            protocol=protocol,
+        )
+        loaded_images = await load_images(transformed.messages, media_loader)
+    except Exception as exc:
+        return classify_error(body=f"request preparation failed: {type(exc).__name__}: {exc}")
+    return transformed.messages, loaded_images
+
+
+def incomplete_stream_error(
+    content: list[AssistantContent],
+    *,
+    origin: Origin,
+    usage: Any,
+    streamed: bool,
+    verified_origin: bool,
+    protocol: str,
+) -> ProviderError:
+    """Classify a successful HTTP stream that ended without its protocol terminator."""
+
+    return classify_error(
+        body=f"{protocol} stream ended before terminal event",
+        streamed=streamed,
+        partial=(
+            assistant_message(
+                content,
+                origin=origin,
+                stop_reason="error",
+                usage=usage,
+                verified_origin=verified_origin,
+            )
+            if streamed
+            else None
+        ),
+    )
 
 
 class _suppress_cancelled:
