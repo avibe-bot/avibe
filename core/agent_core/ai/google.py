@@ -26,6 +26,7 @@ from core.agent_core.ai._common import (
     prepare_messages,
     read_response_body,
     resolve_served_origin,
+    terminal_event,
 )
 from core.agent_core.ai.errors import classify_error
 from core.agent_core.ai.provider import (
@@ -88,6 +89,7 @@ class GoogleAdapter(ProviderAdapter):
             supports_images=request.supports_images,
             protocol=self.protocol,
             media_loader=self._media_loader,
+            cancel=cancel,
         )
         if isinstance(prepared, ProviderError):
             yield prepared
@@ -120,28 +122,66 @@ class GoogleAdapter(ProviderAdapter):
                 if response is None:
                     yield _aborted(cancel.reason, origin, content, usage, verified)
                     return
-                origin, verified = resolve_served_origin(
+                resolved_origin = await resolve_served_origin(
                     request.endpoint,
                     response.headers,
                     self._served_hop_resolver,
                     gateway=self._gateway,
+                    cancel=cancel,
                 )
+                if resolved_origin is None:
+                    yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
+                    return
+                origin, verified = resolved_origin
                 if response.status_code >= 400:
                     body = await read_response_body(response, cancel)
                     if body is None:
-                        yield _aborted(cancel.reason, origin, content, usage, verified)
+                        yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
                         return
-                    yield classify_error(status=response.status_code, body=body, headers=response.headers)
+                    yield terminal_event(
+                        response,
+                        classify_error(status=response.status_code, body=body, headers=response.headers),
+                    )
                     return
                 async for event in iter_sse_events(response, cancel):
                     if cancel.cancelled:
-                        yield _aborted(cancel.reason, origin, content, usage, verified)
+                        yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
                         return
                     if not event.data:
                         continue
                     chunk = json_object(event.data)
                     if chunk is None:
-                        yield _error("Provider returned invalid Gemini JSON", streamed, content, origin, usage, verified)
+                        yield terminal_event(
+                            response,
+                            _error(
+                                "Provider returned invalid Gemini JSON",
+                                streamed,
+                                content,
+                                origin,
+                                usage,
+                                verified,
+                                include_partial=usage is not None,
+                            ),
+                        )
+                        return
+                    top_level_error = chunk.get("error")
+                    if isinstance(top_level_error, Mapping):
+                        yield terminal_event(
+                            response,
+                            _error(
+                                _string(top_level_error.get("message"))
+                                or json.dumps(dict(chunk), ensure_ascii=False),
+                                streamed,
+                                content,
+                                origin,
+                                usage,
+                                verified,
+                                code=_string(top_level_error.get("status"))
+                                or _string(top_level_error.get("code"))
+                                or None,
+                                include_partial=usage is not None,
+                            ),
+                        )
                         return
                     usage = _gemini_usage(chunk.get("usageMetadata")) or usage
                     candidates = chunk.get("candidates")
@@ -181,7 +221,19 @@ class GoogleAdapter(ProviderAdapter):
                                 if isinstance(function_call, Mapping):
                                     explicit_id = _string(function_call.get("id"))
                                     name = _string(function_call.get("name"))
+                                    if not name:
+                                        yield terminal_event(
+                                            response,
+                                            _invalid_tool_metadata("functionCall name must not be empty"),
+                                        )
+                                        return
                                     arguments = function_call.get("args")
+                                    if arguments is not None and not isinstance(arguments, (Mapping, str)):
+                                        yield terminal_event(
+                                            response,
+                                            _invalid_tool_metadata("functionCall args must be an object or JSON string"),
+                                        )
+                                        return
                                     raw_args = (
                                         json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
                                         if isinstance(arguments, Mapping)
@@ -236,26 +288,29 @@ class GoogleAdapter(ProviderAdapter):
                         terminal_seen = True
                         break
                 if cancel.cancelled:
-                    yield _aborted(cancel.reason, origin, content, usage, verified)
+                    yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
                     return
                 if not terminal_seen:
-                    yield incomplete_stream_error(
-                        content,
-                        origin=origin,
-                        usage=usage,
-                        streamed=streamed,
-                        verified_origin=verified,
-                        protocol=self.protocol,
+                    yield terminal_event(
+                        response,
+                        incomplete_stream_error(
+                            content,
+                            origin=origin,
+                            usage=usage,
+                            streamed=streamed,
+                            verified_origin=verified,
+                            protocol=self.protocol,
+                        ),
                     )
                     return
                 for index in range(len(content)):
                     yield BlockEnd(index=index)
                 final = _final(content, calls, origin, finish_reason or ("tool_use" if calls else "stop"), usage, verified)
                 if isinstance(final, ProviderError):
-                    yield final
+                    yield terminal_event(response, final)
                 else:
-                    yield Done(final)
-        except httpx.HTTPError as exc:
+                    yield terminal_event(response, Done(final))
+        except Exception as exc:
             yield classify_error(
                 exc=exc,
                 streamed=streamed,
@@ -533,16 +588,31 @@ def _find(content: list[Any], kind: type[Any]) -> int:
     return 0
 
 
-def _error(message: str, streamed: bool, content: list[Any], origin: Any, usage: Any, verified: bool) -> ProviderError:
+def _error(
+    message: str,
+    streamed: bool,
+    content: list[Any],
+    origin: Any,
+    usage: Any,
+    verified: bool,
+    *,
+    code: str | None = None,
+    include_partial: bool = False,
+) -> ProviderError:
     return classify_error(
         body=message,
+        code=code,
         streamed=streamed,
         partial=(
             assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
-            if streamed
+            if streamed or include_partial
             else None
         ),
     )
+
+
+def _invalid_tool_metadata(message: str) -> ProviderError:
+    return ProviderError(kind="invalid_request", message=message, retryable=False)
 
 
 def _aborted(reason: str | None, origin: Any, content: list[Any] | None = None, usage: Any = None, verified: bool = True) -> ProviderError:

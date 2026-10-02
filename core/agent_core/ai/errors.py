@@ -167,12 +167,29 @@ def _classify_kind(
     if status in {408, 409, 425}:
         return "server"
     normalized_code = (code or "").lower()
-    if normalized_code in {"rate_limit", "rate_limited", "too_many_requests"}:
+    if normalized_code in {
+        "rate_limit",
+        "rate_limited",
+        "rate_limit_error",
+        "too_many_requests",
+        "resource_exhausted",
+    }:
         return "rate_limit"
-    if normalized_code in {"overloaded", "overload"}:
+    if normalized_code in {"overloaded", "overload", "overloaded_error"}:
         return "overloaded"
-    if normalized_code in {"server_error", "internal_server_error", "bad_gateway", "service_unavailable"}:
+    if normalized_code in {
+        "server_error",
+        "internal_server_error",
+        "bad_gateway",
+        "service_unavailable",
+        "internal",
+        "api_error",
+    }:
         return "server"
+    if normalized_code in {"context_length_exceeded", "request_too_large"}:
+        return "overflow"
+    if normalized_code in {"permission_denied", "unauthenticated"}:
+        return "auth"
     if is_overflow_message(message, status=status):
         return "overflow"
     if exc is not None:

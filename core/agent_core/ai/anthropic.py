@@ -27,6 +27,7 @@ from core.agent_core.ai._common import (
     prepare_messages,
     read_response_body,
     resolve_served_origin,
+    terminal_event,
     text_from_content,
 )
 from core.agent_core.ai.errors import classify_error
@@ -96,6 +97,7 @@ class AnthropicAdapter(ProviderAdapter):
             supports_images=request.supports_images,
             protocol=self.protocol,
             media_loader=self._media_loader,
+            cancel=cancel,
         )
         if isinstance(prepared, ProviderError):
             yield prepared
@@ -129,39 +131,60 @@ class AnthropicAdapter(ProviderAdapter):
                 if response is None:
                     yield _aborted_error(cancel.reason, served_origin, content, usage, verified_origin)
                     return
-                served_origin, verified_origin = resolve_served_origin(
+                resolved_origin = await resolve_served_origin(
                     request.endpoint,
                     response.headers,
                     self._served_hop_resolver,
                     gateway=self._gateway,
+                    cancel=cancel,
                 )
+                if resolved_origin is None:
+                    yield terminal_event(
+                        response,
+                        _aborted_error(cancel.reason, served_origin, content, usage, verified_origin),
+                    )
+                    return
+                served_origin, verified_origin = resolved_origin
                 if response.status_code >= 400:
                     body = await read_response_body(response, cancel)
                     if body is None:
-                        yield _aborted_error(cancel.reason, served_origin, content, usage, verified_origin)
+                        yield terminal_event(
+                            response,
+                            _aborted_error(cancel.reason, served_origin, content, usage, verified_origin),
+                        )
                         return
-                    yield classify_error(
-                        status=response.status_code,
-                        body=body,
-                        headers=response.headers,
-                        streamed=False,
+                    yield terminal_event(
+                        response,
+                        classify_error(
+                            status=response.status_code,
+                            body=body,
+                            headers=response.headers,
+                            streamed=False,
+                        ),
                     )
                     return
                 async for event in iter_sse_events(response, cancel):
                     if cancel.cancelled:
-                        yield _aborted_error(cancel.reason, served_origin, content, usage, verified_origin)
+                        yield terminal_event(
+                            response,
+                            _aborted_error(cancel.reason, served_origin, content, usage, verified_origin),
+                        )
                         return
                     if event.data == "[DONE]" or not event.data:
                         continue
                     chunk = json_object(event.data)
                     if chunk is None:
-                        yield _stream_error(
-                            "Provider returned invalid Anthropic JSON",
-                            streamed=streamed,
-                            content=content,
-                            origin=served_origin,
-                            usage=usage,
-                            verified_origin=verified_origin,
+                        yield terminal_event(
+                            response,
+                            _stream_error(
+                                "Provider returned invalid Anthropic JSON",
+                                streamed=streamed,
+                                content=content,
+                                origin=served_origin,
+                                usage=usage,
+                                verified_origin=verified_origin,
+                                include_partial=usage is not None,
+                            ),
                         )
                         return
                     event_type = chunk.get("type")
@@ -171,7 +194,8 @@ class AnthropicAdapter(ProviderAdapter):
                         index = _int(chunk.get("index"), 0)
                         block = chunk.get("content_block")
                         if not isinstance(block, Mapping):
-                            continue
+                            yield terminal_event(response, _invalid_tool_metadata("content_block must be an object"))
+                            return
                         kind = block.get("type")
                         if kind == "text":
                             block_state[index] = {"kind": "text", "text": ""}
@@ -189,7 +213,11 @@ class AnthropicAdapter(ProviderAdapter):
                         elif kind == "redacted_thinking":
                             signature = block.get("data")
                             if not isinstance(signature, str) or not signature:
-                                continue
+                                yield terminal_event(
+                                    response,
+                                    _invalid_tool_metadata("redacted_thinking data must be a non-empty string"),
+                                )
+                                return
                             content_indices[index] = len(content)
                             content.append(
                                 ThinkingBlock(
@@ -202,6 +230,12 @@ class AnthropicAdapter(ProviderAdapter):
                         elif kind == "tool_use":
                             native_id = _string(block.get("id")) or f"tool_{index}"
                             name = _string(block.get("name"))
+                            if not name:
+                                yield terminal_event(
+                                    response,
+                                    _invalid_tool_metadata("tool_use name must not be empty"),
+                                )
+                                return
                             block_state[index] = {
                                 "kind": "tool",
                                 "id": native_id,
@@ -251,6 +285,12 @@ class AnthropicAdapter(ProviderAdapter):
                             state["arguments"] = f"{state.get('arguments', '')}{value}"
                             streamed = True
                             yield ToolCallDelta(index=content_index, arguments_delta=value)
+                        elif delta_type not in {"text_delta", "thinking_delta", "signature_delta", "input_json_delta"}:
+                            yield terminal_event(
+                                response,
+                                _invalid_tool_metadata(f"unsupported Anthropic content delta: {delta_type!r}"),
+                            )
+                            return
                     elif event_type == "content_block_stop":
                         index = _int(chunk.get("index"), 0)
                         yield BlockEnd(index=content_indices.get(index, index))
@@ -262,13 +302,18 @@ class AnthropicAdapter(ProviderAdapter):
                         usage = _merge_anthropic_usage(usage, chunk.get("usage"))
                     elif event_type == "error":
                         message = _error_event_message(chunk)
-                        yield _stream_error(
-                            message,
-                            streamed=streamed,
-                            content=content,
-                            origin=served_origin,
-                            usage=usage,
-                            verified_origin=verified_origin,
+                        yield terminal_event(
+                            response,
+                            _stream_error(
+                                message,
+                                streamed=streamed,
+                                content=content,
+                                origin=served_origin,
+                                usage=usage,
+                                verified_origin=verified_origin,
+                                include_partial=usage is not None,
+                                code=_error_event_code(chunk),
+                            ),
                         )
                         return
                     elif event_type == "message_stop":
@@ -282,21 +327,44 @@ class AnthropicAdapter(ProviderAdapter):
                             verified_origin=verified_origin,
                         )
                         if isinstance(final, ProviderError):
-                            yield final
+                            yield terminal_event(response, final)
                         else:
-                            yield Done(final)
+                            yield terminal_event(response, Done(final))
+                        return
+                    elif event_type == "ping":
+                        continue
+                    elif event_type not in {
+                        "message_start",
+                        "content_block_start",
+                        "content_block_delta",
+                        "content_block_stop",
+                        "message_delta",
+                        "error",
+                        "message_stop",
+                        "ping",
+                    }:
+                        yield terminal_event(
+                            response,
+                            _invalid_tool_metadata(f"unsupported Anthropic stream event: {event_type!r}"),
+                        )
                         return
                 if cancel.cancelled:
-                    yield _aborted_error(cancel.reason, served_origin, content, usage, verified_origin)
+                    yield terminal_event(
+                        response,
+                        _aborted_error(cancel.reason, served_origin, content, usage, verified_origin),
+                    )
                     return
                 if not terminal_seen:
-                    yield incomplete_stream_error(
-                        content,
-                        origin=served_origin,
-                        usage=usage,
-                        streamed=streamed,
-                        verified_origin=verified_origin,
-                        protocol=self.protocol,
+                    yield terminal_event(
+                        response,
+                        incomplete_stream_error(
+                            content,
+                            origin=served_origin,
+                            usage=usage,
+                            streamed=streamed,
+                            verified_origin=verified_origin,
+                            protocol=self.protocol,
+                        ),
                     )
                     return
                 final = _final_message(
@@ -308,10 +376,10 @@ class AnthropicAdapter(ProviderAdapter):
                     verified_origin=verified_origin,
                 )
                 if isinstance(final, ProviderError):
-                    yield final
+                    yield terminal_event(response, final)
                 else:
-                    yield Done(final)
-        except httpx.HTTPError as exc:
+                    yield terminal_event(response, Done(final))
+        except Exception as exc:
             yield classify_error(
                 exc=exc,
                 streamed=streamed,
@@ -501,12 +569,32 @@ def _partial(content: list[Any], origin: Any, usage: Any, verified: bool) -> Ass
     return assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
 
 
-def _stream_error(message: str, *, streamed: bool, content: list[Any], origin: Any, usage: Any, verified_origin: bool) -> ProviderError:
+def _stream_error(
+    message: str,
+    *,
+    streamed: bool,
+    content: list[Any],
+    origin: Any,
+    usage: Any,
+    verified_origin: bool,
+    include_partial: bool = False,
+    code: str | None = None,
+) -> ProviderError:
     return classify_error(
         body=message,
+        code=code,
         streamed=streamed,
-        partial=_partial(content, origin, usage, verified_origin) if streamed else None,
+        partial=_partial(content, origin, usage, verified_origin) if streamed or include_partial else None,
     )
+
+
+def _invalid_tool_metadata(message: str) -> ProviderError:
+    return ProviderError(kind="invalid_request", message=message, retryable=False)
+
+
+def _error_event_code(chunk: Mapping[str, Any]) -> str | None:
+    error = chunk.get("error")
+    return _string(error.get("type")) if isinstance(error, Mapping) else None
 
 
 def _aborted_error(
@@ -571,7 +659,7 @@ def _usage(input_tokens: int = 0, output_tokens: int = 0, cache_read: int = 0, c
 
 
 def _normalize_stop_reason(value: Any) -> str:
-    return {
+    normalized = {
         "end_turn": "stop",
         "stop_sequence": "stop",
         "pause_turn": "stop",
@@ -579,7 +667,8 @@ def _normalize_stop_reason(value: Any) -> str:
         "tool_use": "tool_use",
         "refusal": "refusal",
         "safety": "safety",
-    }.get(str(value), "stop")
+    }.get(str(value))
+    return normalized or "error"
 
 
 def _anthropic_effort(effort: str) -> str:

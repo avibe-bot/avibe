@@ -39,7 +39,13 @@ def _request(
     model_id: str = "model-x",
 ) -> ModelRequest:
     return ModelRequest(
-        endpoint=ModelEndpoint(protocol, "https://model.test/v1", model_id, "token"),
+        endpoint=ModelEndpoint(
+            protocol,
+            "https://model.test/v1",
+            model_id,
+            "token",
+            provider={"anthropic": "anthropic", "openai_chat": "openai", "openai_responses": "openai", "google": "google"}[protocol],
+        ),
         system="system",
         messages=messages or (UserMessage((TextBlock(text="hello"),)),),
         tools=tools,
@@ -600,6 +606,41 @@ class _StalledErrorBody(httpx.AsyncByteStream):
         yield b'{"error":{"message":"late"}}'
 
 
+class _StalledLoader(MediaLoader):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def load(self, media_token: str) -> tuple[bytes, str]:
+        del media_token
+        self.started.set()
+        await self.release.wait()
+        return b"snapshot", "image/png"
+
+
+class _StalledResolver:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, headers: Mapping[str, str]) -> Origin | None:
+        del headers
+        self.started.set()
+        await self.release.wait()
+        return Origin("served", "openai_chat", "served-model")
+
+
+class _CloseFailStream(httpx.AsyncByteStream):
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    async def __aiter__(self):
+        yield self.body
+
+    async def aclose(self) -> None:
+        raise OSError("close failed")
+
+
 _CANCELLATION_CASES = (
     (AnthropicAdapter, "anthropic", 'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n'),
     (OpenAIChatAdapter, "openai_chat", 'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n'),
@@ -610,7 +651,7 @@ _CANCELLATION_CASES = (
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("adapter_type", "protocol", "stream_body"), _CANCELLATION_CASES)
-@pytest.mark.parametrize("phase", ["open", "stream", "error_body"])
+@pytest.mark.parametrize("phase", ["open", "stream", "error_body", "media_load"])
 async def test_all_adapters_cancel_at_every_http_lifecycle_phase(
     adapter_type: Any,
     protocol: str,
@@ -620,6 +661,7 @@ async def test_all_adapters_cancel_at_every_http_lifecycle_phase(
     started = asyncio.Event()
     stalled_stream = _StalledStream(stream_body.encode())
     stalled_body = _StalledErrorBody()
+    stalled_loader = _StalledLoader()
 
     async def handler(_: httpx.Request) -> httpx.Response:
         if phase == "open":
@@ -640,19 +682,302 @@ async def test_all_adapters_cancel_at_every_http_lifecycle_phase(
         )
 
     cancel = CancelToken()
+    if phase == "media_load":
+        request = _request(
+            protocol,
+            messages=(UserMessage((ImageBlock("image/png", "media-1", "image.png"),)),),
+            supports_images=True,
+        )
+    else:
+        request = _request(protocol)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        task = asyncio.create_task(_events(adapter_type(client), _request(protocol), cancel))
+        adapter = adapter_type(
+            client,
+            media_loader=stalled_loader if phase == "media_load" else None,
+        )
+        task = asyncio.create_task(_events(adapter, request, cancel))
         if phase == "open":
             await started.wait()
         elif phase == "stream":
             await stalled_stream.started.wait()
-        else:
+        elif phase == "error_body":
             await stalled_body.started.wait()
+        else:
+            await stalled_loader.started.wait()
         cancel.cancel(f"cancelled during {phase}")
         events = await asyncio.wait_for(task, timeout=1)
 
     assert isinstance(events[-1], ProviderError)
     assert events[-1].kind == "aborted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("adapter_type", "protocol", "stream_body"), _CANCELLATION_CASES)
+async def test_all_adapters_cancel_during_served_hop_resolution(
+    adapter_type: Any,
+    protocol: str,
+    stream_body: str,
+) -> None:
+    resolver = _StalledResolver()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=stream_body,
+        )
+
+    cancel = CancelToken()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = adapter_type(client, served_hop_resolver=resolver, gateway=True)
+        task = asyncio.create_task(_events(adapter, _request(protocol), cancel))
+        await resolver.started.wait()
+        cancel.cancel("cancelled during served-hop resolution")
+        events = await asyncio.wait_for(task, timeout=1)
+
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderError)
+    assert events[0].kind == "aborted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("adapter_type", "protocol", "body"), [
+    (
+        AnthropicAdapter,
+        "anthropic",
+        'data: {"type":"message_stop"}\n\n',
+    ),
+    (
+        OpenAIChatAdapter,
+        "openai_chat",
+        'data: [DONE]\n\n',
+    ),
+    (
+        OpenAIResponsesAdapter,
+        "openai_responses",
+        'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+    ),
+    (
+        GoogleAdapter,
+        "google",
+        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n',
+    ),
+])
+async def test_close_failure_cannot_emit_a_second_terminal_event(
+    adapter_type: Any,
+    protocol: str,
+    body: str,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_CloseFailStream(body.encode()),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    terminals = [event for event in events if isinstance(event, (Done, ProviderError))]
+    assert len(terminals) == 1
+
+
+_WIRE_EVENT_CASES = (
+    (
+        AnthropicAdapter,
+        "anthropic",
+        (
+            'data: {"type":"ping"}\n\n'
+            'data: {"type":"message_stop"}\n\n'
+        ),
+        "done",
+        "stop",
+        None,
+        None,
+    ),
+    (
+        AnthropicAdapter,
+        "anthropic",
+        (
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":4}}}\n\n'
+            'data: {"type":"error","error":{"type":"overloaded_error","message":"busy"}}\n\n'
+        ),
+        "error",
+        None,
+        "overloaded",
+        True,
+    ),
+    (
+        AnthropicAdapter,
+        "anthropic",
+        (
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":4}}}\n\n'
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n'
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n'
+            'data: {"type":"error","error":{"type":"api_error","message":"failed"}}\n\n'
+        ),
+        "error",
+        None,
+        "server",
+        True,
+    ),
+    (
+        AnthropicAdapter,
+        "anthropic",
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":""}}\n\n',
+        "error",
+        None,
+        "invalid_request",
+        False,
+    ),
+    (
+        OpenAIChatAdapter,
+        "openai_chat",
+        'data: {"error":{"type":"rate_limit_error","message":"slow down"}}\n\n',
+        "error",
+        None,
+        "rate_limit",
+        False,
+    ),
+    (
+        OpenAIChatAdapter,
+        "openai_chat",
+        (
+            'data: {"choices":[{"delta":{"function_call":{"name":"read"}}}]}\n\n'
+            'data: {"choices":[{"delta":{"function_call":{"arguments":"{\\"path\\":"}}}]}\n\n'
+            'data: {"choices":[{"delta":{"function_call":{"arguments":"\\"x\\"}"}},"finish_reason":"function_call"}]}\n\n'
+            "data: [DONE]\n\n"
+        ),
+        "done",
+        "tool_use",
+        None,
+        None,
+    ),
+    (
+        OpenAIChatAdapter,
+        "openai_chat",
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":""}}]}}]}\n\n',
+        "error",
+        None,
+        "invalid_request",
+        False,
+    ),
+    (
+        OpenAIChatAdapter,
+        "openai_chat",
+        (
+            'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            'data: {"error":{"type":"server_error","message":"failed"}}\n\n'
+        ),
+        "error",
+        None,
+        "server",
+        True,
+    ),
+    (
+        OpenAIResponsesAdapter,
+        "openai_responses",
+        (
+            'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read"}}\n\n'
+            'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"busy"},"usage":{"input_tokens":2}}}\n\n'
+        ),
+        "error",
+        None,
+        "server",
+        True,
+    ),
+    (
+        OpenAIResponsesAdapter,
+        "openai_responses",
+        (
+            'data: {"type":"response.incomplete","response":{"status":"incomplete","error":{"code":"context_length_exceeded","message":"too long"},"usage":{"input_tokens":2}}}\n\n'
+        ),
+        "error",
+        None,
+        "overflow",
+        True,
+    ),
+    (
+        OpenAIResponsesAdapter,
+        "openai_responses",
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":""}}\n\n',
+        "error",
+        None,
+        "invalid_request",
+        False,
+    ),
+    (
+        GoogleAdapter,
+        "google",
+        'data: {"error":{"status":"RESOURCE_EXHAUSTED","message":"busy"}}\n\n',
+        "error",
+        None,
+        "rate_limit",
+        False,
+    ),
+    (
+        GoogleAdapter,
+        "google",
+        'data: {"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":3}}\n\n',
+        "done",
+        "safety",
+        None,
+        None,
+    ),
+    (
+        GoogleAdapter,
+        "google",
+        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"","args":{}}}]}}]}\n\n',
+        "error",
+        None,
+        "invalid_request",
+        False,
+    ),
+    (
+        GoogleAdapter,
+        "google",
+        'data: {"candidates":[{"finishReason":"MAX_TOKENS"}]}\n\n',
+        "done",
+        "length",
+        None,
+        None,
+    ),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "body", "outcome", "stop_reason", "error_kind", "partial"),
+    _WIRE_EVENT_CASES,
+)
+async def test_wire_event_matrix_has_one_explicit_outcome(
+    adapter_type: Any,
+    protocol: str,
+    body: str,
+    outcome: str,
+    stop_reason: str | None,
+    error_kind: str | None,
+    partial: bool | None,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    terminals = [event for event in events if isinstance(event, (Done, ProviderError))]
+    assert len(terminals) == 1
+    terminal = terminals[0]
+    if outcome == "done":
+        assert isinstance(terminal, Done)
+        assert terminal.message.stop_reason == stop_reason
+    else:
+        assert isinstance(terminal, ProviderError)
+        assert terminal.kind == error_kind
+        if partial:
+            assert terminal.partial is not None
+        elif partial is False:
+            assert terminal.partial is None
 
 
 @pytest.mark.asyncio

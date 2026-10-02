@@ -36,18 +36,22 @@ rules on top of those mappings.
 
 Anthropic stream events:
 
-| Wire event | Provider event / state |
-| --- | --- |
-| `message_start.message.usage` | Initial `Usage`; `input_tokens` excludes cache reads and writes. |
-| `content_block_start` (`text`, `thinking`, `redacted_thinking`, `tool_use`) | Creates the canonical block; `tool_use` emits `ToolCallStart`. |
-| `content_block_delta.text_delta` | `TextDelta`. |
-| `content_block_delta.thinking_delta` | `ThinkingDelta`. |
-| `content_block_delta.signature_delta` | Appends to the thinking signature. |
-| `content_block_delta.input_json_delta` | `ToolCallDelta`; the complete JSON is parsed at `Done`. |
-| `content_block_stop` | `BlockEnd`. |
-| `message_delta.stop_reason` | Normalized stop reason; usage fields are merged. |
-| `message_stop` | `Done(AssistantMessage)`. |
-| `error` | Classified `ProviderError`, retaining a partial message after deltas. |
+| Wire event | Outcome | Provider event / state |
+| --- | --- | --- |
+| `message_start.message.usage` | delta/state | Initial `Usage`; `input_tokens` excludes cache reads and writes. |
+| `content_block_start` (`text`, `thinking`, `redacted_thinking`, `tool_use`) | delta/state | Creates the canonical block; `tool_use` emits `ToolCallStart`. Empty tool names are terminal `invalid_request`. |
+| `content_block_delta.text_delta` | delta | `TextDelta`. |
+| `content_block_delta.thinking_delta` | delta | `ThinkingDelta`. |
+| `content_block_delta.signature_delta` | state | Appends to the thinking signature. |
+| `content_block_delta.input_json_delta` | delta | `ToolCallDelta`; the complete JSON is parsed at `Done`. |
+| `content_block_stop` | delta | `BlockEnd`. |
+| `message_delta.stop_reason` | delta/state | Normalized stop reason; usage fields are merged. |
+| `message_stop` | Done | `Done(AssistantMessage)`. |
+| `ping` | state | Ignored keepalive. |
+| `error` before deltas | retryable or terminal `ProviderError` | Provider error type selects the kind; `message_start` usage is retained in `partial` when present. |
+| `error` after deltas | terminal `ProviderError` | Partial content and usage are retained; `retryable=false`. |
+| malformed JSON, block, delta, or redacted payload | terminal `ProviderError` | `invalid_request` for malformed provider metadata, otherwise `unknown`; never a successful `Done`. |
+| EOF without `message_stop` or response close failure | terminal `ProviderError` | Incomplete/transport failure, preserving partial content and usage. |
 
 Anthropic stop reasons:
 
@@ -75,16 +79,20 @@ Anthropic stop reasons:
 
 Chat stream events:
 
-| Wire field | Provider event / state |
-| --- | --- |
-| `choices[0].delta.content` | `TextDelta`. |
-| `choices[0].delta.reasoning_content/reasoning/reasoning_text` | `ThinkingDelta`. |
-| `choices[0].delta.reasoning_details` | Stored as a structured thinking signature. |
-| `choices[0].delta.tool_calls[].id/function.name` | `ToolCallStart`. |
-| `choices[0].delta.tool_calls[].function.arguments` | `ToolCallDelta`; fragments are parsed at `Done`. |
-| `choices[0].finish_reason` | Stop reason. |
-| `usage` | `Usage` from prompt/completion tokens, cached prompt tokens, and reasoning completion details. |
-| `data: [DONE]` | Completes the response. |
+| Wire field | Outcome | Provider event / state |
+| --- | --- | --- |
+| `choices[0].delta.content` | delta | `TextDelta`. |
+| `choices[0].delta.reasoning_content/reasoning/reasoning_text` | delta | `ThinkingDelta`. |
+| `choices[0].delta.reasoning_details` | state | Stored as a structured thinking signature. |
+| `choices[0].delta.tool_calls[].id/function.name` | delta | `ToolCallStart`; missing/empty names are terminal `invalid_request`. |
+| `choices[0].delta.tool_calls[].function.arguments` | delta | `ToolCallDelta`; fragments are parsed at `Done`. |
+| `choices[0].delta.function_call.name/arguments` | delta | Legacy single-call form; normalized into the same tool-call state machine. |
+| `choices[0].finish_reason` | state | Stop reason. Unknown values become terminal `error`, not `stop`. |
+| `usage` | state | `Usage` from prompt/completion tokens, cached prompt tokens, and reasoning completion details. |
+| top-level `error` frame before deltas | retryable or terminal `ProviderError` | Classified from error type/code. |
+| top-level `error` frame after deltas | terminal `ProviderError` | Partial content and usage are retained; `retryable=false`. |
+| `data: [DONE]` | Done | Completes the response. |
+| malformed tool metadata, JSON, or EOF/close failure | terminal `ProviderError` | Invalid metadata is `invalid_request`; incomplete/transport failures retain partial state. |
 
 Chat stop reasons:
 
@@ -112,17 +120,23 @@ Chat stop reasons:
 
 Responses stream events:
 
-| Wire event | Provider event / state |
-| --- | --- |
-| `response.output_text.delta` | `TextDelta`. |
-| `response.refusal.delta` | Refusal text delta; terminal `stop_reason="refusal"`. |
-| `response.reasoning_summary_text.delta`, `response.reasoning_text.delta` | `ThinkingDelta`. |
-| `response.output_item.added` (`reasoning`) | Captures reasoning item id and encrypted content. |
-| `response.output_item.added` (`function_call`) | `ToolCallStart`. |
-| `response.function_call_arguments.delta` | `ToolCallDelta`. |
-| `response.output_item.done` | Completes reasoning signatures or tool arguments. |
-| `response.completed.response.usage` / `response.incomplete.response.usage` | `Usage`; terminal status is normalized. |
-| `response.failed` / `error` | Classified `ProviderError`, retaining partial content. |
+| Wire event | Outcome | Provider event / state |
+| --- | --- | --- |
+| `response.created`, `response.in_progress`, `response.queued` | state | Records status; no visible delta. |
+| `response.output_text.delta` | delta | `TextDelta`. |
+| `response.refusal.delta` | delta | Refusal text delta; terminal `stop_reason="refusal"`. |
+| `response.reasoning_summary_text.delta`, `response.reasoning_text.delta` | delta | `ThinkingDelta`. |
+| `response.output_item.added` (`reasoning`) | state | Captures reasoning item id and encrypted content; does not mark output streamed by itself. |
+| `response.output_item.added` (`function_call`) | delta/state | `ToolCallStart`; the metadata alone does not make an error retry-ineligible. |
+| `response.function_call_arguments.delta` | delta | `ToolCallDelta`. |
+| `response.function_call_arguments.done` | delta/state | Emits any suffix not already seen and replaces the final argument buffer. |
+| `response.output_item.done` | state | Completes reasoning signatures or tool arguments. |
+| `response.content_part.added/done`, `response.output_text.done`, reasoning `*.done` | state | Recognized no-op completion markers. |
+| `response.completed.response.usage` | Done | `Usage`; terminal status is normalized. |
+| `response.incomplete.response.usage` without an error | Done | `max_output_tokens`/length becomes `length`; safety/content filtering becomes `safety`; other incomplete reasons become terminal `error`. |
+| `response.incomplete.response.error` | retryable or terminal `ProviderError` | Error code and usage are retained; after visible deltas `retryable=false`. |
+| `response.failed` / top-level `error` | retryable or terminal `ProviderError` | Error code classification with partial content and usage. |
+| malformed output item, tool metadata, JSON, or EOF/close failure | terminal `ProviderError` | Invalid metadata is `invalid_request`; transport/incomplete failures retain partial state. |
 
 Responses terminal states:
 
@@ -151,15 +165,18 @@ Responses terminal states:
 
 Gemini stream events:
 
-| Wire field | Provider event / state |
-| --- | --- |
-| `candidates[0].content.parts[].text` | `TextDelta`, unless `thought=true`. |
-| `candidates[0].content.parts[].text` with `thought=true` | `ThinkingDelta`. |
-| `candidates[0].content.parts[].thoughtSignature` | Thinking or tool-call signature. |
-| `candidates[0].content.parts[].functionCall` | `ToolCallStart` and `ToolCallDelta`; argument fragments are accumulated and parsed at `Done`. |
-| `candidates[0].finishReason` | Normalized stop reason. |
-| `usageMetadata` | `Usage` from prompt, candidate, cached-content, and thought token counts. |
-| `promptFeedback.blockReason` | `safety` when no candidate is returned. |
+| Wire field | Outcome | Provider event / state |
+| --- | --- | --- |
+| `candidates[0].content.parts[].text` | delta | `TextDelta`, unless `thought=true`. |
+| `candidates[0].content.parts[].text` with `thought=true` | delta | `ThinkingDelta`. |
+| `candidates[0].content.parts[].thoughtSignature` | state | Thinking or tool-call signature. |
+| `candidates[0].content.parts[].functionCall` | delta | `ToolCallStart` and `ToolCallDelta`; argument fragments are accumulated and parsed at `Done`. Empty names or malformed args are terminal `invalid_request`. |
+| `candidates[0].finishReason` | Done | Normalized stop reason. |
+| `usageMetadata` | state | `Usage` from prompt, candidate, cached-content, and thought token counts. |
+| `promptFeedback.blockReason` | Done | `safety` when no candidate is returned. |
+| top-level `error` before deltas | retryable or terminal `ProviderError` | Error status/code classification. |
+| top-level `error` after deltas | terminal `ProviderError` | Partial content and usage are retained; `retryable=false`. |
+| malformed JSON/parts, EOF, or close failure | terminal `ProviderError` | Invalid metadata is `invalid_request`; incomplete/transport failures retain partial state. |
 
 Gemini stop reasons:
 

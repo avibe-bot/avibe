@@ -26,6 +26,7 @@ from core.agent_core.ai._common import (
     prepare_messages,
     read_response_body,
     resolve_served_origin,
+    terminal_event,
 )
 from core.agent_core.ai.errors import classify_error
 from core.agent_core.ai.provider import (
@@ -89,6 +90,7 @@ class OpenAIChatAdapter(ProviderAdapter):
             supports_images=request.supports_images,
             protocol=self.protocol,
             media_loader=self._media_loader,
+            cancel=cancel,
         )
         if isinstance(prepared, ProviderError):
             yield prepared
@@ -121,22 +123,30 @@ class OpenAIChatAdapter(ProviderAdapter):
                 if response is None:
                     yield _aborted(cancel.reason, origin, content, usage, verified)
                     return
-                origin, verified = resolve_served_origin(
+                resolved_origin = await resolve_served_origin(
                     request.endpoint,
                     response.headers,
                     self._served_hop_resolver,
                     gateway=self._gateway,
+                    cancel=cancel,
                 )
+                if resolved_origin is None:
+                    yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
+                    return
+                origin, verified = resolved_origin
                 if response.status_code >= 400:
                     body = await read_response_body(response, cancel)
                     if body is None:
-                        yield _aborted(cancel.reason, origin, content, usage, verified)
+                        yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
                         return
-                    yield classify_error(status=response.status_code, body=body, headers=response.headers)
+                    yield terminal_event(
+                        response,
+                        classify_error(status=response.status_code, body=body, headers=response.headers),
+                    )
                     return
                 async for event in iter_sse_events(response, cancel):
                     if cancel.cancelled:
-                        yield _aborted(cancel.reason, origin, content, usage, verified)
+                        yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
                         return
                     if not event.data:
                         continue
@@ -145,10 +155,30 @@ class OpenAIChatAdapter(ProviderAdapter):
                         break
                     chunk = json_object(event.data)
                     if chunk is None:
-                        yield _error("Provider returned invalid OpenAI Chat JSON", streamed, content, origin, usage, verified)
+                        yield terminal_event(
+                            response,
+                            _error("Provider returned invalid OpenAI Chat JSON", streamed, content, origin, usage, verified),
+                        )
                         return
                     if isinstance(chunk.get("usage"), Mapping):
                         usage = _openai_usage(chunk["usage"])
+                    top_level_error = chunk.get("error")
+                    if isinstance(top_level_error, Mapping):
+                        yield terminal_event(
+                            response,
+                            _error(
+                                _error_text(top_level_error, chunk),
+                                streamed,
+                                content,
+                                origin,
+                                usage,
+                                verified,
+                                code=_string(top_level_error.get("code"))
+                                or _string(top_level_error.get("type"))
+                                or None,
+                            ),
+                        )
+                        return
                     choices = chunk.get("choices")
                     if not isinstance(choices, list) or not choices:
                         continue
@@ -183,12 +213,22 @@ class OpenAIChatAdapter(ProviderAdapter):
                     if isinstance(raw_tool_calls, list):
                         for raw in raw_tool_calls:
                             if not isinstance(raw, Mapping):
-                                continue
+                                yield terminal_event(
+                                    response,
+                                    _invalid_tool_metadata("tool_calls entry must be an object"),
+                                )
+                                return
                             index = _int(raw.get("index"), len(tools))
                             state = tools.setdefault(index, {"id": "", "name": "", "arguments": ""})
                             function = raw.get("function")
                             if isinstance(function, Mapping):
                                 name = _string(function.get("name"))
+                                if "name" in function and not name:
+                                    yield terminal_event(
+                                        response,
+                                        _invalid_tool_metadata("tool call name must not be empty"),
+                                    )
+                                    return
                                 if name and not state["name"]:
                                     state["name"] = name
                                     content.append(
@@ -214,27 +254,67 @@ class OpenAIChatAdapter(ProviderAdapter):
                             raw_id = _string(raw.get("id"))
                             if raw_id and not state["id"]:
                                 state["id"] = raw_id
+                    legacy_function = delta.get("function_call")
+                    if legacy_function is not None:
+                        if not isinstance(legacy_function, Mapping):
+                            yield terminal_event(
+                                response,
+                                _invalid_tool_metadata("legacy function_call must be an object"),
+                            )
+                            return
+                        state = tools.setdefault(0, {"id": "call_0", "name": "", "arguments": ""})
+                        name = _string(legacy_function.get("name"))
+                        if "name" in legacy_function and not name:
+                            yield terminal_event(
+                                response,
+                                _invalid_tool_metadata("legacy function_call name must not be empty"),
+                            )
+                            return
+                        if name and not state["name"]:
+                            state["name"] = name
+                            content.append(
+                                ToolCallBlock(
+                                    id=state["id"],
+                                    native_id=state["id"],
+                                    name=name,
+                                    arguments={},
+                                )
+                            )
+                            state["content_index"] = len(content) - 1
+                            streamed = True
+                            yield ToolCallStart(index=state["content_index"], id=state["id"], name=name)
+                        arguments = _string(legacy_function.get("arguments"))
+                        if arguments:
+                            state["arguments"] += arguments
+                            streamed = True
+                            yield ToolCallDelta(
+                                index=_int(state.get("content_index"), 0),
+                                arguments_delta=arguments,
+                            )
                 if cancel.cancelled:
                     yield _aborted(cancel.reason, origin, content, usage, verified)
                     return
                 if not terminal_seen:
-                    yield incomplete_stream_error(
-                        content,
-                        origin=origin,
-                        usage=usage,
-                        streamed=streamed,
-                        verified_origin=verified,
-                        protocol=self.protocol,
+                    yield terminal_event(
+                        response,
+                        incomplete_stream_error(
+                            content,
+                            origin=origin,
+                            usage=usage,
+                            streamed=streamed,
+                            verified_origin=verified,
+                            protocol=self.protocol,
+                        ),
                     )
                     return
                 for index in range(len(content)):
                     yield BlockEnd(index=index)
                 final = _final_message(content, tools, origin, finish_reason, usage, verified)
                 if isinstance(final, ProviderError):
-                    yield final
+                    yield terminal_event(response, final)
                 else:
-                    yield Done(final)
-        except httpx.HTTPError as exc:
+                    yield terminal_event(response, Done(final))
+        except Exception as exc:
             yield classify_error(
                 exc=exc,
                 streamed=streamed,
@@ -355,6 +435,9 @@ def _final_message(
     usage: Any,
     verified: bool,
 ) -> AssistantMessage | ProviderError:
+    for state in tools.values():
+        if state.get("id") and not state.get("name"):
+            return _invalid_tool_metadata("tool call name is missing")
     final: list[Any] = []
     for block in content:
         if isinstance(block, ToolCallBlock):
@@ -389,7 +472,7 @@ def _final_message(
 
 
 def _normalize_stop(reason: str | None, has_tools: bool) -> str:
-    return {
+    normalized = {
         "length": "length",
         "content_filter": "safety",
         "refusal": "refusal",
@@ -398,7 +481,10 @@ def _normalize_stop(reason: str | None, has_tools: bool) -> str:
         "function_call": "tool_use",
         "stop": "stop",
         None: "stop",
-    }.get(reason, "tool_use" if has_tools else "stop")
+    }.get(reason)
+    if normalized is not None:
+        return normalized
+    return "error"
 
 
 def _openai_usage(value: Mapping[str, Any]) -> Any:
@@ -477,9 +563,19 @@ def _find_block_index(content: list[Any], kind: type[Any]) -> int:
     return 0
 
 
-def _error(message: str, streamed: bool, content: list[Any], origin: Any, usage: Any, verified: bool) -> ProviderError:
+def _error(
+    message: str,
+    streamed: bool,
+    content: list[Any],
+    origin: Any,
+    usage: Any,
+    verified: bool,
+    *,
+    code: str | None = None,
+) -> ProviderError:
     return classify_error(
         body=message,
+        code=code,
         streamed=streamed,
         partial=(
             assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
@@ -487,6 +583,15 @@ def _error(message: str, streamed: bool, content: list[Any], origin: Any, usage:
             else None
         ),
     )
+
+
+def _error_text(error: Mapping[str, Any], chunk: Mapping[str, Any]) -> str:
+    message = _string(error.get("message"))
+    return message or json.dumps(dict(chunk), ensure_ascii=False)
+
+
+def _invalid_tool_metadata(message: str) -> ProviderError:
+    return ProviderError(kind="invalid_request", message=message, retryable=False)
 
 
 def _aborted(reason: str | None, origin: Any, content: list[Any] | None = None, usage: Any = None, verified: bool = True) -> ProviderError:

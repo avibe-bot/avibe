@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -29,31 +30,46 @@ from core.agent_core.messages import (
 )
 from core.agent_core.ai.provider import MediaLoader, ModelEndpoint, ProviderError
 
-ServedHopResolver = Callable[[Mapping[str, str]], Origin | None]
+ServedHopResolver = Callable[
+    [Mapping[str, str]], Origin | None | Awaitable[Origin | None]
+]
 _T = TypeVar("_T")
 
 
 def endpoint_origin(endpoint: ModelEndpoint) -> Origin:
+    provider = endpoint.provider or f"endpoint:{endpoint.base_url.rstrip('/')}"
+    if provider == "endpoint:":
+        provider = f"endpoint:{endpoint.protocol}:{endpoint.model_id}"
     return Origin(
-        provider=endpoint.provider or _default_provider(endpoint.protocol),
+        provider=provider,
         api=endpoint.protocol,
         model=endpoint.model_id,
     )
 
 
-def resolve_served_origin(
+async def resolve_served_origin(
     endpoint: ModelEndpoint,
     headers: Mapping[str, str],
     resolver: ServedHopResolver | None,
     *,
     gateway: bool,
-) -> tuple[Origin, bool]:
+    cancel: CancelToken,
+) -> tuple[Origin, bool] | None:
     """Return the served origin and whether its signature data is verified."""
 
     direct = endpoint_origin(endpoint)
     if not gateway:
         return direct, True
-    served = resolver(headers) if resolver is not None else default_served_hop_resolver(headers)
+    candidate = resolver(headers) if resolver is not None else default_served_hop_resolver(headers)
+    if inspect.isawaitable(candidate):
+        try:
+            served = await _await_injected(candidate, cancel)
+        except _CancelledDependency:
+            return None
+    else:
+        served = candidate
+    if cancel.cancelled:
+        return None
     return served or direct, served is not None
 
 
@@ -145,10 +161,16 @@ async def open_stream(
         if response is None:
             yield None
             return
+        response.extensions["avibe_terminal_event"] = False
         yield response
     finally:
         if response is not None:
-            await response.aclose()
+            try:
+                await _await_network(response.aclose(), cancel)
+            except Exception as exc:
+                if response.extensions.get("avibe_terminal_event"):
+                    return
+                raise ProviderStreamCloseError(str(exc)) from exc
 
 
 async def _await_network(awaitable: Awaitable[_T], cancel: CancelToken) -> _T | None:
@@ -177,6 +199,36 @@ async def _await_network(awaitable: Awaitable[_T], cancel: CancelToken) -> _T | 
             cancellation.cancel()
             with _suppress_cancelled():
                 await cancellation
+
+
+class ProviderStreamCloseError(httpx.NetworkError):
+    """A response-close failure before a terminal provider event."""
+
+
+class _CancelledDependency(Exception):
+    """Internal marker for cancellation while loading or resolving injected data."""
+
+
+async def _await_injected(awaitable: Awaitable[_T], cancel: CancelToken) -> _T:
+    """Await a loader or resolver through the shared cancellation owner."""
+
+    result = await _await_network(awaitable, cancel)
+    if result is None and cancel.cancelled:
+        raise _CancelledDependency
+    return result  # type: ignore[return-value]
+
+
+def mark_stream_terminal(response: httpx.Response) -> None:
+    """Record that the adapter has emitted its one terminal event."""
+
+    response.extensions["avibe_terminal_event"] = True
+
+
+def terminal_event(response: httpx.Response, event: _T) -> _T:
+    """Mark and return a terminal ProviderEvent in one expression."""
+
+    mark_stream_terminal(response)
+    return event
 
 
 async def read_response_body(
@@ -215,6 +267,7 @@ async def prepare_messages(
     supports_images: bool,
     protocol: str,
     media_loader: MediaLoader | None,
+    cancel: CancelToken,
 ) -> tuple[tuple[Any, ...], dict[str, tuple[str, str]]] | ProviderError:
     """Transform history and resolve immutable media snapshots as one safe boundary."""
 
@@ -227,7 +280,13 @@ async def prepare_messages(
             supports_images=supports_images,
             protocol=protocol,
         )
-        loaded_images = await load_images(transformed.messages, media_loader)
+        loaded_images = await load_images(transformed.messages, media_loader, cancel)
+    except _CancelledDependency:
+        return ProviderError(
+            kind="aborted",
+            message=cancel.reason or "provider request aborted",
+            retryable=False,
+        )
     except Exception as exc:
         return classify_error(body=f"request preparation failed: {type(exc).__name__}: {exc}")
     return transformed.messages, loaded_images
@@ -296,11 +355,18 @@ def image_data(block: ImageBlock) -> str:
     return token
 
 
-async def load_image_data(block: ImageBlock, media_loader: MediaLoader | None) -> tuple[str, str]:
+async def load_image_data(
+    block: ImageBlock,
+    media_loader: MediaLoader | None,
+    cancel: CancelToken | None = None,
+) -> tuple[str, str]:
     """Resolve a media token just before the request is sent."""
 
     if media_loader is not None:
-        raw, mime_type = await media_loader.load(block.media_token)
+        if cancel is None:
+            raw, mime_type = await media_loader.load(block.media_token)
+        else:
+            raw, mime_type = await _await_injected(media_loader.load(block.media_token), cancel)
         return base64.b64encode(raw).decode("ascii"), mime_type
     return image_data(block), block.mime_type
 
@@ -308,6 +374,7 @@ async def load_image_data(block: ImageBlock, media_loader: MediaLoader | None) -
 async def load_images(
     messages: tuple[Any, ...],
     media_loader: MediaLoader | None,
+    cancel: CancelToken,
 ) -> dict[str, tuple[str, str]]:
     """Load every image token once for a request."""
 
@@ -321,7 +388,7 @@ async def load_images(
                 tokens.append(block.media_token)
     loaded: dict[str, tuple[str, str]] = {}
     for token in tokens:
-        raw, mime_type = await media_loader.load(token)
+        raw, mime_type = await _await_injected(media_loader.load(token), cancel)
         loaded[token] = (base64.b64encode(raw).decode("ascii"), mime_type)
     return loaded
 

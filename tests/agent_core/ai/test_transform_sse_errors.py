@@ -5,7 +5,9 @@ import json
 import httpx
 import pytest
 
+from core.agent_core.ai._common import endpoint_origin
 from core.agent_core.ai.errors import classify_error
+from core.agent_core.ai.provider import ModelEndpoint
 from core.agent_core.ai.sse import SSEParser
 from core.agent_core.ai.transform import SYNTHETIC_TOOL_RESULT, transform_messages
 from core.agent_core.messages import (
@@ -93,6 +95,19 @@ def test_cross_provider_transform_drops_opaque_payload_and_answers_orphaned_call
     assert synthetic.tool_call_id == result.tool_call_id_map["call|foreign"]  # type: ignore[attr-defined]
     assert synthetic.content == (TextBlock(text=SYNTHETIC_TOOL_RESULT),)  # type: ignore[attr-defined]
     assert synthetic.is_error is True  # type: ignore[attr-defined]
+
+
+def test_empty_provider_custom_endpoints_have_distinct_origins() -> None:
+    left = endpoint_origin(
+        ModelEndpoint("openai_chat", "https://one.example/v1", "same-model", "token")
+    )
+    right = endpoint_origin(
+        ModelEndpoint("openai_chat", "https://two.example/v1", "same-model", "token")
+    )
+
+    assert left != right
+    assert left.provider.startswith("endpoint:")
+    assert right.provider.startswith("endpoint:")
 
 
 def test_error_classification_preserves_retry_after_and_stream_boundary() -> None:

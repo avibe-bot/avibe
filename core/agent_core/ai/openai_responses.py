@@ -29,6 +29,7 @@ from core.agent_core.ai._common import (
     prepare_messages,
     read_response_body,
     resolve_served_origin,
+    terminal_event,
 )
 from core.agent_core.ai.errors import classify_error
 from core.agent_core.ai.provider import (
@@ -91,6 +92,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             supports_images=request.supports_images,
             protocol=self.protocol,
             media_loader=self._media_loader,
+            cancel=cancel,
         )
         if isinstance(prepared, ProviderError):
             yield prepared
@@ -126,30 +128,51 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 if response is None:
                     yield _aborted(cancel.reason, origin, content, usage, verified)
                     return
-                origin, verified = resolve_served_origin(
+                resolved_origin = await resolve_served_origin(
                     request.endpoint,
                     response.headers,
                     self._served_hop_resolver,
                     gateway=self._gateway,
+                    cancel=cancel,
                 )
+                if resolved_origin is None:
+                    yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
+                    return
+                origin, verified = resolved_origin
                 if response.status_code >= 400:
                     body = await read_response_body(response, cancel)
                     if body is None:
-                        yield _aborted(cancel.reason, origin, content, usage, verified)
+                        yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
                         return
-                    yield classify_error(status=response.status_code, body=body, headers=response.headers)
+                    yield terminal_event(
+                        response,
+                        classify_error(status=response.status_code, body=body, headers=response.headers),
+                    )
                     return
                 async for event in iter_sse_events(response, cancel):
                     if cancel.cancelled:
-                        yield _aborted(cancel.reason, origin, content, usage, verified)
+                        yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
                         return
                     if not event.data or event.data == "[DONE]":
                         continue
                     chunk = json_object(event.data)
                     if chunk is None:
-                        yield _error("Provider returned invalid OpenAI Responses JSON", streamed, content, origin, usage, verified)
+                        yield terminal_event(
+                            response,
+                            _error(
+                                "Provider returned invalid OpenAI Responses JSON",
+                                streamed,
+                                content,
+                                origin,
+                                usage,
+                                verified,
+                                include_partial=usage is not None,
+                            ),
+                        )
                         return
                     event_type = _string(chunk.get("type"))
+                    if event_type == "response.done":
+                        event_type = "response.completed"
                     if event_type in {"response.created", "response.in_progress"}:
                         response_body = chunk.get("response")
                         if isinstance(response_body, Mapping):
@@ -179,51 +202,79 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     elif event_type == "response.output_item.added":
                         item = chunk.get("item")
                         output_index = _int(chunk.get("output_index"), len(calls) + len(reasoning))
-                        if isinstance(item, Mapping):
-                            item_type = _string(item.get("type"))
-                            if item_type == "function_call":
-                                call_id = _string(item.get("call_id")) or _string(item.get("id")) or f"call_{output_index}"
-                                name = _string(item.get("name"))
-                                item_id = _string(item.get("id"))
-                                state = calls.setdefault(
-                                    output_index,
-                                    {
-                                        "id": call_id,
-                                        "name": name,
-                                        "arguments": _string(item.get("arguments")),
-                                        "item_id": item_id,
-                                    },
+                        if not isinstance(item, Mapping):
+                            yield terminal_event(
+                                response,
+                                _invalid_tool_metadata("response.output_item.added item must be an object"),
+                            )
+                            return
+                        item_type = _string(item.get("type"))
+                        if item_type == "function_call":
+                            raw_arguments = item.get("arguments")
+                            if raw_arguments is not None and not isinstance(raw_arguments, str):
+                                yield terminal_event(
+                                    response,
+                                    _invalid_tool_metadata("function_call arguments must be a JSON string"),
                                 )
-                                state["id"] = call_id
-                                state["name"] = name
-                                state["item_id"] = item_id
-                                if "content_index" not in state:
-                                    state["content_index"] = len(content)
-                                    content.append(
-                                        ToolCallBlock(
-                                            id=call_id,
-                                            native_id=item_id or None,
-                                            name=name,
-                                            arguments={},
-                                        )
+                                return
+                            call_id = _string(item.get("call_id")) or _string(item.get("id")) or f"call_{output_index}"
+                            name = _string(item.get("name"))
+                            if not name:
+                                yield terminal_event(
+                                    response,
+                                    _invalid_tool_metadata("function_call name must not be empty"),
+                                )
+                                return
+                            item_id = _string(item.get("id"))
+                            state = calls.setdefault(
+                                output_index,
+                                {
+                                    "id": call_id,
+                                    "name": name,
+                                    "arguments": _string(item.get("arguments")),
+                                    "item_id": item_id,
+                                },
+                            )
+                            state["id"] = call_id
+                            state["name"] = name
+                            state["item_id"] = item_id
+                            if "content_index" not in state:
+                                state["content_index"] = len(content)
+                                content.append(
+                                    ToolCallBlock(
+                                        id=call_id,
+                                        native_id=item_id or None,
+                                        name=name,
+                                        arguments={},
                                     )
-                                if item_id:
-                                    call_indexes_by_item[item_id] = output_index
-                                streamed = True
-                                yield ToolCallStart(index=state["content_index"], id=call_id, name=name)
-                            elif item_type == "reasoning":
-                                state = reasoning.setdefault(output_index, {"id": "", "encrypted_content": "", "text": ""})
-                                state["id"] = _string(item.get("id"))
-                                state["encrypted_content"] = _string(item.get("encrypted_content"))
-                                streamed = True
-                                if state["encrypted_content"]:
-                                    _set_thinking_signature(content, output_index, state)
+                                )
+                            if item_id:
+                                call_indexes_by_item[item_id] = output_index
+                            yield ToolCallStart(index=state["content_index"], id=call_id, name=name)
+                        elif item_type == "reasoning":
+                            state = reasoning.setdefault(output_index, {"id": "", "encrypted_content": "", "text": ""})
+                            state["id"] = _string(item.get("id"))
+                            state["encrypted_content"] = _string(item.get("encrypted_content"))
+                            if state["encrypted_content"]:
+                                _set_thinking_signature(content, output_index, state)
+                        elif item_type not in {"message", "output_text", "refusal"}:
+                            yield terminal_event(
+                                response,
+                                _invalid_tool_metadata(f"unsupported Responses output item: {item_type!r}"),
+                            )
+                            return
                     elif event_type == "response.reasoning_summary_text.done":
                         continue
                     elif event_type == "response.function_call_arguments.delta":
                         output_index = _resolve_call_index(chunk, calls, call_indexes_by_item)
                         state = calls.setdefault(output_index, {"id": "", "name": "", "arguments": ""})
                         value = _string(chunk.get("delta"))
+                        if "content_index" not in state:
+                            yield terminal_event(
+                                response,
+                                _invalid_tool_metadata("function-call arguments arrived before output_item.added"),
+                            )
+                            return
                         state["arguments"] += value
                         streamed = streamed or bool(value)
                         yield ToolCallDelta(index=_int(state.get("content_index"), 0), arguments_delta=value)
@@ -231,7 +282,23 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         output_index = _resolve_call_index(chunk, calls, call_indexes_by_item)
                         state = calls.setdefault(output_index, {"id": "", "name": "", "arguments": ""})
                         if "arguments" in chunk:
-                            state["arguments"] = _string(chunk.get("arguments"))
+                            complete_arguments = chunk.get("arguments")
+                            if not isinstance(complete_arguments, str):
+                                yield terminal_event(
+                                    response,
+                                    _invalid_tool_metadata("function-call arguments must be a JSON string"),
+                                )
+                                return
+                            previous = state.get("arguments", "")
+                            state["arguments"] = complete_arguments
+                            if complete_arguments.startswith(previous):
+                                suffix = complete_arguments[len(previous) :]
+                                if suffix:
+                                    streamed = True
+                                    yield ToolCallDelta(
+                                        index=_int(state.get("content_index"), 0),
+                                        arguments_delta=suffix,
+                                    )
                     elif event_type == "response.output_item.done":
                         item = chunk.get("item")
                         if isinstance(item, Mapping):
@@ -250,55 +317,157 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 state = calls.setdefault(output_index, {"id": "", "name": "", "arguments": ""})
                                 state["id"] = _string(item.get("call_id")) or _string(item.get("id")) or state.get("id", "")
                                 state["name"] = _string(item.get("name")) or state.get("name", "")
+                                if not state["name"]:
+                                    yield terminal_event(
+                                        response,
+                                        _invalid_tool_metadata("function_call name must not be empty"),
+                                    )
+                                    return
                                 state["item_id"] = _string(item.get("id")) or state.get("item_id", "")
                                 if state.get("item_id"):
                                     call_indexes_by_item[state["item_id"]] = output_index
-                                state["arguments"] = _string(item.get("arguments")) or state.get("arguments", "")
+                                raw_arguments = item.get("arguments")
+                                if raw_arguments is not None and not isinstance(raw_arguments, str):
+                                    yield terminal_event(
+                                        response,
+                                        _invalid_tool_metadata("function_call arguments must be a JSON string"),
+                                    )
+                                    return
+                                state["arguments"] = raw_arguments or state.get("arguments", "")
+                            elif item.get("type") not in {"message", "output_text", "refusal"}:
+                                yield terminal_event(
+                                    response,
+                                    _invalid_tool_metadata(
+                                        f"unsupported Responses output item: {item.get('type')!r}"
+                                    ),
+                                )
+                                return
                     elif event_type in {"response.completed", "response.incomplete"}:
                         response_body = chunk.get("response")
-                        if isinstance(response_body, Mapping):
-                            status = _string(response_body.get("status")) or status
-                            incomplete = response_body.get("incomplete_details")
-                            if isinstance(incomplete, Mapping):
-                                incomplete_reason = _string(incomplete.get("reason")) or incomplete_reason
-                            usage = _responses_usage(response_body.get("usage")) or usage
-                            _apply_terminal_output_items(
-                                response_body.get("output"),
-                                content,
-                                calls,
-                                reasoning,
-                                call_indexes_by_item,
+                        if not isinstance(response_body, Mapping):
+                            yield terminal_event(
+                                response,
+                                _invalid_tool_metadata(f"{event_type} response must be an object"),
                             )
+                            return
+                        response_error: Mapping[str, Any] | None = None
+                        status = _string(response_body.get("status")) or status
+                        incomplete = response_body.get("incomplete_details")
+                        if isinstance(incomplete, Mapping):
+                            incomplete_reason = _string(incomplete.get("reason")) or incomplete_reason
+                        usage = _responses_usage(response_body.get("usage")) or usage
+                        if isinstance(response_body.get("error"), Mapping):
+                            response_error = response_body["error"]
+                        terminal_output_error = _apply_terminal_output_items(
+                            response_body.get("output"),
+                            content,
+                            calls,
+                            reasoning,
+                            call_indexes_by_item,
+                        )
+                        if terminal_output_error is not None:
+                            yield terminal_event(response, terminal_output_error)
+                            return
+                        if response_error is not None:
+                            yield terminal_event(
+                                response,
+                                _error(
+                                    _string(response_error.get("message")) or "OpenAI Responses response failed",
+                                    streamed,
+                                    content,
+                                    origin,
+                                    usage,
+                                    verified,
+                                    code=_string(response_error.get("code")) or None,
+                                    include_partial=usage is not None,
+                                ),
+                            )
+                            return
                         final = _final(content, calls, origin, status, incomplete_reason, usage, verified, refusal=refusal)
                         for index in range(len(content)):
                             yield BlockEnd(index=index)
                         if isinstance(final, ProviderError):
-                            yield final
+                            yield terminal_event(response, final)
                         else:
-                            yield Done(final)
+                            yield terminal_event(response, Done(final))
                         return
                     elif event_type == "response.failed":
                         response_body = chunk.get("response")
                         error = response_body.get("error") if isinstance(response_body, Mapping) else chunk.get("error")
+                        if isinstance(response_body, Mapping):
+                            usage = _responses_usage(response_body.get("usage")) or usage
                         message = _string(error.get("message")) if isinstance(error, Mapping) else json.dumps(dict(chunk), ensure_ascii=False)
                         code = _string(error.get("code")) if isinstance(error, Mapping) else ""
-                        yield _error(message, streamed, content, origin, usage, verified, code=code or None)
+                        yield terminal_event(
+                            response,
+                            _error(
+                                message,
+                                streamed,
+                                content,
+                                origin,
+                                usage,
+                                verified,
+                                code=code or None,
+                                include_partial=usage is not None,
+                            ),
+                        )
                         return
                     elif event_type == "error":
-                        yield _error(_string(chunk.get("message")) or json.dumps(dict(chunk), ensure_ascii=False), streamed, content, origin, usage, verified)
+                        nested_error = chunk.get("error")
+                        error_message = (
+                            _string(nested_error.get("message"))
+                            if isinstance(nested_error, Mapping)
+                            else _string(chunk.get("message"))
+                        )
+                        error_code = (
+                            _string(nested_error.get("code"))
+                            if isinstance(nested_error, Mapping)
+                            else _string(chunk.get("code"))
+                        )
+                        yield terminal_event(
+                            response,
+                            _error(
+                                error_message or json.dumps(dict(chunk), ensure_ascii=False),
+                                streamed,
+                                content,
+                                origin,
+                                usage,
+                                verified,
+                                code=error_code or None,
+                                include_partial=usage is not None,
+                            ),
+                        )
+                        return
+                    elif event_type in {
+                        "response.queued",
+                        "response.content_part.added",
+                        "response.content_part.done",
+                        "response.output_text.done",
+                        "response.reasoning_summary_text.done",
+                        "response.reasoning_text.done",
+                    }:
+                        continue
+                    else:
+                        yield terminal_event(
+                            response,
+                            _invalid_tool_metadata(f"unsupported Responses stream event: {event_type!r}"),
+                        )
                         return
                 if cancel.cancelled:
-                    yield _aborted(cancel.reason, origin, content, usage, verified)
+                    yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
                     return
-                yield incomplete_stream_error(
-                    content,
-                    origin=origin,
-                    usage=usage,
-                    streamed=streamed,
-                    verified_origin=verified,
-                    protocol=self.protocol,
+                yield terminal_event(
+                    response,
+                    incomplete_stream_error(
+                        content,
+                        origin=origin,
+                        usage=usage,
+                        streamed=streamed,
+                        verified_origin=verified,
+                        protocol=self.protocol,
+                    ),
                 )
-        except httpx.HTTPError as exc:
+        except Exception as exc:
             yield classify_error(
                 exc=exc,
                 streamed=streamed,
@@ -434,12 +603,12 @@ def _apply_terminal_output_items(
     calls: dict[int, dict[str, Any]],
     reasoning: dict[int, dict[str, Any]],
     call_indexes_by_item: dict[str, int],
-) -> None:
+) -> ProviderError | None:
     if not isinstance(items, list):
-        return
+        return None
     for index, item in enumerate(items):
         if not isinstance(item, Mapping):
-            continue
+            return _invalid_tool_metadata("response output item must be an object")
         if item.get("type") == "reasoning":
             state = reasoning.setdefault(index, {"id": "", "encrypted_content": "", "text": ""})
             state["id"] = _string(item.get("id")) or state.get("id", "")
@@ -447,11 +616,17 @@ def _apply_terminal_output_items(
             if state["encrypted_content"]:
                 _set_thinking_signature(content, index, state)
         elif item.get("type") == "function_call":
+            name = _string(item.get("name"))
+            if not name:
+                return _invalid_tool_metadata("function_call name must not be empty")
+            raw_arguments = item.get("arguments")
+            if raw_arguments is not None and not isinstance(raw_arguments, str):
+                return _invalid_tool_metadata("function_call arguments must be a JSON string")
             item_id = _string(item.get("id"))
             output_index = call_indexes_by_item.get(item_id, index) if item_id else index
             state = calls.setdefault(output_index, {"id": "", "name": "", "arguments": ""})
             state["id"] = _string(item.get("call_id")) or _string(item.get("id")) or state.get("id", "")
-            state["name"] = _string(item.get("name")) or state.get("name", "")
+            state["name"] = name or state.get("name", "")
             state["item_id"] = item_id or state.get("item_id", "")
             if item_id:
                 call_indexes_by_item[item_id] = output_index
@@ -465,7 +640,8 @@ def _apply_terminal_output_items(
                         arguments={},
                     )
                 )
-            state["arguments"] = _string(item.get("arguments")) or state.get("arguments", "")
+            state["arguments"] = raw_arguments or state.get("arguments", "")
+    return None
 
 
 def _final(
@@ -479,6 +655,9 @@ def _final(
     *,
     refusal: bool = False,
 ) -> AssistantMessage | ProviderError:
+    for state in calls.values():
+        if state.get("id") and not state.get("name"):
+            return _invalid_tool_metadata("function_call name is missing")
     final: list[Any] = []
     for block in content:
         if isinstance(block, ToolCallBlock):
@@ -504,6 +683,16 @@ def _final(
         stop = "safety"
     elif incomplete in {"max_output_tokens", "length"}:
         stop = "length"
+    elif status == "incomplete":
+        return _error(
+            f"OpenAI Responses response incomplete: {incomplete or 'unknown'}",
+            streamed=False,
+            content=final,
+            origin=origin,
+            usage=usage,
+            verified=verified,
+            include_partial=usage is not None,
+        )
     else:
         stop = "tool_use" if any(isinstance(block, ToolCallBlock) for block in final) else "stop"
     return assistant_message(final, origin=origin, stop_reason=stop, usage=usage, verified_origin=verified)
@@ -596,6 +785,7 @@ def _error(
     verified: bool,
     *,
     code: str | None = None,
+    include_partial: bool = False,
 ) -> ProviderError:
     return classify_error(
         body=message,
@@ -603,10 +793,14 @@ def _error(
         streamed=streamed,
         partial=(
             assistant_message(content, origin=origin, stop_reason="error", usage=usage, verified_origin=verified)
-            if streamed
+            if streamed or include_partial
             else None
         ),
     )
+
+
+def _invalid_tool_metadata(message: str) -> ProviderError:
+    return ProviderError(kind="invalid_request", message=message, retryable=False)
 
 
 def _aborted(reason: str | None, origin: Any, content: list[Any] | None = None, usage: Any = None, verified: bool = True) -> ProviderError:
