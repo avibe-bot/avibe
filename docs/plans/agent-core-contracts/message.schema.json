@@ -120,7 +120,7 @@
         },
         "media_token": {
           "type": "string",
-          "description": "`media_objects.token`; bytes are loaded by the adapter at request time, never inlined in the transcript."
+          "description": "`media_objects.token` of an immutable, content-addressed snapshot taken when the block is created; bytes are loaded by the adapter's MediaLoader at request time, never inlined in the transcript. The same block always yields the same bytes, even if the original file changes or is deleted."
         },
         "name": {
           "type": "string"

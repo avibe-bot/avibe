@@ -38,7 +38,10 @@ commit input → loop:
         else: commit the response as `result` (final) and close the queues for this run, release the lock → end
 ```
 
-Finality is decided before the response row is inserted, so a `result` row is always the run's last response. A
+Finality is decided before the response row is inserted, so a `result` row is always the run's last response. A final
+response with `stop_reason` `refusal` or `safety` and no text is still committed as `result`, and the run ends with an
+`error` event (`kind` `refusal` or `safety`) so the surface shows an explanation instead of an empty reply; refusal
+text from the provider is kept as the reply. A
 steer that arrives after the queues closed is refused by the running Turn, and Avibe's delivery falls back to the P3
 queue, which starts the next run.
 

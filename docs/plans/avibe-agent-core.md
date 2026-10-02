@@ -151,9 +151,9 @@ Rules:
   an input when it is consumed (a steer after the current tool batch), a response at `message_end`, a tool result at
   `tool_finished`. Queued, removed, display-only, and `interim` rows stay null.
 - Commit points are SQLite transactions. After a crash the context resumes from the last committed `context_seq`.
-  Every external effect follows one recovery model (C-5/C-7 `recovery.md`): open tool calls are settled durably from
-  their job state before the first projection, commands start only through a launch handshake recovery can always
-  decide, and pending deliveries are re-sent.
+  Every external effect meets the recovery invariants in C-5/C-7 `recovery.md`, each with an owning lane and a proof:
+  open tool calls are settled durably before the first projection, commands start at most once, and responses are
+  delivered completely (exactly once on Workbench, at least once per part on IM).
 - Write path: the adapter commits the context row first, then hands that row to the dispatcher for delivery; the
   dispatcher must not persist it again. Display rendering (media rewrite, quick replies, citations) fills
   `content_text` and display keys of the same row. The row carries a pending delivery state committed with it, so a
@@ -185,7 +185,8 @@ resume, fork, and the UI's "model view". Three tiers, cheapest first:
 Trigger, checked before every model request, including inside the tool loop:
 
 ```text
-W = context window, L_in = input limit (else W), O = max_tokens of the next request
+W = context window (configured default 128,000 when Model Hub reports none)
+L_in = input limit (else W), O = max_tokens of the next request (default bound 8,192 when unknown)
 M = max(8_000, 3% of W);  T = min(L_in - O - M, r * W), r = 0.9 by default, configurable per model
 est = occupancy of the last valid response after the latest checkpoint or edit
         (input_tokens + cache_read_tokens + cache_write_tokens + output_tokens: the whole prompt it was sent plus
@@ -258,17 +259,18 @@ the normalized edit tier, and streaming, bounded output with spill.
 owners after it starts, so every command gets a portable handle from its first moment and never has to move.
 
 - **Job handle.** Every `bash` call starts a job: a one-line `sh` wrapper in its own session runs the command,
-  stdout and stderr go to `<state>/agent_core/jobs/<job_id>/output.log`, the wrapper records its own pid before it
-  runs the command, and the exit code is written atomically to `exit`. `meta.json` holds the command, cwd, and cached
-  process identity (`job.schema.json`; write order in C-7). No process holds a
+  stdout and stderr go to `<state>/agent_core/jobs/<job_id>/output.log`, and the exit code is written atomically to
+  `exit`. `meta.json` holds the command, cwd, absolute deadline, and process identity (`job.schema.json`). The job host
+  meets recovery invariants J1–J6 (C-7 `recovery.md`). No process holds a
   pipe to the job, so any holder of the id can read it, wait on it, or kill it. Prototype results: evaluation §5.
 - **Foreground** waits on the handle: the tool tails `output.log` for live progress and Pi's truncation, and
   returns when `exit` appears.
 - **Handover.** `watch: true` hands the handle to Watch at once. A foreground job still running after the foreground
   window (default 120 s, configurable) is handed over instead of killed. Handover registers a once Watch on the same
   handle: nothing restarts, and the command runs exactly once.
-- **Watch target kind `job`.** A Watch can target a job handle instead of a waiter command. Its cycle waits on the
-  handle, which is idempotent across vibe restarts; the command's own exit code is reported and never read as Watch's
+- **Watch target kind `job`.** A Watch can target a job handle instead of a waiter command, keyed by `job_id` and
+  created by adopt-or-create, so one job never has two Watches. Its cycle waits on the handle, which is idempotent
+  across vibe restarts, and enforces the job's deadline; the command's own exit code is reported and never read as Watch's
   75 or 64; the Watch is displayed as the original command. The Watch owns the job: removal, disabling, lifetime
   expiry, and Session archive kill its process tree.
 - **Restart and stop.** Jobs survive vibe restarts, upgrades, and crashes; an open foreground tool call is then

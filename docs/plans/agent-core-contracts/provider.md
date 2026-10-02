@@ -46,17 +46,27 @@ class ModelRequest:
     supports_images: bool                # resolved by the loop; unknown capability counts as False
 ```
 
-The loop's `ModelRouter` returns the `ModelEndpoint` together with its `ModelCapabilities`; the loop uses them for
-the request (`max_tokens`, `supports_images`) and context management (C-9). Adapters are constructed with a
-`MediaLoader` and resolve each `ImageBlock`'s bytes at request time; the canonical message never carries bytes.
+The loop's `ModelRouter` returns the `ModelEndpoint` together with its `ModelCapabilities`. Every capability has a
+defined effect, including when it is unknown:
+
+| Capability | `true` / value | `false` | unknown (`null`) |
+| --- | --- | --- | --- |
+| `context_window` | W for C-9 | — | the configured default window (128,000) |
+| `max_output_tokens` | upper bound for `max_tokens` | — | the configured default (8,192) |
+| `supports_tools` | tools sent | the route is refused before the run with a clear error: the agent needs tools | tools sent; a provider rejection surfaces as an error |
+| `supports_images` | images sent | placeholders | placeholders |
+| `supports_reasoning` | `reasoning_effort` sent if it is one of `reasoning_efforts` | `reasoning_effort = None` | `reasoning_effort = None` | Adapters are constructed with a
+`MediaLoader` and resolve each `ImageBlock`'s bytes at request time; the canonical message never carries bytes. The
+token names an immutable snapshot (`message.schema.json`), so the bytes never change for a committed block.
 
 `stream` yields `ProviderEvent`s (`provider-event.schema.json`) and always ends with exactly one `done` or one
 `error`. `done.message` is the complete canonical `AssistantMessage`; its `origin` comes from the served-hop report
 (C-6), which the gateway sends as the `x-avibe-served-hop` response header: compact JSON with exactly `provider`,
 `api`, `model`, before the first model byte. On the direct channel (no gateway) the endpoint is the served hop. When a gateway response carries no
-served-hop report, the origin is unverified: the adapter commits the message with every thinking `signature` set to
-`null` and redacted thinking dropped, keeping the endpoint as `origin`, so no opaque payload of an unknown vendor can
-ever be replayed. A thinking block without a signature is always sent as plain text (`cross-provider.md`).
+served-hop report, the origin is unverified: the adapter commits the message with every opaque provider payload
+removed (the `signature` of every block of any kind, and redacted thinking), keeping the endpoint as `origin`, so no
+opaque payload of an unknown vendor can ever be replayed. A block without a signature is always sent without one
+(`cross-provider.md`).
 
 Error classification is part of the contract because the loop branches on it:
 

@@ -165,11 +165,11 @@ first steps are usually no-ops; for the future `pty` backend they are required.
 | `hand_over(job_id)` → `watch_id` | yes | register a once Watch with target kind `job` |
 | `send(job_id, keys)`, `screen(job_id)`, `resize(job_id, cols, rows)`, `attach_info(job_id)` | reserved | `pty` backend (plan §5.4) |
 
-Job directory: `<state>/agent_core/jobs/<job_id>/` with `meta.json`, `pid`, `decision`, `output.log`, and `exit`.
-The launch handshake and recovery rules are in [`recovery.md`](recovery.md): the command starts only after the
-exclusively created `decision` file says `go`, so recovery can always tell whether it may have run. Process identity
-is the pid plus the process start time, as `core/process_isolation.py` verifies; `meta.json.process` caches it once
-observed. Directories of finished jobs whose Watch, if any, has settled are removed after 7 days.
+Job directory: `<state>/agent_core/jobs/<job_id>/` with `meta.json`, `output.log`, and the files the `tools` lane's
+launch mechanism needs. The job host meets recovery invariants J1–J6 ([`recovery.md`](recovery.md)): a command starts
+at most once and recovery can always decide whether it did; its identity is recorded before it runs; `timeout` is an
+absolute deadline that survives handover and restarts; output on disk is bounded; files are kept until the call is
+durably settled; handover creates at most one Watch per job.
 
 ## 8. Environment section
 

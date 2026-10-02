@@ -1,50 +1,47 @@
-# Recovery model (C-5, C-7)
+# Recovery invariants (C-5, C-7)
 
-One rule for every effect the Avibe Agent has outside its own process: **record the intent durably, perform the
-effect, record the outcome durably.** Recovery after a crash reconciles intents without outcomes. An effect on an
-external system with no idempotency key is **at-least-once**; this file says where that applies.
+These are properties, not mechanisms. Each invariant names the lane that owns it and the test that proves it; the
+mechanism lives in that lane's code, where the test can exercise every crash point. A contract change is needed only
+when a mechanism needs a field another lane reads; those fields are listed in the last section.
 
-| Effect | Intent | Outcome | Recovery |
-| --- | --- | --- | --- |
-| Start a command (job) | `meta.json` before the spawn | `exit` file | the launch handshake below decides whether the command can still start |
-| Settle a tool call | the committed tool call in the response row | a committed `tool_result` row | at resume, before any projection, append exactly one `tool_result` per open call, chosen from its job state |
-| Deliver a response to a surface | the response row with `metadata_json.delivery.state = "pending"` | `"delivered"` with the receipt | re-deliver pending rows in `context_seq` order |
+General rule: every external effect records its intent durably before the effect and its outcome durably after it,
+and recovery reconciles intents that have no outcome. An effect on a system without an idempotency key is
+at-least-once, and that is stated where it applies.
 
-## Launch handshake
+## Jobs (`tools` lane; Watch `job` target in the adapter wave)
 
-The parent and the wrapper agree through one file, `decision`, created with exclusive create (`O_CREAT | O_EXCL`), so
-exactly one writer wins:
+| ID | Invariant | Proof |
+| --- | --- | --- |
+| J1 | A command starts at most once, and recovery can always decide whether it may have started. A missing or late file never proves that it did not. | crash injected at every step of the launch, then recovery; the command's side effect (a counter file) is at most 1, and recovery's verdict matches it |
+| J2 | Before a command can run, the job record holds an identity that distinguishes its process tree from a recycled pid, so recovery can inspect and kill exactly that tree. | kill and inspect after a simulated pid reuse |
+| J3 | A `timeout` holds across handover and vibe restarts: the deadline is absolute and recorded with the job, and whichever component owns the job when it passes kills the tree. | timeout shorter than the foreground window with `watch: true`, and with a restart in between |
+| J4 | Output on disk is bounded per job (head and tail kept, middle dropped beyond a fixed cap), and every result or follow-up built from a truncated log says so. | a command producing more than the cap |
+| J5 | Job files are kept until the owning tool call has a durable `tool_result` and the Watch that owns the job, if any, has settled. | an exited job whose call is unsettled is never removed |
+| J6 | Handover is idempotent per job: one job has at most one Watch, whatever crashes in between. | crash between Watch creation and committing the handover result, then recovery |
 
-1. The parent writes `meta.json`, then spawns the wrapper.
-2. The wrapper writes `pid` atomically, then waits for `decision`, at most 30 s.
-3. The parent waits for `pid`, then creates `decision` containing `go`.
-4. The wrapper runs the command only if `decision` says `go`. If the wait expires, it tries to create `decision`
-   containing `abandon` itself and exits without running anything; if that create fails, it re-reads `decision`.
+## Tool calls (`loop` lane)
 
-Recovery for a job without `exit`:
+| ID | Invariant | Proof |
+| --- | --- | --- |
+| T1 | `project()` reads only committed rows; the same rows always produce the same request. | projection before and after job state changes |
+| T2 | At resume, before the first projection, every tool call without a committed `tool_result` gets exactly one, chosen from its job state (exited: the output; running: handover; never ran or unknown: the interrupted result). Retries settle nothing twice. | crash between settlement steps, then resume twice |
+| T3 | Inputs accepted by `steer` or `follow_up` are never dropped: they enter the context or are returned to the adapter for the P3 queue. | a terminating tool while a steer is queued |
 
-- `decision` is `go`: the command may be running; use `pid` and the process identity (running or gone).
-- `decision` is `abandon`: the command never ran.
-- `decision` is absent: recovery creates it with `abandon`. If that wins, the command never ran and never will; if it
-  loses, the wrapper's own decision is read and used.
+## Delivery (adapter wave)
 
-A temporarily missing `pid` file therefore never proves anything; only the `decision` file does.
+| ID | Invariant | Proof |
+| --- | --- | --- |
+| D1 | A committed response is delivered completely: every part a surface splits it into is either confirmed or retried. A partial delivery is never recorded as delivered. | failure on a later part, and a crash between parts |
+| D2 | Workbench delivery is exactly once (the row is the message). IM delivery is at least once per part: `BaseIMClient.send_message` has no idempotency key, so a crash after the platform accepted a part but before its receipt was committed resends that part. | crash after accept, before receipt |
 
-## Tool-call settlement
+Today `core/message_dispatcher.py` swallows failures of later split chunks and returns the first chunk's id. The
+adapter wave must not reuse that path as is for agent rows; D1 is the requirement it meets.
 
-`project()` reads only committed rows and stays pure. Before the first projection after a resume, the adapter settles
-every tool call without a `tool_result`:
+## Shared fields
 
-- job `exited` → the final output, formatted as `bash` would;
-- job running → hand it over to Watch and commit the handover result (`tools.md` §5);
-- job gone, or never ran, or no job for that call → `[tool call interrupted; no result recorded]`, `is_error: true`.
+The only cross-lane shapes recovery adds:
 
-`project()` still answers any call that has no result with that same synthetic text, so an unsettled transcript always
-yields a valid request; settlement makes the answer durable and identical across retries and forks.
-
-## Delivery
-
-- Workbench reads the committed row itself, so a re-delivery is a no-op: exactly once.
-- IM platforms have no idempotency key at the `BaseIMClient.send_message` boundary, so a crash after the platform
-  accepted a message but before the receipt was committed sends it again on recovery: at-least-once. The duplicate is
-  limited to that window.
+- `meta.json` (`job.schema.json`): `deadline_at` (absolute, nullable), and `process` with the identity fields of
+  `PersistedProcessIdentity` (`core/process_isolation.py`), recorded before the command can run (J2).
+- Watch `job` target: keyed by `job_id`, created by adopt-or-create (J6).
+- Response rows: `metadata_json.delivery` with one entry per part (`transcript.md` §2).

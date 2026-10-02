@@ -16,7 +16,8 @@ cross-provider history tests (MIT).
 
 Invariants:
 
-- A signature is never synthesized and never sent to a different origin.
+- "Opaque provider payload" means any `signature` field on any block, and any redacted thinking. Every rule here
+  about signatures applies to all of them. A signature is never synthesized and never sent to a different origin.
 - Tool-call id normalization is deterministic: the stored id when the target accepts it; otherwise
   `call_` + the first 24 hex characters of SHA-256 of the stored id. Anthropic accepts `^[a-zA-Z0-9_-]{1,64}$`; the
   other protocols' limits are recorded in the `ai` lane's conversion tables. The map is computed per request; the

@@ -34,7 +34,8 @@ activity panel can pair it with the result).
 - Each commit is one SQLite transaction. The adapter delivers a row to surfaces only after it commits; the
   dispatcher does not persist it again.
 - **Output outbox.** An `assistant` or `result` row is committed with `metadata_json.delivery = {"state":
-  "pending"}` in the same transaction. After the surface accepts it, the adapter sets `{"state": "delivered"}` with
+  "pending", "parts": []}` in the same transaction; each part a surface sends is recorded with its receipt, and the
+  row is `delivered` only when every part is (`recovery.md` D1). After the surface accepts it, the adapter sets `{"state": "delivered"}` with
   the platform receipt (`native_message_id` where the platform returns one). At startup, and before a Session
   resumes, the adapter re-delivers its `pending` rows in `context_seq` order. Nothing is lost or regenerated;
   duplicates are possible on IM in one window ([`recovery.md`](recovery.md) §Delivery).
@@ -60,8 +61,10 @@ The child Session's metadata already records its parent as top-level keys `fork_
 `fork_source_message_id` (written by `reserve_forked_session`, read by `fork_metadata_from_session_metadata` in
 `core/services/session_fork.py`); C-5 reads those keys and adds no new fork shape.
 
-- `anchor_seq` = the largest `context_seq` in the source Session among rows at or before the anchor message in
-  transcript order (the anchor itself may be a display-only row).
+- `anchor_seq` is resolved once, when the fork is reserved, as the largest `context_seq` in the source Session among
+  rows at or before the anchor message, and persisted as the top-level metadata key `fork_source_context_seq`. Rows
+  that receive a `context_seq` later can never move into or out of the prefix. A released fork without that key
+  (forked from a non-`avibe` Session) has no Avibe Agent context to inherit and starts empty.
 - The child's context = the source's context rows with `context_seq <= anchor_seq` (recursively through the source's
   own fork), then the child's rows.
 - The child's `context_seq` continues from `anchor_seq + 1`, so the combined order stays total.
