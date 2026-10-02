@@ -1880,6 +1880,44 @@ WATCH_FOLLOW_UP_RUN_ID_METADATA_KEY = "watch_follow_up_run_id"
 WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY = "watch_recent_event_timestamps"
 WATCH_CIRCUIT_BREAKER_METADATA_KEY = "watch_circuit_breaker"
 WATCH_LIFETIME_STARTED_AT_METADATA_KEY = "watch_lifetime_started_at"
+#: What a Watch waits on when it is not a waiter command: an Avibe Agent job handle
+#: (plan C-7, target kind ``job``). Lives in ``metadata_json`` so the definition needs
+#: no schema change:
+#: ``{"kind": "job", "job_id": "job_…", "state_dir": "<absolute job directory>",
+#: "command": "<the command as the agent wrote it>"}``, plus ``exit_code`` and
+#: ``released_at`` once the Watch has settled the job. A job Watch's waiter columns
+#: (``command_json``, ``shell_command``) stay empty on disk, so nothing that reads them,
+#: including a release without job targets, can run the command a second time; the
+#: read model shows the target's command in ``shell_command`` instead.
+WATCH_TARGET_METADATA_KEY = "watch_target"
+WATCH_TARGET_KIND_JOB = "job"
+
+
+def watch_job_target(metadata: Any) -> Optional[dict[str, Any]]:
+    """The job target in a Watch's metadata, or ``None`` for a waiter-command Watch."""
+
+    if not isinstance(metadata, dict):
+        return None
+    target = metadata.get(WATCH_TARGET_METADATA_KEY)
+    if not isinstance(target, dict) or target.get("kind") != WATCH_TARGET_KIND_JOB:
+        return None
+    job_id = target.get("job_id")
+    return target if isinstance(job_id, str) and job_id else None
+
+
+def _watch_target_sql(field: str) -> Any:
+    """``watch_target.<field>`` of a definition row, read in SQL; NULL for a malformed blob."""
+
+    return case(
+        (
+            func.json_valid(run_definitions.c.metadata_json) == 1,
+            func.json_extract(
+                run_definitions.c.metadata_json,
+                f"$.{WATCH_TARGET_METADATA_KEY}.{field}",
+            ),
+        ),
+        else_=None,
+    )
 
 
 def watch_metadata_after_resume(
@@ -3629,6 +3667,110 @@ class SQLiteBackgroundTaskStore:
             expected_reference_agent_id=expected_reference_agent_id,
         )
 
+    def adopt_or_create_job_watch(self, payload: dict[str, Any]) -> str:
+        """The id of the Watch that owns ``payload``'s job, written from ``payload`` if none does.
+
+        Recovery invariant J6: one job, at most one Watch, whatever crashed in between.
+        Keyed by ``job_id`` across live AND removed rows -- a removed Watch still owned
+        the job, and its removal is what stops it -- and decided under the write lock,
+        so two hand-overs of one job converge on one row. Once this returns, the row
+        is committed.
+        """
+
+        target = watch_job_target(payload.get("metadata"))
+        if target is None:
+            raise ValueError("a job Watch needs a job target")
+        values = self._watch_values(payload)
+        with self.engine.begin() as conn:
+            reserve_write_lock(conn)
+            existing = conn.execute(
+                select(run_definitions.c.id)
+                .where(run_definitions.c.definition_type == "watch")
+                .where(_watch_target_sql("kind") == WATCH_TARGET_KIND_JOB)
+                .where(_watch_target_sql("job_id") == target["job_id"])
+                .order_by(run_definitions.c.created_at, run_definitions.c.id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if existing is not None:
+                return str(existing)
+            upsert_definition_in_connection(conn, values, expect=None, definition_type="watch")
+        return str(values["id"])
+
+    def list_job_watch_targets(self) -> list[dict[str, Any]]:
+        """Every job Watch whose job may still need its owner: live, paused, and removed rows not yet released.
+
+        ``session_archived`` tells a Session archive (which soft-deletes the Watch) from
+        a plain removal, so the job is stopped with the reason that ended it.
+        """
+
+        session_status = (
+            select(agent_sessions.c.status)
+            .where(agent_sessions.c.id == run_definitions.c.session_id)
+            .limit(1)
+            .scalar_subquery()
+        )
+        stmt = (
+            select(
+                run_definitions.c.id,
+                run_definitions.c.enabled,
+                run_definitions.c.deleted_at,
+                run_definitions.c.metadata_json,
+                session_status.label("session_status"),
+            )
+            .where(run_definitions.c.definition_type == "watch")
+            .where(_watch_target_sql("kind") == WATCH_TARGET_KIND_JOB)
+            .where(_watch_target_sql("released_at").is_(None))
+            .order_by(run_definitions.c.created_at, run_definitions.c.id)
+        )
+        targets: list[dict[str, Any]] = []
+        with self.engine.connect() as conn:
+            for row in conn.execute(stmt).mappings():
+                target = watch_job_target(_json_loads(row["metadata_json"], {}))
+                if target is None:
+                    continue
+                targets.append(
+                    {
+                        "id": row["id"],
+                        "enabled": bool(row["enabled"]),
+                        "deleted": row["deleted_at"] is not None,
+                        "session_archived": row["session_status"] == "archived",
+                        "target": target,
+                    }
+                )
+        return targets
+
+    def job_watch_settled(self, job_id: str) -> bool:
+        """Whether every Watch of ``job_id`` has settled it (J5): ``True`` when none ever owned it."""
+
+        with self.engine.connect() as conn:
+            unsettled = conn.execute(
+                select(run_definitions.c.id)
+                .where(run_definitions.c.definition_type == "watch")
+                .where(_watch_target_sql("kind") == WATCH_TARGET_KIND_JOB)
+                .where(_watch_target_sql("job_id") == job_id)
+                .where(_watch_target_sql("released_at").is_(None))
+                .limit(1)
+            ).first()
+        return unsettled is None
+
+    def release_job_watch(self, watch_id: str, *, released_at: str) -> bool:
+        """Record that ``watch_id`` no longer has a job to manage; one key, whatever else the row holds."""
+
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == watch_id)
+                .where(_watch_target_sql("kind") == WATCH_TARGET_KIND_JOB)
+                .values(
+                    metadata_json=func.json_set(
+                        run_definitions.c.metadata_json,
+                        f"$.{WATCH_TARGET_METADATA_KEY}.released_at",
+                        released_at,
+                    )
+                )
+            )
+            return bool(result.rowcount)
+
     def _upsert_definition(
         self,
         values: dict[str, Any],
@@ -4755,6 +4897,8 @@ class SQLiteBackgroundTaskStore:
                     [
                         run_definitions.c.command_json,
                         run_definitions.c.shell_command,
+                        # A job Watch's command lives in its target, not the waiter columns.
+                        _watch_target_sql("command"),
                         run_definitions.c.prefix,
                         run_definitions.c.cwd,
                     ]
@@ -8693,6 +8837,8 @@ class SQLiteBackgroundTaskStore:
         }
 
     def _watch_values(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # A job Watch has no waiter: its command is the job's, kept in the target only.
+        job_target = watch_job_target(payload.get("metadata"))
         return {
             "id": payload["id"],
             "definition_type": "watch",
@@ -8708,14 +8854,14 @@ class SQLiteBackgroundTaskStore:
             "cron": None,
             "run_at": None,
             "timezone": None,
-            "command_json": _json_dumps(payload.get("command") or []),
-            "shell_command": payload.get("shell_command"),
+            "command_json": _json_dumps([] if job_target else payload.get("command") or []),
+            "shell_command": None if job_target else payload.get("shell_command"),
             "prefix": payload.get("prefix"),
             "cwd": payload.get("cwd"),
             "mode": payload.get("mode") or "once",
             "timeout_seconds": float(payload.get("timeout_seconds", 21600.0)),
             "lifetime_timeout_seconds": float(payload.get("lifetime_timeout_seconds", 0.0)),
-            "retry_exit_codes_json": _json_dumps(payload.get("retry_exit_codes") or []),
+            "retry_exit_codes_json": _json_dumps([] if job_target else payload.get("retry_exit_codes") or []),
             "retry_delay_seconds": float(payload.get("retry_delay_seconds", 30.0)),
             "post_to": payload.get("post_to"),
             "deliver_key": payload.get("deliver_key"),
@@ -8827,6 +8973,8 @@ class SQLiteBackgroundTaskStore:
 
     @staticmethod
     def _watch_from_row(row: Any) -> dict[str, Any]:
+        metadata = _json_loads(row["metadata_json"], {})
+        job_target = watch_job_target(metadata)
         return {
             "id": row["id"],
             "name": row["name"],
@@ -8834,8 +8982,9 @@ class SQLiteBackgroundTaskStore:
             "session_policy": row["session_policy"],
             "session_key": row["legacy_session_key"] or "",
             "session_id": row["session_id"],
-            "command": _json_loads(row["command_json"], []),
-            "shell_command": row["shell_command"],
+            # A job Watch reads as the command it waits on, on every surface.
+            "command": [] if job_target else _json_loads(row["command_json"], []),
+            "shell_command": (str(job_target.get("command") or "") or None) if job_target else row["shell_command"],
             "prefix": row["prefix"],
             "message": row["message"] or row["prefix"],
             "message_payload": _json_loads(row["message_payload_json"], None),
@@ -8865,7 +9014,7 @@ class SQLiteBackgroundTaskStore:
             "last_event_at": row["last_event_at"],
             "last_error": row["last_error"],
             "last_exit_code": row["last_exit_code"],
-            "metadata": _json_loads(row["metadata_json"], {}),
+            "metadata": metadata,
             "lifecycle_state": _row_lifecycle_state(row),
         }
 

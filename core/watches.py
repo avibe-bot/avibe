@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 from config import paths
@@ -41,6 +41,7 @@ from core.runtime_work import (
 )
 from core.scheduled_tasks import TaskExecutionRequest, TaskExecutionStore
 from storage.background import (
+    COMMAND_TIMED_OUT_METADATA_KEY,
     DEFINITION_CYCLE_COLUMNS,
     NO_EVENT_EXIT_CODE,
     WATCH_CIRCUIT_BREAKER_METADATA_KEY as CIRCUIT_BREAKER_METADATA_KEY,
@@ -51,10 +52,13 @@ from storage.background import (
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
     WATCH_LIFETIME_STARTED_AT_METADATA_KEY as LIFETIME_STARTED_AT_METADATA_KEY,
     WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY as RECENT_EVENT_TIMESTAMPS_METADATA_KEY,
+    WATCH_TARGET_KIND_JOB,
+    WATCH_TARGET_METADATA_KEY,
     DefinitionWriteConflict,
     DefinitionWriteExpectation,
     SQLiteBackgroundTaskStore,
     definition_resume_clear_columns,
+    watch_job_target,
     watch_metadata_after_resume,
 )
 from vibe import runtime
@@ -129,6 +133,16 @@ WATCH_STORE_RECONCILE_PAUSE_FAILURES = 3
 WATCH_STORE_RETRY_INITIAL_SECONDS = 30.0
 WATCH_STORE_RETRY_MAX_SECONDS = 600.0
 WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS = 2 * DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
+#: How often a job Watch looks at its job handle. The job host enforces the job's
+#: own deadline on every look (J3), so this also bounds how late a deadline can be
+#: enforced while no wrapper does.
+WATCH_JOB_POLL_SECONDS = 1.0
+#: Why a Watch stopped the job it owns (the job host records the first reason given).
+JOB_STOP_WATCH_REMOVED = "watch_removed"
+JOB_STOP_WATCH_DISABLED = "watch_disabled"
+JOB_STOP_WATCH_LIFETIME = "watch_lifetime"
+JOB_STOP_SESSION_ARCHIVED = "session_archived"
+JOB_STOP_VIBE_STOP = "vibe_stop"
 
 
 def _publish_watch_definitions_updated() -> None:
@@ -253,6 +267,12 @@ class ManagedWatch:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
+    def job_target(self) -> Optional[dict[str, Any]]:
+        """The job handle this Watch waits on, or ``None`` for a waiter-command Watch."""
+
+        return watch_job_target(self.metadata)
+
+    @property
     def last_cycle_outcome(self) -> tuple[Optional[int], Optional[str]]:
         """Return the last completed cycle's exit code and error as one snapshot."""
 
@@ -266,6 +286,9 @@ class ManagedWatch:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ManagedWatch":
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        # A job Watch has no waiter, so no waiter exit code is ever retried.
+        default_retry_codes = [] if watch_job_target(metadata) else [DEFAULT_RETRY_EXIT_CODE]
         return cls(
             id=str(payload.get("id") or uuid4().hex[:12]),
             name=(str(payload["name"]).strip() if payload.get("name") is not None else None) or None,
@@ -281,7 +304,7 @@ class ManagedWatch:
             mode=str(payload.get("mode") or "once"),
             timeout_seconds=_payload_float(payload, "timeout_seconds", 21600.0),
             lifetime_timeout_seconds=_payload_float(payload, "lifetime_timeout_seconds", 0.0),
-            retry_exit_codes=[int(code) for code in (payload.get("retry_exit_codes") or [DEFAULT_RETRY_EXIT_CODE])],
+            retry_exit_codes=[int(code) for code in (payload.get("retry_exit_codes") or default_retry_codes)],
             retry_delay_seconds=_payload_float(payload, "retry_delay_seconds", 30.0),
             post_to=payload.get("post_to"),
             deliver_key=payload.get("deliver_key"),
@@ -294,7 +317,7 @@ class ManagedWatch:
             last_event_at=payload.get("last_event_at"),
             last_error=payload.get("last_error"),
             last_exit_code=(int(payload["last_exit_code"]) if payload.get("last_exit_code") is not None else None),
-            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            metadata=metadata,
         )
 
 
@@ -718,6 +741,127 @@ class ManagedWatchStore:
             expected_reference_agent_id=expected_reference_agent_id,
         )
 
+    def adopt_or_create_job_watch(
+        self,
+        job: Mapping[str, Any],
+        *,
+        agent_name: Optional[str] = None,
+        session_key: str = "",
+        post_to: Optional[str] = None,
+        deliver_key: Optional[str] = None,
+        message: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        user_context: Any = None,
+    ) -> str:
+        """The id of the Watch that owns ``job`` (its ``meta.json``), created if none does.
+
+        Recovery invariant J6: keyed by ``job_id``, so a hand-over repeated after a
+        crash gets the same Watch back, even one removed since. The Watch is a
+        ``once`` Watch on the job's Session, delivered through Watch's existing
+        follow-up path; its cycle waits on the job and never runs anything.
+
+        Raising means no Watch owns the job. Once the row is committed this returns its
+        id: a failed mirror refresh afterwards is logged, never raised.
+        """
+
+        from core.vibe_agents import ensure_agent_name_access
+        from storage.resource_access_service import (
+            ensure_harness_definition_write,
+            metadata_with_resource_user_context,
+        )
+
+        ensure_harness_definition_write(user_context)
+        ensure_agent_name_access(agent_name, user_context=user_context)
+        target = _job_target_from_meta(job)
+        watch_metadata = metadata_with_resource_user_context(metadata, user_context)
+        watch_metadata[WATCH_TARGET_METADATA_KEY] = target
+        watch = ManagedWatch(
+            id=uuid4().hex[:12],
+            name=None,
+            session_key=session_key,
+            session_id=str(job["session_id"]),
+            agent_name=agent_name,
+            session_policy="existing",
+            command=[],
+            # What the read model shows for a job Watch; never written as a waiter.
+            shell_command=target["command"] or None,
+            message=message,
+            cwd=str(job.get("cwd") or "") or None,
+            mode="once",
+            timeout_seconds=0.0,
+            retry_exit_codes=[],
+            retry_delay_seconds=0.0,
+            post_to=post_to,
+            deliver_key=deliver_key,
+            metadata=watch_metadata,
+        )
+        watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY] = watch.created_at
+        if self._sqlite is not None:
+            watch_id = self._sqlite.adopt_or_create_job_watch(watch.to_dict())
+            try:
+                self.load()
+            except Exception:
+                logger.warning(
+                    "Job %s is Watch %s, but the watch mirror could not be refreshed",
+                    target["job_id"],
+                    watch_id,
+                    exc_info=True,
+                )
+        else:
+            with self._mirror_lock:
+                for existing in self._watches.values():
+                    existing_target = existing.job_target
+                    if existing_target is not None and existing_target["job_id"] == target["job_id"]:
+                        return existing.id
+                self._watches[watch.id] = watch
+                try:
+                    self._save()
+                except Exception:
+                    self._reload_after_lost_write(watch.id)
+                    raise
+            watch_id = watch.id
+        _publish_watch_definitions_updated()
+        return watch_id
+
+    def list_job_watch_targets(self) -> list[dict[str, Any]]:
+        """Job Watches whose job may still need its owner (``SQLiteBackgroundTaskStore.list_job_watch_targets``).
+
+        The file backend has no removed rows to report: a removed file-backed Watch is gone.
+        """
+
+        if self._sqlite is not None:
+            return self._sqlite.list_job_watch_targets()
+        with self._mirror_lock:
+            return [
+                {"id": watch.id, "enabled": watch.enabled, "deleted": False, "session_archived": False, "target": target}
+                for watch in self._watches.values()
+                if (target := watch.job_target) is not None and not target.get("released_at")
+            ]
+
+    def job_watch_settled(self, job_id: str) -> bool:
+        """The Watch half of J5 for ``LocalJobHost.prune``: no Watch still manages ``job_id``."""
+
+        if self._sqlite is not None:
+            return self._sqlite.job_watch_settled(job_id)
+        return all(target["job_id"] != job_id for target in (row["target"] for row in self.list_job_watch_targets()))
+
+    def release_job_watch(self, watch_id: str, *, released_at: str) -> None:
+        """Record that ``watch_id`` has no job left to manage, so the ownership sweep stops visiting it."""
+
+        with self._mirror_lock:
+            if self._sqlite is not None:
+                self._sqlite.release_job_watch(watch_id, released_at=released_at)
+            cached = self._watches.get(watch_id)
+            target = cached.job_target if cached is not None else None
+            if cached is None or target is None:
+                return
+            cached.metadata = {
+                **cached.metadata,
+                WATCH_TARGET_METADATA_KEY: {**target, "released_at": released_at},
+            }
+            if self._sqlite is None:
+                self._save()
+
     def remove_watch(self, watch_id: str) -> bool:
         """Delete a watch; the mirror rolls back with the delete (HFR-275).
 
@@ -805,6 +949,27 @@ class ManagedWatchStore:
             # Captured before the first mutation: the state ``vibe watch update`` read and
             # resolved its payload from.
             expect = self._read_state(watch)
+            target = watch.job_target
+            if target is not None:
+                # A job Watch has no waiter to change: it waits on a command that is
+                # already running, which it never starts again.
+                if (command, shell_command, cwd, mode, timeout_seconds, retry_exit_codes, retry_delay_seconds) != (
+                    watch.command,
+                    watch.shell_command,
+                    watch.cwd,
+                    watch.mode,
+                    watch.timeout_seconds,
+                    watch.retry_exit_codes,
+                    watch.retry_delay_seconds,
+                ):
+                    raise ValueError(
+                        "this Watch waits on a running command: its command, cwd, mode, timeout, "
+                        "and retry settings cannot be changed"
+                    )
+                metadata = {
+                    **(metadata if metadata is not None else watch.metadata),
+                    WATCH_TARGET_METADATA_KEY: target,
+                }
             waiter_lifecycle_changed = (
                 mode != watch.mode
                 or command != watch.command
@@ -1149,6 +1314,7 @@ class _ManagedWatchRuntimeWorkHandler(RuntimeWorkHandler):
                 await self.service._persist_runtime_state()
             return True
         self.service._note_store_reconcile_ok()
+        await self.service._settle_unowned_jobs()
         if self.service._runtime_state_dirty:
             await self.service._persist_runtime_state()
             if self.service._runtime_state_dirty:
@@ -1645,6 +1811,7 @@ class ManagedWatchService:
                 if self._runtime_state_dirty:
                     self._write_runtime_state()
                 self._note_store_reconcile_ok()
+                await self._settle_unowned_jobs()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -2139,6 +2306,8 @@ class ManagedWatchService:
         *,
         blocking_run_id: str | None = None,
     ) -> bool:
+        if watch.job_target is not None:
+            return await self._stop_job_at_lifetime_async(watch, blocking_run_id=blocking_run_id)
         kwargs: dict[str, Any] = {}
         if blocking_run_id is None:
             kwargs = {
@@ -2163,6 +2332,146 @@ class ManagedWatchService:
             disable=True,
             **kwargs,
         )
+
+    async def _wait_for_job(self, watch: ManagedWatch, *, lifetime_started: float) -> None:
+        """A job Watch's cycle: wait on the job handle until the job ends; never run anything.
+
+        The handle outlives this process, so after a restart the next cycle re-attaches
+        to the same job and reports it once. No pid is registered for this Watch: the
+        stale-worker reaping at startup must never touch a job. The job host enforces
+        the job's own deadline on every look (J3); the Watch's lifetime is enforced
+        here; removal, pausing, and archive stop the job in ``_settle_unowned_jobs``,
+        never through this task's cancellation, which a restart causes too.
+        """
+
+        while self._running:
+            if not self._owns_service_instance():
+                return
+            current = self.store.get_watch(watch.id)
+            if current is None or not current.enabled or current.job_target is None:
+                return
+            watch = current
+            lifetime_remaining: Optional[float] = None
+            if watch.lifetime_timeout_seconds > 0:
+                lifetime_remaining = watch.lifetime_timeout_seconds - (
+                    asyncio.get_running_loop().time() - lifetime_started
+                )
+                if lifetime_remaining <= 0:
+                    await self._commit_lifetime_timeout_async(watch)
+                    return
+            target = watch.job_target
+            try:
+                status = await _job_host(target).wait(target["job_id"], deadline_s=0)
+            except (KeyError, ValueError):
+                status = None  # the job record is gone or unreadable: report what is known
+            except Exception as exc:
+                self._back_off_watch_after_store_error("wait on job", exc, watch_id=watch.id)
+                return
+            if status is None or status.state != "running":
+                await self._commit_job_result_async(watch)
+                return
+            delay = WATCH_JOB_POLL_SECONDS
+            if lifetime_remaining is not None:
+                delay = min(delay, lifetime_remaining)
+            await asyncio.sleep(delay)
+
+    async def _stop_job_at_lifetime_async(
+        self,
+        watch: ManagedWatch,
+        *,
+        blocking_run_id: str | None,
+    ) -> bool:
+        """The Watch's lifetime ended: stop the job it owns, then report how the job ended."""
+
+        target = watch.job_target
+        if not await _stop_job(target, JOB_STOP_WATCH_LIFETIME):
+            # Retiring the Watch now would leave the job running with no owner.
+            self._back_off_watch_after_store_error(
+                "stop job at lifetime",
+                RuntimeError(f"job {target['job_id']} is still running"),
+                watch_id=watch.id,
+            )
+            return False
+        if blocking_run_id is None:
+            return await self._commit_job_result_async(watch)
+        # As for every Watch: while an earlier follow-up is still in flight, no second
+        # report is queued; the stamp says why.
+        return await self._commit_cycle_result_async(
+            watch,
+            exit_code=None,
+            error=self._t(
+                "harness.watch.lifetimeExpiredWithActiveFollowUp",
+                run_id=blocking_run_id,
+            ),
+            disable=True,
+            metadata_updates={
+                WATCH_TARGET_METADATA_KEY: {**target, "released_at": _utc_now_iso()},
+            },
+        )
+
+    async def _commit_job_result_async(self, watch: ManagedWatch) -> bool:
+        """Report how the job ended through Watch's follow-up and retire the Watch, in one commit.
+
+        The command's exit code goes into the report and the target, never into
+        ``last_exit_code``: every reader of that column treats it as a waiter's code,
+        where 64 means "no event" and 124 a timeout.
+        """
+
+        target = watch.job_target
+        try:
+            outcome = await asyncio.to_thread(_job_outcome, watch, target)
+        except (KeyError, ValueError):
+            outcome = _missing_job_outcome(watch, target)
+        except Exception as exc:
+            self._back_off_watch_after_store_error("read job outcome", exc, watch_id=watch.id)
+            return False
+        return await self._commit_cycle_result_async(
+            watch,
+            exit_code=None,
+            error=outcome.error,
+            event_detected=outcome.event_detected,
+            disable=True,
+            prompt=_build_prompt(watch.message or watch.prefix, outcome.report),
+            metadata_updates={
+                WATCH_TARGET_METADATA_KEY: {
+                    **target,
+                    "exit_code": outcome.exit_code,
+                    "released_at": _utc_now_iso(),
+                },
+                COMMAND_TIMED_OUT_METADATA_KEY: outcome.timed_out,
+            },
+        )
+
+    async def _settle_unowned_jobs(self) -> None:
+        """Stop the job of every job Watch that no longer owns it, then release that Watch.
+
+        A Watch owns its job while it is enabled. Removal, pausing (``/new`` and a
+        refused remote origin included), and Session archive all leave the row not
+        enabled -- written by the CLI, the Web UI, or a teardown, in any process, maybe
+        while this service was down -- so ownership is reconciled here from the rows
+        rather than at each of those doorways.
+        """
+
+        if not self._owns_service_instance():
+            return
+        try:
+            rows = await self._run_runtime_sync(self.store.list_job_watch_targets)
+        except Exception:
+            logger.warning("Could not read job Watches to settle their jobs", exc_info=True)
+            return
+        for row in rows:
+            if row["enabled"] and not row["deleted"]:
+                continue
+            if not await _stop_job(row["target"], _unowned_job_stop_reason(row)):
+                continue
+            try:
+                await self._run_runtime_sync(
+                    self.store.release_job_watch,
+                    row["id"],
+                    released_at=_utc_now_iso(),
+                )
+            except Exception:
+                logger.warning("Could not release job Watch %s", row["id"], exc_info=True)
 
     async def _sleep_before_retry(
         self,
@@ -2263,6 +2572,9 @@ class ManagedWatchService:
                 lambda: self.store.mark_cycle_start(watch.id),
                 guarded=True,
             ):
+                return
+            if watch.job_target is not None:
+                await self._wait_for_job(watch, lifetime_started=lifetime_started)
                 return
             cwd_error = _missing_watch_cwd_error(watch)
             if cwd_error:
@@ -2688,6 +3000,218 @@ class ManagedWatchService:
                 watch_id=watch.id,
             )
             return False
+
+
+def _job_target_from_meta(job: Mapping[str, Any]) -> dict[str, Any]:
+    """The Watch target for a job's ``meta.json`` (``job.schema.json``); ``ValueError`` if it cannot be one."""
+
+    job_id = job.get("job_id")
+    state_dir = job.get("state_dir")
+    command = job.get("command")
+    if not isinstance(job_id, str) or not job_id.startswith("job_"):
+        raise ValueError("a job Watch needs the job's job_id")
+    if not isinstance(state_dir, str) or not os.path.isabs(state_dir):
+        raise ValueError("a job Watch needs the job's absolute state_dir")
+    if os.path.basename(os.path.normpath(state_dir)) != job_id:
+        raise ValueError("the job's state_dir does not name its job_id")
+    if not isinstance(command, str):
+        raise ValueError("a job Watch needs the job's command")
+    if not str(job.get("session_id") or "").strip():
+        raise ValueError("a job Watch needs the job's session_id")
+    return {"kind": WATCH_TARGET_KIND_JOB, "job_id": job_id, "state_dir": state_dir, "command": command}
+
+
+def _job_host(target: Mapping[str, Any]):
+    """The job host over the directory that holds ``target``'s job (``LocalJobHost``, PR #2337)."""
+
+    from core.agent_core.tools.jobs import LocalJobHost
+
+    state_dir = os.path.normpath(str(target.get("state_dir") or ""))
+    if not os.path.isabs(state_dir) or os.path.basename(state_dir) != target["job_id"]:
+        raise ValueError(f"job Watch target has no usable job directory: {state_dir!r}")
+    return LocalJobHost(os.path.dirname(state_dir))
+
+
+async def _stop_job(target: Mapping[str, Any], reason: str) -> bool:
+    """Kill ``target``'s process tree through its job host with ``reason``; ``True`` once none of it runs."""
+
+    job_id = target["job_id"]
+    try:
+        host = _job_host(target)
+        await host.kill(job_id, reason=reason)
+        return host.status(job_id).state != "running"
+    except (KeyError, ValueError):
+        return True  # no job record: nothing of it can still be found to run
+    except Exception:
+        logger.warning("Could not stop job %s (%s)", job_id, reason, exc_info=True)
+        return False
+
+
+def _unowned_job_stop_reason(row: Mapping[str, Any]) -> str:
+    if row["deleted"]:
+        return JOB_STOP_SESSION_ARCHIVED if row["session_archived"] else JOB_STOP_WATCH_REMOVED
+    return JOB_STOP_WATCH_DISABLED
+
+
+@dataclass(frozen=True)
+class _JobOutcome:
+    report: str
+    exit_code: Optional[int]
+    error: Optional[str]
+    timed_out: bool
+    event_detected: bool = True
+
+
+def _job_outcome(watch: ManagedWatch, target: Mapping[str, Any]) -> _JobOutcome:
+    """How the job ended, as the Watch follow-up states it (C-7 section 5).
+
+    The command, the exit code, the elapsed time, and the output tail under the
+    ``bash`` tool's rules: its truncation notices, and ``Full output:`` only for a log
+    that was never bounded on disk (J4). Raises ``KeyError`` when the job record is
+    gone.
+    """
+
+    from core.agent_core.tools.output import JobOutput
+
+    host = _job_host(target)
+    job_id = target["job_id"]
+    meta = host.meta(job_id)
+    status = host.status(job_id)
+    output = JobOutput(host, job_id)
+    output.finish()
+    text, truncation = output.render("(no output)")
+    line, timed_out = _job_status_line(watch, status, host.stop_reason(job_id), meta.get("timeout_s"))
+    elapsed = _job_elapsed_seconds(meta, str(target["state_dir"]))
+    header = f"Watch {watch.id} finished" + (f" after {_format_elapsed(elapsed)}." if elapsed is not None else ".")
+    parts = [header, f"Command: {target['command']}", "", text]
+    if truncation is None:
+        parts += ["", output.where()]
+    parts += ["", line]
+    exit_code = status.exit_code if status.state == "exited" else None
+    return _JobOutcome(
+        report="\n".join(parts),
+        exit_code=exit_code,
+        error=None if exit_code == 0 else line,
+        timed_out=timed_out,
+    )
+
+
+def _missing_job_outcome(watch: ManagedWatch, target: Mapping[str, Any]) -> _JobOutcome:
+    line = f"The job record of this command is gone ({target['job_id']}), so how it ended is unknown"
+    return _JobOutcome(
+        report=f"Watch {watch.id} finished.\nCommand: {target['command']}\n\n{line}",
+        exit_code=None,
+        error=line,
+        timed_out=False,
+        event_detected=False,
+    )
+
+
+def _job_status_line(
+    watch: ManagedWatch,
+    status: Any,
+    stop_reason: Optional[str],
+    timeout_s: Any,
+) -> tuple[str, bool]:
+    """The last line of the report, and whether the job's own timeout ended it.
+
+    The first lines are the ``bash`` tool's (Pi's ``bash.ts``, MIT, Copyright (c) 2025
+    Mario Zechner); the others say which owner stopped the command.
+    """
+
+    from core.agent_core.tools.args import format_number
+    from core.agent_core.tools.jobs import STOP_ABORTED, STOP_TIMEOUT
+
+    if status.state == "exited":
+        return f"Command exited with code {status.exit_code}", False
+    if stop_reason == STOP_TIMEOUT:
+        if isinstance(timeout_s, (int, float)) and not isinstance(timeout_s, bool):
+            return f"Command timed out after {format_number(timeout_s)} seconds", True
+        return "Command timed out", True
+    lines = {
+        STOP_ABORTED: "Command aborted",
+        JOB_STOP_VIBE_STOP: "Command stopped by `vibe stop`",
+        JOB_STOP_WATCH_LIFETIME: (
+            f"Command stopped: Watch {watch.id} reached its lifetime of "
+            f"{format_number(watch.lifetime_timeout_seconds)} seconds"
+        ),
+        JOB_STOP_WATCH_DISABLED: f"Command stopped because Watch {watch.id} was paused",
+        JOB_STOP_WATCH_REMOVED: f"Command stopped because Watch {watch.id} was removed",
+        JOB_STOP_SESSION_ARCHIVED: "Command stopped because its Session was archived",
+    }
+    return lines.get(stop_reason or "", "Command terminated without an exit code"), False
+
+
+def _job_elapsed_seconds(meta: Mapping[str, Any], state_dir: str) -> Optional[float]:
+    """From the job's start to when it ended: its ``exit`` (or ``stopped``) record, else now."""
+
+    created_at = meta.get("created_at")
+    if not isinstance(created_at, str):
+        return None
+    # ``Z`` spelled out: ``fromisoformat`` accepts it only from Python 3.11.
+    started = _parse_utc_timestamp(created_at.replace("Z", "+00:00"))
+    if started is None:
+        return None
+    ended = time.time()
+    for name in ("exit", "stopped"):
+        try:
+            ended = os.path.getmtime(os.path.join(state_dir, name))
+            break
+        except OSError:
+            continue
+    return max(0.0, ended - started.timestamp())
+
+
+def _format_elapsed(seconds: float) -> str:
+    total = int(round(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+async def hand_over_job(
+    job: Mapping[str, Any],
+    *,
+    store: Optional[ManagedWatchStore] = None,
+    **route: Any,
+) -> str:
+    """``LocalJobHost``'s ``on_hand_over``: the id of the job's Watch, adopted or created (J6).
+
+    ``route`` goes to ``ManagedWatchStore.adopt_or_create_job_watch``: the Agent, the
+    delivery target, a message, and the user context. Raises only when no Watch owns
+    the job.
+    """
+
+    return await asyncio.to_thread(
+        (store or ManagedWatchStore()).adopt_or_create_job_watch,
+        job,
+        **route,
+    )
+
+
+def stop_watch_jobs(store: Optional[ManagedWatchStore] = None) -> None:
+    """``vibe stop`` ends the commands Watches own, as it ends other tool commands.
+
+    Called once the service has stopped. An enabled Watch stays enabled: the next start
+    re-attaches, finds the job stopped by ``vibe stop``, and reports that once. Jobs of
+    Watches that no longer own them are settled as the service would. Restarts and
+    upgrades never come here, so their jobs keep running.
+    """
+
+    store = store or ManagedWatchStore()
+
+    async def _stop_all() -> None:
+        for row in store.list_job_watch_targets():
+            owned = row["enabled"] and not row["deleted"]
+            reason = JOB_STOP_VIBE_STOP if owned else _unowned_job_stop_reason(row)
+            if await _stop_job(row["target"], reason) and not owned:
+                store.release_job_watch(row["id"], released_at=_utc_now_iso())
+
+    asyncio.run(_stop_all())
 
 
 def _failure_hook_body(watch: ManagedWatch, *, exit_code: int, error_text: str) -> str:
