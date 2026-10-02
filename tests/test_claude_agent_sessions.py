@@ -1611,20 +1611,24 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_coalesced_or_unrecognized_human_echo_releases_queued_steers(self):
         """HFR-487: one native echo may acknowledge every queued input."""
 
+        human = {"kind": "human"}
         cases = (
             # Claude dequeues inputs queued behind a response together and
             # replays them as one newline-joined user message.
-            ("coalesced", "first steer\nsecond steer", None, True),
-            ("unrecognized human", "first steer, rewritten", {"kind": "human"}, True),
+            ("coalesced", "first steer\nsecond steer", None, False, True),
+            ("unrecognized human", "first steer, rewritten", human, False, True),
+            # A steer written while the receiver awaited the echo may not be in it.
+            ("unrecognized human, later steer", "first steer, rewritten", human, True, False),
             # Same text as the queued run, but an injected turn is not Avibe input.
             (
                 "injected notification",
                 "first steer\nsecond steer",
                 {"kind": "task-notification"},
                 False,
+                False,
             ),
         )
-        for name, echo, origin, settles in cases:
+        for name, echo, origin, late_steer, settles in cases:
             with self.subTest(name):
                 controller = _StubController()
                 controller._get_session_key = lambda _context: "session-1"
@@ -1670,6 +1674,14 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                                     "duration_ms": 1,
                                 },
                             )()
+                            if late_steer:
+                                late = agent._register_native_input(
+                                    composite_key,
+                                    "third steer",
+                                    kind="steer",
+                                )
+                                late.state = "accepted"
+                                agent._advance_steering_generation(composite_key)
                             yield UserMessage(echo, origin=origin)
                             yield type(
                                 "ResultMessage",
@@ -1702,7 +1714,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertNotIn(composite_key, agent._native_input_receipts)
                 else:
-                    # Injected turns are not Avibe input; the Turn stays open.
+                    # Unacknowledged input keeps the Turn open.
                     agent.emit_result_message.assert_not_awaited()
 
     async def test_ambiguous_results_emit_each_answer_in_order(self):

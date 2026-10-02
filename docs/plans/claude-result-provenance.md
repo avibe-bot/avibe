@@ -145,8 +145,10 @@ receives a human Result. It predates the rule and needs its own decision.
 Fact 6 is resolved in the receipt owner (HFR-487). The merged replay is the
 queued inputs joined by newlines, so one echo consumes the matching contiguous
 FIFO run of receipts. A human-origin echo that matches no receipt can only be
-Avibe input in a transformed shape; it releases the pending receipts with a
-warning instead of holding the Turn open forever. Echoes with another explicit
+Avibe input in a transformed shape; it releases, with a warning, the receipts
+registered before the receiver began awaiting that frame instead of holding the
+Turn open forever. A steer written during that wait stays pending, because the
+frame may predate it. Echoes with another explicit
 origin never consume receipts, even when their text matches.
 
 ## Validation
