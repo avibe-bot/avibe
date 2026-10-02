@@ -570,6 +570,17 @@ async def test_a_cancel_mid_transition_never_leaves_a_command_without_an_owner(t
     assert (await host.wait(job_id, deadline_s=8)).state != "running"
 
 
+async def test_a_cwd_with_bytes_that_are_not_utf8_is_recorded_and_read_back(tmp_path):
+    """POSIX paths are bytes: Python keeps a non-UTF-8 byte as a surrogate escape, which meta.json must keep too."""
+    cwd = str(tmp_path / "d\udcff")  # what os.fsdecode gives for b"d\xff" (not created: APFS refuses the name)
+    host = LocalJobHost(str(tmp_path / "jobs"))
+
+    with pytest.raises(JobStartError):  # the directory does not exist; the record must not be what fails
+        await host.start("true", cwd=cwd, env=_env(), timeout_s=None, session_id="ses_test", tool_call_id="toolu_1")
+
+    assert host.meta(host.find_job("ses_test", "toolu_1"))["cwd"] == cwd
+
+
 async def test_meta_json_is_read_in_a_bound(tmp_path):
     """The job directory is the command's to write: a huge meta.json is refused as corrupt, not loaded."""
     import tracemalloc

@@ -98,6 +98,7 @@ _TAIL_HEADER = re.compile(rb"\[output from byte (\d+)\]\n")
 _GO = "go"
 _ABANDON = "abandon"
 _STATE_FILE_CHARS = 4096
+_SURROGATE = re.compile("[\ud800-\udfff]")
 # The host's own meta.json holds the command, which a shell cannot even take past ARG_MAX (1 MiB here).
 _META_CHARS = 4 * 1024 * 1024
 
@@ -150,8 +151,14 @@ def _write_atomic(path: str, data: str) -> None:
 
 
 def _meta_text(meta: Mapping[str, Any]) -> str:
-    """``meta.json`` as written: UTF-8 as it is (not escaped), and never past the bound ``meta`` reads in."""
+    """``meta.json`` as written: UTF-8 as it is (not escaped), and never past the bound ``meta`` reads in.
+
+    A POSIX path can hold bytes that are not UTF-8, which Python keeps as surrogate escapes; UTF-8 cannot
+    carry those, so such a record is written ASCII-escaped instead, which JSON reads back exactly.
+    """
     text = json.dumps(meta, indent=2, ensure_ascii=False)
+    if _SURROGATE.search(text):
+        text = json.dumps(meta, indent=2)
     if len(text) > _META_CHARS:
         raise ValueError(f"the job record would be {len(text)} characters, over {_META_CHARS}")
     return text

@@ -374,18 +374,34 @@ async def test_a_result_never_waits_behind_busy_file_tools(tmp_path, make_ctx):
     assert took < 3.0
 
 
-async def test_a_handover_shows_the_latest_output_however_much_came_before(tmp_path, make_ctx):
-    """A one-shot render reads the whole retained log: head, the omitted middle if any, and the tail."""
-    result = await BashTool(_host(tmp_path, Watches())).execute(
-        {"command": "seq 1 300000; sleep 30", "watch": True}, make_ctx()
-    )
+async def test_a_handover_shows_the_latest_output_however_much_came_before(tmp_path):
+    """A one-shot render reads the whole retained log: head, the omitted middle if any, and the tail.
 
+    A fresh ``JobOutput`` (settlement, a recovery handover) renders a job whose end is already on disk.
+    """
+    host = _host(tmp_path, Watches())
+    job_id = await host.start(
+        "seq 1 300000; sleep 30",
+        cwd=str(tmp_path),
+        env={"PATH": os.environ["PATH"]},
+        timeout_s=None,
+        session_id="ses_test",
+        tool_call_id="toolu_1",
+    )
+    tail = os.path.join(host.job_dir(job_id), "tail.log")
     try:
+        for _ in range(500):  # the wrapper snapshots tail.log four times a second
+            if os.path.exists(tail) and open(tail, "rb").read().endswith(b"\n300000\n"):
+                break
+            await asyncio.sleep(0.02)
+
+        result = await settle_bash_call(host, "ses_test", "toolu_1")
+
         text = result_text(result)
         assert text.startswith("Command is still running and is now Watch wch_1.")
         assert "\n300000\n" in text
     finally:
-        await _host(tmp_path).kill(result.details["job_id"])
+        await host.kill(job_id)
 
 
 async def test_the_foreground_window_hands_over_and_the_command_runs_once(tmp_path, make_ctx):
