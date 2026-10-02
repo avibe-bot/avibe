@@ -1612,23 +1612,22 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         """HFR-487: one native echo may acknowledge every queued input."""
 
         human = {"kind": "human"}
+        queued = ["first steer", "second steer"]
+        # (name, echo, origin, steer written while the echo is awaited,
+        #  receipts still pending once the echo is observed)
         cases = (
             # Claude dequeues inputs queued behind a response together and
             # replays them as one newline-joined user message.
-            ("coalesced", "first steer\nsecond steer", None, False, True),
-            ("unrecognized human", "first steer, rewritten", human, False, True),
+            ("coalesced", "first steer\nsecond steer", None, False, []),
+            ("unrecognized human", "first steer, rewritten", human, False, []),
             # A steer written while the receiver awaited the echo may not be in it.
-            ("unrecognized human, later steer", "first steer, rewritten", human, True, False),
+            ("unrecognized human, later steer", "first steer, rewritten", human, True, ["third steer"]),
             # Same text as the queued run, but an injected turn is not Avibe input.
-            (
-                "injected notification",
-                "first steer\nsecond steer",
-                {"kind": "task-notification"},
-                False,
-                False,
-            ),
+            ("injected notification", "first steer\nsecond steer", {"kind": "task-notification"}, False, queued),
         )
-        for name, echo, origin, late_steer, settles in cases:
+        for name, echo, origin, late_steer, still_pending in cases:
+            settles = not still_pending
+            observed_pending = []
             with self.subTest(name):
                 controller = _StubController()
                 controller._get_session_key = lambda _context: "session-1"
@@ -1683,6 +1682,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                                 late.state = "accepted"
                                 agent._advance_steering_generation(composite_key)
                             yield UserMessage(echo, origin=origin)
+                            observed_pending.append(
+                                [r.text for r in agent._native_input_receipts.get(composite_key, [])]
+                            )
                             yield type(
                                 "ResultMessage",
                                 (),
@@ -1703,6 +1705,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     composite_key=composite_key,
                 )
 
+                self.assertEqual(observed_pending, [still_pending])
                 if settles:
                     agent.emit_result_message.assert_awaited_once_with(
                         context,
