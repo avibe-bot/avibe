@@ -56,8 +56,8 @@ BASH_SCHEMA: Mapping[str, Any] = {
 def bash_description(foreground_window_s: float = DEFAULT_FOREGROUND_WINDOW_S) -> str:
     return (
         "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to "
-        f"last {MAX_LINES} lines or {MAX_BYTES // 1024}KB (whichever is hit first). If truncated, full output is saved "
-        "to a temp file. Optionally provide a timeout in seconds. "
+        f"last {MAX_LINES} lines or {MAX_BYTES // 1024}KB (whichever is hit first). If truncated, the output log is saved "
+        "to a file; very large logs keep their beginning and end. Optionally provide a timeout in seconds. "
         f"Commands still running after {format_number(foreground_window_s)} seconds, or started with watch=true, "
         "continue in the background as an Avibe Watch; you get a follow-up message when they finish."
     )

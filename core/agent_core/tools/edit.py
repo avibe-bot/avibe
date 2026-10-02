@@ -36,6 +36,7 @@ EDIT_SCHEMA: Mapping[str, Any] = {
         "path": {"type": "string", "description": "Path to the file to edit (relative or absolute)"},
         "edits": {
             "type": "array",
+            "minItems": 1,
             "description": (
                 "One or more targeted replacements. Each edit is matched against the original file, not "
                 "incrementally. Do not include overlapping or nested edits. If two changes touch the same block or "

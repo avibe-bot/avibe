@@ -249,6 +249,10 @@ async def test_an_edit_never_changes_bytes_outside_the_lines_it_replaces(tmp_pat
             "edits[0] and edits[1] overlap in f.txt. Merge them into one edit or target disjoint regions.",
         ),
         (
+            [],
+            "Edit tool input is invalid. edits must contain at least one replacement.",
+        ),
+        (
             [{"oldText": "alpha", "newText": "A"}, {"oldText": "", "newText": "x"}],
             "edits[1].oldText must not be empty in f.txt.",
         ),
