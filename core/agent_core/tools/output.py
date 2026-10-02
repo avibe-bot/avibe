@@ -133,7 +133,7 @@ class JobOutput:
         return self._accumulator.snapshot("" if self._finished else self._normalizer.peek())
 
     def render(self, empty_text: str) -> tuple[str, Optional[TruncationResult]]:
-        """Pi's ``formatOutput``: the tail (or ``empty_text``) and, when truncated, the notice naming the full output.
+        """Pi's ``formatOutput``: the tail (or ``empty_text``) and, when truncated, the notice naming the output log.
 
         The truncation is returned whenever a notice was added, which a log bounded on disk always gets.
         """
