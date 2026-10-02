@@ -75,6 +75,7 @@ from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
 from storage import messages_service
 from storage.agent_transcript import (
+    FINAL_TYPES,
     INPUT_TYPES,
     PendingDelivery,
     final_outcome,
@@ -385,9 +386,10 @@ class AvibeAgent(BaseAgent):
                 # Delivered at the end of the run, which decides how the Turn settles.
                 run.final_row = event.message_id
             else:
-                pending = await self.store.delivery(run.session_id, event.message_id)
-                if pending is not None:
-                    await self._deliver(run.request.context, pending, output=None)
+                row = await self.store.delivery(run.session_id, event.message_id, include_delivered=True)
+                # Outbox rows that are still pending, and IM narration, which is shown live and never queued.
+                if row is not None and (row.state == "pending" or (row.plan or {}).get("live_log")):
+                    await self._deliver(run.request.context, row, output=None)
         elif isinstance(event, ToolStarted):
             await self._emit_tool_started(run, event)
         elif isinstance(event, AgentError):
@@ -700,7 +702,7 @@ class AvibeAgent(BaseAgent):
             keep_file_links=platform == "avibe",
         )
         display = enhanced.text if enhanced.text.strip() else strip_silent_blocks(source)
-        content: dict[str, Any] = {"kind": "result"}
+        content: dict[str, Any] = {"kind": "error" if final_outcome(message) == "failed" else "result"}
         if platform == "avibe":
             from core.workbench_media import rewrite_agent_media
 
@@ -952,7 +954,7 @@ class AvibeAgent(BaseAgent):
                     .where(
                         messages.c.session_id.in_(select(own.c.id)),
                         messages.c.context_seq.is_not(None),
-                        messages.c.type == "result",
+                        messages.c.type.in_(FINAL_TYPES),
                     )
                     .group_by(messages.c.session_id)
                 ).all()

@@ -3301,13 +3301,7 @@ class ConsolidatedMessageDispatcher:
                 committed_incomplete = False
                 if committed is not None:
                     complete, first_sent_id = await self._deliver_committed_parts(
-                        context,
-                        target_context,
-                        committed,
-                        detached=output_semantics.detached,
-                        live_footer=done_footer,
-                        settings_manager=settings_manager,
-                        settings_key=settings_key,
+                        target_context, committed, live_footer=done_footer
                     )
                     primary_message_id = first_sent_id or (committed.row_id if complete else None)
                     committed_incomplete = not complete
@@ -3695,15 +3689,21 @@ class ConsolidatedMessageDispatcher:
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
         if committed is not None:
-            _complete, delivered_id = await self._deliver_committed_parts(
-                context,
-                target_context,
-                committed,
-                detached=output_semantics.detached,
-                live_footer=None,
-                settings_manager=settings_manager,
-                settings_key=settings_key,
-            )
+            if committed.plan.get("live_log"):
+                if output_semantics.detached:
+                    return None
+                # The process log, with the other backends' settings semantics; no outbox receipt.
+                return await self._deliver_process_log(
+                    im_client,
+                    context,
+                    target_context,
+                    "assistant",
+                    text,
+                    status_label=None,
+                    settings_manager=settings_manager,
+                    settings_key=settings_key,
+                )
+            _complete, delivered_id = await self._deliver_committed_parts(target_context, committed, live_footer=None)
             return delivered_id
         persist_agent_message(target_context, canonical_type, persist_text, citations=citations)
         # Web only: the same text additionally lands as a transcript-visible
@@ -4029,8 +4029,10 @@ class ConsolidatedMessageDispatcher:
                 plan["parts"].append({"kind": "interim", "text": visible})
             return plan
         if not final:
+            # IM narration is live, best-effort process output, as for the other backends:
+            # it is shown once by the running Turn and is not part of the outbox.
             if visible.strip():
-                plan["parts"].append({"kind": "log", "text": visible})
+                plan["live_log"] = True
             return plan
         capabilities = self._capabilities(target)
         enhanced = process_reply(
@@ -4064,14 +4066,10 @@ class ConsolidatedMessageDispatcher:
 
     async def _deliver_committed_parts(
         self,
-        context: MessageContext,
         target_context: MessageContext,
         committed: CommittedOutput,
         *,
-        detached: bool,
         live_footer: Optional[str],
-        settings_manager,
-        settings_key: str,
     ) -> tuple[bool, Optional[str]]:
         """Send a committed row's planned parts that have no receipt, in order.
 
@@ -4109,18 +4107,6 @@ class ConsolidatedMessageDispatcher:
                 evidence = await self._committed_call(
                     "interim copy", lambda: self._committed_interim(target_context, committed.row_id, part["text"])
                 )
-            elif kind == "log":
-                skipped = self._committed_log_skip(context, settings_manager, settings_key, part["text"], detached)
-                if skipped is None:
-                    evidence = await self._deliver_committed_log(
-                        im_client,
-                        context,
-                        target_context,
-                        part["text"],
-                        detached=detached,
-                        settings_manager=settings_manager,
-                        settings_key=settings_key,
-                    )
             elif kind == "text":
                 body = part["text"]
                 subtext = None
@@ -4191,79 +4177,6 @@ class ConsolidatedMessageDispatcher:
             # A duplicate write is refused by its native id: the earlier attempt's copy is the receipt.
             row = agent_message_exists(target_context, native_id)
         return row.get("id") if row else None
-
-    def _committed_log_skip(
-        self, context: MessageContext, settings_manager, settings_key: str, text: str, detached: bool
-    ) -> Optional[str]:
-        """Why the channel does not show this narration at all, decided before anything is sent."""
-        chunk = strip_file_links(text).strip()
-        if not chunk:
-            return "empty"
-        if detached:
-            return "hidden" if settings_manager.is_message_type_hidden(settings_key, "assistant") else None
-        style = self._concise_progress_style(context)
-        if style == "concise":
-            if not to_status_label(chunk):
-                return "no_status_label"
-            if self._get_consolidated_message_key(context) in self._status_finalized:
-                return "status_finalized"
-            return None
-        if settings_manager.is_message_type_hidden(settings_key, "assistant"):
-            return "hidden"
-        if style == "off" and self._supports_message_editing(self._get_im_client(context), context):
-            return "progress_off"
-        return None
-
-    async def _deliver_committed_log(
-        self,
-        im_client,
-        context: MessageContext,
-        target_context: MessageContext,
-        text: str,
-        *,
-        detached: bool,
-        settings_manager,
-        settings_key: str,
-    ) -> Optional[str]:
-        """Show one committed narration the channel shows; evidence of it, or ``None``."""
-        chunk = strip_file_links(text).strip()
-        if detached or not self._supports_message_editing(im_client, context):
-            # No live Turn, or no editable log: fresh messages, every chunk proven.
-            return await self._send_log_strictly(im_client, target_context, chunk)
-        if self._concise_progress_style(context) == "concise":
-            return await self._committed_call(
-                "status bubble", lambda: self._render_concise_status(im_client, context, chunk)
-            )
-        return await self._committed_call(
-            "process log",
-            lambda: self._deliver_process_log(
-                im_client,
-                context,
-                target_context,
-                "assistant",
-                text,
-                status_label=None,
-                settings_manager=settings_manager,
-                settings_key=settings_key,
-            ),
-        )
-
-    async def _send_log_strictly(self, im_client, context: MessageContext, text: str) -> Optional[str]:
-        """Send a narration as fresh messages; evidence only once every chunk went out."""
-        plan = self._plan_result_split_by_bytes(text, self._get_consolidated_max_bytes(context))
-        if not plan.links_whole:
-            return await self._committed_call(
-                "narration document", lambda: self._upload_result_document(im_client, context, text)
-            )
-        first: Optional[str] = None
-        for chunk in plan.chunks:
-            sent = await self._committed_call(
-                "narration", lambda chunk=chunk: im_client.send_message(context, chunk, parse_mode="markdown")
-            )
-            if sent is None:
-                return None
-            first = first or sent
-        return first
 
     async def _committed_file_upload(
         self, im_client, context: MessageContext, path: str, title: str, *, is_image: bool

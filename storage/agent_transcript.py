@@ -84,7 +84,10 @@ from storage.agent_session_rows import reserve_write_lock
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
-RESPONSE_TYPES = ("assistant", "result")
+# A final response is ``result``, or ``error`` when ``final_outcome`` says it failed:
+# the row carries its outcome, as the other backends' terminal rows do.
+FINAL_TYPES = ("result", "error")
+RESPONSE_TYPES = ("assistant", *FINAL_TYPES)
 CONTEXT_VISIBILITY = "context"
 PAYLOAD_VERSION = 1
 
@@ -266,7 +269,7 @@ class SQLiteTranscriptStore:
                 author="agent",
                 source="agent",
                 author_name=origin.agent_name,
-                message_type="result" if final else "assistant",
+                message_type=("error" if final_outcome(message) == "failed" else "result") if final else "assistant",
                 text=display.text,
                 content={**display.content, MODEL_KEY: model},
                 metadata={"delivery": _initial_delivery(display)},
@@ -440,7 +443,7 @@ class SQLiteTranscriptStore:
                     session_id=session_id,
                     context_seq=entry.context_seq,
                     row_id=entry.row_id,
-                    final=row["type"] == "result",
+                    final=row["type"] in FINAL_TYPES,
                     text=row["content_text"] or "",
                     message=entry.message,
                     parts=tuple(delivery["parts"]),
@@ -571,7 +574,7 @@ def committed_final_for_turn(conn: Connection, turn_id: str) -> Optional[Committ
     row = conn.execute(
         select(messages.c.id, messages.c.session_id, messages.c.content_text, messages.c.content_json)
         .where(
-            messages.c.type == "result",
+            messages.c.type.in_(FINAL_TYPES),
             messages.c.context_seq.is_not(None),
             func.json_extract(messages.c.metadata_json, "$.delivery.plan.turn_id") == turn_id,
         )
