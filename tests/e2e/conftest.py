@@ -14,8 +14,15 @@ import pytest
 import urllib.request
 import urllib.error
 
+from tests.conftest import REAL_USER_HOME
 from tests.e2e.drivers.model_hub_app import ModelHubTestApp
 from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
+
+# The root conftest gives the whole run a throwaway HOME. These Docker-backed
+# fixtures keep the developer's Docker client contexts and credential helpers,
+# which the CLI would otherwise look for in that empty home and find none.
+if not os.environ.get("DOCKER_CONFIG") and (REAL_USER_HOME / ".docker").is_dir():
+    os.environ["DOCKER_CONFIG"] = str(REAL_USER_HOME / ".docker")
 
 # E2E tests connect to the Vibe container on this port
 E2E_PORT = int(os.environ.get("VIBE_E2E_PORT", "15123"))

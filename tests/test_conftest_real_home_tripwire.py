@@ -113,6 +113,12 @@ def test_symlinked_alias():
 
 def test_custom_home():
     _in_a_swallowing_daemon_thread(lambda: (HOME / "custom-home" / "leaked.txt").write_text("leaked"))
+
+
+def test_sqlite_read_only_mode():
+    # `mode=ro` on a WAL database can still create its `-shm` sidecar.
+    database = (HOME / ".avibe" / "state" / "other.sqlite").as_uri()
+    _in_a_swallowing_daemon_thread(lambda: sqlite3.connect(f"{database}?mode=ro", uri=True))
 """
 
 _READS = """
@@ -125,24 +131,38 @@ HOME = Path(__HOME__)
 def test_reads_stay_allowed():
     assert (HOME / ".avibe" / "config" / "config.json").read_text() == "{}"
     database = (HOME / ".avibe" / "state" / "vibe.sqlite").as_uri()
-    with sqlite3.connect(f"{database}?mode=ro", uri=True) as conn:
+    with sqlite3.connect(f"{database}?immutable=1", uri=True) as conn:
         assert conn.execute("select count(*) from sqlite_master").fetchone() == (0,)
 """
 
 
-# A daemon thread that finishes while the session reports, after its last test.
+# A daemon thread that finishes after the last test: while the session reports,
+# or while pytest unconfigures -- after every other unconfigure hook has run.
 _LATE_WRITE_CONFTEST = """
 from pathlib import Path
 
 import pytest
 
 
-@pytest.hookimpl(trylast=True)
-def pytest_terminal_summary():
+def _write():
     try:
         (Path(__HOME__) / ".avibe" / "late.txt").write_text("leaked")
     except BaseException:
         pass
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_terminal_summary():
+    if __WHEN__ == "reporting":
+        _write()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_unconfigure():
+    result = yield
+    if __WHEN__ == "unconfiguring":
+        _write()
+    return result
 """
 
 
@@ -192,7 +212,8 @@ def stand_in_home(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
     home = pytester.path
     (home / "custom-home").mkdir()
-    monkeypatch.setenv("AVIBE_HOME", str(home / "custom-home"))
+    # In tilde form, which only the real HOME expands to the custom home.
+    monkeypatch.setenv("AVIBE_HOME", "~/custom-home")
     (home / ".avibe" / "config").mkdir(parents=True)
     (home / ".avibe" / "state").mkdir()
     (home / ".vibe_remote").mkdir()
@@ -213,7 +234,7 @@ def test_a_swallowed_background_write_under_the_real_home_fails_the_run(
     result = _run(pytester, stand_in_home, _BACKGROUND_WRITES)
 
     # Every inner test passes: only the session-level check can fail this run.
-    result.assert_outcomes(passed=12)
+    result.assert_outcomes(passed=13)
     assert result.ret == pytest.ExitCode.TESTS_FAILED, result.stdout.str()
     output = result.stdout.str()
     for event, path in [
@@ -228,6 +249,7 @@ def test_a_swallowed_background_write_under_the_real_home_fails_the_run(
         ("os.mkdir", ".avibe/leaked-relative"),
         ("open", "alias/leaked.txt"),
         ("open", "custom-home/leaked.txt"),
+        ("sqlite3.connect", ".avibe/state/other.sqlite"),
     ]:
         assert f"{event} {stand_in_home / path}" in output, output
     # A descriptor names its directory as resolved.
@@ -247,19 +269,25 @@ def test_a_swallowed_background_write_under_the_real_home_fails_the_run(
         ".avibe/state/leaked-at",
         ".avibe/leaked.txt",
         "custom-home/leaked.txt",
+        ".avibe/state/other.sqlite",
     ):
         assert not os.path.lexists(stand_in_home / leaked), leaked
     with sqlite3.connect(f"{(stand_in_home / '.avibe' / 'state' / 'vibe.sqlite').as_uri()}?mode=ro", uri=True) as conn:
         assert conn.execute("select name from sqlite_master").fetchall() == []
 
 
-def test_a_write_after_the_last_test_still_fails_the_run(pytester: pytest.Pytester, stand_in_home: Path) -> None:
-    pytester.makeconftest(_LATE_WRITE_CONFTEST.replace("__HOME__", repr(str(stand_in_home))))
+@pytest.mark.parametrize("when", ["reporting", "unconfiguring"])
+def test_a_write_after_the_last_test_still_fails_the_run(
+    pytester: pytest.Pytester, stand_in_home: Path, when: str
+) -> None:
+    conftest = _LATE_WRITE_CONFTEST.replace("__HOME__", repr(str(stand_in_home)))
+    pytester.makeconftest(conftest.replace("__WHEN__", repr(when)))
     result = _run(pytester, stand_in_home, "def test_nothing():\n    pass\n")
 
     result.assert_outcomes(passed=1)
-    assert result.ret == pytest.ExitCode.TESTS_FAILED, result.stdout.str()
-    assert f"open {stand_in_home / '.avibe' / 'late.txt'}" in result.stderr.str()
+    assert result.ret == pytest.ExitCode.TESTS_FAILED, result.stdout.str() + result.stderr.str()
+    if when == "reporting":
+        assert f"open {stand_in_home / '.avibe' / 'late.txt'}" in result.stderr.str()
     assert not (stand_in_home / ".avibe" / "late.txt").exists()
 
 

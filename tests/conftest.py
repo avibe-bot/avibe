@@ -149,6 +149,8 @@ def _home_env(home: Path) -> dict[str, str]:
 # resolves this home. Only `uses_real_paths` tests see the real values, for their
 # own duration. Removed at `pytest_unconfigure`.
 _SESSION_HOME = Path(tempfile.mkdtemp(prefix="avibe-pytest-home-")).resolve()
+# Expanded against the real HOME while it is still the ambient one.
+_AMBIENT_AVIBE_HOME = os.path.expanduser(_AMBIENT_ENV["AVIBE_HOME"]) if _AMBIENT_ENV["AVIBE_HOME"] else None
 for _name in _CALLER_ENV:
     os.environ.pop(_name, None)
 os.environ.update(_home_env(_SESSION_HOME))
@@ -802,8 +804,8 @@ def _foreign_signal_guard(request, tmp_path):
 # every test runs with its opt-in flag set and with `Path.home` naming the test's
 # own home, so under pytest neither of its checks can recognise the real database.
 _REAL_STATE_HOMES = [REAL_USER_HOME / ".avibe", REAL_USER_HOME / ".vibe_remote"]
-if _AMBIENT_ENV["AVIBE_HOME"]:
-    _REAL_STATE_HOMES.append(Path(os.path.expanduser(_AMBIENT_ENV["AVIBE_HOME"])))
+if _AMBIENT_AVIBE_HOME:
+    _REAL_STATE_HOMES.append(Path(_AMBIENT_AVIBE_HOME))
 _REAL_STATE_ROOTS = tuple(
     sorted(
         {
@@ -888,7 +890,9 @@ def _sqlite_write_target(database) -> str | None:
         return _under_real_state(text)
     uri = urllib.parse.urlsplit(text)
     query = urllib.parse.parse_qs(uri.query)
-    if query.get("mode") == ["ro"] or query.get("immutable") == ["1"]:
+    # Only an immutable open writes nothing: `mode=ro` on a WAL database can still
+    # create its `-shm` sidecar.
+    if query.get("immutable") == ["1"]:
         return None
     return _under_real_state(urllib.request.url2pathname(uri.path))
 
@@ -933,8 +937,8 @@ def _real_home_tripwire(event: str, args: tuple) -> None:
     An audit hook rather than a fixture, so it holds between tests, during
     collection and in threads that outlive the test that started them -- the
     window per-test isolation cannot reach. Reads stay allowed, including
-    ``uses_real_paths`` tests and read-only SQLite URIs (``mode=ro``,
-    ``immutable=1``). Child processes are outside it: each pytest child loads
+    ``uses_real_paths`` tests and ``immutable=1`` SQLite URIs. Child processes
+    are outside it: each pytest child loads
     its own copy of this file, and other children inherit the test's home. The
     one write it cannot place is ``os.open`` relative to a ``dir_fd``, whose
     audit event omits the descriptor; creating that directory chain still trips.
@@ -953,6 +957,7 @@ def _real_home_tripwire(event: str, args: tuple) -> None:
             return
         message = _describe_real_home_write(event, written)
         _real_home_writes.append(message)
+        _fail_running_session()
     finally:
         _tripwire_busy.active = False
     # A BaseException, so a product `except Exception` around the write cannot
@@ -963,12 +968,22 @@ def _real_home_tripwire(event: str, args: tuple) -> None:
 sys.addaudithook(_real_home_tripwire)
 
 
-_SESSION = pytest.StashKey[pytest.Session]()
 _REPORTED_WRITES = pytest.StashKey[int]()
+_running_session: pytest.Session | None = None
+
+
+def _fail_running_session() -> None:
+    # pytest overwrites the status once the tests have run, so
+    # `pytest_unconfigure` marks it again; a refusal after that point is
+    # marked here, until pytest returns.
+    session = _running_session
+    if session is not None and session.exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED):
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    session.config.stash[_SESSION] = session
+    global _running_session
+    _running_session = session
 
 
 def pytest_terminal_summary(terminalreporter) -> None:
@@ -982,18 +997,15 @@ def pytest_terminal_summary(terminalreporter) -> None:
 
 @pytest.hookimpl(trylast=True)
 def pytest_unconfigure(config: pytest.Config) -> None:
-    # As late as pytest still reads the exit status: a daemon thread can write
-    # after the last test, or while the session reports. Only a write during
-    # interpreter shutdown is refused without failing the run.
+    # The session home and the tripwire stay in place until the process exits:
+    # daemon threads can outlive this hook, and restoring the real values here
+    # would hand them the real home again. Only a write during interpreter
+    # shutdown, after pytest has returned its status, is refused without failing.
+    shutil.rmtree(_SESSION_HOME, ignore_errors=True)
     for message in _real_home_writes[config.stash.get(_REPORTED_WRITES, 0) :]:
         sys.stderr.write(f"refused a write under the real Avibe home: {message}\n")
-    session = config.stash.get(_SESSION, None)
-    if _real_home_writes and session is not None and session.exitstatus in (
-        pytest.ExitCode.OK,
-        pytest.ExitCode.NO_TESTS_COLLECTED,
-    ):
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
-    shutil.rmtree(_SESSION_HOME, ignore_errors=True)
+    if _real_home_writes:
+        _fail_running_session()
 
 
 @pytest.fixture
