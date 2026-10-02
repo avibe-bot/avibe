@@ -24,6 +24,7 @@ from core.agent_core.tools.paths import (
     read_at_most,
     resolve_to_cwd,
     target_kind,
+    to_thread_joined,
 )
 from core.agent_core.tools.text import decode_file, encode_file, model_text
 from core.agent_core.tools.truncate import format_size
@@ -183,7 +184,7 @@ class EditTool:
             if not os.access(absolute, os.R_OK | os.W_OK):
                 return error_result(f"Could not edit file: {path}. Error code: EACCES.")
             try:
-                size, data, base, new_content = await asyncio.to_thread(_plan_edits, absolute, edits, path)
+                size, data, base, new_content = await to_thread_joined(_plan_edits, absolute, edits, path)
                 if len(data) > MAX_EDIT_BYTES:
                     return error_result(
                         f"File {path} would be {format_size(len(data))} after this edit, over the "
@@ -192,7 +193,7 @@ class EditTool:
                     )
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
-                await asyncio.to_thread(write_bytes, absolute, data)
+                await to_thread_joined(write_bytes, absolute, data)
             except _TooLarge as exc:
                 # The whole file and several copies would sit in the process every Session shares.
                 return error_result(

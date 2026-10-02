@@ -330,7 +330,7 @@ def display_diff(path: str, old: str, new: str, context: int = 4) -> Optional[tu
     is quadratic, for example on repetitive lines) sees only the changed middle, at most
     ``DIFF_MAX_LINES`` lines on each side.
     """
-    a, b = old.splitlines(keepends=True), new.splitlines(keepends=True)
+    a, b = _lines_with_breaks(old), _lines_with_breaks(new)
     shortest = min(len(a), len(b))
     prefix = 0
     while prefix < shortest and a[prefix] == b[prefix]:
@@ -350,15 +350,30 @@ def display_diff(path: str, old: str, new: str, context: int = 4) -> Optional[tu
     return diff, first_changed_line, _unified_patch(path, a, b, opcodes, context)
 
 
+def _lines_with_breaks(text: str) -> list[str]:
+    """Lines split at "\n" only, each keeping its "\n", as jsdiff's ``diffLines`` sees them.
+
+    ``str.splitlines`` also breaks at \f, \v, \x1c-\x1e, \x85, U+2028 and U+2029, which are not line
+    breaks for ``read``, ``edit``, or a patch.
+    """
+    lines = [line + "\n" for line in text.split("\n")]
+    lines[-1] = lines[-1][:-1]
+    return lines if lines[-1] else lines[:-1]
+
+
 def _unified_range(start: int, stop: int) -> str:
+    """jsdiff's hunk range: always ``start,count``, and an empty range starts at the line before."""
     length = stop - start
-    if length == 1:
-        return str(start + 1)
     return f"{start + 1 if length else start},{length}"
 
 
+def _patch_line(sign: str, line: str) -> str:
+    # Only a file's last line can lack "\n"; jsdiff marks it the way GNU diff does.
+    return sign + line if line.endswith("\n") else f"{sign}{line}\n\\ No newline at end of file\n"
+
+
 def _unified_patch(path: str, a: list[str], b: list[str], opcodes: list, context: int) -> str:
-    """``difflib.unified_diff``'s output, from the given opcodes."""
+    """Pi's ``generateUnifiedPatch`` (jsdiff ``createTwoFilesPatch`` with file headers only), from the opcodes."""
     groups = list(_FixedOpcodes(a, b, opcodes).get_grouped_opcodes(context))
     if not groups:
         return ""
@@ -368,18 +383,23 @@ def _unified_patch(path: str, a: list[str], b: list[str], opcodes: list, context
         out.append(f"@@ -{_unified_range(first[1], last[2])} +{_unified_range(first[3], last[4])} @@\n")
         for tag, i1, i2, j1, j2 in group:
             if tag == "equal":
-                out.extend(" " + line for line in a[i1:i2])
+                out.extend(_patch_line(" ", line) for line in a[i1:i2])
                 continue
-            out.extend("-" + line for line in a[i1:i2])
-            out.extend("+" + line for line in b[j1:j2])
+            out.extend(_patch_line("-", line) for line in a[i1:i2])
+            out.extend(_patch_line("+", line) for line in b[j1:j2])
     return "".join(out)
+
+
+def _split_count(lines: list[str]) -> int:
+    return len(lines) + (0 if lines and not lines[-1].endswith("\n") else 1)
 
 
 def _render_diff(a: list[str], b: list[str], opcodes: list, context: int) -> tuple[str, Optional[int]]:
     """Pi's display diff: numbered ``+``/``-``/context lines and the first changed line of the new file."""
-    a = [line.rstrip("\r\n") for line in a]
-    b = [line.rstrip("\r\n") for line in b]
-    width = len(str(max(len(a), len(b)) + 1))
+    # Pi's width: the digits of the larger ``split("\n")`` count, which has one more entry after a final "\n".
+    width = len(str(max(_split_count(a), _split_count(b))))
+    a = [line[:-1] if line.endswith("\n") else line for line in a]
+    b = [line[:-1] if line.endswith("\n") else line for line in b]
     parts: list[tuple[str, list[str]]] = []
     for tag, i1, i2, j1, j2 in opcodes:
         if tag == "equal":

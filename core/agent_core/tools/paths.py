@@ -14,10 +14,12 @@ import re
 import stat
 import unicodedata
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Literal
+from typing import Any, AsyncIterator, Callable, Literal, TypeVar
 from urllib.parse import unquote, urlparse
 
 from core.agent_core.tools.args import ToolInputError
+
+T = TypeVar("T")
 
 _UNICODE_SPACES = re.compile("[\u00a0\u2000-\u200a\u202f\u205f\u3000]")
 _NARROW_NO_BREAK_SPACE = "\u202f"
@@ -196,3 +198,24 @@ async def file_mutation_lock(path: str) -> AsyncIterator[None]:
         entry.users -= 1
         if entry.users == 0:
             del _locks[key]
+
+
+async def to_thread_joined(func: Callable[..., T], /, *args: Any) -> T:
+    """``asyncio.to_thread`` for work inside ``file_mutation_lock``: a cancel waits for the thread.
+
+    Cancelling an await does not stop its worker thread, so without the wait a write could land after
+    the lock was released and overwrite the next writer's result. The cancel is re-raised once the
+    thread is done, however often the caller is cancelled and even when the thread raised.
+    """
+    worker = asyncio.ensure_future(asyncio.to_thread(func, *args))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.wait({worker})
+            except asyncio.CancelledError:
+                pass
+        if not worker.cancelled():
+            worker.exception()  # retrieved; the caller's cancel is what propagates
+        raise

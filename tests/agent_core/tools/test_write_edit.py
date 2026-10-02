@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import random
 import re
 import stat
+import threading
 import time
 
 import pytest
@@ -174,6 +176,63 @@ async def test_replacement_contents_stay_private_until_the_rename(tmp_path, make
     assert secret.read_text() == "new secret\n"
 
 
+_WRITE_FIRST = {"path": "f.txt", "content": "first\n"}
+
+
+@pytest.mark.parametrize(
+    ("first", "cancels", "worker_fails"),
+    [
+        (_WRITE_FIRST, 1, False),
+        ({"path": "f.txt", "edits": [{"oldText": "original", "newText": "first"}]}, 1, False),
+        (_WRITE_FIRST, 2, False),
+        (_WRITE_FIRST, 1, True),
+    ],
+    ids=["write", "edit", "cancelled-twice", "worker-fails"],
+)
+async def test_a_cancelled_write_lands_before_the_next_writer_takes_the_lock(
+    tmp_path, make_ctx, monkeypatch, first, cancels, worker_fails
+):
+    """Cancelling an await does not stop its worker thread; the lock is held until the worker is done."""
+    (tmp_path / "f.txt").write_text("original\n")
+    entered, release, renamed = threading.Event(), threading.Event(), threading.Event()
+    real_fsync, real_replace, calls, renames = write_module.os.fsync, write_module.os.replace, [], []
+    expected_renames = 1 if worker_fails else 2
+
+    def first_fsync_blocks(fd):
+        calls.append(fd)
+        if len(calls) == 1:
+            entered.set()
+            release.wait(10)
+            if worker_fails:
+                raise OSError(errno.ENOSPC, "No space left on device")
+        real_fsync(fd)
+
+    def counted_replace(source, target):
+        real_replace(source, target)
+        renames.append(target)
+        if len(renames) == expected_renames:
+            renamed.set()
+
+    monkeypatch.setattr(write_module.os, "fsync", first_fsync_blocks)
+    monkeypatch.setattr(write_module.os, "replace", counted_replace)
+    tool = WriteTool() if "content" in first else EditTool()
+    cancelled = asyncio.ensure_future(tool.execute(first, make_ctx()))
+    await asyncio.to_thread(entered.wait, 10)
+    for _ in range(cancels):
+        cancelled.cancel()
+        await asyncio.sleep(0.05)
+    later = asyncio.ensure_future(WriteTool().execute({"path": "f.txt", "content": "second\n"}, make_ctx()))
+    await asyncio.sleep(0.3)  # time for the later write to get through a lock released too early
+    release.set()
+    outcomes = await asyncio.gather(cancelled, later, return_exceptions=True)
+    assert await asyncio.to_thread(renamed.wait, 10)
+
+    # The cancel propagates even when the worker failed; it is never turned into a result.
+    assert isinstance(outcomes[0], asyncio.CancelledError)
+    assert not outcomes[1].is_error, result_text(outcomes[1])
+    assert (tmp_path / "f.txt").read_text() == "second\n"
+
+
 async def test_new_files_keep_the_umask_default(tmp_path, make_ctx):
     umask = os.umask(0)
     os.umask(umask)
@@ -204,6 +263,62 @@ async def test_the_display_diff_is_bounded_by_lines_not_only_bytes(tmp_path, mak
     # Pi pads line numbers to the widest one (five digits here).
     assert "- 5001 target\n+ 5001 changed" in result.details["diff"]
     assert "@@ -4997,9 +4997,9 @@" in result.details["patch"]
+
+
+# Expected values are the output of Pi's generateDiffString and generateUnifiedPatch (jsdiff 8.0.4).
+@pytest.mark.parametrize(
+    ("original", "edit", "diff", "first_changed_line", "patch"),
+    [
+        (
+            "x\na",
+            {"oldText": "a", "newText": "b"},
+            " 1 x\n-2 a\n+2 b",
+            2,
+            "@@ -1,2 +1,2 @@\n x\n-a\n\\ No newline at end of file\n+b\n\\ No newline at end of file\n",
+        ),
+        (
+            "a\n",
+            {"oldText": "a\n", "newText": "a"},
+            "-1 a\n+1 a",
+            1,
+            "@@ -1,1 +1,1 @@\n-a\n+a\n\\ No newline at end of file\n",
+        ),
+        (
+            # A form feed is not a line break.
+            "a\fb\nc\n",
+            {"oldText": "c", "newText": "C"},
+            " 1 a\fb\n-2 c\n+2 C",
+            2,
+            "@@ -1,2 +1,2 @@\n a\fb\n-c\n+C\n",
+        ),
+        (
+            "one\n",
+            {"oldText": "one\n", "newText": "one\ntwo\n"},
+            " 1 one\n+2 two",
+            2,
+            "@@ -1,1 +1,2 @@\n one\n+two\n",
+        ),
+        (
+            "".join(f"{i}\n" for i in range(1, 9)) + "9",
+            {"oldText": "9", "newText": "nine"},
+            "   ...\n 5 5\n 6 6\n 7 7\n 8 8\n-9 9\n+9 nine",
+            9,
+            "@@ -5,5 +5,5 @@\n 5\n 6\n 7\n 8\n-9\n\\ No newline at end of file\n+nine\n\\ No newline at end of file\n",
+        ),
+    ],
+    ids=["no-final-newline", "final-newline-removed", "form-feed", "insertion", "width"],
+)
+async def test_the_display_diff_and_patch_are_pis(tmp_path, make_ctx, original, edit, diff, first_changed_line, patch):
+    (tmp_path / "f.txt").write_bytes(original.encode())
+
+    result = await _edit(make_ctx, "f.txt", edit)
+
+    assert not result.is_error, result_text(result)
+    assert result.details == {
+        "diff": diff,
+        "patch": "--- f.txt\n+++ f.txt\n" + patch,
+        "first_changed_line": first_changed_line,
+    }
 
 
 async def test_a_large_changed_middle_skips_the_display_diff(tmp_path, make_ctx):

@@ -10,6 +10,7 @@ import time
 import psutil
 import pytest
 
+from core.agent_core.agent.jobs import TrackingJobHost
 from core.agent_core.cancel import CancelToken
 from core.agent_core.tools.bash import BashTool, settle_bash_call
 import core.agent_core.tools.jobs as jobs_module
@@ -180,6 +181,24 @@ async def test_abort_kills_the_command(tmp_path, make_ctx):
     assert result.is_error
     assert result_text(result) == "started\n\n\nCommand aborted"
     assert _process_gone(int((tmp_path / "sh.pid").read_text()))
+
+
+@pytest.mark.parametrize(
+    ("arguments", "abort", "expected"),
+    [
+        ({"command": "echo started; sleep 30", "timeout": 1.5}, False, "started\n\n\nCommand timed out after 1.5 seconds"),
+        ({"command": "echo started; sleep 30"}, True, "started\n\n\nCommand aborted"),
+    ],
+    ids=["timeout", "abort"],
+)
+async def test_stops_are_reported_through_the_agents_job_host(tmp_path, make_ctx, arguments, abort, expected):
+    """bash gets the loop's TrackingJobHost (Agent.jobs); reasoned kills and stop reasons pass through it."""
+    cancel = CancelToken()
+    ctx = make_ctx(cancel=cancel, on_progress=lambda tail: abort and cancel.cancel())
+
+    result = await BashTool(TrackingJobHost(_host(tmp_path))).execute(arguments, ctx)
+
+    assert (result.is_error, result_text(result)) == (True, expected)
 
 
 async def test_the_foreground_window_hands_over_and_the_command_runs_once(tmp_path, make_ctx):

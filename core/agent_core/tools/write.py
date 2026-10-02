@@ -22,6 +22,7 @@ from core.agent_core.tools.paths import (
     os_reason,
     resolve_to_cwd,
     target_kind,
+    to_thread_joined,
 )
 from core.agent_core.tools.text import model_text
 
@@ -65,12 +66,12 @@ class WriteTool:
             if ctx.cancel.cancelled:
                 return error_result("Operation aborted")
             try:
-                refusal = await asyncio.to_thread(_prepare_target, absolute)
+                refusal = await to_thread_joined(_prepare_target, absolute)
                 if refusal:
                     return error_result(f"Cannot write {path}: {refusal}.")
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
-                await asyncio.to_thread(write_text, absolute, content)
+                await to_thread_joined(write_text, absolute, content)
             except OSError as exc:
                 return error_result(f"Cannot write {path}: {os_reason(exc)}.")
         return text_result(f"Successfully wrote to {path}")
