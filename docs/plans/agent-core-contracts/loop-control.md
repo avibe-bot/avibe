@@ -96,7 +96,7 @@ sent with that request gets the error result `Tool <name> is not available.`
 | `steer_applied` | the steer delivery is accepted into the running Turn |
 | `compaction_started`, `compaction_finished`, `compaction_failed` | optional status line; failures always reported |
 | `run_ended` | `MessageOutput` settles the Turn |
-| `error` | `notify` / `error` row |
+| `error` | `notify` / `error` row; the text shown is the adapter's localized copy for the event's `kind` (`vibe/i18n`), and `message` is diagnostic detail, never display copy |
 
 ## 7. Snapshot and fork
 
