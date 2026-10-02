@@ -72,6 +72,8 @@ class WriteTool:
                 return error_result(
                     f"Cannot write {path}: its directory is not writable, so the file cannot be replaced safely."
                 )
+            except FileChanged:
+                return error_result(f"Cannot write {path}: it changed while it was being written; write it again.")
             except NotRegularFile as exc:
                 return error_result(f"Cannot write {path}: {KIND_REASON[exc.kind]}.")
             except OSError as exc:
@@ -136,8 +138,12 @@ def _require(expected: Optional[FileIdentity], path: str, st: os.stat_result) ->
         raise FileChanged()
 
 
-def _check_publishable(current: str, expected: Optional[FileIdentity]) -> None:
-    """Right before the rename: ``current`` is absent, or a writable regular file (the one that was read)."""
+def _check_publishable(path: str, target: str, expected: Optional[FileIdentity]) -> None:
+    """Right before the rename: ``path`` still names ``target``, which is absent or a writable regular file
+    (for a read-modify-write, the one that was read)."""
+    current = os.path.realpath(path)
+    if current != target:
+        raise FileChanged()
     try:
         st = os.stat(current)
     except FileNotFoundError:
@@ -163,10 +169,11 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
     An existing file whose directory does not let a temp file be created is refused
     (``NotReplaceable``) rather than written in place, which a full disk could leave half-written.
 
-    With ``expected``, the file must still be the one that was read, checked once right before the
-    rename. Without it, the target is checked there again as ``write`` first classified it: absent, or a
-    writable regular file, so a file swapped for a FIFO, a directory, or a read-only file is never
-    replaced. POSIX has no compare-and-rename, so a change between that check and the rename is not seen.
+    Right before the rename, the path must still name the same target, which must be absent or a
+    writable regular file, as ``write`` first classified it; with ``expected``, it must also be the very
+    file that was read. So a file swapped for a FIFO, a directory, or a read-only file, or a path
+    retargeted to another file, is never written behind the result's back. POSIX has no
+    compare-and-rename, so a change between that check and the rename is not seen.
     """
     target = os.path.realpath(path)
     try:
@@ -188,7 +195,7 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             os.fsync(handle.fileno())
             if mode is not None:
                 os.fchmod(handle.fileno(), mode)
-        _check_publishable(os.path.realpath(path) if expected is not None else target, expected)
+        _check_publishable(path, target, expected)
         os.replace(tmp, target)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):

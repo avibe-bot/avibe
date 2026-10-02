@@ -96,6 +96,7 @@ _JOB_ID = re.compile(r"^job_[a-z0-9]+$")
 _TAIL_HEADER = re.compile(rb"\[output from byte (\d+)\]\n")
 _GO = "go"
 _ABANDON = "abandon"
+_STATE_FILE_CHARS = 4096
 
 
 class JobStartError(RuntimeError):
@@ -135,9 +136,11 @@ def _write_atomic(path: str, data: str) -> None:
 
 
 def _read_text(path: str) -> Optional[str]:
+    """A small state file (``pid``, ``decision``, ``exit``, ``stopped``), read in a bound: the job's
+    directory is one its command can write to."""
     try:
-        with open(path, encoding="utf-8") as handle:
-            return handle.read().strip()
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read(_STATE_FILE_CHARS).strip()
     except FileNotFoundError:
         return None
 
@@ -402,7 +405,7 @@ class LocalJobHost:
             return data, since + len(data)
         try:
             with open(self._path(job_id, "tail.log"), "rb") as handle:
-                header = _TAIL_HEADER.fullmatch(handle.readline())
+                header = _TAIL_HEADER.fullmatch(handle.readline(64))
                 if header is None:
                     raise ValueError("tail.log header")
                 tail_start = int(header.group(1))

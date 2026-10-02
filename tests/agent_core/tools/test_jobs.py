@@ -432,6 +432,31 @@ async def test_hosts_over_different_spellings_of_the_jobs_directory_see_the_same
         await host.kill(job_id)
 
 
+async def test_readers_of_job_files_bound_what_they_read(tmp_path):
+    """Job files sit where the command can write: a state file or tail.log header of any size is read in a bound."""
+    import tracemalloc
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    job_id = await _start(host, tmp_path, "true")
+    await host.wait(job_id, deadline_s=5)
+    job_dir = host.job_dir(job_id)
+    with open(os.path.join(job_dir, "stopped"), "w") as handle:
+        handle.write("x" * 20_000_000)
+    with open(os.path.join(job_dir, "tail.log"), "w") as handle:
+        handle.write("[output from byte 0" + "0" * 20_000_000)
+    tracemalloc.start()
+    try:
+        reason = host.stop_reason(job_id)
+        data, offset = host.output(job_id, since=os.path.getsize(host.output_path(job_id)))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 1024 * 1024
+    assert len(reason) <= 4096
+    assert (data, offset) == (b"", os.path.getsize(host.output_path(job_id)))
+
+
 def test_the_wrapper_stops_its_group_even_when_its_diagnostics_fail(tmp_path, monkeypatch):
     """The wrapper's own failure handler must stop the command even if writing the traceback fails (ENOSPC)."""
     import core.agent_core.tools.job_wrapper as wrapper

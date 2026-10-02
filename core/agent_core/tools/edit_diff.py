@@ -68,9 +68,12 @@ def normalize_for_fuzzy_match(text: str) -> str:
     return _SPECIAL_SPACES.sub(" ", text)
 
 
-#: Avibe: replacements one ``replaceAll`` may make. Each costs a few hundred bytes of Python objects in
+#: Avibe: replacements one edit call may make. Each costs a few hundred bytes of Python objects in
 #: the process every Session shares, so the budget is structural, not only the file's size.
 MAX_REPLACEMENTS = 10_000
+#: Avibe: every edit scans the whole file (``str.count``/``find``, which hold the GIL), so the number of
+#: edits times the file's length is bounded: about a quarter second of scanning.
+MAX_EDIT_SCAN_CHARS = 256 * 1024 * 1024
 
 
 class ResultTooLarge(Exception):
@@ -95,6 +98,10 @@ def _tier(content: str, normalized: Callable[[], str], old_text: str) -> tuple[b
     count = content.count(old_text)
     if count:
         return False, content, old_text, count
+    if old_text.count("\n") > content.count("\n"):
+        # Normalization keeps every line break (NFKC never makes or removes "\n"), so text with more lines
+        # than the file cannot match; and model text that long is never split into per-line objects.
+        return True, "", "", 0
     fuzzy_old = normalize_for_fuzzy_match(old_text)
     if not fuzzy_old:
         return True, "", "", 0
@@ -126,11 +133,22 @@ def _duplicate(path: str, index: int, total: int, occurrences: int) -> EditError
     )
 
 
-def _too_many(path: str, index: int, total: int, occurrences: int) -> EditError:
-    which = "the text" if total == 1 else f"edits[{index}]"
+def _too_many(path: str, total: int, replacements: int) -> EditError:
+    if total == 1:
+        return EditError(
+            f"Found {replacements} occurrences of the text in {path}, over the {MAX_REPLACEMENTS} replaceAll limit. "
+            "Use bash (for example sed or a short script) to replace this many."
+        )
     return EditError(
-        f"Found {occurrences} occurrences of {which} in {path}, over the {MAX_REPLACEMENTS} replaceAll limit. "
+        f"The edits make {replacements} replacements in {path}, over the {MAX_REPLACEMENTS} replacement limit. "
         "Use bash (for example sed or a short script) to replace this many."
+    )
+
+
+def _too_much_work(path: str, total: int, chars: int) -> EditError:
+    return EditError(
+        f"{total} edits over {path} ({chars} characters) are over the edit work limit. Split them into several "
+        "edit calls, or use bash (for example sed or a short script)."
     )
 
 
@@ -228,15 +246,24 @@ class _Lines:
         return self.breaks[bisect.bisect_right(self.starts, lo) - 1] or self.first_break
 
     def with_breaks(self, lf_text: str, lo: int, own: Optional[list[str]] = None) -> str:
-        """``lf_text`` with each ``\\n`` turned into ``own``'s next break, then the break of the span at ``lo``."""
+        """``lf_text`` with each ``\\n`` turned into ``own``'s next break, then the break of the span at ``lo``.
+
+        Only the ``\\n`` that ``own`` covers (lines of the file) are visited one by one; the rest, which
+        model text can make many of, are replaced in one pass without per-line objects.
+        """
         if "\n" not in lf_text:
             return lf_text
-        pieces = lf_text.split("\n")
         fallback = self.break_for(lo)
-        out = [pieces[0]]
-        for index, piece in enumerate(pieces[1:]):
-            brk = own[index] if own is not None and index < len(own) and own[index] else fallback
-            out.append(brk + piece)
+        out: list[str] = []
+        pos = 0
+        for brk in own or ():
+            newline = lf_text.find("\n", pos)
+            if newline == -1:
+                break
+            out += (lf_text[pos:newline], brk or fallback)
+            pos = newline + 1
+        rest = lf_text[pos:]
+        out.append(rest if fallback == "\n" else rest.replace("\n", fallback))
         return "".join(out)
 
 
@@ -301,6 +328,8 @@ def apply_edits(
         if not edit.old_text:
             raise _empty(path, index, total)
 
+    if total * len(text) > MAX_EDIT_SCAN_CHARS:
+        raise _too_much_work(path, total, len(text))
     lines = _Lines(text)
     cache: list[str] = []
 
@@ -312,14 +341,16 @@ def apply_edits(
     exact: list[_Replacement] = []
     fuzzy: list[_Replacement] = []
     inserted = 0
+    replacements_made = 0
     for index, edit in enumerate(edits):
         used_normalized, haystack, needle, count = _tier(lines.view, normalized, edit.old_text)
         if not count:
             raise _not_found(path, index, total)
         if not edit.replace_all and count > 1:
             raise _duplicate(path, index, total, count)
-        if count > MAX_REPLACEMENTS:
-            raise _too_many(path, index, total, count)
+        replacements_made += count
+        if replacements_made > MAX_REPLACEMENTS:
+            raise _too_many(path, total, replacements_made)
         # The result holds at least every inserted text, so this bound never refuses a result that fits.
         inserted += count * len(edit.new_text)
         if max_result_chars is not None and inserted > max_result_chars:
@@ -344,13 +375,15 @@ def lf_view(text: str) -> str:
 
 #: The display diff runs difflib only on the changed middle, and skips it when either side is longer.
 DIFF_MAX_LINES = 1000
+#: Lines either side may have before the display diff splits it into per-line strings at all.
+DIFF_MAX_SPLIT_LINES = 100_000
 
 
 class _FixedOpcodes(difflib.SequenceMatcher):
     """difflib's hunk grouping over opcodes computed elsewhere."""
 
-    def __init__(self, a: list[str], b: list[str], opcodes: list[tuple[str, int, int, int, int]]) -> None:
-        super().__init__(None, a, b)
+    def __init__(self, opcodes: list[tuple[str, int, int, int, int]]) -> None:
+        super().__init__(None, (), ())  # no sequences: difflib would index all of b, which grouping never uses
         self._fixed = opcodes
 
     def get_opcodes(self) -> list[tuple[str, int, int, int, int]]:  # type: ignore[override]
@@ -364,6 +397,8 @@ def display_diff(path: str, old: str, new: str, context: int = 4) -> Optional[tu
     is quadratic, for example on repetitive lines) sees only the changed middle, at most
     ``DIFF_MAX_LINES`` lines on each side.
     """
+    if old.count("\n") > DIFF_MAX_SPLIT_LINES or new.count("\n") > DIFF_MAX_SPLIT_LINES:
+        return None
     a, b = _lines_with_breaks(old), _lines_with_breaks(new)
     shortest = min(len(a), len(b))
     prefix = 0
@@ -408,7 +443,7 @@ def _patch_line(sign: str, line: str) -> str:
 
 def _unified_patch(path: str, a: list[str], b: list[str], opcodes: list, context: int) -> str:
     """Pi's ``generateUnifiedPatch`` (jsdiff ``createTwoFilesPatch`` with file headers only), from the opcodes."""
-    groups = list(_FixedOpcodes(a, b, opcodes).get_grouped_opcodes(context))
+    groups = list(_FixedOpcodes(opcodes).get_grouped_opcodes(context))
     if not groups:
         return ""
     out = [f"--- {path}\n", f"+++ {path}\n"]
