@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import runpy
 import shutil
 import sqlite3
 import sys
@@ -49,7 +50,11 @@ PLATFORM_DEFS = {
     },
 }
 
-SUPPORTED_BACKENDS = {"opencode", "claude", "codex"}
+# Load the stdlib-only declaration without importing the application package:
+# this bootstrap script also runs before application dependencies are installed.
+SUPPORTED_BACKENDS = frozenset(
+    runpy.run_path(str(Path(__file__).resolve().parents[1] / "modules/agents/catalog.py"))["AGENT_BACKENDS"]
+)
 RESET_MODES = {"none", "config", "all"}
 CONTAINER_HOME = Path("/home/avibe")
 CONTAINER_AVIBE_HOME = CONTAINER_HOME / ".avibe"
@@ -206,6 +211,9 @@ def _build_config_payload() -> dict:
             "codex": {
                 "enabled": True,
                 "cli_path": "codex",
+            },
+            "avibe": {
+                "enabled": any(_env(definition["backend_env"]) == "avibe" for definition in PLATFORM_DEFS.values()),
             },
         },
         "gateway": None,

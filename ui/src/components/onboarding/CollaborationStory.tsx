@@ -1,6 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { Check, CodeXml, FileText, ListChecks } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { BackendIcon } from '../visual';
 import { Card } from '../ui/card';
 import { ASSISTANT_ORDER, WORK_LINES, collaborationFrame } from './collaborationTimeline';
@@ -226,13 +227,13 @@ export function CollaborationStory({ active = true }: { active?: boolean }) {
             const Icon = ICONS[index];
             return (
               <Card key={backend} className="onboarding-collaboration-card" data-active={active}
-                data-state={state} aria-label={t(`onboarding.story.${backend}.name`)}>
+                data-state={state} aria-label={getBackendUiMeta(backend).label}>
                 {/* The same identity header the connection step wears, in the same
                     place: logo, name, and the trailing slot this step fills with the
                     assistant's role and the next one with its enable switch. */}
                 <div className="onboarding-card-identity">
                   <span className="onboarding-card-logo"><BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" /></span>
-                  <strong className="onboarding-card-name">{t(`onboarding.story.${backend}.name`)}</strong>
+                  <strong className="onboarding-card-name">{getBackendUiMeta(backend).label}</strong>
                   <span className="onboarding-card-role">{t(`onboarding.story.${backend}.role`)}</span>
                 </div>
                 <div className="onboarding-story-status" aria-hidden="true">

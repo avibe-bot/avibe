@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import update
 
 from core.session_turns import DeliveryRequest
+from modules.agents.catalog import AGENT_BACKENDS
 from storage import message_deliveries, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import create_sqlite_engine
@@ -231,7 +232,7 @@ def test_retry_notice_preserves_authorized_local_details(isolated_state, tmp_pat
     assert ("local_error_detail" in json.loads(projected)["data"]["metadata"]) is can_manage
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 def test_failure_retry_canonical_continue_and_draft(isolated_state, tmp_path, backend):
     from vibe.ui_server import app
 

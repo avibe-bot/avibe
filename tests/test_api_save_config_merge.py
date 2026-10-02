@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
+from modules.agents.catalog import AGENT_BACKENDS
 from config.v2_config import (
     _FIELD_SCOPED_RECOVERY_SECTIONS,
     AudioAsrConfig,
@@ -166,7 +167,7 @@ def test_save_config_merges_partial_payload(monkeypatch, tmp_path, sqlite_schema
     assert original.update.auto_update is False
     assert all(
         not hasattr(getattr(original.agents, backend), "default_model")
-        for backend in ("claude", "codex", "opencode")
+        for backend in AGENT_BACKENDS
     )
 
     updated = api.save_config({"show_duration": False, "include_time_info": False, "update": {"auto_update": True}})
@@ -1273,7 +1274,7 @@ def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path,
     # ``platform_configs`` is the internal per-platform aggregate; it is emitted
     # under each platform's own key, not as a top-level ``platform_configs`` key.
     top_level = {f.name for f in fields(V2Config)} - {"platform_configs"}
-    agents = {"opencode", "claude", "codex", "avault"}
+    agents = set(AGENT_BACKENDS) | {"avault"}
 
     def _assert_complete(label: str, payload: dict) -> None:
         assert top_level <= set(payload), f"{label} top-level missing: {top_level - set(payload)}"

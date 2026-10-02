@@ -1,4 +1,5 @@
 import { LEGACY_SETTINGS_REDIRECTS } from './settingsRoutes';
+import { AGENT_BACKENDS } from './agentBackends';
 
 const STORAGE_KEY = 'avibe.pwa.last-route.v1';
 
@@ -29,9 +30,7 @@ const RESTORABLE_EXACT_PATHS = new Set([
   '/settings/platforms/users',
   '/settings/remote-access',
   '/settings/backends',
-  '/settings/backends/opencode',
-  '/settings/backends/claude',
-  '/settings/backends/codex',
+  ...AGENT_BACKENDS.map((backend) => backend.settingsRoute),
   '/settings/models',
   '/settings/dependencies',
   '/settings/replies',

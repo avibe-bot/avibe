@@ -468,6 +468,9 @@
     "routingUpdateNeedsNewSession": "请使用 /new 命令创建新会话，以使设置变更生效。新会话创建后将覆盖当前会话。"
   },
   "settings": {
+    "backends": {
+      "avibeDescription": "Avibe 内置智能体，使用 Model Hub 中配置的模型。"
+    },
     "personalizationTitle": "个性化设置",
     "personalizationDesc": "配置 {agent} 的消息在你的 Slack 工作区中的展示方式。",
     "visibilityTitle": "设置 - 消息可见性",
@@ -629,10 +632,6 @@
       "selectCodexAgent": "选择 Codex Agent",
       "codexReasoningEffort": "推理强度",
       "tip": "选择“(默认)”以使用后端的配置默认值。"
-    },
-    "question": {
-      "opencode": "OpenCode",
-      "claudeCode": "Claude Code"
     }
   },
   "command": {
@@ -773,11 +772,6 @@
     "quickReplyNote": "回复：{text}",
     "citationUnresolved": "（来源不可用）"
   },
-  "backend": {
-    "claude": "ClaudeCode",
-    "codex": "Codex",
-    "opencode": "OpenCode"
-  },
   "reasoning": {
     "none": "无",
     "minimal": "最小",
@@ -907,12 +901,6 @@
     "routingCanceled": "已取消更新 Agent 路由设置。"
   },
   "modelHub": {
-    "backends": {
-      "claude": "Claude Code",
-      "codex": "Codex",
-      "opencode": "OpenCode",
-      "avibe": "Avibe Agent"
-    },
     "errors": {
       "source_not_found": "未找到模型供应商。",
       "flow_not_found": "未找到授权流程。",

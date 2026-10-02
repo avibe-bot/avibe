@@ -2304,14 +2304,15 @@ def test_changed_agent_backend_runtimes_keeps_saved_selector_changes_visible(mon
     ) == ["claude"]
 
 
-def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend", ["codex", "avibe"])
+def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tmp_path, backend):
     """Scenario: AUTH-SETUP-902."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
     from vibe import internal_client
 
     payload = _full_config_payload()
-    payload["agents"]["codex"]["enabled"] = False
+    payload["agents"].setdefault(backend, {})["enabled"] = False
     api.save_config(payload)
 
     reconcile_calls = []
@@ -2323,7 +2324,7 @@ def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tm
             "body": {
                 "ok": True,
                 "backends": backends,
-                "states": {"codex": "restarted"},
+                "states": {backend: "restarted"},
             },
         }
 
@@ -2334,9 +2335,9 @@ def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tm
         "/api/config",
         json={
             "agents": {
-                "codex": {
+                backend: {
                     "enabled": True,
-                    "cli_path": "/opt/codex",
+                    **({"cli_path": "/opt/codex"} if backend == "codex" else {}),
                 }
             }
         },
@@ -2345,18 +2346,20 @@ def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tm
 
     assert response.status_code == 200
     data = response.get_json()
-    assert data["agents"]["codex"]["enabled"] is True
+    assert data["agents"][backend]["enabled"] is True
+    if backend == "avibe":
+        assert data["agents"][backend] == {"enabled": True}
     assert data["agent_backend_runtime"] == {
         "ok": True,
         "hot_reconciled": True,
-        "backends": ["codex"],
+        "backends": [backend],
         "body": {
             "ok": True,
-            "backends": ["codex"],
-            "states": {"codex": "restarted"},
+            "backends": [backend],
+            "states": {backend: "restarted"},
         },
     }
-    assert reconcile_calls == [["codex"]]
+    assert reconcile_calls == [[backend]]
 
 
 def test_config_post_defers_backend_reconcile_until_next_start_when_service_is_stopped(

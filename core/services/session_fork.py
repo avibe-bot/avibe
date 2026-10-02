@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from config import paths
+from modules.agents.catalog import AGENT_BACKENDS
 from vibe.authorization import (
     AuthorizationContext,
     require_instance_role,
@@ -252,7 +253,7 @@ def reserve_forked_session(
                 raise SessionForkError(f"agent session is archived: {source_session_id}")
 
             source_backend = str(row["agent_backend"] or "").strip()
-            if source_backend not in {"codex", "claude", "opencode"}:
+            if source_backend not in AGENT_BACKENDS:
                 raise SessionForkError(f"session backend cannot be forked: {source_backend or 'unknown'}")
             source_native = str(row["native_session_id"] or "").strip()
             if not source_native:

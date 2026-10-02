@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Final
+from typing import Final, Literal
+
+NativeCliBackend = Literal["opencode", "claude", "codex"]
+AgentBackend = Literal[NativeCliBackend, "avibe"]
 
 
 @dataclass(frozen=True)
 class AgentBackendCapabilities:
+    supports_cli: bool = True
+    supports_native_sessions: bool = True
     supports_runtime_refresh: bool = True
     supports_web_oauth: bool = True
     supports_install: bool = True
@@ -18,7 +23,7 @@ class AgentBackendDescriptor:
     id: str
     display_name: str
     config_key: str
-    default_cli: str
+    default_cli: str | None
     default_enabled: bool
     latest_probe: tuple[str, str] | None
     capabilities: AgentBackendCapabilities
@@ -66,9 +71,29 @@ AGENT_BACKEND_REGISTRY: Final[dict[str, AgentBackendDescriptor]] = {
         latest_probe=("npm", "@openai/codex"),
         capabilities=AgentBackendCapabilities(),
     ),
+    "avibe": AgentBackendDescriptor(
+        id="avibe",
+        display_name="Avibe Agent",
+        config_key="avibe",
+        default_cli=None,
+        default_enabled=False,
+        latest_probe=None,
+        capabilities=AgentBackendCapabilities(
+            supports_cli=False,
+            supports_native_sessions=False,
+            supports_runtime_refresh=False,
+            supports_web_oauth=False,
+            supports_install=False,
+        ),
+    ),
 }
 
 AGENT_BACKENDS: Final[tuple[str, ...]] = tuple(AGENT_BACKEND_REGISTRY)
+NATIVE_CLI_BACKENDS: Final[tuple[str, ...]] = tuple(
+    descriptor.id
+    for descriptor in AGENT_BACKEND_REGISTRY.values()
+    if descriptor.capabilities.supports_cli
+)
 DEFAULT_AGENT_BACKEND: Final[str] = "opencode"
 RUNTIME_REFRESH_BACKENDS: Final[frozenset[str]] = frozenset(
     descriptor.id
@@ -116,7 +141,7 @@ def agent_backend_catalog_payload() -> list[dict]:
     return [descriptor.to_public_dict() for descriptor in agent_backend_descriptors()]
 
 
-def default_cli_for_backend(name: str) -> str:
+def default_cli_for_backend(name: str) -> str | None:
     """Return the default CLI command for *name*."""
     return get_agent_backend_descriptor(name).default_cli
 
@@ -143,6 +168,11 @@ def latest_probe_for_backend(name: str) -> tuple[str, str] | None:
 def supports_runtime_refresh(name: str) -> bool:
     """Return whether *name* supports runtime config refresh."""
     return name in RUNTIME_REFRESH_BACKENDS
+
+
+def is_native_cli_backend(name: str) -> bool:
+    """Return whether a backend owns an external CLI and native configuration."""
+    return name in NATIVE_CLI_BACKENDS
 
 
 def supports_web_oauth(name: str) -> bool:

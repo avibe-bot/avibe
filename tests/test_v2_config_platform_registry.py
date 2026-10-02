@@ -23,6 +23,7 @@ from config.v2_config import (
     VibeCloudRemoteAccessConfig,
     WeChatConfig,
 )
+from modules.agents.catalog import AGENT_BACKENDS
 from vibe import api
 
 
@@ -208,11 +209,7 @@ def test_config_payload_includes_platform_catalog_and_setup_state() -> None:
         "wechat",
         "avibe",
     ]
-    assert [backend["id"] for backend in payload["agent_backend_catalog"]] == [
-        "opencode",
-        "claude",
-        "codex",
-    ]
+    assert [backend["id"] for backend in payload["agent_backend_catalog"]] == list(AGENT_BACKENDS)
     assert payload["setup_state"]["configured_platforms"] == ["slack", "discord", "telegram", "lark", "wechat"]
     assert payload["setup_state"]["needs_setup"] is False
     assert payload["ui"]["chat_message_font_size"] == 14

@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any, TypeVar
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ _POLL_INTERVAL_SECONDS = 0.1
 # accurate and a retry afterwards proceeds. It stays well inside the 300 s
 # Model Hub RPC timeout the Web UI waits under.
 _INTERRUPT_SETTLE_SECONDS = 120.0
-_NATIVE_BACKENDS = frozenset({"claude", "codex", "opencode"})
+_NATIVE_BACKENDS = frozenset(NATIVE_CLI_BACKENDS)
 _T = TypeVar("_T")
 
 
@@ -787,7 +788,10 @@ class BackendRestartCoordinator:
         # stays registered with an explicit flag. Use loaded state, never disk
         # or a stale successful outcome to excuse unexpected missing agents.
         if isinstance(config, AppCompatConfig):
-            disabled = (backend in {"codex", "opencode"} and getattr(config, backend) is None and not registered) or (
+            disabled = (
+                backend in AGENT_BACKENDS and backend != "claude"
+                and getattr(config, backend) is None and not registered
+            ) or (
                 backend == "claude" and registered and config.claude.enabled is False
             )
             if disabled:

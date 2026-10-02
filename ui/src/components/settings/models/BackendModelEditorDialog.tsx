@@ -21,6 +21,7 @@ import { SegmentedRadio } from '@/components/ui/segmented';
 import { isComposingKey } from '@/lib/imeComposition';
 import { NO_REASONING_EFFORT } from '@/lib/effortOptions';
 import { cn } from '@/lib/utils';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { applyModelsDevMatch, backendModelId, blankBackendModel, draftWithId, retireModelsDevMatch } from './backendCatalog';
 import { Field } from './dialogFields';
 import { formatTokensCompact } from './format';
@@ -398,7 +399,7 @@ export const BackendModelEditorDialog: React.FC<{
   // A suggestion is not a capability declaration: Off stays unchecked until
   // the operator adds it to this exact model, just like any custom effort.
   const efforts = [...new Set([NO_REASONING_EFFORT, ...effortSuggestions, ...draft.reasoning_efforts])];
-  const backendName = t(`settings.models.backends.${backend}`, { defaultValue: backend });
+  const backendName = getBackendUiMeta(backend).label;
   const protocolLabel = t('settings.models.gateway.modelEditor.nativeProtocol.label') as string;
   const idHint = submitted && idError ? t(`settings.models.gateway.modelEditor.id.${idError}`) as string : null;
 

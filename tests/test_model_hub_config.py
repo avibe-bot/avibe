@@ -13,6 +13,7 @@ import pytest
 from jsonschema import Draft7Validator, FormatChecker, ValidationError
 
 import config.v2_config as v2_config
+from modules.agents.catalog import AGENT_BACKENDS
 from config.v2_config import (
     MODEL_HUB_ENABLED_ENV,
     MODEL_HUB_LEGACY_CREATED_AT,
@@ -1407,7 +1408,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
         "sources": [source_example],
         "agents": {
             backend: ModelHubAgentSupplyConfig.default(backend, mode="hub").to_payload()
-            for backend in ("claude", "codex", "opencode")
+            for backend in AGENT_BACKENDS
         },
     }
     config = default_config()
@@ -3129,7 +3130,7 @@ def test_config_reload_preserves_legacy_routes_without_seeding_missing_models(tm
     assert next(model for model in migrated_models if model.id == stale_id).origin == "manual"
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 def test_v2_empty_route_normalizes_on_load_without_writing_until_save(tmp_path, backend):
     from tests.test_model_hub_routing_modes import MODEL, _loaded_catalog_config
     from tests.test_model_hub_resolution import _source
@@ -3151,7 +3152,7 @@ def test_v2_empty_route_normalizes_on_load_without_writing_until_save(tmp_path, 
     assert json.loads(path.read_text())["model_hub"] == expected
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 @pytest.mark.parametrize("bad_key", ["", "authorization=sk-unsafe-fixture"])
 def test_invalid_empty_route_key_keeps_v2_recovery_fence(tmp_path, backend, bad_key):
     payload = api.config_to_payload(default_config())

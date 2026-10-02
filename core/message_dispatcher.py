@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 from urllib.parse import urljoin
+from modules.agents.catalog import AGENT_BACKENDS
 
 from config.platform_registry import get_platform_descriptor
 from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
@@ -1855,7 +1856,7 @@ class ConsolidatedMessageDispatcher:
         if (
             not session_id
             or not base_session_id
-            or backend not in {"claude", "codex", "opencode"}
+            or backend not in AGENT_BACKENDS
         ):
             if lease is not None:
                 release_lease = getattr(

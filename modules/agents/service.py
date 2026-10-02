@@ -365,9 +365,9 @@ class AgentService:
             # never break the turn.
             await self._begin_turn_status(request.context)
             from core.agent_model_selection import require_agent_model
-            from core.vibe_agents import SUPPORTED_AGENT_BACKENDS
+            from modules.agents.catalog import AGENT_BACKENDS
 
-            if agent.name in SUPPORTED_AGENT_BACKENDS:
+            if agent.name in AGENT_BACKENDS:
                 has_subagent_model = request.subagent_model is not None
                 selected_model = require_agent_model(
                     request.subagent_model if has_subagent_model else request.vibe_agent_model,

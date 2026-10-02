@@ -8,6 +8,7 @@ import pytest
 
 from core.backend_restart import BackendRestartCoordinator, NativeCredentialLease, NativeMigrationBlockedError
 from core.controller import Controller
+from modules.agents.catalog import AGENT_BACKENDS
 
 
 class _AgentService:
@@ -236,6 +237,26 @@ def test_application_projection_tracks_prepare_drain_failure_retry_and_registrat
         assert coordinator.snapshot("opencode") == {"state": "unavailable"}
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("backend", [backend for backend in AGENT_BACKENDS if backend != "claude"])
+def test_application_projection_accepts_disabled_optional_compat_backends(backend):
+    """No registered runtime is expected only after its compat section is disabled."""
+    from config.v2_compat import to_app_config
+    from config.v2_config import V2Config
+
+    config = V2Config.default()
+    getattr(config.agents, backend).enabled = False
+    controller = SimpleNamespace(
+        config=to_app_config(config, resolve_agent_paths=False),
+        agent_service=SimpleNamespace(agents={}),
+    )
+    coordinator = BackendRestartCoordinator(controller, AsyncMock())
+    assert coordinator.snapshot(backend) == {"state": "applied", "disabled": True}
+
+    getattr(config.agents, backend).enabled = True
+    controller.config = to_app_config(config, resolve_agent_paths=False)
+    assert coordinator.snapshot(backend) == {"state": "unavailable"}
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("prepare failed"), asyncio.CancelledError()])

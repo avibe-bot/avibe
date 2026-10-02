@@ -62,6 +62,23 @@ const renderCard = () =>
   );
 
 describe('BackendSupplyModeCard', () => {
+  it('offers the Avibe gateway model link without native configuration scanning or direct mode', async () => {
+    vi.mocked(modelsApi.listAgents).mockResolvedValue([{ backend: 'avibe', cli_present: false, mode: 'hub', menu_kind: 'fixed' }]);
+    const setMode = vi.spyOn(modelsApi, 'setAgentMode');
+    render(
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}><BackendSupplyModeCard backend="avibe" /></I18nextProvider>
+      </MemoryRouter>,
+    );
+    const hub = await screen.findByRole('radio', { name: /Gateway mode/ });
+    expect(hub.getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('link', { name: 'Open Models page' }).getAttribute('href')).toBe('/settings/models');
+    expect(screen.queryByRole('radio', { name: /Direct mode/ })).toBeNull();
+    await userEvent.click(hub);
+    expect(modelsApi.scanMigration).not.toHaveBeenCalled();
+    expect(setMode).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['switching to the gateway', /Gateway mode/, true],
     ['importing from the Direct strip', null, false],
