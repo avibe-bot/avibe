@@ -31,6 +31,27 @@ class ModelEndpoint:
 
 
 @dataclass(frozen=True)
+class ModelCapabilities:
+    """From C-6 hop resolution. ``None`` means Model Hub does not know; callers treat it conservatively."""
+
+    context_window: Optional[int] = None
+    input_limit: Optional[int] = None
+    max_output_tokens: Optional[int] = None
+    supports_tools: Optional[bool] = None
+    supports_images: Optional[bool] = None
+    supports_reasoning: Optional[bool] = None
+    reasoning_efforts: tuple[str, ...] = ()
+
+
+class MediaLoader(Protocol):
+    """Supplied by the adapter layer; resolves an ``ImageBlock.media_token`` to its bytes at request time."""
+
+    async def load(self, media_token: str) -> tuple[bytes, str]:
+        """Return the bytes and their mime type."""
+        ...
+
+
+@dataclass(frozen=True)
 class ModelRequest:
     endpoint: ModelEndpoint
     system: str
@@ -39,7 +60,8 @@ class ModelRequest:
     max_tokens: int
     reasoning_effort: Optional[str] = None
     cache: Literal["default", "none"] = "default"
-    supports_images: bool = True
+    supports_images: bool = False
+    """Resolved by the loop from ``ModelCapabilities``; an unknown capability counts as False."""
 
 
 @dataclass(frozen=True)

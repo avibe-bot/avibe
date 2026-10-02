@@ -31,7 +31,7 @@ class LargeRef:
     bytes: int
 
     def __post_init__(self) -> None:
-        if not _LARGE_REF_RE.match(self.ref) or self.bytes < 0:
+        if not _LARGE_REF_RE.fullmatch(self.ref) or self.bytes < 0:
             raise ValueError(f"invalid large-content reference: {self.ref!r}")
 
 
@@ -56,6 +56,8 @@ class ImageBlock:
             raise ValueError(f"unsupported image type: {self.mime_type}")
         if not self.media_token:
             raise ValueError("an image block needs a media token")
+        if self.name is not None and not self.name:
+            raise ValueError("an image name, when present, must not be empty")
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,10 @@ class ThinkingBlock:
     signature: Optional[str] = None
     redacted: bool = False
 
+    def __post_init__(self) -> None:
+        if self.signature is not None and not self.signature:
+            raise ValueError("a signature, when present, must not be empty")
+
 
 @dataclass(frozen=True)
 class ToolCallBlock:
@@ -71,10 +77,16 @@ class ToolCallBlock:
     name: str
     arguments: Mapping[str, Any] = field(default_factory=dict)
     native_id: Optional[str] = None
+    signature: Optional[str] = None
+    """Opaque provider payload on the call itself (Gemini ``thoughtSignature``); same rules as a thinking signature."""
 
     def __post_init__(self) -> None:
         if not self.id or not self.name:
             raise ValueError("a tool call needs an id and a name")
+        if self.native_id is not None and not self.native_id:
+            raise ValueError("a native id, when present, must not be empty")
+        if self.signature is not None and not self.signature:
+            raise ValueError("a signature, when present, must not be empty")
 
 
 UserContent = Union[TextBlock, ImageBlock]
@@ -104,6 +116,11 @@ class Usage:
     cache_write_tokens: int = 0
     reasoning_tokens: Optional[int] = None
 
+    def __post_init__(self) -> None:
+        counts = (self.input_tokens, self.output_tokens, self.cache_read_tokens, self.cache_write_tokens)
+        if any(c < 0 for c in counts) or (self.reasoning_tokens is not None and self.reasoning_tokens < 0):
+            raise ValueError("token counts must not be negative")
+
 
 @dataclass(frozen=True)
 class UserMessage:
@@ -127,6 +144,8 @@ class AssistantMessage:
     error_message: Optional[str] = None
 
     def __post_init__(self) -> None:
+        if self.error_message is not None and not self.error_message:
+            raise ValueError("an error message, when present, must not be empty")
         if self.stop_reason not in STOP_REASONS:
             raise ValueError(f"unknown stop reason: {self.stop_reason}")
 
@@ -146,6 +165,10 @@ class ToolResultMessage:
     content: tuple[UserContent, ...]
     is_error: bool = False
 
+    def __post_init__(self) -> None:
+        if not self.tool_call_id or not self.tool_name:
+            raise ValueError("a tool result needs its call id and tool name")
+
     @property
     def role(self) -> Literal["tool_result"]:
         return "tool_result"
@@ -159,32 +182,39 @@ def text(value: str) -> TextBlock:
 
 
 # --- persisted form ---------------------------------------------------------
+#
+# Two owners, so no field can be checked differently from another:
+# * the dataclasses above own value invariants (non-empty ids, non-negative
+#   counts, enumerations, the large-reference pattern);
+# * ``_read`` owns the wire shape of every object: it must be a JSON object,
+#   unknown keys are refused, required keys must be present, an optional key is
+#   either absent or holds a value (an explicit null is refused, because the
+#   writer never produces one), and every value has exactly its JSON type.
 
 
-def _strict(data: Any, allowed: set[str], what: str) -> None:
+def _read(data: Any, what: str, required: Mapping[str, type], optional: Mapping[str, type] = {}) -> dict[str, Any]:
     if not isinstance(data, Mapping):
         raise ValueError(f"{what} must be an object")
-    unknown = set(data) - allowed
+    unknown = set(data) - set(required) - set(optional)
     if unknown:
         raise ValueError(f"unknown {what} field(s): {', '.join(sorted(unknown))}")
+    out: dict[str, Any] = {}
+    for name, kind in {**required, **optional}.items():
+        if name not in data:
+            if name in required:
+                raise ValueError(f"{what} needs {name}")
+            continue
+        value = data[name]
+        # bool is an int subclass in Python; a JSON boolean is never accepted as a number.
+        if value is None or not isinstance(value, kind) or (isinstance(value, bool) and kind is not bool):
+            raise ValueError(f"{what}.{name} must be {kind.__name__}")
+        out[name] = value
+    return out
 
 
-def _typed(value: Any, kind: type, what: str, *, optional: bool = False) -> Any:
-    """Return ``value`` if it has exactly the JSON type ``kind``; never coerce."""
-    if value is None and optional:
-        return None
-    # bool is an int subclass in Python; a JSON boolean is never an integer here.
-    if isinstance(value, bool) and kind is not bool:
-        raise ValueError(f"{what} must be {kind.__name__}")
-    if not isinstance(value, kind):
-        raise ValueError(f"{what} must be {kind.__name__}")
-    return value
-
-
-def _list(value: Any, what: str) -> list:
-    if not isinstance(value, list):
-        raise ValueError(f"{what} must be an array")
-    return value
+def _put(out: dict[str, Any], name: str, value: Any) -> None:
+    if value is not None:
+        out[name] = value
 
 
 def _block_to_dict(block: Any) -> dict[str, Any]:
@@ -194,94 +224,67 @@ def _block_to_dict(block: Any) -> dict[str, Any]:
         return {"type": "text", "text": block.text}
     if isinstance(block, ImageBlock):
         out: dict[str, Any] = {"type": "image", "mime_type": block.mime_type, "media_token": block.media_token}
-        if block.name is not None:
-            out["name"] = block.name
+        _put(out, "name", block.name)
         return out
     if isinstance(block, ThinkingBlock):
         out = {"type": "thinking", "text": block.text}
-        if block.signature is not None:
-            out["signature"] = block.signature
+        _put(out, "signature", block.signature)
         if block.redacted:
             out["redacted"] = True
         return out
     if isinstance(block, ToolCallBlock):
         out = {"type": "tool_call", "id": block.id, "name": block.name, "arguments": dict(block.arguments)}
-        if block.native_id is not None:
-            out["native_id"] = block.native_id
+        _put(out, "native_id", block.native_id)
+        _put(out, "signature", block.signature)
         return out
     raise TypeError(f"not a content block: {type(block).__name__}")
 
 
 def _block_from_dict(data: Any, allowed_types: tuple[str, ...]) -> Any:
-    if not isinstance(data, Mapping):
-        raise ValueError("a content block must be an object")
-    kind = data.get("type")
+    kind = data.get("type") if isinstance(data, Mapping) else None
     if kind not in allowed_types:
         raise ValueError(f"block type {kind!r} is not allowed here")
     if kind == "text":
-        _strict(data, {"type", "text", "ref"}, "text block")
-        ref = data.get("ref")
-        if ref is not None:
-            _strict(ref, {"ref", "bytes"}, "large-content reference")
-            ref = LargeRef(ref=_typed(ref.get("ref"), str, "ref.ref"), bytes=_typed(ref.get("bytes"), int, "ref.bytes"))
-        return TextBlock(text=_typed(data.get("text"), str, "text", optional=True), ref=ref)
+        f = _read(data, "text block", {"type": str}, {"text": str, "ref": dict})
+        ref = None
+        if "ref" in f:
+            r = _read(f["ref"], "large-content reference", {"ref": str, "bytes": int})
+            ref = LargeRef(ref=r["ref"], bytes=r["bytes"])
+        return TextBlock(text=f.get("text"), ref=ref)
     if kind == "image":
-        _strict(data, {"type", "mime_type", "media_token", "name"}, "image block")
-        return ImageBlock(
-            mime_type=_typed(data.get("mime_type"), str, "mime_type"),
-            media_token=_typed(data.get("media_token"), str, "media_token"),
-            name=_typed(data.get("name"), str, "name", optional=True),
-        )
+        f = _read(data, "image block", {"type": str, "mime_type": str, "media_token": str}, {"name": str})
+        return ImageBlock(mime_type=f["mime_type"], media_token=f["media_token"], name=f.get("name"))
     if kind == "thinking":
-        _strict(data, {"type", "text", "signature", "redacted"}, "thinking block")
-        return ThinkingBlock(
-            text=_typed(data.get("text"), str, "thinking text"),
-            signature=_typed(data.get("signature"), str, "signature", optional=True),
-            redacted=_typed(data.get("redacted", False), bool, "redacted"),
-        )
-    _strict(data, {"type", "id", "name", "arguments", "native_id"}, "tool call block")
+        f = _read(data, "thinking block", {"type": str, "text": str}, {"signature": str, "redacted": bool})
+        if f.get("redacted") is False:
+            raise ValueError("thinking block.redacted is written only when true")
+        return ThinkingBlock(text=f["text"], signature=f.get("signature"), redacted=bool(f.get("redacted")))
+    f = _read(
+        data,
+        "tool call block",
+        {"type": str, "id": str, "name": str, "arguments": dict},
+        {"native_id": str, "signature": str},
+    )
     return ToolCallBlock(
-        id=_typed(data.get("id"), str, "tool call id"),
-        name=_typed(data.get("name"), str, "tool name"),
-        arguments=dict(_typed(data.get("arguments"), dict, "arguments")),
-        native_id=_typed(data.get("native_id"), str, "native_id", optional=True),
+        id=f["id"], name=f["name"], arguments=dict(f["arguments"]), native_id=f.get("native_id"), signature=f.get("signature")
     )
 
 
+_USAGE_REQUIRED = {"input_tokens": int, "output_tokens": int, "cache_read_tokens": int, "cache_write_tokens": int}
+
+
 def _usage_to_dict(usage: Usage) -> dict[str, Any]:
-    out: dict[str, Any] = {
-        "input_tokens": usage.input_tokens,
-        "output_tokens": usage.output_tokens,
-        "cache_read_tokens": usage.cache_read_tokens,
-        "cache_write_tokens": usage.cache_write_tokens,
-    }
-    if usage.reasoning_tokens is not None:
-        out["reasoning_tokens"] = usage.reasoning_tokens
+    out: dict[str, Any] = {name: getattr(usage, name) for name in _USAGE_REQUIRED}
+    _put(out, "reasoning_tokens", usage.reasoning_tokens)
     return out
 
 
 def usage_from_dict(data: Any) -> Usage:
-    _strict(
-        data,
-        {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens"},
-        "usage",
-    )
-    return Usage(
-        input_tokens=_typed(data.get("input_tokens"), int, "input_tokens"),
-        output_tokens=_typed(data.get("output_tokens"), int, "output_tokens"),
-        cache_read_tokens=_typed(data.get("cache_read_tokens"), int, "cache_read_tokens"),
-        cache_write_tokens=_typed(data.get("cache_write_tokens"), int, "cache_write_tokens"),
-        reasoning_tokens=_typed(data.get("reasoning_tokens"), int, "reasoning_tokens", optional=True),
-    )
+    return Usage(**_read(data, "usage", _USAGE_REQUIRED, {"reasoning_tokens": int}))
 
 
 def origin_from_dict(data: Any) -> Origin:
-    _strict(data, {"provider", "api", "model"}, "origin")
-    return Origin(
-        provider=_typed(data.get("provider"), str, "origin.provider"),
-        api=_typed(data.get("api"), str, "origin.api"),
-        model=_typed(data.get("model"), str, "origin.model"),
-    )
+    return Origin(**_read(data, "origin", {"provider": str, "api": str, "model": str}))
 
 
 def message_to_dict(message: Message) -> dict[str, Any]:
@@ -296,8 +299,7 @@ def message_to_dict(message: Message) -> dict[str, Any]:
         }
         if message.usage is not None:
             out["usage"] = _usage_to_dict(message.usage)
-        if message.error_message is not None:
-            out["error_message"] = message.error_message
+        _put(out, "error_message", message.error_message)
         return out
     if isinstance(message, ToolResultMessage):
         return {
@@ -311,32 +313,34 @@ def message_to_dict(message: Message) -> dict[str, Any]:
 
 
 def message_from_dict(data: Mapping[str, Any]) -> Message:
-    if not isinstance(data, Mapping):
-        raise ValueError("a message must be an object")
-    role = data.get("role")
+    role = data.get("role") if isinstance(data, Mapping) else None
     if role == "user":
-        _strict(data, {"role", "content"}, "user message")
-        return UserMessage(
-            content=tuple(_block_from_dict(b, ("text", "image")) for b in _list(data.get("content"), "content"))
-        )
+        f = _read(data, "user message", {"role": str, "content": list})
+        return UserMessage(content=tuple(_block_from_dict(b, ("text", "image")) for b in f["content"]))
     if role == "assistant":
-        _strict(data, {"role", "content", "origin", "usage", "stop_reason", "error_message"}, "assistant message")
-        usage = data.get("usage")
+        f = _read(
+            data,
+            "assistant message",
+            {"role": str, "content": list, "origin": dict, "stop_reason": str},
+            {"usage": dict, "error_message": str},
+        )
         return AssistantMessage(
-            content=tuple(
-                _block_from_dict(b, ("text", "thinking", "tool_call")) for b in _list(data.get("content"), "content")
-            ),
-            origin=origin_from_dict(data.get("origin")),
-            stop_reason=_typed(data.get("stop_reason"), str, "stop_reason"),
-            usage=usage_from_dict(usage) if usage is not None else None,
-            error_message=_typed(data.get("error_message"), str, "error_message", optional=True),
+            content=tuple(_block_from_dict(b, ("text", "thinking", "tool_call")) for b in f["content"]),
+            origin=origin_from_dict(f["origin"]),
+            stop_reason=f["stop_reason"],
+            usage=usage_from_dict(f["usage"]) if "usage" in f else None,
+            error_message=f.get("error_message"),
         )
     if role == "tool_result":
-        _strict(data, {"role", "tool_call_id", "tool_name", "content", "is_error"}, "tool result message")
+        f = _read(
+            data,
+            "tool result message",
+            {"role": str, "tool_call_id": str, "tool_name": str, "content": list, "is_error": bool},
+        )
         return ToolResultMessage(
-            tool_call_id=_typed(data.get("tool_call_id"), str, "tool_call_id"),
-            tool_name=_typed(data.get("tool_name"), str, "tool_name"),
-            content=tuple(_block_from_dict(b, ("text", "image")) for b in _list(data.get("content"), "content")),
-            is_error=_typed(data.get("is_error"), bool, "is_error"),
+            tool_call_id=f["tool_call_id"],
+            tool_name=f["tool_name"],
+            content=tuple(_block_from_dict(b, ("text", "image")) for b in f["content"]),
+            is_error=f["is_error"],
         )
     raise ValueError(f"unknown message role: {role!r}")

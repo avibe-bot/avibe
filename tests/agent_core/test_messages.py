@@ -49,6 +49,12 @@ REDACTED = {
 }
 
 
+GEMINI_CALL = {
+    "role": "assistant",
+    "content": [{"type": "tool_call", "id": "call_1", "name": "read", "arguments": {"path": "a.py"}, "signature": "CiQB"}],
+    "origin": {"provider": "google", "api": "google", "model": "gemini-3-pro"},
+    "stop_reason": "tool_use",
+}
 UNSIGNED = {
     "role": "assistant",
     "content": [{"type": "thinking", "text": "Summary only."}, {"type": "text", "text": "done"}],
@@ -57,7 +63,7 @@ UNSIGNED = {
 }
 
 
-@pytest.mark.parametrize("payload", [ASSISTANT, TOOL_RESULT, USER_WITH_REF, REDACTED, UNSIGNED])
+@pytest.mark.parametrize("payload", [ASSISTANT, TOOL_RESULT, USER_WITH_REF, REDACTED, UNSIGNED, GEMINI_CALL])
 def test_persisted_shape_round_trips_exactly(payload):
     assert message_to_dict(message_from_dict(payload)) == payload
 
@@ -86,11 +92,23 @@ def test_assistant_message_exposes_tool_calls_in_order():
         {**ASSISTANT, "content": [{"type": "tool_call", "id": "t", "name": "bash", "arguments": "[]"}]},
         {**ASSISTANT, "content": [{"type": "text", "text": 5}]},
         {**ASSISTANT, "content": "text"},
+        {**UNSIGNED, "content": [{"type": "thinking", "text": "x", "signature": None}]},
+        {**TOOL_RESULT, "content": [{"type": "image", "mime_type": "image/png", "media_token": "t", "name": None}]},
+        {**REDACTED, "error_message": None},
+        {**ASSISTANT, "usage": None},
+        {**UNSIGNED, "content": [{"type": "thinking", "text": "x", "redacted": False}]},
+        {"role": "user", "content": [{"type": "text", "ref": {"ref": "sha256:" + "a" * 64 + "\n", "bytes": 1}}]},
+        {**TOOL_RESULT, "tool_call_id": ""},
+        {**TOOL_RESULT, "tool_name": ""},
+        {**ASSISTANT, "usage": {**ASSISTANT["usage"], "cache_read_tokens": -1}},
+        {**ASSISTANT, "content": [{"type": "tool_call", "id": "t", "name": "bash", "arguments": {}, "signature": ""}]},
     ],
     ids=[
         "unknown-field", "unknown-block-field", "block-not-allowed", "stop-reason", "protocol", "role",
         "unknown-ref-field", "string-flag", "integer-flag", "string-redacted", "string-count", "boolean-count",
-        "string-arguments", "number-text", "content-not-list",
+        "string-arguments", "number-text", "content-not-list", "null-signature", "null-name", "null-error",
+        "null-usage", "explicit-not-redacted", "digest-newline", "empty-call-id", "empty-tool-name", "negative-count",
+        "empty-call-signature",
     ],
 )
 def test_reader_refuses_shapes_it_does_not_know(payload):

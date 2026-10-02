@@ -80,7 +80,13 @@ class JobHost(Protocol):
 
     def status(self, job_id: str) -> JobStatus: ...
 
-    async def wait(self, job_id: str, *, deadline_s: Optional[float]) -> JobStatus: ...
+    async def wait(self, job_id: str, *, deadline_s: Optional[float]) -> JobStatus:
+        """Wait until exit, or at most ``deadline_s`` seconds from now (``None``: until exit)."""
+        ...
+
+    def output_path(self, job_id: str) -> str:
+        """Absolute path of the job's full output (``output.log``), named in truncated and handover results."""
+        ...
 
     def output(self, job_id: str, since: int = 0) -> tuple[bytes, int]:
         """Raw output bytes after ``since`` and the new offset; callers normalize."""

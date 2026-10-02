@@ -1,8 +1,9 @@
 """C-4 agent events (``agent-core-contracts/agent-event.schema.json``).
 
 Yielded by ``Agent.run`` in process; committed context lives in transcript rows,
-which these events reference by id. The adapter maps them onto existing Avibe
-outputs (``loop-control.md`` section 6).
+which these events reference by id. ``turn_id`` is ``session_turns.id``, the same
+identity as ``agent_events.turn_id``; the Harness Run id stays with the adapter.
+The adapter maps events onto existing Avibe outputs (``loop-control.md`` section 6).
 """
 
 from __future__ import annotations
@@ -16,27 +17,27 @@ CompactionReason = Literal["manual", "threshold", "overflow"]
 
 @dataclass(frozen=True)
 class RunStarted:
-    run_id: str
+    turn_id: str
     seq: int
 
 
 @dataclass(frozen=True)
 class AssistantTextDelta:
-    run_id: str
+    turn_id: str
     seq: int
     delta: str
 
 
 @dataclass(frozen=True)
 class AssistantThinkingDelta:
-    run_id: str
+    turn_id: str
     seq: int
     delta: str
 
 
 @dataclass(frozen=True)
 class MessageCommitted:
-    run_id: str
+    turn_id: str
     seq: int
     message_id: str
     context_seq: int
@@ -45,7 +46,7 @@ class MessageCommitted:
 
 @dataclass(frozen=True)
 class ToolStarted:
-    run_id: str
+    turn_id: str
     seq: int
     tool_call_id: str
     name: str
@@ -55,7 +56,7 @@ class ToolStarted:
 
 @dataclass(frozen=True)
 class ToolProgress:
-    run_id: str
+    turn_id: str
     seq: int
     tool_call_id: str
     tail: str
@@ -63,7 +64,7 @@ class ToolProgress:
 
 @dataclass(frozen=True)
 class ToolFinished:
-    run_id: str
+    turn_id: str
     seq: int
     tool_call_id: str
     event_id: str
@@ -73,21 +74,21 @@ class ToolFinished:
 
 @dataclass(frozen=True)
 class SteerApplied:
-    run_id: str
+    turn_id: str
     seq: int
     message_id: str
 
 
 @dataclass(frozen=True)
 class CompactionStarted:
-    run_id: str
+    turn_id: str
     seq: int
     reason: CompactionReason
 
 
 @dataclass(frozen=True)
 class CompactionFinished:
-    run_id: str
+    turn_id: str
     seq: int
     event_id: str
     reason: CompactionReason
@@ -97,7 +98,7 @@ class CompactionFinished:
 
 @dataclass(frozen=True)
 class CompactionFailed:
-    run_id: str
+    turn_id: str
     seq: int
     reason: CompactionReason
     error: str
@@ -105,14 +106,14 @@ class CompactionFailed:
 
 @dataclass(frozen=True)
 class RunEnded:
-    run_id: str
+    turn_id: str
     seq: int
     reason: RunEndReason
 
 
 @dataclass(frozen=True)
 class AgentError:
-    run_id: str
+    turn_id: str
     seq: int
     kind: str
     message: str
