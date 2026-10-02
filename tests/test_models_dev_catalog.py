@@ -467,6 +467,7 @@ def test_cached_catalog_read_does_not_wait_on_a_foreground_fetch(monkeypatch, tm
     assert read == [_catalog()]
 
 
+@pytest.mark.real_catalog_refresh
 def test_first_catalog_read_reports_one_fetch_in_flight_until_it_fails(monkeypatch, tmp_path):
     """MH-PRICE-014: With no cached copy, readers start one fetch and say one is coming; after a failure they do not."""
 

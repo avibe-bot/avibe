@@ -26,11 +26,6 @@ from tests.test_ui_session_stream import _make_session, isolated_state  # noqa: 
 from tests.ui_server_test_helpers import csrf_headers
 
 
-@pytest.fixture(autouse=True)
-def _isolate_web_push(monkeypatch):
-    monkeypatch.setattr("core.web_push_notifications.maybe_notify_inbox_message", lambda *_args: None)
-
-
 def _harness_restart_notice(tmp_path, *, backend="codex", target="same", linked=True):
     """Real Run/Delivery/Turn settlement, owed-notice drain, and message storage."""
     scope_id, session_id = _make_session(tmp_path, agent_backend=backend)

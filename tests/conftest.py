@@ -53,7 +53,11 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
+import traceback
 import unittest
+import urllib.parse
+import urllib.request
 import warnings
 from contextlib import closing, contextmanager
 from functools import wraps
@@ -63,6 +67,7 @@ import psutil
 import pytest
 from sqlalchemy.exc import SAWarning
 
+from config.paths import AVIBE_HOME_DIRNAME, LEGACY_HOME_DIRNAME
 from tests.fake_pid_helpers import PID_LIMIT
 
 REAL_USER_HOME = Path.home()
@@ -282,6 +287,51 @@ def _reset_latest_version_cache():
     latest_version_cache._MEMORY.clear()  # noqa: SLF001
     yield
     latest_version_cache._MEMORY.clear()  # noqa: SLF001
+
+
+@pytest.fixture(autouse=True)
+def _no_background_web_push(request: pytest.FixtureRequest, monkeypatch) -> list[dict] | None:
+    """Keep the delayed Web Push sender off a thread that outlives its test.
+
+    Persisting a notifiable Workbench message schedules
+    ``_send_to_enabled_subscriptions`` on a daemon thread that sleeps
+    ``WEB_PUSH_NOTIFICATION_DELAY_SECONDS`` and only then resolves the state
+    paths. By then the test that scheduled it has usually ended; one such thread
+    woke while the next test's home isolation was half applied, resolved the
+    developer's real home and migrated its database. Scheduling still runs, and
+    the payloads that would have been pushed are returned, so a test that asserts
+    on them requests this fixture. ``real_web_push_sender`` opts out a test that
+    drives the sender itself.
+    """
+
+    if request.node.get_closest_marker("real_web_push_sender"):
+        return None
+    from core import web_push_notifications
+
+    pushed: list[dict] = []
+    monkeypatch.setattr(web_push_notifications, "_send_to_enabled_subscriptions", pushed.append)
+    return pushed
+
+
+@pytest.fixture(autouse=True)
+def _no_background_catalog_refresh(request: pytest.FixtureRequest, monkeypatch) -> None:
+    """Keep the remote catalog refreshes off threads that outlive their test.
+
+    Reading the backend model catalog or the models.dev catalog from a fresh home
+    finds its cache stale and starts a daemon thread that fetches over the network
+    and only then resolves the state directory to write the cache, usually after
+    the test has ended -- the same shape as the Web Push sender, and the real-home
+    tripwire caught both writing the developer's state. Each scheduler reports
+    that no refresh started. ``real_catalog_refresh`` opts out a test that drives
+    the refresh itself.
+    """
+
+    if request.node.get_closest_marker("real_catalog_refresh"):
+        return
+    from vibe import backend_model_catalog, models_dev_catalog
+
+    monkeypatch.setattr(backend_model_catalog, "schedule_remote_catalog_refresh", lambda: False)
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_background", lambda: False)
 
 
 @pytest.fixture(autouse=True)
@@ -679,6 +729,152 @@ def _foreign_signal_guard(request, tmp_path):
     __tracebackhide__ = True
     if guard.violations:
         pytest.fail("signals and lookups this test may not make were blocked:\n" + "\n".join(guard.violations))
+
+
+# The developer's real Avibe state: both homes under REAL_USER_HOME, spelled as
+# written and as resolved, because the legacy name is usually a symlink to the
+# current one. Fixed when pytest loads this file, before any test patches HOME
+# or `Path.home`. The SQLite migration guard cannot stand in for this: every
+# test runs with its opt-in flag set and with `Path.home` naming the test's own
+# home, so under pytest neither of its checks can recognise the real database.
+_REAL_STATE_ROOTS = tuple(
+    sorted(
+        {
+            spelling
+            for name in (AVIBE_HOME_DIRNAME, LEGACY_HOME_DIRNAME)
+            for spelling in (os.path.abspath(REAL_USER_HOME / name), os.path.realpath(REAL_USER_HOME / name))
+        }
+    )
+)
+_WRITE_OPEN_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+_TRIPWIRE_EVENTS = frozenset(
+    {"open", "sqlite3.connect", "os.mkdir", "os.rename", "os.remove", "os.rmdir", "shutil.rmtree"}
+)
+# Every refused write in this run, in order. A daemon thread or a broad `except`
+# can swallow the refusal itself; this record is what fails the session.
+_real_home_writes: list[str] = []
+_tripwire_busy = threading.local()
+
+
+def _under_real_state(path, dir_fd=None) -> str | None:
+    if isinstance(path, int):
+        return None
+    text = os.fsdecode(path)
+    if dir_fd is not None and not os.path.isabs(text):
+        return None
+    absolute = os.path.abspath(text)
+    if any(absolute == root or absolute.startswith(root + os.sep) for root in _REAL_STATE_ROOTS):
+        return absolute
+    return None
+
+
+def _sqlite_write_target(database) -> str | None:
+    text = os.fsdecode(database)
+    if not text.startswith("file:"):
+        return _under_real_state(text)
+    uri = urllib.parse.urlsplit(text)
+    query = urllib.parse.parse_qs(uri.query)
+    if query.get("mode") == ["ro"] or query.get("immutable") == ["1"]:
+        return None
+    return _under_real_state(urllib.request.url2pathname(uri.path))
+
+
+def _real_state_writes(event: str, args: tuple) -> list[str]:
+    if event == "open":
+        path, mode, flags = args
+        if isinstance(flags, int):
+            writes = bool(flags & _WRITE_OPEN_FLAGS)
+        else:
+            writes = any(letter in (mode or "") for letter in "wax+")
+        targets = [_under_real_state(path)] if writes else []
+    elif event == "sqlite3.connect":
+        targets = [_sqlite_write_target(args[0])]
+    elif event == "os.rename":
+        src, dst, src_dir_fd, dst_dir_fd = args
+        targets = [_under_real_state(src, src_dir_fd), _under_real_state(dst, dst_dir_fd)]
+    else:
+        # mkdir, remove, rmdir and rmtree: the path first, its dir_fd last when the event carries one.
+        targets = [_under_real_state(args[0], args[-1] if len(args) > 1 else None)]
+    return [target for target in targets if target is not None]
+
+
+def _describe_real_home_write(event: str, written: list[str]) -> str:
+    frames = [
+        f"{frame.filename}:{frame.lineno} in {frame.name}"
+        for frame in traceback.extract_stack()
+        if frame.filename.startswith(_REPO_ROOT) and frame.filename != __file__
+    ]
+    return (
+        f"{event} {', '.join(written)} from thread {threading.current_thread().name} during "
+        f"{os.environ.get('PYTEST_CURRENT_TEST', 'no test')}: {'; '.join(frames[-6:]) or 'no repository frame'}"
+    )
+
+
+def _real_home_tripwire(event: str, args: tuple) -> None:
+    """Refuse any write under the developer's real Avibe home, from any thread.
+
+    An audit hook rather than a fixture, so it holds between tests, during
+    collection and in threads that outlive the test that started them -- the
+    window per-test isolation cannot reach. Reads stay allowed, including
+    ``uses_real_paths`` tests and read-only SQLite URIs (``mode=ro``,
+    ``immutable=1``). Child processes are outside it: each pytest child loads
+    its own copy of this file, and other children inherit the test's home.
+    """
+
+    if event not in _TRIPWIRE_EVENTS or getattr(_tripwire_busy, "active", False):
+        return
+    # Reading source for the description opens files, which re-enters this hook.
+    _tripwire_busy.active = True
+    try:
+        try:
+            written = _real_state_writes(event, args)
+        except (TypeError, ValueError, OSError):
+            return  # not a path this hook can name, such as a cwd that no longer exists
+        if not written:
+            return
+        message = _describe_real_home_write(event, written)
+        _real_home_writes.append(message)
+    finally:
+        _tripwire_busy.active = False
+    # A BaseException, so a product `except Exception` around the write cannot
+    # swallow it; the session-end check covers anything broader.
+    pytest.fail(f"refused a write under the real Avibe home: {message}")
+
+
+sys.addaudithook(_real_home_tripwire)
+
+
+_SESSION = pytest.StashKey[pytest.Session]()
+_REPORTED_WRITES = pytest.StashKey[int]()
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    session.config.stash[_SESSION] = session
+
+
+def pytest_terminal_summary(terminalreporter) -> None:
+    written = list(_real_home_writes)
+    terminalreporter.config.stash[_REPORTED_WRITES] = len(written)
+    if written:
+        terminalreporter.section("writes under the real Avibe home were refused", red=True)
+        for message in written:
+            terminalreporter.line(message, red=True)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config: pytest.Config) -> None:
+    # As late as pytest still reads the exit status: a daemon thread can write
+    # after the last test, or while the session reports. Only a write during
+    # interpreter shutdown is refused without failing the run.
+    for message in _real_home_writes[config.stash.get(_REPORTED_WRITES, 0) :]:
+        sys.stderr.write(f"refused a write under the real Avibe home: {message}\n")
+    session = config.stash.get(_SESSION, None)
+    if _real_home_writes and session is not None and session.exitstatus in (
+        pytest.ExitCode.OK,
+        pytest.ExitCode.NO_TESTS_COLLECTED,
+    ):
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.fixture
