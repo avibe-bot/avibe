@@ -89,6 +89,25 @@ An explicit Agent probe still tests only its selected hop: an unsupported
 Google model returns the same controlled 422 reason instead of retrying a
 permanent local limitation as a changed route.
 
+Saved-Source probes are an explicit exception to the Avibe-only consumer
+scope: they test one exact inventory model with a buffered request in the
+Source's protocol. A Google Source model containing `:` returns local HTTP 422
+with `google_model_path_unsupported`, not an upstream/model failure. It does not
+try another model, admit a transport or attempt, settle recovery, verify the
+credential, meter usage, or attach a served origin. The internal `opencode`
+adapter-dispatch marker does not make this Model Hub operation a native CLI call.
+
+One pure predicate owns the two engine limitations, from frontend protocol,
+Source protocol, original model id and streaming mode. Avibe routing/Agent
+probes and saved-Source probes explicitly apply it before engine preparation
+and to the locked, revalidated snapshot immediately before adapter admission.
+A request already known to be unsupported at preflight does not start/reconcile
+the engine or drain credential custody; a supported fallback retains ordinary
+demand preparation. A later configuration change is checked again before any
+inference admission.
+Source observation and inventory discovery remain model-free and do not apply
+these inference-path checks.
+
 Native CLI behavior is unchanged. Google buffered conversion, Google/Anthropic/
 Chat streaming without model colons, and all other frontends served by a Google
 Source are not skipped.

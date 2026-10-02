@@ -185,6 +185,78 @@ def test_probe_refuses_invalid_or_unknown_selection_before_runtime_work(tmp_path
     adapter.invoke.assert_not_awaited()
 
 
+@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("model_id", ["fixture:free", "../fixture", "/fixture"])
+@pytest.mark.parametrize("selection", ["initial", "reconciled"])
+def test_saved_source_probe_checks_google_path_before_engine_and_at_admission(
+    tmp_path, protocol, model_id, selection,
+):
+    """A saved-model test must not turn a known local limitation into upstream evidence.
+
+    The protocol-only probe table missed special model identities and a Source
+    changing while engine preparation yields the mutation lock.
+    """
+    service, store, adapter = _service(tmp_path)
+
+    async def scenario():
+        adapter.discover_models = AsyncMock(return_value=(DiscoveredModel(model_id),))
+        saved = (await service.create_source(_draft(
+            protocol=protocol if selection == "initial" else "openai_chat",
+        )))["source"]
+        store.config.sources[0].state = ModelHubSourceStateConfig(
+            status="cooldown", retry_at="2026-07-23T02:59:00+00:00",
+            detail_key="models.source.cooldown.server_error",
+        )
+        before = copy.deepcopy(store.config.to_payload())
+        generation = service._next_settlement_generation
+        events = service.events.list()
+        original_prepare = service._prepare_engine_for_demand
+
+        async def prepare():
+            nonlocal before
+            await original_prepare()
+            if selection == "reconciled":
+                # The saved Source is reloaded after demand preparation; the
+                # request must use and check that current protocol snapshot.
+                async with service._mutation_lock:
+                    changed = copy.deepcopy(store.config)
+                    changed.sources[0].protocol = protocol
+                    store.save(changed)
+                    before = copy.deepcopy(store.config.to_payload())
+
+        service._prepare_engine_for_demand = AsyncMock(side_effect=prepare)
+        adapter.invoke = AsyncMock(wraps=adapter.invoke)
+        service._meter_call = AsyncMock(wraps=service._meter_call)
+        service._verify_successful_source = AsyncMock(wraps=service._verify_successful_source)
+        service._record_recovery_success = AsyncMock(wraps=service._record_recovery_success)
+        if protocol == "google" and ":" in model_id:
+            with pytest.raises(ModelHubError) as refused:
+                await service.probe_source(saved["id"], {"model": model_id})
+            assert refused.value.code == "google_model_path_unsupported"
+            assert refused.value.status == 422
+            assert refused.value.origin is None
+            adapter.invoke.assert_not_awaited()
+            service._meter_call.assert_not_awaited()
+            service._verify_successful_source.assert_not_awaited()
+            service._record_recovery_success.assert_not_awaited()
+            assert store.config.to_payload() == before
+            assert service._next_settlement_generation == generation
+            assert service.events.list() == events
+            assert service._prepare_engine_for_demand.await_count == (selection == "reconciled")
+        else:
+            answer = await service.probe_source(saved["id"], {"model": model_id})
+            assert answer["reachable"]
+            assert answer["protocol"] == protocol
+            assert answer["model_id"] == model_id
+            adapter.invoke.assert_awaited_once()
+            assert adapter.invoke.call_args.args[1] == model_id
+            assert adapter.invoke.call_args.args[2].protocol == protocol
+            service._prepare_engine_for_demand.assert_awaited_once()
+        assert not service._mutation_lock.locked()
+
+    asyncio.run(scenario())
+
+
 def test_manual_model_addition_never_calls_upstream_discovery(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = asyncio.run(service.create_source(_draft()))["source"]

@@ -12,6 +12,7 @@ import io
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import aiohttp
 from aiohttp import web
@@ -557,6 +558,7 @@ async def test_google_unsupported_model_skip_keeps_next_model_on_the_same_source
     service = _avibe_service(tmp_path, [source], handles=[
         InvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=source.id)),
     ])
+    service.revocations.add("src_retired01", "cred_retired01")
     service.store.config.agents["avibe"].routes["menu-alias"] = ModelHubRouteConfig((
         ModelHubRouteHopConfig(source.id, "fixture:free"),
         ModelHubRouteHopConfig(source.id, "safe-model"),
@@ -567,24 +569,36 @@ async def test_google_unsupported_model_skip_keeps_next_model_on_the_same_source
     )
     assert result.model_id == "safe-model"
     assert service.adapter.invocations == [(source.id, "safe-model", "avibe")]
+    assert service.revocations.list() == []
 
 
-async def test_google_explicit_agent_probe_surfaces_unsupported_model_without_restarting(tmp_path, monkeypatch):
-    """A non-fallback probe cannot treat permanent local incompatibility as route churn."""
+@pytest.mark.parametrize("caller", ["turn", "agent_probe"])
+@pytest.mark.parametrize("pending_revocation", [False, True])
+async def test_google_unsupported_model_refusal_precedes_engine_work(tmp_path, caller, pending_revocation):
+    """Local skips must not start an engine or alter custody before refusing."""
     source = _source("src_google001", "Google", vendor="custom", protocol="google", model_id="fixture:free")
     service = _avibe_service(tmp_path, [source])
-    original = service._invoke_admitted
-    calls = 0
-
-    async def guarded_admission(**kwargs):
-        nonlocal calls
-        calls += 1
-        assert calls == 1, "an unsupported explicit probe must not loop"
-        return await original(**kwargs)
-
-    monkeypatch.setattr(service, "_invoke_admitted", guarded_admission)
+    if pending_revocation:
+        service.revocations.add("src_retired01", "cred_retired01")
+    pending = service.revocations.list()
+    before = copy.deepcopy(service.store.config.to_payload())
+    generation = service._next_settlement_generation
+    service._prepare_engine_for_demand = AsyncMock(wraps=service._prepare_engine_for_demand)
+    service._ensure_engine_synced = AsyncMock(wraps=service._ensure_engine_synced)
     with pytest.raises(ModelHubError) as refused:
-        await service.probe_agent("avibe", "menu-alias")
+        if caller == "agent_probe":
+            await service.probe_agent("avibe", "menu-alias")
+        else:
+            await service.resolve(
+                backend="avibe", model_id="menu-alias",
+                request=ModelHubRequest({"contents": []}, protocol="google"), stream=False,
+            )
     assert refused.value.code == "google_model_path_unsupported"
     assert refused.value.status == 422
+    assert refused.value.origin is None
+    service._prepare_engine_for_demand.assert_not_awaited()
+    service._ensure_engine_synced.assert_not_awaited()
     assert service.adapter.invocations == []
+    assert service.store.config.to_payload() == before
+    assert service.revocations.list() == pending
+    assert service._next_settlement_generation == generation

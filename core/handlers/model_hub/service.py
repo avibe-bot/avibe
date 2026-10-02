@@ -624,6 +624,26 @@ class _InvocationUnsupported(_InvocationPlanChanged):
         self.reason = reason
 
 
+def _google_admission_skip_reason(
+    frontend_protocol: str | None,
+    source_protocol: str,
+    model_id: str,
+    stream: bool,
+) -> str | None:
+    """Pinned-engine facts; callers explicitly own where refusal applies."""
+    if frontend_protocol != "google":
+        return None
+    # Pinned CPA splits the decoded action on every colon; escaping cannot
+    # preserve a model colon through that parser.
+    if ":" in model_id:
+        return "google_model_path_unsupported"
+    # CPA c404af96 omits finishReason on its Responses -> Gemini
+    # response.completed conversion. Usage/EOF cannot supply that terminal.
+    if stream and source_protocol == "openai_responses":
+        return "google_stream_responses_unsupported"
+    return None
+
+
 class _RecoveryWindowClosed(Exception):
     """The request may finish its admitted inference, but cannot start another."""
 
@@ -6247,6 +6267,11 @@ class ModelHubService:
                 or not any(model.id == model_id and not model.retired for model in source.models)
             ):
                 raise ModelHubError("mapping_target_unavailable", status=409)
+            # Saved-Source tests are buffered and speak the Source protocol.
+            # Check both initial selection and the locked post-prepare snapshot.
+            reason = _google_admission_skip_reason(source.protocol, source.protocol, model_id, False)
+            if reason is not None:
+                raise ModelHubError(reason, status=422)
             return source
 
         handle = None
@@ -6537,6 +6562,10 @@ class ModelHubService:
                 ),
             }
 
+        if backend == "avibe":
+            reason = _google_admission_skip_reason(source.protocol, source.protocol, resolved_model, False)
+            if reason is not None:
+                raise _InvocationUnsupported(reason)
         await self._prepare_engine_for_demand()
         started_at = time.monotonic()
         settlement_generation = None
@@ -7899,16 +7928,11 @@ class ModelHubService:
                     raise _InvocationPlanChanged
                 attempt_request = request
                 if backend == "avibe":
-                    if getattr(request, "protocol", None) == "google":
-                        # Pinned CPA splits the decoded action on every colon;
-                        # escaping cannot preserve a model colon through it.
-                        if ":" in model_id:
-                            raise _InvocationUnsupported("google_model_path_unsupported")
-                        if stream and source.protocol == "openai_responses":
-                            # CPA c404af96 omits finishReason on its Responses
-                            # -> Gemini response.completed conversion. Usage or
-                            # transport EOF cannot prove a missing terminal.
-                            raise _InvocationUnsupported("google_stream_responses_unsupported")
+                    reason = _google_admission_skip_reason(
+                        getattr(request, "protocol", None), source.protocol, model_id, stream,
+                    )
+                    if reason is not None:
+                        raise _InvocationUnsupported(reason)
                     # Validate the exact rechecked admission snapshot for every
                     # hop, including fallback/refresh. Persisted ids stay intact;
                     # refusal must precede a transport, attempt, or recovery slot.
@@ -8209,7 +8233,10 @@ class ModelHubService:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
         engine_prepared = False
-        if self.revocations.list():
+        # An entirely unsupported Google request must not reconcile the engine
+        # or custody. Supported hops drain the journal in demand preparation.
+        google_preflight = backend == "avibe" and getattr(request, "protocol", None) == "google"
+        if not google_preflight and self.revocations.list():
             try:
                 await self._ensure_engine_synced()
             except ModelHubError:
@@ -8298,8 +8325,6 @@ class ModelHubService:
                     outcome=None,
                     supply_channel="native_cli",
                 )
-            await self._prepare_engine_for_demand(already_synced=engine_prepared)
-            engine_prepared = True
             settlement_generation = None
 
             def admitted(generation: int) -> None:
@@ -8323,6 +8348,14 @@ class ModelHubService:
                     )
 
             try:
+                if backend == "avibe":
+                    reason = _google_admission_skip_reason(
+                        getattr(request, "protocol", None), source.protocol, target_model, stream,
+                    )
+                    if reason is not None:
+                        raise _InvocationUnsupported(reason)
+                await self._prepare_engine_for_demand(already_synced=engine_prepared)
+                engine_prepared = True
                 handle, outcome, cancelled = await self._invoke(
                     source=source,
                     model_id=target_model,
