@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import sqlite3
+import sys
 import time
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,10 @@ from storage.background import SQLiteBackgroundTaskStore
 from storage.models import agent_sessions
 from storage.session_reclaim import reclaim_bound_definitions
 from vibe import cli
+from vibe.i18n import t as i18n_t
+from vibe.ui_server import app as ui_app
+
+from tests.ui_server_test_helpers import csrf_headers
 
 SESSION_ID = "ses_job_watch"
 
@@ -257,43 +262,87 @@ def test_ending_ownership_kills_the_job_process_tree(tmp_path: Path, end, reason
     assert _follow_ups(watch_id) == []
 
 
-def _pause_and_resume_in_the_cli(store: ManagedWatchStore, watch_id: str) -> None:
-    store.set_enabled(watch_id, False)
-    store.set_enabled(watch_id, True)
+def _resume_in_the_cli(watch_id: str, capsys) -> tuple[str, str]:
+    assert cli.cmd_watch_set_enabled(watch_id, True) == 1
+    error = json.loads(capsys.readouterr().err)
+    return error["code"], error["error"]
 
 
-def _pause_and_resume_in_the_web_ui(store: ManagedWatchStore, watch_id: str) -> None:
-    sqlite = SQLiteBackgroundTaskStore()
-    sqlite.set_definition_enabled(watch_id, False, definition_type="watch")
-    sqlite.set_definition_enabled(watch_id, True, definition_type="watch")
+def _resume_in_the_web_ui(watch_id: str, capsys) -> tuple[str, str]:
+    client = ui_app.test_client()
+    response = client.patch(
+        f"/api/harness/watches/{watch_id}", json={"enabled": True}, headers=csrf_headers(client)
+    )
+    assert response.status_code == 409
+    error = response.get_json()["error"]
+    return error["code"], error["message"]
 
 
-@pytest.mark.parametrize(
-    "pause_and_resume",
-    [_pause_and_resume_in_the_cli, _pause_and_resume_in_the_web_ui],
-    ids=["cli", "web-ui"],
-)
-def test_a_pause_resumed_before_the_service_saw_it_still_stops_the_job(tmp_path: Path, pause_and_resume) -> None:
-    async def run() -> tuple[LocalJobHost, str, str]:
+@pytest.mark.parametrize("state", ["paused", "released"])
+@pytest.mark.parametrize("resume", [_resume_in_the_cli, _resume_in_the_web_ui], ids=["cli", "web-ui"])
+def test_a_job_watch_that_no_longer_owns_its_job_is_never_resumed(
+    tmp_path: Path, capsys, monkeypatch, state: str, resume
+) -> None:
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    async def run() -> tuple[LocalJobHost, str, str, tuple[str, str]]:
         store = ManagedWatchStore()
         host = _host(tmp_path, store)
-        job_id = await _start_job(host, tmp_path, "sleep 60")
+        job_id = await _start_job(host, tmp_path, "echo done" if state == "released" else "sleep 60")
         watch_id = await host.hand_over(job_id)
-        # Both writes land before any service reads the row.
-        pause_and_resume(store, watch_id)
+        if state == "released":
+            first = _service(store)
+            await _start_service(first)
+            await _until(lambda: not store.get_watch(watch_id).enabled, "the job never reported")
+            await first.stop()
+        else:
+            # Paused, and resumed before any service has seen the pause.
+            store.set_enabled(watch_id, False)
+        refusal = resume(watch_id, capsys)
+        # A repeated hand-over adopts the same Watch and does not re-arm it either.
+        assert await hand_over_job(host.meta(job_id), store=ManagedWatchStore()) == watch_id
         reloaded = ManagedWatchStore()
         service = _service(reloaded)
         await _start_service(service)
-        await _until(lambda: host.status(job_id).state != "running", "the pause never stopped the job")
-        await _until(lambda: not reloaded.get_watch(watch_id).enabled, "the resumed Watch never reported")
+        await _until(lambda: host.status(job_id).state != "running", "the paused job kept running")
+        await _until(lambda: _released(watch_id), "the Watch was never released")
+        await asyncio.sleep(0.2)  # a replayed report would land here
         await service.stop()
-        return host, job_id, watch_id
+        return host, job_id, watch_id, refusal
 
-    host, job_id, watch_id = asyncio.run(run())
+    host, job_id, watch_id, (code, message) = asyncio.run(run())
 
-    assert host.stop_reason(job_id) == "watch_disabled"
-    (follow_up,) = _follow_ups(watch_id)
-    assert follow_up.prompt.endswith(f"Command stopped because Watch {watch_id} was paused")
+    assert code == "job_watch_not_resumable"
+    language = "zh" if resume is _resume_in_the_cli else "en"
+    assert message == i18n_t("error.jobWatchResumeRefused.message", language)
+    assert not ManagedWatchStore().get_watch(watch_id).enabled
+    if state == "released":
+        assert len(_follow_ups(watch_id)) == 1
+        assert host.stop_reason(job_id) is None
+    else:
+        assert _follow_ups(watch_id) == []
+        assert host.stop_reason(job_id) == "watch_disabled"
+
+
+def test_changing_a_job_watch_waiter_is_refused_in_the_user_language(tmp_path: Path, capsys, monkeypatch) -> None:
+    async def hand_over() -> tuple[LocalJobHost, str, str]:
+        store = ManagedWatchStore()
+        host = _host(tmp_path, store)
+        job_id = await _start_job(host, tmp_path, "sleep 60")
+        return host, job_id, await host.hand_over(job_id)
+
+    host, job_id, watch_id = asyncio.run(hand_over())
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    monkeypatch.setattr(sys, "argv", ["vibe", "watch", "update", watch_id, "--shell", "pytest -q"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+
+    assert exit_info.value.code == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error["code"] == "job_watch_update_refused"
+    assert error["error"] == i18n_t("error.jobWatchUpdateRefused.message", "zh")
+    assert ManagedWatchStore().get_watch(watch_id).job_target["command"] == "sleep 60"
+    asyncio.run(host.kill(job_id))
 
 
 def _session_gone() -> None:
@@ -303,7 +352,7 @@ def _session_gone() -> None:
 
 @pytest.mark.parametrize(
     ("teardown", "reason"),
-    [(_archive_session, "session_archived"), (_session_gone, "watch_disabled")],
+    [(_archive_session, "session_archived"), (_session_gone, "watch_removed")],
     ids=["archived", "deleted"],
 )
 def test_a_hand_over_after_its_session_teardown_still_ends_the_job(tmp_path: Path, teardown, reason: str) -> None:

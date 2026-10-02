@@ -145,6 +145,19 @@ JOB_STOP_SESSION_ARCHIVED = "session_archived"
 JOB_STOP_VIBE_STOP = "vibe_stop"
 
 
+class JobWatchUpdateRefused(ValueError):
+    """A job Watch has no waiter: the command it waits on is already running."""
+
+    code = "job_watch_update_refused"
+
+    def __init__(self, watch_id: str) -> None:
+        super().__init__(
+            f"watch {watch_id} waits on a running command: its command, cwd, mode, timeout, "
+            "and retry settings cannot be changed"
+        )
+        self.watch_id = watch_id
+
+
 def _publish_watch_definitions_updated() -> None:
     try:
         from core.inbox_events import publish_definitions_updated
@@ -891,16 +904,18 @@ class ManagedWatchStore:
             watch = self._watches[watch_id]
             expect = self._read_state(watch)
             if enabled and not watch.enabled:
+                # First, because it may refuse (a job Watch): nothing is mutated yet.
+                resumed_metadata = watch_metadata_after_resume(
+                    watch.metadata,
+                    resumed_at=_utc_now_iso(),
+                )
                 # Same field split the storage layer applies to the Harness UI's
                 # toggle, so the two doorways cannot drift apart again.
                 self._clear_cycle_state(
                     watch,
                     definition_resume_clear_columns("watch", watch.mode),
                 )
-                watch.metadata = watch_metadata_after_resume(
-                    watch.metadata,
-                    resumed_at=_utc_now_iso(),
-                )
+                watch.metadata = resumed_metadata
             watch.enabled = enabled
             watch.updated_at = _utc_now_iso()
             if not self._write_watch(watch, expect):
@@ -962,10 +977,7 @@ class ManagedWatchStore:
                     watch.retry_exit_codes,
                     watch.retry_delay_seconds,
                 ):
-                    raise ValueError(
-                        "this Watch waits on a running command: its command, cwd, mode, timeout, "
-                        "and retry settings cannot be changed"
-                    )
+                    raise JobWatchUpdateRefused(watch_id)
                 metadata = {
                     **(metadata if metadata is not None else watch.metadata),
                     WATCH_TARGET_METADATA_KEY: target,
@@ -2428,7 +2440,7 @@ class ManagedWatchService:
         return await self._commit_cycle_result_async(
             watch,
             exit_code=None,
-            error=outcome.error,
+            error=self._t(outcome.error_key, **outcome.error_args) if outcome.error_key else None,
             event_detected=outcome.event_detected,
             disable=True,
             prompt=_build_prompt(watch.message or watch.prefix, outcome.report),
@@ -3050,10 +3062,11 @@ async def _stop_job(target: Mapping[str, Any], reason: str) -> bool:
 def _job_still_owned(row: Mapping[str, Any]) -> bool:
     """Whether the Watch of a ``list_job_watch_targets`` row still owns its job.
 
-    Enabled is not enough: a pause resumed before the sweep saw it still owes the stop.
+    Enabled and not removed: a job Watch is never re-enabled once it lets go
+    (``watch_metadata_after_resume`` refuses), so this cannot flip back.
     """
 
-    return bool(row["enabled"] and not row["deleted"] and not row["target"].get("stop_pending"))
+    return bool(row["enabled"] and not row["deleted"])
 
 
 def _unowned_job_stop_reason(row: Mapping[str, Any]) -> str:
@@ -3064,9 +3077,12 @@ def _unowned_job_stop_reason(row: Mapping[str, Any]) -> str:
 
 @dataclass(frozen=True)
 class _JobOutcome:
+    #: The follow-up for the agent, in the ``bash`` tool's English.
     report: str
     exit_code: Optional[int]
-    error: Optional[str]
+    #: The Watch's ``last_error``, which people read: an i18n key and its arguments.
+    error_key: Optional[str]
+    error_args: dict[str, Any]
     timed_out: bool
     event_detected: bool = True
 
@@ -3089,18 +3105,20 @@ def _job_outcome(watch: ManagedWatch, target: Mapping[str, Any]) -> _JobOutcome:
     output = JobOutput(host, job_id)
     output.finish()
     text, truncation = output.render("(no output)")
-    line, timed_out = _job_status_line(watch, status, host.stop_reason(job_id), meta.get("timeout_s"))
+    line, error_key, error_args, timed_out = _job_status(
+        watch, status, host.stop_reason(job_id), meta.get("timeout_s")
+    )
     elapsed = _job_elapsed_seconds(meta, str(target["state_dir"]))
     header = f"Watch {watch.id} finished" + (f" after {_format_elapsed(elapsed)}." if elapsed is not None else ".")
     parts = [header, f"Command: {target['command']}", "", text]
     if truncation is None:
         parts += ["", output.where()]
     parts += ["", line]
-    exit_code = status.exit_code if status.state == "exited" else None
     return _JobOutcome(
         report="\n".join(parts),
-        exit_code=exit_code,
-        error=None if exit_code == 0 else line,
+        exit_code=status.exit_code if status.state == "exited" else None,
+        error_key=error_key,
+        error_args=error_args,
         timed_out=timed_out,
     )
 
@@ -3110,45 +3128,48 @@ def _missing_job_outcome(watch: ManagedWatch, target: Mapping[str, Any]) -> _Job
     return _JobOutcome(
         report=f"Watch {watch.id} finished.\nCommand: {target['command']}\n\n{line}",
         exit_code=None,
-        error=line,
+        error_key="harness.watch.jobRecordGone",
+        error_args={"job_id": target["job_id"]},
         timed_out=False,
         event_detected=False,
     )
 
 
-def _job_status_line(
+def _job_status(
     watch: ManagedWatch,
     status: Any,
     stop_reason: Optional[str],
     timeout_s: Any,
-) -> tuple[str, bool]:
-    """The last line of the report, and whether the job's own timeout ended it.
+) -> tuple[str, Optional[str], dict[str, Any], bool]:
+    """How the job ended: the report's last line, the error's i18n key and arguments, and
+    whether the job's own timeout ended it.
 
-    The first lines are the ``bash`` tool's (Pi's ``bash.ts``, MIT, Copyright (c) 2025
-    Mario Zechner); the others say which owner stopped the command.
+    A report comes only from an owning Watch, so the only stoppers it can name are the
+    job's deadline, ``vibe stop``, and the Watch's lifetime. The lines are the ``bash``
+    tool's (Pi's ``bash.ts``, MIT, Copyright (c) 2025 Mario Zechner) where it has one.
     """
 
     from core.agent_core.tools.args import format_number
-    from core.agent_core.tools.jobs import STOP_ABORTED, STOP_TIMEOUT
+    from core.agent_core.tools.jobs import STOP_TIMEOUT
 
     if status.state == "exited":
-        return f"Command exited with code {status.exit_code}", False
+        line = f"Command exited with code {status.exit_code}"
+        if status.exit_code == 0:
+            return line, None, {}, False
+        return line, "harness.watch.jobExitedWithCode", {"code": status.exit_code}, False
     if stop_reason == STOP_TIMEOUT:
         if isinstance(timeout_s, (int, float)) and not isinstance(timeout_s, bool):
-            return f"Command timed out after {format_number(timeout_s)} seconds", True
-        return "Command timed out", True
-    lines = {
-        STOP_ABORTED: "Command aborted",
-        JOB_STOP_VIBE_STOP: "Command stopped by `vibe stop`",
-        JOB_STOP_WATCH_LIFETIME: (
+            return f"Command timed out after {format_number(timeout_s)} seconds", "harness.watch.jobTimedOut", {}, True
+        return "Command timed out", "harness.watch.jobTimedOut", {}, True
+    if stop_reason == JOB_STOP_VIBE_STOP:
+        return "Command stopped by `vibe stop`", "harness.watch.jobStoppedByVibeStop", {}, False
+    if stop_reason == JOB_STOP_WATCH_LIFETIME:
+        line = (
             f"Command stopped: Watch {watch.id} reached its lifetime of "
             f"{format_number(watch.lifetime_timeout_seconds)} seconds"
-        ),
-        JOB_STOP_WATCH_DISABLED: f"Command stopped because Watch {watch.id} was paused",
-        JOB_STOP_WATCH_REMOVED: f"Command stopped because Watch {watch.id} was removed",
-        JOB_STOP_SESSION_ARCHIVED: "Command stopped because its Session was archived",
-    }
-    return lines.get(stop_reason or "", "Command terminated without an exit code"), False
+        )
+        return line, "harness.watch.jobStoppedAtLifetime", {}, False
+    return "Command terminated without an exit code", "harness.watch.jobEndedWithoutExitCode", {}, False
 
 
 def _job_elapsed_seconds(meta: Mapping[str, Any], state_dir: str) -> Optional[float]:

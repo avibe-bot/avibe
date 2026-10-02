@@ -1885,8 +1885,7 @@ WATCH_LIFETIME_STARTED_AT_METADATA_KEY = "watch_lifetime_started_at"
 #: no schema change:
 #: ``{"kind": "job", "job_id": "job_…", "state_dir": "<absolute job directory>",
 #: "command": "<the command as the agent wrote it>"}``, plus ``exit_code`` and
-#: ``released_at`` once the Watch has settled the job, and ``stop_pending`` when a
-#: pause that must stop the job was resumed before it did. A job Watch's waiter columns
+#: ``released_at`` once the Watch has settled the job. A job Watch's waiter columns
 #: (``command_json``, ``shell_command``) stay empty on disk, so nothing that reads them,
 #: including a release without job targets, can run the command a second time; the
 #: read model shows the target's command in ``shell_command`` instead.
@@ -1921,6 +1920,15 @@ def _watch_target_sql(field: str) -> Any:
     )
 
 
+class JobWatchResumeRefused(RuntimeError):
+    """A job Watch is never resumed: once paused or finished it owns no command."""
+
+    code = "job_watch_not_resumable"
+
+    def __init__(self) -> None:
+        super().__init__("a Watch on a running command cannot be resumed once it is paused or finished")
+
+
 def watch_metadata_after_resume(
     metadata: dict[str, Any],
     *,
@@ -1928,15 +1936,15 @@ def watch_metadata_after_resume(
 ) -> dict[str, Any]:
     """Start a new armed episode while retaining the repair Run admission fence."""
 
+    if watch_job_target(metadata) is not None:
+        # The one refusal point for resuming, which every resume doorway reaches before
+        # it writes. A job Watch is disabled only once it no longer owns its job: a
+        # pause stops the command, and a report released it. Resuming would replay a
+        # released result, or erase a pause the ownership sweep has yet to act on.
+        raise JobWatchResumeRefused()
     updated = dict(metadata)
     updated.pop(WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
     updated[WATCH_LIFETIME_STARTED_AT_METADATA_KEY] = resumed_at
-    job_target = watch_job_target(updated)
-    if job_target is not None and not job_target.get("released_at"):
-        # Pausing a job Watch stops its job, and the Watch service learns of a pause
-        # only from the row. A resume landing before it looked would erase the pause,
-        # so the stop it owes stays requested here: every resume comes through here.
-        updated[WATCH_TARGET_METADATA_KEY] = {**job_target, "stop_pending": True}
     incident = updated.get(WATCH_CIRCUIT_BREAKER_METADATA_KEY)
     if isinstance(incident, dict) and incident.get("status") == "tripped":
         updated[WATCH_CIRCUIT_BREAKER_METADATA_KEY] = {
@@ -3707,15 +3715,11 @@ class SQLiteBackgroundTaskStore:
                 .limit(1)
             ).scalar_one_or_none()
             if session_status is None or session_status == "archived":
-                # The Session's teardown committed first, so its reclaim could not see
-                # this Watch. It is born reclaimed the way that teardown reclaims
-                # (archive soft-deletes; the ``/new`` hard delete pauses), and the
-                # ownership sweep stops the job, so the command never runs unowned.
-                if session_status == "archived":
-                    values["deleted_at"] = _utc_now_iso()
-                else:
-                    values["enabled"] = 0
-                    values["last_error"] = "the Watch's Session was gone before the command was handed over"
+                # The Session's teardown (archive, or the ``/new`` hard delete)
+                # committed first, so its reclaim could not see this Watch. It is born
+                # removed, and the ownership sweep stops the job, so the command never
+                # runs unowned and no follow-up targets the dead Session.
+                values["deleted_at"] = _utc_now_iso()
             upsert_definition_in_connection(conn, values, expect=None, definition_type="watch")
         return str(values["id"])
 

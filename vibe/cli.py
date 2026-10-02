@@ -62,6 +62,7 @@ from core.watches import (
     NO_EVENT_EXIT_CODE,
     WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
     WATCH_RECONCILE_INTERVAL_SECONDS,
+    JobWatchUpdateRefused,
     ManagedWatchStore,
     WatchRuntimeStateStore,
 )
@@ -111,6 +112,7 @@ from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
     TASK_RETIREMENT_SCHEDULE_MISSED,
+    JobWatchResumeRefused,
     TaskResumeBlocked,
     TaskScheduleRetired,
     compute_next_run_at,
@@ -10954,6 +10956,18 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
         return 1
     try:
         updated = store.set_enabled(watch_id, enabled)
+    except JobWatchResumeRefused as exc:
+        lang = _configured_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.jobWatchResumeRefused.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.jobWatchResumeRefused.hint", lang, id=watch_id),
+                help_command=f"vibe watch remove {watch_id}",
+                details={"watch_id": watch_id},
+            )
+        )
+        return 1
     except DefinitionWriteConflict as exc:
         _print_task_error(
             _definition_conflict_cli_error(
@@ -11339,6 +11353,23 @@ def cmd_watch_update(args):
         watch_payload = _watch_mutation_payload(updated, runtime_entry)
         _print_definition_payload(watch_payload, warnings=warnings)
         return 0
+    except JobWatchUpdateRefused as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="watch update failed before its Session reservation was adopted",
+            )
+        lang = _configured_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.jobWatchUpdateRefused.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.jobWatchUpdateRefused.hint", lang, id=exc.watch_id),
+                help_command="vibe watch update --help",
+                details={"watch_id": exc.watch_id},
+            )
+        )
+        return 1
     except DefinitionWriteConflict as exc:
         if reserved_session_id:
             _release_cli_session_reservation(
