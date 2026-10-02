@@ -13,7 +13,8 @@
     "runtime_model",
     "source_id",
     "provider",
-    "capabilities"
+    "capabilities",
+    "request_headers"
   ],
   "additionalProperties": false,
   "properties": {
@@ -52,7 +53,7 @@
       "additionalProperties": {
         "type": "string"
       },
-      "description": "Correlation metadata the gateway needs (today's gateway_request_metadata)."
+      "description": "Correlation metadata the gateway needs; always present, empty when there is none."
     },
     "capabilities": {
       "type": "object",
