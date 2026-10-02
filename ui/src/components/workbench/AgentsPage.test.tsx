@@ -252,8 +252,12 @@ describe('AgentsPage contextual selection', () => {
     expect(screen.queryByText(/Avibe Agent CLI/)).toBeNull();
     expect(screen.getByText('agents.detail.backendName:{"backend":"Avibe Agent"}')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'agents.import' }));
-    expect(screen.queryByText('agents.importFromAvibe Agent')).toBeNull();
-    expect(screen.getByText('agents.importFromClaude')).toBeTruthy();
+    expect(screen.queryByText('agents.importFrom:{"backend":"Avibe Agent"}')).toBeNull();
+    // Display names are not translation-key suffixes: a catalog brand change
+    // must keep the native import actions translated and correctly scoped.
+    for (const label of ['Claude Code', 'OpenCode', 'Codex']) {
+      expect(screen.getByText(`agents.importFrom:{"backend":"${label}"}`)).toBeTruthy();
+    }
   });
 
   it('opens the Agent named by ?agent= instead of the default one', async () => {

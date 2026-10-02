@@ -679,6 +679,8 @@ def test_system_prompt_catalog_is_backend_neutral_for_remote_sessions(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    from modules.agents.catalog import AGENT_BACKENDS
+
     cwd = tmp_path / "project"
     cwd.mkdir()
     home = tmp_path / "home"
@@ -702,11 +704,12 @@ def test_system_prompt_catalog_is_backend_neutral_for_remote_sessions(
     )
     prompts = {
         backend: build_system_prompt_injection(
+            backend=backend,
             context=context,
             fallback_platform="avibe",
             skills_cwd=cwd,
         )
-        for backend in ("claude", "codex", "opencode")
+        for backend in AGENT_BACKENDS
     }
 
     assert all("- shared: Shared" in prompt for prompt in prompts.values())

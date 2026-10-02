@@ -3274,7 +3274,7 @@ class FeishuBot(BaseIMClient):
             }
         )
 
-        title = t("modal.question.claudeCode")
+        title = display_name_for_backend("claude")
 
         card = {
             "schema": "2.0",

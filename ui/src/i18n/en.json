@@ -584,7 +584,6 @@
       "claudeSubtitle": "Detect or install the Claude Code CLI. Sign in or supply an API key from the CLI itself.",
       "claudeDescription": "Anthropic agent · sign in with Claude or supply an API key",
       "codexDescription": "OpenAI agent · ChatGPT login or OPENAI_API_KEY",
-      "avibeTitle": "Avibe Agent",
       "avibeDescription": "Built-in agent · models and routes managed in Model Hub",
       "backToBackends": "Back to backends",
       "openProviderPage": "Configure provider",
@@ -2077,12 +2076,6 @@
           "codex": "Codex configuration",
           "opencode": "OpenCode configuration"
         }
-      },
-      "backends": {
-        "claude": "Claude Code",
-        "codex": "Codex",
-        "opencode": "OpenCode",
-        "avibe": "Avibe Agent"
       },
       "sourceTest": {
         "open": "Test",
@@ -4010,9 +4003,7 @@
     "statusDisabled": "disabled",
     "newAgent": "New agent",
     "import": "Import",
-    "importFromClaude": "Import from Claude",
-    "importFromCodex": "Import from Codex",
-    "importFromOpenCode": "Import from OpenCode",
+    "importFrom": "Import from {{backend}}",
     "importSuccess": "Imported {{imported}}, skipped {{skipped}}.",
     "importFailed": "Import failed: {{error}}",
     "importNoneFound": "No {{backend}} agents found on disk to import.",
@@ -5208,20 +5199,17 @@
       "caption": "Plan · Build · Test · Deliver",
       "returnCaption": "Tests passed · back to the PM",
       "claude": {
-        "name": "Claude Code",
         "role": "PM",
         "working": "Writing the project brief",
         "complete": "Project brief ready",
         "summary": "Summarizing the delivery"
       },
       "codex": {
-        "name": "Codex",
         "role": "Developer",
         "working": "Writing code",
         "complete": "Implementation ready"
       },
       "opencode": {
-        "name": "OpenCode",
         "role": "Tester",
         "working": "Writing and running tests",
         "complete": "All tests passed"

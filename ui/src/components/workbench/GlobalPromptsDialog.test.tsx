@@ -30,8 +30,8 @@ describe('native global prompts', () => {
     mocks.saveGlobalPrompts.mockResolvedValue({ backends: files });
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     render(<GlobalPromptsDialog open onClose={vi.fn()} />);
-    await screen.findByRole('tab', { name: 'Claude' });
-    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Claude', 'OpenCode', 'Codex']);
+    await screen.findByRole('tab', { name: 'Claude Code' });
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Claude Code', 'OpenCode', 'Codex']);
     expect(screen.queryByRole('tab', { name: 'Avibe Agent' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'globalPrompts.sync' }));
     await waitFor(() => expect(mocks.saveGlobalPrompts).toHaveBeenCalledWith({

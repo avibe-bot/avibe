@@ -79,7 +79,7 @@ class AppCompatConfig:
     wechat: Optional[WeChatConfig] = None
     codex: Optional[CodexCompatConfig] = None
     opencode: Optional[OpenCodeCompatConfig] = None
-    avibe: AvibeAgentConfig = field(default_factory=AvibeAgentConfig)
+    avibe: Optional[AvibeAgentConfig] = None
     show_duration: bool = False
     include_time_info: bool = True
     include_user_info: bool = True
@@ -204,7 +204,7 @@ def to_app_config(
         claude=claude,
         codex=codex,
         opencode=opencode,
-        avibe=AvibeAgentConfig(enabled=v2.agents.avibe.enabled),
+        avibe=AvibeAgentConfig(enabled=True) if v2.agents.avibe.enabled else None,
         log_level=v2.runtime.log_level,
         ack_mode=v2.ack_mode,
         language=v2.language,

@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from modules.agents.catalog import NATIVE_CLI_BACKENDS, NativeCliBackend
+from modules.agents.catalog import NATIVE_CLI_BACKENDS, NativeCliBackend, display_name_for_backend
 from typing import Any, Awaitable, Callable, Collection, Literal, Mapping, Optional, Protocol, cast
 
 from config.v2_config import (
@@ -592,7 +592,7 @@ def _blocked_item(
         selected=False, notes_key=f"settings.models.migration.blocked.{reason}",
         vendor={"claude": "anthropic", "codex": "openai", "opencode": "opencode"}[backend],
         protocol="anthropic" if backend == "claude" else "openai_responses",
-        display_name={"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"}[backend],
+        display_name=display_name_for_backend(backend),
         source_paths=source_paths, shell_variables=shell_variables,
         shell_auth_variables=shell_auth_variables, config_blocker=config_blocker,
     )

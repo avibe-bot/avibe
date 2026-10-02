@@ -19,7 +19,7 @@ export function SettingsBackendPage({ backend }: { backend: AgentBackendId }) {
   return (
     <SettingsPageShell
       activeTab="backends"
-      title={t(`settings.backends.${backend}Title`)}
+      title={meta.label}
       subtitle={t(meta.descriptionKey)}
       breadcrumb={
         <Link to="/settings/backends" className="inline-flex items-center gap-1.5 hover:text-foreground">

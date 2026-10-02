@@ -74,7 +74,7 @@ import { SUBSCRIPTION_MENU_ROWS } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { backendVisual } from './vendorMeta';
 import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentMode, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
-import { getBackendUiMeta } from '@/lib/agentBackends';
+import { getBackendUiMeta, isNativeCliBackend, type NativeCliBackend } from '@/lib/agentBackends';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
@@ -347,7 +347,7 @@ const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ t
 };
 
 const DirectHome: React.FC<{
-  agents: AgentSupply[];
+  agents: (AgentSupply & { backend: NativeCliBackend })[];
   switchFailures: ReadonlySet<string>;
   connectingBackend: string | null;
   onSwitch: (agent: AgentSupply) => void;
@@ -372,7 +372,7 @@ const DirectHome: React.FC<{
                   <span className="model-hub-direct-tile flex size-[34px] shrink-0 items-center justify-center rounded-[9px]"><Icon className="size-[17px]" /></span>
                   <span className="model-hub-direct-backend-copy">
                     <span className="flex min-w-0 items-center gap-1.5">
-                      <span className="model-hub-direct-backend-name truncate text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</span>
+                      <span className="model-hub-direct-backend-name truncate text-foreground">{getBackendUiMeta(agent.backend).label}</span>
                       <span className="model-hub-pill model-hub-direct-kind-pill border">{t('settings.models.direct.pill.direct')}</span>
                     </span>
                     {switchFailed
@@ -1159,6 +1159,9 @@ export const SettingsModelsPage: React.FC = () => {
   const installedAgents = agents.filter(
     (agent) => !getBackendUiMeta(agent.backend).capabilities.supports_cli || agent.cli_present,
   );
+  const installedNativeAgents = installedAgents.filter(
+    (agent): agent is AgentSupply & { backend: NativeCliBackend } => isNativeCliBackend(agent.backend),
+  );
   const hubBackends = agents.filter(agentUsesHubRuntime).map((agent) => agent.backend);
   const activeBackends = supplyRead.kind === 'ready' ? new Set(hubBackends) : undefined;
   const stopBlocked = runtimeEnabled && (supplyRead.kind !== 'ready' || hubBackends.length > 0);
@@ -1553,7 +1556,7 @@ export const SettingsModelsPage: React.FC = () => {
                 read={runtimeRead}
                 starting={startingRuntime}
                 stopping={stoppingRuntime}
-                directCount={directEmpty ? installedAgents.length : undefined}
+                directCount={directEmpty ? installedNativeAgents.length : undefined}
               />
               {runtimeConfigurationVisible && migrationAvailable === true && (
                 <Button
@@ -1618,7 +1621,7 @@ export const SettingsModelsPage: React.FC = () => {
                     />
                     : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
-                    : directEmpty ? <DirectHome agents={installedAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} />
+                    : directEmpty ? <DirectHome agents={installedNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} />
                     : <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">

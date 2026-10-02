@@ -97,6 +97,16 @@ afterEach(() => {
 });
 
 describe('NewAgentDialog', () => {
+  // The picker used a second label table, so its Claude label disagreed with
+  // Settings and Model Hub. All backend choices share the catalog brands.
+  it('uses the catalog brand names for every backend choice', () => {
+    renderDialog();
+    for (const label of ['Claude Code', 'OpenCode', 'Codex', 'Avibe Agent']) {
+      expect(screen.getByRole('button', { name: new RegExp(label) }).textContent).toContain(label);
+    }
+    expect(screen.queryByText('Claude', { exact: true })).toBeNull();
+  });
+
   it('creates an Avibe Agent through the existing backend and model pickers', async () => {
     modelCatalog = { models: ['avibe-model'], reasoningOptions: { 'avibe-model': [] } };
     const { createVibeAgent } = renderDialog();

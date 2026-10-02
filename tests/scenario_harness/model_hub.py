@@ -367,10 +367,11 @@ def unlisted_model_copy(backend: str, language: str = "en") -> str:
     """The one refusal every backend shows for a turn on ``UNLISTED_MODEL``."""
 
     from vibe.i18n import t
+    from modules.agents.catalog import display_name_for_backend
 
     return t(
         "modelHub.launch.model_unlisted",
         language,
         model=UNLISTED_MODEL,
-        backend=t(f"modelHub.backends.{backend}", language),
+        backend=display_name_for_backend(backend),
     )

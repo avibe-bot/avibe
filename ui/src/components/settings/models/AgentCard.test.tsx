@@ -30,7 +30,7 @@ const localeInstance = (lng: 'en' | 'zh') => {
   void instance.use(initReactI18next).init({
     lng,
     fallbackLng: 'en',
-    resources: { en: { translation: en }, zh: { translation: zh } },
+    resources: { en: { translation: structuredClone(en) }, zh: { translation: structuredClone(zh) } },
     interpolation: { escapeValue: false },
   });
   return instance;
@@ -69,6 +69,32 @@ const openCodeAgent: AgentSupply = {
 };
 
 afterEach(cleanup);
+
+describe('backend brand ownership', () => {
+  // Card headings previously came from a second i18n brand table. Existing
+  // fixtures used identical translations, masking divergence from the catalog.
+  it.each(['en', 'zh'] as const)('keeps every backend brand catalog-owned in %s', (language) => {
+    const locale = localeInstance(language);
+    const rows = [
+      { backend: 'claude', label: 'Claude Code' },
+      { backend: 'codex', label: 'Codex' },
+      { backend: 'opencode', label: 'OpenCode' },
+      { backend: 'avibe', label: 'Avibe Agent' },
+    ] as const;
+    for (const { backend } of rows) {
+      locale.addResource(language, 'translation', `settings.models.backends.${backend}`, 'Obsolete localized brand');
+    }
+    render(<I18nextProvider i18n={locale}><AgentCard
+      agents={rows.map(({ backend }) => ({ ...hubAgent, backend }))}
+      sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()}
+      connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()}
+      onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()}
+    /></I18nextProvider>);
+    expect(screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent))
+      .toEqual(rows.map(({ label }) => label));
+    expect(screen.queryByText('Obsolete localized brand')).toBeNull();
+  });
+});
 
 describe('AgentCard origin help ownership', () => {
   const agents: AgentSupply[] = ['claude', 'codex'].map((backend) => ({

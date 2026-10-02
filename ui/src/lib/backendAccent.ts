@@ -12,12 +12,9 @@ export const BACKEND_ORDER = [...AGENT_BACKENDS]
 export const NATIVE_BACKEND_ORDER = BACKEND_ORDER.filter(isNativeCliBackend);
 export type Backend = AgentBackendId;
 
-export const BACKEND_LABEL = {
-  claude: 'Claude',
-  opencode: 'OpenCode',
-  codex: 'Codex',
-  avibe: 'Avibe Agent',
-} as const satisfies Record<Backend, string>;
+export const BACKEND_LABEL = Object.fromEntries(
+  AGENT_BACKENDS.map(({ id, label }) => [id, label]),
+) as Record<Backend, string>;
 
 // Text / icon accent — e.g. <Icon className={BACKEND_TEXT[b]} />.
 export const BACKEND_TEXT: Record<Backend, string> = {

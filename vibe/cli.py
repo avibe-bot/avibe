@@ -35,7 +35,7 @@ from sqlalchemy import select
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend
 from core.scheduled_tasks import (
     AGENT_RUN_CLOSE_AFTER_METADATA_KEY,
     AGENT_RUN_DELIVERY_QUEUE,
@@ -12326,75 +12326,30 @@ def _doctor(*, deep: bool = False):
     # Agent Backends Group
     agent_items = []
     if config:
-        # OpenCode
-        if config.agents.opencode.enabled:
-            cli_path = config.agents.opencode.cli_path
-            found_path = api.detect_cli(cli_path).get("path") if cli_path else None
-            if found_path:
-                _add_doctor_item(
-                    agent_items,
-                    "pass",
-                    i18n_t("doctor.item.agentCliFound", language, agent="OpenCode", path=found_path),
-                )
-                summary["pass"] += 1
+        for backend in NATIVE_CLI_BACKENDS:
+            backend_config = getattr(config.agents, backend)
+            label = display_name_for_backend(backend)
+            if backend_config.enabled:
+                cli_path = backend_config.cli_path
+                found_path = api.detect_cli(cli_path).get("path") if cli_path else None
+                if found_path:
+                    _add_doctor_item(
+                        agent_items,
+                        "pass",
+                        i18n_t("doctor.item.agentCliFound", language, agent=label, path=found_path),
+                    )
+                    summary["pass"] += 1
+                else:
+                    _add_doctor_item(
+                        agent_items,
+                        "warn",
+                        i18n_t("doctor.item.agentCliMissing", language, agent=label, path=cli_path),
+                        i18n_t("doctor.action.agentCliMissing", language, agent=label),
+                    )
+                    summary["warn"] += 1
             else:
-                _add_doctor_item(
-                    agent_items,
-                    "warn",
-                    i18n_t("doctor.item.agentCliMissing", language, agent="OpenCode", path=cli_path),
-                    i18n_t("doctor.action.agentCliMissing", language, agent="OpenCode"),
-                )
-                summary["warn"] += 1
-        else:
-            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="OpenCode"))
-            summary["pass"] += 1
-
-        # Claude
-        if config.agents.claude.enabled:
-            cli_path = config.agents.claude.cli_path
-            found_path = api.detect_cli(cli_path).get("path") if cli_path else None
-
-            if found_path:
-                _add_doctor_item(
-                    agent_items,
-                    "pass",
-                    i18n_t("doctor.item.agentCliFound", language, agent="Claude", path=found_path),
-                )
+                _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent=label))
                 summary["pass"] += 1
-            else:
-                _add_doctor_item(
-                    agent_items,
-                    "warn",
-                    i18n_t("doctor.item.agentCliMissing", language, agent="Claude", path=cli_path),
-                    i18n_t("doctor.action.agentCliMissing", language, agent="Claude"),
-                )
-                summary["warn"] += 1
-        else:
-            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="Claude"))
-            summary["pass"] += 1
-
-        # Codex
-        if config.agents.codex.enabled:
-            cli_path = config.agents.codex.cli_path
-            found_path = api.detect_cli(cli_path).get("path") if cli_path else None
-            if found_path:
-                _add_doctor_item(
-                    agent_items,
-                    "pass",
-                    i18n_t("doctor.item.agentCliFound", language, agent="Codex", path=found_path),
-                )
-                summary["pass"] += 1
-            else:
-                _add_doctor_item(
-                    agent_items,
-                    "warn",
-                    i18n_t("doctor.item.agentCliMissing", language, agent="Codex", path=cli_path),
-                    i18n_t("doctor.action.agentCliMissing", language, agent="Codex"),
-                )
-                summary["warn"] += 1
-        else:
-            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="Codex"))
-            summary["pass"] += 1
 
         # Default Agent check
         default_agent_name = None

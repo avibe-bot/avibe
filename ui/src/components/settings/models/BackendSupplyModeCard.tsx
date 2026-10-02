@@ -205,7 +205,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
             </Link>
           }
           description={t('settings.models.supplyMode.hub.description', {
-            backend: t(`settings.models.backends.${backend}`, { defaultValue: backend }),
+            backend: getBackendUiMeta(backend).label,
           }) as string}
         >
           {/* The banner asks the supply question. `fixHint` is appended only
@@ -229,7 +229,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
           onSelect={() => void setMode('direct')}
           title={<span className="text-[15px] font-semibold text-foreground">{t('settings.models.supplyMode.direct.title')}</span>}
           description={t('settings.models.supplyMode.direct.description', {
-            backend: t(`settings.models.backends.${backend}`, { defaultValue: backend }),
+            backend: getBackendUiMeta(backend).label,
           }) as string}
         >
           {mode === 'direct' && detectItem && (

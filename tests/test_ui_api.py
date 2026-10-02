@@ -24,6 +24,7 @@ from config import paths
 from config.v2_settings import ChannelSettings, SettingsStore
 from core.vibe_agents import VibeAgentStore
 from core import chat_discovery
+from modules.agents.catalog import AGENT_BACKENDS
 from vibe import api, backend_model_catalog, cli_paths
 from vibe.opencode_config import parse_jsonc_object
 
@@ -4180,7 +4181,7 @@ def test_builtin_default_agent_uses_first_enabled_backend_when_no_default_exists
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
-        store.ensure_builtin_default_agents(["opencode", "claude", "codex"])
+        store.ensure_builtin_default_agents(list(AGENT_BACKENDS))
         assert store.get_default_agent_name() == "opencode"
     finally:
         store.close()

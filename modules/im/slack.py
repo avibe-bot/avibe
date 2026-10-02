@@ -4285,11 +4285,7 @@ class SlackBot(BaseIMClient):
 
         # Use callback_prefix to generate callback_id
         callback_id = f"{callback_prefix}_modal"
-        title = (
-            self._t("modal.question.claudeCode")
-            if callback_prefix.startswith("claude")
-            else self._t("modal.question.claudeCode")
-        )
+        title = display_name_for_backend("claude")
 
         view = {
             "type": "modal",

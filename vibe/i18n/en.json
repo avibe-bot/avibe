@@ -632,10 +632,6 @@
       "selectCodexAgent": "Select Codex agent",
       "codexReasoningEffort": "Reasoning Effort",
       "tip": "Select (Default) to use the backend's configured defaults."
-    },
-    "question": {
-      "opencode": "OpenCode",
-      "claudeCode": "Claude Code"
     }
   },
   "command": {
@@ -776,11 +772,6 @@
     "quickReplyNote": "Reply: {text}",
     "citationUnresolved": "(source unavailable)"
   },
-  "backend": {
-    "claude": "ClaudeCode",
-    "codex": "Codex",
-    "opencode": "OpenCode"
-  },
   "reasoning": {
     "none": "None",
     "minimal": "Minimal",
@@ -910,12 +901,6 @@
     "routingCanceled": "Routing update canceled."
   },
   "modelHub": {
-    "backends": {
-      "claude": "Claude Code",
-      "codex": "Codex",
-      "opencode": "OpenCode",
-      "avibe": "Avibe Agent"
-    },
     "errors": {
       "source_not_found": "Model source not found.",
       "flow_not_found": "Authorization flow not found.",
