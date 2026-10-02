@@ -149,6 +149,14 @@ def _write_atomic(path: str, data: str) -> None:
     os.replace(tmp, path)
 
 
+def _meta_text(meta: Mapping[str, Any]) -> str:
+    """``meta.json`` as written: UTF-8 as it is (not escaped), and never past the bound ``meta`` reads in."""
+    text = json.dumps(meta, indent=2, ensure_ascii=False)
+    if len(text) > _META_CHARS:
+        raise ValueError(f"the job record would be {len(text)} characters, over {_META_CHARS}")
+    return text
+
+
 def _read_text(path: str) -> Optional[str]:
     """A small state file (``pid``, ``decision``, ``exit``, ``stopped``), read in a bound: the job's
     directory is one its command can write to."""
@@ -208,7 +216,7 @@ class LocalJobHost:
         return json.loads(text)
 
     def _write_meta(self, job_id: str, meta: Mapping[str, Any]) -> None:
-        _write_atomic(self._path(job_id, "meta.json"), json.dumps(meta, indent=2))
+        _write_atomic(self._path(job_id, "meta.json"), _meta_text(meta))
 
     def find_job(self, session_id: str, tool_call_id: str) -> Optional[str]:
         """The job started for a tool call, for settling it at resume."""
@@ -306,8 +314,6 @@ class LocalJobHost:
         """The job directory, ``meta.json``, and the wrapper, which waits for the decision (J1)."""
         job_id = f"job_{secrets.token_hex(8)}"
         job_dir = self.job_dir(job_id)
-        os.makedirs(self._jobs_dir, exist_ok=True)
-        os.mkdir(job_dir, 0o700)
         created = datetime.now(timezone.utc)
         deadline = _ceil_ms(created + timedelta(seconds=timeout_s)) if timeout_s is not None else None
         meta: dict[str, Any] = {
@@ -326,6 +332,15 @@ class LocalJobHost:
             "watch_id": None,
             "deadline_at": _iso(deadline) if deadline is not None else None,
         }
+        try:
+            # Checked before anything exists: a record the host could not read back would leave the job unmanaged.
+            _meta_text(meta)
+        except ValueError:
+            raise JobStartError(
+                f"Could not start the command: its job record would be over {_META_CHARS} characters."
+            ) from None
+        os.makedirs(self._jobs_dir, exist_ok=True)
+        os.mkdir(job_dir, 0o700)
         self._write_meta(job_id, meta)
 
         marker = new_process_identity_marker()

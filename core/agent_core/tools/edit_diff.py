@@ -66,9 +66,10 @@ def _bounded_fuzzy_view(view: str) -> Optional[str]:
     """``normalize_for_fuzzy_match(view)``, or ``None`` once NFKC would grow it by more than
     ``MAX_FUZZY_GROWTH_CHARS`` (one character can become eighteen, U+FDFA).
 
-    Text already in NFKC is not normalized again. Otherwise it is normalized a chunk of whole lines at a
-    time (NFKC never composes across a line break, so the pieces join to the whole), stopping at the
-    budget; a single line too long to chunk is normalized only if it is already in NFKC.
+    Text already in NFKC is not normalized again. Otherwise it is normalized a chunk at a time, each
+    chunk ending just before an ASCII character (NFKC never composes anything with a following ASCII
+    character, so the pieces join to the whole), stopping at the budget. A run of more than
+    ``2 * _NFKC_CHUNK_CHARS`` characters without an ASCII character that is not in NFKC stops it too.
     """
     if unicodedata.is_normalized("NFKC", view):
         return _after_nfkc(view)
@@ -76,8 +77,8 @@ def _bounded_fuzzy_view(view: str) -> Optional[str]:
     pieces: list[str] = []
     total = pos = 0
     while pos < len(view):
-        end = view.find("\n", pos + _NFKC_CHUNK_CHARS)
-        end = len(view) if end == -1 else end + 1
+        boundary = _ASCII.search(view, pos + _NFKC_CHUNK_CHARS)
+        end = boundary.start() if boundary else len(view)
         chunk = view[pos:end]
         if len(chunk) > 2 * _NFKC_CHUNK_CHARS and not unicodedata.is_normalized("NFKC", chunk):
             return None
@@ -106,6 +107,7 @@ MAX_REPLACEMENTS = 10_000
 #: matching stops once normalization has grown the file by this many characters.
 MAX_FUZZY_GROWTH_CHARS = 1024 * 1024
 _NFKC_CHUNK_CHARS = 64 * 1024
+_ASCII = re.compile("[\x00-\x7f]")
 #: Avibe: every edit scans the whole file (``str.count``/``find``, which hold the GIL), so the number of
 #: edits times the file's length is bounded: about a quarter second of scanning.
 MAX_EDIT_SCAN_CHARS = 256 * 1024 * 1024

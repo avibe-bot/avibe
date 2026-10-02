@@ -534,6 +534,18 @@ async def test_a_large_file_with_a_few_compatibility_characters_still_matches_lo
     assert (tmp_path / "f.txt").read_text().endswith("\u2026 text\nsaid\n")
 
 
+async def test_a_long_minified_line_still_matches_loosely(tmp_path, make_ctx):
+    """A 200 KiB line is normalized in pieces split before ASCII characters, which NFKC never composes with."""
+    line = "x=1;" * 50_000 + "\u2026 say \u2018marker\u2019"
+    (tmp_path / "f.min.js").write_text(line + "\n")
+
+    result = await _edit(make_ctx, "f.min.js", {"oldText": "say 'marker'", "newText": "said"})
+
+    assert not result.is_error, result_text(result)
+    # A normalized match rewrites its whole line from the normalized view (ledger 13), so "…" became "...".
+    assert (tmp_path / "f.min.js").read_text() == "x=1;" * 50_000 + "... said\n"
+
+
 async def test_edit_refuses_files_with_more_lines_than_it_plans(tmp_path, make_ctx, monkeypatch):
     monkeypatch.setattr(edit_module, "MAX_EDIT_LINES", 100)
     (tmp_path / "ok.txt").write_text("x\n" * 99 + "t")

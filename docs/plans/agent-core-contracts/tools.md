@@ -100,7 +100,9 @@ is true". Logic, from Pi's `edit-diff.ts`:
 2. For each edit, find `oldText` exactly; if absent, find it after Pi's deterministic normalization (NFKC, trailing
    whitespace per line, smart quotes to ASCII, Unicode dashes to `-`, special spaces to a space). No similarity
    threshold. Avibe bound: NFKC can make one character eighteen, so normalization stops once it has grown the file by
-   1 Mi characters, and the not-found error then says that loose matching was not possible (below).
+   1 Mi characters, or at a run of over 128 Ki characters with no ASCII character that is not already in NFKC (it is
+   normalized in pieces split before ASCII characters); the not-found error then says that loose matching was not
+   possible (below).
 3. Require exactly one occurrence unless `replaceAll`; reject empty `oldText`; reject overlapping spans, including
    any occurrence matched by a `replaceAll` item.
 4. Apply all edits against the original, restore line endings and BOM, write once. Nothing is written if any edit

@@ -512,6 +512,29 @@ async def test_a_cancelled_kill_still_finishes_the_group(tmp_path):
     assert _wait_until(lambda: _gone(shell_pid), timeout_s=8)
 
 
+@pytest.mark.parametrize(
+    ("command", "starts"),
+    [
+        ("# " + "\x01" * 1000 + "\ntrue", False),  # JSON escapes each control character to six characters
+        ("# " + "\u4e2d" * 1000 + "\ntrue", True),  # written as it is, not escaped
+    ],
+    ids=["escapes-past-the-bound", "non-ascii"],
+)
+async def test_a_command_whose_record_would_be_unreadable_never_starts(tmp_path, monkeypatch, command, starts):
+    """The host reads meta.json in a bound, so it never writes one past it: such a command is refused unstarted."""
+    monkeypatch.setattr(jobs_module, "_META_CHARS", 2000)
+    host = LocalJobHost(str(tmp_path / "jobs"))
+
+    if not starts:
+        with pytest.raises(JobStartError):
+            await _start(host, tmp_path, command)
+        assert host.find_job("ses_test", "toolu_1") is None
+        return
+    job_id = await _start(host, tmp_path, command)
+    assert (await host.wait(job_id, deadline_s=5)).state == "exited"
+    assert host.meta(job_id)["command"] == command
+
+
 async def test_meta_json_is_read_in_a_bound(tmp_path):
     """The job directory is the command's to write: a huge meta.json is refused as corrupt, not loaded."""
     import tracemalloc
