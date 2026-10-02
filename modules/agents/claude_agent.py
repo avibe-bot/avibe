@@ -2507,7 +2507,9 @@ class ClaudeAgent(BaseAgent):
                                     composite_key,
                                     message,
                                     raw_result_text,
-                                    record.text or phase_text,
+                                    # The phase text stands in only for an empty body.
+                                    record.text
+                                    or (None if str(raw_result_text or "").strip() else phase_text),
                                 ),
                                 message=message,
                             )
