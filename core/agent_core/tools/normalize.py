@@ -28,6 +28,14 @@ _ANSI_RE = re.compile(
 _MAX_OPEN_CHARS = 64 * 1024
 
 
+def _bounded(segment: str, dropped: int) -> tuple[str, int]:
+    """``segment``'s last ``_MAX_OPEN_CHARS`` characters, and the UTF-8 bytes dropped from its start."""
+    if len(segment) <= _MAX_OPEN_CHARS:
+        return segment, dropped
+    cut = len(segment) - _MAX_OPEN_CHARS
+    return segment[cut:], dropped + utf8_len(segment[:cut])
+
+
 def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text).replace("\x1b", "")
 
@@ -49,6 +57,8 @@ class OutputNormalizer:
         # last carriage return, each with the UTF-8 bytes dropped from its start.
         self._prev, self._prev_dropped = "", 0
         self._cur, self._cur_dropped = "", 0
+        # UTF-8 bytes of the last finished line, counting what was dropped from its start.
+        self._finished_line_bytes = 0
 
     def feed(self, data: bytes) -> str:
         return self._consume(self._decoder.decode(data))
@@ -58,12 +68,23 @@ class OutputNormalizer:
         if self._carry_cr:
             self._carry_cr = False
             self._open_segments("\r")
-        tail = self._line()
+        tail, size = self._line_and_size()
+        if tail:
+            self._finished_line_bytes = size
         self._reset()
         return out + tail
 
     def peek(self) -> str:
         return self._line()
+
+    def last_line_bytes(self) -> int:
+        """UTF-8 bytes of the last line: the open one if it shows anything, else the last finished one.
+
+        Bytes dropped from the start of a long line count (before ANSI stripping), so the size is the
+        line's, not the kept part's.
+        """
+        _, size = self._line_and_size()
+        return size or self._finished_line_bytes
 
     def _consume(self, text: str) -> str:
         if self._carry_cr:
@@ -81,7 +102,8 @@ class OutputNormalizer:
             if line.endswith("\r"):
                 line = line[:-1]
             self._open_segments(line)
-            out.append(self._line() + "\n")
+            text, self._finished_line_bytes = self._line_and_size()
+            out.append(text + "\n")
             self._reset()
         self._open_segments(lines[-1])
         return "".join(out)
@@ -92,22 +114,21 @@ class OutputNormalizer:
             # The first piece continues the current segment, so it keeps that segment's drop count.
             for index in range(len(segments) - 2, -1, -1):
                 if strip_ansi(segments[index]):
-                    self._prev = segments[index]
-                    self._prev_dropped = self._cur_dropped if index == 0 else 0
+                    self._prev, self._prev_dropped = _bounded(segments[index], self._cur_dropped if index == 0 else 0)
                     break
             self._cur_dropped = 0
-        self._cur = segments[-1]
-        if len(self._cur) > _MAX_OPEN_CHARS:
-            cut = len(self._cur) - _MAX_OPEN_CHARS
-            self._cur_dropped += utf8_len(self._cur[:cut])
-            self._cur = self._cur[cut:]
+        self._cur, self._cur_dropped = _bounded(segments[-1], self._cur_dropped)
 
     def _line(self) -> str:
+        return self._line_and_size()[0]
+
+    def _line_and_size(self) -> tuple[str, int]:
         for segment, dropped in ((self._cur, self._cur_dropped), (self._prev, self._prev_dropped)):
             visible = strip_ansi(segment)
             if visible:
-                return f"[... {dropped} bytes omitted ...]{visible}" if dropped else visible
-        return ""
+                text = f"[... {dropped} bytes omitted ...]{visible}" if dropped else visible
+                return text, dropped + utf8_len(visible)
+        return "", 0
 
     def _reset(self) -> None:
         self._prev, self._prev_dropped = "", 0

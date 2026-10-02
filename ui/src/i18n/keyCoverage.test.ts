@@ -1245,13 +1245,14 @@ describe('app i18n key coverage', () => {
         'remoteAuthorization.unavailable.body',
       ]),
     );
-    // A name two kinds of call reach. `RouteOriginBadge` asks for the copy
-    // outright; a dozen sites pass `agent.backend` as their own fallback. Both
-    // belong here, and while the dedup key was the failure label the fallback
-    // calls buried the outright one — so the whole family sat outside the
-    // existence check, in the one place the app names its backends.
-    expect(referenced).toContainEqual({ key: 'settings.models.backends.claude', counted: false, listed: false, demand: 'exact' });
-    expect(referenced).toContainEqual({ key: 'settings.models.backends.claude', counted: false, listed: false, demand: 'none' });
+    // DirectHome is native-only. Widening its props to every backend made the
+    // checker demand nonexistent Avibe Direct prose. Brand names themselves
+    // now belong to catalog metadata; exact/defaulted dedup stays covered by
+    // fixture.both in the collector test above.
+    for (const backend of ['claude', 'codex', 'opencode']) {
+      expect(referenced).toContainEqual({ key: `settings.models.direct.backend.${backend}.detail`, counted: false, listed: false, demand: 'exact' });
+    }
+    expect(referenced.some(({ key }) => key === 'settings.models.direct.backend.avibe.detail')).toBe(false);
   });
 
   // A name the bundles never had is not an existence gap: nothing here can tell

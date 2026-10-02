@@ -5,6 +5,7 @@ import {
   type ConfigMutation,
 } from './configMutations';
 import { getEnabledPlatforms, platformHasRunnableConfig } from './platforms';
+import { NATIVE_CLI_BACKENDS } from './agentBackends';
 import {
   withoutConfiguredSecretMarker,
   withSecretDraft,
@@ -12,7 +13,7 @@ import {
 } from './secretFields';
 
 const WIZARD_PLATFORMS = ['slack', 'discord', 'telegram', 'lark', 'wechat'] as const;
-const WIZARD_BACKENDS = ['opencode', 'claude', 'codex'] as const;
+const WIZARD_BACKENDS = NATIVE_CLI_BACKENDS;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);

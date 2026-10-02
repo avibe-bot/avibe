@@ -485,6 +485,9 @@
     "routingUpdateNeedsNewSession": "Use /new to create a new session for this setting change to take effect. The new session will replace the current session."
   },
   "settings": {
+    "backends": {
+      "avibeDescription": "Avibe's built-in agent, powered by models configured in Model Hub."
+    },
     "personalizationTitle": "Personalization Settings",
     "personalizationDesc": "Configure how {agent} messages appear in your Slack workspace.",
     "visibilityTitle": "Settings - Message Visibility",
@@ -646,10 +649,6 @@
       "selectCodexAgent": "Select Codex agent",
       "codexReasoningEffort": "Reasoning Effort",
       "tip": "Select (Default) to use the backend's configured defaults."
-    },
-    "question": {
-      "opencode": "OpenCode",
-      "claudeCode": "Claude Code"
     }
   },
   "command": {
@@ -790,11 +789,6 @@
     "quickReplyNote": "Reply: {text}",
     "citationUnresolved": "(source unavailable)"
   },
-  "backend": {
-    "claude": "ClaudeCode",
-    "codex": "Codex",
-    "opencode": "OpenCode"
-  },
   "reasoning": {
     "none": "None",
     "minimal": "Minimal",
@@ -924,12 +918,6 @@
     "routingCanceled": "Routing update canceled."
   },
   "modelHub": {
-    "backends": {
-      "claude": "Claude Code",
-      "codex": "Codex",
-      "opencode": "OpenCode",
-      "avibe": "Avibe Agent"
-    },
     "errors": {
       "source_not_found": "Model source not found.",
       "flow_not_found": "Authorization flow not found.",

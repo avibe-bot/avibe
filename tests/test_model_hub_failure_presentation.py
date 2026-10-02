@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, Mock
 import aiohttp
 import pytest
 
-from config.v2_config import ModelHubBackendModelConfig, ModelHubSourceStateConfig
+from config.v2_config import (
+    ModelHubBackendModelConfig,
+    ModelHubRouteConfig,
+    ModelHubRouteHopConfig,
+    ModelHubSourceStateConfig,
+)
 from core.backend_failure import emit_backend_failure, emit_replayed_backend_failure
 from core.controller import Controller
 from core.handlers.model_hub.adapter import RawOutcomeKind
@@ -16,6 +21,7 @@ from core.handlers.model_hub.provenance import (
     render_turn_outcome_copy,
 )
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from modules.agents.catalog import AGENT_BACKENDS
 from modules.agents.model_hub import ModelHubRuntimeRouter, bind_launch
 from modules.im import MessageContext
 from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _outcome
@@ -34,6 +40,9 @@ def unavailable(tmp_path, backend="codex"):
     )
     config = _config([source], model="模型/alpha")
     config.agents[backend].models.append(ModelHubBackendModelConfig(id="模型/alpha", origin="manual"))
+    config.agents[backend].routes["模型/alpha"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "模型/alpha"),),
+    )
     service, _, _ = _service(tmp_path, config)
     config, resolution = service._inspect_terminal_chain(backend=backend, model_id="模型/alpha")
     return service._produce_exhausted_terminal_outcome(
@@ -41,7 +50,7 @@ def unavailable(tmp_path, backend="codex"):
     )
 
 
-@pytest.mark.parametrize("backend", ["codex", "claude", "opencode"])
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 @pytest.mark.parametrize("platform", ["avibe", "slack"])
 @pytest.mark.parametrize("language", ["en", "zh"])
 async def test_shared_failure_uses_exact_hub_copy_and_preserves_terminal_evidence(

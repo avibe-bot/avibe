@@ -1,5 +1,7 @@
-export const ASSISTANT_ORDER = ['claude', 'codex', 'opencode'] as const;
-export type AssistantId = typeof ASSISTANT_ORDER[number];
+import { NATIVE_SETUP_BACKENDS, type NativeCliBackend } from '@/lib/agentBackends';
+
+export const ASSISTANT_ORDER = NATIVE_SETUP_BACKENDS;
+export type AssistantId = NativeCliBackend;
 
 /**
  * The authored relay from the approved Welcome design: each assistant works for

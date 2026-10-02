@@ -1,5 +1,5 @@
 {
-  "contract_version": 11,
+  "contract_version": 12,
   "input_generation": {
     "mode": "same_run_live_files",
     "external_snapshot": "content_fingerprint_required"
@@ -15,6 +15,7 @@
       "tests/e2e/test_model_hub*.py",
       "ui/src/components/settings/models/types.ts",
       "ui/src/components/settings/models/*.test.*",
+      "ui/src/components/onboarding/providers/*.test.*",
       "ui/e2e/**/*.ts",
       "ui/e2e/**/*.tsx"
     ],
@@ -59,6 +60,18 @@
       "id": "A3",
       "source_file": "docs/plans/model-hub-implementation.md",
       "start_marker": "The final set contains no",
+      "allowed_property_values": [
+        {
+          "file": "docs/plans/model-hub-contracts/source.schema.json",
+          "property_path": ["allOf", 0, "then", "properties", "vendor"],
+          "values": ["custom"]
+        },
+        {
+          "file": "docs/plans/model-hub-contracts/source-create.schema.json",
+          "property_path": ["allOf", 0, "then", "properties", "vendor"],
+          "values": ["custom"]
+        }
+      ],
       "scope_globs": [
         "docs/plans/model-hub-contracts/*.schema.json"
       ]
@@ -571,6 +584,11 @@
         },
         {
           "kind": "python_string_assignment",
+          "file": "vibe/model_hub_runtime/api_key_vendors.py",
+          "name": "_SUPPORTED_PROTOCOLS"
+        },
+        {
+          "kind": "python_string_assignment",
           "file": "docs/plans/model-hub-contracts/adapter-interface.py",
           "name": "SOURCE_PROTOCOLS"
         },
@@ -588,6 +606,17 @@
           "kind": "schema_vocabulary",
           "schema": "source-create.schema.json",
           "paths": ["/properties/protocol"]
+        },
+        {
+          "kind": "schema_vocabulary",
+          "schema": "source-probe-result.schema.json",
+          "paths": ["/properties/protocol"]
+        },
+        {
+          "kind": "schema_vocabulary",
+          "schema": "observation-result.schema.json",
+          "paths": ["/properties/protocol"],
+          "exclude": [null]
         }
       ]
     },

@@ -9,7 +9,7 @@ import { BackendLifecycleChip } from './BackendLifecycleChip';
 import { SettingsPageShell } from './SettingsPageShell';
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
-import { AGENT_BACKENDS, DEFAULT_AGENT_STATE } from '@/lib/agentBackends';
+import { AGENT_BACKENDS, DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/agentBackends';
 import { configChanges } from '@/lib/configMutations';
 import { errorMessage } from '@/lib/errorMessage';
 
@@ -24,7 +24,7 @@ type CliStatus = 'unknown' | 'ok' | 'missing';
 
 type AgentState = {
   enabled: boolean;
-  cli_path: string;
+  cli_path?: string;
   status: CliStatus;
 };
 
@@ -79,7 +79,7 @@ export const SettingsBackendsPage: React.FC = () => {
     let cancelled = false;
     (async () => {
       const results = await Promise.all(
-        Object.entries(agents).map(async ([name, agent]) => {
+        Object.entries(agents).filter(([name]) => getBackendUiMeta(name).capabilities.supports_cli).map(async ([name, agent]) => {
           try {
             const result = await api.detectCli(agent.cli_path || name);
             return [name, result] as const;
@@ -126,7 +126,7 @@ export const SettingsBackendsPage: React.FC = () => {
     await persistBackendField(name, { enabled });
   };
 
-  const refreshDetectionFor = async (name: string, cli_path: string) => {
+  const refreshDetectionFor = async (name: string, cli_path?: string) => {
     try {
       const result = await api.detectCli(cli_path || name);
       setAgents((prev) => ({
@@ -164,14 +164,14 @@ export const SettingsBackendsPage: React.FC = () => {
                 tileClassName={meta.tileCls}
                 iconClassName={meta.iconCls}
                 title={meta.label}
-                detail={t(`settings.backends.${meta.id}Description`)}
+                detail={t(meta.descriptionKey)}
                 actions={
                   <>
-                    <BackendLifecycleChip
+                    {meta.capabilities.supports_runtime_refresh && <BackendLifecycleChip
                       name={meta.id}
                       enabled={agent.enabled}
                       cliStatus={agent.status}
-                      cliPath={agent.cli_path}
+                      cliPath={agent.cli_path || ''}
                       onChanged={async (info) => {
                         const installedPath = info?.installedPath || null;
                         if (installedPath) {
@@ -182,7 +182,7 @@ export const SettingsBackendsPage: React.FC = () => {
                         }
                         await refreshDetectionFor(meta.id, installedPath || agent.cli_path);
                       }}
-                    />
+                    />}
                     <ToggleSwitch
                       enabled={agent.enabled}
                       onClick={() => void handleToggle(meta.id, !agent.enabled)}

@@ -58,10 +58,12 @@ import { CapabilityTabs } from './CapabilityTabs';
 // with the Skills surface (BACKEND_TEXT is this page's old BACKEND_ICON_CLASS).
 import {
   BACKEND_ORDER,
+  NATIVE_BACKEND_ORDER,
   BACKEND_LABEL,
   BACKEND_TEXT as BACKEND_ICON_CLASS,
   type Backend,
 } from '../../lib/backendAccent';
+import { getBackendUiMeta, type NativeCliBackend } from '@/lib/agentBackends';
 import { errorMessage } from '@/lib/errorMessage';
 // Tab set + its cross-visit memory live together so the remembered value can
 // never name a tab this page no longer renders (see agentsViewMemory).
@@ -319,7 +321,7 @@ export const AgentsPage: React.FC = () => {
   const mutationErrorSequenceRef = useRef(0);
   const [search, setSearch] = useState('');
   const [backendFilter, setBackendFilter] = useState<Backend | 'all'>('all');
-  const [importing, setImporting] = useState<Backend | null>(null);
+  const [importing, setImporting] = useState<NativeCliBackend | null>(null);
   const [onboardingInventory, setOnboardingInventory] = useState<VibeAgentOnboardingResult | null>(null);
   const [onboardingExpanded, setOnboardingExpanded] = useState(false);
   const [onboardingSubmitting, setOnboardingSubmitting] = useState(false);
@@ -1296,7 +1298,7 @@ export const AgentsPage: React.FC = () => {
   }, [agents, search, backendFilter]);
 
   const grouped = useMemo(() => {
-    const groups: Record<Backend, VibeAgentBrief[]> = { claude: [], opencode: [], codex: [] };
+    const groups = Object.fromEntries(BACKEND_ORDER.map((backend) => [backend, [] as VibeAgentBrief[]])) as Record<Backend, VibeAgentBrief[]>;
     for (const agent of filtered) {
       const key = (agent.backend as Backend) in groups ? (agent.backend as Backend) : null;
       if (key) groups[key].push(agent);
@@ -1386,7 +1388,7 @@ export const AgentsPage: React.FC = () => {
     }
   };
 
-  const onImport = async (from: Backend) => {
+  const onImport = async (from: NativeCliBackend) => {
     setImporting(from);
     try {
       const result = await api.importVibeAgents({ from, all: true });
@@ -1871,8 +1873,8 @@ const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
 };
 
 interface ImportMenuProps {
-  onImport: (from: Backend) => void;
-  importing: Backend | null;
+  onImport: (from: NativeCliBackend) => void;
+  importing: NativeCliBackend | null;
 }
 
 // Outline Button that opens a popover with one entry per backend. The
@@ -1891,7 +1893,7 @@ const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-[200px] p-1">
-        {BACKEND_ORDER.map((backend) => (
+        {NATIVE_BACKEND_ORDER.map((backend) => (
           <button
             key={backend}
             type="button"
@@ -1903,7 +1905,7 @@ const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04] disabled:opacity-50"
           >
             <Bot className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
-            <span>{t(`agents.importFrom${BACKEND_LABEL[backend]}` as const)}</span>
+            <span>{t('agents.importFrom', { backend: BACKEND_LABEL[backend] })}</span>
           </button>
         ))}
       </PopoverContent>
@@ -2372,7 +2374,10 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
             {agent.backend}
           </span>
           <span className="text-[11px] text-muted">·</span>
-          <span className="text-[11px] text-muted">{BACKEND_LABEL[agent.backend as Backend] || agent.backend} CLI</span>
+          <span className="text-[11px] text-muted">{t(
+            getBackendUiMeta(agent.backend).capabilities.supports_cli ? 'agents.detail.nativeBackend' : 'agents.detail.backendName',
+            { backend: BACKEND_LABEL[agent.backend as Backend] || agent.backend },
+          )}</span>
           <span className="ml-auto font-mono text-[9px] text-muted">{t('agents.detail.backendLocked')}</span>
         </div>
       </Field>

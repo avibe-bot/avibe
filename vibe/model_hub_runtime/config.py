@@ -9,6 +9,7 @@ import yaml
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
 from vibe.model_hub_runtime.api_key_vendors import (
+    google_api_base_url,
     official_api_key_base_url,
     openai_compatible_endpoint,
     validate_api_key_auth_scheme,
@@ -146,6 +147,20 @@ def _append_source(
         if model in text_only:
             entry["input-modalities"] = ["text"]
         models.append(entry)
+    if source.protocol == "google":
+        if not source.base_url:
+            raise EngineStateError("Google source requires a base URL")
+        # CPA (MIT), internal/config/config_types.go: GeminiKey/GeminiModel,
+        # pinned c404af96. The executor, not Avibe, owns protocol conversion.
+        entry = {
+            "api-key": api_key,
+            "prefix": source.prefix,
+            "base-url": google_api_base_url(source.base_url),
+        }
+        if models:
+            entry["models"] = models
+        payload.setdefault("gemini-api-key", []).append(entry)
+        return
     if source.protocol == "anthropic":
         base_url = source.base_url
         if not base_url:

@@ -15,6 +15,7 @@ import { gatewayRouteStatus } from './supply';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { currentChainLink, isTakeoverChain } from './takeover';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import type { AgentSupply, Source } from './types';
 
 const sourceName = (sources: Source[], id: string): string => sources.find((source) => source.id === id)?.display_name ?? id;
@@ -261,7 +262,7 @@ const AgentModelCard: React.FC<{
         <div className="model-hub-agent-head-summary flex min-w-0 items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-[9px]">
             <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px]', ACCENT_TILE[accent])}><Icon className={cn('size-[15px]', ACCENT_ICON[accent])} /></span>
-            <h2 className="truncate text-[14px] font-bold leading-[17px] text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</h2>
+            <h2 className="truncate text-[14px] font-bold leading-[17px] text-foreground">{getBackendUiMeta(agent.backend).label}</h2>
           </div>
           {agent.mode === 'hub' && (
             <ResponsiveMenu
@@ -292,7 +293,7 @@ const AgentModelCard: React.FC<{
                   </span>
                   <Check className="model-hub-ink-mint mt-0.5 size-4 shrink-0" aria-hidden="true" />
                 </button>
-                <button
+                {getBackendUiMeta(agent.backend).capabilities.supports_cli && <button
                   type="button"
                   aria-pressed="false"
                   disabled={pending}
@@ -305,9 +306,9 @@ const AgentModelCard: React.FC<{
                   <Power className="mt-0.5 size-4 shrink-0 text-muted" aria-hidden="true" />
                   <span className="min-w-0">
                     <span className="block text-[12px] font-bold text-foreground">{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToDirect')}</span>
-                    <span className="mt-0.5 block text-[10.5px] leading-[15px] text-muted">{t('settings.models.gateway.modeMenu.directDescription', { backend: t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend }) })}</span>
+                    <span className="mt-0.5 block text-[10.5px] leading-[15px] text-muted">{t('settings.models.gateway.modeMenu.directDescription', { backend: getBackendUiMeta(agent.backend).label })}</span>
                   </span>
-                </button>
+                </button>}
               </div>
             </ResponsiveMenu>
           )}

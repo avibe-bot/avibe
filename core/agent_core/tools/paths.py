@@ -8,14 +8,16 @@ Mario Zechner).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
+import ipaddress
 import os
 import re
 import stat
 import unicodedata
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable, Literal, TypeVar
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote
 
 from core.agent_core.tools.args import ToolInputError
 
@@ -28,6 +30,16 @@ _WINDOWS = os.name == "nt"
 _ENCODED_SEPARATOR = re.compile("%2f", re.IGNORECASE)
 _ENCODED_SEPARATOR_WINDOWS = re.compile("%2f|%5c", re.IGNORECASE)
 _MALFORMED_ESCAPE = re.compile("%(?![0-9a-fA-F]{2})")
+_C0_OR_SPACE = "".join(map(chr, range(0x21)))
+_TAB_OR_NEWLINE = dict.fromkeys(map(ord, "\t\n\r"))
+_QUERY_OR_FRAGMENT = re.compile("[?#]")
+_DRIVE = re.compile(r"[A-Za-z][:|]\Z")
+_NORMALIZED_DRIVE = re.compile(r"[A-Za-z]:\Z")
+_FORBIDDEN_HOST = re.compile(r"[\x00-\x20#%/:<>?@\[\\\]^|\x7f]")
+_IDNA_JOINERS = re.compile("[\u1806\u200c\u200d]")
+_NUMERIC_LABEL = re.compile(r"(?:[0-9]+|0[xX][0-9a-fA-F]*)\Z")
+_SINGLE_DOT = {".", "%2e"}
+_DOUBLE_DOT = {"..", ".%2e", "%2e.", "%2e%2e"}
 
 
 def expand_path(path: str) -> str:
@@ -43,28 +55,106 @@ def expand_path(path: str) -> str:
 
 
 def _file_url_to_path(url: str) -> str:
-    """Node's ``fileURLToPath``, which Pi uses.
+    """Node's ``fileURLToPath``, which Pi uses, after the WHATWG URL parser's steps for a file URL.
 
-    An empty or ``localhost`` host names this machine. Any other host is a UNC share on Windows and
-    an error elsewhere, so a URL can never name a local file it did not mean. Encoded separators
-    are refused, as Node refuses them.
+    The parser removes C0 controls and spaces at either end and every tab and newline, reads a
+    backslash as ``/``, drops the query and fragment, percent-decodes and lowercases the host, takes
+    ``file://C:/`` as a path, writes a drive ``C|`` as ``C:``, and resolves ``.`` and ``..`` segments
+    (``%2e`` too) without climbing above a drive. An empty or ``localhost`` host names this machine.
+    Any other host is a UNC share on Windows and an error elsewhere, so a URL can never name a local
+    file it did not mean. Encoded separators are refused, as Node refuses them.
     """
-    parsed = urlparse(url)
-    host = "" if parsed.netloc.lower() == "localhost" else parsed.netloc
+    rest = url.strip(_C0_OR_SPACE).translate(_TAB_OR_NEWLINE).replace("\\", "/")[len("file://") :]
+    rest = _QUERY_OR_FRAGMENT.split(rest, maxsplit=1)[0]
+    authority, slash, path = rest.partition("/")
+    if _DRIVE.match(authority):
+        authority, path = "", f"{authority}/{path}" if slash else authority
+    host = _url_host(authority)
+    pathname = _url_pathname(path)
     if _WINDOWS:
-        if _ENCODED_SEPARATOR_WINDOWS.search(parsed.path):
+        if _ENCODED_SEPARATOR_WINDOWS.search(pathname):
             raise ToolInputError("Invalid path: a file URL must not include encoded \\ or / characters")
-        path = _decode_url_path(parsed.path).replace("/", "\\")
+        local = _decode_url_path(pathname).replace("/", "\\")
         if host:
-            return f"\\\\{host}{path}"
-        if len(path) >= 3 and path[0] == "\\" and path[1].isascii() and path[1].isalpha() and path[2] == ":":
-            return path[1:]
+            return f"\\\\{host}{local}"
+        if len(local) >= 3 and local[1].isascii() and local[1].isalpha() and local[2] == ":":
+            return local[1:]
         raise ToolInputError("Invalid path: a file URL must be absolute")
     if host:
         raise ToolInputError("Invalid path: file URL host must be empty or localhost")
-    if _ENCODED_SEPARATOR.search(parsed.path):
+    if _ENCODED_SEPARATOR.search(pathname):
         raise ToolInputError("Invalid path: a file URL must not include encoded / characters")
-    return _decode_url_path(parsed.path)
+    return _decode_url_path(pathname)
+
+
+def _url_host(authority: str) -> str:
+    """The WHATWG host of a file URL, lowercased, and empty for ``localhost``.
+
+    Only hosts whose WHATWG form is the text itself are kept: ASCII names, dotted-quad IPv4, and
+    IPv6 in its compressed form. A host that needs IDNA processing or address parsing to reach
+    Node's form is refused rather than guessed (Python has IDNA 2003, Node UTS #46), unless it maps
+    to ``localhost``, so a URL never names a share or a file Node would not.
+    """
+    if not authority:
+        return ""
+    try:
+        host = unquote(authority, errors="strict")
+    except UnicodeError:
+        raise _invalid_host() from None
+    if host.startswith("[") and host.endswith("]"):
+        try:
+            canonical = ipaddress.IPv6Address(host[1:-1]).compressed
+        except ValueError:
+            raise _invalid_host() from None
+        if "." in host or canonical != host[1:-1].lower():
+            raise _invalid_host()
+        return f"[{canonical}]"
+    if not host.isascii() or "xn--" in host.lower():
+        # Node fails a zero-width joiner or non-joiner where Python's IDNA quietly drops it.
+        if not _IDNA_JOINERS.search(host):
+            with contextlib.suppress(UnicodeError):
+                if host.encode("idna").decode("ascii").lower() == "localhost":
+                    return ""
+        raise _invalid_host()
+    host = host.lower()
+    if _FORBIDDEN_HOST.search(host):
+        raise _invalid_host()
+    labels = host.split(".")
+    last = labels[-1] or (labels[-2] if len(labels) > 1 else "")
+    if _NUMERIC_LABEL.match(last):
+        # WHATWG parses it as IPv4 and prints it as a dotted quad; only that form is the text itself.
+        try:
+            if str(ipaddress.IPv4Address(host)) != host:
+                raise ValueError(host)
+        except ValueError:
+            raise _invalid_host() from None
+    return "" if host == "localhost" else host
+
+
+def _invalid_host() -> ToolInputError:
+    return ToolInputError("Invalid path: a file URL must have a valid host")
+
+
+def _url_pathname(path: str) -> str:
+    """The WHATWG path of a file URL (still percent-encoded), from the text after the authority's ``/``."""
+    segments: list[str] = []
+    parts = path.split("/")
+    for index, segment in enumerate(parts):
+        last = index == len(parts) - 1
+        lowered = segment.lower()
+        if lowered in _DOUBLE_DOT:
+            if segments and not (len(segments) == 1 and _NORMALIZED_DRIVE.match(segments[0])):
+                segments.pop()
+            if last:
+                segments.append("")
+        elif lowered in _SINGLE_DOT:
+            if last:
+                segments.append("")
+        else:
+            if not segments and _DRIVE.match(segment):
+                segment = segment[0] + ":"
+            segments.append(segment)
+    return "/" + "/".join(segments)
 
 
 def _decode_url_path(path: str) -> str:

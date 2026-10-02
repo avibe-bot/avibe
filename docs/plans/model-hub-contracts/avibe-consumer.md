@@ -183,8 +183,8 @@ The header needs no upstream credentials and is never forwarded upstream.
 - Contract authority/version closure, focused Python tests, and the existing UI
   type/build checks run before push.
 
-Known by design: this first PR supports the three existing protocols. Google
-requires a second PR covering the runtime/engine frontend as well as vocabulary;
-adding only an enum would claim a transport that cannot serve requests. There are
+The v11 consumer introduced the three existing protocols. The v12 extension in
+[`google-protocol.md`](google-protocol.md) adds the Google runtime/engine frontend
+together with the vocabulary, while preserving the origin delivery rules. There are
 no new UI elements in this lane. C-8 owns enabling the Avibe backend card and its
 Hub-only presentation; `cli_present` truthfully remains false here.

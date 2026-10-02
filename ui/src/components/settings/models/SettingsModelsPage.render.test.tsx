@@ -48,7 +48,7 @@ const manifest = {
 } satisfies RuntimeManifest;
 
 const runtime: RuntimeDependency = {
-  contract_version: 11,
+  contract_version: 12,
   manifest,
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
@@ -119,7 +119,7 @@ const takeoverAgent: AgentSupply = {
 };
 
 const takeoverChain: AgentChain = { manual_override: {hops:[{source_id:'src_head',model_id:'gpt-5.6-sol'},{source_id:'src_relay',model_id:'gpt-5.6-sol'}]}, route_origin: "manual" as const,
-  contract_version: 11,
+  contract_version: 12,
   backend: 'codex',
   model_id: 'gpt-5.6-sol',
   current: { source_id: 'src_relay', model_id: 'gpt-5.6-sol' },
@@ -222,7 +222,7 @@ const routedHubAgent: AgentSupply = {
 const routedChain: AgentChain = {
   manual_override: { hops: [{ source_id: retainedSource.id, model_id: routedModelId }] },
   route_origin: 'manual' as const,
-  contract_version: 11,
+  contract_version: 12,
   backend: 'claude',
   model_id: routedModelId,
   current: { source_id: retainedSource.id, model_id: routedModelId },
@@ -660,7 +660,7 @@ describe('SettingsModelsPage surface branches', () => {
   });
 
   it('renders Frame 09 as the sources tab when every backend is direct and no source exists', async () => {
-    renderPage([]);
+    renderPage([], [directAgent('claude'), directAgent('codex'), directAgent('opencode')]);
 
     expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
     expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
@@ -916,8 +916,8 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByText('Retained source')).toBeTruthy();
   });
 
-  // Upgrades always return an empty Avibe row. Existing native-only responses
-  // missed both the lost Direct landing and the unusable runtime Stop control.
+  // The in-process catalog is configurable even when empty and without a CLI.
+  // Runtime Stop still depends on whether that catalog actually owns models.
   it.each([false, true])('MH-AVIBE-003 derives runtime use from Avibe catalog presence: %s', async (configured) => {
     const catalogModel: BackendModel = {
       id: 'menu-alias', display_name: null, origin: 'manual', models_dev_id: null,
@@ -933,12 +933,18 @@ describe('SettingsModelsPage surface branches', () => {
       name: configured ? /Avibe models use|Avibe 的模型通过/i : /Turn model gateway off|关闭模型网关/i,
     });
     expect((toggle as HTMLButtonElement).disabled).toBe(configured);
+    const avibeCard = (await screen.findByText('Avibe Agent')).closest('[data-agent-backend]') as HTMLElement;
+    expect(within(avibeCard).getAllByRole('button', { name: /^Manage models$|^管理模型$/i }).length).toBeGreaterThan(0);
+    await userEvent.click(within(avibeCard).getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
+    const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
+    expect(within(modeGroup).queryByRole('button', { name: /Switch to direct|切到直连/i })).toBeNull();
+    await userEvent.click(within(modeGroup).getByRole('button', { pressed: true }));
     if (configured) {
       expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
       await userEvent.click(toggle);
       expect(stop).not.toHaveBeenCalled();
     } else {
-      expect(await screen.findByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeTruthy();
+      expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
       expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
       await userEvent.click(toggle);
       await waitFor(() => expect(stop).toHaveBeenCalledOnce());

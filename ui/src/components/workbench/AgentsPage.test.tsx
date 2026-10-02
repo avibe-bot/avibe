@@ -231,6 +231,35 @@ describe('AgentsPage load requests follow the rank that can serve them', () => {
 });
 
 describe('AgentsPage contextual selection', () => {
+  it('lists, selects and edits an Avibe Agent without a native import option or CLI detail', async () => {
+    const agent = { ...brief('local-helper', 'before'), backend: 'avibe' };
+    const changed = { ...agent, description: 'updated in place' };
+    const updateVibeAgent = vi.fn().mockResolvedValue(fullAgent(changed, 'prompt'));
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(agent)),
+      vi.fn().mockResolvedValue(fullAgent(agent, 'prompt')),
+      undefined, undefined, updateVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true, entry: '/agents?agent=local-helper' });
+    expect(await screen.findByText('Avibe Agent')).toBeTruthy();
+    const row = screen.getAllByText('local-helper').find((node) => node.closest('button'))?.closest('button');
+    expect(row).toBeTruthy();
+    fireEvent.click(row!);
+    const description = await screen.findByDisplayValue('before');
+    fireEvent.change(description, { target: { value: 'updated in place' } });
+    fireEvent.blur(description);
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('local-helper', { description: 'updated in place' }));
+    expect(screen.queryByText(/Avibe Agent CLI/)).toBeNull();
+    expect(screen.getByText('agents.detail.backendName:{"backend":"Avibe Agent"}')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'agents.import' }));
+    expect(screen.queryByText('agents.importFrom:{"backend":"Avibe Agent"}')).toBeNull();
+    // Display names are not translation-key suffixes: a catalog brand change
+    // must keep the native import actions translated and correctly scoped.
+    for (const label of ['Claude Code', 'OpenCode', 'Codex']) {
+      expect(screen.getByText(`agents.importFrom:{"backend":"${label}"}`)).toBeTruthy();
+    }
+  });
+
   it('opens the Agent named by ?agent= instead of the default one', async () => {
     const agentA = brief('agent-a', 'A');
     const agentB = brief('agent-b', 'B');

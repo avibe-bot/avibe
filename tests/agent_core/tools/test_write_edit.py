@@ -10,6 +10,7 @@ import re
 import stat
 import threading
 import time
+import tracemalloc
 
 import pytest
 
@@ -17,6 +18,7 @@ import core.agent_core.tools.paths as paths_module
 import core.agent_core.tools.write as write_module
 
 import core.agent_core.tools.edit as edit_module
+import core.agent_core.tools.edit_diff as edit_diff_module
 from core.agent_core.tools.args import ToolInputError
 from core.agent_core.tools.edit import EditTool
 from core.agent_core.tools.read import ReadTool
@@ -130,6 +132,19 @@ async def test_text_copied_from_read_edits_a_file_with_invalid_bytes(tmp_path, m
     assert (tmp_path / "f.txt").read_bytes() == b"fixed\nkeep\x80\n"
 
 
+@pytest.mark.parametrize("data", [b"alpha\r\r\nbeta\nkeep\n", b"alpha\r\nbeta\nkeep\n", b"a\rlpha\r\r\r\nbeta\nkeep\n"])
+async def test_lines_copied_from_read_edit_the_file_whatever_their_carriage_returns(tmp_path, make_ctx, data):
+    """read's view is edit's matching view: two lines copied from read are found, ``\\r\\r\\n`` included."""
+    (tmp_path / "f.txt").write_bytes(data)
+    shown = result_text(await ReadTool().execute({"path": "f.txt"}, make_ctx()))
+    first_two = shown.split("\nkeep")[0]
+
+    result = await _edit(make_ctx, "f.txt", {"oldText": first_two, "newText": "fixed"})
+
+    assert not result.is_error, result_text(result)
+    assert (tmp_path / "f.txt").read_bytes() == b"fixed\nkeep\n"
+
+
 async def test_text_copied_from_read_edits_the_first_line_of_a_bom_file(tmp_path, make_ctx):
     """read does not show the BOM, edit does not match it, and the BOM survives."""
     (tmp_path / "f.txt").write_bytes(b"\xef\xbb\xbfalpha\r\nbeta\r\n")
@@ -233,6 +248,86 @@ async def test_a_cancelled_write_lands_before_the_next_writer_takes_the_lock(
     assert (tmp_path / "f.txt").read_text() == "second\n"
 
 
+@pytest.mark.parametrize("change", ["replaced", "retargeted", "rewritten"])
+async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, monkeypatch, change):
+    """Another writer (bash, an editor) changed the file after edit read it: nothing is written over it."""
+    (tmp_path / "d").mkdir()
+    real, other, link = tmp_path / "d" / "a.txt", tmp_path / "d" / "b.txt", tmp_path / "d" / "f.txt"
+    real.write_text("alpha\n")
+    other.write_text("other\n")
+    link.symlink_to(real)
+    real_plan = edit_module._plan_edits
+
+    def plan_then_change(*args):
+        planned = real_plan(*args)
+        if change == "replaced":
+            (tmp_path / "d" / "new").write_text("unrelated text\n")
+            os.replace(tmp_path / "d" / "new", real)
+        elif change == "retargeted":
+            link.unlink()
+            link.symlink_to(other)
+        else:
+            real.write_text("unrelated text\n")
+        return planned
+
+    monkeypatch.setattr(edit_module, "_plan_edits", plan_then_change)
+    result = await _edit(make_ctx, "d/f.txt", {"oldText": "alpha", "newText": "beta"})
+
+    assert (result.is_error, result_text(result)) == (
+        True,
+        "Could not edit file: d/f.txt. It changed while the edit was being applied; read it again.",
+    )
+    expected = {"retargeted": ("alpha\n", "other\n")}.get(change, ("unrelated text\n", "other\n"))
+    assert (real.read_text(), other.read_text()) == expected
+
+
+@pytest.mark.parametrize("swap", ["fifo", "read-only", "directory"])
+async def test_write_revalidates_the_target_right_before_replacing_it(tmp_path, make_ctx, monkeypatch, swap):
+    """Another process swapped the file after write classified it: nothing that is not a writable regular file
+    is ever replaced."""
+    (tmp_path / "f").write_text("old\n")
+    real_prepare = write_module._prepare_target
+
+    def prepare_then_swap(absolute):
+        refusal = real_prepare(absolute)
+        os.remove(absolute)
+        if swap == "fifo":
+            os.mkfifo(absolute)
+        elif swap == "read-only":
+            with open(absolute, "w") as handle:
+                handle.write("theirs\n")
+            os.chmod(absolute, 0o444)
+        else:
+            os.mkdir(absolute)
+        return refusal
+
+    monkeypatch.setattr(write_module, "_prepare_target", prepare_then_swap)
+    result = await WriteTool().execute({"path": "f", "content": "new\n"}, make_ctx())
+
+    reason = {"fifo": "it is not a regular file", "read-only": "permission denied", "directory": "it is a directory"}
+    assert (result.is_error, result_text(result)) == (True, f"Cannot write f: {reason[swap]}.")
+    kind = os.lstat(tmp_path / "f").st_mode
+    assert {"fifo": stat.S_ISFIFO, "read-only": stat.S_ISREG, "directory": stat.S_ISDIR}[swap](kind)
+    if swap == "read-only":
+        assert (tmp_path / "f").read_text() == "theirs\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["f"]
+
+
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_a_name_at_the_length_limit_can_be_replaced(tmp_path, make_ctx, tool):
+    """The temp file beside the target must not be longer than the target's own (valid) name."""
+    name = "n" * 251 + ".txt"  # 255 bytes, the usual NAME_MAX
+    (tmp_path / name).write_text("old\n")
+
+    if tool == "write":
+        result = await WriteTool().execute({"path": name, "content": "new\n"}, make_ctx())
+    else:
+        result = await _edit(make_ctx, name, {"oldText": "old", "newText": "new"})
+
+    assert not result.is_error, result_text(result)
+    assert (tmp_path / name).read_text() == "new\n"
+
+
 async def test_new_files_keep_the_umask_default(tmp_path, make_ctx):
     umask = os.umask(0)
     os.umask(umask)
@@ -321,6 +416,102 @@ async def test_the_display_diff_and_patch_are_pis(tmp_path, make_ctx, original, 
     }
 
 
+@pytest.mark.parametrize(
+    ("content", "edit"),
+    [
+        # Normalized matching strips trailing whitespace per line; a long run must not be quadratic.
+        ("x" + " " * 60_000 + "y\n", {"oldText": "\u201cmissing\u201d", "newText": "z"}),
+        # replaceAll over one long line: tens of thousands of occurrences.
+        ("a," * 40_000 + "\n", {"oldText": "a", "newText": "b", "replaceAll": True}),
+    ],
+    ids=["whitespace-run", "replace-all"],
+)
+async def test_edit_work_stays_linear_on_adversarial_files(tmp_path, make_ctx, content, edit):
+    (tmp_path / "f.txt").write_text(content)
+    started = time.monotonic()
+
+    await _edit(make_ctx, "f.txt", edit)
+
+    assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.parametrize(
+    ("content", "edit", "is_error"),
+    [
+        # A unique edit stops looking after the second match; the count comes from str.count.
+        ("x" * 1_000_000, {"oldText": "x", "newText": "y"}, True),
+        # More lines than edit plans per-line state for: refused before any is built.
+        ("\n" * 1_000_000 + "t", {"oldText": "t", "newText": "u"}, True),
+        # More occurrences than replaceAll builds replacements for: refused before any is built.
+        ("x" * 1_000_000, {"oldText": "x", "newText": "y", "replaceAll": True}, True),
+        # A result of three million lines, within the byte limit: its view is built without per-line state.
+        ("t," * 10, {"oldText": "t", "newText": "\n" * 300_000, "replaceAll": True}, False),
+    ],
+    ids=["duplicate", "many-lines", "many-occurrences", "many-result-lines"],
+)
+async def test_edit_memory_is_bounded_by_its_budgets_not_by_the_file(tmp_path, make_ctx, content, edit, is_error):
+    """Python objects per line or per match cost hundreds of bytes each, in the process every Session shares."""
+    (tmp_path / "f.txt").write_text(content)
+    tracemalloc.start()
+    try:
+        result = await _edit(make_ctx, "f.txt", edit)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert result.is_error == is_error, result_text(result)
+    assert peak < 32 * 1024 * 1024
+
+
+async def test_edit_refuses_files_with_more_lines_than_it_plans(tmp_path, make_ctx, monkeypatch):
+    monkeypatch.setattr(edit_module, "MAX_EDIT_LINES", 100)
+    (tmp_path / "ok.txt").write_text("x\n" * 99 + "t")
+    (tmp_path / "big.txt").write_text("x\r\n" * 100 + "t")
+
+    ok = await _edit(make_ctx, "ok.txt", {"oldText": "t", "newText": "u"})
+    big = await _edit(make_ctx, "big.txt", {"oldText": "t", "newText": "u"})
+
+    assert not ok.is_error, result_text(ok)
+    assert (big.is_error, result_text(big)) == (
+        True,
+        "File big.txt has 101 lines, over the 100 line edit limit. "
+        "Use bash (for example sed or a short script) to change files this large.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("edits", "message"),
+    [
+        (
+            [{"oldText": "a", "newText": "b", "replaceAll": True}],
+            "Found 11 occurrences of the text in f.txt, over the 10 replaceAll limit. "
+            "Use bash (for example sed or a short script) to replace this many.",
+        ),
+        (
+            [{"oldText": "zz", "newText": "q"}, {"oldText": "a", "newText": "b", "replaceAll": True}],
+            "Found 11 occurrences of edits[1] in f.txt, over the 10 replaceAll limit. "
+            "Use bash (for example sed or a short script) to replace this many.",
+        ),
+        (
+            # Ten replacements of 200 characters: over a 1,000-byte limit before anything is built.
+            [{"oldText": "c", "newText": "y" * 200, "replaceAll": True}],
+            "File f.txt would be over the 1000B edit limit after this edit. "
+            "Use bash (for example sed or a short script) to change files this large.",
+        ),
+    ],
+    ids=["single", "batch", "inserted-text"],
+)
+async def test_replace_all_has_a_budget(tmp_path, make_ctx, monkeypatch, edits, message):
+    monkeypatch.setattr(edit_module, "MAX_EDIT_BYTES", 1000)
+    monkeypatch.setattr(edit_diff_module, "MAX_REPLACEMENTS", 10)
+    (tmp_path / "f.txt").write_text("a," * 11 + "zz\n" + "c," * 10 + "\n")
+
+    result = await _edit(make_ctx, "f.txt", *edits)
+
+    assert (result.is_error, result_text(result)) == (True, message)
+    assert (tmp_path / "f.txt").read_text() == "a," * 11 + "zz\n" + "c," * 10 + "\n"
+
+
 async def test_a_large_changed_middle_skips_the_display_diff(tmp_path, make_ctx):
     (tmp_path / "f.txt").write_text("".join(f"line {i}\n" for i in range(3000)))
 
@@ -346,7 +537,7 @@ async def test_a_planned_result_over_the_limit_is_refused_and_its_diff_skipped(t
     assert grown.details == {"diff_skipped": True}
     assert too_big.is_error
     assert result_text(too_big) == (
-        "File small.txt would be 2.0KB after this edit, over the 1000B edit limit. "
+        "File small.txt would be over the 1000B edit limit after this edit. "
         "Use bash (for example sed or a short script) to change files this large."
     )
     assert (tmp_path / "small.txt").read_text() == "x" * 600 + "\n"
@@ -545,6 +736,19 @@ async def test_a_failing_edit_writes_nothing(tmp_path, make_ctx, edits, message)
 
 
 @pytest.mark.parametrize(
+    ("tool", "arguments", "expected"),
+    [
+        (ReadTool(), {"path": "a\ud800"}, "Cannot read a\ufffd: no such file or directory."),
+        (WriteTool(), {"path": "a\udfff", "content": "x"}, "Successfully wrote to a\ufffd"),
+    ],
+)
+async def test_lone_surrogates_in_a_path_are_sanitized(tmp_path, make_ctx, tool, arguments, expected):
+    result = await tool.execute(arguments, make_ctx())
+
+    assert result_text(result) == expected
+
+
+@pytest.mark.parametrize(
     ("tool", "arguments"),
     [
         (ReadTool(), {"path": "a\x00b"}),
@@ -560,9 +764,44 @@ async def test_a_path_no_file_can_have_is_an_error_result(make_ctx, tool, argume
 
 
 @pytest.mark.parametrize(
+    "url",
+    [
+        "file://h%C3%A9/x",  # Node: \\\\hé\\x, through IDNA processing Python does not have
+        "file://xn--9ca/x",  # the same host, spelled in punycode
+        "file://127.1/x",  # Node: \\\\127.0.0.1\\x, after WHATWG's IPv4 parsing
+        "file://[::ffff:1.2.3.4]/x",  # Node: \\\\[::ffff:102:304]\\x
+    ],
+)
+def test_unc_hosts_that_need_idna_or_address_parsing_are_refused(monkeypatch, url):
+    """Refused rather than guessed, so a URL never names a share Node would not."""
+    monkeypatch.setattr(paths_module, "_WINDOWS", True)
+
+    with pytest.raises(ToolInputError) as raised:
+        paths_module.expand_path(url)
+
+    assert str(raised.value) == "Invalid path: a file URL must have a valid host"
+
+
+# Expected values are Node's fileURLToPath (WHATWG URL parsing), which Pi uses.
+@pytest.mark.parametrize(
     ("windows", "url", "expected"),
     [
         (False, "file:///tmp/a%20b.txt", "/tmp/a b.txt"),
+        # The WHATWG URL parser's steps: a backslash is a separator, C0 controls and spaces at the ends go.
+        (False, "file:///tmp\\x", "/tmp/x"),
+        (False, "file:///tmp/a ", "/tmp/a"),
+        (False, "file:///tmp/a\x1f \x00", "/tmp/a"),
+        (False, "file:///tmp/a%20", "/tmp/a "),
+        (True, "file:///C:\\tmp\\x", "C:\\tmp\\x"),
+        (True, "file://localhost\\C:\\x", "C:\\x"),
+        # Pi's gate is case-sensitive: this is a relative path in Pi too.
+        (False, "FILE:///tmp/a", "FILE:///tmp/a"),
+        # IDNA maps a soft hyphen to nothing; Node fails a host with a zero-width joiner.
+        (False, "file://local\u00adhost/x", "/x"),
+        (False, "file://local\u200dhost/etc/passwd", ToolInputError("Invalid path: a file URL must have a valid host")),
+        (True, "file://Server/Share/x", "\\\\server\\Share\\x"),
+        (True, "file://192.168.1.5/x", "\\\\192.168.1.5\\x"),
+        (True, "file://[::1]/x", "\\\\[::1]\\x"),
         (False, "file://localhost/tmp/x", "/tmp/x"),
         (False, "file://server/tmp/x", ToolInputError("Invalid path: file URL host must be empty or localhost")),
         (False, "file:///tmp/a%2Fb", ToolInputError("Invalid path: a file URL must not include encoded / characters")),

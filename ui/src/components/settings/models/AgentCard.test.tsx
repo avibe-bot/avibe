@@ -16,7 +16,7 @@ import { freshRuntimeProjection } from './runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency, Source } from './types';
 
 const runtime: RuntimeDependency = {
-  contract_version: 11,
+  contract_version: 12,
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'fixture', assets: [] },
   status: { installed_version: '1.0.0', verified: true, listening: null, health: 'ok', last_check: null },
 };
@@ -30,7 +30,7 @@ const localeInstance = (lng: 'en' | 'zh') => {
   void instance.use(initReactI18next).init({
     lng,
     fallbackLng: 'en',
-    resources: { en: { translation: en }, zh: { translation: zh } },
+    resources: { en: { translation: structuredClone(en) }, zh: { translation: structuredClone(zh) } },
     interpolation: { escapeValue: false },
   });
   return instance;
@@ -69,6 +69,32 @@ const openCodeAgent: AgentSupply = {
 };
 
 afterEach(cleanup);
+
+describe('backend brand ownership', () => {
+  // Card headings previously came from a second i18n brand table. Existing
+  // fixtures used identical translations, masking divergence from the catalog.
+  it.each(['en', 'zh'] as const)('keeps every backend brand catalog-owned in %s', (language) => {
+    const locale = localeInstance(language);
+    const rows = [
+      { backend: 'claude', label: 'Claude Code' },
+      { backend: 'codex', label: 'Codex' },
+      { backend: 'opencode', label: 'OpenCode' },
+      { backend: 'avibe', label: 'Avibe Agent' },
+    ] as const;
+    for (const { backend } of rows) {
+      locale.addResource(language, 'translation', `settings.models.backends.${backend}`, 'Obsolete localized brand');
+    }
+    render(<I18nextProvider i18n={locale}><AgentCard
+      agents={rows.map(({ backend }) => ({ ...hubAgent, backend }))}
+      sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()}
+      connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()}
+      onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()}
+    /></I18nextProvider>);
+    expect(screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent))
+      .toEqual(rows.map(({ label }) => label));
+    expect(screen.queryByText('Obsolete localized brand')).toBeNull();
+  });
+});
 
 describe('AgentCard origin help ownership', () => {
   const agents: AgentSupply[] = ['claude', 'codex'].map((backend) => ({
@@ -374,7 +400,7 @@ describe('AgentCard', () => {
     ['zh', 'Backup → claude-opus-4-6（已自动切换）', '打开 claude-opus-4-6 的路由 · Backup → claude-opus-4-6（已自动切换）'],
   ] as const)('derives and announces takeover from the exact current hop in %s', (lng, mappingCopy, accessibleName) => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
-    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 11, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={localeInstance(lng)}><AgentCard agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 12, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
     expect(screen.getByText(/Backup/)).toBeTruthy();
     expect(screen.getByTitle(mappingCopy)).toBeTruthy();
     expect(screen.getByRole('button', { name: accessibleName })).toBeTruthy();
@@ -394,7 +420,7 @@ describe('AgentCard', () => {
           sources={[source('src_b', 'Backup source')]}
           chains={{
             [key]: readyRegion({ manual_override: {hops:[{source_id:'src_b',model_id:'routed-opus'}]}, route_origin: "manual" as const,
-              contract_version: 11,
+              contract_version: 12,
               backend: 'claude',
               model_id: 'claude-opus-4-6',
               current: { source_id: 'src_b', model_id: 'routed-opus' },
@@ -427,7 +453,7 @@ describe('AgentCard', () => {
 
   it('does not call a later current hop takeover unless the head is unavailable for cooldown', () => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
-    render(<I18nextProvider i18n={i18n}><AgentCard agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 11, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'native_cli', health: 'healthy', runnable: false, reason: 'native_cli_unavailable', retry_at: null }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><AgentCard agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 12, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'native_cli', health: 'healthy', runnable: false, reason: 'native_cli_unavailable', retry_at: null }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
     expect(screen.getByText(/Backup/)).toBeTruthy();
     expect(screen.queryByText(/takeover/i)).toBeNull();
   });
@@ -435,7 +461,7 @@ describe('AgentCard', () => {
   it('hides current and takeover projections while the runtime is stopped', () => {
     const key = modelChainKey('claude', 'claude-opus-4-6');
     const stopped = { ...runtime, status: { ...runtime.status, health: 'down' as const } };
-    render(<I18nextProvider i18n={i18n}><RuntimeAgentCard runtime={freshRuntimeProjection(readyRegion(stopped))} agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 11, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><RuntimeAgentCard runtime={freshRuntimeProjection(readyRegion(stopped))} agents={[hubAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 12, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
 
     expect(screen.queryByText(/Backup/)).toBeNull();
     expect(screen.queryByText(/takeover/i)).toBeNull();
@@ -447,7 +473,7 @@ describe('AgentCard', () => {
     const onOpenModels = vi.fn();
     const key = modelChainKey('claude', 'claude-opus-4-6');
     const directAgent: AgentSupply = { ...hubAgent, mode: 'direct', sources: null, routes: null, supply_status: null, model_supply: null };
-    render(<I18nextProvider i18n={i18n}><AgentCard agents={[directAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 11, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><AgentCard agents={[directAgent]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: readyRegion({ manual_override: {hops:[{source_id:'src_a',model_id:'claude-opus-4-6'},{source_id:'src_b',model_id:'claude-opus-4-6'}]}, route_origin: "manual" as const, contract_version: 12, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' }) }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenModels={onOpenModels} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
     expect(screen.queryByText(/Adjust priority/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /route chain/i })).toBeNull();
     expect(screen.queryByText(/Backup/)).toBeNull();

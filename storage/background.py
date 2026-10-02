@@ -3309,9 +3309,9 @@ def _capture_run_backend(conn: Any, values: dict[str, Any]) -> Optional[str]:
     if cleaned_agent_backend:
         return cleaned_agent_backend
 
-    from core.vibe_agents import SUPPORTED_AGENT_BACKENDS
+    from modules.agents.catalog import AGENT_BACKENDS
 
-    return agent_name if agent_name in SUPPORTED_AGENT_BACKENDS else None
+    return agent_name if agent_name in AGENT_BACKENDS else None
 
 
 def enqueue_run_in_connection(conn: Any, values: dict[str, Any]) -> None:

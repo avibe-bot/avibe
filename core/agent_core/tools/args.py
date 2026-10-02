@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal
 from typing import Any, Mapping, Optional
 
 from core.agent_core.messages import TextBlock
 from core.agent_core.tools.base import ToolResult
+from core.agent_core.tools.text import model_text
 
 
 class ToolInputError(ValueError):
@@ -22,10 +24,11 @@ def error_result(text: str, *, details: Optional[Mapping[str, Any]] = None) -> T
 
 
 def str_arg(arguments: Mapping[str, Any], name: str) -> str:
+    """A string argument, through the one sanitizer for model text (a lone surrogate becomes U+FFFD)."""
     value = arguments.get(name)
     if not isinstance(value, str):
         raise ToolInputError(f"{name} must be a string")
-    return value
+    return model_text(value)
 
 
 def optional_number_arg(arguments: Mapping[str, Any], name: str) -> Optional[float]:
@@ -65,5 +68,20 @@ def optional_bool_arg(arguments: Mapping[str, Any], name: str) -> bool:
 
 
 def format_number(value: float) -> str:
-    """``5`` for 5.0 and ``0.5`` for 0.5, as JavaScript prints numbers in Pi's messages."""
-    return str(int(value)) if float(value).is_integer() else repr(float(value))
+    """JavaScript's ``String(number)``, as Pi prints numbers in its messages: ``5``, ``0.5``, ``0.00001``, ``1e-7``."""
+    value = float(value)
+    if value == 0 or not math.isfinite(value):
+        return {0.0: "0", math.inf: "Infinity", -math.inf: "-Infinity"}.get(value, "NaN")
+    sign = "-" if value < 0 else ""
+    # repr gives the shortest digits that round-trip, as JavaScript does; only the layout differs.
+    _, digit_tuple, exponent = Decimal(repr(abs(value))).normalize().as_tuple()
+    digits = "".join(map(str, digit_tuple))
+    point = exponent + len(digits)  # value = 0.<digits> * 10**point
+    if len(digits) <= point <= 21:
+        return sign + digits + "0" * (point - len(digits))
+    if 0 < point <= 21:
+        return f"{sign}{digits[:point]}.{digits[point:]}"
+    if -6 < point <= 0:
+        return f"{sign}0.{'0' * -point}{digits}"
+    mantissa = digits[0] + (f".{digits[1:]}" if len(digits) > 1 else "")
+    return f"{sign}{mantissa}e{'+' if point - 1 >= 0 else '-'}{abs(point - 1)}"

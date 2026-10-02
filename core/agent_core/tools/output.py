@@ -30,7 +30,6 @@ class OutputAccumulator:
         self._tail_starts_at_line_boundary = True
         self._total_bytes = 0
         self._completed_lines = 0
-        self._current_line_bytes = 0
         self._has_open_line = False
 
     def append(self, text: str) -> None:
@@ -44,13 +43,10 @@ class OutputAccumulator:
             self._trim()
         newlines = text.count("\n")
         if newlines == 0:
-            self._current_line_bytes += size
             self._has_open_line = True
-        else:
-            self._completed_lines += newlines
-            rest = text[text.rindex("\n") + 1 :]
-            self._current_line_bytes = utf8_len(rest)
-            self._has_open_line = bool(rest)
+            return
+        self._completed_lines += newlines
+        self._has_open_line = not text.endswith("\n")
 
     def snapshot(self, open_line: str = "") -> TruncationResult:
         """The tail as the model would see it, with ``open_line`` (not yet final) appended."""
@@ -65,9 +61,6 @@ class OutputAccumulator:
         return replace(
             tail, truncated=truncated, truncated_by=truncated_by, total_lines=total_lines, total_bytes=total_bytes
         )
-
-    def last_line_bytes(self, open_line: str = "") -> int:
-        return (self._current_line_bytes if self._has_open_line else 0) + utf8_len(open_line)
 
     def _trim(self) -> None:
         data = self._tail.encode("utf-8", "surrogatepass")
@@ -147,8 +140,9 @@ class JobOutput:
         if not truncation.truncated:
             notice = f"[{where}]"
         elif truncation.last_line_partial:
-            open_line = "" if self._finished else self._normalizer.peek()
-            line_size = format_size(self._accumulator.last_line_bytes(open_line))
+            # Avibe fix to Pi, whose count drops to 0 once the line ends: the normalizer knows the whole
+            # line's size, including what it dropped from the start of a line too long to keep.
+            line_size = format_size(self._normalizer.last_line_bytes())
             notice = (
                 f"[Showing last {format_size(truncation.output_bytes)} of line {end} (line is {line_size}). {where}]"
             )
@@ -159,19 +153,20 @@ class JobOutput:
                 f"[Showing lines {start}-{end} of {truncation.total_lines} ({format_size(MAX_BYTES)} limit). {where}]"
             )
         if self._omitted:
-            # Only LocalJobHost drops output, and it keeps the end in tail.log next to output.log.
-            notice += f"\n[{format_size(self._omitted)} were omitted; the end of the log is in tail.log beside it.]"
+            # Only LocalJobHost drops output: the middle, between output.log and tail.log.
+            notice += f"\n[{format_size(self._omitted)} between output.log and tail.log were omitted.]"
         return f"{text}\n\n{notice}", truncation
 
     def where(self) -> str:
         """Where the log is, in one wording for every state (C-7 section 5).
 
-        The log keeps everything up to the cap and drops the middle beyond it, and a job can keep
-        appending after its result was built (a background child holding the pipe), so the label states
-        that policy rather than the log's current state: it can never become untrue.
+        ``output.log`` keeps the first ``OUTPUT_HEAD_BYTES``; past that, ``tail.log`` beside it keeps the
+        latest ``OUTPUT_TAIL_BYTES``. A job can keep appending after its result was built (a handed-over
+        job, a background child holding the pipe), so the label states that policy rather than the
+        log's current state: it can never become untrue.
         """
-        cap = format_size(job_host.OUTPUT_HEAD_BYTES + job_host.OUTPUT_TAIL_BYTES)
-        return f"Output log (middle omitted beyond {cap}): {self.path}"
+        head, tail = format_size(job_host.OUTPUT_HEAD_BYTES), format_size(job_host.OUTPUT_TAIL_BYTES)
+        return f"Output log (first {head}, then the last {tail} in tail.log beside it): {self.path}"
 
     def details(self, truncation: Optional[TruncationResult]) -> dict[str, Any]:
         out: dict[str, Any] = {"job_id": self._job_id, "output_path": self.path}

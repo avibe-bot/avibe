@@ -51,6 +51,21 @@ const mountRuntime = async () => {
 };
 
 describe('persisted backend install paths', () => {
+  it('keeps an in-process backend disabled by default and rejects CLI work at the hook boundary', async () => {
+    const hook = renderHook(() => useBackendRuntime({ backend: 'avibe' }));
+    await waitFor(() => expect(hook.result.current.loaded).toBe(true));
+    expect(hook.result.current.enabled).toBe(false);
+    expect(hook.result.current.cliPath).toBe('');
+    await act(async () => {
+      await hook.result.current.detect();
+      await hook.result.current.install();
+      await hook.result.current.onSaveRuntime();
+    });
+    expect(mocks.api.detectCli).not.toHaveBeenCalled();
+    expect(mocks.api.installAgent).not.toHaveBeenCalled();
+    expect(hook.result.current.runtimeDirty).toBe(false);
+  });
+
   it('does not mark a lifecycle install as an unsaved path edit', async () => {
     const hook = await mountRuntime();
 

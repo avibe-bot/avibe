@@ -43,3 +43,15 @@ def test_a_long_final_line_keeps_its_end_and_says_what_was_dropped():
     out = "".join(normalizer.feed(b"y" * 10_000) for _ in range(10)) + normalizer.feed(b"\n") + normalizer.flush()
 
     assert out == f"[... {100_000 - 65_536} bytes omitted ...]" + "y" * 65_536 + "\n"
+
+
+@pytest.mark.parametrize("after", [b"\r\r", b"\r\x1b[0m"], ids=["two-returns", "ansi-only-redraw"])
+def test_a_segment_kept_for_a_redraw_is_bounded_too(after):
+    """Both kept segments of an open line obey the bound: the one a redraw may fall back to as well."""
+    normalizer = OutputNormalizer()
+
+    normalizer.feed(b"x" * 200_000 + after)
+    open_line = normalizer.peek()
+    out = normalizer.flush()
+
+    assert open_line == out == f"[... {200_000 - 65_536} bytes omitted ...]" + "x" * 65_536

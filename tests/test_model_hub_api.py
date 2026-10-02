@@ -17,6 +17,7 @@ from urllib.parse import quote
 import pytest
 from jsonschema import Draft7Validator, FormatChecker
 from referencing import Registry, Resource
+from modules.agents.catalog import AGENT_BACKENDS
 
 from config.v2_config import (
     ModelHubAgentSupplyConfig,
@@ -1025,7 +1026,7 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     assert adapter.start_calls == 1
     assert store.config.enabled is True
     assert runtime["enabled"] is True
-    assert runtime["contract_version"] == 11
+    assert runtime["contract_version"] == 12
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
@@ -1332,7 +1333,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 11, "status": {"health": "ok"}}
+        return {"contract_version": 12, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1349,7 +1350,7 @@ def test_runtime_stop_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 11, "status": {"health": "not_started"}}
+        return {"contract_version": 12, "status": {"health": "not_started"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1366,7 +1367,7 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 11, "status": {"health": "installing"}}
+        return {"contract_version": 12, "status": {"health": "installing"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1384,7 +1385,7 @@ def test_runtime_dependency_ensure_crosses_the_controller_rpc_boundary(monkeypat
     def rpc(operation, payload=None):
         calls.append((operation, payload))
         return {
-            "contract_version": 11,
+            "contract_version": 12,
             "changed": True,
             "status": {"health": "not_started", "verified": True},
         }
@@ -4083,7 +4084,7 @@ def test_backend_catalog_preserves_requested_insertion_position_for_a_new_model(
     ]
 
 
-@pytest.mark.parametrize("backend", ("claude", "codex", "opencode"))
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 def test_backend_catalog_allows_editing_a_persisted_legacy_long_id(tmp_path, backend):
     service, store, _adapter = _service(tmp_path)
     legacy_id = "legacy-" + "模型🧪/e\u0301" * 3000
@@ -4132,7 +4133,7 @@ def test_backend_catalog_allows_a_persisted_legacy_claude_alias_to_round_trip(
     assert response["agent"]["catalog_models"][1]["display_name"] == "Unrelated edit"
 
 
-@pytest.mark.parametrize("backend", ("claude", "codex", "opencode"))
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 def test_backend_catalog_rejects_a_new_unencodable_id(tmp_path, backend):
     service, _store, _adapter = _service(tmp_path)
     baseline = service.backend_catalog_models(backend)
@@ -4148,7 +4149,7 @@ def test_backend_catalog_rejects_a_new_unencodable_id(tmp_path, backend):
     assert raised.value.code == "backend_model_id_invalid"
 
 
-@pytest.mark.parametrize("backend", ("claude", "codex", "opencode"))
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 @pytest.mark.parametrize(
     "identifier", ["x" * 257, "模型🧪/e\u0301" * 3000, "x" * 17000],
     ids=("past-former-bound", "long-unicode", "past-lexical-budget"),
@@ -4801,7 +4802,7 @@ def test_agent_models_route_returns_only_picker_catalog_fields(monkeypatch):
     assert response.status_code == 200
     assert response.get_json() == {
         "ok": True,
-        "contract_version": 11,
+        "contract_version": 12,
         "agent": {
             "backend": "codex",
             "mode": "hub",
@@ -9620,7 +9621,7 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 11
+    assert runtime["contract_version"] == 12
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 

@@ -440,6 +440,8 @@ def test_runtime_opencode_resolution_preserves_absent_selection():
 
 
 def test_hub_subscription_is_cross_backend_eligible_and_origin_unrestricted():
+    from modules.agents.catalog import AGENT_BACKENDS
+
     source = _source(
         "src_hubsub002",
         ("shared-model",),
@@ -453,7 +455,7 @@ def test_hub_subscription_is_cross_backend_eligible_and_origin_unrestricted():
     )
     config.agents["codex"].sources.order = [source.id]
 
-    assert all(ModelHubConfig.source_eligible_for_backend(source, backend) for backend in ("claude", "codex", "opencode"))
+    assert all(ModelHubConfig.source_eligible_for_backend(source, backend) for backend in AGENT_BACKENDS)
     assert allowed_origins(source) == ("claude", "codex", "opencode", "avibe")
     resolution = resolve_model_hub_turn(config, "codex", "shared-model")
     assert resolution.source is source
@@ -1705,7 +1707,7 @@ def test_service_accepts_authoritative_reachable_adapter_error(tmp_path):
     )
 
     assert result["observation"] == {
-        "contract_version": 11,
+        "contract_version": 12,
         "outcome": "adapter_error",
         "reachable": True,
         "authenticated": "unknown",
@@ -1736,7 +1738,7 @@ def test_unknown_adapter_error_does_not_claim_connection(tmp_path):
     assert exc.value.code == "discovery_failed"
     assert exc.value.detail == "modelHub.errors.adapter_error"
     assert exc.value.data["observation"] == {
-        "contract_version": 11,
+        "contract_version": 12,
         "outcome": "adapter_error",
         "reachable": None,
         "authenticated": "unknown",

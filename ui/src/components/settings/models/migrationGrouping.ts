@@ -9,6 +9,7 @@
 // native config cannot be parsed at all.
 import type { TranslationKey } from '@/i18n/types';
 import type { AgentBackend, MigrationItem, MigrationScan } from './types';
+import { NATIVE_SETUP_BACKENDS } from '@/lib/agentBackends';
 
 /**
  * A scan plus the backends consented to against it.
@@ -22,7 +23,7 @@ export type MigrationSelection = {
   selectedBackends: AgentBackend[];
 };
 
-export const BACKEND_ORDER: AgentBackend[] = ['claude', 'codex', 'opencode'];
+export const BACKEND_ORDER = NATIVE_SETUP_BACKENDS;
 
 export const isImportable = (item: MigrationItem) => item.proposed_action === 'import';
 

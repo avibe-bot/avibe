@@ -34,6 +34,7 @@ POSIX only in v1.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -87,7 +88,12 @@ STOP_TIMEOUT = "timeout"
 STOP_ABORTED = "aborted"
 
 _WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "job_wrapper.py")
+#: How long past the deadline the host leaves a live wrapper to decide (its poll interval, its
+#: 0.5 s drain, and margin) before stopping the job itself.
+_WRAPPER_DECIDES_S = 1.0
 _JOB_ID = re.compile(r"^job_[a-z0-9]+$")
+# tail.log starts with this line (written by the wrapper), so a reader of the file sees where it begins.
+_TAIL_HEADER = re.compile(rb"\[output from byte (\d+)\]\n")
 _GO = "go"
 _ABANDON = "abandon"
 
@@ -150,7 +156,9 @@ class LocalJobHost:
         on_hand_over: Optional[HandOver] = None,
         shell: Optional[str] = None,
     ) -> None:
-        self._jobs_dir = os.path.abspath(jobs_dir)
+        # Canonical, so every host names a job's directory (and its wrapper's argv) the same way, whatever
+        # alias it was given (``~/.vibe_remote`` -> ``~/.avibe``, ``/tmp`` -> ``/private/tmp``).
+        self._jobs_dir = os.path.realpath(jobs_dir)
         self._on_hand_over = on_hand_over
         self._shell = shell or default_shell()
         # Wrappers this host spawned. Each has a reaper thread, so a finished wrapper never lingers
@@ -211,10 +219,12 @@ class LocalJobHost:
         try:
             os.link(tmp, target)
         except FileExistsError:
-            pass
+            return _read_text(target) or value
         finally:
-            os.unlink(tmp)
-        return _read_text(target) or value
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)  # a leftover temp is harmless; it goes with the job directory
+        # Linked: ours is durable, so nothing that fails after this may say otherwise.
+        return value
 
     def _create_decision(self, job_id: str, value: str) -> str:
         """Try to decide; return the decision that holds, ours or the wrapper's."""
@@ -348,7 +358,7 @@ class LocalJobHost:
             return JobStatus("exited", exit_code)
         if self._decision(job_id) != _GO:
             return JobStatus("gone")
-        if self._alive(job_id):
+        if self._alive(job_id) or self._orphaned_group_runs(job_id):
             return JobStatus("running")
         # The wrapper writes `exit` before it exits, so look once more.
         exit_code = self._exit_code(job_id)
@@ -392,7 +402,10 @@ class LocalJobHost:
             return data, since + len(data)
         try:
             with open(self._path(job_id, "tail.log"), "rb") as handle:
-                tail_start = int(handle.readline())
+                header = _TAIL_HEADER.fullmatch(handle.readline())
+                if header is None:
+                    raise ValueError("tail.log header")
+                tail_start = int(header.group(1))
                 start = max(since, tail_start)
                 handle.seek(start - tail_start, os.SEEK_CUR)
                 data = handle.read(OUTPUT_CHUNK_BYTES)
@@ -416,7 +429,11 @@ class LocalJobHost:
             if _group_exists(identity.pid):
                 logger.warning("Job %s process group %s cannot be verified; not signaling", job_id, identity.pid)
             return
-        self._create_once(job_id, "stopped", reason)  # the first stopper's reason wins
+        try:
+            self._create_once(job_id, "stopped", reason)  # the first stopper's reason wins
+        except OSError:
+            # Recording is best effort at every stopper: the kill matters more than the record.
+            logger.warning("Could not record why job %s was stopped", job_id, exc_info=True)
         if not await asyncio.to_thread(_terminate_group, identity.pid):
             logger.warning("Job %s process group %s survived termination", job_id, identity.pid)
 
@@ -446,11 +463,17 @@ class LocalJobHost:
     # --- deadline (J3) and reporting --------------------------------------
 
     async def enforce_deadline(self, job_id: str) -> bool:
-        """Kill the job if its ``deadline_at`` has passed while it runs; ``True`` if it was killed."""
+        """Kill the job if its ``deadline_at`` has passed while it runs; ``True`` if it was killed.
+
+        Only the wrapper sees the shell exit, and it publishes the exit after draining the output, so a
+        running job may already have ended on time: a live wrapper decides timeout versus exit. The
+        host stops the job as the second owner once the wrapper has not, ``_WRAPPER_DECIDES_S`` late.
+        """
         deadline_at = self.meta(job_id).get("deadline_at")
-        if not deadline_at or datetime.now(timezone.utc) < _parse_iso(deadline_at):
+        if not deadline_at:
             return False
-        if self.status(job_id).state != "running":
+        late = (datetime.now(timezone.utc) - _parse_iso(deadline_at)).total_seconds()
+        if late < _WRAPPER_DECIDES_S or self.status(job_id).state != "running":
             return False
         await self.kill(job_id, reason=STOP_TIMEOUT)
         return True
@@ -470,7 +493,8 @@ class LocalJobHost:
                 job_dir = self.job_dir(name)
                 if max(entry.stat().st_mtime for entry in os.scandir(job_dir)) > cutoff:
                     continue
-                if self.status(name).state == "running" or not settled(self.meta(name)):
+                # An exited job's wrapper may still drain children that hold the pipe; it needs the directory.
+                if self.status(name).state == "running" or self._alive(name) or not settled(self.meta(name)):
                     continue
             except (KeyError, ValueError, OSError):
                 continue
@@ -512,6 +536,11 @@ class LocalJobHost:
             return False
         job_dir = self.job_dir(job_id)
         return any(argv[i : i + 2] == ["avibe-job", job_dir] for i in range(len(argv) - 1))
+
+    def _orphaned_group_runs(self, job_id: str) -> bool:
+        """The wrapper was killed on its own (SIGKILL), but its group still provably runs the job."""
+        identity = self._identity(job_id)
+        return identity is not None and _group_exists(identity.pid) and self._group_carries_marker(identity)
 
     def _group_carries_marker(self, identity: PersistedProcessIdentity) -> bool:
         return process_group_identity_status(identity.pid, identity, logger, "agent job") == "match"

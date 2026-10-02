@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
 from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig
+from modules.agents.catalog import display_name_for_backend
 from core.os_errors import format_os_errno
 
 from core.run_settlement import (
@@ -590,7 +591,7 @@ def render_turn_outcome_copy(
             )
         params["blockers"] = ", ".join(rendered)
     if params.get("backend"):
-        params["backend"] = i18n_t(f"modelHub.backends.{params['backend']}", language)
+        params["backend"] = display_name_for_backend(params["backend"])
     return i18n_t(copy.key, language, **params)
 
 
@@ -2333,7 +2334,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 11,
+                    "contract_version": 12,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,

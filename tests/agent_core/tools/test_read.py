@@ -72,6 +72,15 @@ async def test_offset_and_limit_are_integers_of_at_least_one(tmp_path, make_ctx,
     assert result_text(result) == f"{message} must be an integer of at least 1"
 
 
+async def test_an_over_long_first_line_is_measured_as_it_would_be_shown(tmp_path, make_ctx):
+    """Each undecodable byte is shown as U+FFFD (3 bytes), and the limit applies to what is shown."""
+    (tmp_path / "bin.txt").write_bytes(b"\xff" * 20_000 + b"\n")
+
+    text = result_text(await _read(make_ctx, path="bin.txt"))
+
+    assert text.startswith("[Line 1 is 58.6KB, exceeds 50.0KB limit.")
+
+
 @pytest.mark.parametrize(
     "spelling", ["big file.txt", "~/big file.txt", "file://{home}/big%20file.txt", "@big file.txt"]
 )
@@ -117,9 +126,12 @@ async def test_cancel_stops_a_long_scan(tmp_path, make_ctx, monkeypatch):
 def _whole_file_read(data: bytes, start: int, stop):
     """Pi's algorithm on the whole file, as the oracle for the streamed reader."""
     lines = data.decode("utf-8", "replace").split("\n")
-    # The "\r" of a CRLF break is not shown.
-    lines = [line[:-1] if line.endswith("\r") and i < len(lines) - 1 else line for i, line in enumerate(lines)]
-    return truncate_head("\n".join(lines[start:stop]), max_lines=5, max_bytes=20), len(lines)
+    # The "\r" of a CRLF break is not shown; a line ending in more than one "\r" shows them all.
+    lines = [
+        line[:-1] if line.endswith("\r") and not line.endswith("\r\r") and i < len(lines) - 1 else line
+        for i, line in enumerate(lines)
+    ]
+    return truncate_head("\n".join(lines[start:stop]), max_lines=5, max_bytes=20), lines
 
 
 async def test_streaming_matches_reading_the_whole_file(tmp_path, monkeypatch):
@@ -138,7 +150,8 @@ async def test_streaming_matches_reading_the_whole_file(tmp_path, monkeypatch):
 
         with open(path, "rb") as handle:
             lines, total, first_line_bytes = read_module._scan_lines(handle, start, stop)
-        expected, expected_total = _whole_file_read(data, start, stop)
+        expected, whole_lines = _whole_file_read(data, start, stop)
+        expected_total = len(whole_lines)
 
         assert total == expected_total, data
         if start >= total:
@@ -151,7 +164,8 @@ async def test_streaming_matches_reading_the_whole_file(tmp_path, monkeypatch):
             expected.first_line_exceeds_limit,
         ), (data, start, stop)
         if got.first_line_exceeds_limit:
-            assert first_line_bytes == len(data.split(b"\n")[start])
+            # The size of the line as shown, which is what the limit applies to.
+            assert first_line_bytes == len(whole_lines[start].encode()), (data, start)
 
 
 def _chunk(kind: bytes, body: bytes) -> bytes:

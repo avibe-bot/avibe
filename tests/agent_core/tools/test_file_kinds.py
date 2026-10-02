@@ -161,15 +161,9 @@ async def test_write_has_a_defined_result_for_every_kind(tmp_path, make_ctx, pla
 
     result = await _run(WriteTool(), {"path": path, "content": "new\n"}, make_ctx(), tmp_path)
 
-    if kind in ("regular", "link_regular", "dangling", "missing", "in_locked_dir"):
+    if kind in ("regular", "link_regular", "dangling", "missing"):
         assert (result.is_error, result_text(result)) == (False, f"Successfully wrote to {path}")
-        target = {
-            "regular": "f",
-            "link_regular": "f",
-            "dangling": "missing/f",
-            "missing": "missing/sub/f",
-            "in_locked_dir": "ro/f",  # written in place: the only non-atomic case
-        }[kind]
+        target = {"regular": "f", "link_regular": "f", "dangling": "missing/f", "missing": "missing/sub/f"}[kind]
         assert (tmp_path / target).read_text() == "new\n"
         if kind in ("link_regular", "dangling"):
             assert (tmp_path / path).is_symlink()
@@ -177,6 +171,8 @@ async def test_write_has_a_defined_result_for_every_kind(tmp_path, make_ctx, pla
     reason = {
         "read_only": "permission denied",
         "unreadable": "permission denied",
+        # Replacing needs a temp file beside it; writing in place could leave it half-written (ENOSPC).
+        "in_locked_dir": "its directory is not writable, so the file cannot be replaced safely",
         "under_file": "not a directory",
         "loop": "too many levels of symbolic links",
         **dict.fromkeys(DIRECTORY, "it is a directory"),
@@ -188,6 +184,8 @@ async def test_write_has_a_defined_result_for_every_kind(tmp_path, make_ctx, pla
         assert os.lstat(path if os.path.isabs(path) else tmp_path / path).st_mode == before
     if kind == "read_only":
         assert (tmp_path / "f").read_text() == "hello\n"
+    if kind == "in_locked_dir":
+        assert (tmp_path / "ro" / "f").read_text() == "hello\n"
 
 
 @pytest.mark.parametrize("kind", _cases(KINDS))
@@ -197,14 +195,15 @@ async def test_edit_has_a_defined_result_for_every_kind(tmp_path, make_ctx, plac
 
     result = await _run(EditTool(), arguments, make_ctx(), tmp_path)
 
-    if kind in ("regular", "link_regular", "in_locked_dir"):
+    if kind in ("regular", "link_regular"):
         assert (result.is_error, result_text(result)) == (False, f"Successfully replaced 1 block(s) in {path}.")
-        assert (tmp_path / ("ro/f" if kind == "in_locked_dir" else "f")).read_text() == "bye\n"
+        assert (tmp_path / "f").read_text() == "bye\n"
         assert (tmp_path / path).is_symlink() == (kind == "link_regular")
         return
     detail = {
         "read_only": "Error code: EACCES.",
         "unreadable": "Error code: EACCES.",
+        "in_locked_dir": "Its directory is not writable, so the file cannot be replaced safely.",
         "loop": "Error code: ELOOP.",
         "under_file": "Error code: ENOTDIR.",
         **dict.fromkeys(DIRECTORY, "Error code: EISDIR."),
@@ -214,3 +213,5 @@ async def test_edit_has_a_defined_result_for_every_kind(tmp_path, make_ctx, plac
     assert (result.is_error, result_text(result)) == (True, f"Could not edit file: {path}. {detail}")
     if kind == "read_only":
         assert stat.S_IMODE(os.stat(tmp_path / "f").st_mode) == 0o444
+    if kind == "in_locked_dir":
+        assert (tmp_path / "ro" / "f").read_text() == "hello\n"

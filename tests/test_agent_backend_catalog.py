@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from modules.agents.catalog import (
     AGENT_BACKENDS,
+    NATIVE_CLI_BACKENDS,
     DEFAULT_AGENT_BACKEND,
     agent_backend_catalog_payload,
     default_cli_for_backend,
@@ -18,10 +19,10 @@ from vibe import api
 
 
 def test_agent_catalog_is_backend_management_source_of_truth() -> None:
-    assert AGENT_BACKENDS == ("opencode", "claude", "codex")
+    assert AGENT_BACKENDS == ("opencode", "claude", "codex", "avibe")
     assert DEFAULT_AGENT_BACKEND == "opencode"
 
-    for backend in AGENT_BACKENDS:
+    for backend in NATIVE_CLI_BACKENDS:
         assert is_agent_backend(backend)
         assert supports_runtime_refresh(backend)
         assert supports_web_oauth(backend)
@@ -33,6 +34,14 @@ def test_agent_catalog_is_backend_management_source_of_truth() -> None:
     assert display_name_for_backend("opencode") == "OpenCode"
     assert display_name_for_backend("claude") == "Claude Code"
     assert default_enabled_for_backend("codex") is False
+    assert is_agent_backend("avibe")
+    assert display_name_for_backend("avibe") == "Avibe Agent"
+    assert not default_enabled_for_backend("avibe")
+    assert default_cli_for_backend("avibe") is None
+    assert latest_probe_for_backend("avibe") is None
+    assert not supports_runtime_refresh("avibe")
+    assert not supports_web_oauth("avibe")
+    assert not supports_install("avibe")
     assert not is_agent_backend("unknown")
     assert not supports_runtime_refresh("unknown")
     assert not supports_web_oauth("unknown")

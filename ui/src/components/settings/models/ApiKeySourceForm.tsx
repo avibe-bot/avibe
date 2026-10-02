@@ -29,7 +29,7 @@ import {
 } from './apiKeySourceDraft';
 import { Field } from './dialogFields';
 import { ProtocolGlyph } from './protocolGlyph';
-import { SOURCE_PROTOCOLS, type SourceProtocol } from './types';
+import { SELECTABLE_SOURCE_PROTOCOLS, type SourceProtocol } from './types';
 import { VendorGlyph } from './vendorGlyph';
 
 // The form's own dressing travels with the form. Every class below is declared
@@ -53,7 +53,7 @@ const ProtocolSegments: React.FC<{
       aria-label={t('settings.models.addKey.field.protocol')}
       className="model-hub-add-key-segments flex max-w-full flex-wrap"
     >
-      {SOURCE_PROTOCOLS.map((item) => (
+      {SELECTABLE_SOURCE_PROTOCOLS.map((item) => (
         <button
           key={item}
           type="button"
