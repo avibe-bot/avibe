@@ -2452,6 +2452,10 @@ class ClaudeAgent(BaseAgent):
                         continue
 
                     if message_type == "result":
+                        replay_baseline = (
+                            self._pending_assistant_message.get(composite_key),
+                            self._last_assistant_text.get(composite_key),
+                        )
                         if await self._flush_buffered_assistant_messages(
                             composite_key,
                             context,
@@ -2466,6 +2470,19 @@ class ClaudeAgent(BaseAgent):
                                 reason="assistant_auth_failure",
                             )
                             return
+                        # Replayed frames belong to the phase this Result ends.
+                        # Each write stores a fresh object, so identity shows one.
+                        if any(
+                            current is not None and current is not before
+                            for current, before in zip(
+                                (
+                                    self._pending_assistant_message.get(composite_key),
+                                    self._last_assistant_text.get(composite_key),
+                                ),
+                                replay_baseline,
+                            )
+                        ):
+                            pending_assistant_phase = ending_phase
                         raw_result_text = getattr(message, "result", None)
                         result_text = raw_result_text
                         if output_mode in {"activity", "detached"}:
@@ -2476,17 +2493,21 @@ class ClaudeAgent(BaseAgent):
                             )
                             if record is None:
                                 raise RuntimeError("Claude terminal phase has no output owner")
+                            phase_text = None
                             if pending_assistant_phase is ending_phase:
                                 # This phase streamed Assistant text on the human
                                 # path before its Result proved another owner. The
-                                # Result supersedes it, so it must not replay as the
+                                # record takes it over, so it never replays as the
                                 # next turn's narration or terminal text.
                                 self._pending_assistant_message.pop(composite_key, None)
-                                self._last_assistant_text.pop(composite_key, None)
+                                phase_text = self._last_assistant_text.pop(composite_key, None)
                             self._classify_output_record(
                                 record, context,
                                 text=self._select_detached_result_text(
-                                    composite_key, message, raw_result_text, record.text,
+                                    composite_key,
+                                    message,
+                                    raw_result_text,
+                                    record.text or phase_text,
                                 ),
                                 message=message,
                             )

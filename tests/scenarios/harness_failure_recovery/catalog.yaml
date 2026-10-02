@@ -4406,8 +4406,9 @@ scenarios:
     layer: contract
     backend: claude
     # A peer or wakeup turn without an Activity streams its Assistant text on the
-    # human path, then its Result proves a detached owner. That Result supersedes
-    # the text from the same response phase; text another phase set is untouched.
+    # human path (inline or buffered replay), then its Result proves a detached
+    # owner. The detached record takes that phase's text, even when the Result body
+    # is empty, so it never replays later; text another phase set is untouched.
     test: tests/test_claude_result_provenance.py::test_injected_turn_result_retires_its_unbuffered_assistant_text
 manual_evidence:
   - local Incus backend process death after prompt acceptance
