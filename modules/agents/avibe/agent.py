@@ -39,7 +39,6 @@ from core.agent_core.agent.events import (
 )
 from core.agent_core.agent.hooks import AgentInput
 from core.agent_core.agent.loop import Agent
-from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.messages import (
@@ -170,11 +169,11 @@ class AvibeAgent(BaseAgent):
                 return
             cwd = request.working_path or runtime.cwd
             try:
-                router, selection = await self._preflight(request, session_id)
+                router = await self._preflight(request, session_id)
             except Exception as error:
                 await self._fail_preflight(request, error)
                 return
-            run = self._new_run(request, session_id, turn_id, cwd, router, selection)
+            run = self._new_run(request, session_id, turn_id, cwd, router)
             runtime.cwd = cwd
             runtime.run = run
             try:
@@ -303,7 +302,8 @@ class AvibeAgent(BaseAgent):
 
     # --- one run ---------------------------------------------------------------
 
-    async def _preflight(self, request: AgentRequest, session_id: str) -> tuple[HubModelRouter, ModelSelection]:
+    async def _preflight(self, request: AgentRequest, session_id: str) -> HubModelRouter:
+        """Resolve the route before the input is written; the run's first model call reuses it."""
         from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
 
         model = request.subagent_model or request.vibe_agent_model
@@ -318,8 +318,7 @@ class AvibeAgent(BaseAgent):
             bind_launch(context, launch)
             return launch.to_hop_resolution()
 
-        selection = selection_from_hop(await resolve_hop())
-        return HubModelRouter(resolve_hop, self._providers, first=selection), selection
+        return HubModelRouter(resolve_hop, self._providers, first=selection_from_hop(await resolve_hop()))
 
     def _new_run(
         self,
@@ -328,7 +327,6 @@ class AvibeAgent(BaseAgent):
         turn_id: str,
         cwd: str,
         router: HubModelRouter,
-        selection: ModelSelection,
     ) -> _Run:
         suite = self._tools()
         agent = Agent(
