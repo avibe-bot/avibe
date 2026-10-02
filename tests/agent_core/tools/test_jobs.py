@@ -535,6 +535,41 @@ async def test_a_command_whose_record_would_be_unreadable_never_starts(tmp_path,
     assert host.meta(job_id)["command"] == command
 
 
+@pytest.mark.parametrize("step", ["start", "kill"])
+async def test_a_cancel_mid_transition_never_leaves_a_command_without_an_owner(tmp_path, monkeypatch, step):
+    """A cancel during the step that publishes ``go``, or during kill's verification, still ends the command."""
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    entered = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    name = "_record_and_decide" if step == "start" else "_verify_for_kill"
+    real = getattr(LocalJobHost, name)
+
+    def slow_after(self, *args):
+        result = real(self, *args)  # go is published / stopped is recorded
+        loop.call_soon_threadsafe(entered.set)
+        time.sleep(0.5)
+        return result
+
+    command = f"echo $$ > {tmp_path / 'sh.pid'}; sleep 30"
+    if step == "kill":
+        job_id = await _start(host, tmp_path, command)
+    monkeypatch.setattr(LocalJobHost, name, slow_after)
+    task = asyncio.ensure_future(
+        _start(host, tmp_path, command) if step == "start" else host.kill(job_id, reason="aborted")
+    )
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    monkeypatch.undo()
+
+    job_id = host.find_job("ses_test", "toolu_1")
+    if (tmp_path / "sh.pid").exists():
+        shell_pid = _pid_written(tmp_path / "sh.pid")
+        assert _wait_until(lambda: _gone(shell_pid), timeout_s=8)
+    assert (await host.wait(job_id, deadline_s=8)).state != "running"
+
+
 async def test_meta_json_is_read_in_a_bound(tmp_path):
     """The job directory is the command's to write: a huge meta.json is refused as corrupt, not loaded."""
     import tracemalloc

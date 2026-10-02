@@ -18,7 +18,7 @@ import stat
 import unicodedata
 from contextlib import asynccontextmanager
 from concurrent.futures import Executor
-from typing import Any, AsyncIterator, Callable, Literal, Optional, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Optional, TypeVar
 from urllib.parse import unquote
 
 from core.agent_core.tools.args import ToolInputError
@@ -304,7 +304,15 @@ async def to_thread_joined(func: Callable[..., T], /, *args: Any) -> T:
 
 async def run_joined(executor: Optional[Executor], func: Callable[..., T], /, *args: Any) -> T:
     """``func(*args)`` on ``executor`` (``None``: asyncio's default); a cancel waits for it (see above)."""
-    worker = asyncio.get_running_loop().run_in_executor(executor, functools.partial(func, *args))
+    return await run_to_end(asyncio.get_running_loop().run_in_executor(executor, functools.partial(func, *args)))
+
+
+async def run_to_end(awaitable: Awaitable[T]) -> T:
+    """Await ``awaitable`` to its end even if the caller is cancelled meanwhile, then re-raise the cancel.
+
+    For state transitions that must not stop half-way once begun (a worker thread, a decision, a kill).
+    """
+    worker = asyncio.ensure_future(awaitable)
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:

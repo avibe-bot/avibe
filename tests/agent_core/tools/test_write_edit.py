@@ -382,11 +382,11 @@ async def test_write_and_edit_sanitize_model_text_the_same_way(tmp_path, make_ct
 async def test_the_display_diff_is_bounded_by_lines_not_only_bytes(tmp_path, make_ctx):
     """Repetitive lines made difflib quadratic (Codex measured over 22 s); the changed middle is all it sees."""
     (tmp_path / "rep.txt").write_text("x\n" * 5000 + "target\n" + "x\n" * 5000)
-    started = time.monotonic()
+    started = time.process_time()
 
     result = await _edit(make_ctx, "rep.txt", {"oldText": "target", "newText": "changed"})
 
-    assert time.monotonic() - started < 2.0
+    assert time.process_time() - started < 2.0
     assert not result.is_error, result_text(result)
     # Pi pads line numbers to the widest one (five digits here).
     assert "- 5001 target\n+ 5001 changed" in result.details["diff"]
@@ -460,12 +460,13 @@ async def test_the_display_diff_and_patch_are_pis(tmp_path, make_ctx, original, 
     ids=["whitespace-run", "replace-all"],
 )
 async def test_edit_work_stays_linear_on_adversarial_files(tmp_path, make_ctx, content, edit):
+    """CPU time, which a quadratic match would take seconds of; disk waits do not count."""
     (tmp_path / "f.txt").write_text(content)
-    started = time.monotonic()
+    started = time.process_time()
 
     await _edit(make_ctx, "f.txt", edit)
 
-    assert time.monotonic() - started < 1.0
+    assert time.process_time() - started < 1.0
 
 
 @pytest.mark.parametrize(
@@ -507,7 +508,7 @@ async def test_nfkc_expansion_has_a_budget_and_says_so(tmp_path, make_ctx, conte
     """NFKC can make one character eighteen (U+FDFA): loose matching stops at a budget and says why."""
     (tmp_path / "f.txt").write_text(content + "\u2019marker\u2019\n")
     tracemalloc.start()
-    started = time.monotonic()
+    started = time.process_time()
     try:
         result = await _edit(make_ctx, "f.txt", {"oldText": "'marker'", "newText": "x"})
         peak = tracemalloc.get_traced_memory()[1]
@@ -520,7 +521,7 @@ async def test_nfkc_expansion_has_a_budget_and_says_so(tmp_path, make_ctx, conte
         "newlines: the file is too large to match it loosely after Unicode normalization.",
     )
     assert peak < 48 * 1024 * 1024
-    assert time.monotonic() - started < 3.0
+    assert time.process_time() - started < 3.0
 
 
 async def test_a_large_file_with_a_few_compatibility_characters_still_matches_loosely(tmp_path, make_ctx):

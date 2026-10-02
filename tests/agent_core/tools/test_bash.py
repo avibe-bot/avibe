@@ -356,6 +356,38 @@ async def test_a_slow_disk_never_stalls_the_event_loop(tmp_path, make_ctx, monke
     assert max(lags) < 0.2, max(lags)
 
 
+async def test_a_result_never_waits_behind_busy_file_tools(tmp_path, make_ctx):
+    """asyncio's default executor is the file tools'; following a job's output has a pool of its own."""
+    import threading
+
+    release = threading.Event()
+    busy = [asyncio.ensure_future(asyncio.to_thread(release.wait, 10)) for _ in range(64)]
+    started = time.monotonic()
+    try:
+        result = await BashTool(_host(tmp_path)).execute({"command": "echo hi"}, make_ctx())
+        took = time.monotonic() - started
+    finally:
+        release.set()
+        await asyncio.gather(*busy)
+
+    assert result_text(result) == "hi\n"
+    assert took < 3.0
+
+
+async def test_a_handover_shows_the_latest_output_however_much_came_before(tmp_path, make_ctx):
+    """A one-shot render reads the whole retained log: head, the omitted middle if any, and the tail."""
+    result = await BashTool(_host(tmp_path, Watches())).execute(
+        {"command": "seq 1 300000; sleep 30", "watch": True}, make_ctx()
+    )
+
+    try:
+        text = result_text(result)
+        assert text.startswith("Command is still running and is now Watch wch_1.")
+        assert "\n300000\n" in text
+    finally:
+        await _host(tmp_path).kill(result.details["job_id"])
+
+
 async def test_the_foreground_window_hands_over_and_the_command_runs_once(tmp_path, make_ctx):
     watches = Watches()
     host = _host(tmp_path, watches)

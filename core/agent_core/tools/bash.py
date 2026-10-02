@@ -27,9 +27,16 @@ from core.agent_core.tools.args import (
     text_result,
 )
 from core.agent_core.tools.base import MAX_BYTES, MAX_LINES, JobHost, JobStatus, ToolContext, ToolResult, ToolSpec
-from core.agent_core.tools.jobs import STOP_ABORTED, STOP_TIMEOUT, JobHandOverUnavailable, JobStartError, LocalJobHost
+from core.agent_core.tools.jobs import (
+    STOP_ABORTED,
+    STOP_TIMEOUT,
+    JobHandOverUnavailable,
+    JobStartError,
+    LocalJobHost,
+    run_host_io,
+)
 from core.agent_core.tools.paths import os_reason
-from core.agent_core.tools.output import JobOutput
+from core.agent_core.tools.output import FINISH_BYTES, JobOutput
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +89,7 @@ def _timeout_arg(arguments: Mapping[str, Any]) -> Optional[float]:
 
 async def final_result(output: JobOutput, status: JobStatus, *, note: Optional[str] = None) -> ToolResult:
     """The result of a job that is no longer running, as Pi formats a finished command."""
-    await asyncio.to_thread(output.finish)
+    await output.finish_off_loop()
     text, truncation = output.render("(no output)")
     if note:
         text = f"{text}\n\n{note}"
@@ -96,7 +103,7 @@ async def final_result(output: JobOutput, status: JobStatus, *, note: Optional[s
 
 async def stopped_result(output: JobOutput, status_line: str) -> ToolResult:
     """The result of a job that was killed (timeout, abort): the output so far, then why it stopped."""
-    await asyncio.to_thread(output.finish)
+    await output.finish_off_loop()
     text, truncation = output.render("")
     return error_result(_append_status(text, status_line), details=output.details(truncation))
 
@@ -116,7 +123,8 @@ def _stopped_line(reason: Optional[str], timeout_s: Optional[float]) -> Optional
 
 async def handover_result(output: JobOutput, watch_id: str) -> ToolResult:
     """Avibe: the command keeps running as a Watch; the model sees the output so far and how to manage it."""
-    await asyncio.to_thread(output.poll)
+    # A one-shot render reads the whole retained log (head, omitted middle, tail), not one poll's worth.
+    await output.poll_off_loop(FINISH_BYTES)
     text, truncation = output.render("(no output yet)")
     text = text.rstrip("\n")
     lines = [
@@ -140,17 +148,17 @@ async def settle_bash_call(jobs: LocalJobHost, session_id: str, tool_call_id: st
     commits the synthetic interrupted result.
     """
     # The host's synchronous reads run off the event loop, as its own async methods do.
-    job_id = await asyncio.to_thread(jobs.find_job, session_id, tool_call_id)
+    job_id = await run_host_io(jobs.find_job, session_id, tool_call_id)
     if job_id is None:
         return None
     await jobs.enforce_deadline(job_id)
-    status = await asyncio.to_thread(jobs.status, job_id)
+    status = await run_host_io(jobs.status, job_id)
     if status.state == "running":
         return await handover_result(JobOutput(jobs, job_id), await jobs.hand_over(job_id))
     if status.state == "exited":
         return await final_result(JobOutput(jobs, job_id), status)
-    reason = await asyncio.to_thread(jobs.stop_reason, job_id)
-    line = _stopped_line(reason, (await asyncio.to_thread(jobs.meta, job_id)).get("timeout_s"))
+    reason = await run_host_io(jobs.stop_reason, job_id)
+    line = _stopped_line(reason, (await run_host_io(jobs.meta, job_id)).get("timeout_s"))
     return await stopped_result(JobOutput(jobs, job_id), line) if line else None
 
 
@@ -234,7 +242,7 @@ class BashTool:
                     return await handover_result(output, watch_id)
                 continue
             # Off the event loop: following a flood of output costs CPU every Session would otherwise wait on.
-            if ctx.on_progress is not None and await asyncio.to_thread(output.poll):
+            if ctx.on_progress is not None and await output.poll_off_loop():
                 tail = output.snapshot().content
                 if tail != last_progress:
                     last_progress = tail
