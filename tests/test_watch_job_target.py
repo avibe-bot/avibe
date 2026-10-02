@@ -29,6 +29,7 @@ from core import watches as watches_module
 from core.agent_core.tools.jobs import LocalJobHost
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import (
+    JobWatchUpdateRefused,
     ManagedWatchService,
     ManagedWatchStore,
     WatchRuntimeStateStore,
@@ -342,12 +343,155 @@ def test_changing_a_job_watch_waiter_is_refused_in_the_user_language(tmp_path: P
     assert error["code"] == "job_watch_update_refused"
     assert error["error"] == i18n_t("error.jobWatchUpdateRefused.message", "zh")
     assert ManagedWatchStore().get_watch(watch_id).job_target["command"] == "sleep 60"
+
+    # What it does take goes through the same doorway.
+    monkeypatch.setattr(sys, "argv", ["vibe", "watch", "update", watch_id, "--name", "slow tests"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 0, capsys.readouterr().err
+    assert ManagedWatchStore().get_watch(watch_id).name == "slow tests"
     asyncio.run(host.kill(job_id))
 
 
 def _session_gone() -> None:
     with SQLiteBackgroundTaskStore().engine.begin() as conn:
         conn.execute(agent_sessions.delete().where(agent_sessions.c.id == SESSION_ID))
+
+
+def _update_fields(watch) -> dict:
+    """Every field ``update_watch`` takes, as the Watch has them now."""
+
+    return {
+        "name": watch.name,
+        "session_key": watch.session_key,
+        "session_id": watch.session_id,
+        "command": list(watch.command),
+        "shell_command": watch.shell_command,
+        "prefix": watch.prefix,
+        "cwd": watch.cwd,
+        "mode": watch.mode,
+        "timeout_seconds": watch.timeout_seconds,
+        "lifetime_timeout_seconds": watch.lifetime_timeout_seconds,
+        "retry_exit_codes": list(watch.retry_exit_codes),
+        "retry_delay_seconds": watch.retry_delay_seconds,
+        "post_to": watch.post_to,
+        "deliver_key": watch.deliver_key,
+        "agent_name": watch.agent_name,
+        "session_policy": watch.session_policy,
+        "message": watch.message,
+        "metadata": dict(watch.metadata),
+    }
+
+
+_FIXED_JOB_WATCH_FIELDS = {
+    "session_id": "ses_other",
+    "session_key": "slack::channel::C999",
+    "session_policy": "create_once",
+    "agent_name": "claude",
+    "post_to": "channel",
+    "deliver_key": "slack::channel::C999",
+    "metadata": {"binding_follows_session": True},
+    "command": ["pytest", "-q"],
+    "shell_command": "pytest -q",
+    "cwd": "/tmp",
+    "mode": "forever",
+    "timeout_seconds": 60.0,
+    "retry_exit_codes": [75],
+    "retry_delay_seconds": 5.0,
+}
+
+
+@pytest.mark.parametrize(("field", "value"), sorted(_FIXED_JOB_WATCH_FIELDS.items()))
+def test_a_job_watch_takes_no_update_beyond_its_name_message_and_lifetime(tmp_path: Path, field: str, value) -> None:
+    async def hand_over() -> tuple[LocalJobHost, str, str]:
+        store = ManagedWatchStore()
+        host = _host(tmp_path, store)
+        job_id = await _start_job(host, tmp_path, "sleep 60")
+        return host, job_id, await host.hand_over(job_id)
+
+    host, job_id, watch_id = asyncio.run(hand_over())
+    store = ManagedWatchStore()
+    before = store.get_watch(watch_id).to_dict()
+    fields = _update_fields(store.get_watch(watch_id))
+    if field == "metadata":
+        value = {**fields["metadata"], **value}
+
+    with pytest.raises(JobWatchUpdateRefused):
+        store.update_watch(watch_id, **{**fields, field: value})
+    assert ManagedWatchStore().get_watch(watch_id).to_dict() == before
+
+    # The three it does take still land.
+    allowed = {**fields, "name": "tests", "message": "Tests finished.", "lifetime_timeout_seconds": 900.0}
+    updated = store.update_watch(watch_id, **allowed)
+    assert (updated.name, updated.message, updated.lifetime_timeout_seconds) == ("tests", "Tests finished.", 900.0)
+    assert ManagedWatchStore().get_watch(watch_id).session_id == SESSION_ID
+    asyncio.run(host.kill(job_id))
+
+
+def _corrupt_deadline(meta: dict) -> dict:
+    return {**meta, "deadline_at": "not a time"}
+
+
+def test_an_unreadable_job_state_stops_the_job_before_the_watch_lets_go(tmp_path: Path) -> None:
+    async def run() -> tuple[LocalJobHost, str, str]:
+        store = ManagedWatchStore()
+        host = _host(tmp_path, store)
+        job_id = await _start_job(host, tmp_path, "echo started; sleep 60")
+        watch_id = await host.hand_over(job_id)
+        meta_path = Path(host.job_dir(job_id)) / "meta.json"
+        meta_path.write_text(json.dumps(_corrupt_deadline(json.loads(meta_path.read_text()))))
+        service = _service(store)
+        await _start_service(service)
+        await _until(lambda: not store.get_watch(watch_id).enabled, "the Watch never settled the unreadable job")
+        await service.stop()
+        return host, job_id, watch_id
+
+    host, job_id, watch_id = asyncio.run(run())
+
+    assert host.status(job_id).state == "gone"
+    assert host.stop_reason(job_id) == "watch_unreadable_state"
+    (follow_up,) = _follow_ups(watch_id)
+    assert "started" in follow_up.prompt
+    assert follow_up.prompt.endswith("Command stopped: its job state could not be read")
+    assert SQLiteBackgroundTaskStore().get_watch(watch_id)["last_error"] == i18n_t(
+        "harness.watch.jobStoppedUnreadable", "en"
+    )
+    assert _released(watch_id)
+
+
+@pytest.mark.parametrize("owned", [True, False], ids=["owning-watch", "removed-watch"])
+def test_a_job_that_cannot_be_stopped_is_never_released(tmp_path: Path, owned: bool) -> None:
+    async def run() -> tuple[LocalJobHost, str, str, str]:
+        store = ManagedWatchStore()
+        host = _host(tmp_path, store)
+        job_id = await _start_job(host, tmp_path, "sleep 60")
+        watch_id = await host.hand_over(job_id)
+        meta_path = Path(host.job_dir(job_id)) / "meta.json"
+        intact = meta_path.read_text()
+        # Unreadable: neither its deadline nor the process identity a kill needs can be read.
+        meta_path.write_text("{ not json")
+        if not owned:
+            store.remove_watch(watch_id)
+        service = _service(store)
+        await _start_service(service)
+        if owned:
+            await _until(lambda: store.get_watch(watch_id).last_error, "the Watch never said it was stuck")
+        else:
+            await asyncio.sleep(0.5)  # several sweeps
+        await service.stop()
+        meta_path.write_text(intact)
+        return host, job_id, watch_id, intact
+
+    host, job_id, watch_id, _intact = asyncio.run(run())
+
+    assert host.status(job_id).state == "running"
+    assert not _released(watch_id)
+    assert _follow_ups(watch_id) == []
+    if owned:
+        row = SQLiteBackgroundTaskStore().get_watch(watch_id)
+        assert row["enabled"]
+        assert row["last_error"] == i18n_t("harness.watch.jobUnmanageable", "en")
+    asyncio.run(host.kill(job_id))
 
 
 @pytest.mark.parametrize(

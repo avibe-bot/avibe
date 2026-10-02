@@ -143,17 +143,17 @@ JOB_STOP_WATCH_DISABLED = "watch_disabled"
 JOB_STOP_WATCH_LIFETIME = "watch_lifetime"
 JOB_STOP_SESSION_ARCHIVED = "session_archived"
 JOB_STOP_VIBE_STOP = "vibe_stop"
+JOB_STOP_UNREADABLE = "watch_unreadable_state"
 
 
 class JobWatchUpdateRefused(ValueError):
-    """A job Watch has no waiter: the command it waits on is already running."""
+    """A job Watch takes only a new name, message, or lifetime: its job fixed the rest."""
 
     code = "job_watch_update_refused"
 
     def __init__(self, watch_id: str) -> None:
         super().__init__(
-            f"watch {watch_id} waits on a running command: its command, cwd, mode, timeout, "
-            "and retry settings cannot be changed"
+            f"watch {watch_id} waits on a running command: only its name, message, and lifetime can be changed"
         )
         self.watch_id = watch_id
 
@@ -964,24 +964,28 @@ class ManagedWatchStore:
             # Captured before the first mutation: the state ``vibe watch update`` read and
             # resolved its payload from.
             expect = self._read_state(watch)
-            target = watch.job_target
-            if target is not None:
-                # A job Watch has no waiter to change: it waits on a command that is
-                # already running, which it never starts again.
-                if (command, shell_command, cwd, mode, timeout_seconds, retry_exit_codes, retry_delay_seconds) != (
-                    watch.command,
-                    watch.shell_command,
-                    watch.cwd,
-                    watch.mode,
-                    watch.timeout_seconds,
-                    watch.retry_exit_codes,
-                    watch.retry_delay_seconds,
-                ):
-                    raise JobWatchUpdateRefused(watch_id)
-                metadata = {
-                    **(metadata if metadata is not None else watch.metadata),
-                    WATCH_TARGET_METADATA_KEY: target,
+            if watch.job_target is not None:
+                # A job Watch is a read-only projection of its job: the hand-over fixed
+                # its Session, Agent, delivery, and waiter. Only what it says and how
+                # long it may wait can change (an allowlist, so a new field is fixed too).
+                requested = {
+                    "session_key": session_key,
+                    "session_id": session_id,
+                    "agent_name": agent_name,
+                    "session_policy": session_policy if session_policy is not None else watch.session_policy,
+                    "post_to": post_to,
+                    "deliver_key": deliver_key,
+                    "metadata": metadata if metadata is not None else watch.metadata,
+                    "command": command,
+                    "shell_command": shell_command,
+                    "cwd": cwd,
+                    "mode": mode,
+                    "timeout_seconds": timeout_seconds,
+                    "retry_exit_codes": retry_exit_codes,
+                    "retry_delay_seconds": retry_delay_seconds,
                 }
+                if any(value != getattr(watch, field) for field, value in requested.items()):
+                    raise JobWatchUpdateRefused(watch_id)
             waiter_lifecycle_changed = (
                 mode != watch.mode
                 or command != watch.command
@@ -2374,10 +2378,20 @@ class ManagedWatchService:
             target = watch.job_target
             try:
                 status = await _job_host(target).wait(target["job_id"], deadline_s=0)
-            except (KeyError, ValueError):
-                status = None  # the job record is gone or unreadable: report what is known
+            except KeyError:
+                status = None  # the job record is gone: report what is known
+            except ValueError as exc:
+                # Unreadable state (its deadline, say): the Watch cannot keep its promises
+                # for this job, so it stops the command, and lets go only once the job
+                # host confirms nothing of it runs.
+                if await _stop_job(target, JOB_STOP_UNREADABLE):
+                    await self._commit_job_result_async(watch)
+                else:
+                    await self._hold_unmanageable_job_async(watch, exc)
+                return
             except Exception as exc:
-                self._back_off_watch_after_store_error("wait on job", exc, watch_id=watch.id)
+                # Possibly transient (I/O): keep the job, say so, and look again later.
+                await self._hold_unmanageable_job_async(watch, exc)
                 return
             if status is None or status.state != "running":
                 await self._commit_job_result_async(watch)
@@ -2398,12 +2412,9 @@ class ManagedWatchService:
         target = watch.job_target
         if not await _stop_job(target, JOB_STOP_WATCH_LIFETIME):
             # Retiring the Watch now would leave the job running with no owner.
-            self._back_off_watch_after_store_error(
-                "stop job at lifetime",
-                RuntimeError(f"job {target['job_id']} is still running"),
-                watch_id=watch.id,
+            return await self._hold_unmanageable_job_async(
+                watch, RuntimeError(f"job {target['job_id']} could not be stopped at the Watch's lifetime")
             )
-            return False
         if blocking_run_id is None:
             return await self._commit_job_result_async(watch)
         # As for every Watch: while an earlier follow-up is still in flight, no second
@@ -2432,11 +2443,16 @@ class ManagedWatchService:
         target = watch.job_target
         try:
             outcome = await asyncio.to_thread(_job_outcome, watch, target)
-        except (KeyError, ValueError):
+        except KeyError:
             outcome = _missing_job_outcome(watch, target)
+        except _JobStillRunning as exc:
+            # Never reported as ended: whoever called this had no proof it ended.
+            return await self._hold_unmanageable_job_async(watch, exc)
         except Exception as exc:
-            self._back_off_watch_after_store_error("read job outcome", exc, watch_id=watch.id)
-            return False
+            # The outcome cannot be read. The Watch lets go only once nothing of the job runs.
+            if not await _stop_job(target, JOB_STOP_UNREADABLE):
+                return await self._hold_unmanageable_job_async(watch, exc)
+            outcome = _unreadable_job_outcome(watch, target)
         return await self._commit_cycle_result_async(
             watch,
             exit_code=None,
@@ -2453,6 +2469,28 @@ class ManagedWatchService:
                 COMMAND_TIMED_OUT_METADATA_KEY: outcome.timed_out,
             },
         )
+
+    async def _hold_unmanageable_job_async(self, watch: ManagedWatch, exc: BaseException) -> bool:
+        """The Watch can neither follow nor stop its job: it keeps it, says so, and tries again later.
+
+        Never released: letting go of a job that may still run would leave it with no
+        owner. The stamp keeps the Watch enabled and queues no follow-up.
+        """
+
+        logger.warning(
+            "Watch %s cannot follow or stop job %s; it keeps the job and retries: %s",
+            watch.id,
+            watch.job_target["job_id"],
+            exc,
+        )
+        await self._commit_cycle_result_async(
+            watch,
+            exit_code=None,
+            error=self._t("harness.watch.jobUnmanageable"),
+            disable=False,
+        )
+        self._back_off_watch_after_store_error("hold an unmanageable job", exc, watch_id=watch.id)
+        return False
 
     async def _settle_unowned_jobs(self) -> None:
         """Stop the job of every job Watch that no longer owns it, then release that Watch.
@@ -3045,17 +3083,32 @@ def _job_host(target: Mapping[str, Any]):
 
 
 async def _stop_job(target: Mapping[str, Any], reason: str) -> bool:
-    """Kill ``target``'s process tree through its job host with ``reason``; ``True`` once none of it runs."""
+    """Kill ``target``'s process tree through its job host with ``reason``.
+
+    ``True`` only with proof that nothing of the job runs: its record is gone, or the
+    job host's status says it is not running. Anything else, a failed kill included,
+    is ``False``, and the caller must keep the job.
+    """
 
     job_id = target["job_id"]
     try:
         host = _job_host(target)
-        await host.kill(job_id, reason=reason)
-        return host.status(job_id).state != "running"
-    except (KeyError, ValueError):
-        return True  # no job record: nothing of it can still be found to run
     except Exception:
+        logger.warning("Job %s has no usable job directory; it cannot be stopped", job_id, exc_info=True)
+        return False
+    try:
+        await host.kill(job_id, reason=reason)
+    except KeyError:
+        return True  # the record is gone
+    except Exception:
+        # The status below still decides: a job that already ended needs no kill.
         logger.warning("Could not stop job %s (%s)", job_id, reason, exc_info=True)
+    try:
+        return host.status(job_id).state != "running"
+    except KeyError:
+        return True
+    except Exception:
+        logger.warning("Could not confirm that job %s stopped", job_id, exc_info=True)
         return False
 
 
@@ -3073,6 +3126,10 @@ def _unowned_job_stop_reason(row: Mapping[str, Any]) -> str:
     if row["deleted"]:
         return JOB_STOP_SESSION_ARCHIVED if row["session_archived"] else JOB_STOP_WATCH_REMOVED
     return JOB_STOP_WATCH_DISABLED
+
+
+class _JobStillRunning(RuntimeError):
+    """A job whose outcome was asked for has not ended."""
 
 
 @dataclass(frozen=True)
@@ -3102,6 +3159,8 @@ def _job_outcome(watch: ManagedWatch, target: Mapping[str, Any]) -> _JobOutcome:
     job_id = target["job_id"]
     meta = host.meta(job_id)
     status = host.status(job_id)
+    if status.state == "running":
+        raise _JobStillRunning(f"job {job_id} is still running")
     output = JobOutput(host, job_id)
     output.finish()
     text, truncation = output.render("(no output)")
@@ -3135,6 +3194,18 @@ def _missing_job_outcome(watch: ManagedWatch, target: Mapping[str, Any]) -> _Job
     )
 
 
+def _unreadable_job_outcome(watch: ManagedWatch, target: Mapping[str, Any]) -> _JobOutcome:
+    line = f"The job state of this command could not be read ({target['job_id']}), so how it ended is unknown"
+    return _JobOutcome(
+        report=f"Watch {watch.id} finished.\nCommand: {target['command']}\n\n{line}",
+        exit_code=None,
+        error_key="harness.watch.jobStateUnreadable",
+        error_args={"job_id": target["job_id"]},
+        timed_out=False,
+        event_detected=False,
+    )
+
+
 def _job_status(
     watch: ManagedWatch,
     status: Any,
@@ -3145,7 +3216,8 @@ def _job_status(
     whether the job's own timeout ended it.
 
     A report comes only from an owning Watch, so the only stoppers it can name are the
-    job's deadline, ``vibe stop``, and the Watch's lifetime. The lines are the ``bash``
+    job's deadline, ``vibe stop``, the Watch's lifetime, and the Watch itself when the
+    job's state could not be read. The lines are the ``bash``
     tool's (Pi's ``bash.ts``, MIT, Copyright (c) 2025 Mario Zechner) where it has one.
     """
 
@@ -3169,6 +3241,8 @@ def _job_status(
             f"{format_number(watch.lifetime_timeout_seconds)} seconds"
         )
         return line, "harness.watch.jobStoppedAtLifetime", {}, False
+    if stop_reason == JOB_STOP_UNREADABLE:
+        return "Command stopped: its job state could not be read", "harness.watch.jobStoppedUnreadable", {}, False
     return "Command terminated without an exit code", "harness.watch.jobEndedWithoutExitCode", {}, False
 
 
