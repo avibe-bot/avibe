@@ -14080,9 +14080,9 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
     except runtime.DesktopRuntimeClaimRefused as refusal:
         _print_provenance_refusal("desktopRuntime.stopRefused", refusal)
         return 3
-    if not (service_was_running and service_stopped is False):
-        # Not while a service that failed to stop still owns them.
-        _stop_watch_jobs()
+    # Holding the free service lock: neither a service that failed to stop nor one
+    # started since owns these commands while they are stopped.
+    runtime.desktop_service_lock_presence(while_absent=_stop_watch_jobs)
     from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
 
     # Each tree's owner decides whether it is abandoned, so the reap runs

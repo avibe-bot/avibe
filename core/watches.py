@@ -2460,7 +2460,7 @@ class ManagedWatchService:
             logger.warning("Could not read job Watches to settle their jobs", exc_info=True)
             return
         for row in rows:
-            if row["enabled"] and not row["deleted"]:
+            if _job_still_owned(row):
                 continue
             if not await _stop_job(row["target"], _unowned_job_stop_reason(row)):
                 continue
@@ -3047,6 +3047,15 @@ async def _stop_job(target: Mapping[str, Any], reason: str) -> bool:
         return False
 
 
+def _job_still_owned(row: Mapping[str, Any]) -> bool:
+    """Whether the Watch of a ``list_job_watch_targets`` row still owns its job.
+
+    Enabled is not enough: a pause resumed before the sweep saw it still owes the stop.
+    """
+
+    return bool(row["enabled"] and not row["deleted"] and not row["target"].get("stop_pending"))
+
+
 def _unowned_job_stop_reason(row: Mapping[str, Any]) -> str:
     if row["deleted"]:
         return JOB_STOP_SESSION_ARCHIVED if row["session_archived"] else JOB_STOP_WATCH_REMOVED
@@ -3196,17 +3205,18 @@ async def hand_over_job(
 def stop_watch_jobs(store: Optional[ManagedWatchStore] = None) -> None:
     """``vibe stop`` ends the commands Watches own, as it ends other tool commands.
 
-    Called once the service has stopped. An enabled Watch stays enabled: the next start
-    re-attaches, finds the job stopped by ``vibe stop``, and reports that once. Jobs of
-    Watches that no longer own them are settled as the service would. Restarts and
-    upgrades never come here, so their jobs keep running.
+    Called holding the free service lock, so no service owns the jobs meanwhile. An
+    enabled Watch stays enabled: the next start re-attaches, finds the job stopped by
+    ``vibe stop``, and reports that once. Jobs of Watches that no longer own them are
+    settled as the service would. Restarts and upgrades never come here, so their jobs
+    keep running.
     """
 
     store = store or ManagedWatchStore()
 
     async def _stop_all() -> None:
         for row in store.list_job_watch_targets():
-            owned = row["enabled"] and not row["deleted"]
+            owned = _job_still_owned(row)
             reason = JOB_STOP_VIBE_STOP if owned else _unowned_job_stop_reason(row)
             if await _stop_job(row["target"], reason) and not owned:
                 store.release_job_watch(row["id"], released_at=_utc_now_iso())

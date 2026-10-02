@@ -8,6 +8,7 @@ Stores default to SQLite under the per-test ``AVIBE_HOME`` (``tests/conftest.py`
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
 import sqlite3
@@ -45,6 +46,30 @@ SESSION_ID = "ses_job_watch"
 def _fast_watch_loop(monkeypatch):
     monkeypatch.setattr(watches_module, "WATCH_RECONCILE_INTERVAL_SECONDS", 0.05)
     monkeypatch.setattr(watches_module, "WATCH_JOB_POLL_SECONDS", 0.05)
+
+
+@pytest.fixture(autouse=True)
+def _job_session():
+    """The live Session the jobs run in: a hand-over binds its Watch to it."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    with SQLiteBackgroundTaskStore().engine.begin() as conn:
+        conn.execute(
+            insert(agent_sessions).values(
+                id=SESSION_ID,
+                agent_backend="avibe",
+                agent_variant="default",
+                session_anchor=SESSION_ID,
+                native_session_id=SESSION_ID,
+                status="active",
+                visibility="foreground",
+                pinned=0,
+                agent_status="idle",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+            )
+        )
 
 
 def _jobs_dir(tmp_path: Path) -> str:
@@ -175,29 +200,17 @@ def _end_by_pause(store: ManagedWatchStore, watch_id: str) -> None:
     store.set_enabled(watch_id, False)
 
 
-def _end_by_archive(store: ManagedWatchStore, watch_id: str) -> None:
-    # The archive dialog's teardown: the Session is archived and its Watches soft-deleted.
-    sqlite = SQLiteBackgroundTaskStore()
-    now = datetime.now(timezone.utc).isoformat()
-    with sqlite.engine.begin() as conn:
-        conn.execute(
-            insert(agent_sessions).values(
-                id=SESSION_ID,
-                agent_backend="avibe",
-                agent_variant="default",
-                session_anchor=SESSION_ID,
-                native_session_id=SESSION_ID,
-                status="archived",
-                visibility="foreground",
-                pinned=0,
-                agent_status="idle",
-                metadata_json="{}",
-                created_at=now,
-                updated_at=now,
-            )
-        )
+def _archive_session() -> None:
+    """The archive dialog's teardown: the Session is archived and its Watches soft-deleted."""
+
+    with SQLiteBackgroundTaskStore().engine.begin() as conn:
+        conn.execute(agent_sessions.update().where(agent_sessions.c.id == SESSION_ID).values(status="archived"))
         reclaim_bound_definitions(conn, SESSION_ID, mode="delete")
     watches_module._publish_watch_definitions_updated()
+
+
+def _end_by_archive(store: ManagedWatchStore, watch_id: str) -> None:
+    _archive_session()
 
 
 @pytest.mark.parametrize(
@@ -232,6 +245,76 @@ def test_ending_ownership_kills_the_job_process_tree(tmp_path: Path, end, reason
 
     assert host.stop_reason(job_id) == reason
     assert _gone(int(child_pid_file.read_text()))
+    assert _follow_ups(watch_id) == []
+
+
+def _pause_and_resume_in_the_cli(store: ManagedWatchStore, watch_id: str) -> None:
+    store.set_enabled(watch_id, False)
+    store.set_enabled(watch_id, True)
+
+
+def _pause_and_resume_in_the_web_ui(store: ManagedWatchStore, watch_id: str) -> None:
+    sqlite = SQLiteBackgroundTaskStore()
+    sqlite.set_definition_enabled(watch_id, False, definition_type="watch")
+    sqlite.set_definition_enabled(watch_id, True, definition_type="watch")
+
+
+@pytest.mark.parametrize(
+    "pause_and_resume",
+    [_pause_and_resume_in_the_cli, _pause_and_resume_in_the_web_ui],
+    ids=["cli", "web-ui"],
+)
+def test_a_pause_resumed_before_the_service_saw_it_still_stops_the_job(tmp_path: Path, pause_and_resume) -> None:
+    async def run() -> tuple[LocalJobHost, str, str]:
+        store = ManagedWatchStore()
+        host = _host(tmp_path, store)
+        job_id = await _start_job(host, tmp_path, "sleep 60")
+        watch_id = await host.hand_over(job_id)
+        # Both writes land before any service reads the row.
+        pause_and_resume(store, watch_id)
+        reloaded = ManagedWatchStore()
+        service = _service(reloaded)
+        await _start_service(service)
+        await _until(lambda: host.status(job_id).state != "running", "the pause never stopped the job")
+        await _until(lambda: not reloaded.get_watch(watch_id).enabled, "the resumed Watch never reported")
+        await service.stop()
+        return host, job_id, watch_id
+
+    host, job_id, watch_id = asyncio.run(run())
+
+    assert host.stop_reason(job_id) == "watch_disabled"
+    (follow_up,) = _follow_ups(watch_id)
+    assert follow_up.prompt.endswith(f"Command stopped because Watch {watch_id} was paused")
+
+
+def _session_gone() -> None:
+    with SQLiteBackgroundTaskStore().engine.begin() as conn:
+        conn.execute(agent_sessions.delete().where(agent_sessions.c.id == SESSION_ID))
+
+
+@pytest.mark.parametrize(
+    ("teardown", "reason"),
+    [(_archive_session, "session_archived"), (_session_gone, "watch_disabled")],
+    ids=["archived", "deleted"],
+)
+def test_a_hand_over_after_its_session_teardown_still_ends_the_job(tmp_path: Path, teardown, reason: str) -> None:
+    async def run() -> tuple[LocalJobHost, str, str]:
+        store = ManagedWatchStore()
+        host = _host(tmp_path, store)
+        job_id = await _start_job(host, tmp_path, "sleep 60")
+        # The teardown's reclaim commits before the hand-over, so it cannot see this Watch.
+        teardown()
+        watch_id = await host.hand_over(job_id)
+        service = _service(store)
+        await _start_service(service)
+        await _until(lambda: host.status(job_id).state != "running", "the job outlived its Session")
+        await _until(lambda: _released(watch_id), "the Watch was never released")
+        await service.stop()
+        return host, job_id, watch_id
+
+    host, job_id, watch_id = asyncio.run(run())
+
+    assert host.stop_reason(job_id) == reason
     assert _follow_ups(watch_id) == []
 
 
@@ -536,3 +619,28 @@ def test_vibe_stop_ends_owned_jobs_and_the_watch_reports_after_the_next_start(tm
     # Called again, there is nothing left to stop and nothing to report twice.
     stop_watch_jobs()
     assert len(_follow_ups(watch_id)) == 1
+
+
+def test_vibe_stop_leaves_the_jobs_of_a_service_that_holds_the_lock(tmp_path: Path, monkeypatch) -> None:
+    async def hand_over() -> tuple[LocalJobHost, str]:
+        store = ManagedWatchStore()
+        host = _host(tmp_path, store)
+        job_id = await _start_job(host, tmp_path, "sleep 60")
+        await host.hand_over(job_id)
+        return host, job_id
+
+    host, job_id = asyncio.run(hand_over())
+    monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
+    monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: False)
+    monkeypatch.setattr(cli.runtime, "stop_ui", lambda **kwargs: False)
+    monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
+    monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: None)
+    lock_path = cli.runtime.get_service_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # A service that started after this stop's own stop of the service owns the jobs now.
+    with lock_path.open("a+") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert cli.cmd_stop() == 0
+
+    assert host.status(job_id).state == "running"
+    asyncio.run(host.kill(job_id))
