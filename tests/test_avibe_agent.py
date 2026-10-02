@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -31,13 +33,13 @@ from sqlalchemy import select, update
 from core.agent_core.agent.recovery import UNRECORDED_EFFECT
 from core.agent_core.ai.provider import Done
 from core.agent_core.harness.projection import project
-from core.agent_core.messages import AssistantMessage, TextBlock, ToolCallBlock, UserMessage, text
+from core.agent_core.messages import AssistantMessage, TextBlock, ToolCallBlock, ToolResultMessage, UserMessage, text
 from core.agent_core.tools.base import JobStatus, ToolResult
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.avibe import AvibeAgent
 from modules.agents.avibe.errors import _KIND_KEYS, error_key
-from modules.agents.avibe.tools import ToolSuite
+from modules.agents.avibe.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AgentRequest
 from modules.agents.model_hub import ModelHubLaunch
 from modules.im import MessageContext
@@ -265,6 +267,10 @@ def _context(platform: str, session_id: str, *, turn_id: str, delivery_id: str) 
     )
 
 
+async def _unused_renderer(*_args) -> ToolResult:
+    return ToolResult((text("unused"),))
+
+
 class _Harness:
     def __init__(
         self, engine, tmp_path: Path, platform: str, scripts, *, tools=None, suite=None, language="en", session_id=SESSION,
@@ -282,7 +288,7 @@ class _Harness:
         self.suite = suite or ToolSuite(
             jobs=self.jobs,
             create_tools=lambda jobs, sink: list(self.tools),
-            render_recovered=lambda *args: ToolResult((text("unused"),)),
+            render_recovered=_unused_renderer,
             find_job=lambda session_id, call_id: None,
         )
         self.agent = self.new_agent()
@@ -611,7 +617,7 @@ async def test_resume_settles_open_calls_and_admits_unconsumed_inputs_before_the
     jobs = FakeJobHost()
     rendered: list[tuple] = []
 
-    def render(call, job_id, status, watch_id):
+    async def render(call, job_id, status, watch_id):
         rendered.append((call.id, job_id, status.state, watch_id))
         return ToolResult((text(f"Command is still running and is now Watch {watch_id}."),))
 
@@ -830,7 +836,7 @@ async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_pa
 
         return [FakeTool("echo", execute=start_and_leave)]
 
-    suite = ToolSuite(jobs=jobs, create_tools=tools, render_recovered=lambda *a: None, find_job=lambda *a: None)
+    suite = ToolSuite(jobs=jobs, create_tools=tools, render_recovered=_unused_renderer, find_job=lambda *a: None)
     harness = _Harness(engine, tmp_path, "avibe", _tool_turn(), suite=suite)
     harness.controller.config.show_duration = True
 
@@ -1014,7 +1020,7 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
     jobs = FakeJobHost()
     rendered: list[tuple] = []
 
-    def render(call, job_id, status, watch_id):
+    async def render(call, job_id, status, watch_id):
         rendered.append((call.id, job_id, watch_id))
         return ToolResult((text(f"Command is still running and is now Watch {watch_id}."),))
 
@@ -1361,3 +1367,135 @@ async def test_a_final_is_stored_with_its_outcome_semantics(
     assert [name for name, payload in published if name == "message.new" and payload.get("id") == row["id"]] == [
         "message.new"
     ]
+
+
+# --- real wiring: the merged tools, job host and Watch hand-over ---------------------------
+
+
+async def _real_job(suite, command: str, *, call_id: str, cwd: Path) -> str:
+    return await suite.jobs.start(
+        command,
+        cwd=str(cwd),
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        timeout_s=None,
+        session_id=SESSION,
+        tool_call_id=call_id,
+    )
+
+
+async def _until(predicate, what: str, timeout: float = 10.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(what)
+        await asyncio.sleep(0.05)
+
+
+async def test_a_turn_runs_bash_through_the_real_job_host(engine, session, tmp_path, published) -> None:
+    command = "printf 'hi from bash'"
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": command})
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "avibe",
+        [[Done(assistant("", calls=(call,)))], [Done(assistant("done"))]],
+        suite=local_tool_suite(str(tmp_path / "jobs")),
+    )
+
+    await harness.agent.handle_message(harness.request("say hi"))
+
+    rows = await harness.context_rows()
+    assert [entry.kind for entry in rows] == ["input", "response", "tool_result", "response"]
+    assert "hi from bash" in rows[2].message.content[0].text and not rows[2].message.is_error
+    assert "hi from bash" in str(harness.provider.requests[1].messages[-1])
+
+
+@pytest.mark.parametrize("state", ["exited", "running"])
+async def test_resume_settles_a_real_bash_job_through_the_real_renderer(
+    engine, session, tmp_path, published, state
+) -> None:
+    from core.watches import ManagedWatchStore
+
+    suite = local_tool_suite(str(tmp_path / "jobs"))
+    harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
+    request = harness.request("run it")
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run it"),))
+    )
+    command = "printf done" if state == "exited" else "sleep 30"
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": command})
+    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    # The crashed process had started the command; nothing committed its result.
+    job_id = await _real_job(suite, command, call_id="call_bash", cwd=tmp_path)
+    try:
+        if state == "exited":
+            await _until(lambda: suite.jobs.status(job_id).state == "exited", "the command never exited")
+
+        harness.new_agent()
+        await harness.agent.restore_pending_deliveries({"avibe"})
+
+        result = (await harness.context_rows())[-1]
+        assert result.kind == "tool_result"
+        body = result.message.content[0].text
+        if state == "exited":
+            assert "done" in body and not result.message.is_error
+        else:
+            watch_id = ManagedWatchStore().find_job_watch(job_id)
+            assert watch_id and f"now Watch {watch_id}" in body
+            assert suite.jobs.status(job_id).state == "running"
+    finally:
+        if suite.jobs.status(job_id).state == "running":
+            await suite.jobs.kill(job_id)
+
+
+async def test_the_default_job_host_lives_in_the_watch_jobs_dir(engine, session, tmp_path) -> None:
+    from core.watches import agent_jobs_dir
+
+    controller = _Controller(engine, "avibe")
+    suite = AvibeAgent(controller, engine=engine)._tools()
+    job_id = await _real_job(suite, "true", call_id="call_true", cwd=tmp_path)
+    try:
+        # vibe stop's stop_all_jobs and the job-Watch sweep both look in this one directory.
+        assert Path(suite.jobs.output_path(job_id)).is_relative_to(Path(os.path.realpath(agent_jobs_dir())))
+    finally:
+        await _until(lambda: suite.jobs.status(job_id).state != "running", "the job never ended")
+
+
+async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(engine, session, tmp_path, published) -> None:
+    from core.watches import ManagedWatchStore
+
+    suite = local_tool_suite(str(tmp_path / "jobs"))
+    harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
+    request = harness.request("run them")
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run them"),))
+    )
+    calls = tuple(ToolCallBlock(id=f"call_{name}", name="bash", arguments={"command": "printf out"}) for name in "abc")
+    await harness.agent.store.append_response(SESSION, assistant("", calls=calls), final=False)
+    # d's call is in no committed response, so nothing can ever settle it.
+    jobs = {name: await _real_job(suite, "printf out", call_id=f"call_{name}", cwd=tmp_path) for name in "abcd"}
+    for job_id in jobs.values():
+        await _until(lambda job_id=job_id: suite.jobs.status(job_id).state == "exited", "a job never exited")
+    # a and b have durable results and b's Watch still owns it; c's call is still open.
+    for name in "ab":
+        await harness.agent.store.append_tool_result(
+            SESSION, ToolResultMessage(f"call_{name}", "bash", (text("ok"),)), details={"job_id": jobs[name]}
+        )
+    await suite.jobs.hand_over(jobs["b"])
+    assert ManagedWatchStore().job_watch_settled(jobs["b"]) is False
+    week_ago = time.time() - 8 * 24 * 3600
+    for job_id in jobs.values():
+        for entry in Path(suite.jobs.output_path(job_id)).parent.iterdir():
+            os.utime(entry, (week_ago, week_ago))
+
+    harness.new_agent()
+    await harness.agent.restore_pending_deliveries({"avibe"})
+
+    # Startup settles c's open call from its job's output (T2) before any file goes.
+    [c_result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"][-1:]
+    assert c_result.message.tool_call_id == "call_c" and "out" in c_result.message.content[0].text
+    present = {name: Path(suite.jobs.output_path(job_id)).parent.exists() for name, job_id in jobs.items()}
+    # J5: a job is removed only once its call has a durable result and no Watch still manages it.
+    assert present == {"a": False, "b": True, "c": False, "d": True}

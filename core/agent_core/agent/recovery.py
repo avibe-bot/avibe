@@ -8,14 +8,14 @@ remaining result is appended immediately. It never executes a tool/command.
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Callable, Mapping, Optional
+from typing import Awaitable, Callable, Mapping, Optional
 
 from core.agent_core.harness.projection import interrupted_result, open_tool_calls, validate_message_append
 from core.agent_core.harness.store import ContextEntry, TranscriptStore
 from core.agent_core.messages import ToolCallBlock, ToolResultMessage, text
 from core.agent_core.tools.base import JobHost, JobStatus, ToolResult
 
-RecoveryRenderer = Callable[[ToolCallBlock, str, JobStatus, Optional[str]], ToolResult]
+RecoveryRenderer = Callable[[ToolCallBlock, str, JobStatus, Optional[str]], Awaitable[ToolResult]]
 
 # recovery.md T2: no job evidence can establish whether a file mutation ran.
 UNRECORDED_EFFECT = "[tool call interrupted; it may or may not have completed; re-read the file before continuing]"
@@ -56,7 +56,7 @@ async def settle_open_calls(
             details["job_id"] = job_id
             if status.state in {"running", "exited"}:
                 watch_id = await jobs.hand_over(job_id) if status.state == "running" else None
-                result = render_result(deepcopy(call), job_id, status, watch_id)
+                result = await render_result(deepcopy(call), job_id, status, watch_id)
                 message = ToolResultMessage(call.id, call.name, result.content, result.is_error)
                 details.update(deepcopy(dict(result.details)))
                 details["job_id"] = job_id

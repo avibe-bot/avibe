@@ -26,8 +26,12 @@ from tests.agent_core.fakes import (
 )
 
 
+async def _never_rendered(*_args):
+    pytest.fail("missing/gone jobs must not invoke the renderer")
+
+
 def renderer(jobs):
-    def render(call, job_id, status, watch_id):
+    async def render(call, job_id, status, watch_id):
         output, _ = jobs.output(job_id)
         content = (
             f"still running, now Watch {watch_id}"
@@ -77,7 +81,7 @@ async def test_resume_settles_each_job_state_once_and_projection_never_rechecks_
         render_result=(
             renderer(jobs)
             if state in {"running", "exited"}
-            else lambda *args: pytest.fail("missing/gone jobs must not invoke the renderer")
+            else _never_rendered
         ),
     )
     assert len(committed) == 1
@@ -140,10 +144,10 @@ async def test_settlement_resume_after_partial_commit_skips_done_calls_and_keeps
         jobs.outputs[name] = name.encode()
     ids = {("session", name): name for name in ("a", "b")}
 
-    def render(call, job_id, status, watch_id):
+    async def render(call, job_id, status, watch_id):
         if failure == "unsupported_result" and store.fail and call.id == "b":
             return ToolResult((TextBlock(ref=LargeRef("sha256:" + "a" * 64, 1)),))
-        return renderer(jobs)(call, job_id, status, watch_id)
+        return await renderer(jobs)(call, job_id, status, watch_id)
 
     error_type, error_message = (
         (OSError, "second result") if failure == "store_write" else (ProjectionError, "large-content references")

@@ -69,7 +69,7 @@ from modules.agents.avibe.media import MediaSnapshots
 from modules.agents.avibe.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
 from modules.agents.avibe.prompt import current_environment, system_prompt
 from modules.agents.avibe.store import AdapterTranscriptStore
-from modules.agents.avibe.tools import ToolSuite, WatchJobs, local_tool_suite
+from modules.agents.avibe.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
@@ -139,7 +139,6 @@ class AvibeAgent(BaseAgent):
         engine: Optional[Engine] = None,
         providers: Optional[ProviderFactory] = None,
         tool_suite: Optional[ToolSuite] = None,
-        watch_jobs: Optional[WatchJobs] = None,
         state_dir: Optional[Path] = None,
     ) -> None:
         super().__init__(controller)
@@ -155,7 +154,6 @@ class AvibeAgent(BaseAgent):
         )
         self._providers = providers or registry_providers(media_loader=self.media)
         self._tool_suite = tool_suite
-        self._watch_jobs = watch_jobs
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.
         self._runtimes: dict[str, _SessionRuntime] = {}
@@ -276,6 +274,40 @@ class AvibeAgent(BaseAgent):
                     await self._settle_open_calls(runtime)
                 except Exception:
                     logger.exception("Avibe Agent startup tool-call recovery failed for Session %s", session_id)
+        await self._prune_settled_jobs()
+
+    async def _prune_settled_jobs(self) -> None:
+        """J5 at startup: remove finished jobs whose call has a durable result and whose Watch settled."""
+        try:
+            suite = self._tools()
+            if suite.prune is not None:
+                removed = await asyncio.to_thread(suite.prune, self._job_call_settled)
+                if removed:
+                    logger.info("Avibe Agent pruned %d settled job(s)", len(removed))
+        except Exception:
+            logger.exception("Avibe Agent job pruning failed")
+
+    def _job_call_settled(self, meta: Any) -> bool:
+        """Whether the job's tool call has a durable ``tool_result`` row (the adapter's half of J5)."""
+        from sqlalchemy import func
+
+        session_id, call_id = str(meta.get("session_id") or ""), str(meta.get("tool_call_id") or "")
+        if not session_id or not call_id:
+            return False
+        with self._engine.connect() as conn:
+            return (
+                conn.execute(
+                    select(agent_events.c.id)
+                    .where(
+                        agent_events.c.session_id == session_id,
+                        agent_events.c.event_type == "tool_result",
+                        agent_events.c.context_seq.is_not(None),
+                        func.json_extract(agent_events.c.content_json, "$.message.tool_call_id") == call_id,
+                    )
+                    .limit(1)
+                ).first()
+                is not None
+            )
 
     async def shutdown_runtime(self) -> None:
         """Disabling the backend ends its runs; the rolling refresh drains Turns before this."""
@@ -877,7 +909,8 @@ class AvibeAgent(BaseAgent):
 
     def _tools(self) -> ToolSuite:
         if self._tool_suite is None:
-            self._tool_suite = local_tool_suite(str(self._state_dir / "jobs"), watches=self._watch_jobs)
+            # Jobs live in Watch's agent_jobs_dir(), where vibe stop and the job-Watch sweep look.
+            self._tool_suite = local_tool_suite()
         return self._tool_suite
 
     @asynccontextmanager
