@@ -23,6 +23,15 @@ IMAGE_MIME_TYPES: tuple[str, ...] = ("image/png", "image/jpeg", "image/gif", "im
 _LARGE_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
+def _require(value: Any, kind: type, what: str, *, optional: bool = False) -> None:
+    """Exact-type check shared by construction and reading: what one accepts, the other accepts."""
+    if value is None and optional:
+        return
+    # bool is an int subclass in Python; a boolean is never accepted as a number.
+    if not isinstance(value, kind) or (isinstance(value, bool) and kind is not bool):
+        raise ValueError(f"{what} must be {kind.__name__}")
+
+
 @dataclass(frozen=True)
 class LargeRef:
     """Reserved reference to content stored outside the row; v1 never writes it."""
@@ -31,6 +40,8 @@ class LargeRef:
     bytes: int
 
     def __post_init__(self) -> None:
+        _require(self.ref, str, "ref")
+        _require(self.bytes, int, "bytes")
         if not _LARGE_REF_RE.fullmatch(self.ref) or self.bytes < 0:
             raise ValueError(f"invalid large-content reference: {self.ref!r}")
 
@@ -41,6 +52,8 @@ class TextBlock:
     ref: Optional[LargeRef] = None
 
     def __post_init__(self) -> None:
+        _require(self.text, str, "text", optional=True)
+        _require(self.ref, LargeRef, "ref", optional=True)
         if (self.text is None) == (self.ref is None):
             raise ValueError("a text block holds exactly one of text or ref")
 
@@ -52,6 +65,9 @@ class ImageBlock:
     name: Optional[str] = None
 
     def __post_init__(self) -> None:
+        _require(self.mime_type, str, "mime_type")
+        _require(self.media_token, str, "media_token")
+        _require(self.name, str, "name", optional=True)
         if self.mime_type not in IMAGE_MIME_TYPES:
             raise ValueError(f"unsupported image type: {self.mime_type}")
         if not self.media_token:
@@ -68,6 +84,9 @@ class ThinkingBlock:
     """True for reasoning the provider returned only in opaque form: ``signature`` holds that payload, ``text`` is empty."""
 
     def __post_init__(self) -> None:
+        _require(self.text, str, "thinking text")
+        _require(self.signature, str, "signature", optional=True)
+        _require(self.redacted, bool, "redacted")
         if self.signature is not None and not self.signature:
             raise ValueError("a signature, when present, must not be empty")
         if self.redacted and (self.signature is None or self.text):
@@ -84,12 +103,22 @@ class ToolCallBlock:
     """Opaque provider payload on the call itself (Gemini ``thoughtSignature``); same rules as a thinking signature."""
 
     def __post_init__(self) -> None:
+        _require(self.id, str, "tool call id")
+        _require(self.name, str, "tool name")
+        _require(self.arguments, Mapping, "arguments")
+        _require(self.native_id, str, "native_id", optional=True)
+        _require(self.signature, str, "signature", optional=True)
         if not self.id or not self.name:
             raise ValueError("a tool call needs an id and a name")
         if self.native_id is not None and not self.native_id:
             raise ValueError("a native id, when present, must not be empty")
         if self.signature is not None and not self.signature:
             raise ValueError("a signature, when present, must not be empty")
+
+
+def _require_blocks(content: Any, allowed: tuple[type, ...], what: str) -> None:
+    if not isinstance(content, tuple) or not all(isinstance(block, allowed) for block in content):
+        raise ValueError(f"{what} content must be a tuple of {', '.join(k.__name__ for k in allowed)}")
 
 
 UserContent = Union[TextBlock, ImageBlock]
@@ -105,6 +134,8 @@ class Origin:
     model: str
 
     def __post_init__(self) -> None:
+        for name in ("provider", "api", "model"):
+            _require(getattr(self, name), str, f"origin.{name}")
         if not self.provider or not self.model:
             raise ValueError("an origin needs a provider and a model")
         if self.api not in PROTOCOLS:
@@ -120,6 +151,9 @@ class Usage:
     reasoning_tokens: Optional[int] = None
 
     def __post_init__(self) -> None:
+        for name in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
+            _require(getattr(self, name), int, name)
+        _require(self.reasoning_tokens, int, "reasoning_tokens", optional=True)
         counts = (self.input_tokens, self.output_tokens, self.cache_read_tokens, self.cache_write_tokens)
         if any(c < 0 for c in counts) or (self.reasoning_tokens is not None and self.reasoning_tokens < 0):
             raise ValueError("token counts must not be negative")
@@ -130,6 +164,7 @@ class UserMessage:
     content: tuple[UserContent, ...]
 
     def __post_init__(self) -> None:
+        _require_blocks(self.content, (TextBlock, ImageBlock), "user message")
         if not self.content:
             raise ValueError("a user message needs content")
 
@@ -147,6 +182,11 @@ class AssistantMessage:
     error_message: Optional[str] = None
 
     def __post_init__(self) -> None:
+        _require_blocks(self.content, (TextBlock, ThinkingBlock, ToolCallBlock), "assistant message")
+        _require(self.origin, Origin, "origin")
+        _require(self.stop_reason, str, "stop_reason")
+        _require(self.usage, Usage, "usage", optional=True)
+        _require(self.error_message, str, "error_message", optional=True)
         if self.error_message is not None and not self.error_message:
             raise ValueError("an error message, when present, must not be empty")
         if self.stop_reason not in STOP_REASONS:
@@ -169,6 +209,10 @@ class ToolResultMessage:
     is_error: bool = False
 
     def __post_init__(self) -> None:
+        _require(self.tool_call_id, str, "tool_call_id")
+        _require(self.tool_name, str, "tool_name")
+        _require_blocks(self.content, (TextBlock, ImageBlock), "tool result")
+        _require(self.is_error, bool, "is_error")
         if not self.tool_call_id or not self.tool_name:
             raise ValueError("a tool result needs its call id and tool name")
 

@@ -10,7 +10,13 @@ import pytest
 
 from core.agent_core.messages import (
     AssistantMessage,
+    Origin,
     TextBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultMessage,
+    Usage,
+    UserMessage,
     message_from_dict,
     message_to_dict,
 )
@@ -123,3 +129,23 @@ def test_text_block_holds_exactly_one_form():
         TextBlock()
     with pytest.raises(ValueError):
         message_from_dict({"role": "user", "content": [{"type": "text", "text": "a", "ref": USER_WITH_REF["content"][0]["ref"]}]})
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: Usage(input_tokens=True),
+        lambda: Usage(output_tokens=1.0),
+        lambda: ToolResultMessage(tool_call_id="c", tool_name="bash", content=(), is_error=0),
+        lambda: ThinkingBlock(text="x", redacted=1),
+        lambda: ToolCallBlock(id="c", name="bash", arguments=[]),
+        lambda: UserMessage(content=[TextBlock(text="list, not tuple")]),
+        lambda: Origin(provider="openai", api="openai_chat", model=5),
+    ],
+    ids=["bool-count", "float-count", "int-flag", "int-redacted", "list-arguments", "list-content", "int-model"],
+)
+def test_construction_refuses_what_the_reader_would_refuse(build):
+    # The writer must never produce a row its own reader rejects.
+    with pytest.raises(ValueError):
+        build()
+
