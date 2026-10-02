@@ -34,7 +34,9 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
 6. **No opaque payload crosses origins at failover.** The agent builds the request for the primary hop's origin, so it
    may carry that origin's opaque payloads (C-1: any block's signature, redacted thinking). When the gateway fails
    over to a hop whose origin `(provider, api, model)` differs from the primary's, it removes every such payload
-   before sending, applying the same rule as `cross-provider.md`, whether or not it converts protocols.
+   before sending, applying the same rule as `cross-provider.md`, whether or not it converts protocols. Known limit:
+   the next request targets the primary origin again, so payloads returned by a fallback origin are not replayed if a
+   later request fails over to that same fallback; a provider that then rejects the call surfaces as a provider error.
 
 ## 3. Not required
 

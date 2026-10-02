@@ -28,13 +28,15 @@ activity panel can pair it with the result).
   `next = max(context_seq of the Session in both tables, fork_source_context_seq if the Session is a fork) + 1`, so a
   fork's first entry follows its inherited prefix.
 - Inputs already exist as rows when they are submitted. The loop sets `context_seq` and `content_json.model` on that
-  row when it consumes the input, in the same transaction that commits the previous step if there is one.
+  row when it consumes the input. Each entry is its own transaction; an input accepted by `steer` but not yet
+  consumed when a crash happens is re-queued by the adapter at resume (`recovery.md` T3).
 - A response row is inserted at `message_end` with both `content_json.model` and its rendered `content_text`.
 - A tool result row is inserted at `tool_finished`. The `tool_call` trace row is inserted at tool start without a
   `context_seq`.
 - Each commit is one SQLite transaction. The adapter delivers a row to surfaces only after it commits; the
   dispatcher does not persist it again.
-- **Output outbox.** An `assistant` or `result` row is committed with `metadata_json.delivery = {"state":
+- **Output outbox.** Every row a run produces for a surface (`assistant`, `result`, and the `notify` / `error` rows
+  that report its failures) is in the outbox. Such a row is committed with `metadata_json.delivery = {"state":
   "pending", "parts": []}` in the same transaction; each part a surface sends is recorded with its receipt, and the
   row is `delivered` only when every part is (`recovery.md` D1). After the surface accepts it, the adapter sets `{"state": "delivered"}` with
   the platform receipt (`native_message_id` where the platform returns one). At startup, and before a Session
@@ -50,7 +52,8 @@ activity panel can pair it with the result).
 3. If a `context_compaction` row exists, take the latest; the context becomes its checkpoint message followed by the
    rows with `context_seq >= first_kept_seq`, excluding every `context_compaction` row (including the selected one)
    and `agent_state` rows.
-4. Apply `context_edit` rows: the latest edit per target replaces that tool result's content with its placeholder.
+4. Apply `context_edit` rows: the latest edit per target replaces that tool result's content with its placeholder;
+   the `context_edit` rows themselves are then removed, so the result is only messages.
 5. Answer any tool call that still has no committed result with the synthetic interrupted result from
    `cross-provider.md`. Projection never consults a live job; resume settles open calls durably first
    ([`recovery.md`](recovery.md)).

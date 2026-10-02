@@ -24,8 +24,9 @@ at-least-once, and that is stated where it applies.
 | ID | Invariant | Proof |
 | --- | --- | --- |
 | T1 | `project()` reads only committed rows; the same rows always produce the same request. | projection before and after job state changes |
-| T2 | At resume, before the first projection, every tool call without a committed `tool_result` gets exactly one, chosen from its job state (exited: the output; running: handover; never ran or unknown: the interrupted result). Retries settle nothing twice. | crash between settlement steps, then resume twice |
-| T3 | Inputs accepted by `steer` or `follow_up` are never dropped: they enter the context or are returned to the adapter for the P3 queue. | a terminating tool while a steer is queued |
+| T2 | At resume, before the first projection, every tool call without a committed `tool_result` gets exactly one, chosen from its job state (exited: the output; running: handover; never ran: the interrupted result). A call without job state (`write`, `edit`) gets `[tool call interrupted; it may or may not have completed; re-read the file before continuing]`. Retries settle nothing twice. | crash between settlement steps, then resume twice |
+| T3 | Inputs accepted by `steer` or `follow_up` are never dropped: they enter the context or are returned to the adapter for the P3 queue, including after a crash (the adapter re-queues accepted but unconsumed inputs at resume). | a terminating tool while a steer is queued; a crash before consumption |
+| T4 | An unsettled Turn found at startup is settled as interrupted after T2; the agent never continues it on its own (a hook `end`, an abort, or a crash all leave the same safe state). The user's next message starts a new Turn with the full context. | crash after an `end` hook and after a mid-turn commit |
 
 ## Delivery (adapter wave)
 

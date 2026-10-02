@@ -342,14 +342,15 @@ Properties; the test suites enumerate cases.
   governed by tool and workspace policy, not by this criterion.
 - **A6 Surfaces.** The same turn produces equivalent user-visible outcomes on Workbench and on every IM platform in
   the Incus regression environment: progress, tool activity, final message, stop, questions, Watch follow-ups.
-- **A7 Registration.** Every backend list in the tree is either the catalog's set or the native-CLI subset defined in
-  C-8, and a contract test enforces it.
+- **A7 Registration.** Every declaration that stands for a whole backend universe equals the catalog's set or the
+  native-CLI subset, and every capability-specific set is classified with its relation to one of them (C-8); a contract
+  test enforces both.
 - **A8 Isolation.** Engine tests never touch `$HOME`, `~/.avibe`, or a live service.
 - **A9 Portability.** Any session, rebuilt from the tables, continues on every other protocol with the original
   provider unreachable: all user, tool, and assistant text is present in the new request, no signature from another
   origin is sent, and the run completes.
-- **A10 One copy.** For every Avibe Agent Session, the context rebuilt from `messages` and `agent_events` equals what
-  the stub received, and no other file or table holds a copy of it.
+- **A10 One copy.** For every request without a transient `before_model` rewrite (C-3 §3), the context rebuilt from
+  `messages` and `agent_events` equals what the stub received; no other file or table holds a copy of it.
 - **A11 Exactly-once commands.** A command started by `bash` runs once across foreground completion, `watch: true`,
   foreground-to-Watch handover, and a vibe restart in any of those states; Watch removal ends its process tree.
 - **A12 Compaction quality.** On a scripted long-session fixture compacted twice, the agent still states the user's

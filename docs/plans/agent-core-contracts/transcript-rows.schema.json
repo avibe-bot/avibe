@@ -7,46 +7,94 @@
     "ModelInput": {
       "description": "`messages.content_json.model` on user, harness, agent_initiated, and annotation rows, set when the loop consumes the input.",
       "type": "object",
-      "required": ["version", "message"],
+      "required": [
+        "version",
+        "message"
+      ],
       "additionalProperties": false,
       "properties": {
-        "version": { "const": 1 },
-        "message": { "$ref": "message.schema.json#/definitions/UserMessage", "description": "The input exactly as sent, including the rendered time and identity prefix and attachments." }
+        "version": {
+          "const": 1
+        },
+        "message": {
+          "$ref": "message.schema.json#/definitions/UserMessage",
+          "description": "The input exactly as sent, including the rendered time and identity prefix and attachments."
+        }
       }
     },
     "ModelResponse": {
       "description": "`messages.content_json.model` on assistant and result rows.",
       "type": "object",
-      "required": ["version", "message"],
+      "required": [
+        "version",
+        "message"
+      ],
       "additionalProperties": false,
       "properties": {
-        "version": { "const": 1 },
-        "message": { "$ref": "message.schema.json#/definitions/AssistantMessage", "description": "Verbatim, including quick-reply blocks and file:// links that the display copy rewrites." },
-        "request_fingerprint": { "type": "string", "description": "SHA-256 of the system prompt and tool specs sent, for cache and debugging analysis." }
+        "version": {
+          "const": 1
+        },
+        "message": {
+          "$ref": "message.schema.json#/definitions/AssistantMessage",
+          "description": "Verbatim, including quick-reply blocks and file:// links that the display copy rewrites."
+        }
       }
     },
     "ToolResult": {
       "description": "`agent_events.content_json` of a `tool_result` row.",
       "type": "object",
-      "required": ["version", "message"],
+      "required": [
+        "version",
+        "message"
+      ],
       "additionalProperties": false,
       "properties": {
-        "version": { "const": 1 },
-        "message": { "$ref": "message.schema.json#/definitions/ToolResultMessage" },
+        "version": {
+          "const": 1
+        },
+        "message": {
+          "$ref": "message.schema.json#/definitions/ToolResultMessage"
+        },
         "details": {
           "type": "object",
           "description": "Not sent to the model.",
           "properties": {
-            "job_id": { "type": "string" },
-            "watch_id": { "type": "string" },
-            "exit_code": { "type": ["integer", "null"] },
-            "full_output_path": { "type": "string" },
-            "truncated": { "type": "boolean" },
-            "diff": { "type": "string", "description": "edit/write display diff." },
+            "job_id": {
+              "type": "string"
+            },
+            "watch_id": {
+              "type": "string"
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "full_output_path": {
+              "type": "string"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "diff": {
+              "type": "string",
+              "description": "edit/write display diff."
+            },
             "skill": {
               "type": "object",
-              "required": ["name", "revision"],
-              "properties": { "name": { "type": "string" }, "revision": { "type": "string" } },
+              "required": [
+                "name",
+                "revision"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "revision": {
+                  "type": "string"
+                }
+              },
               "description": "Set when the command loaded a skill (`vibe skill load`); used for rehydration after compaction."
             }
           }
@@ -56,56 +104,160 @@
     "Compaction": {
       "description": "`agent_events.content_json` of a `context_compaction` row (plan §5.2).",
       "type": "object",
-      "required": ["version", "summary", "first_kept_seq", "summarized_from_seq", "summarized_to_seq", "reason", "tokens_before", "tokens_after_estimate", "summarizer", "files_read", "files_modified"],
+      "required": [
+        "version",
+        "summary",
+        "first_kept_seq",
+        "summarized_from_seq",
+        "summarized_to_seq",
+        "reason",
+        "tokens_before",
+        "tokens_after_estimate",
+        "summarizer",
+        "files_read",
+        "files_modified"
+      ],
       "additionalProperties": false,
       "properties": {
-        "version": { "const": 1 },
-        "summary": { "type": "string", "description": "Self-contained checkpoint text, including the mechanical file lists and `<current-request>` when present." },
-        "first_kept_seq": { "type": "integer" },
-        "summarized_from_seq": { "type": "integer" },
-        "summarized_to_seq": { "type": "integer" },
-        "previous_compaction_id": { "type": ["string", "null"] },
-        "reason": { "enum": ["manual", "threshold", "overflow"] },
-        "focus": { "type": ["string", "null"], "description": "Text after `/compact`." },
-        "tokens_before": { "type": "integer", "minimum": 0 },
-        "tokens_after_estimate": { "type": "integer", "minimum": 0 },
+        "version": {
+          "const": 1
+        },
+        "summary": {
+          "type": "string",
+          "description": "Self-contained checkpoint text, including the mechanical file lists and `<current-request>` when present."
+        },
+        "first_kept_seq": {
+          "type": "integer"
+        },
+        "summarized_from_seq": {
+          "type": "integer"
+        },
+        "summarized_to_seq": {
+          "type": "integer"
+        },
+        "previous_compaction_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "enum": [
+            "manual",
+            "threshold",
+            "overflow"
+          ]
+        },
+        "focus": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Text after `/compact`."
+        },
+        "tokens_before": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens_after_estimate": {
+          "type": "integer",
+          "minimum": 0
+        },
         "summarizer": {
           "type": "object",
-          "required": ["origin", "prompt_version", "chunks"],
+          "required": [
+            "origin",
+            "prompt_version",
+            "chunks"
+          ],
           "properties": {
-            "origin": { "$ref": "message.schema.json#/definitions/Origin" },
-            "prompt_version": { "type": "string" },
-            "chunks": { "type": "integer", "minimum": 1 }
+            "origin": {
+              "$ref": "message.schema.json#/definitions/Origin"
+            },
+            "prompt_version": {
+              "type": "string"
+            },
+            "chunks": {
+              "type": "integer",
+              "minimum": 1
+            }
           }
         },
-        "usage": { "$ref": "message.schema.json#/definitions/Usage" },
-        "files_read": { "type": "array", "items": { "type": "string" } },
-        "files_modified": { "type": "array", "items": { "type": "string" } },
-        "current_request_message_id": { "type": ["string", "null"] }
+        "usage": {
+          "$ref": "message.schema.json#/definitions/Usage"
+        },
+        "files_read": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "files_modified": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "current_request_message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "ContextEdit": {
       "description": "`agent_events.content_json` of a `context_edit` row.",
       "type": "object",
-      "required": ["version", "target_event_id", "replacement", "reason"],
+      "required": [
+        "version",
+        "target_event_id",
+        "replacement",
+        "reason"
+      ],
       "additionalProperties": false,
       "properties": {
-        "version": { "const": 1 },
-        "target_event_id": { "type": "string", "description": "The `tool_result` row whose content is replaced in projection." },
+        "version": {
+          "const": 1
+        },
+        "target_event_id": {
+          "type": "string",
+          "description": "The `tool_result` row whose content is replaced in projection."
+        },
         "replacement": {
           "type": "object",
-          "required": ["text"],
-          "properties": { "text": { "type": "string" } }
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
         },
-        "reason": { "enum": ["clear_old_tool_result"] }
+        "reason": {
+          "enum": [
+            "clear_old_tool_result"
+          ]
+        }
       }
     },
     "AgentState": {
       "description": "`agent_events.content_json` of an `agent_state` row: hook state at a commit point (loop-control.md section 7). Not projected into messages.",
       "type": "object",
-      "required": ["version", "state"],
+      "required": [
+        "version",
+        "state"
+      ],
       "additionalProperties": false,
-      "properties": { "version": { "const": 1 }, "state": { "type": "object" } }
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "state": {
+          "type": "object"
+        }
+      }
     }
   },
   "examples": [
@@ -120,10 +272,28 @@
       "focus": null,
       "tokens_before": 158432,
       "tokens_after_estimate": 31877,
-      "summarizer": { "origin": { "provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5" }, "prompt_version": "ckpt-v1", "chunks": 1 },
-      "usage": { "input_tokens": 61210, "output_tokens": 2304, "cache_read_tokens": 0, "cache_write_tokens": 0 },
-      "files_read": ["core/paths.py", "tests/test_paths.py"],
-      "files_modified": ["core/paths.py"],
+      "summarizer": {
+        "origin": {
+          "provider": "anthropic",
+          "api": "anthropic",
+          "model": "claude-opus-5-5"
+        },
+        "prompt_version": "ckpt-v1",
+        "chunks": 1
+      },
+      "usage": {
+        "input_tokens": 61210,
+        "output_tokens": 2304,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0
+      },
+      "files_read": [
+        "core/paths.py",
+        "tests/test_paths.py"
+      ],
+      "files_modified": [
+        "core/paths.py"
+      ],
       "current_request_message_id": null
     }
   ]

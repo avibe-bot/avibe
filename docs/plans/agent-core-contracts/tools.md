@@ -15,7 +15,7 @@ reference. One tool set serves every model.
 
 ## 2. `read`
 
-Description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent
+Description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent
 as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit
 for large files. When you need the full file, continue with offset until complete.`
 
@@ -40,8 +40,9 @@ Raw text, no line numbers, head kept. Model-facing suffixes:
   `{quoted_path}` is the path shell-quoted (Avibe change to Pi's text, so the suggested command is always safe to run)
 - Error: `Offset {offset} is beyond end of file ({total} lines total)`
 
-Images are attached as `ImageBlock`s (C-1) after resizing; for a model without image input the result says so and
-omits the image.
+Images are attached as `ImageBlock`s (C-1); for a model without image input the result says so and omits the image.
+Avibe changes to Pi's text: `bmp` is not listed because v1 does not convert it, and there is no resizing (no image
+dependency); oversized images are refused with a message.
 
 ## 3. `write`
 
@@ -76,6 +77,7 @@ changes.`
     "path": { "type": "string", "description": "Path to the file to edit (relative or absolute)" },
     "edits": {
       "type": "array",
+      "minItems": 1,
       "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
       "items": {
         "type": "object",
@@ -113,8 +115,9 @@ Result: `Successfully replaced {n} block(s) in {path}.`; the diff goes to `detai
 ## 5. `bash`
 
 Description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated
-to last 2000 lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally
-provide a timeout in seconds.` Avibe appends: `Commands still running after 120 seconds, or started with watch=true,
+to last 2000 lines or 50KB (whichever is hit first). If truncated, the output log is saved to a file; very large logs
+keep their beginning and end. Optionally provide a timeout in seconds.` (Avibe change to Pi's last-but-one sentence,
+because the on-disk log is bounded.) Avibe appends: `Commands still running after 120 seconds, or started with watch=true,
 continue in the background as an Avibe Watch; you get a follow-up message when they finish.`
 
 ```json
