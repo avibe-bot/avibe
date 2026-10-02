@@ -141,11 +141,7 @@ class JobOutput:
         text = truncation.content or empty_text
         if not truncation.truncated and not self._omitted:
             return text, None
-        # C-7 section 5: a log bounded on disk (J4) is never called the full output.
-        label = "Full output"
-        if self._omitted:
-            label = f"Output log (middle omitted beyond {format_size(job_host.OUTPUT_HEAD_BYTES + job_host.OUTPUT_TAIL_BYTES)})"
-        where = f"{label}: {self.path}"
+        where = self.where()
         start = truncation.total_lines - truncation.output_lines + 1
         end = truncation.total_lines
         if not truncation.truncated:
@@ -166,6 +162,14 @@ class JobOutput:
             # Only LocalJobHost drops output, and it keeps the end in tail.log next to output.log.
             notice += f"\n[{format_size(self._omitted)} were omitted; the end of the log is in tail.log beside it.]"
         return f"{text}\n\n{notice}", truncation
+
+    def where(self) -> str:
+        """Where the log is. ``Full output`` only for a finished job whose log was never bounded on disk (J4):
+        a running job's log may still pass the cap."""
+        if self._finished and not self._omitted:
+            return f"Full output: {self.path}"
+        cap = format_size(job_host.OUTPUT_HEAD_BYTES + job_host.OUTPUT_TAIL_BYTES)
+        return f"Output log (middle omitted beyond {cap}): {self.path}"
 
     def details(self, truncation: Optional[TruncationResult]) -> dict[str, Any]:
         out: dict[str, Any] = {"job_id": self._job_id, "output_path": self.path}

@@ -9,9 +9,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import secrets
 import stat
-import tempfile
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 from core.agent_core.tools.args import ToolInputError, error_result, os_error_text, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
@@ -63,37 +63,41 @@ class WriteTool:
 
 
 def write_text(path: str, content: str) -> None:
-    """UTF-8 without newline translation; a lone surrogate (possible from JSON) is replaced.
+    """UTF-8 without newline translation; a lone surrogate (possible from JSON) is replaced."""
+    write_bytes(path, content.encode("utf-8", "replace"))
 
-    An existing file is replaced only once the new content is completely on disk, so a failed write
-    (a full disk, a quota) leaves the original intact. The replacement goes through symlinks and keeps
-    the file's mode.
+
+def write_bytes(path: str, data: bytes) -> None:
+    """Create or replace ``path`` only once ``data`` is completely on disk.
+
+    A failed write (a full disk, a quota) leaves the original, or its absence, as it was. The temp
+    file sits beside the real target (through symlinks); it takes the existing file's mode, or the
+    umask default for a new file, is fsynced, and replaces the target with ``os.replace``.
     """
     target = os.path.realpath(path)
     try:
-        mode = stat.S_IMODE(os.stat(target).st_mode)
+        mode: Optional[int] = stat.S_IMODE(os.stat(target).st_mode)
     except FileNotFoundError:
-        _write_file(target, content)
-        return
+        mode = None
+    tmp = os.path.join(os.path.dirname(target), f".{os.path.basename(target)}.{secrets.token_hex(4)}.tmp")
     try:
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=f".{os.path.basename(target)}.", suffix=".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     except PermissionError:
-        # A writable file in a directory we cannot add to: only an in-place write is possible.
-        _write_file(target, content)
+        if mode is None:
+            raise
+        # An existing, writable file in a directory we cannot add to: only an in-place write is possible.
+        with open(target, "wb") as handle:
+            handle.write(data)
         return
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", errors="replace", newline="") as handle:
-            handle.write(content)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(tmp, mode)
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, target)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
         raise
-
-
-def _write_file(path: str, content: str) -> None:
-    with open(path, "w", encoding="utf-8", errors="replace", newline="") as handle:
-        handle.write(content)

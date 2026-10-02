@@ -7,8 +7,9 @@ original, overlapping edits rejected. Avibe adds ``replaceAll`` (from Claude
 Code and OpenCode): every occurrence in the tier that matched, each one a span
 for the overlap check. Avibe departures from Pi: each edit matches in its own
 tier, so one normalized edit no longer switches the whole batch to normalized
-text; uniqueness is counted in the tier that matched; classic Mac CR line
-endings are restored like CRLF.
+text; uniqueness is counted in the tier that matched; and the file is never
+re-encoded: replacements are spliced into the original text, so its BOM, its
+line breaks (mixed or not), and every byte outside a replaced span survive.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from typing import Callable, Optional
 BOM = "\ufeff"
 
 # JavaScript's String.prototype.trimEnd set, which Pi uses (Python's isspace differs).
+_BREAK = re.compile(r"\r\n|\r|\n")
 _TRAILING_SPACE = re.compile("[ \t\v\f\r\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+$")
 _SMART_SINGLE = re.compile("[\u2018\u2019\u201a\u201b]")
 _SMART_DOUBLE = re.compile("[\u201c\u201d\u201e\u201f]")
@@ -49,24 +51,8 @@ class _Replacement:
     new_text: str
 
 
-def split_bom(content: str) -> tuple[str, str]:
-    return (BOM, content[1:]) if content.startswith(BOM) else ("", content)
-
-
-def detect_line_ending(content: str) -> str:
-    """The style of the first line break. Pi knows CRLF and LF; Avibe also keeps classic Mac CR."""
-    cr, lf = content.find("\r"), content.find("\n")
-    if cr == -1 or (lf != -1 and lf < cr):
-        return "\n"
-    return "\r\n" if cr + 1 == lf else "\r"
-
-
 def normalize_to_lf(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
-
-
-def restore_line_endings(text: str, ending: str) -> str:
-    return text if ending == "\n" else text.replace("\n", ending)
 
 
 def normalize_for_fuzzy_match(text: str) -> str:
@@ -172,49 +158,116 @@ def _check_disjoint(path: str, replacements: list[_Replacement]) -> None:
             raise _overlap(path, previous.edit_index, current.edit_index)
 
 
-def _line_groups(content: str, normalized: str, replacements: list[_Replacement]) -> list[_Replacement]:
-    """Normalized-tier replacements as whole-line replacements in original coordinates.
+class _Lines:
+    """The file as lines with their own breaks, and an LF view whose offsets map back to the file.
 
-    Normalization keeps every line break, so line ``i`` of the normalized text is line ``i`` of the
-    original. Replacements sharing lines form one group; its lines are rewritten from the
-    normalized text with the group's replacements applied (Pi's way of applying a normalized match).
+    Matching happens in the view, as Pi matches LF-normalized text; replacements are spliced into
+    the original, so a BOM, every line break, and every byte outside a replaced span stay as they were.
     """
-    original_starts, normalized_starts = _line_starts(content), _line_starts(normalized)
-    if len(original_starts) != len(normalized_starts):
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        prefix = len(BOM) if text.startswith(BOM) else 0
+        self.contents: list[str] = []
+        self.breaks: list[str] = []
+        pos = prefix
+        for match in _BREAK.finditer(text, prefix):
+            self.contents.append(text[pos : match.start()])
+            self.breaks.append(match.group())
+            pos = match.end()
+        self.contents.append(text[pos:])
+        self.breaks.append("")
+        self.view = "\n".join(self.contents)
+        self.view_starts: list[int] = []
+        self.starts: list[int] = []
+        view_pos, pos = 0, prefix
+        for content, brk in zip(self.contents, self.breaks):
+            self.view_starts.append(view_pos)
+            self.starts.append(pos)
+            view_pos += len(content) + 1
+            pos += len(content) + len(brk)
+
+    def to_original(self, view_offset: int) -> int:
+        line = bisect.bisect_right(self.view_starts, view_offset) - 1
+        return self.starts[line] + (view_offset - self.view_starts[line])
+
+    def line_end(self, line: int) -> int:
+        """Original offset just past ``line`` and its break."""
+        return self.starts[line + 1] if line + 1 < len(self.starts) else len(self.text)
+
+    def break_for(self, lo: int, hi: int) -> str:
+        """The break new text uses in ``[lo, hi)``: one inside it, else the next one, else the file's first."""
+        inside = _BREAK.search(self.text, lo, hi)
+        if inside:
+            return inside.group()
+        following = _BREAK.search(self.text, hi)
+        if following:
+            return following.group()
+        return next((brk for brk in self.breaks if brk), "\n")
+
+    def with_breaks(self, lf_text: str, lo: int, hi: int, own: Optional[list[str]] = None) -> str:
+        """``lf_text`` with each ``\\n`` turned into ``own``'s next break, then the span's break."""
+        pieces = lf_text.split("\n")
+        fallback = self.break_for(lo, hi)
+        out = [pieces[0]]
+        for index, piece in enumerate(pieces[1:]):
+            brk = own[index] if own is not None and index < len(own) and own[index] else fallback
+            out.append(brk + piece)
+        return "".join(out)
+
+
+def _exact_replacements(lines: _Lines, matches: list[_Replacement]) -> list[_Replacement]:
+    out = []
+    for match in matches:
+        lo, hi = lines.to_original(match.index), lines.to_original(match.index + match.length)
+        out.append(_Replacement(match.edit_index, lo, hi - lo, lines.with_breaks(match.new_text, lo, hi)))
+    return out
+
+
+def _line_groups(lines: _Lines, normalized: str, matches: list[_Replacement]) -> list[_Replacement]:
+    """Normalized-tier matches as whole-line replacements of the original.
+
+    Normalization keeps every line break, so line ``i`` of the normalized view is line ``i`` of the
+    file. Matches sharing lines form one group; its lines are rewritten from the normalized view with
+    the group's matches applied (Pi's way of applying a normalized match), and each rewritten line
+    keeps its own break.
+    """
+    normalized_starts = _line_starts(normalized)
+    if len(normalized_starts) != len(lines.starts):
         raise EditError("Cannot preserve unchanged lines because the base content has a different line count.")
 
     def line_of(index: int) -> int:
         return bisect.bisect_right(normalized_starts, index) - 1
 
     groups: list[list] = []  # [first_line, last_line, members]
-    for replacement in sorted(replacements, key=lambda r: r.index):
-        first, last = line_of(replacement.index), line_of(replacement.index + replacement.length - 1)
+    for match in sorted(matches, key=lambda r: r.index):
+        first, last = line_of(match.index), line_of(match.index + match.length - 1)
         if groups and first <= groups[-1][1]:
             groups[-1][1] = max(groups[-1][1], last)
-            groups[-1][2].append(replacement)
+            groups[-1][2].append(match)
         else:
-            groups.append([first, last, [replacement]])
-
-    def bounds(starts: list[int], text: str, first: int, last: int) -> tuple[int, int]:
-        return starts[first], starts[last + 1] if last + 1 < len(starts) else len(text)
+            groups.append([first, last, [match]])
 
     out: list[_Replacement] = []
     for first, last, members in groups:
-        lo, hi = bounds(normalized_starts, normalized, first, last)
-        original_lo, original_hi = bounds(original_starts, content, first, last)
+        lo = normalized_starts[first]
+        hi = normalized_starts[last + 1] if last + 1 < len(normalized_starts) else len(normalized)
         rewritten = _apply(normalized[lo:hi], members, lo)
-        out.append(_Replacement(members[0].edit_index, original_lo, original_hi - original_lo, rewritten))
+        original_lo, original_hi = lines.starts[first], lines.line_end(last)
+        text = lines.with_breaks(rewritten, original_lo, original_hi, lines.breaks[first : last + 1])
+        out.append(_Replacement(members[0].edit_index, original_lo, original_hi - original_lo, text))
     return out
 
 
-def apply_edits_to_normalized_content(content: str, edits: list[Edit], path: str) -> str:
-    """Apply every edit to LF-normalized ``content`` and return the new content.
+def apply_edits(text: str, edits: list[Edit], path: str) -> tuple[str, str, str]:
+    """Apply every edit to the file's ``text``; return the new text and the LF views before and after.
 
-    Each edit matches in its own tier against the original. Exact edits replace exactly the text
-    they matched; a normalized edit rewrites the whole lines it touches from the normalized text.
-    Uniqueness, ``replaceAll``, overlap, and application are all per edit in original coordinates,
-    so nothing an exact edit did not match is touched. (Pi matches a whole batch in normalized text
-    as soon as one edit needs it.)
+    Each edit matches in its own tier against the original, in the file's LF view. Exact edits replace
+    exactly the text they matched; a normalized edit rewrites the whole lines it touches from the
+    normalized view. Uniqueness, ``replaceAll``, overlap, and application are all per edit in original
+    coordinates, and replacements are spliced into the original, so nothing an edit did not match
+    changes: not a byte, not a line break. (Pi matches a whole batch in normalized text as soon as one
+    edit needs it, and re-encodes every line break in the file.)
     """
     edits = [Edit(normalize_to_lf(e.old_text), normalize_to_lf(e.new_text), e.replace_all) for e in edits]
     total = len(edits)
@@ -222,17 +275,18 @@ def apply_edits_to_normalized_content(content: str, edits: list[Edit], path: str
         if not edit.old_text:
             raise _empty(path, index, total)
 
+    lines = _Lines(text)
     cache: list[str] = []
 
     def normalized() -> str:
         if not cache:
-            cache.append(normalize_for_fuzzy_match(content))
+            cache.append(normalize_for_fuzzy_match(lines.view))
         return cache[0]
 
     exact: list[_Replacement] = []
     fuzzy: list[_Replacement] = []
     for index, edit in enumerate(edits):
-        used_normalized, spans = _occurrences(content, normalized, edit.old_text)
+        used_normalized, spans = _occurrences(lines.view, normalized, edit.old_text)
         if not spans:
             raise _not_found(path, index, total)
         if not edit.replace_all and len(spans) > 1:
@@ -243,12 +297,12 @@ def apply_edits_to_normalized_content(content: str, edits: list[Edit], path: str
         )
 
     _check_disjoint(path, fuzzy)  # in normalized coordinates, before they are grouped into lines
-    replacements = exact + (_line_groups(content, normalized(), fuzzy) if fuzzy else [])
+    replacements = _exact_replacements(lines, exact) + (_line_groups(lines, normalized(), fuzzy) if fuzzy else [])
     _check_disjoint(path, replacements)
-    new_content = _apply(content, replacements)
-    if new_content == content:
+    new_text = _apply(text, replacements)
+    if new_text == text:
         raise _no_change(path, total)
-    return new_content
+    return new_text, lines.view, _Lines(new_text).view
 
 
 def generate_unified_patch(path: str, old: str, new: str, context: int = 4) -> str:

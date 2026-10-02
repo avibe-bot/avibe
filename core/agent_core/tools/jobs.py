@@ -24,8 +24,9 @@ inherited ``AVIBE_PROCESS_IDENTITY`` marker is set and fingerprinted as well,
 but macOS hides the environment of its own binaries (``/bin/bash``,
 ``/bin/sleep``), so the marker only verifies a group whose wrapper has exited.
 
-J3: ``meta.json.deadline_at`` is absolute; ``wait`` and ``enforce_deadline``
-kill the tree once it passes, whoever holds the job.
+J3: ``meta.json.deadline_at`` is absolute. The wrapper enforces it itself, so
+it holds while no host runs; ``wait`` and ``enforce_deadline`` are a second,
+idempotent owner. Whoever kills records ``stopped`` first.
 
 POSIX only in v1.
 """
@@ -246,6 +247,7 @@ class LocalJobHost:
         os.makedirs(self._jobs_dir, exist_ok=True)
         os.mkdir(job_dir, 0o700)
         created = datetime.now(timezone.utc)
+        deadline = _ceil_ms(created + timedelta(seconds=timeout_s)) if timeout_s is not None else None
         meta: dict[str, Any] = {
             "version": 1,
             "job_id": job_id,
@@ -260,7 +262,7 @@ class LocalJobHost:
             "process": None,
             "terminal": None,
             "watch_id": None,
-            "deadline_at": _iso(_ceil_ms(created + timedelta(seconds=timeout_s))) if timeout_s is not None else None,
+            "deadline_at": _iso(deadline) if deadline is not None else None,
         }
         self._write_meta(job_id, meta)
 
@@ -279,6 +281,7 @@ class LocalJobHost:
             repr(DECISION_TIMEOUT_S),
             str(OUTPUT_HEAD_BYTES),
             str(OUTPUT_TAIL_BYTES),
+            repr(deadline.timestamp()) if deadline is not None else "-",
         ]
         open(self.output_path(job_id), "ab").close()
         diagnostics = os.open(self._path(job_id, "wrapper.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)

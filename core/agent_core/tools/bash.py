@@ -118,7 +118,7 @@ def handover_result(output: JobOutput, watch_id: str) -> ToolResult:
         "",
     ]
     if truncation is None:
-        lines.append(f"Full output: {output.path}")
+        lines.append(output.where())
     lines += [f"Check: vibe watch show {watch_id}", f"Stop: vibe watch remove {watch_id}"]
     return text_result("\n".join(lines), details={**output.details(truncation), "watch_id": watch_id})
 
@@ -161,6 +161,8 @@ class BashTool:
     async def execute(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
         try:
             command = str_arg(arguments, "command")
+            if "\x00" in command:
+                raise ToolInputError("Invalid command: contains a NUL byte")
             timeout = _timeout_arg(arguments)
             watch = optional_bool_arg(arguments, "watch")
         except ToolInputError as exc:

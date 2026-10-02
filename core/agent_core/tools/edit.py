@@ -12,23 +12,16 @@ import asyncio
 import errno
 import json
 import os
+import re
 from typing import Any, Mapping
 
 from core.agent_core.tools.args import ToolInputError, error_result, os_error_text, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
-from core.agent_core.tools.edit_diff import (
-    Edit,
-    EditError,
-    apply_edits_to_normalized_content,
-    detect_line_ending,
-    generate_diff_string,
-    generate_unified_patch,
-    normalize_to_lf,
-    restore_line_endings,
-    split_bom,
-)
+from core.agent_core.tools.edit_diff import Edit, EditError, apply_edits, generate_diff_string, generate_unified_patch
 from core.agent_core.tools.paths import file_mutation_lock, resolve_to_cwd
-from core.agent_core.tools.write import write_text
+from core.agent_core.tools.write import write_bytes
+
+_SURROGATE = re.compile("[\ud800-\udfff]")
 
 EDIT_DESCRIPTION = (
     "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping "
@@ -115,19 +108,20 @@ def _edits_arg(arguments: Mapping[str, Any]) -> list[Edit]:
             replace_all = False
         if not isinstance(replace_all, bool):
             raise ToolInputError(f"edits[{index}].replaceAll must be a boolean")
-        parsed.append(Edit(old_text, new_text, replace_all))
+        # A lone surrogate (possible from JSON) cannot be written; it becomes U+FFFD.
+        parsed.append(Edit(_SURROGATE.sub("\ufffd", old_text), _SURROGATE.sub("\ufffd", new_text), replace_all))
     return parsed
 
 
-def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[str, str, str, str]:
-    """Read the file and compute the edited content: ``(bom, line_ending, before, after)``, LF-normalized."""
+def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[bytes, str, str]:
+    """Read the file and compute its new bytes, with the LF views before and after for the diff.
+
+    ``surrogateescape`` carries bytes that are not UTF-8 through unchanged; only replaced spans change.
+    """
     with open(absolute, "rb") as handle:
-        raw = handle.read().decode("utf-8", "replace")
-    # The model never includes an invisible BOM in oldText.
-    bom, content = split_bom(raw)
-    ending = detect_line_ending(content)
-    base = normalize_to_lf(content)
-    return bom, ending, base, apply_edits_to_normalized_content(base, edits, path)
+        text = handle.read().decode("utf-8", "surrogateescape")
+    new_text, before, after = apply_edits(text, edits, path)
+    return new_text.encode("utf-8", "surrogateescape"), before, after
 
 
 class EditTool:
@@ -154,10 +148,10 @@ class EditTool:
                 code = errno.errorcode.get(errno.ENOENT if not os.path.exists(absolute) else errno.EACCES, "EACCES")
                 return error_result(f"Could not edit file: {path}. Error code: {code}.")
             try:
-                bom, ending, base, new_content = await asyncio.to_thread(_plan_edits, absolute, edits, path)
+                data, base, new_content = await asyncio.to_thread(_plan_edits, absolute, edits, path)
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
-                await asyncio.to_thread(write_text, absolute, bom + restore_line_endings(new_content, ending))
+                await asyncio.to_thread(write_bytes, absolute, data)
             except EditError as exc:
                 return error_result(str(exc))
             except OSError as exc:

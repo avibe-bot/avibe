@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import errno
+import random
+import re
 import stat
 
 import pytest
@@ -24,8 +26,10 @@ async def test_write_creates_parent_directories_and_keeps_bytes(tmp_path, make_c
     assert (tmp_path / "a/b/notes.txt").read_bytes() == "第一行\r\nsecond\n".encode()
 
 
-async def test_a_failed_write_leaves_the_original_intact(tmp_path, make_ctx, monkeypatch):
-    (tmp_path / "f.txt").write_text("original\n")
+@pytest.mark.parametrize("existing", [True, False])
+async def test_a_failed_write_leaves_the_original_intact(tmp_path, make_ctx, monkeypatch, existing):
+    if existing:
+        (tmp_path / "f.txt").write_text("original\n")
 
     def disk_full(fd):
         raise OSError(errno.ENOSPC, "No space left on device")
@@ -34,8 +38,9 @@ async def test_a_failed_write_leaves_the_original_intact(tmp_path, make_ctx, mon
     result = await WriteTool().execute({"path": "f.txt", "content": "replacement\n"}, make_ctx())
 
     assert result.is_error
-    assert (tmp_path / "f.txt").read_text() == "original\n"
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["f.txt"]
+    if existing:
+        assert (tmp_path / "f.txt").read_text() == "original\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == (["f.txt"] if existing else [])
 
 
 async def test_write_goes_through_a_symlink_and_keeps_the_mode(tmp_path, make_ctx):
@@ -160,6 +165,45 @@ async def test_each_edit_matches_in_its_own_tier(tmp_path, make_ctx, original, e
 
     assert not result.is_error, result_text(result)
     assert (tmp_path / "f.txt").read_text() == expected
+
+
+_BREAKS = ["\r\n", "\r", "\n"]
+_WORDS = ["alpha", "beta", "gamma", "x = 1", "  ", "\u201cq\u201d", "\u00e9"]
+
+
+def _random_file(rng: random.Random) -> list[tuple[str, str]]:
+    """Lines with their own breaks, as the file reads back: ``"\\r"`` then ``"\\n"`` is one CRLF."""
+    body = (
+        "".join(" ".join(rng.choice(_WORDS) for _ in range(rng.randint(0, 3))) + rng.choice(_BREAKS) for _ in range(7))
+        + " ".join(rng.choice(_WORDS) for _ in range(rng.randint(0, 3)))
+        + rng.choice(["", *_BREAKS])
+    )
+    parts = re.split(r"(\r\n|\r|\n)", body)
+    return list(zip(parts[0::2], [*parts[1::2], ""]))
+
+
+async def test_an_edit_never_changes_bytes_outside_the_lines_it_replaces(tmp_path, make_ctx):
+    """Mixed line breaks, a BOM, and an invalid byte survive every edit that does not cover them."""
+    rng = random.Random(11)
+    path = tmp_path / "f.txt"
+    for _ in range(300):
+        lines = _random_file(rng)
+        view = "\n".join(content for content, _ in lines) + ("\n" if lines[-1][1] else "")
+        first, last = sorted(rng.sample(range(len(lines)), 2))
+        old = "\n".join(content for content, _ in lines[first : last + 1])
+        if not old.strip() or view.count(old) != 1:
+            continue
+        prefix = "".join(c + b for c, b in lines[:first])
+        suffix = lines[last][1] + "".join(c + b for c, b in lines[last + 1 :])
+        # The replaced lines in the file keep their own breaks; oldText uses LF, as the model sends it.
+        middle = "".join(c + b for c, b in lines[first:last]) + lines[last][0]
+        raw = b"\xef\xbb\xbf\xff" + (prefix + middle + suffix).encode()
+        path.write_bytes(raw)
+
+        result = await _edit(make_ctx, "f.txt", {"oldText": old, "newText": "NEW"})
+
+        assert not result.is_error, (result_text(result), lines, old)
+        assert path.read_bytes() == b"\xef\xbb\xbf\xff" + (prefix + "NEW" + suffix).encode(), (lines, old)
 
 
 @pytest.mark.parametrize(

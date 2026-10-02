@@ -202,6 +202,39 @@ async def test_output_on_disk_keeps_the_head_and_tail_of_a_long_command(tmp_path
     assert b"".join(chunks).endswith(b"99999\n100000\n")
 
 
+async def test_the_wrapper_enforces_the_deadline_while_no_host_runs(tmp_path):
+    """J3: the host crashed right after the start; the deadline still ends the tree and is recorded."""
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    job_id = await _start(host, tmp_path, f"echo $$ > {tmp_path / 'sh.pid'}; sleep 30 & sleep 30", timeout_s=0.5)
+    shell_pid = None
+    assert _wait_until(lambda: (tmp_path / "sh.pid").exists())
+    shell_pid = int((tmp_path / "sh.pid").read_text())
+    del host  # nobody waits on the job from here on
+
+    assert _wait_until(lambda: _wrapper_gone(str(tmp_path / "jobs" / job_id)), timeout_s=6)
+    restarted = LocalJobHost(str(tmp_path / "jobs"))
+    assert restarted.status(job_id).state == "gone"
+    assert restarted.stop_reason(job_id) == "timeout"
+    assert not psutil.pid_exists(shell_pid) or psutil.Process(shell_pid).status() == psutil.STATUS_ZOMBIE
+
+
+async def test_a_wrapper_that_cannot_keep_the_log_stops_its_command(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs_module, "OUTPUT_HEAD_BYTES", 10)
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    job_id = await _start(host, tmp_path, f"echo $$ > {tmp_path / 'sh.pid'}; sleep 0.5; seq 1 1000; sleep 30")
+    # The tail cannot be written once the head is full, as on a full disk.
+    os.mkdir(os.path.join(host.job_dir(job_id), "tail.log"))
+
+    status = await asyncio.wait_for(host.wait(job_id, deadline_s=None), timeout=10)
+
+    assert status.state == "gone"
+    assert host.stop_reason(job_id) == "wrapper_error"
+    shell_pid = int((tmp_path / "sh.pid").read_text())
+    assert _wait_until(
+        lambda: not psutil.pid_exists(shell_pid) or psutil.Process(shell_pid).status() == psutil.STATUS_ZOMBIE
+    )
+
+
 async def test_job_files_stay_until_the_call_is_settled(tmp_path):
     """J5."""
     host = LocalJobHost(str(tmp_path / "jobs"))

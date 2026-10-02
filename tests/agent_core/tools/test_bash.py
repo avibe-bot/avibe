@@ -78,6 +78,13 @@ async def test_an_out_of_range_timeout_is_an_error_result(tmp_path, make_ctx):
     assert result_text(result) == "Invalid timeout: must be a finite number of seconds"
 
 
+async def test_a_nul_byte_in_the_command_is_an_error_result(tmp_path, make_ctx):
+    result = await BashTool(_host(tmp_path)).execute({"command": "echo a\x00b"}, make_ctx())
+
+    assert result.is_error
+    assert result_text(result) == "Invalid command: contains a NUL byte"
+
+
 async def test_stdin_is_closed(tmp_path, make_ctx):
     started = time.monotonic()
     result = await BashTool(_host(tmp_path)).execute({"command": 'read x; echo "rc=$?"'}, make_ctx())
@@ -129,7 +136,10 @@ async def test_the_foreground_window_hands_over_and_the_command_runs_once(tmp_pa
     assert text.startswith(
         "Command is still running and is now Watch wch_1. You will get a follow-up message when it finishes.\n\n"
     )
-    assert text.endswith(f"\n\nFull output: {path}\nCheck: vibe watch show wch_1\nStop: vibe watch remove wch_1")
+    # A running job's log may still pass the on-disk cap, so it is never called the full output (J4).
+    assert text.endswith(
+        f"\n\nOutput log (middle omitted beyond 3.0MB): {path}\nCheck: vibe watch show wch_1\nStop: vibe watch remove wch_1"
+    )
     assert (await host.wait(job_id, deadline_s=5)).exit_code == 0
     assert open(path).read() == "working\nfinished\n"
     assert (tmp_path / "counter").read_text() == "run\n"

@@ -140,8 +140,10 @@ def _chunk(kind: bytes, body: bytes) -> bytes:
     return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
 
 
-def _png(*, animated: bool = False) -> bytes:
+def _png(*, animated: bool = False, padding: int = 0) -> bytes:
     ihdr = _chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+    if padding:
+        ihdr += _chunk(b"tEXt", b"Comment\0" + b"x" * padding)
     actl = _chunk(b"acTL", struct.pack(">II", 1, 0)) if animated else b""
     idat = _chunk(b"IDAT", zlib.compress(b"\0\xff\0\0"))
     return b"\x89PNG\r\n\x1a\n" + ihdr + actl + idat + _chunk(b"IEND", b"")
@@ -181,6 +183,13 @@ async def test_an_image_is_stored_through_the_sink_and_attached(tmp_path, make_c
             "Read image file [image/apng]\n[Image omitted: could not be converted to a supported inline image format.]",
         ),
         (
+            # acTL behind a large ancillary chunk, past the sniffed prefix.
+            "late.png",
+            _png(animated=True, padding=10_000),
+            None,
+            "Read image file [image/apng]\n[Image omitted: could not be converted to a supported inline image format.]",
+        ),
+        (
             "pic.png",
             _png(),
             16,
@@ -188,6 +197,7 @@ async def test_an_image_is_stored_through_the_sink_and_attached(tmp_path, make_c
             "Images are not resized.]",
         ),
     ],
+    ids=["bmp", "animated", "late-actl", "oversized"],
 )
 async def test_images_that_cannot_be_sent_as_they_are_are_omitted(
     tmp_path, make_ctx, monkeypatch, name, data, cap, expected

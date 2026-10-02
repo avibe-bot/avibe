@@ -43,7 +43,7 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _READ_CHUNK_BYTES = 1024 * 1024
 
 READ_DESCRIPTION = (
-    "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as "
+    "Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as "
     f"attachments. For text files, output is truncated to {MAX_LINES} lines or {MAX_BYTES // 1024}KB (whichever is "
     "hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
 )
@@ -132,6 +132,9 @@ def _sniff_image(path: str) -> Optional[str]:
     with open(path, "rb") as handle:
         head = handle.read(_IMAGE_SNIFF_BYTES)
     supported = detect_supported_image_mime_type(head)
+    if supported == "image/png" and _png_file_is_animated(path):
+        # acTL may sit past the sniffed prefix, behind large ancillary chunks.
+        return "image/apng"
     if supported is not None:
         return supported
     if head.startswith(_PNG_SIGNATURE):
@@ -265,6 +268,25 @@ def detect_supported_image_mime_type(data: bytes) -> Optional[str]:
     if data.startswith(b"BM") and _is_bmp(data):
         return "image/bmp"
     return None
+
+
+def _png_file_is_animated(path: str) -> bool:
+    """Walk the chunk headers until IDAT or acTL, seeking over chunk bodies; bounded by the file size."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as handle:
+        offset = len(_PNG_SIGNATURE)
+        while offset + 8 <= size:
+            handle.seek(offset)
+            header = handle.read(8)
+            if len(header) < 8:
+                return False
+            length, kind = struct.unpack(">I", header[:4])[0], header[4:]
+            if kind == b"acTL":
+                return True
+            if kind == b"IDAT":
+                return False
+            offset += 12 + length
+    return False
 
 
 def _is_png(data: bytes) -> bool:
