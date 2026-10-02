@@ -1884,7 +1884,6 @@ def test_a_sent_notice_is_not_listed_again(tmp_path: Path) -> None:
 
 def test_a_session_less_definition_now_reaches_the_workspace_inbox(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     """The INVERSION of a pin this branch used to carry, kept so the reversal is legible.
 
@@ -1909,7 +1908,6 @@ def test_a_session_less_definition_now_reaches_the_workspace_inbox(
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
 
     controller, _dispatcher, _touched = _live_turn_dispatcher()
-    _no_background_web_push(monkeypatch)
     _migrated_state_db()
 
     sqlite, requests = _store(tmp_path)
@@ -4534,30 +4532,10 @@ def _workbench_session(
     return scope_id
 
 
-def _no_background_web_push(monkeypatch) -> list[dict]:
-    """Keep the Web Push fan-out off the DAEMON THREAD, on the calling thread's DB.
-
-    Persisting an avibe inbox row schedules ``_send_to_enabled_subscriptions`` on a
-    daemon thread that sleeps ``WEB_PUSH_NOTIFICATION_DELAY_SECONDS`` and only then
-    opens its own connection — long after the test's isolated home is gone, so it
-    raises ``no such table: messages`` into an unhandled-thread warning attributable
-    to no test. Scheduling is still exercised; only the delayed send is stubbed.
-
-    Returns the payloads that WOULD have been pushed.
-    """
-
-    import core.web_push_notifications as web_push_notifications
-
-    pushed: list[dict] = []
-    monkeypatch.setattr(
-        web_push_notifications, "_send_to_enabled_subscriptions", pushed.append
-    )
-    return pushed
-
-
 def test_a_workbench_addressed_notice_lands_as_a_durable_inbox_row(
     tmp_path: Path,
     monkeypatch,
+    _no_background_web_push,
 ) -> None:
     """HFR-079 — the workbench rungs of D5's ladder were never reachable at all.
 
@@ -4589,7 +4567,7 @@ def test_a_workbench_addressed_notice_lands_as_a_durable_inbox_row(
     from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
 
-    pushed = _no_background_web_push(monkeypatch)
+    pushed = _no_background_web_push
     controller, _dispatcher, touched = _live_turn_dispatcher()
     controller.agent_auth_service = _ForbiddenAuthService()
     scope_id = _workbench_session("sesWork", project="proj-notice")
@@ -4671,7 +4649,6 @@ def test_a_workbench_addressed_notice_lands_as_a_durable_inbox_row(
 
 def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     """HFR-079 — the trap a bare parser swap walks straight into.
 
@@ -4744,7 +4721,6 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
     from storage.db import get_cached_sqlite_engine
     from storage.messages_service import get_inbox_session
 
-    _no_background_web_push(monkeypatch)
     controller, _dispatcher, _touched = _live_turn_dispatcher()
     # The schema, but deliberately NO session row for ``sesGone`` yet: the binding
     # points at a session that has been deleted.
@@ -4863,7 +4839,6 @@ def test_an_avibe_rung_does_not_ack_on_a_synthetic_send_id(
 
 def test_a_background_session_notice_is_rerouted_to_the_workspace_inbox(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     """A hidden bound session cannot acknowledge a user-visible failure notice."""
 
@@ -4872,7 +4847,6 @@ def test_a_background_session_notice_is_rerouted_to_the_workspace_inbox(
     from storage.db import get_cached_sqlite_engine
     from storage.messages_service import get_inbox_session
 
-    _no_background_web_push(monkeypatch)
     controller, _dispatcher, _touched = _live_turn_dispatcher()
     _workbench_session(
         "sesBackgroundNotice",
@@ -4931,7 +4905,7 @@ def _workspace_notice_session_rows() -> list[dict]:
 
 def test_a_caller_less_cli_definition_still_delivers_its_failure_notice(
     tmp_path: Path,
-    monkeypatch,
+    _no_background_web_push,
 ) -> None:
     """D5 rung (5), owed by name at plan ``docs/plans/harness-run-reliability.md:3216``.
 
@@ -4966,7 +4940,7 @@ def test_a_caller_less_cli_definition_still_delivers_its_failure_notice(
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
     from vibe.cli import _definition_creation_metadata_from_caller
 
-    pushed = _no_background_web_push(monkeypatch)
+    pushed = _no_background_web_push
     controller, _dispatcher, _touched = _live_turn_dispatcher()
     # The real workbench schema, and deliberately NO session row and NO project
     # scope of any kind: the workspace session must be created by the notice path.
@@ -5047,13 +5021,11 @@ def test_a_caller_less_cli_definition_still_delivers_its_failure_notice(
 
 def test_workspace_notification_session_is_created_once_and_reused(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     """Repeated workspace notices reuse one retained Session history owner."""
 
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
 
-    _no_background_web_push(monkeypatch)
     controller, _dispatcher, _touched = _live_turn_dispatcher()
     _migrated_state_db()
 
@@ -5103,7 +5075,6 @@ def test_workspace_notification_session_is_created_once_and_reused(
 
 def test_an_archived_workspace_notice_session_heals_instead_of_swallowing_the_notice(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     """The one state "lazy recreation" does NOT cover, and it fails SILENTLY.
 
@@ -5141,7 +5112,6 @@ def test_an_archived_workspace_notice_session_heals_instead_of_swallowing_the_no
     from storage.messages_service import get_inbox_session
     from storage.models import agent_sessions
 
-    _no_background_web_push(monkeypatch)
     controller, _dispatcher, _touched = _live_turn_dispatcher()
     _migrated_state_db()
 
@@ -5219,7 +5189,7 @@ def test_an_archived_workspace_notice_session_heals_instead_of_swallowing_the_no
 
 def test_an_archived_ordinary_session_is_rerouted_instead_of_acked_into(
     tmp_path: Path,
-    monkeypatch,
+    _no_background_web_push,
 ) -> None:
     """HFR-079, subordinate — the SAME hole for an ordinary session, opposite remedy.
 
@@ -5272,7 +5242,7 @@ def test_an_archived_ordinary_session_is_rerouted_instead_of_acked_into(
     from storage.messages_service import get_inbox_session
     from storage.models import agent_sessions
 
-    pushed = _no_background_web_push(monkeypatch)
+    pushed = _no_background_web_push
     controller, _dispatcher, _touched = _live_turn_dispatcher()
     archived_scope_id = _workbench_session(
         "sesArchived", project="proj-archived", status="archived"
@@ -12100,7 +12070,6 @@ def _execution_service(tmp_path: Path, controller, sqlite, requests):
 
 def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     tmp_path: Path,
-    monkeypatch,
     capsys,
 ) -> None:
     """HFR-094, subordinate — #1060's four-step terminal case, driven end to end.
@@ -12142,7 +12111,6 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     from vibe import cli
     from vibe.i18n import t as i18n_t
 
-    _no_background_web_push(monkeypatch)
     _migrated_state_db()
     _workbench_session("sesd46nxp3cz5", project="proj-lane-b")
 
@@ -12581,7 +12549,6 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     import core.failure_notices as failure_notices
     from core.watches import ManagedWatchService, ManagedWatchStore, WatchRuntimeStateStore
 
-    _no_background_web_push(monkeypatch)
     _migrated_state_db()
     _workbench_session("sesGoneForever", project="proj-forever")
 
@@ -12828,7 +12795,6 @@ def _session_transcript(session_id: str) -> list[tuple[str, str]]:
 
 def test_an_agent_run_pinned_to_the_reserved_session_dispatches_no_turn(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     """HFR-094, subordinate — the CLI lane the composer guard could not reach.
 
@@ -12853,7 +12819,6 @@ def test_an_agent_run_pinned_to_the_reserved_session_dispatches_no_turn(
       no assistant reply.
     """
 
-    _no_background_web_push(monkeypatch)
     _migrated_state_db()
     reserved = _reserved_notice_session()
     before = _session_transcript(reserved)
@@ -12929,7 +12894,6 @@ def test_a_task_pinned_to_the_reserved_session_is_paused_never_rebound(
 
     from tests.test_scheduled_tasks import _binding_env, _binding_service
 
-    _no_background_web_push(monkeypatch)
     _binding_env(tmp_path, monkeypatch)
     _migrated_state_db()
     reserved = _reserved_notice_session()
@@ -13404,7 +13368,6 @@ def _avibe_sends(controller) -> list[str]:
 
 def test_a_walk_whose_preferred_rungs_all_fail_lands_in_the_workspace_inbox(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     """Subordinate to HFR-079 — a non-empty ladder of undeliverable rungs must not
     dead-letter in silence, and must not wait six attempts to say so.
@@ -13441,7 +13404,6 @@ def test_a_walk_whose_preferred_rungs_all_fail_lands_in_the_workspace_inbox(
     from core.delivery_evidence import ACK_EVIDENCE_RECEIPT
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
 
-    _no_background_web_push(monkeypatch)
     controller, _dispatcher, _touched = _live_turn_dispatcher()
     # The real schema, and deliberately NO row for ``sesGone`` and no reserved
     # workspace session: both absences are the premise.
@@ -13507,7 +13469,6 @@ def test_a_walk_whose_preferred_rungs_all_fail_lands_in_the_workspace_inbox(
 
 def test_a_healthy_preferred_rung_never_reaches_the_workspace_inbox(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     """The ORDERING property, which is what makes the mandatory rung safe to make
     mandatory.
@@ -13538,7 +13499,6 @@ def test_a_healthy_preferred_rung_never_reaches_the_workspace_inbox(
 
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
 
-    _no_background_web_push(monkeypatch)
     _migrated_state_db()
     assert _workspace_notice_session_rows() == [], "the premise: no reserved row yet"
 
@@ -13641,7 +13601,6 @@ def test_an_archived_session_ladder_holds_exactly_one_workspace_rung(
 
 def test_replaying_the_workspace_walk_reuses_the_persisted_receipt(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     """Subordinate to HFR-079/HFR-075 — restart cannot duplicate the workspace card.
 
@@ -13672,7 +13631,6 @@ def test_replaying_the_workspace_walk_reuses_the_persisted_receipt(
     from storage.background import NOTICE_PENDING
     from storage.db import get_cached_sqlite_engine
 
-    _no_background_web_push(monkeypatch)
     controller, _dispatcher, _touched = _live_turn_dispatcher()
     _migrated_state_db()
 
@@ -13746,7 +13704,6 @@ def test_replaying_the_workspace_walk_reuses_the_persisted_receipt(
 
 def test_an_unwritable_workspace_inbox_still_dead_letters_visibly(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     """Subordinate to HFR-079 — the residual, asserted rather than described.
 
@@ -13770,7 +13727,6 @@ def test_an_unwritable_workspace_inbox_still_dead_letters_visibly(
     from core import failure_notices
     from storage.background import NOTICE_FAILED, NOTICE_PENDING
 
-    _no_background_web_push(monkeypatch)
     controller, _dispatcher, _touched = _live_turn_dispatcher()
     _migrated_state_db()
 
@@ -14157,7 +14113,6 @@ def test_a_captured_origin_lights_up_the_scope_and_owner_dm_rungs(tmp_path: Path
 
 def test_the_workspace_card_carries_the_creation_origin(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     """The half of the gate that is about the WORKSPACE notice, not the owner DM.
 
@@ -14181,7 +14136,6 @@ def test_the_workspace_card_carries_the_creation_origin(
     from storage.background import NOTICE_SENT
     from vibe.i18n import t as i18n_t
 
-    _no_background_web_push(monkeypatch)
     controller, _dispatcher, _touched = _live_turn_dispatcher()
     _migrated_state_db()
 

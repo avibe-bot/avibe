@@ -489,7 +489,6 @@ def test_local_details_authorized_in_history_and_live_events(
             )
     published = []
     monkeypatch.setattr(message_mirror, "_publish_session_message", published.append)
-    monkeypatch.setattr("core.web_push_notifications.maybe_notify_inbox_message", lambda *_args: None)
     message_mirror.persist_agent_message(
         MessageContext(
             user_id="U1", channel_id="C1", platform="avibe",

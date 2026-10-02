@@ -13,10 +13,13 @@ The post-install bookkeeping in ``vibe.api._run_install_command`` then
 called ``load_config()`` / ``cfg.save()`` against the real config.json and
 persisted the fixture path, surfacing in the UI after the next restart.
 
-Isolation mechanism: we set ``HOME``, XDG config/data/cache/state homes, and
-``AVIBE_HOME`` to a per-test tmp directory, and patch
-``pathlib.Path.home`` to match. This means ``config.paths.get_vibe_remote_dir``
-runs as written — only its env-var-set branch is exercised under isolation, and
+Isolation mechanism: when pytest loads this file, before any product module is
+imported, ``HOME``, the XDG homes, ``AVIBE_HOME``, ``CODEX_HOME``,
+``CLAUDE_CONFIG_DIR`` and ``pathlib.Path.home`` move to a throwaway session home
+for the whole run, and each test then swaps in its own tmp home on top of that.
+The real home is never the ambient one, not even between tests, so work that
+outlives its test lands in the session home. ``config.paths.get_vibe_remote_dir``
+therefore runs as written — only its env-var-set branch is exercised under isolation, and
 the function itself is never replaced, so the suite still catches regressions in
 path-resolution logic while Python helpers, subprocesses, and ``expanduser("~")``
 do not see the developer's real home.
@@ -45,6 +48,7 @@ from __future__ import annotations
 
 import ast
 import errno
+import importlib
 import inspect
 import os
 import re
@@ -53,7 +57,12 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import threading
+import traceback
 import unittest
+import urllib.parse
+import urllib.request
 import warnings
 from contextlib import closing, contextmanager
 from functools import wraps
@@ -67,6 +76,85 @@ from tests.fake_pid_helpers import PID_LIMIT
 
 REAL_USER_HOME = Path.home()
 _SQLITE_DEFAULT_STATE_MODULES: dict[Path, bool] = {}
+
+# The variables that name a home, and the caller identity an Agent-launched
+# pytest inherits from the live conversation. Tests must opt in to that context
+# explicitly, or unrelated Harness/session assertions bind themselves to the
+# live Agent session.
+_HOME_ENV = (
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "AVIBE_HOME",
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+)
+_CALLER_ENV = (
+    "AVIBE_SESSION_ID",
+    "AVIBE_CALLER_SESSION_PROOF",
+    "AVIBE_RUN_ID",
+    "AVIBE_NATIVE_SESSION_ID",
+    "AVIBE_CALLER_SOURCE",
+    "AVIBE_CALLER_BACKEND",
+    "AVIBE_CALLER_PLATFORM",
+    "AVIBE_CALLER_USER_ID",
+    "AVIBE_CALLER_CHANNEL_ID",
+    "AVIBE_CALLER_SESSION_KEY",
+    "AVIBE_CALLER_MESSAGE_ID",
+    "AVIBE_CALLER_WORKSPACE_ID",
+    "AVIBE_CALLER_REMOTE",
+    "AVIBE_CALLER_RESOURCE_CONTEXT",
+    "VIBE_INTERNAL_DISPATCH_SOCKET",
+    "VIBE_CURRENT_EXECUTABLE",
+    "AVIBE_SKILL_WORKING_DIR",
+    "AVIBE_SKILL_PROJECT_BASE",
+    "AVIBE_SKILL_HOME",
+    "AVIBE_SKILL_CODEX_HOME",
+    "AVIBE_SKILL_CLAUDE_HOME",
+    "AVIBE_SKILL_CLAUDE_CLI_PATH",
+    "AVIBE_SKILL_XDG_CONFIG_HOME",
+    "AVIBE_BUILTIN_SKILLS_ROOT",
+    "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID",
+    # A pytest started from a desktop Runtime's terminal would otherwise act as
+    # that Runtime, and every stop, restart and start refuses or claims by its id.
+    "AVIBE_DESKTOP_RUNTIME_ID",
+    "AVIBE_DESKTOP_RUNTIME_ROOT",
+)
+# What the run started with, for `uses_real_paths` tests and the tripwire.
+_AMBIENT_ENV = {name: os.environ.get(name) for name in (*_HOME_ENV, *_CALLER_ENV)}
+_REAL_PATH_HOME = Path.__dict__["home"]
+
+
+def _home_env(home: Path) -> dict[str, str]:
+    return {
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_STATE_HOME": str(home / ".local" / "state"),
+        "AVIBE_HOME": str(home / ".avibe"),
+        # Codex and Claude Code keep credentials under these, not under HOME.
+        "CODEX_HOME": str(home / ".codex"),
+        "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+    }
+
+
+# Isolation by construction: from here on the run's own home is a throwaway one,
+# before any product module is imported, through collection, session fixtures
+# and the gaps between tests. Per-test isolation swaps a test's home in and back
+# to this one, never to the real one, so work that outlives its test -- the
+# delayed Web Push thread that once migrated a developer's real database --
+# resolves this home. Only `uses_real_paths` tests see the real values, for their
+# own duration. Removed at `pytest_unconfigure`.
+_SESSION_HOME = Path(tempfile.mkdtemp(prefix="avibe-pytest-home-")).resolve()
+# Expanded against the real HOME while it is still the ambient one.
+_AMBIENT_AVIBE_HOME = os.path.expanduser(_AMBIENT_ENV["AVIBE_HOME"]) if _AMBIENT_ENV["AVIBE_HOME"] else None
+for _name in _CALLER_ENV:
+    os.environ.pop(_name, None)
+os.environ.update(_home_env(_SESSION_HOME))
+Path.home = classmethod(lambda cls: _SESSION_HOME)
 
 
 def pytest_configure(config):
@@ -213,59 +301,22 @@ def sqlite_schema_db_factory(sqlite_db_factory, _sqlite_schema_template_factory)
 @pytest.fixture(autouse=True)
 def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
     if request.node.get_closest_marker("uses_real_paths"):
+        # The real values, for this test only; it must stay read-only.
+        monkeypatch.setattr(Path, "home", _REAL_PATH_HOME)
+        for name, value in _AMBIENT_ENV.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
         return
-    monkeypatch.delenv("AVIBE_HOME", raising=False)
-    # Agent-launched pytest processes inherit the active conversation's caller
-    # identity. Tests must opt in to that context explicitly or unrelated
-    # Harness/session assertions can bind themselves to the live Agent session.
-    for name in (
-        "AVIBE_SESSION_ID",
-        "AVIBE_CALLER_SESSION_PROOF",
-        "AVIBE_RUN_ID",
-        "AVIBE_NATIVE_SESSION_ID",
-        "AVIBE_CALLER_SOURCE",
-        "AVIBE_CALLER_BACKEND",
-        "AVIBE_CALLER_PLATFORM",
-        "AVIBE_CALLER_USER_ID",
-        "AVIBE_CALLER_CHANNEL_ID",
-        "AVIBE_CALLER_SESSION_KEY",
-        "AVIBE_CALLER_MESSAGE_ID",
-        "AVIBE_CALLER_WORKSPACE_ID",
-        "AVIBE_CALLER_REMOTE",
-        "AVIBE_CALLER_RESOURCE_CONTEXT",
-        "VIBE_INTERNAL_DISPATCH_SOCKET",
-        "VIBE_CURRENT_EXECUTABLE",
-        "AVIBE_SKILL_WORKING_DIR",
-        "AVIBE_SKILL_PROJECT_BASE",
-        "AVIBE_SKILL_HOME",
-        "AVIBE_SKILL_CODEX_HOME",
-        "AVIBE_SKILL_CLAUDE_HOME",
-        "AVIBE_SKILL_CLAUDE_CLI_PATH",
-        "AVIBE_SKILL_XDG_CONFIG_HOME",
-        "AVIBE_BUILTIN_SKILLS_ROOT",
-        "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID",
-        # A pytest started from a desktop Runtime's terminal would otherwise
-        # act as that Runtime, and every stop, restart and start refuses or
-        # claims by its id.
-        "AVIBE_DESKTOP_RUNTIME_ID",
-        "AVIBE_DESKTOP_RUNTIME_ROOT",
-    ):
-        monkeypatch.delenv(name, raising=False)
     isolated_home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: isolated_home)
-    monkeypatch.setenv("HOME", str(isolated_home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated_home / ".config"))
-    monkeypatch.setenv("XDG_DATA_HOME", str(isolated_home / ".local" / "share"))
-    monkeypatch.setenv("XDG_CACHE_HOME", str(isolated_home / ".cache"))
-    monkeypatch.setenv("XDG_STATE_HOME", str(isolated_home / ".local" / "state"))
-    monkeypatch.setenv("AVIBE_HOME", str(isolated_home / ".avibe"))
+    # Tests that manage these themselves (e.g. the ``get_codex_home``
+    # env-precedence tests) override them with their own monkeypatch calls,
+    # which run after this fixture.
+    for name, value in _home_env(isolated_home).items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setenv("AVIBE_ALLOW_DEV_STATE_MIGRATION", "1")
-    # Keep Codex / Claude Code credential writes off the developer's real
-    # home. Tests that manage these env vars themselves (e.g. the
-    # ``get_codex_home`` env-precedence tests) override these via their own
-    # monkeypatch calls, which run after this fixture.
-    monkeypatch.setenv("CODEX_HOME", str(isolated_home / ".codex"))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(isolated_home / ".claude"))
 
 
 @pytest.fixture(autouse=True)
@@ -282,6 +333,69 @@ def _reset_latest_version_cache():
     latest_version_cache._MEMORY.clear()  # noqa: SLF001
     yield
     latest_version_cache._MEMORY.clear()  # noqa: SLF001
+
+
+def _module_this_test_can_import(name: str):
+    """``name``, or None where this file's own ``sys.modules`` stubs keep it from importing.
+
+    Several test files replace packages such as ``modules.agents`` with partial
+    stubs at import time; a module that cannot import under them cannot start a
+    background worker in that file either, so there is nothing to stub.
+    """
+
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _no_background_web_push(request: pytest.FixtureRequest, monkeypatch) -> list[dict] | None:
+    """Keep the delayed Web Push sender off a thread that outlives its test.
+
+    Persisting a notifiable Workbench message schedules
+    ``_send_to_enabled_subscriptions`` on a daemon thread that sleeps
+    ``WEB_PUSH_NOTIFICATION_DELAY_SECONDS`` and only then resolves the state
+    paths. By then the test that scheduled it has usually ended; one such thread
+    woke while the next test's home isolation was half applied, resolved the
+    developer's real home and migrated its database. Scheduling still runs, and
+    the payloads that would have been pushed are returned, so a test that asserts
+    on them requests this fixture. ``real_web_push_sender`` opts out a test that
+    drives the sender itself.
+    """
+
+    if request.node.get_closest_marker("real_web_push_sender"):
+        return None
+    web_push_notifications = _module_this_test_can_import("core.web_push_notifications")
+    if web_push_notifications is None:
+        return None
+    pushed: list[dict] = []
+    monkeypatch.setattr(web_push_notifications, "_send_to_enabled_subscriptions", pushed.append)
+    return pushed
+
+
+@pytest.fixture(autouse=True)
+def _no_background_catalog_refresh(request: pytest.FixtureRequest, monkeypatch) -> None:
+    """Keep the remote catalog refreshes off threads that outlive their test.
+
+    Reading the backend model catalog or the models.dev catalog from a fresh home
+    finds its cache stale and starts a daemon thread that fetches over the network
+    and only then resolves the state directory to write the cache, usually after
+    the test has ended -- the same shape as the Web Push sender, and the real-home
+    tripwire caught both writing the developer's state. Each scheduler reports
+    that no refresh started. ``real_catalog_refresh`` opts out a test that drives
+    the refresh itself.
+    """
+
+    if request.node.get_closest_marker("real_catalog_refresh"):
+        return
+    for name, scheduler in (
+        ("vibe.backend_model_catalog", "schedule_remote_catalog_refresh"),
+        ("vibe.models_dev_catalog", "_refresh_in_background"),
+    ):
+        module = _module_this_test_can_import(name)
+        if module is not None:
+            monkeypatch.setattr(module, scheduler, lambda: False)
 
 
 @pytest.fixture(autouse=True)
@@ -679,6 +793,219 @@ def _foreign_signal_guard(request, tmp_path):
     __tracebackhide__ = True
     if guard.violations:
         pytest.fail("signals and lookups this test may not make were blocked:\n" + "\n".join(guard.violations))
+
+
+# The developer's real Avibe state: both homes under REAL_USER_HOME, plus the
+# custom home AVIBE_HOME names when pytest starts with one, each spelled as
+# written and as resolved, because the legacy name is usually a symlink to the
+# current one. Fixed when pytest loads this file, before any test replaces HOME,
+# AVIBE_HOME or `Path.home`; teardown restores them, so work that outlives a test
+# resolves exactly these. The SQLite migration guard cannot stand in for this:
+# every test runs with its opt-in flag set and with `Path.home` naming the test's
+# own home, so under pytest neither of its checks can recognise the real database.
+_REAL_STATE_HOMES = [REAL_USER_HOME / ".avibe", REAL_USER_HOME / ".vibe_remote"]
+if _AMBIENT_AVIBE_HOME:
+    _REAL_STATE_HOMES.append(Path(_AMBIENT_AVIBE_HOME))
+_REAL_STATE_ROOTS = tuple(
+    sorted(
+        {
+            spelling
+            for home in _REAL_STATE_HOMES
+            for spelling in (os.path.abspath(home), os.path.realpath(home))
+        }
+    )
+)
+_WRITE_OPEN_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+# Every path-mutating audit event CPython raises, mapped to the arguments that
+# name a path it writes, each with the index of its dir_fd (None when the event
+# carries none). shutil's copy, move and chown helpers end in these events or in
+# `open`; only rmtree is listed itself, because its fd-based walk names entries
+# relative to descriptors. `open` and `sqlite3.connect` depend on their mode.
+_WRITE_EVENTS = {
+    "os.mkdir": ((0, 2),),
+    "os.rmdir": ((0, 1),),
+    "os.remove": ((0, 1),),
+    "os.rename": ((0, 2), (1, 3)),
+    "os.symlink": ((1, 2),),
+    "os.link": ((1, 3),),
+    "os.chmod": ((0, 2),),
+    "os.chown": ((0, 3),),
+    "os.utime": ((0, 3),),
+    "os.truncate": ((0, None),),
+    "os.chflags": ((0, None),),
+    "os.setxattr": ((0, None),),
+    "os.removexattr": ((0, None),),
+    "shutil.rmtree": ((0, 1),),
+}
+_TRIPWIRE_EVENTS = frozenset({"open", "sqlite3.connect", *_WRITE_EVENTS})
+# Events that act on a final symlink itself rather than on what it names.
+_LINK_LEVEL_EVENTS = frozenset(
+    {"os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.symlink", "os.link", "shutil.rmtree"}
+)
+# What the audit arguments carry for a dir_fd the caller did not pass.
+_NO_DIR_FD = (None, -1)
+# Every refused write in this run, in order. A daemon thread or a broad `except`
+# can swallow the refusal itself; this record is what fails the session.
+_real_home_writes: list[str] = []
+_tripwire_busy = threading.local()
+
+
+def _descriptor_path(fd: int) -> str | None:
+    """The directory an open descriptor names, where the platform can say."""
+
+    try:
+        if sys.platform == "darwin":
+            import fcntl
+
+            return os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0])
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except (OSError, AttributeError):
+        return None
+
+
+def _under_real_state(path, dir_fd=None, *, follows: bool = True) -> str | None:
+    if isinstance(path, int):
+        return None  # a descriptor: its own open was checked by name
+    text = os.fsdecode(path)
+    if not os.path.isabs(text) and dir_fd not in _NO_DIR_FD:
+        directory = _descriptor_path(dir_fd)
+        if directory is None:
+            return None
+        text = os.path.join(directory, text)
+    absolute = os.path.abspath(text)
+    # Resolved as well, so an alias -- a symlink elsewhere into a protected home --
+    # is recognised; an operation on a link itself resolves only its directory.
+    head, tail = os.path.split(absolute)
+    resolved = os.path.realpath(absolute) if follows else os.path.join(os.path.realpath(head), tail)
+    for spelling in (absolute, resolved):
+        if any(spelling == root or spelling.startswith(root + os.sep) for root in _REAL_STATE_ROOTS):
+            return absolute
+    return None
+
+
+def _sqlite_write_target(database) -> str | None:
+    text = os.fsdecode(database)
+    if not text.startswith("file:"):
+        return _under_real_state(text)
+    uri = urllib.parse.urlsplit(text)
+    query = urllib.parse.parse_qs(uri.query)
+    # Only an immutable open writes nothing: `mode=ro` on a WAL database can still
+    # create its `-shm` sidecar.
+    if query.get("immutable") == ["1"]:
+        return None
+    return _under_real_state(urllib.request.url2pathname(uri.path))
+
+
+def _real_state_writes(event: str, args: tuple) -> list[str]:
+    if event == "open":
+        path, mode, flags = args
+        if isinstance(flags, int):
+            writes = bool(flags & _WRITE_OPEN_FLAGS)
+        else:
+            writes = any(letter in (mode or "") for letter in "wax+")
+        targets = [_under_real_state(path)] if writes else []
+    elif event == "sqlite3.connect":
+        targets = [_sqlite_write_target(args[0])]
+    else:
+        follows = event not in _LINK_LEVEL_EVENTS
+        targets = [
+            # shutil.rmtree carries its dir_fd only from Python 3.12.
+            _under_real_state(
+                args[at], args[fd_at] if fd_at is not None and fd_at < len(args) else None, follows=follows
+            )
+            for at, fd_at in _WRITE_EVENTS[event]
+        ]
+    return [target for target in targets if target is not None]
+
+
+def _describe_real_home_write(event: str, written: list[str]) -> str:
+    frames = [
+        f"{frame.filename}:{frame.lineno} in {frame.name}"
+        for frame in traceback.extract_stack()
+        if frame.filename.startswith(_REPO_ROOT) and frame.filename != __file__
+    ]
+    return (
+        f"{event} {', '.join(written)} from thread {threading.current_thread().name} during "
+        f"{os.environ.get('PYTEST_CURRENT_TEST', 'no test')}: {'; '.join(frames[-6:]) or 'no repository frame'}"
+    )
+
+
+def _real_home_tripwire(event: str, args: tuple) -> None:
+    """Refuse any write under the developer's real Avibe home, from any thread.
+
+    An audit hook rather than a fixture, so it holds between tests, during
+    collection and in threads that outlive the test that started them -- the
+    window per-test isolation cannot reach. Reads stay allowed, including
+    ``uses_real_paths`` tests and ``immutable=1`` SQLite URIs. Child processes
+    are outside it: each pytest child loads
+    its own copy of this file, and other children inherit the test's home. The
+    one write it cannot place is ``os.open`` relative to a ``dir_fd``, whose
+    audit event omits the descriptor; creating that directory chain still trips.
+    """
+
+    if event not in _TRIPWIRE_EVENTS or getattr(_tripwire_busy, "active", False):
+        return
+    # Reading source for the description opens files, which re-enters this hook.
+    _tripwire_busy.active = True
+    try:
+        try:
+            written = _real_state_writes(event, args)
+        except (TypeError, ValueError, OSError):
+            return  # not a path this hook can name, such as a cwd that no longer exists
+        if not written:
+            return
+        message = _describe_real_home_write(event, written)
+        _real_home_writes.append(message)
+        _fail_running_session()
+    finally:
+        _tripwire_busy.active = False
+    # A BaseException, so a product `except Exception` around the write cannot
+    # swallow it; the session-end check covers anything broader.
+    pytest.fail(f"refused a write under the real Avibe home: {message}")
+
+
+sys.addaudithook(_real_home_tripwire)
+
+
+_REPORTED_WRITES = pytest.StashKey[int]()
+_running_session: pytest.Session | None = None
+
+
+def _fail_running_session() -> None:
+    # pytest overwrites the status once the tests have run, so
+    # `pytest_unconfigure` marks it again; a refusal after that point is
+    # marked here, until pytest returns.
+    session = _running_session
+    if session is not None and session.exitstatus in (pytest.ExitCode.OK, pytest.ExitCode.NO_TESTS_COLLECTED):
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    global _running_session
+    _running_session = session
+
+
+def pytest_terminal_summary(terminalreporter) -> None:
+    written = list(_real_home_writes)
+    terminalreporter.config.stash[_REPORTED_WRITES] = len(written)
+    if written:
+        terminalreporter.section("writes under the real Avibe home were refused", red=True)
+        for message in written:
+            terminalreporter.line(message, red=True)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config: pytest.Config) -> None:
+    # The session home and the tripwire stay in place until the process exits:
+    # daemon threads can outlive this hook, and restoring the real values here
+    # would hand them the real home again. Only a write during interpreter
+    # shutdown, after pytest has returned its status, is refused without failing.
+    shutil.rmtree(_SESSION_HOME, ignore_errors=True)
+    for message in _real_home_writes[config.stash.get(_REPORTED_WRITES, 0) :]:
+        sys.stderr.write(f"refused a write under the real Avibe home: {message}\n")
+    if _real_home_writes:
+        _fail_running_session()
 
 
 @pytest.fixture
