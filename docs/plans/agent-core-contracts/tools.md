@@ -147,9 +147,11 @@ continue in the background as an Avibe Watch; you get a follow-up message when t
 
 ## 6. Output normalizer
 
-Every model-facing tool output passes through one normalizer: decode as UTF-8 with replacement, strip ANSI escape
-sequences, collapse carriage-return redraws to the final line state, then apply the caps above. For `pipe` jobs the
-first steps are usually no-ops; for the future `pty` backend they are required.
+Every model-facing command output (`bash` results, job logs, Watch follow-ups) passes through one normalizer: decode
+as UTF-8 with replacement, strip ANSI escape sequences, collapse carriage-return redraws to the final line state, then
+apply the caps above. `read` returns file contents unchanged apart from Pi's caps: the model copies that text into
+`edit`, which must match the real file. For `pipe` jobs the first steps are usually no-ops; for the future `pty`
+backend they are required.
 
 ## 7. Job handle
 

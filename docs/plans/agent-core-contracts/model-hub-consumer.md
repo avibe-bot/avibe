@@ -27,7 +27,8 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    with exactly `provider`, `api`, `model`, taken from the winning attempt (Source vendor, Source protocol, upstream
    target) and sent before the first model byte. The gateway does not commit early keepalive headers for `avibe`;
    other backends are unchanged. The same origin is recorded on `TurnProvenance.served`. An `api` different from the
-   frontend protocol means the gateway converted. The agent records it as the message `origin` (C-1).
+   frontend protocol means the gateway converted. The agent records it as the message `origin` (C-1). The header value is at most 4096 bytes; a hop whose origin cannot be represented within that limit is
+   refused before invocation with a controlled local error (no model call, no header). Identifiers are never truncated.
 5. **Conversion stays a fallback.** The agent speaks the primary hop's protocol. When failover reaches a hop with
    another protocol, the gateway converts (degraded, not broken) and the served-hop report says so.
 
