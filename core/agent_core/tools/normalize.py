@@ -28,6 +28,14 @@ _ANSI_RE = re.compile(
 _MAX_OPEN_CHARS = 64 * 1024
 
 
+def _bounded(segment: str, dropped: int) -> tuple[str, int]:
+    """``segment``'s last ``_MAX_OPEN_CHARS`` characters, and the UTF-8 bytes dropped from its start."""
+    if len(segment) <= _MAX_OPEN_CHARS:
+        return segment, dropped
+    cut = len(segment) - _MAX_OPEN_CHARS
+    return segment[cut:], dropped + utf8_len(segment[:cut])
+
+
 def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text).replace("\x1b", "")
 
@@ -106,15 +114,10 @@ class OutputNormalizer:
             # The first piece continues the current segment, so it keeps that segment's drop count.
             for index in range(len(segments) - 2, -1, -1):
                 if strip_ansi(segments[index]):
-                    self._prev = segments[index]
-                    self._prev_dropped = self._cur_dropped if index == 0 else 0
+                    self._prev, self._prev_dropped = _bounded(segments[index], self._cur_dropped if index == 0 else 0)
                     break
             self._cur_dropped = 0
-        self._cur = segments[-1]
-        if len(self._cur) > _MAX_OPEN_CHARS:
-            cut = len(self._cur) - _MAX_OPEN_CHARS
-            self._cur_dropped += utf8_len(self._cur[:cut])
-            self._cur = self._cur[cut:]
+        self._cur, self._cur_dropped = _bounded(segments[-1], self._cur_dropped)
 
     def _line(self) -> str:
         return self._line_and_size()[0]

@@ -281,6 +281,53 @@ async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, 
     assert (real.read_text(), other.read_text()) == expected
 
 
+@pytest.mark.parametrize("swap", ["fifo", "read-only", "directory"])
+async def test_write_revalidates_the_target_right_before_replacing_it(tmp_path, make_ctx, monkeypatch, swap):
+    """Another process swapped the file after write classified it: nothing that is not a writable regular file
+    is ever replaced."""
+    (tmp_path / "f").write_text("old\n")
+    real_prepare = write_module._prepare_target
+
+    def prepare_then_swap(absolute):
+        refusal = real_prepare(absolute)
+        os.remove(absolute)
+        if swap == "fifo":
+            os.mkfifo(absolute)
+        elif swap == "read-only":
+            with open(absolute, "w") as handle:
+                handle.write("theirs\n")
+            os.chmod(absolute, 0o444)
+        else:
+            os.mkdir(absolute)
+        return refusal
+
+    monkeypatch.setattr(write_module, "_prepare_target", prepare_then_swap)
+    result = await WriteTool().execute({"path": "f", "content": "new\n"}, make_ctx())
+
+    reason = {"fifo": "it is not a regular file", "read-only": "permission denied", "directory": "it is a directory"}
+    assert (result.is_error, result_text(result)) == (True, f"Cannot write f: {reason[swap]}.")
+    kind = os.lstat(tmp_path / "f").st_mode
+    assert {"fifo": stat.S_ISFIFO, "read-only": stat.S_ISREG, "directory": stat.S_ISDIR}[swap](kind)
+    if swap == "read-only":
+        assert (tmp_path / "f").read_text() == "theirs\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["f"]
+
+
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_a_name_at_the_length_limit_can_be_replaced(tmp_path, make_ctx, tool):
+    """The temp file beside the target must not be longer than the target's own (valid) name."""
+    name = "n" * 251 + ".txt"  # 255 bytes, the usual NAME_MAX
+    (tmp_path / name).write_text("old\n")
+
+    if tool == "write":
+        result = await WriteTool().execute({"path": name, "content": "new\n"}, make_ctx())
+    else:
+        result = await _edit(make_ctx, name, {"oldText": "old", "newText": "new"})
+
+    assert not result.is_error, result_text(result)
+    assert (tmp_path / name).read_text() == "new\n"
+
+
 async def test_new_files_keep_the_umask_default(tmp_path, make_ctx):
     umask = os.umask(0)
     os.umask(umask)

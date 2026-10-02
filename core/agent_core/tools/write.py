@@ -7,6 +7,7 @@ Ported from Pi ``packages/coding-agent/src/core/tools/write.ts`` (MIT, Copyright
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import secrets
 import stat
@@ -17,6 +18,7 @@ from core.agent_core.tools.args import ToolInputError, error_result, str_arg, te
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.paths import (
     KIND_REASON,
+    NotRegularFile,
     file_mutation_lock,
     os_reason,
     resolve_to_cwd,
@@ -70,6 +72,8 @@ class WriteTool:
                 return error_result(
                     f"Cannot write {path}: its directory is not writable, so the file cannot be replaced safely."
                 )
+            except NotRegularFile as exc:
+                return error_result(f"Cannot write {path}: {KIND_REASON[exc.kind]}.")
             except OSError as exc:
                 return error_result(f"Cannot write {path}: {os_reason(exc)}.")
         return text_result(f"Successfully wrote to {path}")
@@ -132,6 +136,21 @@ def _require(expected: Optional[FileIdentity], path: str, st: os.stat_result) ->
         raise FileChanged()
 
 
+def _check_publishable(current: str, expected: Optional[FileIdentity]) -> None:
+    """Right before the rename: ``current`` is absent, or a writable regular file (the one that was read)."""
+    try:
+        st = os.stat(current)
+    except FileNotFoundError:
+        if expected is not None:
+            raise FileChanged() from None
+        return
+    if not stat.S_ISREG(st.st_mode):
+        raise NotRegularFile("directory" if stat.S_ISDIR(st.st_mode) else "other")
+    if not os.access(current, os.W_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), current)
+    _require(expected, current, st)
+
+
 def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None) -> None:
     """Create or replace ``path`` only once ``data`` is completely on disk.
 
@@ -145,14 +164,17 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
     (``NotReplaceable``) rather than written in place, which a full disk could leave half-written.
 
     With ``expected``, the file must still be the one that was read, checked once right before the
-    rename. POSIX has no compare-and-rename, so a change between that check and the rename is not seen.
+    rename. Without it, the target is checked there again as ``write`` first classified it: absent, or a
+    writable regular file, so a file swapped for a FIFO, a directory, or a read-only file is never
+    replaced. POSIX has no compare-and-rename, so a change between that check and the rename is not seen.
     """
     target = os.path.realpath(path)
     try:
         mode: Optional[int] = stat.S_IMODE(os.stat(target).st_mode)
     except FileNotFoundError:
         mode = None
-    tmp = os.path.join(os.path.dirname(target), f".{os.path.basename(target)}.{secrets.token_hex(4)}.tmp")
+    # Short and not derived from the target's name, which may already be at NAME_MAX.
+    tmp = os.path.join(os.path.dirname(target), f".avibe-{secrets.token_hex(6)}.tmp")
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if mode is not None else 0o666)
     except PermissionError:
@@ -166,12 +188,7 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             os.fsync(handle.fileno())
             if mode is not None:
                 os.fchmod(handle.fileno(), mode)
-        if expected is not None:
-            current = os.path.realpath(path)
-            try:
-                _require(expected, current, os.stat(current))
-            except FileNotFoundError:
-                raise FileChanged() from None
+        _check_publishable(os.path.realpath(path) if expected is not None else target, expected)
         os.replace(tmp, target)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
