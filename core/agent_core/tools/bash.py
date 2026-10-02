@@ -33,7 +33,6 @@ from core.agent_core.tools.jobs import (
     JobHandOverUnavailable,
     JobStartError,
     LocalJobHost,
-    run_host_io,
 )
 from core.agent_core.tools.paths import os_reason
 from core.agent_core.tools.output import FINISH_BYTES, JobOutput
@@ -147,18 +146,16 @@ async def settle_bash_call(jobs: LocalJobHost, session_id: str, tool_call_id: st
     the job is gone for another reason, never ran, or does not exist: the caller
     commits the synthetic interrupted result.
     """
-    # The host's synchronous reads run off the event loop, as its own async methods do.
-    job_id = await run_host_io(jobs.find_job, session_id, tool_call_id)
+    job_id = jobs.find_job(session_id, tool_call_id)
     if job_id is None:
         return None
     await jobs.enforce_deadline(job_id)
-    status = await run_host_io(jobs.status, job_id)
+    status = jobs.status(job_id)
     if status.state == "running":
         return await handover_result(JobOutput(jobs, job_id), await jobs.hand_over(job_id))
     if status.state == "exited":
         return await final_result(JobOutput(jobs, job_id), status)
-    reason = await run_host_io(jobs.stop_reason, job_id)
-    line = _stopped_line(reason, (await run_host_io(jobs.meta, job_id)).get("timeout_s"))
+    line = _stopped_line(jobs.stop_reason(job_id), jobs.meta(job_id).get("timeout_s"))
     return await stopped_result(JobOutput(jobs, job_id), line) if line else None
 
 

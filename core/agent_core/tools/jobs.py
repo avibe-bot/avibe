@@ -34,7 +34,6 @@ POSIX only in v1.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import contextlib
 import json
 import logging
@@ -53,7 +52,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 import psutil
 
 from core.agent_core.tools.base import JobStatus
-from core.agent_core.tools.paths import os_reason, run_joined, run_to_end
+from core.agent_core.tools.paths import os_reason, run_to_end
 from core.process_isolation import (
     DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
     KILL_SIGNAL,
@@ -109,17 +108,6 @@ class JobStartError(RuntimeError):
 
 class JobHandOverUnavailable(RuntimeError):
     """This host has no Watch to hand a job to."""
-
-
-# The host's own file and process work (start, polling, kill, handover) runs here: off the event loop
-# every Session shares, where a slow disk would stall it, and apart from asyncio's default executor,
-# which the file tools fill, so a kill or a poll never waits behind a long read.
-_IO = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="avibe-job-io")
-
-
-async def run_host_io(func: Callable[..., Any], *args: Any) -> Any:
-    """``func(*args)`` on the host's pool; a cancel waits for it, so no host work outlives its caller."""
-    return await run_joined(_IO, func, *args)
 
 
 def default_shell() -> str:
@@ -300,24 +288,19 @@ class LocalJobHost:
             raise JobStartError("Command jobs are not supported on Windows yet.")
         if not sys.executable:
             raise JobStartError("No Python interpreter is available to run the command.")
-        job_id, proc, marker, meta = await run_host_io(
-            self._spawn, command, cwd, env, timeout_s, session_id, tool_call_id
-        )
+        # The host's own steps are small and synchronous, so the only await is the wait for the pid: a cancel
+        # can land nowhere else, and never between publishing ``go`` and returning the job id.
+        job_id, proc, marker, meta = self._spawn(command, cwd, env, timeout_s, session_id, tool_call_id)
         try:
             identity = await self._await_pid(job_id, proc, marker)
-            decision = await run_host_io(self._record_and_decide, job_id, meta, identity)
         except asyncio.CancelledError:
-            # The wrapper exists and the caller will never learn the job id: leave no command without an owner.
-            await run_to_end(self._abandon_or_stop(job_id))
+            # Undecided: abandon the wrapper now rather than leave it waiting 30 s for a decision.
+            self._create_decision(job_id, _ABANDON)
             raise
+        decision = self._record_and_decide(job_id, meta, identity)
         if decision != _GO:
             raise JobStartError("The command did not start.")
         return job_id
-
-    async def _abandon_or_stop(self, job_id: str) -> None:
-        """Abandon an undecided wrapper now; stop a command that already got ``go``."""
-        if await run_host_io(self._create_decision, job_id, _ABANDON) == _GO:
-            await self.kill(job_id, reason=STOP_ABORTED)
 
     def _spawn(
         self,
@@ -411,7 +394,7 @@ class LocalJobHost:
         deadline = time.monotonic() + PID_TIMEOUT_S
         pid_path = self._path(job_id, "pid")
         while time.monotonic() < deadline:
-            text = await run_host_io(_read_text, pid_path)
+            text = _read_text(pid_path)
             if text:
                 try:
                     pgid = os.getpgid(proc.pid)
@@ -420,7 +403,7 @@ class LocalJobHost:
                 if text != str(proc.pid) or pgid != proc.pid:
                     logger.error("Job %s wrapper reported pid %s, expected %s", job_id, text, proc.pid)
                     return None
-                return await run_host_io(capture_spawned_process_identity, proc.pid, marker)
+                return capture_spawned_process_identity(proc.pid, marker)
             if proc.poll() is not None:
                 return None
             await asyncio.sleep(0.002)
@@ -444,8 +427,8 @@ class LocalJobHost:
         delay = 0.005
         while True:
             if await self.enforce_deadline(job_id):
-                return await run_host_io(self.status, job_id)
-            current = await run_host_io(self.status, job_id)
+                return self.status(job_id)
+            current = self.status(job_id)
             if current.state != "running":
                 return current
             if end is not None:
@@ -498,7 +481,7 @@ class LocalJobHost:
         await run_to_end(self._kill(job_id, reason))
 
     async def _kill(self, job_id: str, reason: str) -> None:
-        identity = await run_host_io(self._verify_for_kill, job_id, reason)
+        identity = self._verify_for_kill(job_id, reason)
         if identity is None:
             return
         if not await _terminate_group(identity.pid):
@@ -528,7 +511,7 @@ class LocalJobHost:
 
         Raising means no Watch owns the job: it never raises after ``on_hand_over`` returned.
         """
-        meta = await run_host_io(self.meta, job_id)
+        meta = self.meta(job_id)
         if meta.get("watch_id"):
             return meta["watch_id"]
         if self._on_hand_over is None:
@@ -537,7 +520,7 @@ class LocalJobHost:
         # The Watch owns the job from here on, so nothing below may undo the handover: the recorded id
         # is a cache, and adopt-or-create finds the Watch by job id without it.
         try:
-            await run_host_io(self._record_watch, job_id, watch_id)
+            self._record_watch(job_id, watch_id)
         except (OSError, KeyError, ValueError):
             logger.warning(
                 "Job %s is Watch %s, but its meta.json could not record that", job_id, watch_id, exc_info=True
@@ -558,7 +541,7 @@ class LocalJobHost:
         running job may already have ended on time: a live wrapper decides timeout versus exit. The
         host stops the job as the second owner once the wrapper has not, ``_WRAPPER_DECIDES_S`` late.
         """
-        if not await run_host_io(self._overdue, job_id):
+        if not self._overdue(job_id):
             return False
         await self.kill(job_id, reason=STOP_TIMEOUT)
         return True

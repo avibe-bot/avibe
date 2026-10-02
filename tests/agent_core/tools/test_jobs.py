@@ -535,39 +535,29 @@ async def test_a_command_whose_record_would_be_unreadable_never_starts(tmp_path,
     assert host.meta(job_id)["command"] == command
 
 
-@pytest.mark.parametrize("step", ["start", "kill"])
-async def test_a_cancel_mid_transition_never_leaves_a_command_without_an_owner(tmp_path, monkeypatch, step):
-    """A cancel during the step that publishes ``go``, or during kill's verification, still ends the command."""
+async def test_a_start_cancelled_before_its_decision_abandons_the_wrapper_at_once(tmp_path, monkeypatch):
+    """The only await in ``start`` is the wait for the pid: a cancel there abandons the wrapper, so it
+    exits now instead of waiting 30 s for a decision, and the command never runs."""
     host = LocalJobHost(str(tmp_path / "jobs"))
     entered = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    name = "_record_and_decide" if step == "start" else "_verify_for_kill"
-    real = getattr(LocalJobHost, name)
+    real_await_pid = LocalJobHost._await_pid
 
-    def slow_after(self, *args):
-        result = real(self, *args)  # go is published / stopped is recorded
-        loop.call_soon_threadsafe(entered.set)
-        time.sleep(0.5)
-        return result
+    async def slow_await_pid(self, *args):
+        entered.set()
+        await asyncio.sleep(1.0)
+        return await real_await_pid(self, *args)
 
-    command = f"echo $$ > {tmp_path / 'sh.pid'}; sleep 30"
-    if step == "kill":
-        job_id = await _start(host, tmp_path, command)
-    monkeypatch.setattr(LocalJobHost, name, slow_after)
-    task = asyncio.ensure_future(
-        _start(host, tmp_path, command) if step == "start" else host.kill(job_id, reason="aborted")
-    )
+    monkeypatch.setattr(LocalJobHost, "_await_pid", slow_await_pid)
+    task = asyncio.ensure_future(_start(host, tmp_path, f"echo ran > {tmp_path / 'ran'}"))
     await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    monkeypatch.undo()
 
     job_id = host.find_job("ses_test", "toolu_1")
-    if (tmp_path / "sh.pid").exists():
-        shell_pid = _pid_written(tmp_path / "sh.pid")
-        assert _wait_until(lambda: _gone(shell_pid), timeout_s=8)
-    assert (await host.wait(job_id, deadline_s=8)).state != "running"
+    assert host.started(job_id) is False
+    assert _wait_until(lambda: _wrapper_gone(host.job_dir(job_id)), timeout_s=5)
+    assert not (tmp_path / "ran").exists()
 
 
 async def test_a_cwd_with_bytes_that_are_not_utf8_is_recorded_and_read_back(tmp_path):
