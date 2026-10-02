@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -1608,24 +1609,23 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(composite_key, agent._pending_requests)
         self.assertNotIn(composite_key, agent._native_input_receipts)
 
-    async def test_coalesced_or_unrecognized_human_echo_releases_queued_steers(self):
+    async def test_coalesced_echo_acknowledges_its_whole_queued_run(self):
         """HFR-487: one native echo may acknowledge every queued input."""
 
-        human = {"kind": "human"}
+        agent_logger = logging.getLogger("modules.agents.claude_agent")
         queued = ["first steer", "second steer"]
-        # (name, echo, origin, steer written while the echo is awaited,
-        #  receipts still pending once the echo is observed)
+        # (name, echo, origin, receipts still pending once the echo is observed)
         cases = (
             # Claude dequeues inputs queued behind a response together and
             # replays them as one newline-joined user message.
-            ("coalesced", "first steer\nsecond steer", None, False, []),
-            ("unrecognized human", "first steer, rewritten", human, False, []),
-            # A steer written while the receiver awaited the echo may not be in it.
-            ("unrecognized human, later steer", "first steer, rewritten", human, True, ["third steer"]),
+            ("coalesced", "first steer\nsecond steer", None, []),
+            # Avibe input in a shape the receipts do not model: nothing is
+            # guessed, and the drift is logged.
+            ("unrecognized human", "first steer, rewritten", {"kind": "human"}, queued),
             # Same text as the queued run, but an injected turn is not Avibe input.
-            ("injected notification", "first steer\nsecond steer", {"kind": "task-notification"}, False, queued),
+            ("injected notification", "first steer\nsecond steer", {"kind": "task-notification"}, queued),
         )
-        for name, echo, origin, late_steer, still_pending in cases:
+        for name, echo, origin, still_pending in cases:
             settles = not still_pending
             observed_pending = []
             with self.subTest(name):
@@ -1673,14 +1673,6 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                                     "duration_ms": 1,
                                 },
                             )()
-                            if late_steer:
-                                late = agent._register_native_input(
-                                    composite_key,
-                                    "third steer",
-                                    kind="steer",
-                                )
-                                late.state = "accepted"
-                                agent._advance_steering_generation(composite_key)
                             yield UserMessage(echo, origin=origin)
                             observed_pending.append(
                                 [r.text for r in agent._native_input_receipts.get(composite_key, [])]
@@ -1697,13 +1689,17 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
                         return _iterate()
 
-                await agent._receive_messages(
-                    _Client(),
-                    "session-coalesced-steer",
-                    "/tmp/work",
-                    context,
-                    composite_key=composite_key,
-                )
+                with self.assertLogs("modules.agents.claude_agent", "WARNING") as logs:
+                    await agent._receive_messages(
+                        _Client(),
+                        "session-coalesced-steer",
+                        "/tmp/work",
+                        context,
+                        composite_key=composite_key,
+                    )
+                    agent_logger.warning("receiver finished")
+                drifted = any("matches no pending receipt" in line for line in logs.output)
+                self.assertEqual(drifted, name == "unrecognized human")
 
                 self.assertEqual(observed_pending, [still_pending])
                 if settles:

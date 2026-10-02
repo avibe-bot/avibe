@@ -71,8 +71,6 @@ class _ClaudeInputReceipt:
     text: str
     kind: Literal["primary", "steer"]
     state: Literal["writing", "accepted", "unknown"] = "writing"
-    # Registration order across this adapter; bounds which inputs a frame can echo.
-    seq: int = 0
 
 
 @dataclass(frozen=True)
@@ -1490,13 +1488,9 @@ class ClaudeAgent(BaseAgent):
         *,
         kind: Literal["primary", "steer"],
     ) -> _ClaudeInputReceipt:
-        self._native_input_seq = self._native_input_receipt_seq() + 1
-        receipt = _ClaudeInputReceipt(text=text, kind=kind, seq=self._native_input_seq)
+        receipt = _ClaudeInputReceipt(text=text, kind=kind)
         self._native_input_receipt_map().setdefault(composite_key, []).append(receipt)
         return receipt
-
-    def _native_input_receipt_seq(self) -> int:
-        return getattr(self, "_native_input_seq", 0)
 
     def _native_input_receipt_map(self) -> dict[str, list[_ClaudeInputReceipt]]:
         receipts = getattr(self, "_native_input_receipts", None)
@@ -1562,8 +1556,6 @@ class ClaudeAgent(BaseAgent):
         self,
         composite_key: str,
         message,
-        *,
-        registered_before_receive: int,
     ) -> list[_ClaudeInputReceipt]:
         text = self._native_user_input_text(message)
         if text is None:
@@ -1579,25 +1571,18 @@ class ClaudeAgent(BaseAgent):
             return []
         run = self._echoed_receipt_run(receipts, text)
         if run is None:
-            if origin != "human":
-                return []
-            # Only Avibe writes human input to this process, so a human echo
-            # that matches nothing still proves Claude consumed the input queued
-            # before this frame. A receipt that can never match must not hold the
-            # Turn open forever; one written while the frame was awaited may not
-            # be in it yet.
-            preceding = sum(
-                1 for receipt in receipts if receipt.seq <= registered_before_receive
-            )
-            if not preceding:
-                return []
-            logger.warning(
-                "Claude replayed human input that matches no pending receipt for %s; "
-                "releasing %d pending input receipt(s)",
-                composite_key,
-                preceding,
-            )
-            run = (0, preceding)
+            if origin == "human":
+                # Only Avibe writes human input to this process, so this echo is
+                # Avibe input in a shape the receipts do not model. The stream
+                # gives no sound boundary for which receipts it covers, so they
+                # stay pending; make the drift loud instead of guessing.
+                logger.warning(
+                    "Claude replayed human input that matches no pending receipt for %s; "
+                    "%d input receipt(s) remain pending",
+                    composite_key,
+                    len(receipts),
+                )
+            return []
         start, end = run
         consumed = receipts[start:end]
         del receipts[start:end]
@@ -2073,7 +2058,6 @@ class ClaudeAgent(BaseAgent):
                 # native frame. A frame already buffered in the SDK must retain
                 # the ownership state at the time its receive was started.
                 terminal_steering_generation = self._steering_generation(composite_key)
-                input_receipt_seq = self._native_input_receipt_seq()
                 try:
                     message = await anext(message_stream)
                 except StopAsyncIteration:
@@ -2180,7 +2164,6 @@ class ClaudeAgent(BaseAgent):
                             receipts = self._observe_native_user_input(
                                 composite_key,
                                 message,
-                                registered_before_receive=input_receipt_seq,
                             )
                             if any(receipt.kind == "steer" for receipt in receipts):
                                 await self._retire_primary_phase_on_steer_receipt(

@@ -4400,18 +4400,16 @@ scenarios:
     # Real argv/shell children with clean/contaminated parents, bound/unbound
     # targets, isolated Vault expiry, retargeting, and remote snapshot transport.
   - id: HFR-487
-    name: one coalesced Claude input echo releases every queued steer
+    name: one coalesced Claude input echo acknowledges every queued steer
     status: covered
     kind: recovery
     layer: contract
     backend: claude
     # Claude dequeues every input queued behind a running response together and
     # replays them as one newline-joined UserMessage. That echo acknowledges the
-    # whole FIFO run; a human-origin echo matching no receipt still releases the
-    # receipts registered before that frame was awaited, never a later steer.
-    # Injected turns such as task notifications never consume
-    # receipts, even when their text matches.
-    test: tests/test_claude_agent_sessions.py::test_coalesced_or_unrecognized_human_echo_releases_queued_steers
+    # whole FIFO run. Injected turns such as task notifications never consume
+    # receipts, even when their text matches; an unmatched human echo is logged.
+    test: tests/test_claude_agent_sessions.py::test_coalesced_echo_acknowledges_its_whole_queued_run
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
