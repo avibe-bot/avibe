@@ -64,6 +64,9 @@ SERVER_START_TIMEOUT = 120
 DIRECTORY_BOOTSTRAP_TIMEOUT = 300
 OPENCODE_LOG_TAIL_BYTES = 2_000_000
 MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
+# How long a turn that needs a different overlay waits for live runs on the
+# shared server to finish before it is refused; the runs are never interrupted.
+MODEL_HUB_OVERLAY_SWITCH_WAIT_SECONDS = 30.0
 _USE_CURRENT_CALLER_CONTEXT_PATH = object()
 _CURRENT_OWNER_PID = os.getpid()
 _DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
@@ -239,8 +242,50 @@ class OpenCodeModelHubOverlayRequiredError(RuntimeError):
     """Hub mode cannot launch OpenCode until its owner configures an overlay."""
 
 
+class OpenCodeModelHubOverlaySwitchBlockedError(RuntimeError):
+    """Live runs still hold the shared server this turn's overlay must replace."""
+
+    reason = "model_hub_overlay_switch_blocked"
+
+
 class OpenCodeDirectoryBootstrapTimeoutError(RuntimeError):
     """OpenCode is still bootstrapping a directory after the readiness ceiling."""
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _running_overlay_record(overlay_path: str) -> Path:
+    return Path(overlay_path).with_suffix(".running.json")
+
+
+def _overlay_signature(content: str | None) -> dict[str, Any] | None:
+    """Digest an overlay as one ``base`` without model rows plus one digest per row."""
+
+    if content is None:
+        return None
+    try:
+        document = json.loads(content)
+    except ValueError:
+        return None
+    if not isinstance(document, dict):
+        return None
+    providers = document.get("provider")
+    if not isinstance(providers, dict):
+        return {"base": _digest(document), "rows": {}}
+    base_providers: dict[str, Any] = {}
+    rows: dict[str, str] = {}
+    for provider_id, provider in providers.items():
+        if not isinstance(provider, dict):
+            base_providers[provider_id] = provider
+            continue
+        base_providers[provider_id] = {key: value for key, value in provider.items() if key != "models"}
+        models = provider.get("models")
+        if isinstance(models, dict):
+            for model_id, row in models.items():
+                rows[f"{provider_id}/{model_id}"] = _digest(row)
+    return {"base": _digest({**document, "provider": base_providers}), "rows": rows}
 
 
 class OpenCodeServerManager:
@@ -302,6 +347,7 @@ class OpenCodeServerManager:
             object, tuple[Optional[str], Optional[str]]
         ] = {}
         self._model_hub_overlay_drain_timeout_seconds = MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS
+        self._model_hub_overlay_switch_wait_seconds = MODEL_HUB_OVERLAY_SWITCH_WAIT_SECONDS
         self._runtime_activation_retire: Callable[[bool, bool], bool] | None = None
         self._runtime_generation_token: tuple[int, float | None] | None = None
         self._observed_runtime_process: tuple[int, float] | None = None
@@ -872,8 +918,19 @@ class OpenCodeServerManager:
             self._refuse_unconfigured_model_hub_launch()
         return await self.configure_model_hub_overlay(overlay)
 
-    async def configure_model_hub_overlay(self, overlay: Any | None) -> object:
-        """Select an overlay and reserve it until the caller registers its run."""
+    async def configure_model_hub_overlay(
+        self,
+        overlay: Any | None,
+        *,
+        required_model: str | None = None,
+    ) -> object:
+        """Select an overlay and reserve it until the caller registers its run.
+
+        ``required_model`` is the ``provider/model`` the caller's turn runs.
+        While live runs hold the server, a turn whose model the running overlay
+        defines identically keeps it; only a turn that needs the new overlay
+        waits, bounded.
+        """
 
         desired_path = str(overlay.path) if overlay is not None else None
         desired_hash = str(overlay.content_hash) if overlay is not None else None
@@ -902,48 +959,74 @@ class OpenCodeServerManager:
                 raise RuntimeError("Model Hub OpenCode overlay content hash changed")
             self._model_hub_overlay_refusal_logged = False
         drain_deadline = time.monotonic() + self._model_hub_overlay_drain_timeout_seconds
+        switch_deadline = time.monotonic() + self._model_hub_overlay_switch_wait_seconds
         transition_owner = object()
         owns_transition = False
         try:
             while True:
                 should_wait = False
+                blocked_by_live_runs = False
                 async with self._get_lock():
-                    transition = self._model_hub_overlay_transition
-                    if transition is not None and transition[2] is not transition_owner:
-                        # Once a real configuration change is queued, new turns on
-                        # the old overlay must wait. Otherwise they can continuously
-                        # replenish the active set and starve the transition.
-                        should_wait = True
-                    else:
-                        info = self._read_pid_file() or {}
-                        current_server = self._pid_file_references_current_server(info)
-                        effective_path = (
-                            info.get("model_hub_overlay_path") if current_server else None
-                        )
-                        effective_hash = (
-                            info.get("model_hub_overlay_hash") if current_server else None
-                        )
-                        if effective_path is None and effective_hash is None:
-                            effective_path = self._model_hub_overlay_path
-                            effective_hash = self._model_hub_overlay_hash
+                    info = self._read_pid_file() or {}
+                    current_server = self._pid_file_references_current_server(info)
+                    if current_server:
+                        # A run that an adopted server's durable poll still
+                        # owns is live work, not a stale marker.
+                        info = self._reconcile_adopted_active_run_sessions(info) or info
+                        self._restore_adopted_overlay(info)
+                    effective_path = (
+                        info.get("model_hub_overlay_path") if current_server else None
+                    )
+                    effective_hash = (
+                        info.get("model_hub_overlay_hash") if current_server else None
+                    )
+                    if effective_path is None and effective_hash is None:
+                        effective_path = self._model_hub_overlay_path
+                        effective_hash = self._model_hub_overlay_hash
 
-                        # Most turns reuse the running server's overlay. They must
-                        # not wait behind unrelated active work when no transition
-                        # has claimed the runtime.
-                        if (effective_path, effective_hash) == (
+                    # A turn the running overlay serves never waits, neither
+                    # behind unrelated active work nor behind another turn's
+                    # queued switch.
+                    if (effective_path, effective_hash) == (
+                        desired_path,
+                        desired_hash,
+                    ):
+                        self._model_hub_overlay_path = desired_path
+                        self._model_hub_overlay_hash = desired_hash
+                        self._model_hub_overlay_content = desired_content
+                        self._model_hub_overlay_provider_ids = desired_provider_ids
+                        self._model_hub_overlay_reservations[transition_owner] = (
                             desired_path,
                             desired_hash,
-                        ):
-                            self._model_hub_overlay_path = desired_path
-                            self._model_hub_overlay_hash = desired_hash
-                            self._model_hub_overlay_content = desired_content
-                            self._model_hub_overlay_provider_ids = desired_provider_ids
-                            self._model_hub_overlay_reservations[transition_owner] = (
-                                desired_path,
-                                desired_hash,
-                            )
-                            return transition_owner
+                        )
+                        return transition_owner
 
+                    live_runs = bool(
+                        self._active_requests > 0
+                        or self._has_active_run_sessions()
+                        or self._model_hub_overlay_reservations
+                    )
+                    if live_runs and self._running_overlay_serves(
+                        effective_hash,
+                        desired_content,
+                        required_model,
+                    ):
+                        # Only other model rows changed: this turn runs exactly as
+                        # it would on the new overlay. A turn that finds the server
+                        # idle switches it.
+                        self._model_hub_overlay_reservations[transition_owner] = (
+                            effective_path,
+                            effective_hash,
+                        )
+                        return transition_owner
+
+                    transition = self._model_hub_overlay_transition
+                    if transition is not None and transition[2] is not transition_owner:
+                        # Another turn's switch is queued: wait for it to land
+                        # rather than race it to a second restart.
+                        should_wait = True
+                        blocked_by_live_runs = live_runs
+                    else:
                         if not owns_transition:
                             self._model_hub_overlay_transition = (
                                 desired_path,
@@ -952,12 +1035,9 @@ class OpenCodeServerManager:
                             )
                             owns_transition = True
 
-                        if (
-                            self._active_requests > 0
-                            or self._has_active_run_sessions()
-                            or self._model_hub_overlay_reservations
-                        ):
+                        if live_runs:
                             should_wait = True
+                            blocked_by_live_runs = True
                         else:
                             persisted_active = current_server and bool(
                                 info.get("active_run_sessions")
@@ -988,6 +1068,10 @@ class OpenCodeServerManager:
                                 owns_transition = False
                                 return transition_owner
                 if should_wait:
+                    if blocked_by_live_runs and time.monotonic() >= switch_deadline:
+                        raise OpenCodeModelHubOverlaySwitchBlockedError(
+                            "Live OpenCode runs still use the previous Model Hub overlay"
+                        )
                     await asyncio.sleep(0.05)
         finally:
             if owns_transition:
@@ -995,6 +1079,55 @@ class OpenCodeServerManager:
                     transition = self._model_hub_overlay_transition
                     if transition is not None and transition[2] is transition_owner:
                         self._model_hub_overlay_transition = None
+
+    def _restore_adopted_overlay(self, info: Dict[str, Any]) -> None:
+        """Recover the overlay an adopted server runs from its launch record."""
+
+        path = info.get("model_hub_overlay_path")
+        digest = info.get("model_hub_overlay_hash")
+        provider_ids = info.get("model_hub_overlay_provider_ids")
+        if (
+            not isinstance(path, str)
+            or not isinstance(digest, str)
+            or (digest == self._model_hub_overlay_hash and self._model_hub_overlay_content is not None)
+            or not isinstance(provider_ids, list)
+            or not provider_ids
+            or not all(isinstance(item, str) and item for item in provider_ids)
+        ):
+            return
+        try:
+            content = _running_overlay_record(path).read_text()
+        except OSError:
+            return
+        if hashlib.sha256(content.encode()).hexdigest() != digest:
+            return
+        self._model_hub_overlay_path = path
+        self._model_hub_overlay_hash = digest
+        self._model_hub_overlay_content = content
+        self._model_hub_overlay_provider_ids = tuple(provider_ids)
+
+    def _running_overlay_serves(
+        self,
+        effective_hash: str | None,
+        desired_content: str | None,
+        required_model: str | None,
+    ) -> bool:
+        """Whether the running overlay serves a turn exactly as the desired one would.
+
+        True only when the two documents differ in model rows alone and the
+        turn's own model row is identical in both, so the turn reaches the same
+        providers, endpoint, credentials, and model definition.
+        """
+        if effective_hash is None or effective_hash != self._model_hub_overlay_hash:
+            return False
+        running = _overlay_signature(self._model_hub_overlay_content)
+        desired = _overlay_signature(desired_content)
+        if running is None or desired is None or running["base"] != desired["base"]:
+            return False
+        if required_model is None:
+            return True
+        row = desired["rows"].get(required_model)
+        return row is not None and running["rows"].get(required_model) == row
 
     async def release_model_hub_overlay_reservation(
         self,
@@ -1115,6 +1248,17 @@ class OpenCodeServerManager:
             write_atomic(self._pid_file, json.dumps(payload))
         except Exception as e:
             logger.debug(f"Failed to write OpenCode pid file: {e}")
+            return
+        if payload.get("model_hub_overlay_hash") and self._model_hub_overlay_content is not None:
+            # The overlay file is rewritten per turn, so keep the exact document
+            # this server runs for a later controller that adopts it.
+            try:
+                write_atomic(
+                    _running_overlay_record(self._model_hub_overlay_path),
+                    self._model_hub_overlay_content,
+                )
+            except Exception:
+                logger.warning("Could not record the running OpenCode overlay", exc_info=True)
 
     def _apply_resource_governance(self, pid: int | None) -> None:
         governor = getattr(self, "resource_governor", None)

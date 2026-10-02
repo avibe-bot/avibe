@@ -59,8 +59,9 @@ OpenCodeRuntimeConfigInvalidError = SERVER_MODULE.OpenCodeRuntimeConfigInvalidEr
 OpenCodeServerManager = SERVER_MODULE.OpenCodeServerManager
 
 
-def _model_hub_overlay(path: str, model_id: str | None):
-    models = {} if model_id is None else {model_id: {"id": model_id}}
+def _model_hub_overlay(path: str, model_id: str | None, *, models: dict | None = None):
+    if models is None:
+        models = {} if model_id is None else {model_id: {"id": model_id}}
     content = json.dumps(
         {
             "enabled_providers": ["avibe-openai"],
@@ -3446,8 +3447,8 @@ def test_changed_overlay_passes_completed_persisted_drain_to_retirement():
     )
 
 
-def test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_overlay():
-    """MH-RUNTIME-003: a queued change drains without old-overlay starvation."""
+def test_mh_runtime_003_a_queued_overlay_switch_never_holds_turns_the_running_overlay_serves():
+    """MH-RUNTIME-003: a turn on the running overlay starts while another turn's switch waits."""
 
     old_overlay = _model_hub_overlay("/tmp/old-overlay.json", "old-model")
     new_overlay = _model_hub_overlay("/tmp/new-overlay.json", "new-model")
@@ -3461,16 +3462,22 @@ def test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_o
     manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
     async def exercise():
         configuring = asyncio.create_task(
-            manager.configure_model_hub_overlay(new_overlay)
+            manager.configure_model_hub_overlay(
+                new_overlay,
+                required_model="avibe-openai/new-model",
+            )
         )
         await asyncio.sleep(0.01)
-        matching_old_turn = asyncio.create_task(
-            manager.configure_model_hub_overlay(old_overlay)
+        assert manager._model_hub_overlay_transition is not None
+        old_turn = await asyncio.wait_for(
+            manager.configure_model_hub_overlay(
+                old_overlay,
+                required_model="avibe-openai/old-model",
+            ),
+            timeout=0.1,
         )
-        await asyncio.sleep(0.01)
-        assert not matching_old_turn.done()
-        matching_old_turn.cancel()
-        await asyncio.gather(matching_old_turn, return_exceptions=True)
+        assert not configuring.done()
+        await manager.release_model_hub_overlay_reservation(old_turn)
         manager._active_run_sessions.clear()
         reservation = await asyncio.wait_for(configuring, timeout=0.2)
         await manager.release_model_hub_overlay_reservation(reservation)
@@ -3497,8 +3504,12 @@ def test_mh_runtime_004_overlay_reservation_promotes_atomically_to_active_run():
     manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
     async def exercise():
         reservation = await manager.configure_model_hub_overlay(new_overlay)
+        # Only the old overlay serves this turn's model.
         reverting = asyncio.create_task(
-            manager.configure_model_hub_overlay(old_overlay)
+            manager.configure_model_hub_overlay(
+                old_overlay,
+                required_model="avibe-openai/old-model",
+            )
         )
         await asyncio.sleep(0.01)
         assert not reverting.done()
@@ -3521,6 +3532,131 @@ def test_mh_runtime_004_overlay_reservation_promotes_atomically_to_active_run():
     assert manager._model_hub_overlay_reservations == {}
     assert manager._active_run_sessions == set()
     assert manager._restart_for_auth_refresh_locked.await_count == 2
+
+
+def test_mh_runtime_014_a_busy_server_keeps_serving_turns_its_overlay_still_serves():
+    """MH-RUNTIME-014: a catalog change never makes an unaffected turn wait behind live runs.
+
+    A turn whose model row the running overlay defines identically starts on it
+    at once. A turn on a changed or newly added model waits a bounded time and
+    is refused, never interrupting the live run. A turn that finds the server
+    idle switches it to the committed overlay.
+    """
+
+    old_overlay = _model_hub_overlay(
+        "/tmp/old-overlay.json",
+        None,
+        models={
+            "kept": {"id": "kept", "limit": {"context": 1000, "output": 100}},
+            "edited": {"id": "edited", "limit": {"context": 1000, "output": 100}},
+        },
+    )
+    new_overlay = _model_hub_overlay(
+        "/tmp/new-overlay.json",
+        None,
+        models={
+            "kept": {"id": "kept", "limit": {"context": 1000, "output": 100}},
+            "edited": {"id": "edited", "limit": {"context": 2000, "output": 100}},
+            "added": {"id": "added"},
+        },
+    )
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._model_hub_overlay_path = str(old_overlay.path)
+    manager._model_hub_overlay_hash = old_overlay.content_hash
+    manager._model_hub_overlay_content = SERVER_MODULE._managed_runtime_config_content(old_overlay.content)
+    manager._model_hub_overlay_switch_wait_seconds = 0.2
+    manager._active_run_sessions.add("sess-long-running")
+    manager._read_pid_file = lambda: {}  # type: ignore[method-assign]
+    manager._pid_file_references_current_server = Mock(return_value=False)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+
+    async def exercise():
+        kept = await asyncio.wait_for(
+            manager.configure_model_hub_overlay(new_overlay, required_model="avibe-openai/kept"),
+            timeout=0.1,
+        )
+        assert manager._model_hub_overlay_hash == old_overlay.content_hash
+        await manager.release_model_hub_overlay_reservation(kept)
+
+        for model in ("edited", "added"):
+            with pytest.raises(SERVER_MODULE.OpenCodeModelHubOverlaySwitchBlockedError):
+                await asyncio.wait_for(
+                    manager.configure_model_hub_overlay(new_overlay, required_model=f"avibe-openai/{model}"),
+                    timeout=2,
+                )
+            assert manager._model_hub_overlay_transition is None
+        assert manager._active_run_sessions == {"sess-long-running"}
+        manager._restart_for_auth_refresh_locked.assert_not_awaited()
+
+        manager._active_run_sessions.clear()
+        switched = await asyncio.wait_for(
+            manager.configure_model_hub_overlay(new_overlay, required_model="avibe-openai/edited"),
+            timeout=0.2,
+        )
+        await manager.release_model_hub_overlay_reservation(switched)
+
+    asyncio.run(exercise())
+
+    assert manager._model_hub_overlay_hash == new_overlay.content_hash
+    manager._restart_for_auth_refresh_locked.assert_awaited_once()
+
+
+def test_an_overlay_switch_treats_an_adopted_run_its_durable_poll_owns_as_live(tmp_path):
+    """MH-RUNTIME-014: after a controller restart, an adopted server's run is live work.
+
+    The launching process records the overlay its server runs, so the adopter
+    keeps unaffected turns on it at once with a usable launch boundary; a turn
+    that needs the new overlay is refused after its bound instead of restarting
+    the server under the run.
+    """
+
+    old_overlay = _model_hub_overlay(str(tmp_path / "opencode-overlay.json"), "kept")
+    new_overlay = _model_hub_overlay(
+        str(tmp_path / "opencode-overlay.json"),
+        None,
+        models={"kept": {"id": "kept"}, "added": {"id": "added"}},
+    )
+    launcher = OpenCodeServerManager(binary="opencode", port=4096)
+    launcher._pid_file = tmp_path / "opencode_server.json"
+    launcher._model_hub_overlay_path = str(old_overlay.path)
+    launcher._model_hub_overlay_hash = old_overlay.content_hash
+    launcher._model_hub_overlay_content = SERVER_MODULE._managed_runtime_config_content(old_overlay.content)
+    launcher._model_hub_overlay_provider_ids = old_overlay.provider_ids
+    launcher._active_run_sessions.add("sess-adopted")
+    launcher._write_pid_file(321)
+    # Each turn rewrites the shared overlay file with the committed document.
+    old_overlay.path.write_text(new_overlay.content)
+
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._pid_file = launcher._pid_file
+    manager._model_hub_overlay_drain_timeout_seconds = 0.05
+    manager._model_hub_overlay_switch_wait_seconds = 0.2
+    manager._pid_file_references_current_server = Mock(return_value=True)  # type: ignore[method-assign]
+    manager.set_active_poll_session_ids_provider(lambda: {"sess-adopted"})
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+
+    async def exercise():
+        kept = await asyncio.wait_for(
+            manager.configure_model_hub_overlay(new_overlay, required_model="avibe-openai/kept"),
+            timeout=0.1,
+        )
+        # The turn's launch boundary accepts the adopted overlay.
+        assert manager._configured_model_hub_overlay()
+        assert manager._model_hub_overlay_hash == old_overlay.content_hash
+        await manager.release_model_hub_overlay_reservation(kept)
+        with pytest.raises(SERVER_MODULE.OpenCodeModelHubOverlaySwitchBlockedError):
+            await asyncio.wait_for(
+                manager.configure_model_hub_overlay(new_overlay, required_model="avibe-openai/added"),
+                timeout=2,
+            )
+
+    asyncio.run(exercise())
+
+    manager._restart_for_auth_refresh_locked.assert_not_awaited()
+    assert manager._active_run_sessions == {"sess-adopted"}
+    assert manager._model_hub_overlay_transition is None
 
 
 if __name__ == "__main__":

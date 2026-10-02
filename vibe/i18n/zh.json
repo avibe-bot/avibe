@@ -440,6 +440,7 @@
     "codexRuntimeChangeBlocked": "此工作目录中另一个 Codex 回合仍在使用不同的模型运行时，所选模型暂时无法启动。请在该回合结束后重试这条输入，或改用其他工作目录。",
     "codexResponseTooLarge": "Codex 返回的响应超过 {limitMiB} MiB，此连接无法继续。请检查或升级 Codex 后重试。",
     "opencodeModelHubOverlayRequired": "OpenCode 仍在准备 Gateway 模式，请稍后重试。",
+    "opencodeModelHubOverlaySwitchBlocked": "OpenCode 仍有其他任务在使用之前的模型配置运行，这一轮暂时无法开始，这些任务不会被中断。请在它们结束后重试这条输入。",
     "opencodePolicyRefreshPending": "OpenCode 仍在完成已有回合，暂时无法按 Avibe 当前的 Skill 策略重启。请在该回合结束后重试。",
     "opencodeRuntimeConfigInvalid": "OpenCode 无法启动，因为 OPENCODE_CONFIG_CONTENT 无效。请修正运行时配置后重试。",
     "opencodeDirectoryBootstrapTimeout": "OpenCode 仍在完成首次准备，请稍后重新发送消息。",

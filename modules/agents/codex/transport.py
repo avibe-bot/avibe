@@ -118,6 +118,9 @@ class CodexTransport:
         self._runtime_args = runtime_args or []
         self._runtime_env = runtime_env
         self.runtime_fingerprint = runtime_fingerprint
+        # The pin ends with the process; the digest path stays to name the
+        # catalog this app-server serves.
+        self.model_hub_catalog_path = model_hub_catalog.path if model_hub_catalog is not None else None
         self._model_hub_catalog = model_hub_catalog.retain() if model_hub_catalog is not None else None
         self._catalog_required = model_hub_catalog is not None
         self._catalog_exit_task: asyncio.Task[None] | None = None

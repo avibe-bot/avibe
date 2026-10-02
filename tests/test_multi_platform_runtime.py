@@ -124,6 +124,76 @@ def test_opencode_resource_failure_preserves_zero_pid_count() -> None:
     assert "unknown" not in suffix
 
 
+def test_mh_runtime_014_opencode_turn_names_its_model_when_selecting_the_overlay(
+    monkeypatch,
+) -> None:
+    """MH-RUNTIME-014: overlay selection learns the model this turn will run,
+    so a busy server can keep serving it only if that row is unchanged."""
+    required_models: list[str | None] = []
+    overlay = OpenCodeOverlay(
+        path=Path("/tmp/opencode-overlay.json"),
+        content_hash="overlay-hash",
+        content=(
+            b'{"enabled_providers":["avibe-openai"],"provider":'
+            b'{"avibe-openai":{"models":{"kept":{"id":"kept"}}}}}\n'
+        ),
+        provider_ids=("avibe-openai",),
+        model_provider_ids=(("kept", "avibe-openai"),),
+        checked_identifiers=("kept",),
+        available_identifiers=("kept",),
+        launches=(),
+    )
+
+    class _Runtime:
+        @staticmethod
+        def turn_mode(_backend):
+            return "hub"
+
+        @staticmethod
+        async def prepare_opencode_overlay():
+            return overlay
+
+    class _Server:
+        async def configure_model_hub_overlay(self, value, *, required_model=None):
+            assert value is overlay
+            required_models.append(required_model)
+            raise RuntimeError("test boundary after overlay selection")
+
+    server = _Server()
+
+    async def _get_server():
+        return server
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("modules.agents.opencode.agent.emit_backend_failure", _noop)
+    controller = SimpleNamespace(
+        config=SimpleNamespace(language="en"),
+        model_hub_runtime=_Runtime(),
+        # The channel's model override, not the Agent default, runs.
+        get_opencode_overrides=lambda _context: (None, "kept", None),
+    )
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = controller
+    agent.config = controller.config
+    agent._get_server = _get_server
+    agent._remove_ack_reaction = _noop
+    request = AgentRequest(
+        context=MessageContext(user_id="user", channel_id="channel", platform="slack", platform_specific={}),
+        message="hello",
+        user_message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::channel",
+    )
+
+    asyncio.run(agent._process_message(request))
+
+    assert required_models == ["avibe-openai/kept"]
+
+
 def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running(
     monkeypatch,
 ) -> None:
@@ -153,7 +223,7 @@ def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running
             return empty_overlay
 
     class _Server:
-        async def configure_model_hub_overlay(self, overlay):
+        async def configure_model_hub_overlay(self, overlay, *, required_model=None):
             assert overlay is empty_overlay
             calls.append("configure")
             return reservation
@@ -186,6 +256,7 @@ def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running
         {
             "config": type("Config", (), {"language": "en"})(),
             "model_hub_runtime": _Runtime(),
+            "get_opencode_overrides": lambda _self, _context: (None, None, None),
         },
     )()
     agent = OpenCodeAgent.__new__(OpenCodeAgent)
@@ -231,7 +302,7 @@ def test_opencode_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(
     explicit retry."""
 
     class _Server:
-        async def configure_model_hub_overlay(self, overlay):
+        async def configure_model_hub_overlay(self, overlay, *, required_model=None):
             return None
 
         async def ensure_running(self):
@@ -4003,7 +4074,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
     )
 
     class _Server:
-        async def configure_model_hub_overlay(self, overlay):
+        async def configure_model_hub_overlay(self, overlay, *, required_model=None):
             configured_overlays.append(overlay)
             return overlay_reservation
 

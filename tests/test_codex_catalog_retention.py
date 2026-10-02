@@ -17,7 +17,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from config import paths
-from modules.agents.codex.agent import CodexAgent, CodexModelHubCatalogUnavailableError
+from modules.agents.codex import agent as codex_agent_module
+from modules.agents.codex.agent import CodexAgent, CodexModelHubCatalogUnavailableError, CodexRuntimeChangeBlockedError
 from modules.agents.codex.transport import CodexTransport
 from vibe import backend_model_catalog as catalogs
 
@@ -224,27 +225,33 @@ async def test_cache_invalidation_during_pending_launch_keeps_local_reference(mo
 
 
 @pytest.mark.asyncio
-async def test_invalidated_export_releases_unpublished_pin(monkeypatch):
+async def test_invalidated_export_releases_its_pin_and_prepares_the_committed_generation(monkeypatch):
     value = agent()
     entered = threading.Event()
     released = threading.Event()
+    exports = []
 
     def export(*_):
-        entered.set()
-        assert released.wait(timeout=5)
-        return b'{"models":[{"slug":"raced"}]}'
+        exports.append(None)
+        if len(exports) == 1:
+            entered.set()
+            assert released.wait(timeout=5)
+            return b'{"models":[{"slug":"raced"}]}'
+        return b'{"models":[{"slug":"committed"}]}'
 
     monkeypatch.setattr(catalogs, "_export_codex_bundled_catalog", export)
     preparation = asyncio.create_task(value.prepare_model_hub_runtime())
     assert await asyncio.to_thread(entered.wait, 2)
     await value.invalidate_model_hub_runtime()
     released.set()
-    with pytest.raises(CodexModelHubCatalogUnavailableError, match="generation changed"):
-        await preparation
-    assert value._model_hub_catalog is None
+    # A catalog change during the export never fails the launch waiting on it.
+    catalog = await preparation
+    assert len(exports) == 2
+    assert value._model_hub_catalog is catalog
+    assert b"committed" in catalog.path.read_bytes()
     del preparation
     churn()
-    assert len(retained()) <= 1
+    assert not [path for path in retained() if b"raced" in path.read_bytes()]
 
 
 @pytest.mark.asyncio
@@ -336,12 +343,88 @@ async def test_agent_launch_keeps_pin_across_invalidation_and_reuses_transport(m
         assert path in retained()
         await transport.stop()
         await transport._catalog_exit_task
+        # Reuse confirmed the catalog was unchanged by caching it again.
+        await value.invalidate_model_hub_runtime()
         churn()
         assert len(retained()) <= 1
     finally:
         finish.set()
         transport = await starting
         await transport.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "model"),
+    [("idle", "edited"), ("busy", "kept"), ("busy", "edited"), ("unchanged", "edited")],
+)
+async def test_mh_runtime_013_catalog_change_replaces_only_an_idle_hub_transport(monkeypatch, tmp_path, case, model):
+    """MH-RUNTIME-013: a changed catalog never interrupts a directory's work.
+
+    An idle directory's next Hub turn gets an app-server serving the committed
+    catalog. In a busy directory a turn whose model row is unchanged keeps the
+    running app-server at once, while a turn on a changed row waits a bounded
+    time and is refused. An unchanged catalog keeps the app-server.
+    """
+    value = agent()
+    value._transports = {}
+    value._transport_locks = {}
+    value._transport_cwd_inodes = {}
+    active = {}
+    value._session_mgr = SimpleNamespace(
+        sessions_for_cwd=lambda _cwd: ["long-job"],
+        invalidate_thread=lambda _session_id: None,
+    )
+    value._turn_registry = SimpleNamespace(
+        get_active_turn=active.get,
+        has_pending_turn_start=lambda _session_id: False,
+        clear_session=lambda _session_id: None,
+    )
+    value._clear_thread_developer_instructions = lambda _session_id: None
+    value._runtime_ownership_snapshot_for_cwd = lambda _cwd: SimpleNamespace(blocks_transport_replacement=False)
+    exported = [b'{"models":[{"slug":"kept","context_window":1},{"slug":"edited","context_window":1}]}']
+    monkeypatch.setattr(catalogs, "_export_codex_bundled_catalog", lambda *_: exported[0])
+    monkeypatch.setattr(codex_agent_module, "_RUNTIME_CHANGE_WAIT_SECONDS", 0.2)
+    spawn = asyncio.create_subprocess_exec
+
+    async def fixture_spawn(*_args, **kwargs):
+        return await spawn(sys.executable, "-u", "-c", _STDIO_CONSUMER, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fixture_spawn)
+    launch = SimpleNamespace(
+        channel="hub", fingerprint="hub:test", requested_model=model, runtime_model=model,
+        gateway_base_url="http://127.0.0.1:1", gateway_token="fixture-only",
+    )
+    cwd = str(tmp_path)
+    launched = await value._get_or_create_transport(cwd, launch)
+    current = launched
+    try:
+        if case != "unchanged":
+            exported[0] = b'{"models":[{"slug":"kept","context_window":1},{"slug":"edited","context_window":2}]}'
+        await value.invalidate_model_hub_runtime()
+        if case == "busy":
+            active["long-job"] = "turn-running"
+
+        if case == "busy" and model == "edited":
+            with pytest.raises(CodexRuntimeChangeBlockedError):
+                await asyncio.wait_for(value._get_or_create_transport(cwd, launch), 5)
+            assert value._transports[cwd] is launched
+            assert launched._process.returncode is None
+            return
+
+        current = await asyncio.wait_for(value._get_or_create_transport(cwd, launch), 5)
+
+        if case == "idle":
+            assert current is not launched
+            assert current.model_hub_catalog_path == value._model_hub_catalog.path
+            assert current.model_hub_catalog_path != launched.model_hub_catalog_path
+            assert launched._process.returncode is not None
+        else:
+            assert current is launched
+            assert launched._process.returncode is None
+    finally:
+        await launched.stop()
+        await current.stop()
 
 
 @pytest.mark.asyncio
