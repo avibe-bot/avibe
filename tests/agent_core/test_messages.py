@@ -49,7 +49,15 @@ REDACTED = {
 }
 
 
-@pytest.mark.parametrize("payload", [ASSISTANT, TOOL_RESULT, USER_WITH_REF, REDACTED])
+UNSIGNED = {
+    "role": "assistant",
+    "content": [{"type": "thinking", "text": "Summary only."}, {"type": "text", "text": "done"}],
+    "origin": {"provider": "google", "api": "google", "model": "gemini-3-pro"},
+    "stop_reason": "stop",
+}
+
+
+@pytest.mark.parametrize("payload", [ASSISTANT, TOOL_RESULT, USER_WITH_REF, REDACTED, UNSIGNED])
 def test_persisted_shape_round_trips_exactly(payload):
     assert message_to_dict(message_from_dict(payload)) == payload
 
@@ -69,8 +77,21 @@ def test_assistant_message_exposes_tool_calls_in_order():
         {**ASSISTANT, "stop_reason": "end_turn"},
         {**ASSISTANT, "origin": {"provider": "anthropic", "api": "anthropic-messages", "model": "m"}},
         {"role": "system", "content": []},
+        {"role": "user", "content": [{"type": "text", "ref": {"ref": "sha256:" + "a" * 64, "bytes": 1, "enc": "gz"}}]},
+        {**TOOL_RESULT, "is_error": "false"},
+        {**TOOL_RESULT, "is_error": 0},
+        {**REDACTED, "content": [{"type": "thinking", "text": "", "redacted": "yes"}]},
+        {**ASSISTANT, "usage": {**ASSISTANT["usage"], "input_tokens": "1834"}},
+        {**ASSISTANT, "usage": {**ASSISTANT["usage"], "output_tokens": True}},
+        {**ASSISTANT, "content": [{"type": "tool_call", "id": "t", "name": "bash", "arguments": "[]"}]},
+        {**ASSISTANT, "content": [{"type": "text", "text": 5}]},
+        {**ASSISTANT, "content": "text"},
     ],
-    ids=["unknown-field", "unknown-block-field", "block-not-allowed", "stop-reason", "protocol", "role"],
+    ids=[
+        "unknown-field", "unknown-block-field", "block-not-allowed", "stop-reason", "protocol", "role",
+        "unknown-ref-field", "string-flag", "integer-flag", "string-redacted", "string-count", "boolean-count",
+        "string-arguments", "number-text", "content-not-list",
+    ],
 )
 def test_reader_refuses_shapes_it_does_not_know(payload):
     with pytest.raises(ValueError):
