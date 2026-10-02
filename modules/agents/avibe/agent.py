@@ -84,6 +84,7 @@ from storage.agent_transcript import (
 )
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
+from storage.workbench_sessions_service import touch_session_agent_activity
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,8 @@ class AvibeAgent(BaseAgent):
         # the last holder retires it, together with the store's per-Session state.
         self._runtimes: dict[str, _SessionRuntime] = {}
         self._open_calls_recovered = False
+        # Sessions whose activity rank a commit just bumped; announced once the commit returns.
+        self._ranked: dict[str, Optional[str]] = {}
 
     # --- BaseAgent -----------------------------------------------------------
 
@@ -242,9 +245,12 @@ class AvibeAgent(BaseAgent):
         await self._recover_open_tool_calls_once()
         session_ids = await asyncio.to_thread(self._sessions_with_pending_rows, platforms)
         for session_id in session_ids:
-            async with self._held(session_id) as runtime:
+            async with self._held(session_id, wait=False) as runtime:
+                if runtime is None:
+                    # A run holds the Session; its own resume re-delivers before it starts.
+                    continue
                 try:
-                    await self._resume(runtime)
+                    await self._resume(runtime, platforms=platforms)
                 except Exception:
                     logger.exception("Avibe Agent startup resume failed for Session %s", session_id)
         return len(session_ids)
@@ -261,7 +267,10 @@ class AvibeAgent(BaseAgent):
             return
         self._open_calls_recovered = True
         for session_id in await asyncio.to_thread(self._sessions_with_open_tail):
-            async with self._held(session_id) as runtime:
+            async with self._held(session_id, wait=False) as runtime:
+                if runtime is None:
+                    # A run holds the Session; its own resume settles open calls first.
+                    continue
                 try:
                     await self._settle_open_calls(runtime)
                 except Exception:
@@ -495,8 +504,9 @@ class AvibeAgent(BaseAgent):
             # The row stays pending and is re-delivered before the Session's next run.
             logger.exception("Avibe Agent delivery of %s failed", row_id)
             if output.completes_turn and not output.detached:
+                # The Turn still settles from the row's outcome; the row stays pending for re-delivery.
                 await self.controller.emit_agent_message(
-                    context, "result", "", level="silent", is_error=True, output=output
+                    context, "result", "", level="silent", is_error=is_error, output=output
                 )
         finally:
             manager = getattr(self.controller, "session_turns", None)
@@ -504,15 +514,18 @@ class AvibeAgent(BaseAgent):
             if callable(complete):
                 complete(context)
 
-    async def _redeliver_pending(self, session_id: str) -> None:
+    async def _redeliver_pending(self, session_id: str, *, platforms: Optional[set[str]] = None) -> None:
         """Deliver every committed row whose delivery a crash or failure left pending (D1/D2).
 
         Each row replays its own plan, with its own target and finality; a detached
-        output never settles a Turn, old or current.
+        output never settles a Turn, old or current. A transport-ready sweep passes
+        ``platforms`` and delivers only rows planned for them; a run delivers them all.
         """
         for item in await self.store.pending_deliveries(session_id):
             if item.plan is None:
                 logger.warning("Avibe Agent cannot re-deliver %s: it has no delivery plan", item.row_id)
+                continue
+            if platforms is not None and (item.plan.get("target") or {}).get("platform") not in platforms:
                 continue
             target = CommittedOutput(item.row_id, item.plan, _no_acknowledgement).target()
             await self._deliver(
@@ -521,7 +534,7 @@ class AvibeAgent(BaseAgent):
 
     # --- resume (recovery.md T2, T3, D1) ---------------------------------------
 
-    async def _resume(self, runtime: _SessionRuntime) -> None:
+    async def _resume(self, runtime: _SessionRuntime, *, platforms: Optional[set[str]] = None) -> None:
         session_id = runtime.session_id
         if not runtime.recovered:
             await self._settle_open_calls(runtime)
@@ -530,7 +543,7 @@ class AvibeAgent(BaseAgent):
         for message_id, text_value, files, metadata in await asyncio.to_thread(self._unconsumed_inputs, session_id):
             message = await self._render_input(session_id, text_value, files, metadata)
             await self.store.consume_input(session_id, message_id, message)
-        await self._redeliver_pending(session_id)
+        await self._redeliver_pending(session_id, platforms=platforms)
 
     async def _settle_open_calls(self, runtime: _SessionRuntime) -> None:
         """T2: one committed result for every open tool call, chosen from its job's state."""
@@ -643,12 +656,15 @@ class AvibeAgent(BaseAgent):
     def _display_source(self, message: AssistantMessage, *, final: bool) -> str:
         """The text a surface renders a response from: its text blocks, verbatim.
 
-        A final refusal or safety stop without text is explained by localized copy
-        written with the row, so a re-delivery shows it too (loop-control.md section 2).
+        A final without text of its own (``final_outcome`` failed) is explained by
+        localized copy written with the row, so a re-delivery after a crash shows
+        it too (loop-control.md section 2): the refusal or safety explanation, else
+        the empty-reply one.
         """
         value = render_text(message)
-        if final and not value.strip() and message.stop_reason in _EXPLAINED_STOPS:
-            return error_text(message.stop_reason, self._language())
+        if final and not value.strip():
+            kind = message.stop_reason if message.stop_reason in _EXPLAINED_STOPS else "empty_response"
+            return error_text(kind, self._language())
         return value
 
     def _render_display(
@@ -664,8 +680,12 @@ class AvibeAgent(BaseAgent):
         """The row's display copy and delivery plan, decided once inside its commit transaction.
 
         The display copy is what ``persist_agent_message`` would have written; the
-        plan (``plan_committed_delivery``) is everything each surface will send.
+        plan (``plan_committed_delivery``) is everything each surface will send. The
+        session's activity rank is set here, once, because it asserts that the agent
+        persisted output (``touch_session_agent_activity``).
         """
+        if touch_session_agent_activity(conn, session_id) and platform == "avibe":
+            self._ranked[session_id] = scope_id
         source = self._display_source(message, final=final)
         plan = self.controller.message_dispatcher.plan_committed_delivery(
             self._plan_context(session_id, platform), source, final=final
@@ -766,7 +786,17 @@ class AvibeAgent(BaseAgent):
             logger.exception("Avibe Agent could not show tool %s", event.name)
 
     def _on_response(self, session_id: str, row_id: str, message: AssistantMessage) -> None:
-        """A response committed for the Session's run: keep what its tool events need."""
+        """A response committed: announce a rank it bumped, and keep what the run's tool events need."""
+        if session_id in self._ranked:
+            scope_id = self._ranked.pop(session_id)
+            try:
+                from core.inbox_events import bus
+
+                bus.publish(
+                    "session.activity", {"session_id": session_id, "scope_id": scope_id, "event": "agent_activity"}
+                )
+            except Exception:
+                logger.debug("Avibe Agent session.activity publish failed", exc_info=True)
         run = self._run_for(session_id, None)
         if run is None:
             return
@@ -849,11 +879,18 @@ class AvibeAgent(BaseAgent):
         return self._tool_suite
 
     @asynccontextmanager
-    async def _held(self, session_id: str) -> AsyncIterator[_SessionRuntime]:
-        """Hold the Session's writer lock; the last holder retires its in-memory state."""
+    async def _held(self, session_id: str, *, wait: bool = True) -> AsyncIterator[Optional[_SessionRuntime]]:
+        """Hold the Session's writer lock; the last holder retires its in-memory state.
+
+        With ``wait=False`` a Session someone already holds yields ``None`` instead of
+        waiting: sweeps never block behind a run, which does the same work itself.
+        """
         runtime = self._runtimes.get(session_id)
         if runtime is None:
             runtime = self._runtimes[session_id] = _SessionRuntime(session_id)
+        if not wait and runtime.lock.locked():
+            yield None
+            return
         runtime.holders += 1
         try:
             async with runtime.lock:

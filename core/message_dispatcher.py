@@ -3298,10 +3298,9 @@ class ConsolidatedMessageDispatcher:
                 footer_kwargs = {"subtext": done_footer} if done_footer else {}
 
                 # Deliver the result as a NEW message: inline / split / summarized.
-                committed_row = None
                 committed_incomplete = False
                 if committed is not None:
-                    complete, first_sent_id, committed_row = await self._deliver_committed_parts(
+                    complete, first_sent_id = await self._deliver_committed_parts(
                         context,
                         target_context,
                         committed,
@@ -3517,13 +3516,9 @@ class ConsolidatedMessageDispatcher:
                 # recorded, matching the old outbound mirror's success-only rule.
                 persisted_output = None
                 if committed is not None:
-                    # The committed row is the persisted output. Workbench announced it as a
-                    # part; a background Session's row is local history and is not announced.
-                    persisted_output = committed_row or (
-                        load_committed_agent_message(committed.row_id)
-                        if committed.plan.get("suppressed")
-                        else publish_committed_agent_message(target_context, committed.row_id)
-                    )
+                    # The committed row is the persisted output. Settlement only reads it:
+                    # publishing it is the planned ``row`` part, never a side effect here.
+                    persisted_output = load_committed_agent_message(committed.row_id)
                 elif persists_without_delivery or primary_message_id is not None:
                     # A failed terminal result persists as type='error' so it shows in
                     # the transcript/inbox like any terminal message but is NOT counted
@@ -3700,7 +3695,7 @@ class ConsolidatedMessageDispatcher:
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
         if committed is not None:
-            _complete, delivered_id, _row = await self._deliver_committed_parts(
+            _complete, delivered_id = await self._deliver_committed_parts(
                 context,
                 target_context,
                 committed,
@@ -4077,11 +4072,12 @@ class ConsolidatedMessageDispatcher:
         live_footer: Optional[str],
         settings_manager,
         settings_key: str,
-    ) -> tuple[bool, Optional[str], Optional[dict]]:
+    ) -> tuple[bool, Optional[str]]:
         """Send a committed row's planned parts that have no receipt, in order.
 
-        Returns whether every part now has a receipt, the first platform message id
-        sent, and the announced Workbench row. Every platform call goes through
+        Returns whether every part now has a receipt and the first platform message
+        id sent. The planned parts are the only content-bearing effects a committed
+        row has (the ledger's effect table). Every platform call goes through
         ``_committed_call``, the one evidence rule; a part is acknowledged with that
         evidence or with an explicit skipped reason decided before sending. A part
         without evidence is not acknowledged and stops the delivery, so later parts
@@ -4096,7 +4092,6 @@ class ConsolidatedMessageDispatcher:
         last_text = text_indexes[-1] if text_indexes else None
         parse_mode = plan.get("parse_mode") or "markdown"
         first_id: Optional[str] = None
-        announced: list[dict] = []
         for index, part in enumerate(parts):
             if committed.part_delivered(index, count):
                 continue
@@ -4107,8 +4102,6 @@ class ConsolidatedMessageDispatcher:
 
                 async def announce() -> Optional[str]:
                     row = publish_committed_agent_message(target_context, committed.row_id)
-                    if row is not None:
-                        announced.append(row)
                     return row.get("id") if row else None
 
                 evidence = await self._committed_call("Workbench row", announce)
@@ -4166,11 +4159,11 @@ class ConsolidatedMessageDispatcher:
             else:
                 logger.error("Committed row %s has an unknown delivery part %r", committed.row_id, kind)
             if evidence is None and skipped is None:
-                return False, first_id, announced[0] if announced else None
+                return False, first_id
             await committed.acknowledge(index, count, evidence, skipped=skipped)
             if evidence is not None and kind not in ("row", "interim"):
                 first_id = first_id or evidence
-        return True, first_id, announced[0] if announced else None
+        return True, first_id
 
     async def _committed_call(self, label: str, call: Callable[[], Awaitable[Any]]) -> Optional[str]:
         """The one evidence rule of committed delivery: a truthy platform id, or nothing.

@@ -45,7 +45,7 @@ from storage import message_deliveries
 from storage.agent_transcript import resolve_fork_anchor_seq
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import messages, session_turns
+from storage.models import agent_sessions, messages, session_turns
 from storage.settings_service import upsert_scope
 from tests.agent_core.fakes import ORIGIN, FakeJobHost, FakeTool, ScriptedProvider, assistant
 from vibe.i18n import t as i18n_t
@@ -715,9 +715,9 @@ async def test_a_failed_run_shows_localized_copy_and_a_refusal_shows_its_explana
     sent = harness.controller.im_client.sent
     empty_copy = i18n_t("avibeAgent.error.emptyResponse", language)
     refusal_copy = i18n_t("avibeAgent.error.refusal", language)
-    assert sent == [f"❌ {empty_copy}", refusal_copy]
-    [_, refusal_row] = harness.rows("result")
-    assert refusal_row["content_text"] == refusal_copy
+    # Each failed final carries its own explanation, so a re-delivery after a crash shows it too.
+    assert sent == [empty_copy, refusal_copy]
+    assert sorted(row["content_text"] for row in harness.rows("result")) == sorted([empty_copy, refusal_copy])
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [True, True]
 
 
@@ -1230,3 +1230,157 @@ async def test_a_provider_that_fails_to_close_does_not_fail_a_delivered_turn(
     closed.clear()
     await router.aclose()
     assert closed == ["anthropic", "google"]
+
+
+# --- round 4: every content-bearing effect of a committed row is a planned part -----------
+
+
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+async def test_every_content_effect_of_a_committed_row_happens_once_across_sweeps(
+    engine, session, tmp_path, published, monkeypatch, platform
+) -> None:
+    import core.message_dispatcher as dispatcher_module
+
+    report = tmp_path / "report.txt"
+    report.write_text("numbers", encoding="utf-8")
+    reply = f"Here is the report: [report](file://{report})"
+    harness = _Harness(engine, tmp_path, platform, [[Done(assistant(reply))]])
+    client = harness.controller.im_client
+    real_publish = dispatcher_module.publish_committed_agent_message
+    failures = {"publish": 1}
+
+    def flaky_publish(context, row_id):
+        if failures["publish"]:
+            failures["publish"] -= 1
+            return None  # the planned row part's publication fails once
+        return real_publish(context, row_id)
+
+    if platform == "avibe":
+        monkeypatch.setattr(dispatcher_module, "publish_committed_agent_message", flaky_publish)
+    else:
+        client.upload_results = [""]  # the planned file part comes back without evidence once
+
+    await harness.agent.handle_message(harness.request("send me the report"))
+    [row] = harness.rows("result")
+    for _ in range(2):
+        harness.new_agent()
+        await harness.agent.restore_pending_deliveries({platform})
+
+    assert await harness.agent.store.pending_deliveries(SESSION) == []
+    announced = [payload for name, payload in published if name == "message.new" and payload.get("id") == row["id"]]
+    inbox = [payload for name, payload in published if name == "inbox.session.updated"]
+    if platform == "avibe":
+        assert len(announced) == 1 and len(inbox) == 1
+        # The only send is the failed attempt's notice (class (c)); the row is never sent as content.
+        assert client.sent == [i18n_t("error.resultDeliveryFailed", "en")] and client.uploads == []
+    else:
+        assert announced == [] and inbox == []
+        assert client.sent.count("Here is the report: report") == 1 and client.uploads == [str(report)]
+
+
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+async def test_a_committed_row_ranks_its_session_when_it_is_persisted(
+    engine, session, tmp_path, published, platform
+) -> None:
+    harness = _Harness(engine, tmp_path, platform, [])
+    # Committed, never delivered: the rank asserts persisted output, not delivery.
+    await _crash_after_commit(harness, "go", assistant("the answer"), finals=[True])
+
+    with engine.connect() as conn:
+        last_active = conn.execute(
+            select(agent_sessions.c.last_active_at).where(agent_sessions.c.id == SESSION)
+        ).scalar_one()
+    assert last_active != NOW
+    activity = [payload for name, payload in published if name == "session.activity"]
+    assert len(activity) == (1 if platform == "avibe" else 0)
+
+
+# --- round 4 self-review: sweep liveness, self-explaining finals, per-row target filtering ---
+
+
+async def test_a_startup_sweep_never_waits_for_a_running_session(engine, session, tmp_path, published) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(arguments, ctx):
+        started.set()
+        await release.wait()
+        return ToolResult((text("ok"),))
+
+    harness = _Harness(engine, tmp_path, "avibe", _tool_turn(), tools=[FakeTool("echo", execute=slow)])
+    running = asyncio.create_task(harness.agent.handle_message(harness.request("work")))
+    await started.wait()
+    try:
+        # The running Session's own resume already did T2, T3 and D1; the sweep must not block on it.
+        await asyncio.wait_for(harness.agent.restore_pending_deliveries({"avibe"}), timeout=2)
+    finally:
+        release.set()
+        await running
+
+
+@pytest.mark.parametrize("final", ["refusal", "empty"])
+async def test_a_crash_after_a_failed_final_still_shows_its_explanation(
+    engine, session, tmp_path, published, final
+) -> None:
+    from core.session_turns import SessionTurnManager
+
+    message = AssistantMessage((), ORIGIN, "refusal" if final == "refusal" else "stop")
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(message)]])
+    request = harness.request("answer")
+    turn_id = _turn(request.context)
+
+    class _Crash(BaseException):
+        pass
+
+    async def crash_before_settlement(_run) -> None:
+        raise _Crash()
+
+    harness.agent._settle = crash_before_settlement
+    with pytest.raises(_Crash):
+        await harness.agent.handle_message(request)
+    manager = SessionTurnManager(harness.controller, build_context=lambda sid: request.context)
+    manager._engine = engine
+    notices: list[str] = []
+
+    async def emit(_context, kind, body, **_kwargs):
+        notices.append(kind)
+        return "msg"
+
+    manager.controller = SimpleNamespace(**{**vars(harness.controller), "emit_agent_message": emit})
+    manager._active_identity = lambda *_args: None
+    await manager.recover_durable_delivery_state(SESSION, service_restart=True)
+    harness.new_agent()
+    await harness.agent.restore_pending_deliveries({"telegram"})
+
+    explanation = i18n_t(f"avibeAgent.error.{'refusal' if final == 'refusal' else 'emptyResponse'}", "en")
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+    assert (turn["terminal_outcome"], turn["terminal_evidence_kind"]) == ("failed", "committed_final")
+    assert json.loads(turn["terminal_evidence_json"])["result_text"] == explanation
+    assert notices == [] and harness.controller.im_client.sent.count(explanation) == 1
+
+
+async def test_a_sweep_delivers_only_rows_planned_for_its_ready_transport(
+    engine, session, tmp_path, published
+) -> None:
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("for wechat"))], [Done(assistant("for telegram"))]])
+    client = harness.controller.im_client
+    override = harness.request("scheduled report")
+    override.context.platform_specific["delivery_override"] = {"platform": "wechat", "channel_id": "W-report"}
+    client.fail_sends, client.fail_uploads = {1}, 1
+    await harness.agent.handle_message(override)
+    plain = harness.request("normal question")
+    # This Turn's resume retries the WeChat row, then its own reply fails too: both stay pending.
+    client.fail_sends, client.fail_uploads = set(range(client.attempts + 1, client.attempts + 5)), 2
+    await harness.agent.handle_message(plain)
+    assert len(await harness.agent.store.pending_deliveries(SESSION)) == 2
+    client.fail_sends, client.fail_uploads = set(), 0
+    attempts = client.attempts
+
+    harness.new_agent()
+    await harness.agent.restore_pending_deliveries({"telegram"})
+
+    replies = [(channel, body) for channel, route, body in client.routes if route == "reply"]
+    assert replies == [("C1", "for telegram")]
+    assert client.attempts == attempts + 1
+    [left] = await harness.agent.store.pending_deliveries(SESSION)
+    assert left.plan["target"]["platform"] == "wechat"
