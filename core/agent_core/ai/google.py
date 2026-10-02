@@ -14,33 +14,20 @@ import httpx
 
 from core.agent_core.ai._common import (
     ServedHopResolver,
-    assistant_message,
     auth_headers,
     content_parts,
+    drive_sse_stream,
     endpoint_origin,
-    incomplete_stream_error,
-    iter_sse_events,
     json_object,
-    open_stream,
-    partial_message,
-    parsed_arguments,
     prepare_messages,
-    read_response_body,
-    resolve_served_origin,
-    terminal_event,
+    StreamAssembler,
 )
-from core.agent_core.ai.errors import classify_error
 from core.agent_core.ai.provider import (
-    BlockEnd,
     Done,
     MediaLoader,
     ModelRequest,
     ProviderAdapter,
     ProviderError,
-    TextDelta,
-    ThinkingDelta,
-    ToolCallDelta,
-    ToolCallStart,
 )
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -51,7 +38,6 @@ from core.agent_core.messages import (
     ToolResultMessage,
     UserMessage,
 )
-
 
 class GoogleAdapter(ProviderAdapter):
     """Adapter for Gemini's native streaming generate-content protocol."""
@@ -81,8 +67,16 @@ class GoogleAdapter(ProviderAdapter):
 
     async def _stream(self, request: ModelRequest, cancel: CancelToken) -> AsyncIterator[Any]:
         target = endpoint_origin(request.endpoint)
+        assembler = StreamAssembler(
+            origin=target,
+            protocol=self.protocol,
+            verified_origin=not self._gateway,
+            endpoint_url=request.endpoint.base_url,
+        )
         if cancel.cancelled:
-            yield _aborted(cancel.reason, target)
+            terminal = assembler.terminal(assembler.aborted(cancel.reason))
+            if terminal is not None:
+                yield terminal
             return
         prepared = await prepare_messages(
             request.messages,
@@ -93,240 +87,276 @@ class GoogleAdapter(ProviderAdapter):
             cancel=cancel,
         )
         if isinstance(prepared, ProviderError):
-            yield prepared
+            terminal = assembler.terminal(prepared)
+            if terminal is not None:
+                yield terminal
             return
         transformed_messages, loaded_images = prepared
         if cancel.cancelled:
-            yield _aborted(cancel.reason, target)
+            terminal = assembler.terminal(assembler.aborted(cancel.reason))
+            if terminal is not None:
+                yield terminal
             return
-        content: list[Any] = []
-        calls: list[dict[str, Any]] = []
-        usage = None
         finish_reason: str | None = None
-        streamed = False
-        terminal_seen = False
-        origin = target
-        verified = not self._gateway
+        protocol_terminal = False
+        part_sequence = 0
+        text_key: Any = ("text", 0)
+        thinking_key: Any = ("thinking", 0)
+        last_part_kind: str | None = None
         try:
             payload = build_google_payload(request, transformed_messages, loaded_images=loaded_images)
             headers = auth_headers(request.endpoint, provider="google", gateway=self._gateway)
             headers.setdefault("content-type", "application/json")
             url = _google_url(request.endpoint.base_url, request.endpoint.model_id)
-            async with open_stream(
-                self._client,
-                method="POST",
-                url=url,
-                json_body=payload,
-                headers=headers,
-                cancel=cancel,
-            ) as response:
-                if response is None:
-                    yield _aborted(cancel.reason, origin, content, usage, verified)
-                    return
-                resolved_origin = await resolve_served_origin(
-                    request.endpoint,
-                    response.headers,
-                    self._served_hop_resolver,
-                    gateway=self._gateway,
-                    cancel=cancel,
-                )
-                if resolved_origin is None:
-                    yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
-                    return
-                origin, verified = resolved_origin
-                if response.status_code >= 400:
-                    body = await read_response_body(response, cancel)
-                    if body is None:
-                        yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
-                        return
-                    yield terminal_event(
-                        response,
-                        classify_error(status=response.status_code, body=body, headers=response.headers),
-                    )
-                    return
-                async for event in iter_sse_events(response, cancel):
+            async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
+                nonlocal finish_reason, protocol_terminal, part_sequence
+                nonlocal text_key, thinking_key, last_part_kind
+                async for event in events:
                     if cancel.cancelled:
-                        yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
+                        terminal = assembler.terminal(assembler.aborted(cancel.reason))
+                        if terminal is not None:
+                            yield terminal
                         return
                     if not event.data:
                         continue
                     chunk = json_object(event.data)
                     if chunk is None:
-                        yield terminal_event(
-                            response,
-                            _error(
-                                "Provider returned invalid Gemini JSON",
-                                streamed,
-                                content,
-                                origin,
-                                usage,
-                                verified,
-                                include_partial=usage is not None,
-                            ),
+                        terminal = assembler.terminal(
+                            assembler.error("Provider returned invalid Gemini JSON", kind="invalid_request")
                         )
+                        if terminal is not None:
+                            yield terminal
                         return
                     top_level_error = chunk.get("error")
+                    if top_level_error is not None and not isinstance(top_level_error, Mapping):
+                        terminal = assembler.terminal(
+                            assembler.error("Gemini error must be an object", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if isinstance(top_level_error, Mapping):
-                        yield terminal_event(
-                            response,
-                            _error(
+                        terminal = assembler.terminal(
+                            assembler.error(
                                 _string(top_level_error.get("message"))
                                 or json.dumps(dict(chunk), ensure_ascii=False),
-                                streamed,
-                                content,
-                                origin,
-                                usage,
-                                verified,
                                 code=_string(top_level_error.get("status"))
                                 or _string(top_level_error.get("code"))
                                 or None,
-                                include_partial=usage is not None,
-                            ),
+                            )
                         )
+                        if terminal is not None:
+                            yield terminal
                         return
-                    usage = _gemini_usage(chunk.get("usageMetadata")) or usage
+                    if chunk.get("usageMetadata") is not None and not isinstance(chunk.get("usageMetadata"), Mapping):
+                        terminal = assembler.terminal(
+                            assembler.error("Gemini usageMetadata must be an object", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    assembler.set_usage(_gemini_usage(chunk.get("usageMetadata")))
                     candidates = chunk.get("candidates")
+                    if candidates is not None and not isinstance(candidates, list):
+                        terminal = assembler.terminal(
+                            assembler.error("Gemini candidates must be an array", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if not isinstance(candidates, list) or not candidates:
                         feedback = chunk.get("promptFeedback")
                         if isinstance(feedback, Mapping) and feedback.get("blockReason"):
                             finish_reason = "SAFETY"
-                            terminal_seen = True
+                            protocol_terminal = True
                             break
                         continue
                     candidate = candidates[0]
                     if not isinstance(candidate, Mapping):
-                        continue
+                        terminal = assembler.terminal(
+                            assembler.error("Gemini candidate must be an object", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if isinstance(candidate.get("finishReason"), str):
                         finish_reason = candidate["finishReason"]
+                    elif candidate.get("finishReason") is not None:
+                        terminal = assembler.terminal(
+                            assembler.error("Gemini finishReason must be a string", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     candidate_content = candidate.get("content")
+                    if candidate_content is not None and not isinstance(candidate_content, Mapping):
+                        terminal = assembler.terminal(
+                            assembler.error("Gemini candidate content must be an object", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if isinstance(candidate_content, Mapping):
                         parts = candidate_content.get("parts")
+                        if parts is not None and not isinstance(parts, list):
+                            terminal = assembler.terminal(
+                                assembler.error("Gemini content parts must be an array", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         if isinstance(parts, list):
                             for part in parts:
                                 if not isinstance(part, Mapping):
-                                    continue
-                                signature = _string(part.get("thoughtSignature"))
+                                    terminal = assembler.terminal(
+                                        assembler.error("Gemini part must be an object", kind="invalid_request")
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
+                                raw_signature = part.get("thoughtSignature")
+                                if raw_signature is not None and not isinstance(raw_signature, str):
+                                    terminal = assembler.terminal(
+                                        assembler.error(
+                                            "Gemini thoughtSignature must be a string",
+                                            kind="invalid_request",
+                                        )
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
+                                signature = _string(raw_signature)
                                 value = _string(part.get("text"))
-                                if value:
+                                if part.get("text") is not None and not isinstance(part.get("text"), str):
+                                    terminal = assembler.terminal(
+                                        assembler.error("Gemini text must be a string", kind="invalid_request")
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
+                                if part.get("text") is not None and (value or signature):
                                     if part.get("thought") is True:
-                                        content = _append_thinking(content, value, signature or None)
-                                        streamed = True
-                                        yield ThinkingDelta(index=_find(content, ThinkingBlock), delta=value)
+                                        if last_part_kind != "thinking":
+                                            part_sequence += 1
+                                            thinking_key = ("thinking", part_sequence)
+                                        last_part_kind = "thinking"
+                                        emitted = assembler.thinking_delta(
+                                            thinking_key,
+                                            value,
+                                            signature=signature or None,
+                                        )
+                                        if emitted is not None:
+                                            yield emitted
                                     else:
-                                        content = _append_text(content, value)
-                                        streamed = True
-                                        yield TextDelta(index=_find(content, TextBlock), delta=value)
+                                        if last_part_kind != "text":
+                                            part_sequence += 1
+                                            text_key = ("text", part_sequence)
+                                        last_part_kind = "text"
+                                        if value:
+                                            emitted = assembler.text_delta(text_key, value)
+                                            if emitted is not None:
+                                                yield emitted
                                     if signature:
-                                        _set_thinking_signature(content, signature)
+                                        if part.get("thought") is True:
+                                            assembler.set_thinking_signature(thinking_key, signature)
+                                        else:
+                                            assembler.set_latest_thinking_signature(
+                                                signature,
+                                                fallback_key=("gemini-text-signature", text_key),
+                                            )
                                 function_call = part.get("functionCall")
+                                if function_call is not None and not isinstance(function_call, Mapping):
+                                    terminal = assembler.terminal(
+                                        assembler.error("Gemini functionCall must be an object", kind="invalid_request")
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
                                 if isinstance(function_call, Mapping):
+                                    if last_part_kind != "tool":
+                                        part_sequence += 1
+                                    last_part_kind = "tool"
                                     explicit_id = _string(function_call.get("id"))
                                     name = _string(function_call.get("name"))
                                     if not name:
-                                        yield terminal_event(
-                                            response,
-                                            _invalid_tool_metadata("functionCall name must not be empty"),
+                                        terminal = assembler.terminal(
+                                            assembler.error("functionCall name must not be empty", kind="invalid_request")
                                         )
+                                        if terminal is not None:
+                                            yield terminal
                                         return
                                     arguments = function_call.get("args")
                                     if arguments is not None and not isinstance(arguments, (Mapping, str)):
-                                        yield terminal_event(
-                                            response,
-                                            _invalid_tool_metadata("functionCall args must be an object or JSON string"),
+                                        terminal = assembler.terminal(
+                                            assembler.error(
+                                                "functionCall args must be an object or JSON string",
+                                                kind="invalid_request",
+                                            )
                                         )
+                                        if terminal is not None:
+                                            yield terminal
                                         return
                                     raw_args = (
                                         json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
                                         if isinstance(arguments, Mapping)
                                         else _string(arguments)
                                     )
-                                    state = (
-                                        next((item for item in calls if item["id"] == explicit_id), None)
-                                        if explicit_id
-                                        else None
+                                    key = ("google-call", assembler.tool_count())
+                                    start = assembler.tool_start(
+                                        key,
+                                        call_id=None,
+                                        native_id=explicit_id or None,
+                                        name=name,
+                                        signature=signature or None,
                                     )
-                                    if state is None:
-                                        call_id = explicit_id or f"call_{len(calls)}"
-                                        state = {
-                                            "id": call_id,
-                                            "name": name,
-                                            "arguments": raw_args,
-                                            "arguments_obj": dict(arguments) if isinstance(arguments, Mapping) else None,
-                                            "signature": signature or None,
-                                        }
-                                        calls.append(state)
-                                        content.append(
-                                            ToolCallBlock(
-                                                id=call_id,
-                                                native_id=call_id,
-                                                name=name,
-                                                arguments={},
-                                                signature=state["signature"],
-                                            )
-                                        )
-                                        state["content_index"] = len(content) - 1
-                                        streamed = True
-                                        yield ToolCallStart(index=state["content_index"], id=call_id, name=name)
+                                    if start is not None:
+                                        yield start
+                                    if isinstance(arguments, Mapping):
+                                        emitted = assembler.tool_arguments_object(key, arguments)
+                                        if emitted is not None:
+                                            yield emitted
                                     else:
-                                        if isinstance(arguments, Mapping):
-                                            existing = state.get("arguments_obj")
-                                            if isinstance(existing, dict):
-                                                existing.update(arguments)
-                                                state["arguments"] = json.dumps(existing, ensure_ascii=False, separators=(",", ":"))
-                                            else:
-                                                state["arguments"] += raw_args
-                                        else:
-                                            state["arguments"] += raw_args
-                                        if signature:
-                                            state["signature"] = signature
-                                    if raw_args:
-                                        streamed = True
-                                        yield ToolCallDelta(
-                                            index=_nonnegative(state.get("content_index")),
-                                            arguments_delta=raw_args,
-                                        )
+                                        emitted = assembler.tool_arguments(key, raw_args)
+                                        if emitted is not None:
+                                            yield emitted
                     if finish_reason:
-                        terminal_seen = True
-                        break
+                        protocol_terminal = True
                 if cancel.cancelled:
-                    yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
+                    terminal = assembler.terminal(assembler.aborted(cancel.reason))
+                    if terminal is not None:
+                        yield terminal
                     return
-                if not terminal_seen:
-                    yield terminal_event(
-                        response,
-                        incomplete_stream_error(
-                            content,
-                            origin=origin,
-                            usage=usage,
-                            streamed=streamed,
-                            verified_origin=verified,
-                            protocol=self.protocol,
-                        ),
-                    )
+                if not protocol_terminal:
+                    terminal = assembler.terminal(assembler.incomplete())
+                    if terminal is not None:
+                        yield terminal
                     return
-                for index in range(len(content)):
-                    yield BlockEnd(index=index)
-                final = _final(content, calls, origin, finish_reason or ("tool_use" if calls else "stop"), usage, verified)
-                if isinstance(final, ProviderError):
-                    yield terminal_event(response, final)
-                else:
-                    yield terminal_event(response, Done(final))
+                for event in assembler.block_end_events():
+                    yield event
+                final = assembler.finalize(
+                    _normalize_stop(finish_reason, assembler.has_tools())
+                )
+                terminal = assembler.terminal(final if isinstance(final, ProviderError) else Done(final))
+                if terminal is not None:
+                    yield terminal
+            async for event in drive_sse_stream(
+                self._client,
+                method="POST",
+                url=url,
+                json_body=payload,
+                headers=headers,
+                cancel=cancel,
+                assembler=assembler,
+                endpoint=request.endpoint,
+                resolver=self._served_hop_resolver,
+                gateway=self._gateway,
+                translate=translate,
+            ):
+                yield event
         except Exception as exc:
-            yield classify_error(
-                exc=exc,
-                streamed=streamed,
-                partial=(
-                    partial_message(
-                        content,
-                        origin=origin,
-                        stop_reason="error",
-                        usage=usage,
-                        verified_origin=verified,
-                    )
-                    if streamed or usage is not None
-                    else None
-                ),
-            )
+            terminal = assembler.terminal(assembler.exception(exc))
+            if terminal is not None:
+                yield terminal
 
 
 def build_google_payload(
@@ -456,48 +486,17 @@ def _google_parts(
     return result or [{"text": "(no content)"}]
 
 
-def _final(
-    content: list[Any],
-    calls: list[Mapping[str, Any]],
-    origin: Any,
-    reason: str,
-    usage: Any,
-    verified: bool,
-) -> AssistantMessage | ProviderError:
-    final: list[Any] = []
-    call_index = 0
-    for block in content:
-        if isinstance(block, ToolCallBlock):
-            state = calls[call_index] if call_index < len(calls) else {}
-            arguments = parsed_arguments(str(state.get("arguments", "")), tool_name=block.name)
-            if isinstance(arguments, ProviderError):
-                return arguments
-            final.append(
-                ToolCallBlock(
-                    id=block.id,
-                    native_id=block.native_id,
-                    name=block.name,
-                    arguments=arguments,
-                    signature=state.get("signature") or block.signature,
-                )
-            )
-            call_index += 1
-        else:
-            final.append(block)
-    stop = _normalize_stop(reason, bool(calls))
-    return assistant_message(final, origin=origin, stop_reason=stop, usage=usage, verified_origin=verified)
-
-
 def _gemini_usage(value: Any) -> Any:
     if not isinstance(value, Mapping):
         return None
     from core.agent_core.messages import Usage
 
+    cache_read_tokens = _nonnegative(value.get("cachedContentTokenCount"))
     return Usage(
-        input_tokens=_nonnegative(value.get("promptTokenCount")),
+        input_tokens=max(0, _nonnegative(value.get("promptTokenCount")) - cache_read_tokens),
         output_tokens=_nonnegative(value.get("candidatesTokenCount"))
         + _nonnegative(value.get("thoughtsTokenCount")),
-        cache_read_tokens=_nonnegative(value.get("cachedContentTokenCount")),
+        cache_read_tokens=cache_read_tokens,
         cache_write_tokens=0,
         reasoning_tokens=_nonnegative(value.get("thoughtsTokenCount")) if "thoughtsTokenCount" in value else None,
     )
@@ -570,89 +569,6 @@ def _sanitize_schema(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_schema(item) for item in value]
     return value
-
-
-def _append_text(content: list[Any], value: str) -> list[Any]:
-    if content and isinstance(content[-1], TextBlock):
-        content[-1] = TextBlock(text=(content[-1].text or "") + value)
-        return content
-    content.append(TextBlock(text=value))
-    return content
-
-
-def _append_thinking(content: list[Any], value: str, signature: str | None) -> list[Any]:
-    if content and isinstance(content[-1], ThinkingBlock):
-        block = content[-1]
-        content[-1] = ThinkingBlock(text=block.text + value, signature=signature or block.signature)
-        return content
-    content.append(ThinkingBlock(text=value, signature=signature))
-    return content
-
-
-def _set_thinking_signature(content: list[Any], signature: str) -> None:
-    for index in range(len(content) - 1, -1, -1):
-        block = content[index]
-        if isinstance(block, ThinkingBlock):
-            content[index] = ThinkingBlock(text=block.text, signature=signature)
-            return
-
-
-def _find(content: list[Any], kind: type[Any]) -> int:
-    for index in range(len(content) - 1, -1, -1):
-        if isinstance(content[index], kind):
-            return index
-    return 0
-
-
-def _error(
-    message: str,
-    streamed: bool,
-    content: list[Any],
-    origin: Any,
-    usage: Any,
-    verified: bool,
-    *,
-    code: str | None = None,
-    include_partial: bool = False,
-) -> ProviderError:
-    return classify_error(
-        body=message,
-        code=code,
-        streamed=streamed,
-            partial=(
-                partial_message(
-                    content,
-                    origin=origin,
-                    stop_reason="error",
-                    usage=usage,
-                    verified_origin=verified,
-                )
-                if streamed or include_partial or usage is not None
-                else None
-            ),
-    )
-
-
-def _invalid_tool_metadata(message: str) -> ProviderError:
-    return ProviderError(kind="invalid_request", message=message, retryable=False)
-
-
-def _aborted(reason: str | None, origin: Any, content: list[Any] | None = None, usage: Any = None, verified: bool = True) -> ProviderError:
-    return ProviderError(
-        kind="aborted",
-        message=reason or "provider request aborted",
-        retryable=False,
-        partial=(
-            partial_message(
-                content,
-                origin=origin,
-                usage=usage,
-                verified_origin=verified,
-            )
-            if content or usage is not None
-            else None
-        ),
-    )
 
 
 def _google_url(base_url: str, model: str) -> str:

@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from core.agent_core.ai._common import endpoint_origin
+from core.agent_core.ai._common import endpoint_origin, sanitize_endpoint_text
 from core.agent_core.ai.errors import classify_error
 from core.agent_core.ai.provider import ModelEndpoint
 from core.agent_core.ai.sse import SSEParser
@@ -167,6 +167,29 @@ def test_empty_provider_custom_endpoints_have_distinct_origins() -> None:
     assert left != right
     assert left.provider.startswith("endpoint:")
     assert right.provider.startswith("endpoint:")
+
+
+def test_unnamed_custom_endpoint_origin_is_credential_free() -> None:
+    origin = endpoint_origin(
+        ModelEndpoint(
+            "openai_chat",
+            "https://user:secret@one.example:8443/v1?api_key=query-secret",
+            "same-model",
+            "token",
+        )
+    )
+
+    assert "secret" not in origin.provider
+    assert "query-secret" not in origin.provider
+    assert origin.provider == "endpoint:https://one.example:8443/v1"
+
+
+def test_endpoint_redaction_handles_punctuation_in_credentials() -> None:
+    endpoint = "https://user:p,ss@one.example:8443/v1?token=query-secret"
+
+    message = sanitize_endpoint_text(f"request failed at {endpoint}", endpoint)
+
+    assert message == "request failed at https://one.example:8443/v1"
 
 
 def test_error_classification_preserves_retry_after_and_stream_boundary() -> None:

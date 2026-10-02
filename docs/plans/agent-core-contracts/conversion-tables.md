@@ -19,7 +19,57 @@ rules on top of those mappings.
 | Origin | Direct requests use the endpoint origin. Gateway requests parse only `x-avibe-served-hop`, whose JSON object must contain exactly `provider`, `api`, and `model`. A missing or invalid report makes the response unverified: thinking and tool-call signatures are nulled, and redacted thinking is dropped. |
 | Cancellation | `CancelToken` ends the HTTP stream and yields one non-retryable `ProviderError(kind="aborted")`. Opening, stream reads, error-body reads, media loads, and served-hop resolution all use the shared cancellation-aware await owner. |
 | Retry boundary | `ProviderError.retryable` is false once any model content delta or tool-call start/delta was emitted. A Responses `ToolCallStart` therefore makes a later provider failure non-retryable. |
-| Partial and abort | The shared `partial_message` policy is used by all four adapters. Usage captured before the first visible delta is retained, and cancellation returns the assembled `AssistantMessage` whenever content or usage exists, including an empty message with usage only. |
+| Partial and abort | The shared `partial_message` policy is used by all four adapters. Usage captured before the first visible delta is retained, and errors/abort carry an assembled `AssistantMessage` whenever visible content or usage exists; empty placeholder slots alone do not count as streamed output, while non-empty terminal snapshots do. Consumer/task cancellation is preserved even if response cleanup fails. |
+| Retry admission | `RetryPolicy.delay` in `core/agent_core/agent/models.py` applies only the bounded retry count/time budget and obeys `ProviderError.retryable`; it does not reject a usage-only partial or infer a second streamed-output boundary. `test_retry_obeys_provider_flag_and_allows_usage_only_partial` is the loop proof. |
+
+## Shared stream assembler and dispatch ledger
+
+`StreamAssembler` in `core/agent_core/ai/_common.py` is the only owner of
+stream-boundary state, and `drive_sse_stream` is the only lifecycle owner.
+Adapter modules translate wire fields from the driver's shared SSE iterator into
+assembler calls; they do not open/close responses, classify retryability,
+construct partials, mark terminal state, or parse final tool arguments.
+
+| Concern | Single owner | Adapter call sites |
+| --- | --- | --- |
+| Content accumulation and visible-output flag | `StreamAssembler.text_delta`, `thinking_delta`, `tool_start`, `tool_arguments` | `anthropic.py` content-block branches; `openai_chat.py` delta branches; `openai_responses.py` output/reasoning/tool branches; `google.py` candidate-part branches |
+| Stable tool id and native id map | `StreamAssembler.tool_start`, `tool_state` | The four adapters' tool-call translation branches only |
+| Final JSON argument validation | `StreamAssembler.finalize` → `parsed_arguments` | The four adapters call `finalize` once after their protocol terminator; malformed arguments are a C-2 terminal `invalid_request` deviation from Pi's permissive partial parser |
+| Usage and early usage retention | `set_usage` | Anthropic `message_start`/`message_delta`; Chat usage chunks; Responses terminal response; Gemini `usageMetadata` |
+| Partial on every error and abort | `StreamAssembler.partial`, `error`, `exception`, `aborted`, `incomplete` | `drive_sse_stream` owns HTTP, transport-read, error-body, cancellation, and translator exceptions; protocol translators only request assembler errors |
+| Exactly one terminal event before response cleanup | `drive_sse_stream` → `StreamAssembler.terminal` | The driver commits the translator's candidate or its own transport/incomplete outcome before `response.aclose`; cleanup cannot replace a consumer/task cancellation |
+| Endpoint redaction | `sanitize_endpoint_text` in `StreamAssembler.terminal`, `error`, and `exception` | Includes preparation errors, HTTP error bodies, stream errors, network errors, and close failures |
+| Unknown wire event policy | `dispatch_wire_event` plus protocol frame validation | Anthropic and Responses use explicit protocol event sets; Chat and Gemini use implicit frame kinds and validate their payload shapes directly. Unknown explicit types are ignored like Pi. Anthropic also accepts a valid data-only SSE frame whose JSON `type` is known; this is a rule (b) data-loss prevention deviation because SSE `event` is optional. |
+
+The shared dispatch helper only identifies a known event. Each adapter then
+validates the shape of that known event and emits exactly one terminal
+`invalid_request` error for malformed metadata. Thus a future event type is
+forward-compatible, while a known event with an invalid payload cannot become a
+successful response.
+
+## Endpoint identity and redaction ledger
+
+Unnamed custom endpoints use `credential_free_endpoint_identity`: scheme,
+hostname, explicit port, and path only. Userinfo, query, and fragment are never
+part of `Origin.provider`; distinct endpoints remain distinct even when their
+provider field is empty.
+
+| Path that can carry endpoint text | Redaction owner | Proof |
+| --- | --- | --- |
+| Origin construction for an unnamed endpoint | `endpoint_origin` → `credential_free_endpoint_identity` | `test_unnamed_custom_endpoint_origin_is_credential_free` |
+| HTTP/provider error body | `StreamAssembler.error` → `sanitize_endpoint_text` | `test_error_message_redacts_quoted_json_nested_in_message` plus adapter error cases |
+| Network, cancellation, parser, and close exceptions | `StreamAssembler.exception`/`terminal` → `sanitize_endpoint_text` | `test_adapter_error_redaction_preserves_json_classification`, `test_close_failure_cannot_emit_a_second_terminal_event`, `test_all_adapters_cancel_at_every_http_lifecycle_phase` |
+| Media preparation and served-hop resolver failures | adapter preflight plus `drive_sse_stream` | `test_media_loader_failure_is_a_provider_error` and cancellation lifecycle matrix |
+| Adapter logs | none: adapters do not log endpoint URLs | source audit of all four adapter modules |
+
+The driver call sites are exactly `AnthropicAdapter._stream`,
+`OpenAIChatAdapter._stream`, `OpenAIResponsesAdapter._stream`, and
+`GoogleAdapter._stream`. The delayed transport-read regression exercises all
+four call sites and proves terminal delivery precedes response cleanup.
+
+| Shared driver branch | Canonical outcome | Recorded proof |
+| --- | --- | --- |
+| transport read raises after a visible delta, while response close is observable | one non-retryable `ProviderError(kind="network", partial=...)`, delivered before `response.aclose`; no second terminal | `test_delayed_transport_read_emits_terminal_before_close` across all four adapters |
 
 ## Pi branch audit
 
@@ -30,36 +80,125 @@ origin, retry, cancellation, media, or message-shape rules.
 
 | Protocol | Pi branch | Avibe handler | Result |
 | --- | --- | --- | --- |
-| Responses | `openai-responses-shared.ts:599-604` response id and output-item creation | `openai_responses.py:175-283` | Same slot creation order; Avibe stores canonical blocks. |
-| Responses | `:605-634` reasoning summary/text deltas | `openai_responses.py:209-220` | Same; unknown slots are ignored. |
-| Responses | `:635-654` output/refusal deltas | `openai_responses.py:182-208` | Same slot lookup; refusal is preserved as a canonical refusal stop. |
-| Responses | `:655-671` function-call argument delta/done | `openai_responses.py:290-319` | Same suffix and replacement rules; malformed metadata is canonical `invalid_request`. |
-| Responses | `:683-742` output-item finalization | `openai_responses.py:320-362` | Same arrival-order slots and final argument/signature capture. |
-| Responses | `:743-744` completed/incomplete | `openai_responses.py:363-412` | Same terminal response ownership; canonical stop reasons and usage. |
-| Responses | `:745-757` provider error/failed | `openai_responses.py:413-459` | Same classification, with Avibe's streamed retry boundary and partial message. |
-| Responses | `:759-777` missing terminal/unfinished call | `openai_responses.py:474-487` and `_common.py:298-323` | Same terminal requirement; Avibe emits canonical `ProviderError`. |
-| Responses | unknown event fallthrough | `openai_responses.py:460-473` | Same: ignored for forward compatibility. |
-| Chat | `openai-completions.ts:553-565` chunk metadata and usage | `openai_chat.py:154-199` | Same relevant metadata/usage behavior. |
-| Chat | `:567-585` choice finish reason | `openai_chat.py:199-207` and `_normalize_stop` | Same known mapping; unknown values become canonical `error`. |
-| Chat | `:586-633` text and legacy reasoning fields | `openai_chat.py:199-209` and `530-536` | Same first non-empty reasoning field and visible deltas. |
-| Chat | `:635-661` tool-call state machine | `openai_chat.py:210-273` | Same index/id correlation; an id arriving before the name is retained and reused. |
-| Chat | `:665-675` reasoning-details accumulation | `openai_chat.py:210-212` and `538-578` | Same consecutive text/summary merge and opaque-entry preservation. |
-| Chat | `:680-701` finish blocks and terminal checks | `openai_chat.py:285-318` | Same final argument parsing and terminal requirement. |
-| Chat | top-level provider error | `openai_chat.py:175-198` | Same classification, with canonical partial usage and streamed retry boundary. |
-| Chat | aborted/error cleanup | `openai-completions.ts:702-724` | Same assembled partial policy through `_common.partial_message`. |
-| Anthropic | `anthropic-messages.ts:665-690` message start | `anthropic.py:192-194` and `_usage` | Same early usage capture; cache-write total is retained. |
-| Anthropic | `:691-738` block start | `anthropic.py:194-257` | Same supported text/thinking/redacted/tool blocks; opaque payloads follow C-1 origin rules. |
-| Anthropic | `:739-784` content deltas | `anthropic.py:257-301` | Same supported delta accumulation and signature append. |
-| Anthropic | `:785-816` block stop | `anthropic.py:302-305` | Same block finalization. |
-| Anthropic | `:817-860` message delta and usage merge | `anthropic.py:306-320` and `_usage` | Same non-null usage merge and stop normalization. |
-| Anthropic | `:863-899` abort/error terminal path | `anthropic.py:381-392` and `623-635` | Same assembled partial behavior; cancellation is the C-2 non-retryable `aborted` kind. |
-| Anthropic | unknown event/content block | `anthropic.py:194-257` and `346-352` | Same Pi ignore policy; later deltas for an unknown block are ignored. |
-| Google | `google-generative-ai.ts:130-173` text/thought parts | `google.py:201-220` | Same thought marker; signatures are retained on their originating canonical block. |
-| Google | `:175-220` function-call parts | `google.py:221-281` | Same call emission; ID-less parallel parts remain distinct as required by C-2 canonical history. |
-| Google | `:224-251` finish reason and usage | `google.py:282-315` | Same usage accounting and stop mapping; failure reasons never become `stop`. |
-| Google | `:254-283` final block/abort checks | `google.py:285-315` and `642-655` | Same terminal requirement and assembled partial policy. |
-| Google | top-level error/prompt feedback | `google.py:148-199` | Same provider error classification with retryable transient status codes. |
-| Google | unknown fields/parts | `google.py:201-281` | Same permissive ignore behavior for fields Pi does not consume. |
+| Responses | `openai-responses-shared.ts:599-604` response id and output-item creation | `OpenAIResponsesAdapter._stream` → `response.output_item.added` | Same slot creation order; Avibe stores canonical blocks. |
+| Responses | `:605-634` reasoning summary/text deltas | `OpenAIResponsesAdapter._stream` → reasoning delta branches | Same; unknown slots are ignored. |
+| Responses | `:635-654` output/refusal deltas | `OpenAIResponsesAdapter._stream` → text/refusal branches | Same slot lookup; refusal is preserved as a canonical refusal stop for an existing message slot, while orphan refusal deltas are ignored like Pi. |
+| Responses | `:655-671` function-call argument delta/done | `OpenAIResponsesAdapter._stream` → argument branches | Same suffix and replacement rules; malformed metadata is canonical `invalid_request`. |
+| Responses | `:683-742` output-item finalization | `OpenAIResponsesAdapter._stream` and `_apply_terminal_output_items` | `output_item.done` follows Pi for arrival-order slots, argument finalization, and reasoning signatures; consecutive calls with omitted `output_index` are rebound by item id to prevent call loss (rule (b)); terminal `response.output` only backfills an existing reasoning signature, while refusal status is a C-2 deviation. |
+| Responses | `:743-744` completed/incomplete | `OpenAIResponsesAdapter._stream` → completed/incomplete branch | Same terminal response ownership; canonical stop reasons and usage, with cached read/write tokens excluded from `input_tokens`. |
+| Responses | `:745-757` provider error/failed | `OpenAIResponsesAdapter._stream` → failed/error branches | Same classification, with Avibe's streamed retry boundary and partial message. |
+| Responses | `:759-777` missing terminal/unfinished call | `OpenAIResponsesAdapter._stream` → `StreamAssembler.unfinished_tool_calls` | Same terminal requirement; Avibe emits canonical `ProviderError`. |
+| Responses | unknown event fallthrough | `dispatch_wire_event` and `_KNOWN_RESPONSE_EVENTS` | Same: ignored for forward compatibility. |
+| Chat | `openai-completions.ts:553-565` chunk metadata and usage | `OpenAIChatAdapter._stream` → chunk metadata/usage | Same relevant metadata/usage behavior, including cache subtraction from `input_tokens`. |
+| Chat | `:567-585` choice finish reason | `OpenAIChatAdapter._stream` and `_normalize_stop` | Known mapping is the same, including `end -> stop`; unknown values become canonical `Done(stop_reason="error")` instead of Pi's provider error, as required by C-2 stop reasons. |
+| Chat | `:586-633` text and legacy reasoning fields | `OpenAIChatAdapter._stream` → content/reasoning branches | Same first non-empty reasoning field and visible deltas. |
+| Chat | `:635-661` tool-call state machine | `OpenAIChatAdapter._stream` and `StreamAssembler.tool_key` | Same index/id correlation; an id arriving before the name is retained and reused. |
+| Chat | `:665-675` reasoning-details accumulation | `OpenAIChatAdapter._stream` → `merge_thinking_details` | Same consecutive text/summary merge and opaque-entry preservation. |
+| Chat | `:680-701` finish blocks and terminal checks | `OpenAIChatAdapter._stream` → finish/EOF checks | Same terminal requirement; malformed final arguments are a C-2 `invalid_request` deviation from Pi's permissive parser. |
+| Chat | top-level provider error | `OpenAIChatAdapter._stream` → top-level error branch | Same classification, with canonical partial usage and streamed retry boundary. |
+| Chat | aborted/error cleanup | `openai-completions.ts:702-724` | Same assembled partial policy through `StreamAssembler`. |
+| Anthropic | `anthropic-messages.ts:665-690` message start | `AnthropicAdapter._stream` → `message_start` | Same early usage capture; cache-write total is retained. |
+| Anthropic | `:691-738` block start | `AnthropicAdapter._stream` → `content_block_start` | Same supported text/thinking/redacted/tool blocks and initial content; non-empty initial `tool_use.input` is retained when no JSON delta follows (rule (b), preventing tool-argument loss); opaque payloads follow C-1 origin rules. |
+| Anthropic | `:739-784` content deltas | `AnthropicAdapter._stream` → `content_block_delta` | Same supported delta accumulation and signature append; malformed known fields are a C-2 terminal `invalid_request` deviation. |
+| Anthropic | `:785-816` block stop | `AnthropicAdapter._stream` → `content_block_stop` | Same block finalization. |
+| Anthropic | `:817-860` message delta and usage merge | `AnthropicAdapter._stream` → `message_delta` | Same non-null usage merge and stop normalization; explicit null fields do not erase earlier counts; malformed usage is terminal `invalid_request`, and unknown stop values become canonical `error` under C-2 stop-reason normalization. |
+| Anthropic | stream end after `message_start` | `AnthropicAdapter._stream` → post-loop finalization | Same as Pi: even a captured `message_delta.stop_reason` requires `message_stop`; EOF after `message_start` is incomplete and retains early usage. A stream with no `message_start` may complete from a captured stop reason, matching Pi's handler state. |
+| Anthropic | `:863-899` abort/error terminal path | `AnthropicAdapter._stream` → error/cleanup branches | Same assembled partial behavior; cancellation is the C-2 non-retryable `aborted` kind. |
+| Anthropic | unknown event/content block | `dispatch_wire_event` and `content_block_start` | Unknown named events and unknown content blocks follow Pi's ignore policy; a valid data-only SSE frame is accepted as a rule (b) data-loss prevention deviation. |
+| Google | `google-generative-ai.ts:130-173` text/thought parts | `GoogleAdapter._stream` → candidate parts | Same thought marker; thought signatures are retained on the originating thinking block, or on an empty canonical thinking block when a signed non-thinking text part has no thinking block (canonical schema has no text signature field). A later text signature cannot replace an existing signed thinking block. |
+| Google | `:175-220` function-call parts | `GoogleAdapter._stream` → function-call parts | Same call emission; ID-less parallel parts remain distinct as required by C-2 canonical history. |
+| Google | `:224-251` finish reason and usage | `GoogleAdapter._stream` → finish/usage branches | Usage subtracts cached-content tokens from `input_tokens`; Avibe retains canonical `safety` for safety finishes under C-2 while Pi maps the safety family to `error`; unknown/failure reasons become canonical `Done(stop_reason="error")` instead of Pi's provider error. |
+| Google | `:254-283` final block/abort checks | `GoogleAdapter._stream` → final/cleanup branches | Same terminal requirement and assembled partial policy. |
+| Google | top-level error/prompt feedback | `GoogleAdapter._stream` → error/prompt feedback | Same provider error classification with retryable transient status codes; prompt blocking is canonical `safety` under C-2 although Pi has no equivalent prompt-feedback branch. |
+| Google | unknown fields/parts | `dispatch_wire_event` and candidate-part branches | Same permissive ignore behavior for fields Pi does not consume. |
+
+### Branch closure by protocol
+
+The rows below enumerate the state-machine branches in Pi `7fbbd5f`; the
+recorded fixture names point to the table-driven tests that exercise the
+canonical projection. “Ignore” is intentional Pi parity, not an unhandled
+case.
+
+| Protocol | Pi branch | Avibe outcome | Recorded proof |
+| --- | --- | --- | --- |
+| Responses | `response.created`, `response.in_progress`, `response.queued` | `created`/`in_progress` record state and validate an optional response object; `queued` is a no-op; unknown type is ignored | `test_responses_known_lifecycle_events_are_accounted_for`, `responses_unknown_event_is_ignored` |
+| Responses | `response.output_item.added` reasoning/message/function_call | create arrival-order slot; malformed item/name/arguments is terminal `invalid_request` | `responses_output_slots_arrive_in_order` |
+| Responses | missing `output_index` on output-item and argument events | non-tool items retain Pi's shared fallback; consecutive function calls allocate distinct internal fallback slots and rebind by `item_id` | `test_responses_missing_output_index_uses_one_shared_fallback_slot`, `test_responses_consecutive_missing_output_indexes_rebind_tool_slots` |
+| Responses | `response.reasoning_summary_text.delta`, `response.reasoning_text.delta` | thinking delta for an existing slot; unknown slot ignored | `responses_output_slots_arrive_in_order` |
+| Responses | `response.reasoning_summary_part.added` | ignore | `test_responses_known_lifecycle_events_are_accounted_for` |
+| Responses | `response.reasoning_summary_part.done` | append `"\n\n"` to the thinking block, matching Pi; a present non-integer `output_index` is terminal malformed metadata | `test_responses_summary_done_adds_separator`, `test_responses_summary_done_replaces_streaming_separator_after_late_delta`, `test_responses_summary_done_rejects_non_integer_output_index` |
+| Responses | `response.output_text.delta`, `response.refusal.delta` | text delta; refusal sets canonical `refusal` stop only for an existing message slot, while orphan refusal deltas are ignored | `responses_terminal_refusal_is_contract_deviation`, `responses_orphan_refusal_delta_is_ignored` |
+| Responses | `response.function_call_arguments.delta`, `.done` | accumulate and emit only the unseen suffix; orphan slots are ignored like Pi; malformed arguments for a known slot are terminal | `test_responses_argument_done_emits_only_the_unseen_suffix`, `test_responses_orphan_argument_events_are_ignored_like_pi` |
+| Responses | `response.custom_tool_call_input.delta`, `.done`; `custom_tool_call` output items | ignored because Avibe has no canonical custom-tool block; function-call events remain the only tool-call wire form | `test_responses_custom_tool_events_are_ignored_without_custom_tool_blocks` |
+| Responses | `response.output_item.done` reasoning/message/function_call | backfill reasoning signatures, replace the final message snapshot, create a missing function-call slot, emit final argument suffixes, close visible and empty slots before later deltas, or finish tool calls; malformed item is terminal | `test_responses_message_output_item_done_backfills_text`, `test_responses_output_item_done_can_create_a_function_call_slot`, `test_responses_output_item_done_closes_slot_before_late_delta`, `test_responses_empty_slots_close_before_late_deltas` |
+| Responses | `response.done` alias | normalized to `response.completed` | `test_responses_done_alias_follows_terminal_response_state` |
+| Responses | `response.content_part.added/done`, `response.output_text.done`, `response.reasoning_text.done`, `response.reasoning_summary_text.done` | state/no-op | `test_responses_known_lifecycle_events_are_accounted_for` |
+| Responses | `response.completed`, `response.incomplete` | usage and terminal stop mapping; content filtering becomes `safety`, unsupported reasons are terminal errors; terminal message snapshots are not adopted, while refusal status is retained | `test_responses_incomplete_reasons_have_explicit_outcomes`, `test_responses_does_not_adopt_terminal_message_snapshot`, `test_responses_terminal_refusal_output_sets_refusal_stop_reason` |
+| Responses | `response.failed`, top-level `error` | classified provider error with partial and usage | `test_responses_top_level_error_frame_is_classified`, `_WIRE_EVENT_CASES` Responses rows |
+| Responses | missing terminal or unfinished tool call; final-only function calls in terminal `response.output` are ignored like Pi | terminal incomplete/invalid error with partial, or completed streamed tool call | `test_eof_without_protocol_terminal_is_not_success`, `test_responses_rejects_unfinished_tool_call_on_completed_response`, `test_responses_ignores_final_only_function_call_like_pi` |
+| Chat | chunk metadata, `usage`, and `choices[0].usage` fallback | retain usage fields; the choice-level fallback is used only when the chunk-level usage is absent | `test_chat_uses_choice_usage_fallback`, `chat_reasoning_details_merge` |
+| Chat | `choices[0].finish_reason` | canonical stop mapping, including compatibility value `end -> stop`; unknown value becomes canonical `stop_reason="error"` | `test_chat_finish_reason_end_maps_to_stop`, `test_chat_unknown_finish_reason_is_canonical_error`, `_WIRE_EVENT_CASES` Chat rows |
+| Chat | `delta.content` | text delta; wrong content/refusal field types are terminal malformed metadata | `chat_error_after_text_keeps_partial`, `test_chat_known_text_fields_reject_wrong_types` |
+| Chat | legacy reasoning fields | first non-empty field becomes thinking text/signature marker | `test_chat_reasoning_field_is_replayed_as_a_marker` |
+| Chat | `delta.tool_calls` | index/id/name correlation; late id binds to a stable canonical id; an absent index falls back to the native id alias | `chat_late_tool_id_uses_stable_canonical_id`, `test_chat_tool_call_without_integer_index_uses_native_id_alias` |
+| Chat | legacy `delta.function_call` | same single-tool state machine | `_WIRE_EVENT_CASES` legacy function-call row |
+| Chat | `delta.reasoning_details` | consecutive text/summary entries merge; opaque entries remain discrete | `chat_reasoning_details_merge` |
+| Chat | `delta.refusal` | preserve refusal text and canonical `refusal` stop reason; this is an Avibe C-2 deviation from Pi's text-only projection | `test_chat_refusal_stop_is_not_overwritten_by_later_stop_reason` |
+| Chat | top-level `error` | classified provider error with partial after deltas | `chat_error_after_text_keeps_partial` |
+| Chat | `[DONE]`, finish reason, missing terminal/close failure | `[DONE]` requires a finish reason; a finish reason may terminate at EOF; otherwise one terminal incomplete/transport error | `test_chat_requires_finish_reason_before_done_marker`, `test_chat_finish_reason_can_terminate_at_eof_without_done_marker`, `test_close_failure_cannot_emit_a_second_terminal_event` |
+| Anthropic | `message_start` | capture usage before visible output; malformed message/usage is terminal | `anthropic_message_start_stop_reason_survives_eof` |
+| Anthropic | `content_block_start` text/thinking/redacted/tool_use/fallback | create canonical block; initial tool input is retained even without a later delta; unknown block type and pre-output fallback are ignored; a mid-output fallback is terminal like Pi | `test_anthropic_nonempty_initial_tool_input_is_preserved_without_deltas`, `test_anthropic_ignores_unknown_content_block_types_like_pi`, `test_anthropic_pre_output_fallback_is_ignored_like_pi`, `test_anthropic_mid_output_fallback_is_terminal_like_pi` |
+| Anthropic | content deltas text/thinking/signature/input JSON | corresponding delta/state; wrong field types are terminal malformed metadata; wrong-kind and unknown delta variants are ignored | `test_anthropic_malformed_delta_is_terminal_invalid_request`, `test_anthropic_known_delta_fields_reject_wrong_types`, `test_anthropic_wrong_kind_delta_is_ignored_like_pi`, `test_anthropic_ignores_unknown_delta_variants_like_pi` |
+| Anthropic | known event shape validation | malformed indexes, envelopes, or usage objects are terminal `invalid_request` | `test_wire_event_matrix_has_one_explicit_outcome` malformed Anthropic tuples plus the focused malformed-event tests |
+| Anthropic | `content_block_stop` | block end only for non-empty visible output; late deltas for a closed block are ignored | `test_anthropic_streams_thinking_tool_arguments_and_usage`, `test_anthropic_empty_block_end_does_not_count_as_streamed_output` |
+| Anthropic | `message_delta` | merge non-null usage and normalize stop reason; explicit `null` fields preserve earlier `message_start` counts; malformed usage is terminal | `test_anthropic_streams_thinking_tool_arguments_and_usage`, `test_anthropic_null_delta_usage_does_not_erase_message_start_usage`, `test_anthropic_malformed_message_delta_usage_is_terminal_invalid_request` |
+| Anthropic | `message_stop` or EOF | `message_stop` completes only with a captured stop reason; after `message_start`, EOF without `message_stop` is incomplete even when a stop reason was captured; a no-`message_start` stream with a stop reason follows Pi's completion path | `test_anthropic_message_stop_without_reason_is_terminal_error`, `test_anthropic_message_start_requires_message_stop_even_with_stop_reason`, `test_anthropic_stop_reason_allows_eof_without_message_stop_like_pi` |
+| Anthropic | `error`/transport close | classified error with assembled partial and early usage; an empty placeholder block does not make the error non-retryable | `_WIRE_EVENT_CASES` Anthropic rows, `test_close_failure_cannot_emit_a_second_terminal_event` |
+| Anthropic | unknown top-level event | named unknown events are ignored before JSON parsing, matching Pi; valid data-only JSON frames are accepted under the documented rule (b) deviation, while malformed data-only frames are ignored like Pi | `test_anthropic_ignores_unknown_top_level_events_like_pi`, `test_anthropic_ignores_unknown_sse_event_before_parsing_like_pi`, `test_anthropic_malformed_data_only_frame_is_ignored_like_pi` |
+| Gemini | candidate text/thought parts | text or thinking delta; a text-part `thoughtSignature` backfills the latest thinking block, including an empty-text final part, or creates an empty signed thinking block when no thinking block exists; wrong signature types are terminal malformed metadata | `test_gemini_text_part_signature_is_kept_on_thinking_block`, `test_gemini_empty_text_part_keeps_thought_signature`, `test_gemini_text_signature_without_thinking_block_is_preserved`, `test_gemini_signed_thought_part_is_replayed`, `test_gemini_thought_signature_rejects_wrong_type` |
+| Gemini | function-call parts | tool start/delta with `thoughtSignature` on `ToolCallBlock.signature`; object and JSON-string arguments are parsed; parallel and repeated-id calls remain distinct | `test_gemini_function_call_signature_is_kept_on_tool_call`, `test_gemini_string_function_arguments_are_replayed`, `test_gemini_keeps_parallel_idless_calls_distinct`, `test_gemini_repeated_explicit_ids_remain_distinct_calls` |
+| Gemini | finish reason | canonical stop/length/safety/error mapping; safety remains a C-2 `safety` result even though Pi maps the safety family to `error`; later usage frames remain readable | `test_gemini_finish_reasons_preserve_safety_and_tool_errors`, `test_gemini_keeps_usage_after_finish_reason_frame` |
+| Gemini | `usageMetadata` | input, candidate, cached, and thought token accounting | `test_gemini_carries_tool_thought_signature_and_usage` |
+| Gemini | prompt feedback and top-level error | prompt blocking becomes canonical `safety` under C-2; top-level errors are classified provider errors | `_WIRE_EVENT_CASES` Gemini rows |
+| Gemini | malformed candidate/part/function metadata | terminal `invalid_request`; unknown fields remain ignored | `test_wire_event_matrix_has_one_explicit_outcome` malformed Gemini tuples plus the focused malformed-function test |
+| Gemini | EOF/close failure | terminal incomplete/transport error with partial | `test_eof_without_protocol_terminal_is_not_success` |
+
+## Recorded Pi stream differential
+
+Pi was driven at revision `7fbbd5f` in an isolated temporary checkout with
+credential-free stub transports. The runner fed the same recorded wire
+sequences used by `tests/agent_core/ai/test_pi_stream_differential.py` to
+Pi's `processResponsesStream`, `openai-completions.stream`, and
+`anthropic-messages.stream`, then projected both outputs to:
+`outcome`, canonical stop reason, canonical blocks, usage, error kind, and
+partial blocks. The run covered Responses, Chat, and Anthropic; Google was
+not included because this required differential run was explicitly limited to
+the three adapters named by the escalation.
+
+| Fixture | Pi projection | Avibe projection | Difference |
+| --- | --- | --- | --- |
+| `responses_output_slots_arrive_in_order` | reasoning `plan` with signed item, then text `answer`; `stop`; usage `2/3/reasoning=1` | same | none |
+| `responses_unknown_event_is_ignored` | empty successful response; `stop`; Pi's initialized usage shape | empty successful response; `stop`; usage remains unknown when the provider omits it | canonical optional usage does not invent provider counts |
+| `responses_missing_output_index_shares_pi_slot` | one undefined output slot correlates the function-call argument delta; provider-native composite id; Pi's initialized usage shape | one fallback slot correlates the same delta; stable canonical id plus native id; optional usage remains absent | C-2 canonical id and optional usage |
+| `responses_terminal_message_snapshot_is_not_adopted` | terminal message output does not replace the empty slot created by `output_item.added`; `stop`; Pi's initialized usage shape | same; optional usage remains absent | canonical optional usage does not invent provider counts |
+| `chat_reasoning_details_merge` | one thinking block with signature `reasoning.text=ab`; `stop`; the usage parser fills missing reasoning details with `0` | same block and stop; canonical usage keeps unknown reasoning details as `None` | canonical optional usage fields |
+| `chat_error_after_text_keeps_partial` | server error with text partial and Pi's zero-initialized usage | server error with text partial and absent usage | canonical optional usage does not invent provider counts |
+| `anthropic_message_start_stop_reason_survives_eof` | error partial with input usage `7`, empty content | same canonical partial | none |
+| `anthropic_unknown_event_is_ignored` | empty successful response with input usage `4` | same | none |
+| `responses_terminal_refusal_is_contract_deviation` | completed refusal projected as an empty text block with `stop` and zero-initialized usage | refusal text is retained with `refusal` and optional usage remains absent | C-2 canonical refusal stop reason; refusal is never folded into `stop` |
+| `chat_late_tool_id_uses_stable_canonical_id` | final provider id with Pi's initialized usage shape | stable id from `ToolCallStart` is retained, provider id is `native_id`, and optional usage remains absent | C-2 provider-event id stability |
+| `responses_consecutive_missing_output_indexes_rebind` | Pi's undefined slot is removed at each `output_item.done`, so both final calls survive with composite ids | item ids bind each call to a distinct internal fallback slot, preserving both streamed argument paths with canonical id/native id split | rule (b) data-loss prevention plus canonical ids |
+| `responses_empty_slots_ignore_late_deltas` | empty text and reasoning slots close on `output_item.done`; later deltas are ignored | same, with optional usage remaining absent | canonical optional usage |
+| `chat_finish_reason_end_maps_to_stop` | compatibility `finish_reason=end` maps to `stop`; no usage frame leaves Pi's initialized usage shape | same stop mapping; usage remains unknown | canonical optional usage |
+| `anthropic_null_delta_usage_preserves_message_start` | `message_start.input_tokens=7` survives null fields in `message_delta` | same | none |
+| `chat_malformed_tool_arguments` | Pi's permissive parser completes `read` with `{}` and `tool_use` | terminal `invalid_request` naming malformed arguments; partial has no tool block | C-2 canonical malformed-argument error |
+| `chat_eof_after_text_is_partial_abort` | missing finish reason becomes an error with text partial and Pi's initialized usage shape | same error/partial with optional usage absent | canonical optional usage |
+| `anthropic_empty_block_end_then_error` | empty text block is ended before the overloaded error; Pi retains the empty block in partial and does not apply the empty-slot retry boundary | empty placeholder does not count as streamed output, so retry remains allowed and partial is omitted | C-2 retry boundary |
+| `anthropic_malformed_delta` | Pi's null delta raises a generic stream error with the empty text block in partial | known malformed metadata is terminal `invalid_request`; empty placeholder is omitted from partial | C-2 malformed-event classification and retry boundary |
+
+The isolated Pi run was successful for all 18 fixtures across the three handlers. The only setup
+limitation was the absent upstream `node_modules`; the runner used local
+credential-free stubs and did not alter the Pi source or Avibe dependencies.
 
 ## Anthropic Messages
 
@@ -80,20 +219,22 @@ Anthropic stream events:
 | Wire event | Outcome | Provider event / state |
 | --- | --- | --- |
 | `message_start.message.usage` | delta/state | Initial `Usage`; `input_tokens` excludes cache reads and writes. |
-| `content_block_start` (`text`, `thinking`, `redacted_thinking`, `tool_use`) | delta/state | Creates the canonical block; `tool_use` emits `ToolCallStart`. Empty tool names are terminal `invalid_request`. |
+| `content_block_start` (`text`, `thinking`, `redacted_thinking`, `tool_use`) | delta/state | Creates the canonical block, preserves initial text/thinking/input, and `tool_use` emits `ToolCallStart`. Empty tool names are terminal `invalid_request`. |
 | `content_block_delta.text_delta` | delta | `TextDelta`. |
 | `content_block_delta.thinking_delta` | delta | `ThinkingDelta`. |
 | `content_block_delta.signature_delta` | state | Appends to the thinking signature. |
 | `content_block_delta.input_json_delta` | delta | `ToolCallDelta`; the complete JSON is parsed at `Done`. |
 | `content_block_stop` | delta | `BlockEnd`. |
 | `message_delta.stop_reason` | delta/state | Normalized stop reason; usage fields are merged. |
-| `message_stop` | Done | `Done(AssistantMessage)`. |
+| `message_delta.usage` with a non-object value | terminal `ProviderError` | `invalid_request`; malformed usage is never silently discarded. |
+| `message_stop` or clean EOF | Done or terminal `ProviderError` | `message_stop` yields `Done` when `message_delta.stop_reason` was present; after `message_start`, clean EOF without `message_stop` yields an incomplete error even when a stop reason was captured. A no-`message_start` stream with a stop reason follows Pi's clean-EOF completion path. |
 | `ping` | state | Ignored keepalive. |
+| SSE data-only frame with a known JSON event type | delta/state | Accepted because SSE `event` is optional; this is the documented rule (b) data-loss prevention deviation from Pi's event-name filter. |
 | `error` before deltas | retryable or terminal `ProviderError` | Provider error type selects the kind; `message_start` usage is retained in `partial` when present. |
 | `error` after deltas | terminal `ProviderError` | Partial content and usage are retained; `retryable=false`. |
 | unknown `content_block` type | state | Ignored like Pi; later deltas for an unknown block index are ignored. |
 | malformed JSON, block, delta, or redacted payload | terminal `ProviderError` | `invalid_request` for malformed provider metadata, otherwise `unknown`; never a successful `Done`. |
-| EOF without `message_stop` or response close failure | terminal `ProviderError` | Incomplete/transport failure, preserving partial content and usage. |
+| EOF without `message_stop` or response close failure | terminal `ProviderError` | After `message_start`, incomplete/transport failure preserves partial content and early usage regardless of a captured stop reason; close failures retain the same partial. |
 
 Anthropic stop reasons:
 
@@ -130,10 +271,10 @@ Chat stream events:
 | `choices[0].delta.tool_calls[].function.arguments` | delta | `ToolCallDelta`; fragments are parsed at `Done`. |
 | `choices[0].delta.function_call.name/arguments` | delta | Legacy single-call form; normalized into the same tool-call state machine. |
 | `choices[0].finish_reason` | state | Stop reason. Unknown values become terminal `error`, not `stop`. |
-| `usage` | state | `Usage` from prompt/completion tokens, cached prompt tokens, and reasoning completion details. |
+| `usage` | state | `Usage` from prompt/completion tokens, cached prompt tokens, and reasoning completion details; cached read/write tokens are excluded from `input_tokens`. |
 | top-level `error` frame before deltas | retryable or terminal `ProviderError` | Classified from error type/code. |
 | top-level `error` frame after deltas | terminal `ProviderError` | Partial content and usage are retained; `retryable=false`. |
-| `data: [DONE]` | Done | Completes the response. |
+| `data: [DONE]` | Done | Completes the response only after a `finish_reason`; a finish reason may also complete at clean EOF. |
 | malformed tool metadata, JSON, or EOF/close failure | terminal `ProviderError` | Invalid metadata is `invalid_request`; incomplete/transport failures retain partial state. |
 
 Chat stop reasons:
@@ -166,16 +307,17 @@ Responses stream events:
 | --- | --- | --- |
 | `response.created`, `response.in_progress`, `response.queued` | state | Records status; no visible delta. |
 | `response.output_text.delta` | delta | `TextDelta`. |
-| `response.refusal.delta` | delta | Refusal text delta; terminal `stop_reason="refusal"`. |
+| `response.refusal.delta` | delta/state | Refusal text delta and canonical `stop_reason="refusal"` only when its message slot exists; orphan deltas are ignored like Pi. |
 | `response.reasoning_summary_text.delta`, `response.reasoning_text.delta` | delta | `ThinkingDelta`. |
-| `response.reasoning_summary_part.added/done` | state | Recognized no-op lifecycle markers; future unknown event types remain ignored. |
+| `response.reasoning_summary_part.added` | state | Recognized no-op lifecycle marker; future unknown event types remain ignored. |
+| `response.reasoning_summary_part.done` | delta | Adds the Pi-compatible `"\n\n"` separator to the current reasoning block. |
 | `response.output_item.added` (`reasoning`) | state | Captures reasoning item id and encrypted content; does not mark output streamed by itself. |
-| `response.output_item.added` (`function_call`) | delta/state | `ToolCallStart`; because a canonical provider event was emitted, a later error is non-retryable under C-2. |
+| `response.output_item.added` (`function_call`) | delta/state | `ToolCallStart`; missing `output_index` uses a distinct internal fallback per consecutive call and later `item_id` events rebind to it; a later error is non-retryable under C-2. |
 | `response.function_call_arguments.delta` | delta | `ToolCallDelta`. |
 | `response.function_call_arguments.done` | delta/state | Emits any suffix not already seen and replaces the final argument buffer. |
-| `response.output_item.done` | state | Completes reasoning signatures or tool arguments. |
+| `response.output_item.done` | delta/state | Completes reasoning signatures, replaces the final message snapshot, emits unseen text/thinking and argument suffixes, and emits one `BlockEnd`; later deltas for the closed slot are ignored. |
 | `response.content_part.added/done`, `response.output_text.done`, reasoning `*.done` | state | Recognized no-op completion markers. |
-| `response.completed.response.usage` | Done | `Usage`; terminal status is normalized. |
+| `response.completed.response.usage` | Done | `Usage`; cached read/write tokens are excluded from `input_tokens`. Terminal status is normalized. Function calls and ordinary message/reasoning items listed only in terminal `response.output` are not adopted; existing reasoning signatures are backfilled and refusal status is detected. |
 | `response.incomplete.response.usage` without an error | Done | `max_output_tokens`/length becomes `length`; safety/content filtering becomes `safety`; other incomplete reasons become terminal `error`. |
 | `response.incomplete.response.error` | retryable or terminal `ProviderError` | Error code and usage are retained; after visible deltas `retryable=false`. |
 | `response.failed` / top-level `error` | retryable or terminal `ProviderError` | Error code classification with partial content and usage. |
@@ -190,7 +332,7 @@ Responses terminal states:
 | Refusal deltas | `refusal` |
 | `incomplete_details.reason=max_output_tokens` or `length` | `length` |
 | `incomplete_details.reason=content_filter` or `safety` | `safety` |
-| Failed | `error` |
+| Failed/cancelled | terminal `ProviderError` (classified `unknown` when no provider error code is present) |
 
 ## Google Gemini
 
@@ -214,8 +356,8 @@ Gemini stream events:
 | `candidates[0].content.parts[].text` with `thought=true` | delta | `ThinkingDelta`. |
 | `candidates[0].content.parts[].thoughtSignature` | state | Thinking or tool-call signature. |
 | `candidates[0].content.parts[].functionCall` | delta | `ToolCallStart` and `ToolCallDelta`; argument fragments are accumulated and parsed at `Done`. Empty names or malformed args are terminal `invalid_request`. |
-| `candidates[0].finishReason` | Done | Normalized stop reason. |
-| `usageMetadata` | state | `Usage` from prompt, candidate, cached-content, and thought token counts. |
+| `candidates[0].finishReason` | Done | Normalized stop reason; parsing continues so later `usageMetadata` is retained. |
+| `usageMetadata` | state | `Usage` from prompt, candidate, cached-content, and thought token counts; cached-content tokens are excluded from `input_tokens`. |
 | `promptFeedback.blockReason` | Done | `safety` when no candidate is returned. |
 | top-level `error` before deltas | retryable or terminal `ProviderError` | Error status/code classification. |
 | top-level `error` after deltas | terminal `ProviderError` | Partial content and usage are retained; `retryable=false`. |
@@ -227,6 +369,7 @@ Gemini stop reasons:
 | --- | --- |
 | `STOP` or absent | `stop` |
 | `MAX_TOKENS` | `length` |
+| `LENGTH` | `length` |
 | `SAFETY`, `IMAGE_SAFETY`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `RECITATION`, `SPII`, `IMAGE_PROHIBITED_CONTENT` | `safety` |
 | `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, `TOO_MANY_TOOL_CALLS`, `OTHER_ERROR`, `FINISH_REASON_UNSPECIFIED`, `IMAGE_RECITATION`, `IMAGE_OTHER`, `LANGUAGE`, `NO_IMAGE`, `OTHER`, or any unknown non-normal value | `error` |
 | A normal `STOP` response containing function calls | `tool_use` |

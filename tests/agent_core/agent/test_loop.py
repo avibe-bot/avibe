@@ -465,7 +465,7 @@ async def test_C9_events_reference_committed_rows_and_progress_precedes_tool_fin
 
 
 @pytest.mark.parametrize("streamed", [False, "text", "tool", "partial"])
-async def test_retry_only_before_output_and_re_resolves_the_route(streamed, monkeypatch):
+async def test_retry_obeys_provider_flag_and_allows_usage_only_partial(streamed, monkeypatch):
     sleeps = []
     real_sleep = asyncio.sleep
 
@@ -477,7 +477,7 @@ async def test_retry_only_before_output_and_re_resolves_the_route(streamed, monk
     error = ProviderError(
         "rate_limit",
         "busy",
-        True,
+        streamed not in {"text", "tool"},
         retry_after_s=3.0,
         partial=assistant("partial", stop_reason="error") if streamed == "partial" else None,
     )
@@ -487,11 +487,13 @@ async def test_retry_only_before_output_and_re_resolves_the_route(streamed, monk
     provider = ScriptedProvider([prefix + [error], [Done(assistant())]])
     agent = make_agent(provider)
     events = await collect(agent)
-    if streamed:
+    if streamed in {"text", "tool"}:
         assert len(provider.requests) == 1
         assert events[-1].reason == "error"
         assert sleeps == []
     else:
+        # A usage-only partial is evidence for the next attempt, not emitted
+        # model output. The provider has already marked the error retryable.
         assert len(provider.requests) == agent.models.resolutions == 2
         assert sleeps == [3.0]
         assert events[-1].reason == "completed"
@@ -501,7 +503,7 @@ async def test_retry_only_before_output_and_re_resolves_the_route(streamed, monk
     "kind,retryable,reason,count",
     [
         ("server", True, "error", 3),
-        ("unknown", True, "error", 1),
+        ("unknown", True, "error", 3),
         ("auth", False, "error", 1),
         ("overflow", False, "context_exhausted", 1),
         ("aborted", False, "aborted", 1),

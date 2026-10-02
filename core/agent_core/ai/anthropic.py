@@ -15,33 +15,20 @@ import httpx
 
 from core.agent_core.ai._common import (
     ServedHopResolver,
-    assistant_message,
     auth_headers,
     content_parts,
+    drive_sse_stream,
+    dispatch_wire_event,
     endpoint_origin,
-    incomplete_stream_error,
-    iter_sse_events,
     json_object,
-    open_stream,
-    partial_message,
-    parsed_arguments,
     prepare_messages,
-    read_response_body,
-    resolve_served_origin,
-    terminal_event,
-    text_from_content,
+    StreamAssembler,
 )
-from core.agent_core.ai.errors import classify_error
 from core.agent_core.ai.provider import (
-    BlockEnd,
     Done,
     ModelRequest,
     ProviderAdapter,
     ProviderError,
-    TextDelta,
-    ThinkingDelta,
-    ToolCallDelta,
-    ToolCallStart,
     MediaLoader,
 )
 from core.agent_core.cancel import CancelToken
@@ -57,7 +44,18 @@ from core.agent_core.messages import (
 
 ANTHROPIC_VERSION = "2023-06-01"
 _MAX_CACHE_BREAKPOINTS = 4
-_SYNTHETIC_EVENT_TYPES = {"message_stop", "content_block_stop"}
+_KNOWN_STREAM_EVENTS = frozenset(
+    {
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "error",
+        "message_stop",
+        "ping",
+    }
+)
 
 
 class AnthropicAdapter(ProviderAdapter):
@@ -88,8 +86,16 @@ class AnthropicAdapter(ProviderAdapter):
 
     async def _stream(self, request: ModelRequest, cancel: CancelToken) -> AsyncIterator[Any]:
         origin = endpoint_origin(request.endpoint)
+        assembler = StreamAssembler(
+            origin=origin,
+            protocol=self.protocol,
+            verified_origin=not self._gateway,
+            endpoint_url=request.endpoint.base_url,
+        )
         if cancel.cancelled:
-            yield _aborted_error(cancel.reason, origin)
+            terminal = assembler.terminal(assembler.aborted(cancel.reason))
+            if terminal is not None:
+                yield terminal
             return
         target = origin
         prepared = await prepare_messages(
@@ -101,164 +107,211 @@ class AnthropicAdapter(ProviderAdapter):
             cancel=cancel,
         )
         if isinstance(prepared, ProviderError):
-            yield prepared
+            terminal = assembler.terminal(prepared)
+            if terminal is not None:
+                yield terminal
             return
         transformed_messages, loaded_images = prepared
         if cancel.cancelled:
-            yield _aborted_error(cancel.reason, origin)
+            terminal = assembler.terminal(assembler.aborted(cancel.reason))
+            if terminal is not None:
+                yield terminal
             return
-        content: list[Any] = []
         block_state: dict[int, dict[str, Any]] = {}
-        content_indices: dict[int, int] = {}
-        usage = None
         stop_reason: str | None = None
-        streamed = False
-        terminal_seen = False
-        verified_origin = not self._gateway
-        served_origin = origin
+        message_started = False
+        message_stopped = False
         try:
             payload = build_messages_payload(request, transformed_messages, loaded_images=loaded_images)
             headers = auth_headers(request.endpoint, provider="anthropic", gateway=self._gateway)
             headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
             url = _endpoint_url(request.endpoint.base_url, "/messages")
-            async with open_stream(
-                self._client,
-                method="POST",
-                url=url,
-                json_body=payload,
-                headers=headers,
-                cancel=cancel,
-            ) as response:
-                if response is None:
-                    yield _aborted_error(cancel.reason, served_origin, content, usage, verified_origin)
-                    return
-                resolved_origin = await resolve_served_origin(
-                    request.endpoint,
-                    response.headers,
-                    self._served_hop_resolver,
-                    gateway=self._gateway,
-                    cancel=cancel,
-                )
-                if resolved_origin is None:
-                    yield terminal_event(
-                        response,
-                        _aborted_error(cancel.reason, served_origin, content, usage, verified_origin),
-                    )
-                    return
-                served_origin, verified_origin = resolved_origin
-                if response.status_code >= 400:
-                    body = await read_response_body(response, cancel)
-                    if body is None:
-                        yield terminal_event(
-                            response,
-                            _aborted_error(cancel.reason, served_origin, content, usage, verified_origin),
-                        )
-                        return
-                    yield terminal_event(
-                        response,
-                        classify_error(
-                            status=response.status_code,
-                            body=body,
-                            headers=response.headers,
-                            streamed=False,
-                        ),
-                    )
-                    return
-                async for event in iter_sse_events(response, cancel):
+            async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
+                nonlocal message_started, message_stopped, stop_reason
+                async for event in events:
                     if cancel.cancelled:
-                        yield terminal_event(
-                            response,
-                            _aborted_error(cancel.reason, served_origin, content, usage, verified_origin),
-                        )
+                        terminal = assembler.terminal(assembler.aborted(cancel.reason))
+                        if terminal is not None:
+                            yield terminal
                         return
                     if event.data == "[DONE]" or not event.data:
                         continue
+                    if event.event == "error":
+                        terminal = assembler.terminal(assembler.error(event.data))
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    if event.event is not None and event.event not in _KNOWN_STREAM_EVENTS:
+                        # Pi filters by the SSE event name before parsing its
+                        # JSON payload, so unknown event names are ignored
+                        # even when their data is malformed.
+                        continue
                     chunk = json_object(event.data)
                     if chunk is None:
-                        yield terminal_event(
-                            response,
-                            _stream_error(
-                                "Provider returned invalid Anthropic JSON",
-                                streamed=streamed,
-                                content=content,
-                                origin=served_origin,
-                                usage=usage,
-                                verified_origin=verified_origin,
-                                include_partial=usage is not None,
-                            ),
+                        # Pi ignores data-only frames because Anthropic event
+                        # dispatch is keyed by the SSE event name. Avibe
+                        # accepts valid data-only JSON for gateway
+                        # compatibility, but malformed data-only frames are
+                        # still ignored rather than misclassified as provider
+                        # payload errors.
+                        if event.event is None:
+                            continue
+                        terminal = assembler.terminal(
+                            assembler.error("Provider returned invalid Anthropic JSON", kind="invalid_request")
                         )
+                        if terminal is not None:
+                            yield terminal
                         return
-                    event_type = chunk.get("type")
+                    event_type = dispatch_wire_event(chunk, known=_KNOWN_STREAM_EVENTS)
+                    if event_type is None:
+                        continue
                     if event_type == "message_start":
-                        usage = _anthropic_usage(chunk.get("message", {}).get("usage"))
+                        message_started = True
+                        message = chunk.get("message")
+                        if not isinstance(message, Mapping):
+                            terminal = assembler.terminal(
+                                assembler.error("message_start message must be an object", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        if "usage" in message and not isinstance(message.get("usage"), Mapping):
+                            terminal = assembler.terminal(
+                                assembler.error("message_start usage must be an object", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        assembler.set_usage(
+                            _anthropic_usage(message.get("usage"))
+                        )
                     elif event_type == "content_block_start":
-                        index = _int(chunk.get("index"), 0)
+                        index = _stream_index(chunk)
+                        if index is None:
+                            terminal = assembler.terminal(
+                                assembler.error("content_block_start index must be an integer", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         block = chunk.get("content_block")
                         if not isinstance(block, Mapping):
-                            yield terminal_event(response, _invalid_tool_metadata("content_block must be an object"))
+                            terminal = assembler.terminal(
+                                assembler.error("content_block must be an object", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
                             return
                         kind = block.get("type")
+                        if kind == "fallback":
+                            if assembler.has_content():
+                                terminal = assembler.terminal(
+                                    assembler.exception(
+                                        RuntimeError(
+                                            "Anthropic performed an unsupported mid-output model fallback"
+                                        )
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            continue
                         if kind == "text":
-                            block_state[index] = {"kind": "text", "text": ""}
-                            content_indices[index] = len(content)
-                            content.append(TextBlock(text=""))
+                            block_state[index] = {"kind": "text"}
+                            assembler.ensure_text_slot(index)
+                            initial = block.get("text")
+                            if initial is not None and not isinstance(initial, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "text content must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            if initial:
+                                emitted = assembler.text_delta(index, initial)
+                                if emitted is not None:
+                                    yield emitted
                         elif kind == "thinking":
                             signature = block.get("signature")
-                            block_state[index] = {
-                                "kind": "thinking",
-                                "text": "",
-                                "signature": signature if isinstance(signature, str) and signature else None,
-                            }
-                            content_indices[index] = len(content)
-                            content.append(ThinkingBlock(text="", signature=block_state[index]["signature"]))
+                            signature = signature if isinstance(signature, str) and signature else None
+                            block_state[index] = {"kind": "thinking"}
+                            assembler.ensure_thinking_slot(index, signature=signature)
+                            initial = block.get("thinking")
+                            if initial is not None and not isinstance(initial, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "thinking content must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            if initial:
+                                emitted = assembler.thinking_delta(index, initial)
+                                if emitted is not None:
+                                    yield emitted
                         elif kind == "redacted_thinking":
                             signature = block.get("data")
                             if not isinstance(signature, str) or not signature:
-                                yield terminal_event(
-                                    response,
-                                    _invalid_tool_metadata("redacted_thinking data must be a non-empty string"),
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "redacted_thinking data must be a non-empty string",
+                                        kind="invalid_request",
+                                    )
                                 )
+                                if terminal is not None:
+                                    yield terminal
                                 return
-                            content_indices[index] = len(content)
-                            content.append(
-                                ThinkingBlock(
-                                    text="",
-                                    signature=signature,
-                                    redacted=True,
-                                )
-                            )
-                            block_state[index] = {"kind": "redacted", "text": ""}
+                            assembler.redacted_thinking(index, signature)
+                            block_state[index] = {"kind": "redacted"}
                         elif kind == "tool_use":
-                            native_id = _string(block.get("id")) or f"tool_{index}"
+                            native_id = _string(block.get("id")) or None
                             name = _string(block.get("name"))
                             if not name:
-                                yield terminal_event(
-                                    response,
-                                    _invalid_tool_metadata("tool_use name must not be empty"),
+                                terminal = assembler.terminal(
+                                    assembler.error("tool_use name must not be empty", kind="invalid_request")
                                 )
+                                if terminal is not None:
+                                    yield terminal
                                 return
-                            block_state[index] = {
-                                "kind": "tool",
-                                "id": native_id,
-                                "name": name,
-                                "arguments": "",
-                            }
-                            content_indices[index] = len(content)
-                            content.append(
-                                ToolCallBlock(
-                                    id=native_id,
-                                    native_id=native_id,
-                                    name=name,
-                                    arguments={},
+                            block_state[index] = {"kind": "tool"}
+                            start = assembler.tool_start(index, name=name, native_id=native_id)
+                            if start is not None:
+                                yield start
+                            initial_input = block.get("input")
+                            if initial_input is not None and not isinstance(initial_input, Mapping):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "tool_use input must be an object",
+                                        kind="invalid_request",
+                                    )
                                 )
-                            )
-                            streamed = True
-                            yield ToolCallStart(index=content_indices[index], id=native_id, name=name)
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            if isinstance(initial_input, Mapping):
+                                assembler.set_tool_arguments_object(index, initial_input)
                     elif event_type == "content_block_delta":
-                        index = _int(chunk.get("index"), 0)
+                        index = _stream_index(chunk)
+                        if index is None:
+                            terminal = assembler.terminal(
+                                assembler.error("content_block_delta index must be an integer", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         delta = chunk.get("delta")
                         if not isinstance(delta, Mapping):
-                            continue
+                            terminal = assembler.terminal(
+                                assembler.error("content_block_delta delta must be an object", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         delta_type = delta.get("type")
                         state = block_state.get(index)
                         if state is None:
@@ -266,138 +319,188 @@ class AnthropicAdapter(ProviderAdapter):
                             # does not know yet; preserve that forward-
                             # compatible policy instead of inventing text.
                             continue
-                        content_index = content_indices.get(index)
-                        if content_index is None:
-                            continue
                         if delta_type == "text_delta":
-                            value = _string(delta.get("text"))
+                            if state.get("kind") != "text":
+                                continue
+                            raw_text = delta.get("text")
+                            if "text" in delta and not isinstance(raw_text, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "text_delta text must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            value = _string(raw_text)
                             if value:
-                                state["text"] += value
-                                _set_block_text(content, content_index, value, append=True)
-                                streamed = True
-                                yield TextDelta(index=content_index, delta=value)
+                                emitted = assembler.text_delta(index, value)
+                                if emitted is not None:
+                                    yield emitted
                         elif delta_type == "thinking_delta":
-                            value = _string(delta.get("thinking"))
+                            if state.get("kind") != "thinking":
+                                continue
+                            raw_thinking = delta.get("thinking")
+                            if "thinking" in delta and not isinstance(raw_thinking, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "thinking_delta thinking must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            value = _string(raw_thinking)
                             if value:
-                                state["text"] += value
-                                _set_thinking_text(content, content_index, value)
-                                streamed = True
-                                yield ThinkingDelta(index=content_index, delta=value)
+                                emitted = assembler.thinking_delta(index, value)
+                                if emitted is not None:
+                                    yield emitted
                         elif delta_type == "signature_delta":
-                            value = _string(delta.get("signature"))
+                            if state.get("kind") != "thinking":
+                                continue
+                            raw_signature = delta.get("signature")
+                            if "signature" in delta and not isinstance(raw_signature, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "signature_delta signature must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            value = _string(raw_signature)
                             if value:
-                                state["signature"] = f"{state.get('signature') or ''}{value}"
-                                _set_thinking_signature(content, content_index, state["signature"])
+                                assembler.append_thinking_signature(index, value)
                         elif delta_type == "input_json_delta":
-                            value = _string(delta.get("partial_json"))
-                            state["arguments"] = f"{state.get('arguments', '')}{value}"
-                            streamed = True
-                            yield ToolCallDelta(index=content_index, arguments_delta=value)
-                        elif delta_type not in {"text_delta", "thinking_delta", "signature_delta", "input_json_delta"}:
-                            yield terminal_event(
-                                response,
-                                _invalid_tool_metadata(f"unsupported Anthropic content delta: {delta_type!r}"),
-                            )
-                            return
+                            if state.get("kind") != "tool":
+                                continue
+                            raw_partial_json = delta.get("partial_json")
+                            if "partial_json" in delta and not isinstance(raw_partial_json, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "input_json_delta partial_json must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            value = _string(raw_partial_json)
+                            emitted = assembler.tool_arguments(index, value)
+                            if emitted is not None:
+                                yield emitted
+                        # Pi ignores delta variants it does not know yet.
+                        # Known event shape has already been validated above.
                     elif event_type == "content_block_stop":
-                        index = _int(chunk.get("index"), 0)
-                        if index in content_indices:
-                            yield BlockEnd(index=content_indices[index])
+                        index = _stream_index(chunk)
+                        if index is None:
+                            terminal = assembler.terminal(
+                                assembler.error("content_block_stop index must be an integer", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        end = assembler.block_end(index)
+                        if end is not None:
+                            yield end
                     elif event_type == "message_delta":
                         delta = chunk.get("delta")
+                        if "delta" in chunk and not isinstance(delta, Mapping):
+                            terminal = assembler.terminal(
+                                assembler.error("message_delta delta must be an object", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        usage = chunk.get("usage")
+                        if usage is not None and not isinstance(usage, Mapping):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "message_delta usage must be an object",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         if isinstance(delta, Mapping):
                             if delta.get("stop_reason") is not None:
                                 stop_reason = _normalize_stop_reason(delta.get("stop_reason"))
-                        usage = _merge_anthropic_usage(usage, chunk.get("usage"))
+                        assembler.set_usage(_merge_anthropic_usage(assembler.usage, usage))
                     elif event_type == "error":
                         message = _error_event_message(chunk)
-                        yield terminal_event(
-                            response,
-                            _stream_error(
+                        terminal = assembler.terminal(
+                            assembler.error(
                                 message,
-                                streamed=streamed,
-                                content=content,
-                                origin=served_origin,
-                                usage=usage,
-                                verified_origin=verified_origin,
-                                include_partial=usage is not None,
                                 code=_error_event_code(chunk),
-                            ),
+                            )
                         )
+                        if terminal is not None:
+                            yield terminal
                         return
                     elif event_type == "message_stop":
-                        terminal_seen = True
-                        final = _final_message(
-                            content,
-                            block_state,
-                            origin=served_origin,
-                            stop_reason=stop_reason or ("tool_use" if _has_tools(content) else "stop"),
-                            usage=usage,
-                            verified_origin=verified_origin,
+                        message_stopped = True
+                        if stop_reason is None:
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "Anthropic stream ended without a stop reason",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        final = assembler.finalize(
+                            stop_reason or ("tool_use" if assembler.has_tools() else "stop")
                         )
-                        if isinstance(final, ProviderError):
-                            yield terminal_event(response, final)
-                        else:
-                            yield terminal_event(response, Done(final))
+                        terminal = assembler.terminal(final if isinstance(final, ProviderError) else Done(final))
+                        if terminal is not None:
+                            yield terminal
                         return
                     elif event_type == "ping":
                         continue
-                    elif event_type not in {
-                        "message_start",
-                        "content_block_start",
-                        "content_block_delta",
-                        "content_block_stop",
-                        "message_delta",
-                        "error",
-                        "message_stop",
-                        "ping",
-                    }:
-                        yield terminal_event(
-                            response,
-                            _invalid_tool_metadata(f"unsupported Anthropic stream event: {event_type!r}"),
-                        )
-                        return
                 if cancel.cancelled:
-                    yield terminal_event(
-                        response,
-                        _aborted_error(cancel.reason, served_origin, content, usage, verified_origin),
-                    )
+                    terminal = assembler.terminal(assembler.aborted(cancel.reason))
+                    if terminal is not None:
+                        yield terminal
                     return
-                if not terminal_seen:
-                    yield terminal_event(
-                        response,
-                        incomplete_stream_error(
-                            content,
-                            origin=served_origin,
-                            usage=usage,
-                            streamed=streamed,
-                            verified_origin=verified_origin,
-                            protocol=self.protocol,
-                        ),
-                    )
+                if message_started and not message_stopped:
+                    terminal = assembler.terminal(assembler.incomplete())
+                    if terminal is not None:
+                        yield terminal
                     return
-                final = _final_message(
-                    content,
-                    block_state,
-                    origin=served_origin,
-                    stop_reason=stop_reason or ("tool_use" if _has_tools(content) else "stop"),
-                    usage=usage,
-                    verified_origin=verified_origin,
-                )
-                if isinstance(final, ProviderError):
-                    yield terminal_event(response, final)
-                else:
-                    yield terminal_event(response, Done(final))
+                if stop_reason is not None:
+                    final = assembler.finalize(stop_reason)
+                    terminal = assembler.terminal(
+                        final if isinstance(final, ProviderError) else Done(final)
+                    )
+                    if terminal is not None:
+                        yield terminal
+                    return
+                terminal = assembler.terminal(assembler.incomplete())
+                if terminal is not None:
+                    yield terminal
+            async for event in drive_sse_stream(
+                self._client,
+                method="POST",
+                url=url,
+                json_body=payload,
+                headers=headers,
+                cancel=cancel,
+                assembler=assembler,
+                endpoint=request.endpoint,
+                resolver=self._served_hop_resolver,
+                gateway=self._gateway,
+                translate=translate,
+            ):
+                yield event
         except Exception as exc:
-            yield classify_error(
-                exc=exc,
-                streamed=streamed,
-                partial=(
-                    _partial(content, served_origin, usage, verified_origin)
-                    if streamed or usage is not None
-                    else None
-                ),
-            )
+            terminal = assembler.terminal(assembler.exception(exc))
+            if terminal is not None:
+                yield terminal
 
 
 def build_messages_payload(
@@ -534,105 +637,9 @@ def _mark_message_breakpoints(messages: list[dict[str, Any]]) -> None:
                 last["cache_control"] = {"type": "ephemeral"}
 
 
-def _final_message(
-    content: list[Any],
-    states: Mapping[int, Mapping[str, Any]],
-    *,
-    origin: Any,
-    stop_reason: str,
-    usage: Any,
-    verified_origin: bool,
-) -> AssistantMessage | ProviderError:
-    final: list[Any] = []
-    for block in content:
-        if isinstance(block, TextBlock):
-            final.append(block)
-        elif isinstance(block, ThinkingBlock):
-            final.append(block)
-        elif isinstance(block, ToolCallBlock):
-            state = next(
-                (
-                    candidate
-                    for candidate in states.values()
-                    if candidate.get("kind") == "tool" and candidate.get("id") == block.id
-                ),
-                {},
-            )
-            args = parsed_arguments(str(state.get("arguments", "")), tool_name=block.name)
-            if isinstance(args, ProviderError):
-                return args
-            final.append(
-                ToolCallBlock(
-                    id=block.id,
-                    native_id=block.native_id,
-                    name=block.name,
-                    arguments=args,
-                )
-            )
-    return assistant_message(
-        final,
-        origin=origin,
-        stop_reason=stop_reason,
-        usage=usage,
-        verified_origin=verified_origin,
-    )
-
-
-def _partial(content: list[Any], origin: Any, usage: Any, verified: bool) -> AssistantMessage:
-    return partial_message(
-        content,
-        origin=origin,
-        usage=usage,
-        verified_origin=verified,
-        stop_reason="error",
-    )
-
-
-def _stream_error(
-    message: str,
-    *,
-    streamed: bool,
-    content: list[Any],
-    origin: Any,
-    usage: Any,
-    verified_origin: bool,
-    include_partial: bool = False,
-    code: str | None = None,
-) -> ProviderError:
-    return classify_error(
-        body=message,
-        code=code,
-        streamed=streamed,
-        partial=(
-            _partial(content, origin, usage, verified_origin)
-            if streamed or include_partial or usage is not None
-            else None
-        ),
-    )
-
-
-def _invalid_tool_metadata(message: str) -> ProviderError:
-    return ProviderError(kind="invalid_request", message=message, retryable=False)
-
-
 def _error_event_code(chunk: Mapping[str, Any]) -> str | None:
     error = chunk.get("error")
     return _string(error.get("type")) if isinstance(error, Mapping) else None
-
-
-def _aborted_error(
-    reason: str | None,
-    origin: Any,
-    content: list[Any] | None = None,
-    usage: Any = None,
-    verified: bool = True,
-) -> ProviderError:
-    return ProviderError(
-        kind="aborted",
-        message=reason or "provider request aborted",
-        retryable=False,
-        partial=_partial(content, origin, usage, verified) if content or usage is not None else None,
-    )
 
 
 def _anthropic_usage(value: Any) -> Any:
@@ -710,40 +717,13 @@ def _error_event_message(chunk: Mapping[str, Any]) -> str:
     return json.dumps(dict(chunk), ensure_ascii=False)
 
 
-def _set_block_text(content: list[Any], index: int, value: str, *, append: bool) -> None:
-    if index >= len(content):
-        return
-    block = content[index]
-    if isinstance(block, TextBlock):
-        content[index] = TextBlock(text=(block.text or "") + value if append else value)
-
-
-def _set_thinking_text(content: list[Any], index: int, value: str) -> None:
-    if index >= len(content):
-        return
-    block = content[index]
-    if isinstance(block, ThinkingBlock):
-        content[index] = ThinkingBlock(text=block.text + value, signature=block.signature, redacted=block.redacted)
-
-
-def _set_thinking_signature(content: list[Any], index: int, signature: str) -> None:
-    if index >= len(content):
-        return
-    block = content[index]
-    if isinstance(block, ThinkingBlock):
-        content[index] = ThinkingBlock(text=block.text, signature=signature, redacted=block.redacted)
-
-
-def _has_tools(content: list[Any]) -> bool:
-    return any(isinstance(block, ToolCallBlock) for block in content)
-
-
 def _string(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _int(value: Any, default: int) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else default
+def _stream_index(chunk: Mapping[str, Any]) -> int | None:
+    value = chunk.get("index")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _nonnegative(value: Any) -> int:
@@ -751,12 +731,16 @@ def _nonnegative(value: Any) -> int:
 
 
 def _pick(value: Mapping[str, Any], key: str, default: int) -> int:
-    return _nonnegative(value[key]) if key in value else default
+    candidate = value.get(key)
+    return default if candidate is None else _nonnegative(candidate)
 
 
 def _pick_nested(value: Mapping[str, Any], parent: str, key: str, default: int | None) -> int | None:
     nested = value.get(parent)
-    return _nonnegative(nested[key]) if isinstance(nested, Mapping) and key in nested else default
+    if not isinstance(nested, Mapping):
+        return default
+    candidate = nested.get(key)
+    return default if candidate is None else _nonnegative(candidate)
 
 
 AnthropicProvider = AnthropicAdapter

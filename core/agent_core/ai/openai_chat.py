@@ -14,33 +14,20 @@ import httpx
 
 from core.agent_core.ai._common import (
     ServedHopResolver,
-    assistant_message,
     auth_headers,
     content_parts,
+    drive_sse_stream,
     endpoint_origin,
-    incomplete_stream_error,
-    iter_sse_events,
     json_object,
-    open_stream,
-    partial_message,
-    parsed_arguments,
     prepare_messages,
-    read_response_body,
-    resolve_served_origin,
-    terminal_event,
+    StreamAssembler,
 )
-from core.agent_core.ai.errors import classify_error
 from core.agent_core.ai.provider import (
-    BlockEnd,
     Done,
+    MediaLoader,
     ModelRequest,
     ProviderAdapter,
     ProviderError,
-    TextDelta,
-    ThinkingDelta,
-    ToolCallDelta,
-    ToolCallStart,
-    MediaLoader,
 )
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -52,7 +39,6 @@ from core.agent_core.messages import (
     ToolResultMessage,
     UserMessage,
 )
-
 
 class OpenAIChatAdapter(ProviderAdapter):
     """Adapter for OpenAI-compatible ``/chat/completions`` endpoints."""
@@ -82,8 +68,16 @@ class OpenAIChatAdapter(ProviderAdapter):
 
     async def _stream(self, request: ModelRequest, cancel: CancelToken) -> AsyncIterator[Any]:
         target = endpoint_origin(request.endpoint)
+        assembler = StreamAssembler(
+            origin=target,
+            protocol=self.protocol,
+            verified_origin=not self._gateway,
+            endpoint_url=request.endpoint.base_url,
+        )
         if cancel.cancelled:
-            yield _aborted(cancel.reason, target)
+            terminal = assembler.terminal(assembler.aborted(cancel.reason))
+            if terminal is not None:
+                yield terminal
             return
         prepared = await prepare_messages(
             request.messages,
@@ -94,258 +88,313 @@ class OpenAIChatAdapter(ProviderAdapter):
             cancel=cancel,
         )
         if isinstance(prepared, ProviderError):
-            yield prepared
+            terminal = assembler.terminal(prepared)
+            if terminal is not None:
+                yield terminal
             return
         transformed_messages, loaded_images = prepared
         if cancel.cancelled:
-            yield _aborted(cancel.reason, target)
+            terminal = assembler.terminal(assembler.aborted(cancel.reason))
+            if terminal is not None:
+                yield terminal
             return
-        content: list[Any] = []
-        tools: dict[int, dict[str, Any]] = {}
-        usage = None
         finish_reason: str | None = None
-        streamed = False
-        terminal_seen = False
-        verified = not self._gateway
-        origin = target
+        refusal_seen = False
+        protocol_terminal = False
         try:
             payload = build_chat_payload(request, transformed_messages, loaded_images=loaded_images)
             headers = auth_headers(request.endpoint, provider="openai", gateway=self._gateway)
             headers.setdefault("content-type", "application/json")
             url = _endpoint_url(request.endpoint.base_url, "/chat/completions")
-            async with open_stream(
+            async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
+                nonlocal finish_reason, refusal_seen, protocol_terminal
+                async for event in events:
+                    if cancel.cancelled:
+                        terminal = assembler.terminal(assembler.aborted(cancel.reason))
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    if not event.data:
+                        continue
+                    if event.data == "[DONE]":
+                        break
+                    chunk = json_object(event.data)
+                    if chunk is None:
+                        terminal = assembler.terminal(
+                            assembler.error("Provider returned invalid OpenAI Chat JSON", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    if isinstance(chunk.get("usage"), Mapping):
+                        assembler.set_usage(_openai_usage(chunk["usage"]))
+                    top_level_error = chunk.get("error")
+                    if top_level_error is not None and not isinstance(top_level_error, Mapping):
+                        terminal = assembler.terminal(
+                            assembler.error("OpenAI Chat error must be an object", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    if isinstance(top_level_error, Mapping):
+                        terminal = assembler.terminal(
+                            assembler.error(
+                                _error_text(top_level_error, chunk),
+                                code=_string(top_level_error.get("code"))
+                                or _string(top_level_error.get("type"))
+                                or None,
+                            )
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    choices = chunk.get("choices")
+                    if choices is not None and not isinstance(choices, list):
+                        terminal = assembler.terminal(
+                            assembler.error("OpenAI Chat choices must be an array", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    if choices is None or not choices:
+                        continue
+                    choice = choices[0]
+                    if not isinstance(choice, Mapping):
+                        terminal = assembler.terminal(
+                            assembler.error("OpenAI Chat choice must be an object", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    if not isinstance(chunk.get("usage"), Mapping) and isinstance(choice.get("usage"), Mapping):
+                        assembler.set_usage(_openai_usage(choice["usage"]))
+                    if choice.get("finish_reason") is not None:
+                        if not isinstance(choice.get("finish_reason"), str):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "OpenAI Chat finish_reason must be a string",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        finish_reason = _string(choice.get("finish_reason"))
+                    delta = choice.get("delta")
+                    if delta is None or not isinstance(delta, Mapping):
+                        if delta is None:
+                            continue
+                        terminal = assembler.terminal(
+                            assembler.error("OpenAI Chat delta must be an object", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    raw_content = delta.get("content")
+                    if raw_content is not None and not isinstance(raw_content, str):
+                        terminal = assembler.terminal(
+                            assembler.error(
+                                "OpenAI Chat content must be a string",
+                                kind="invalid_request",
+                            )
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    value = _string(raw_content)
+                    if value:
+                        emitted = assembler.text_delta("chat-text", value)
+                        if emitted is not None:
+                            yield emitted
+                    reasoning_field, reasoning = _first_reasoning_delta(delta)
+                    if reasoning:
+                        emitted = assembler.thinking_delta("chat-thinking", reasoning, signature=reasoning_field)
+                        if emitted is not None:
+                            yield emitted
+                    raw_refusal = delta.get("refusal")
+                    if raw_refusal is not None and not isinstance(raw_refusal, str):
+                        terminal = assembler.terminal(
+                            assembler.error(
+                                "OpenAI Chat refusal must be a string",
+                                kind="invalid_request",
+                            )
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    refusal = _string(raw_refusal)
+                    if refusal:
+                        refusal_seen = True
+                        emitted = assembler.text_delta("chat-text", refusal)
+                        if emitted is not None:
+                            yield emitted
+                    details = delta.get("reasoning_details")
+                    if isinstance(details, list):
+                        assembler.merge_thinking_details("chat-thinking", details)
+                    raw_tool_calls = delta.get("tool_calls")
+                    if raw_tool_calls is not None and not isinstance(raw_tool_calls, list):
+                        terminal = assembler.terminal(
+                            assembler.error("OpenAI Chat tool_calls must be an array", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    if isinstance(raw_tool_calls, list):
+                        for raw in raw_tool_calls:
+                            if not isinstance(raw, Mapping):
+                                terminal = assembler.terminal(
+                                    assembler.error("tool_calls entry must be an object", kind="invalid_request")
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            raw_id = _string(raw.get("id"))
+                            index_value = raw.get("index")
+                            if isinstance(index_value, int) and not isinstance(index_value, bool):
+                                key = ("chat-tool", index_value)
+                            else:
+                                key = assembler.fallback_tool_key(
+                                    native_id=raw_id or None,
+                                    allocate=True,
+                                )
+                                if key is None:
+                                    terminal = assembler.terminal(
+                                        assembler.error(
+                                            "OpenAI Chat tool call could not allocate a slot",
+                                            kind="invalid_request",
+                                        )
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
+                            function = raw.get("function")
+                            if isinstance(function, Mapping):
+                                raw_name = function.get("name")
+                                if raw_name is not None and not isinstance(raw_name, str):
+                                    terminal = assembler.terminal(
+                                        assembler.error("tool call name must not be empty", kind="invalid_request")
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
+                                if raw_name == "":
+                                    terminal = assembler.terminal(
+                                        assembler.error("tool call name must not be empty", kind="invalid_request")
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
+                                name = _string(raw_name)
+                                start = assembler.tool_start(key, name=name or None, native_id=raw_id or None)
+                                if start is not None:
+                                    yield start
+                                    pending = assembler.pending_tool_arguments(key)
+                                    if pending is not None:
+                                        yield pending
+                                arguments = _string(function.get("arguments"))
+                                raw_arguments = function.get("arguments")
+                                if raw_arguments is not None and not isinstance(raw_arguments, str):
+                                    terminal = assembler.terminal(
+                                        assembler.error(
+                                            "OpenAI Chat tool arguments must be a string",
+                                            kind="invalid_request",
+                                        )
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
+                                emitted = assembler.tool_arguments(key, arguments)
+                                if emitted is not None:
+                                    yield emitted
+                            elif raw_id:
+                                assembler.tool_start(key, native_id=raw_id)
+                    legacy_function = delta.get("function_call")
+                    if legacy_function is not None:
+                        if not isinstance(legacy_function, Mapping):
+                            terminal = assembler.terminal(
+                                assembler.error("legacy function_call must be an object", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        key = ("legacy-tool", 0)
+                        raw_name = legacy_function.get("name")
+                        if raw_name is not None and not isinstance(raw_name, str):
+                            terminal = assembler.terminal(
+                                assembler.error("legacy function_call name must not be empty", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        if raw_name == "":
+                            terminal = assembler.terminal(
+                                assembler.error("legacy function_call name must not be empty", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        name = _string(raw_name)
+                        start = assembler.tool_start(key, name=name or None, native_id=None)
+                        if start is not None:
+                            yield start
+                            pending = assembler.pending_tool_arguments(key)
+                            if pending is not None:
+                                yield pending
+                        arguments = _string(legacy_function.get("arguments"))
+                        raw_arguments = legacy_function.get("arguments")
+                        if raw_arguments is not None and not isinstance(raw_arguments, str):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "legacy function_call arguments must be a string",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        emitted = assembler.tool_arguments(key, arguments)
+                        if emitted is not None:
+                            yield emitted
+                if cancel.cancelled:
+                    terminal = assembler.terminal(assembler.aborted(cancel.reason))
+                    if terminal is not None:
+                        yield terminal
+                    return
+                if finish_reason is not None:
+                    protocol_terminal = True
+                if not protocol_terminal:
+                    terminal = assembler.terminal(assembler.incomplete())
+                    if terminal is not None:
+                        yield terminal
+                    return
+                for event in assembler.block_end_events():
+                    yield event
+                final = assembler.finalize(
+                    "refusal"
+                    if refusal_seen
+                    else _normalize_stop(finish_reason, assembler.has_tools())
+                )
+                terminal = assembler.terminal(final if isinstance(final, ProviderError) else Done(final))
+                if terminal is not None:
+                    yield terminal
+            async for event in drive_sse_stream(
                 self._client,
                 method="POST",
                 url=url,
                 json_body=payload,
                 headers=headers,
                 cancel=cancel,
-            ) as response:
-                if response is None:
-                    yield _aborted(cancel.reason, origin, content, usage, verified)
-                    return
-                resolved_origin = await resolve_served_origin(
-                    request.endpoint,
-                    response.headers,
-                    self._served_hop_resolver,
-                    gateway=self._gateway,
-                    cancel=cancel,
-                )
-                if resolved_origin is None:
-                    yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
-                    return
-                origin, verified = resolved_origin
-                if response.status_code >= 400:
-                    body = await read_response_body(response, cancel)
-                    if body is None:
-                        yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
-                        return
-                    yield terminal_event(
-                        response,
-                        classify_error(status=response.status_code, body=body, headers=response.headers),
-                    )
-                    return
-                async for event in iter_sse_events(response, cancel):
-                    if cancel.cancelled:
-                        yield terminal_event(response, _aborted(cancel.reason, origin, content, usage, verified))
-                        return
-                    if not event.data:
-                        continue
-                    if event.data == "[DONE]":
-                        terminal_seen = True
-                        break
-                    chunk = json_object(event.data)
-                    if chunk is None:
-                        yield terminal_event(
-                            response,
-                            _error("Provider returned invalid OpenAI Chat JSON", streamed, content, origin, usage, verified),
-                        )
-                        return
-                    if isinstance(chunk.get("usage"), Mapping):
-                        usage = _openai_usage(chunk["usage"])
-                    top_level_error = chunk.get("error")
-                    if isinstance(top_level_error, Mapping):
-                        yield terminal_event(
-                            response,
-                            _error(
-                                _error_text(top_level_error, chunk),
-                                streamed,
-                                content,
-                                origin,
-                                usage,
-                                verified,
-                                code=_string(top_level_error.get("code"))
-                                or _string(top_level_error.get("type"))
-                                or None,
-                            ),
-                        )
-                        return
-                    choices = chunk.get("choices")
-                    if not isinstance(choices, list) or not choices:
-                        continue
-                    choice = choices[0]
-                    if not isinstance(choice, Mapping):
-                        continue
-                    if choice.get("finish_reason") is not None:
-                        finish_reason = _string(choice.get("finish_reason"))
-                    delta = choice.get("delta")
-                    if not isinstance(delta, Mapping):
-                        continue
-                    value = _string(delta.get("content"))
-                    if value:
-                        content = _append_text(content, value)
-                        streamed = True
-                        yield TextDelta(index=_find_block_index(content, TextBlock), delta=value)
-                    reasoning_field, reasoning = _first_reasoning_delta(delta)
-                    if reasoning:
-                        content = _append_thinking(content, reasoning, reasoning_field)
-                        streamed = True
-                        yield ThinkingDelta(index=_find_block_index(content, ThinkingBlock), delta=reasoning)
-                    refusal = _string(delta.get("refusal"))
-                    if refusal:
-                        content = _append_text(content, refusal)
-                        finish_reason = "refusal"
-                        streamed = True
-                        yield TextDelta(index=_find_block_index(content, TextBlock), delta=refusal)
-                    details = delta.get("reasoning_details")
-                    if isinstance(details, list):
-                        content = _apply_reasoning_details(content, details)
-                    raw_tool_calls = delta.get("tool_calls")
-                    if isinstance(raw_tool_calls, list):
-                        for raw in raw_tool_calls:
-                            if not isinstance(raw, Mapping):
-                                yield terminal_event(
-                                    response,
-                                    _invalid_tool_metadata("tool_calls entry must be an object"),
-                                )
-                                return
-                            index = _int(raw.get("index"), len(tools))
-                            state = tools.setdefault(index, {"id": "", "name": "", "arguments": ""})
-                            raw_id = _string(raw.get("id"))
-                            function = raw.get("function")
-                            if isinstance(function, Mapping):
-                                name = _string(function.get("name"))
-                                if "name" in function and not name:
-                                    yield terminal_event(
-                                        response,
-                                        _invalid_tool_metadata("tool call name must not be empty"),
-                                    )
-                                    return
-                                if name and not state["name"]:
-                                    state["name"] = name
-                                    existing_id = state["id"]
-                                    call_id = raw_id or existing_id or f"call_{index}"
-                                    content.append(
-                                        ToolCallBlock(
-                                            id=call_id,
-                                            native_id=call_id,
-                                            name=name,
-                                            arguments={},
-                                        )
-                                    )
-                                    state["content_index"] = len(content) - 1
-                                    state["id"] = call_id
-                                    state["id_provisional"] = not bool(raw_id or existing_id)
-                                    streamed = True
-                                    yield ToolCallStart(index=state["content_index"], id=state["id"], name=name)
-                                arguments = _string(function.get("arguments"))
-                                if arguments:
-                                    state["arguments"] += arguments
-                                    streamed = True
-                                    yield ToolCallDelta(
-                                        index=_int(state.get("content_index"), 0),
-                                        arguments_delta=arguments,
-                                    )
-                            if raw_id and (not state["id"] or state.get("id_provisional")):
-                                state["id"] = raw_id
-                                state["id_provisional"] = False
-                                content_index = state.get("content_index")
-                                if isinstance(content_index, int) and content_index < len(content):
-                                    block = content[content_index]
-                                    if isinstance(block, ToolCallBlock):
-                                        content[content_index] = ToolCallBlock(
-                                            id=raw_id,
-                                            native_id=raw_id,
-                                            name=block.name,
-                                            arguments=dict(block.arguments),
-                                            signature=block.signature,
-                                        )
-                    legacy_function = delta.get("function_call")
-                    if legacy_function is not None:
-                        if not isinstance(legacy_function, Mapping):
-                            yield terminal_event(
-                                response,
-                                _invalid_tool_metadata("legacy function_call must be an object"),
-                            )
-                            return
-                        state = tools.setdefault(0, {"id": "call_0", "name": "", "arguments": ""})
-                        name = _string(legacy_function.get("name"))
-                        if "name" in legacy_function and not name:
-                            yield terminal_event(
-                                response,
-                                _invalid_tool_metadata("legacy function_call name must not be empty"),
-                            )
-                            return
-                        if name and not state["name"]:
-                            state["name"] = name
-                            content.append(
-                                ToolCallBlock(
-                                    id=state["id"],
-                                    native_id=state["id"],
-                                    name=name,
-                                    arguments={},
-                                )
-                            )
-                            state["content_index"] = len(content) - 1
-                            streamed = True
-                            yield ToolCallStart(index=state["content_index"], id=state["id"], name=name)
-                        arguments = _string(legacy_function.get("arguments"))
-                        if arguments:
-                            state["arguments"] += arguments
-                            streamed = True
-                            yield ToolCallDelta(
-                                index=_int(state.get("content_index"), 0),
-                                arguments_delta=arguments,
-                            )
-                if cancel.cancelled:
-                    yield _aborted(cancel.reason, origin, content, usage, verified)
-                    return
-                if not terminal_seen:
-                    yield terminal_event(
-                        response,
-                        incomplete_stream_error(
-                            content,
-                            origin=origin,
-                            usage=usage,
-                            streamed=streamed,
-                            verified_origin=verified,
-                            protocol=self.protocol,
-                        ),
-                    )
-                    return
-                for index in range(len(content)):
-                    yield BlockEnd(index=index)
-                final = _final_message(content, tools, origin, finish_reason, usage, verified)
-                if isinstance(final, ProviderError):
-                    yield terminal_event(response, final)
-                else:
-                    yield terminal_event(response, Done(final))
+                assembler=assembler,
+                endpoint=request.endpoint,
+                resolver=self._served_hop_resolver,
+                gateway=self._gateway,
+                translate=translate,
+            ):
+                yield event
         except Exception as exc:
-            yield classify_error(
-                exc=exc,
-                streamed=streamed,
-                partial=(
-                    partial_message(
-                        content,
-                        origin=origin,
-                        stop_reason="error",
-                        usage=usage,
-                        verified_origin=verified,
-                    )
-                    if streamed or usage is not None
-                    else None
-                ),
-            )
+            terminal = assembler.terminal(assembler.exception(exc))
+            if terminal is not None:
+                yield terminal
 
 
 def build_chat_payload(
@@ -449,50 +498,6 @@ def _chat_content(
     return result or [{"type": "text", "text": "(no content)"}]
 
 
-def _final_message(
-    content: list[Any],
-    tools: Mapping[int, Mapping[str, Any]],
-    origin: Any,
-    finish_reason: str | None,
-    usage: Any,
-    verified: bool,
-) -> AssistantMessage | ProviderError:
-    for state in tools.values():
-        if state.get("id") and not state.get("name"):
-            return _invalid_tool_metadata("tool call name is missing")
-    final: list[Any] = []
-    for block in content:
-        if isinstance(block, ToolCallBlock):
-            state = next(
-                (
-                    candidate
-                    for candidate in tools.values()
-                    if candidate.get("id") == block.id
-                ),
-                {},
-            )
-            arguments = parsed_arguments(str(state.get("arguments", "")), tool_name=block.name)
-            if isinstance(arguments, ProviderError):
-                return arguments
-            final.append(
-                ToolCallBlock(
-                    id=block.id,
-                    native_id=block.native_id,
-                    name=block.name,
-                    arguments=arguments,
-                )
-            )
-        else:
-            final.append(block)
-    return assistant_message(
-        final,
-        origin=origin,
-        stop_reason=_normalize_stop(finish_reason, bool(tools)),
-        usage=usage,
-        verified_origin=verified,
-    )
-
-
 def _normalize_stop(reason: str | None, has_tools: bool) -> str:
     normalized = {
         "length": "length",
@@ -502,6 +507,7 @@ def _normalize_stop(reason: str | None, has_tools: bool) -> str:
         "tool_calls": "tool_use",
         "function_call": "tool_use",
         "stop": "stop",
+        "end": "stop",
         None: "stop",
     }.get(reason)
     if normalized is not None:
@@ -514,11 +520,21 @@ def _openai_usage(value: Mapping[str, Any]) -> Any:
 
     prompt_details = value.get("prompt_tokens_details")
     completion_details = value.get("completion_tokens_details")
+    cache_read_tokens = (
+        _nonnegative(prompt_details.get("cached_tokens"))
+        if isinstance(prompt_details, Mapping)
+        else _nonnegative(value.get("prompt_cache_hit_tokens") or value.get("cached_tokens"))
+    )
+    cache_write_tokens = (
+        _nonnegative(prompt_details.get("cache_write_tokens"))
+        if isinstance(prompt_details, Mapping)
+        else 0
+    )
     return Usage(
-        input_tokens=_nonnegative(value.get("prompt_tokens")),
+        input_tokens=max(0, _nonnegative(value.get("prompt_tokens")) - cache_read_tokens - cache_write_tokens),
         output_tokens=_nonnegative(value.get("completion_tokens")),
-        cache_read_tokens=_nonnegative(prompt_details.get("cached_tokens")) if isinstance(prompt_details, Mapping) else 0,
-        cache_write_tokens=0,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
         reasoning_tokens=(
             _nonnegative(completion_details.get("reasoning_tokens"))
             if isinstance(completion_details, Mapping) and "reasoning_tokens" in completion_details
@@ -535,49 +551,6 @@ def _first_reasoning_delta(delta: Mapping[str, Any]) -> tuple[str | None, str]:
     return None, ""
 
 
-def _apply_reasoning_details(content: list[Any], details: list[Any]) -> list[Any]:
-    valid = [detail for detail in details if isinstance(detail, Mapping)]
-    if not valid:
-        return content
-    accumulated: list[dict[str, Any]] = []
-    for index, block in enumerate(content):
-        if isinstance(block, ThinkingBlock):
-            if block.signature:
-                try:
-                    previous = json.loads(block.signature)
-                except (TypeError, ValueError):
-                    previous = []
-                if isinstance(previous, list):
-                    accumulated.extend(
-                        item for item in previous if isinstance(item, Mapping)
-                    )
-            break
-    for detail in valid:
-        item = dict(detail)
-        previous = accumulated[-1] if accumulated else None
-        if (
-            isinstance(previous, dict)
-            and previous.get("type") == item.get("type")
-            and item.get("type") in {"reasoning.text", "reasoning.summary"}
-        ):
-            field = "text" if item["type"] == "reasoning.text" else "summary"
-            if isinstance(previous.get(field), str) and isinstance(item.get(field), str):
-                previous[field] += item[field]
-                for key in ("id", "format", "index", "signature"):
-                    if key not in previous or previous[key] in (None, ""):
-                        if key in item:
-                            previous[key] = item[key]
-                continue
-        accumulated.append(item)
-    signature = json.dumps(accumulated, ensure_ascii=False, separators=(",", ":"))
-    for index, block in enumerate(content):
-        if isinstance(block, ThinkingBlock):
-            content[index] = ThinkingBlock(text=block.text, signature=signature, redacted=block.redacted)
-            return content
-    content.append(ThinkingBlock(text="", signature=signature))
-    return content
-
-
 def _signature_details(signature: str) -> Any:
     try:
         value = json.loads(signature)
@@ -586,88 +559,9 @@ def _signature_details(signature: str) -> Any:
     return value if isinstance(value, (list, dict)) else None
 
 
-def _append_text(content: list[Any], value: str) -> list[Any]:
-    for index, block in enumerate(content):
-        if isinstance(block, TextBlock):
-            content[index] = TextBlock(text=(block.text or "") + value)
-            return content
-    content.append(TextBlock(text=value))
-    return content
-
-
-def _append_thinking(content: list[Any], value: str, marker: str | None = None) -> list[Any]:
-    for index, block in enumerate(content):
-        if isinstance(block, ThinkingBlock):
-            content[index] = ThinkingBlock(
-                text=block.text + value,
-                signature=block.signature or marker,
-                redacted=block.redacted,
-            )
-            return content
-    content.append(ThinkingBlock(text=value, signature=marker))
-    return content
-
-
-def _find_block_index(content: list[Any], kind: type[Any]) -> int:
-    for index, block in enumerate(content):
-        if isinstance(block, kind):
-            return index
-    return 0
-
-
-def _error(
-    message: str,
-    streamed: bool,
-    content: list[Any],
-    origin: Any,
-    usage: Any,
-    verified: bool,
-    *,
-    code: str | None = None,
-) -> ProviderError:
-    return classify_error(
-        body=message,
-        code=code,
-        streamed=streamed,
-            partial=(
-                partial_message(
-                    content,
-                    origin=origin,
-                    stop_reason="error",
-                    usage=usage,
-                    verified_origin=verified,
-                )
-                if streamed or usage is not None
-                else None
-            ),
-    )
-
-
 def _error_text(error: Mapping[str, Any], chunk: Mapping[str, Any]) -> str:
     message = _string(error.get("message"))
     return message or json.dumps(dict(chunk), ensure_ascii=False)
-
-
-def _invalid_tool_metadata(message: str) -> ProviderError:
-    return ProviderError(kind="invalid_request", message=message, retryable=False)
-
-
-def _aborted(reason: str | None, origin: Any, content: list[Any] | None = None, usage: Any = None, verified: bool = True) -> ProviderError:
-    return ProviderError(
-        kind="aborted",
-        message=reason or "provider request aborted",
-        retryable=False,
-        partial=(
-            partial_message(
-                content,
-                origin=origin,
-                usage=usage,
-                verified_origin=verified,
-            )
-            if content or usage is not None
-            else None
-        ),
-    )
 
 
 def _endpoint_url(base_url: str, suffix: str) -> str:
@@ -688,10 +582,6 @@ def _uses_completion_tokens(model: str, effort: str | None) -> bool:
 
 def _string(value: Any) -> str:
     return value if isinstance(value, str) else ""
-
-
-def _int(value: Any, default: int) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else default
 
 
 def _nonnegative(value: Any) -> int:
