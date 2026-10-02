@@ -68,28 +68,38 @@ def normalize_for_fuzzy_match(text: str) -> str:
     return _SPECIAL_SPACES.sub(" ", text)
 
 
-def _find_all(content: str, needle: str) -> list[int]:
+#: Avibe: replacements one ``replaceAll`` may make. Each costs a few hundred bytes of Python objects in
+#: the process every Session shares, so the budget is structural, not only the file's size.
+MAX_REPLACEMENTS = 10_000
+
+
+class ResultTooLarge(Exception):
+    """The edits insert more text than the result may hold; nothing was built."""
+
+
+def _find_all(content: str, needle: str, limit: int) -> list[int]:
     found: list[int] = []
-    if not needle:
-        return found
     index = content.find(needle)
-    while index != -1:
+    while index != -1 and len(found) < limit:
         found.append(index)
         index = content.find(needle, index + len(needle))
     return found
 
 
-def _occurrences(content: str, normalized: Callable[[], str], old_text: str) -> tuple[bool, list[tuple[int, int]]]:
-    """``(used_normalized, spans)``: the edit's occurrences in the first tier that has one.
+def _tier(content: str, normalized: Callable[[], str], old_text: str) -> tuple[bool, str, str, int]:
+    """``(used_normalized, haystack, needle, count)`` for the first tier where the edit occurs.
 
-    Exact spans are in the original text, normalized spans in the normalized text. Text that
-    normalizes to nothing never matches in the normalized tier.
+    Counting is ``str.count`` (no objects per match), so a match budget holds before any are built.
+    Text that normalizes to nothing never matches in the normalized tier.
     """
-    exact = _find_all(content, old_text)
-    if exact:
-        return False, [(index, len(old_text)) for index in exact]
+    count = content.count(old_text)
+    if count:
+        return False, content, old_text, count
     fuzzy_old = normalize_for_fuzzy_match(old_text)
-    return True, [(index, len(fuzzy_old)) for index in _find_all(normalized(), fuzzy_old)]
+    if not fuzzy_old:
+        return True, "", "", 0
+    haystack = normalized()
+    return True, haystack, fuzzy_old, haystack.count(fuzzy_old)
 
 
 def _not_found(path: str, index: int, total: int) -> EditError:
@@ -113,6 +123,14 @@ def _duplicate(path: str, index: int, total: int, occurrences: int) -> EditError
     return EditError(
         f"Found {occurrences} occurrences of edits[{index}] in {path}. Each oldText must be unique. Please provide "
         "more context to make it unique."
+    )
+
+
+def _too_many(path: str, index: int, total: int, occurrences: int) -> EditError:
+    which = "the text" if total == 1 else f"edits[{index}]"
+    return EditError(
+        f"Found {occurrences} occurrences of {which} in {path}, over the {MAX_REPLACEMENTS} replaceAll limit. "
+        "Use bash (for example sed or a short script) to replace this many."
     )
 
 
@@ -265,7 +283,9 @@ def _line_groups(lines: _Lines, normalized: str, matches: list[_Replacement]) ->
     return out
 
 
-def apply_edits(text: str, edits: list[Edit], path: str) -> tuple[str, str, str]:
+def apply_edits(
+    text: str, edits: list[Edit], path: str, max_result_chars: Optional[int] = None
+) -> tuple[str, str, str]:
     """Apply every edit to the file's ``text``; return the new text and the LF views before and after.
 
     Each edit matches in its own tier against the original, in the file's LF view. Exact edits replace
@@ -291,15 +311,21 @@ def apply_edits(text: str, edits: list[Edit], path: str) -> tuple[str, str, str]
 
     exact: list[_Replacement] = []
     fuzzy: list[_Replacement] = []
+    inserted = 0
     for index, edit in enumerate(edits):
-        used_normalized, spans = _occurrences(lines.view, normalized, edit.old_text)
-        if not spans:
+        used_normalized, haystack, needle, count = _tier(lines.view, normalized, edit.old_text)
+        if not count:
             raise _not_found(path, index, total)
-        if not edit.replace_all and len(spans) > 1:
-            raise _duplicate(path, index, total, len(spans))
-        chosen = spans if edit.replace_all else spans[:1]
+        if not edit.replace_all and count > 1:
+            raise _duplicate(path, index, total, count)
+        if count > MAX_REPLACEMENTS:
+            raise _too_many(path, index, total, count)
+        # The result holds at least every inserted text, so this bound never refuses a result that fits.
+        inserted += count * len(edit.new_text)
+        if max_result_chars is not None and inserted > max_result_chars:
+            raise ResultTooLarge()
         (fuzzy if used_normalized else exact).extend(
-            _Replacement(index, at, length, edit.new_text) for at, length in chosen
+            _Replacement(index, at, len(needle), edit.new_text) for at in _find_all(haystack, needle, count)
         )
 
     _check_disjoint(path, fuzzy)  # in normalized coordinates, before they are grouped into lines
@@ -308,7 +334,12 @@ def apply_edits(text: str, edits: list[Edit], path: str) -> tuple[str, str, str]
     new_text = _apply(text, replacements)
     if new_text == text:
         raise _no_change(path, total)
-    return new_text, lines.view, _Lines(new_text).view
+    return new_text, lines.view, lf_view(new_text)
+
+
+def lf_view(text: str) -> str:
+    """``_Lines(text).view`` without per-line state: the result may have far more lines than the file."""
+    return shown(normalize_to_lf(text[len(BOM) :] if text.startswith(BOM) else text))
 
 
 #: The display diff runs difflib only on the changed middle, and skips it when either side is longer.

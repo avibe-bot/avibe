@@ -6,7 +6,6 @@ Ported from Pi ``packages/coding-agent/src/core/tools/write.ts`` (MIT, Copyright
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import os
 import secrets
@@ -19,7 +18,6 @@ from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.paths import (
     KIND_REASON,
     file_mutation_lock,
-    open_regular,
     os_reason,
     resolve_to_cwd,
     target_kind,
@@ -68,6 +66,10 @@ class WriteTool:
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
                 await to_thread_joined(write_text, absolute, content)
+            except NotReplaceable:
+                return error_result(
+                    f"Cannot write {path}: its directory is not writable, so the file cannot be replaced safely."
+                )
             except OSError as exc:
                 return error_result(f"Cannot write {path}: {os_reason(exc)}.")
         return text_result(f"Successfully wrote to {path}")
@@ -103,6 +105,13 @@ class FileChanged(Exception):
     """The file is no longer the one a read-modify-write read; nothing was written."""
 
 
+class NotReplaceable(Exception):
+    """An existing file in a directory no temp file can be created in; nothing was written.
+
+    Writing it in place could leave it half-written (ENOSPC, a quota), so it is refused.
+    """
+
+
 @dataclass(frozen=True)
 class FileIdentity:
     """The file a read-modify-write read, so its result is published only over that same file."""
@@ -132,9 +141,11 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
     created with the umask default it keeps, so the process umask is never read or changed. Then
     ``os.replace`` puts it in place.
 
-    With ``expected``, the file must still be the one that was read: checked once, right before the
-    rename, or with ``fstat`` on the descriptor an in-place write goes through. POSIX has no
-    compare-and-rename, so a change between that check and the rename is not seen.
+    An existing file whose directory does not let a temp file be created is refused
+    (``NotReplaceable``) rather than written in place, which a full disk could leave half-written.
+
+    With ``expected``, the file must still be the one that was read, checked once right before the
+    rename. POSIX has no compare-and-rename, so a change between that check and the rename is not seen.
     """
     target = os.path.realpath(path)
     try:
@@ -147,12 +158,7 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
     except PermissionError:
         if mode is None:
             raise
-        # An existing, writable file in a directory we cannot add to: only an in-place write is possible.
-        with os.fdopen(open_regular(target, os.O_WRONLY), "wb") as handle:
-            _require(expected, target, os.fstat(handle.fileno()))
-            handle.truncate(0)
-            handle.write(data)
-        return
+        raise NotReplaceable() from None
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)

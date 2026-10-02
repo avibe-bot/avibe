@@ -17,7 +17,7 @@ import stat
 import unicodedata
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable, Literal, TypeVar
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote
 
 from core.agent_core.tools.args import ToolInputError
 

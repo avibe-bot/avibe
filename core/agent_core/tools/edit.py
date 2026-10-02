@@ -15,7 +15,7 @@ from typing import Any, Mapping
 
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
-from core.agent_core.tools.edit_diff import Edit, EditError, apply_edits, display_diff
+from core.agent_core.tools.edit_diff import Edit, EditError, ResultTooLarge, apply_edits, display_diff
 from core.agent_core.tools.paths import (
     NotRegularFile,
     errno_name,
@@ -28,11 +28,13 @@ from core.agent_core.tools.paths import (
 )
 from core.agent_core.tools.text import decode_file, encode_file, model_text
 from core.agent_core.tools.truncate import format_size
-from core.agent_core.tools.write import FileChanged, FileIdentity, write_bytes
+from core.agent_core.tools.write import FileChanged, FileIdentity, NotReplaceable, write_bytes
 
 #: Avibe: larger files are refused rather than loaded whole; the display diff stops at a smaller size.
 MAX_EDIT_BYTES = 10 * 1024 * 1024
 MAX_DIFF_BYTES = 1024 * 1024
+#: Avibe: planning keeps a few hundred bytes of Python objects per line, so lines have a budget too.
+MAX_EDIT_LINES = 200_000
 
 EDIT_DESCRIPTION = (
     "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping "
@@ -131,6 +133,17 @@ class _TooLarge(Exception):
         self.size = size
 
 
+class _TooManyLines(Exception):
+    def __init__(self, lines: int) -> None:
+        super().__init__(lines)
+        self.lines = lines
+
+
+def _line_count(text: str) -> int:
+    """Lines as edit's view counts them: ``\\r\\n``, ``\\r`` and ``\\n`` each end one."""
+    return text.count("\n") + text.count("\r") - text.count("\r\n") + 1
+
+
 def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[int, bytes, str, str, FileIdentity]:
     """Read the file and compute its new bytes: ``(size, data, view_before, view_after, identity)``.
 
@@ -151,7 +164,11 @@ def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[int, bytes
         os.close(fd)
     if len(raw) > MAX_EDIT_BYTES:
         raise _TooLarge(max(size, len(raw)))
-    new_text, before, after = apply_edits(decode_file(raw), edits, path)
+    text = decode_file(raw)
+    lines = _line_count(text)
+    if lines > MAX_EDIT_LINES:
+        raise _TooManyLines(lines)
+    new_text, before, after = apply_edits(text, edits, path, max_result_chars=MAX_EDIT_BYTES)
     return len(raw), encode_file(new_text), before, after, FileIdentity.of(real, st)
 
 
@@ -189,11 +206,7 @@ class EditTool:
             try:
                 size, data, base, new_content, identity = await to_thread_joined(_plan_edits, absolute, edits, path)
                 if len(data) > MAX_EDIT_BYTES:
-                    return error_result(
-                        f"File {path} would be {format_size(len(data))} after this edit, over the "
-                        f"{format_size(MAX_EDIT_BYTES)} edit limit. "
-                        "Use bash (for example sed or a short script) to change files this large."
-                    )
+                    raise ResultTooLarge()
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
                 await to_thread_joined(write_bytes, absolute, data, identity)
@@ -202,6 +215,20 @@ class EditTool:
                 return error_result(
                     f"File {path} is {format_size(exc.size)}, over the {format_size(MAX_EDIT_BYTES)} edit limit. "
                     "Use bash (for example sed or a short script) to change files this large."
+                )
+            except _TooManyLines as exc:
+                return error_result(
+                    f"File {path} has {exc.lines} lines, over the {MAX_EDIT_LINES} line edit limit. "
+                    "Use bash (for example sed or a short script) to change files this large."
+                )
+            except ResultTooLarge:
+                return error_result(
+                    f"File {path} would be over the {format_size(MAX_EDIT_BYTES)} edit limit after this edit. "
+                    "Use bash (for example sed or a short script) to change files this large."
+                )
+            except NotReplaceable:
+                return error_result(
+                    f"Could not edit file: {path}. Its directory is not writable, so the file cannot be replaced safely."
                 )
             except EditError as exc:
                 return error_result(str(exc))

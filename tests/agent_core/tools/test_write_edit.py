@@ -10,6 +10,7 @@ import re
 import stat
 import threading
 import time
+import tracemalloc
 
 import pytest
 
@@ -17,6 +18,7 @@ import core.agent_core.tools.paths as paths_module
 import core.agent_core.tools.write as write_module
 
 import core.agent_core.tools.edit as edit_module
+import core.agent_core.tools.edit_diff as edit_diff_module
 from core.agent_core.tools.args import ToolInputError
 from core.agent_core.tools.edit import EditTool
 from core.agent_core.tools.read import ReadTool
@@ -246,7 +248,7 @@ async def test_a_cancelled_write_lands_before_the_next_writer_takes_the_lock(
     assert (tmp_path / "f.txt").read_text() == "second\n"
 
 
-@pytest.mark.parametrize("change", ["replaced", "retargeted", "rewritten", "rewritten-in-place"])
+@pytest.mark.parametrize("change", ["replaced", "retargeted", "rewritten"])
 async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, monkeypatch, change):
     """Another writer (bash, an editor) changed the file after edit read it: nothing is written over it."""
     (tmp_path / "d").mkdir()
@@ -269,12 +271,7 @@ async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, 
         return planned
 
     monkeypatch.setattr(edit_module, "_plan_edits", plan_then_change)
-    if change == "rewritten-in-place":
-        (tmp_path / "d").chmod(0o555)  # no temp file can be created beside it
-    try:
-        result = await _edit(make_ctx, "d/f.txt", {"oldText": "alpha", "newText": "beta"})
-    finally:
-        (tmp_path / "d").chmod(0o755)
+    result = await _edit(make_ctx, "d/f.txt", {"oldText": "alpha", "newText": "beta"})
 
     assert (result.is_error, result_text(result)) == (
         True,
@@ -391,6 +388,83 @@ async def test_edit_work_stays_linear_on_adversarial_files(tmp_path, make_ctx, c
     assert time.monotonic() - started < 1.0
 
 
+@pytest.mark.parametrize(
+    ("content", "edit", "is_error"),
+    [
+        # A unique edit stops looking after the second match; the count comes from str.count.
+        ("x" * 1_000_000, {"oldText": "x", "newText": "y"}, True),
+        # More lines than edit plans per-line state for: refused before any is built.
+        ("\n" * 1_000_000 + "t", {"oldText": "t", "newText": "u"}, True),
+        # More occurrences than replaceAll builds replacements for: refused before any is built.
+        ("x" * 1_000_000, {"oldText": "x", "newText": "y", "replaceAll": True}, True),
+        # A result of three million lines, within the byte limit: its view is built without per-line state.
+        ("t," * 10, {"oldText": "t", "newText": "\n" * 300_000, "replaceAll": True}, False),
+    ],
+    ids=["duplicate", "many-lines", "many-occurrences", "many-result-lines"],
+)
+async def test_edit_memory_is_bounded_by_its_budgets_not_by_the_file(tmp_path, make_ctx, content, edit, is_error):
+    """Python objects per line or per match cost hundreds of bytes each, in the process every Session shares."""
+    (tmp_path / "f.txt").write_text(content)
+    tracemalloc.start()
+    try:
+        result = await _edit(make_ctx, "f.txt", edit)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert result.is_error == is_error, result_text(result)
+    assert peak < 32 * 1024 * 1024
+
+
+async def test_edit_refuses_files_with_more_lines_than_it_plans(tmp_path, make_ctx, monkeypatch):
+    monkeypatch.setattr(edit_module, "MAX_EDIT_LINES", 100)
+    (tmp_path / "ok.txt").write_text("x\n" * 99 + "t")
+    (tmp_path / "big.txt").write_text("x\r\n" * 100 + "t")
+
+    ok = await _edit(make_ctx, "ok.txt", {"oldText": "t", "newText": "u"})
+    big = await _edit(make_ctx, "big.txt", {"oldText": "t", "newText": "u"})
+
+    assert not ok.is_error, result_text(ok)
+    assert (big.is_error, result_text(big)) == (
+        True,
+        "File big.txt has 101 lines, over the 100 line edit limit. "
+        "Use bash (for example sed or a short script) to change files this large.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("edits", "message"),
+    [
+        (
+            [{"oldText": "a", "newText": "b", "replaceAll": True}],
+            "Found 11 occurrences of the text in f.txt, over the 10 replaceAll limit. "
+            "Use bash (for example sed or a short script) to replace this many.",
+        ),
+        (
+            [{"oldText": "zz", "newText": "q"}, {"oldText": "a", "newText": "b", "replaceAll": True}],
+            "Found 11 occurrences of edits[1] in f.txt, over the 10 replaceAll limit. "
+            "Use bash (for example sed or a short script) to replace this many.",
+        ),
+        (
+            # Ten replacements of 200 characters: over a 1,000-byte limit before anything is built.
+            [{"oldText": "c", "newText": "y" * 200, "replaceAll": True}],
+            "File f.txt would be over the 1000B edit limit after this edit. "
+            "Use bash (for example sed or a short script) to change files this large.",
+        ),
+    ],
+    ids=["single", "batch", "inserted-text"],
+)
+async def test_replace_all_has_a_budget(tmp_path, make_ctx, monkeypatch, edits, message):
+    monkeypatch.setattr(edit_module, "MAX_EDIT_BYTES", 1000)
+    monkeypatch.setattr(edit_diff_module, "MAX_REPLACEMENTS", 10)
+    (tmp_path / "f.txt").write_text("a," * 11 + "zz\n" + "c," * 10 + "\n")
+
+    result = await _edit(make_ctx, "f.txt", *edits)
+
+    assert (result.is_error, result_text(result)) == (True, message)
+    assert (tmp_path / "f.txt").read_text() == "a," * 11 + "zz\n" + "c," * 10 + "\n"
+
+
 async def test_a_large_changed_middle_skips_the_display_diff(tmp_path, make_ctx):
     (tmp_path / "f.txt").write_text("".join(f"line {i}\n" for i in range(3000)))
 
@@ -416,7 +490,7 @@ async def test_a_planned_result_over_the_limit_is_refused_and_its_diff_skipped(t
     assert grown.details == {"diff_skipped": True}
     assert too_big.is_error
     assert result_text(too_big) == (
-        "File small.txt would be 2.0KB after this edit, over the 1000B edit limit. "
+        "File small.txt would be over the 1000B edit limit after this edit. "
         "Use bash (for example sed or a short script) to change files this large."
     )
     assert (tmp_path / "small.txt").read_text() == "x" * 600 + "\n"
