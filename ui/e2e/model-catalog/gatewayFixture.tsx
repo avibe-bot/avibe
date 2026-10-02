@@ -35,13 +35,13 @@ export function GatewayFixture() {
     }],
   };
   const chains = Object.fromEntries(ids.map((model_id, index) => [modelChainKey(backend, model_id), readyRegion<AgentChain>({
-    contract_version: 11, backend, model_id, route_origin: origins[index],
+    contract_version: 12, backend, model_id, route_origin: origins[index],
     manual_override: origins[index] === 'manual' ? { hops: [{ source_id: source.id, model_id }] } : null,
     current: { source_id: source.id, model_id }, supply_state: 'ok',
     chain: [{ source_id: source.id, model_id, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
   })]));
   const runtime = freshRuntimeProjection(readyRegion({
-    contract_version: 11,
+    contract_version: 12,
     manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'fixture', assets: [] },
     status: { installed_version: '1.0.0', verified: true, listening: null, health: 'ok', last_check: null },
   }));

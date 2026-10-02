@@ -1319,7 +1319,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 11, **supervisor.status()}
+    projected = {"contract_version": 12, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -8136,7 +8136,8 @@ def test_every_oauth_start_vendor_binds_by_exactly_one_route(
                 protocol=protocol,
             )
         except EngineClientError as refused:
-            assert refused.status_code == 404
+            # Google admission is API-key-only; no OAuth probe was added.
+            assert refused.status_code == (None if protocol == "google" else 404)
             assert client.calls == []
             continue
         assert client.calls == ["/api-call"]

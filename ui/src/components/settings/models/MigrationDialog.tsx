@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { useToast } from '@/context/ToastContext';
 import type { TranslationKey } from '@/i18n/types';
 import { providerLabel, providerVendorId } from '../providers/providerIdentity';
@@ -462,14 +463,14 @@ export const MigrationDialog: React.FC<{
             {grouped.map((group) => (
               <div key={group.backend} className="flex flex-col gap-2">
                 <span className="px-1 font-mono text-[11px] font-semibold uppercase tracking-normal text-muted">
-                  {t(`settings.models.backends.${group.backend}`, { defaultValue: group.backend })}
+                  {getBackendUiMeta(group.backend).label}
                 </span>
                 {group.required.size > 1 && (
                   <p className="px-1 text-[12px] leading-relaxed text-muted">
                     {t('settings.models.migration.sharedFiles', {
                       backends: BACKEND_ORDER
                         .filter((backend) => group.required.has(backend))
-                        .map((backend) => t(`settings.models.backends.${backend}`))
+                        .map((backend) => getBackendUiMeta(backend).label)
                         .join(', '),
                     })}
                   </p>

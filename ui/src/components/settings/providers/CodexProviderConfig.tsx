@@ -7,6 +7,7 @@ import { useBackendRuntime } from '../shared/useBackendRuntime';
 import { BackendTestPanel } from '../BackendTestPanel';
 import { BackendConnectionForm } from './BackendConnectionForm';
 import { Card, CardContent } from '@/components/ui/card';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 
 export function CodexProviderConfig({ hideEnableToggle }: { hideEnableToggle?: boolean } = {}) {
   const { t } = useTranslation();
@@ -14,7 +15,7 @@ export function CodexProviderConfig({ hideEnableToggle }: { hideEnableToggle?: b
   const modelHubEnabled = useModelHubCapability();
   if (!runtime.loaded) return <p>{t('common.loading')}</p>;
   return <div className="flex flex-col gap-4">
-    <BackendRuntimeCard backend="codex" label="Codex" description={t('settings.backends.codexDescription')}
+    <BackendRuntimeCard backend="codex" label={getBackendUiMeta('codex').label} description={t('settings.backends.codexDescription')}
       Icon={Bot} iconTileClassName="bg-gold" iconClassName="text-gold-foreground" runtime={runtime} hideEnableToggle={hideEnableToggle} />
     {modelHubEnabled === true && <BackendSupplyModeCard backend="codex" />}
     <Card><CardContent className="p-6"><BackendConnectionForm backend="codex" connectionRevision={runtime.connectionRevision} /></CardContent></Card>

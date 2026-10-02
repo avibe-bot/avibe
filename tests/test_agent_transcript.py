@@ -430,3 +430,23 @@ async def test_a_cancelled_write_raises_only_after_its_commit_settled(engine) ->
     finally:
         release.join()
         holder.close()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [("a", "b"), {1: "x"}, float("nan"), float("inf"), b"raw"],
+    ids=["tuple", "non-str key", "nan", "inf", "bytes"],
+)
+async def test_payloads_that_would_not_read_back_unchanged_are_refused(engine, value) -> None:
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "go")
+    store = SQLiteTranscriptStore(engine)
+    entry = await store.consume_input("ses_main", consumed, _user("go"))
+
+    with pytest.raises(ValueError):
+        await store.append_payload("ses_main", "agent_state", {"version": 1, "state": {"value": value}})
+    with pytest.raises(ValueError):
+        await store.append_tool_result("ses_main", _tool_result("call_1", "ok"), details={"value": value})
+    assert list(await store.load("ses_main")) == [entry]

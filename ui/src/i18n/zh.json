@@ -584,6 +584,8 @@
       "claudeSubtitle": "检测或安装 Claude Code CLI。登录与 API Key 请直接通过 CLI 完成。",
       "claudeDescription": "Anthropic Agent · 通过 Claude 登录或填入 API Key",
       "codexDescription": "OpenAI Agent · 通过 ChatGPT 登录或 OPENAI_API_KEY",
+      "avibeDescription": "内置 Agent · 在模型中枢管理模型和路由",
+      "backToBackends": "返回后端列表",
       "openProviderPage": "配置 Provider",
       "providerOauth": "OAuth(默认)",
       "providerApiKey": "API Key",
@@ -1883,6 +1885,7 @@
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
           "openaiChatCompletions": "OpenAI Chat Completions",
+          "google": "Google Gemini",
           "idleHint": "填好 Base URL 和 API Key 后自动识别",
           "detecting": "识别接口中…",
           "manual": "手动指定接口类型",
@@ -2073,12 +2076,6 @@
           "codex": "Codex 配置",
           "opencode": "OpenCode 配置"
         }
-      },
-      "backends": {
-        "claude": "Claude Code",
-        "codex": "Codex",
-        "opencode": "OpenCode",
-        "avibe": "Avibe Agent"
       },
       "sourceTest": {
         "open": "测试",
@@ -4006,9 +4003,7 @@
     "statusDisabled": "已停用",
     "newAgent": "新建 Agent",
     "import": "导入",
-    "importFromClaude": "从 Claude 导入",
-    "importFromCodex": "从 Codex 导入",
-    "importFromOpenCode": "从 OpenCode 导入",
+    "importFrom": "从 {{backend}} 导入",
     "importSuccess": "已导入 {{imported}} 个,跳过 {{skipped}} 个。",
     "importFailed": "导入失败:{{error}}",
     "importNoneFound": "磁盘上没有找到可导入的 {{backend}} Agent。",
@@ -4036,6 +4031,8 @@
       "descriptionPlaceholder": "这个 Agent 用来做什么…",
       "backend": "后端",
       "backendLocked": "创建时确定 · 不可改",
+      "nativeBackend": "{{backend}} CLI",
+      "backendName": "{{backend}}",
       "model": "模型",
       "modelPlaceholder": "选择或输入模型",
       "modelEmpty": "找不到匹配的模型,可以直接输入。",
@@ -5202,20 +5199,17 @@
       "caption": "规划 · 开发 · 测试 · 交付",
       "returnCaption": "测试通过，回传 PM",
       "claude": {
-        "name": "Claude Code",
         "role": "PM",
         "working": "编写需求文档",
         "complete": "需求文档已就绪",
         "summary": "汇总结果，完成交付"
       },
       "codex": {
-        "name": "Codex",
         "role": "开发",
         "working": "编写功能代码",
         "complete": "功能代码已就绪"
       },
       "opencode": {
-        "name": "OpenCode",
         "role": "测试",
         "working": "编写并执行用例",
         "complete": "测试全部通过"

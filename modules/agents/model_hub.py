@@ -112,7 +112,7 @@ class ModelHubLaunch:
             "backend": self.backend,
             "requested_model": self.requested_model,
             "protocol": self.protocol,
-            "base_url": f"{self.gateway_base_url.rstrip('/')}/v1",
+            "base_url": f"{self.gateway_base_url.rstrip('/')}/{'v1beta' if self.protocol == 'google' else 'v1'}",
             "token": self.gateway_token,
             "runtime_model": self.runtime_model,
             "source_id": self.source_id,

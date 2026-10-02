@@ -19,6 +19,7 @@ from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
 from modules.agent_router import AgentRouter
 from modules.agents.service import AgentService
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 from modules.claude_client import ClaudeClient
 from modules.session_manager import SessionManager
 from modules.settings_manager import SettingsManager, MultiSettingsManager
@@ -169,7 +170,7 @@ def _target_agent_variant(value: Any, backend: Any = None, agent_name: Any = Non
     variant = _optional_target_str(value)
     if variant is None:
         return None
-    sentinel_values = {"default", "claude", "codex", "opencode"}
+    sentinel_values = {"default", *AGENT_BACKENDS}
     backend_text = _optional_target_str(backend)
     if backend_text:
         sentinel_values.add(backend_text)
@@ -353,7 +354,7 @@ class Controller:
         agent_config = getattr(self.config, "agents", None)
         if agent_config is None:
             return list(getattr(self.agent_service, "agents", {}).keys()) or [DEFAULT_AGENT_BACKEND]
-        for backend in ("opencode", "claude", "codex"):
+        for backend in AGENT_BACKENDS:
             cfg = getattr(agent_config, backend, None)
             if bool(getattr(cfg, "enabled", False)):
                 result.append(backend)
@@ -1570,7 +1571,7 @@ class Controller:
             )
             if vibe_agent:
                 return vibe_agent.backend
-        if target_backend and str(target_backend) in {"opencode", "claude", "codex"}:
+        if target_backend and str(target_backend) in AGENT_BACKENDS:
             return str(target_backend)
 
         vibe_agent = self.resolve_vibe_agent_for_context(context, required=False)
@@ -2599,7 +2600,7 @@ class Controller:
             backends: tuple[str, ...] | None = None,
         ) -> None:
             nonlocal cli_presence, next_cli_presence_generation
-            selected_backends = backends or ("claude", "codex", "opencode")
+            selected_backends = backends or tuple(sorted(NATIVE_CLI_BACKENDS))
             with cli_presence_lock:
                 next_cli_presence_generation += 1
                 generation = next_cli_presence_generation

@@ -15,10 +15,11 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from config.atomic_io import write_atomic
-from config.v2_config import normalize_model_hub_base_url
+from config.v2_config import normalize_model_hub_base_url, validate_model_hub_protocol_vendor
 from core.handlers.model_hub.events import contains_credential_material
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from vibe.model_hub_runtime.api_key_vendors import (
+    google_api_base_url,
     official_api_key_base_url,
     validate_api_key_auth_scheme,
 )
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
 _BEARER_CREDENTIAL_REF_RE = re.compile(r"^cred_auth_bearer_[0-9a-f]{32}$")
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
-_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat"}
+_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "google"}
 
 
 class EngineStateError(RuntimeError):
@@ -1621,6 +1622,13 @@ def _validate_source_target(
     """
 
     if credential_kind != "api_key":
+        return
+    if protocol == "google":
+        try:
+            validate_model_hub_protocol_vendor(vendor, protocol)
+            google_api_base_url(base_url)
+        except ValueError as exc:
+            raise EngineStateError(str(exc)) from None
         return
     if base_url is not None:
         return

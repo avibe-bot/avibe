@@ -48,13 +48,13 @@ def _fixture(kind):
         # Start from a valid native response so no Hub latency constraint can
         # accidentally reject the Avibe/native pairing for an unrelated cause.
         return {
-            "contract_version": 11, "backend": "claude", "channel": "native_cli", "reachable": True,
+            "contract_version": 12, "backend": "claude", "channel": "native_cli", "reachable": True,
             "source_id": "src_fixture01", "model_id": "fixture-model", "latency_ms": None,
             "error": None,
         }
     if kind == "chain":
         return {
-            "contract_version": 11, "backend": "avibe", "model_id": "fixture-model",
+            "contract_version": 12, "backend": "avibe", "model_id": "fixture-model",
             "manual_override": None, "route_origin": "automatic",
             "chain": [{"source_id": "src_fixture01", "model_id": "fixture-model", "channel": "hub",
                        "health": "healthy", "runnable": True, "reason": None, "retry_at": None}],
@@ -66,7 +66,7 @@ def _fixture(kind):
             "proposed_action": "import", "selected": False,
         }
     return {
-        "contract_version": 11, "turn_id": "turn-fixture", "ts": "2026-10-02T07:00:00Z",
+        "contract_version": 12, "turn_id": "turn-fixture", "ts": "2026-10-02T07:00:00Z",
         "agent": "avibe", "requested_model_id": "fixture-model", "outcome": kind,
         "failed_attempts": [{**identity, "reason": "rate_limited"}] if kind == "exhausted" else [],
         "served": identity if kind == "served" else None,

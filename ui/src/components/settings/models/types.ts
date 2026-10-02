@@ -10,8 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 11 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11] as const;
+export const CONTRACT_VERSION = 12 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -21,8 +21,11 @@ export const SOURCE_PROTOCOLS = [
   'anthropic',
   'openai_responses',
   'openai_chat',
+  'google',
 ] as const;
 export type SourceProtocol = (typeof SOURCE_PROTOCOLS)[number];
+// Google is API/config-only until its picker frame is approved.
+export const SELECTABLE_SOURCE_PROTOCOLS = ['anthropic', 'openai_responses', 'openai_chat'] as const;
 export const SOURCE_DISPLAY_NAME_MAX_LENGTH = 64 as const;
 export type SupplyChannel = 'native_cli' | 'hub';
 /** v3 (§4.5): classified by whether the state heals itself. cooldown carries a
@@ -152,8 +155,9 @@ export type Source = {
 // per-backend subset, carried by `AgentSupply.sources` below.
 
 // ── agent-supply.schema.json ────────────────────────────────────────────
-export type NativeCliBackend = 'claude' | 'codex' | 'opencode';
-export type AgentBackend = NativeCliBackend | 'avibe';
+import type { AgentBackendId, NativeCliBackend } from '@/lib/agentBackends';
+export type { NativeCliBackend } from '@/lib/agentBackends';
+export type AgentBackend = AgentBackendId;
 export type AgentMode = 'hub' | 'direct';
 export type MenuKind = 'fixed' | 'open';
 

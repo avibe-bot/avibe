@@ -5,13 +5,12 @@
 // question screen 3 owns, and the handoff would have to animate it appearing. The
 // row says who the routing is for and nothing else.
 import type { FC } from 'react';
-import { useTranslation } from 'react-i18next';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 
 import { ASSISTANT_ORDER } from '../collaborationTimeline';
 import { BackendIcon } from '../../visual';
 
 export const DestinationRow: FC = () => {
-  const { t } = useTranslation();
   return (
     <div className="setup-destinations">
       {ASSISTANT_ORDER.map((backend) => (
@@ -19,7 +18,7 @@ export const DestinationRow: FC = () => {
           <span className="setup-destination-logo">
             <BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" />
           </span>
-          <span className="setup-destination-name">{t(`onboarding.story.${backend}.name`)}</span>
+          <span className="setup-destination-name">{getBackendUiMeta(backend).label}</span>
         </div>
       ))}
     </div>

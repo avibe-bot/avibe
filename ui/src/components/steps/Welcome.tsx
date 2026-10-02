@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useApi } from '../../context/ApiContext';
 import { CollaborationStory } from '../onboarding/CollaborationStory';
 import { ASSISTANT_ORDER } from '../onboarding/collaborationTimeline';
-import { DEFAULT_AGENT_STATE } from '@/lib/agentBackends';
+import { DEFAULT_NATIVE_AGENT_STATE } from '@/lib/agentBackends';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import type { SetupAction, SetupScreenHandle } from '../onboarding/setupFlow';
 import '../onboarding/onboarding.css';
@@ -36,7 +36,7 @@ export function Welcome({ data, onNext, active, ref, onActionChange }: WelcomePr
     setError(null);
     try {
       const results = await Promise.all(ASSISTANT_ORDER.map(async (name) => {
-        const agent = { ...DEFAULT_AGENT_STATE[name], ...data?.agents?.[name] };
+        const agent = { ...DEFAULT_NATIVE_AGENT_STATE[name], ...data?.agents?.[name] };
         const result = await api.detectCli(agent.cli_path || name);
         return [name, { ...agent, cli_path: result.path || agent.cli_path, status: result.found ? 'ok' : 'missing' }];
       }));

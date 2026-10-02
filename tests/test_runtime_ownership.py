@@ -297,10 +297,11 @@ async def test_hfr_146_shared_codex_target_and_claude_mapping_use_exact_bindings
 
 
 def test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership() -> None:
-    """HFR-145: Claude, Codex, and OpenCode invalidation probes fail closed."""
+    """HFR-145: shared Agent invalidation probes fail closed."""
+    from modules.agents.catalog import AGENT_BACKENDS
 
     blocking = SimpleNamespace(blocks_reclamation=True)
-    for backend in ("claude", "codex", "opencode"):
+    for backend in AGENT_BACKENDS:
         probe = Mock(return_value=(blocking,))
         service = AgentService(SimpleNamespace())
         service.register(

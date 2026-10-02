@@ -18,6 +18,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { chosenCandidate, EMPTY_PICKER_GROUPS, pickerGroups } from './backendCatalog';
 import type { ChosenCandidate, PickerGroups } from './backendCatalog';
 import { modelsApi } from './modelsApi';
@@ -173,7 +174,7 @@ export const BackendModelPickerDialog: React.FC<{
       >
         <DialogHeader className="model-hub-catalog-head shrink-0 justify-center border-b border-border">
           <DialogTitle className="model-hub-catalog-title">
-            {t('settings.models.gateway.picker.title', { backend: t(`settings.models.backends.${backend}`) })}
+            {t('settings.models.gateway.picker.title', { backend: getBackendUiMeta(backend).label })}
           </DialogTitle>
           <DialogDescription className="sr-only">{t('settings.models.gateway.picker.description')}</DialogDescription>
         </DialogHeader>
@@ -224,7 +225,7 @@ export const BackendModelPickerDialog: React.FC<{
               </div>
             ) : (
               <div className="model-hub-picker-list">
-                {group('builtin', t('settings.models.gateway.picker.groupBuiltin', { backend: t(`settings.models.backends.${backend}`) }) as string, shown.builtin)}
+                {group('builtin', t('settings.models.gateway.picker.groupBuiltin', { backend: getBackendUiMeta(backend).label }) as string, shown.builtin)}
                 {group('providers', t('settings.models.gateway.picker.groupProviders') as string, shown.providers)}
                 {group('listed', t('settings.models.gateway.picker.groupListed') as string, shown.listed)}
               </div>

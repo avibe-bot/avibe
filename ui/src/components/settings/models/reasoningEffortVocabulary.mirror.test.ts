@@ -74,7 +74,8 @@ describe('reasoning-effort vocabulary UI ↔ backend mirror', () => {
   });
 
   it('holds TIER_SUGGESTIONS equal to PROTOCOL_REASONING_EFFORT_DEFAULTS, or the frozen family lists while that name is absent', () => {
-    expect(TIER_SUGGESTIONS).toEqual(exportedDefaults ?? FROZEN_PROTOCOL_DEFAULTS);
+    // Google has no family ladder: its API-only detail editor suggests nothing.
+    expect(TIER_SUGGESTIONS).toEqual({ ...(exportedDefaults ?? FROZEN_PROTOCOL_DEFAULTS), google: [] });
   });
 
   it.each(['en', 'zh'] as const)('gives %s picker copy for every vocabulary value, in vocabulary order', (lng) => {
