@@ -7,6 +7,7 @@ checks the real gateway/router/adapter/engine with only loopback fixture traffic
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
@@ -27,13 +28,22 @@ from tests.test_model_hub_l3 import _source
 pytestmark = pytest.mark.e2e_model_hub
 
 
-@pytest.mark.parametrize(("frontend", "protocol"), [
-    ("google", "google"), ("google", "anthropic"), ("google", "openai_responses"), ("google", "openai_chat"),
-    ("anthropic", "google"), ("openai_responses", "google"), ("openai_chat", "google"),
+@pytest.mark.parametrize(("frontend", "protocol", "model_id"), [
+    (frontend, protocol, "fixture-model")
+    for frontend, protocol in [
+        ("google", "google"), ("google", "anthropic"), ("google", "openai_responses"), ("google", "openai_chat"),
+        ("anthropic", "google"), ("openai_responses", "google"), ("openai_chat", "google"),
+    ]
+] + [
+    # CPA must receive the literal registered identity after HTTP normalization;
+    # a Python loopback endpoint alone cannot prove the engine's route match.
+    ("google", "openai_chat", model_id) for model_id in (
+        "../fixture", "/fixture", "nested/../fixture", "fixture:free",
+    )
 ])
 @pytest.mark.parametrize("stream", [False, True])
 async def test_real_google_frontend_uses_pinned_engine_and_reports_serving_origin(
-    tmp_path, monkeypatch, frontend, protocol, stream,
+    tmp_path, monkeypatch, frontend, protocol, model_id, stream,
 ):
     requests = []
 
@@ -55,7 +65,7 @@ async def test_real_google_frontend_uses_pinned_engine_and_reports_serving_origi
 
     with _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
         async with _server(upstream) as root:
-            source = _source("src_google001", "Fixture", vendor="custom", protocol=protocol, model_id="fixture-model")
+            source = _source("src_google001", "Fixture", vendor="custom", protocol=protocol, model_id=model_id)
             source.base_url = root + ("/v1" if protocol == "openai_responses" else "")
             source.credential_ref = adapter.state_store.store_api_key(
                 "synthetic-google-integration", vendor="custom", protocol=protocol, base_url=source.base_url,
@@ -73,7 +83,7 @@ async def test_real_google_frontend_uses_pinned_engine_and_reports_serving_origi
                 method = "streamGenerateContent?alt=sse" if stream else "generateContent"
                 prompt = "真实 fixture: 上海"
                 if frontend == "google":
-                    endpoint = f'/v1beta/models/{hop["runtime_model"]}:{method}'
+                    endpoint = f'/v1beta/models/{quote(hop["runtime_model"], safe="")}:{method}'
                     body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
                 else:
                     endpoint = "/v1/" + {
@@ -90,10 +100,15 @@ async def test_real_google_frontend_uses_pinned_engine_and_reports_serving_origi
                         headers={"Authorization": f'Bearer {hop["token"]}'}, json=body,
                     ) as response:
                         raw = await response.read()
-                        if frontend == "google" and protocol == "openai_responses" and stream:
+                        unsupported_reason = None
+                        if frontend == "google" and ":" in model_id:
+                            unsupported_reason = b"google_model_path_unsupported"
+                        elif frontend == "google" and protocol == "openai_responses" and stream:
+                            unsupported_reason = b"google_stream_responses_unsupported"
+                        if unsupported_reason is not None:
                             assert response.status == 422, raw
                             assert SERVED_HOP_HEADER not in response.headers
-                            assert b"google_stream_responses_unsupported" in raw
+                            assert unsupported_reason in raw
                             assert requests == []
                             return
                         assert response.status == 200, raw
@@ -101,7 +116,7 @@ async def test_real_google_frontend_uses_pinned_engine_and_reports_serving_origi
                             assert b"candidates" in raw
                         assert b"mock response" in raw or b"Answer" in raw
                         origin = json.loads(response.headers[SERVED_HOP_HEADER])
-                        assert origin == {"provider": "custom", "api": protocol, "model": "fixture-model"}
+                        assert origin == {"provider": "custom", "api": protocol, "model": model_id}
                 completion = router.settle_turn(
                     "real-google", settled_by=SETTLED_BY_TERMINAL_RESULT, ts="2026-10-02T09:00:00Z",
                 )
@@ -114,14 +129,14 @@ async def test_real_google_frontend_uses_pinned_engine_and_reports_serving_origi
                 path, body, headers = requests[0]
                 assert "真实 fixture: 上海" in json.dumps(body, ensure_ascii=False)
                 if protocol == "google":
-                    assert path == f"/v1beta/models/fixture-model:{method.split('?')[0]}"
+                    assert path == f"/v1beta/models/{model_id}:{method.split('?')[0]}"
                     assert headers["X-Goog-Api-Key"] == "synthetic-google-integration"
                     # The pinned executor injects model and safetySettings;
                     # frontend routing still comes only from the URL.
-                    assert body["model"] == "fixture-model"
+                    assert body["model"] == model_id
                     assert "stream" not in body
                 else:
-                    assert body["model"] == "fixture-model"
+                    assert body["model"] == model_id
                     assert path == {
                         "anthropic": "/v1/messages", "openai_responses": "/v1/responses",
                         "openai_chat": "/v1/chat/completions",

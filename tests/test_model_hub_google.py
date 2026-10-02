@@ -17,8 +17,9 @@ import aiohttp
 from aiohttp import web
 import pytest
 import yaml
+from jsonschema import ValidationError
 
-from config.v2_config import ModelHubSourceConfig
+from config.v2_config import ModelHubModelConfig, ModelHubRouteConfig, ModelHubRouteHopConfig, ModelHubSourceConfig
 from core.handlers.model_hub.adapter import ObservationOutcome, RawOutcomeKind, SourceBinding
 from core.handlers.model_hub.provenance import SERVED_HOP_HEADER
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
@@ -29,6 +30,7 @@ from core.handlers.model_hub.stream_wire import (
 )
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.handlers.model_hub.request import ModelHubRequest
+from core.handlers.model_hub.service import ModelHubError
 from modules.agents.model_hub import ModelHubRuntimeRouter
 from tests.test_model_hub_avibe_consumer import _avibe_service, _validate
 from tests.test_model_hub_l3 import InvokeHandle, LiveInvokeHandle, _outcome, _source
@@ -102,15 +104,59 @@ def test_google_source_roundtrips_and_uses_native_engine_registration(tmp_path, 
     assert "openai-compatibility" not in rendered
 
 
-@pytest.mark.parametrize("vendor", ["custom", "openai"])
+@pytest.mark.parametrize("vendor", ["relay-x", "openai"])
+@pytest.mark.parametrize("boundary", ["config", "schema", "create-schema", "observe", "create", "save", "runtime"])
+async def test_google_vendor_refusal_is_shared_by_source_admission(tmp_path, vendor, boundary):
+    """Unpinned vendors must not bypass Google's custom-only provider identity."""
+    source = _source("src_google001", "Google", vendor=vendor, protocol="google")
+    source.base_url = "https://upstream.invalid"
+    draft = {
+        "vendor": vendor, "protocol": "google", "base_url": source.base_url, "key": "synthetic-key",
+    }
+    if boundary == "config":
+        with pytest.raises(ValueError, match="Google"):
+            ModelHubSourceConfig.from_payload(source.to_payload())
+    elif boundary in {"schema", "create-schema"}:
+        with pytest.raises(ValidationError) as refused:
+            _validate(
+                "source.schema.json" if boundary == "schema" else "source-create.schema.json",
+                source.to_payload() if boundary == "schema" else draft,
+            )
+        assert list(refused.value.absolute_path) == ["vendor"]
+    elif boundary == "runtime":
+        store = EngineStateStore(tmp_path / "state")
+        credential = store.store_api_key(
+            "synthetic-key", vendor=vendor, protocol="google", base_url=source.base_url,
+        )
+        with pytest.raises(EngineStateError, match="Google"):
+            store.sync_sources([SourceBinding(
+                source_id=source.id, vendor=vendor, protocol="google", base_url=source.base_url,
+                credential_ref=credential, allowed_origins=(), model_ids=("gemini-fixture",),
+            )])
+        assert store.list_sources() == []
+    else:
+        from tests.test_model_hub_api import _service
+
+        service, store, adapter = _service(tmp_path)
+        with pytest.raises(ModelHubError):
+            if boundary == "observe":
+                await service.observe_source(draft)
+            else:
+                await service.create_source({
+                    **draft, "kind": "api_key", "save_unverified": boundary == "save",
+                })
+        assert store.config.sources == []
+        assert adapter.credential_count == 0
+
+
 @pytest.mark.parametrize("base_url", [None, "https://upstream.invalid/v1beta?api-version=fixture"])
-def test_google_target_refuses_unrenderable_roots_before_runtime_state_change(tmp_path, vendor, base_url):
+def test_google_target_refuses_unrenderable_roots_before_runtime_state_change(tmp_path, base_url):
     """Google has no vendor-default root, and CPA appends paths rather than joining query URLs."""
     store = EngineStateStore(tmp_path / "state")
-    credential = store.store_api_key("synthetic-key", vendor=vendor, protocol="google", base_url=base_url)
+    credential = store.store_api_key("synthetic-key", vendor="custom", protocol="google", base_url=base_url)
     with pytest.raises(EngineStateError, match="Google"):
         store.sync_sources([SourceBinding(
-            source_id="src_google001", vendor=vendor, protocol="google", base_url=base_url,
+            source_id="src_google001", vendor="custom", protocol="google", base_url=base_url,
             credential_ref=credential, allowed_origins=(), model_ids=("gemini-fixture",),
         )])
     assert store.list_sources() == []
@@ -118,7 +164,8 @@ def test_google_target_refuses_unrenderable_roots_before_runtime_state_change(tm
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("upstream_protocol", ["google", "anthropic", "openai_responses", "openai_chat"])
-async def test_google_engine_frontend_addresses_routed_model_in_url(stream, upstream_protocol):
+@pytest.mark.parametrize("model_id", ["vendor/model-中文", "../fixture", "/fixture", "nested/../fixture"])
+async def test_google_engine_frontend_addresses_routed_model_in_url(stream, upstream_protocol, model_id):
     """CPA selects the upstream using its path, regardless of Source protocol."""
     received = []
 
@@ -134,10 +181,10 @@ async def test_google_engine_frontend_addresses_routed_model_in_url(stream, upst
         source = SourceRecord(
             source_id="src_google001", vendor="custom", protocol=upstream_protocol,
             base_url="https://upstream.invalid", credential_ref="cred_google001",
-            allowed_origins=(), model_ids=("vendor/model-中文",), prefix="fixture",
+            allowed_origins=(), model_ids=(model_id,), prefix="fixture",
         )
         payload = {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]}
-        handle = await client.invoke(source, "vendor/model-中文", payload, stream=stream, request_protocol="google")
+        handle = await client.invoke(source, model_id, payload, stream=stream, request_protocol="google")
         assert handle.stream is not None
         raw = b"".join([chunk async for chunk in handle.stream])
         await handle.close_stream()
@@ -147,10 +194,35 @@ async def test_google_engine_frontend_addresses_routed_model_in_url(stream, upst
         assert b"Answer" in raw
     path, query, body, headers = received[0]
     action = "streamGenerateContent" if stream else "generateContent"
-    assert path == f"/v1beta/models/fixture/vendor/model-中文:{action}"
+    assert path == f"/v1beta/models/fixture/{model_id}:{action}"
     assert query == ({"alt": "sse"} if stream else {})
     assert body == payload
     assert headers["Authorization"] == "Bearer synthetic-gateway"
+
+
+@pytest.mark.parametrize(("payload", "verified"), [
+    (b'{"promptFeedback":{"blockReason":"SAFETY"}}', True),
+    (b'{"promptFeedback":{"blockReason":"OTHER"},"usageMetadata":{"promptTokenCount":4}}', True),
+    (b'{"promptFeedback":{"blockReason":""}}', False),
+    (b'{"promptFeedback":{"blockReason":null}}', False),
+    (b'{"promptFeedback":{"blockReason":"SAFETY"},"promptFeedback":{}}', False),
+    (b'{"promptFeedback":{"blockReason":"SAFETY"}', False),
+    (b'{"promptFeedback":{"blockReason":"SAFETY"},"error":{"code":503}}', False),
+])
+async def test_google_buffered_prompt_block_proves_recovery_without_candidates(payload, verified):
+    """A native blocked completion restores health; metadata/malformed/error bodies cannot."""
+    async def handle(request):
+        return web.Response(body=payload, content_type="application/json")
+
+    async with _server(handle) as root:
+        source = SourceRecord(
+            source_id="src_google001", vendor="custom", protocol="google", base_url=root,
+            credential_ref="cred_google001", allowed_origins=(), model_ids=("fixture",), prefix="fixture",
+        )
+        client = EngineClient(EngineConnection(root, "unused", "synthetic-key"))
+        result = await client.invoke(source, "fixture", {"contents": []}, stream=False)
+        assert (await result.outcome()).recovery_verified is verified
+        await result.close_stream()
 
 
 def test_google_stream_facts_do_not_confuse_metadata_with_output_or_drop_usage():
@@ -367,7 +439,7 @@ async def test_google_discovery_does_not_follow_redirects_with_credentials():
 ])
 async def test_google_local_errors_are_native_and_never_admit_a_hop(tmp_path, suffix, payload, token_valid, status):
     """Native endpoint/query/body validation shares all pre-admission no-origin rules."""
-    service = _avibe_service(tmp_path, [_source("src_google001", "Google", protocol="google")], handles=[])
+    service = _avibe_service(tmp_path, [_source("src_google001", "Google", vendor="custom", protocol="google")], handles=[])
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
@@ -390,7 +462,7 @@ async def test_google_local_errors_are_native_and_never_admit_a_hop(tmp_path, su
 
 async def test_google_saved_source_probe_speaks_the_declared_protocol(tmp_path):
     """Add-time discovery is not inference; an explicit model test is and needs Gemini's body."""
-    service = _avibe_service(tmp_path, [_source("src_google001", "Google", protocol="google")], handles=[
+    service = _avibe_service(tmp_path, [_source("src_google001", "Google", vendor="custom", protocol="google")], handles=[
         InvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id="src_google001")),
     ])
     result = await service.probe_source("src_google001", {"model": "shared-model"})
@@ -402,40 +474,51 @@ async def test_google_saved_source_probe_speaks_the_declared_protocol(tmp_path):
 
 
 @pytest.mark.parametrize("working_fallback", [False, True])
-async def test_google_stream_skips_unsupported_responses_before_admission(tmp_path, caplog, working_fallback):
+@pytest.mark.parametrize(("protocol", "model_id", "stream", "reason"), [
+    ("openai_responses", "shared-model", True, "google_stream_responses_unsupported"),
+] + [
+    (protocol, "fixture:free", stream, "google_model_path_unsupported")
+    for protocol in ("google", "anthropic", "openai_chat", "openai_responses")
+    for stream in (False, True)
+])
+async def test_google_skips_unsupported_hops_before_admission(
+    tmp_path, caplog, working_fallback, protocol, model_id, stream, reason,
+):
     """Unsupported conversion is a local skip, never an upstream failure or false success."""
     import logging
 
     caplog.set_level(logging.INFO, logger="core.handlers.model_hub.service")
-    blocked = _source("src_blocked01", "Blocked", vendor="custom", protocol="openai_responses")
+    blocked = _source("src_blocked01", "Blocked", vendor="custom", protocol=protocol, model_id=model_id)
     good = _source("src_google001", "Google", vendor="custom", protocol="google", model_id="gemini-fixture")
+    raw = _sse(GOOGLE_RESPONSE) if stream else json.dumps(GOOGLE_RESPONSE).encode()
     service = _avibe_service(tmp_path, [blocked, good] if working_fallback else [blocked], handles=[
-        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=good.id), (_sse(GOOGLE_RESPONSE),)),
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=good.id), (raw,)),
     ])
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="google:unsupported", turn_id="unsupported")
         base = hop["base_url"].rsplit("/", 1)[0] + "/v1beta"
+        action = "streamGenerateContent?alt=sse" if stream else "generateContent"
         async with aiohttp.ClientSession() as client:
             async with client.post(
-                f'{base}/models/{hop["runtime_model"]}:streamGenerateContent?alt=sse',
+                f'{base}/models/{hop["runtime_model"]}:{action}',
                 headers={"x-goog-api-key": hop["token"]},
                 json={"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
             ) as response:
                 if working_fallback:
                     assert response.status == 200
                     assert json.loads(response.headers[SERVED_HOP_HEADER])["api"] == "google"
-                    assert await response.read() == _sse(GOOGLE_RESPONSE)
+                    assert await response.read() == raw
                 else:
                     assert response.status == 422
                     assert SERVED_HOP_HEADER not in response.headers
                     assert (await response.json())["error"]["details"] == [
-                        {"reason": "google_stream_responses_unsupported"},
+                        {"reason": reason},
                     ]
         assert [call[0] for call in service.adapter.invocations] == ([good.id] if working_fallback else [])
         assert blocked.state.status == "standby"
-        assert any(getattr(record, "reason", None) == "google_stream_responses_unsupported" for record in caplog.records)
+        assert any(getattr(record, "reason", None) == reason for record in caplog.records)
         completion = router.settle_turn(
             "unsupported", settled_by=SETTLED_BY_TERMINAL_RESULT, ts="2026-10-02T09:00:00Z",
         )
@@ -449,14 +532,59 @@ async def test_google_stream_skips_unsupported_responses_before_admission(tmp_pa
         await gateway.close()
 
 
-async def test_native_google_conversion_is_not_changed_by_avibe_admission_policy(tmp_path):
-    """The engine limitation must not silently broaden to native CLI behavior."""
-    source = _source("src_blocked01", "Native", protocol="openai_responses")
+@pytest.mark.parametrize(("backend", "protocol", "model_id"), [
+    ("codex", "google", "shared-model"),
+    ("codex", "google", "fixture:free"),
+    ("avibe", "openai_chat", "fixture:free"),
+])
+async def test_other_frontends_and_native_paths_keep_their_admission_policy(tmp_path, backend, protocol, model_id):
+    """The Google limitations must not silently broaden to native/other frontends."""
+    source = _source("src_blocked01", "Native", protocol="openai_responses", model_id=model_id)
     service = _avibe_service(tmp_path, [source], handles=[
         InvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=source.id)),
     ])
     await service.resolve(
-        backend="codex", model_id=service.store.requested_models["codex"],
-        request=ModelHubRequest({"contents": []}, protocol="google"), stream=True,
+        backend=backend, model_id=service.store.requested_models[backend],
+        request=ModelHubRequest({"contents": []}, protocol=protocol), stream=True,
     )
     assert [call[0] for call in service.adapter.invocations] == [source.id]
+
+
+async def test_google_unsupported_model_skip_keeps_next_model_on_the_same_source(tmp_path):
+    """The colon restriction belongs to the exact hop, not the Source's healthy inventory."""
+    source = _source("src_google001", "Google", vendor="custom", protocol="google", model_id="fixture:free")
+    source.models.append(ModelHubModelConfig(id="safe-model", provenance="discovered"))
+    service = _avibe_service(tmp_path, [source], handles=[
+        InvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=source.id)),
+    ])
+    service.store.config.agents["avibe"].routes["menu-alias"] = ModelHubRouteConfig((
+        ModelHubRouteHopConfig(source.id, "fixture:free"),
+        ModelHubRouteHopConfig(source.id, "safe-model"),
+    ))
+    result = await service.resolve(
+        backend="avibe", model_id="menu-alias",
+        request=ModelHubRequest({"contents": []}, protocol="google"), stream=False,
+    )
+    assert result.model_id == "safe-model"
+    assert service.adapter.invocations == [(source.id, "safe-model", "avibe")]
+
+
+async def test_google_explicit_agent_probe_surfaces_unsupported_model_without_restarting(tmp_path, monkeypatch):
+    """A non-fallback probe cannot treat permanent local incompatibility as route churn."""
+    source = _source("src_google001", "Google", vendor="custom", protocol="google", model_id="fixture:free")
+    service = _avibe_service(tmp_path, [source])
+    original = service._invoke_admitted
+    calls = 0
+
+    async def guarded_admission(**kwargs):
+        nonlocal calls
+        calls += 1
+        assert calls == 1, "an unsupported explicit probe must not loop"
+        return await original(**kwargs)
+
+    monkeypatch.setattr(service, "_invoke_admitted", guarded_admission)
+    with pytest.raises(ModelHubError) as refused:
+        await service.probe_agent("avibe", "menu-alias")
+    assert refused.value.code == "google_model_path_unsupported"
+    assert refused.value.status == 422
+    assert service.adapter.invocations == []

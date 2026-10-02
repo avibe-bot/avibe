@@ -12,6 +12,9 @@ Base URL and the usual transient `key` through the existing observe/create APIs.
 Existing vendor pins, subscriptions, OAuth and native CLI configuration do not
 change. The UI protocol picker still contains only its three approved options.
 Existing Source details can label Google; its tier suggestions are empty.
+The custom-only Google vendor rule is validated before API credential work and
+at config/runtime Source admission; unverified save cannot bypass it. Source and
+SourceCreate schemas enforce the same conditional.
 
 The Base URL is the upstream origin or a proxy root, optionally ending in
 `/v1beta`; that suffix is removed only for CPA configuration because its Gemini
@@ -46,6 +49,10 @@ The gateway accepts:
 It also accepts omitted `alt` or `$alt=sse` on the streaming path, always using SSE.
 Other `alt` values are refused before admission. Model and streaming mode come
 from the path, not JSON `model` or `stream` fields; those fields are refused.
+Callers percent-encode the runtime model as one path parameter. The engine client
+likewise encodes model identity as data, retaining only its deliberate
+`Source.prefix/model` boundary as a structural slash; dot segments and leading
+slashes in admitted model ids must not change routing.
 `countTokens`, embedding/batch APIs and query-string credential authentication are
 not consumer endpoints. A caller uses the returned gateway token through Bearer
 authentication or `x-goog-api-key`; upstream keys never cross this boundary.
@@ -55,7 +62,7 @@ frontend regardless of the selected Source's protocol. CPA owns native or
 cross-protocol request/response conversion. Avibe performs no duplicate translator.
 The engine remains v7.3.16 at upstream `c404af96` with the existing Avibe patch.
 
-### Pinned-engine limitation and admission skip
+### Pinned-engine limitations and admission skips
 
 For **Avibe streaming only**, a Google frontend request cannot admit an
 `openai_responses` Source hop: the pinned CPA Responses/Codex-to-Gemini translator
@@ -69,8 +76,22 @@ is fabricated. If all selectable hops were skipped without an upstream attempt,
 return local HTTP 422 with that same machine reason and no served-hop header.
 If actual upstream attempts failed too, ordinary exhaustion still owns the turn.
 
+For **Avibe Google-frontend requests**, buffered or streaming, a selected original
+model id containing `:` is also unsupported: CPA splits the decoded Google action
+on every colon, so percent-encoding does not preserve that identity. Skip exactly
+that hop with reason `google_model_path_unsupported` before transport, recovery
+or attempt admission. Continue the chain, including a later supported model on
+the same Source. Do not rename, truncate or normalize the configured model id.
+This check precedes the streaming conversion check when both apply. If all hops
+are skipped, the last skip reason is returned in the same local 422/no-origin
+envelope. Logs retain each exact skipped identity and its reason.
+An explicit Agent probe still tests only its selected hop: an unsupported
+Google model returns the same controlled 422 reason instead of retrying a
+permanent local limitation as a changed route.
+
 Native CLI behavior is unchanged. Google buffered conversion, Google/Anthropic/
-Chat streaming, and other frontends served by a Google Source are not skipped.
+Chat streaming without model colons, and all other frontends served by a Google
+Source are not skipped.
 No usage frame or clean EOF is interpreted as a missing model terminal.
 Fixing the engine and publishing a replacement managed-runtime asset is a
 separate owner-authorized release operation, not part of this PR.
@@ -81,6 +102,9 @@ Google candidate content parts are model output; metadata alone is not. Native
 `finishReason` or prompt blocking marks terminal completion; there is no `[DONE]`.
 Native `error` envelopes (unnamed or CPA's `event: error`) are failures. The
 existing no-fallback-after-output rule remains in force.
+A buffered `promptFeedback.blockReason` completion needs no candidates array and
+is positive recovery evidence, just like its streaming terminal. Empty, malformed
+or error-bearing bodies do not gain recovery evidence from that field.
 
 Token reports project `usageMetadata.promptTokenCount` (including its cached
 subset), `cachedContentTokenCount`, and the sum of `candidatesTokenCount` and

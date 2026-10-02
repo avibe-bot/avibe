@@ -9313,6 +9313,8 @@ def test_probe_request_matches_live_backend_protocol_matrix(
 ) -> None:
     source = _source("src_primary01", "Primary")
     source.protocol = source_protocol
+    if source_protocol == "google":
+        source.vendor = "custom"
     service = _service(
         tmp_path,
         sources=[source],

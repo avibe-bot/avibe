@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from config.atomic_io import write_atomic
-from config.v2_config import normalize_model_hub_base_url
+from config.v2_config import normalize_model_hub_base_url, validate_model_hub_protocol_vendor
 from core.handlers.model_hub.events import contains_credential_material
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from vibe.model_hub_runtime.api_key_vendors import (
@@ -1625,6 +1625,7 @@ def _validate_source_target(
         return
     if protocol == "google":
         try:
+            validate_model_hub_protocol_vendor(vendor, protocol)
             google_api_base_url(base_url)
         except ValueError as exc:
             raise EngineStateError(str(exc)) from None

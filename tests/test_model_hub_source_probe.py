@@ -79,9 +79,15 @@ def test_probe_invokes_selected_source_even_without_agent_routes_and_isolates_fa
         args = adapter.invoke.call_args.args
         assert args[:2] == (source_id, model_id)
         assert args[2].protocol == protocol
-        assert args[2]["model"] == model_id
-        budget_key = "max_output_tokens" if protocol == "openai_responses" else "max_tokens"
-        assert args[2][budget_key] == 128
+        if protocol == "google":
+            assert args[2] == {
+                "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+                "generationConfig": {"maxOutputTokens": 128},
+            }
+        else:
+            assert args[2]["model"] == model_id
+            budget_key = "max_output_tokens" if protocol == "openai_responses" else "max_tokens"
+            assert args[2][budget_key] == 128
         assert args[3:] == (False, "opencode")
         adapter.discover_models.assert_not_awaited()
         after = store.config.to_payload()
@@ -223,6 +229,11 @@ def test_source_probe_crosses_real_adapter_and_http_transport(tmp_path, protocol
         async def handler(request):
             body = await request.json()
             requests.append((request.path, body))
+            if protocol == "google":
+                return web.json_response({
+                    "candidates": [{"content": {"parts": [{"text": "pong"}]}, "finishReason": "STOP"}],
+                    "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1},
+                })
             return web.json_response({
                 "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}],
                 "content": [{"type": "text", "text": "pong"}],
@@ -257,9 +268,17 @@ def test_source_probe_crosses_real_adapter_and_http_transport(tmp_path, protocol
             assert answer["reachable"]
             assert len(requests) == 1
             path, body = requests[0]
-            assert path == {"anthropic": "/v1/messages", "openai_chat": "/v1/chat/completions", "openai_responses": "/v1/responses"}[protocol]
-            assert body["model"] == f"{runtime_store.get_source(source['id']).prefix}/{model_id}"
-            assert body["stream"] is False
+            routed_model = f"{runtime_store.get_source(source['id']).prefix}/{model_id}"
+            if protocol == "google":
+                assert path == f"/v1beta/models/{routed_model}:generateContent"
+                assert body == {
+                    "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+                    "generationConfig": {"maxOutputTokens": 128},
+                }
+            else:
+                assert path == {"anthropic": "/v1/messages", "openai_chat": "/v1/chat/completions", "openai_responses": "/v1/responses"}[protocol]
+                assert body["model"] == routed_model
+                assert body["stream"] is False
             assert transport._active_transports == 0
             assert not store.config.sources[0].verification_pending
             service._meter_call.assert_awaited_once()

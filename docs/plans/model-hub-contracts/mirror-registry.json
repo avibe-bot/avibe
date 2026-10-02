@@ -15,6 +15,7 @@
       "tests/e2e/test_model_hub*.py",
       "ui/src/components/settings/models/types.ts",
       "ui/src/components/settings/models/*.test.*",
+      "ui/src/components/onboarding/providers/*.test.*",
       "ui/e2e/**/*.ts",
       "ui/e2e/**/*.tsx"
     ],
@@ -59,6 +60,18 @@
       "id": "A3",
       "source_file": "docs/plans/model-hub-implementation.md",
       "start_marker": "The final set contains no",
+      "allowed_property_values": [
+        {
+          "file": "docs/plans/model-hub-contracts/source.schema.json",
+          "property_path": ["allOf", 0, "then", "properties", "vendor"],
+          "values": ["custom"]
+        },
+        {
+          "file": "docs/plans/model-hub-contracts/source-create.schema.json",
+          "property_path": ["allOf", 0, "then", "properties", "vendor"],
+          "values": ["custom"]
+        }
+      ],
       "scope_globs": [
         "docs/plans/model-hub-contracts/*.schema.json"
       ]

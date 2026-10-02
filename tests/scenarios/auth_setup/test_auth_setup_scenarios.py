@@ -3673,6 +3673,7 @@ def test_api_key_setup_does_not_schedule_a_model(
             "openai_responses": "/v1/responses",
             "openai_chat": "/v1/chat/completions",
         }
+        listing_path = "/v1beta/models" if protocol == "google" else "/v1/models"
 
         async def upstream(request):
             body = await request.json() if request.method == "POST" else None
@@ -3680,6 +3681,8 @@ def test_api_key_setup_does_not_schedule_a_model(
             supplied_key = (
                 request.headers.get("x-api-key")
                 if protocol == "anthropic"
+                else request.headers.get("x-goog-api-key")
+                if protocol == "google"
                 else request.headers.get("Authorization", "").removeprefix("Bearer ")
             ) or ""
             observed_credentials.add(supplied_key)
@@ -3698,6 +3701,8 @@ def test_api_key_setup_does_not_schedule_a_model(
             if supplied_key != valid_key and not (request.method == "GET" and public_inventory):
                 return web.json_response({"code": "INVALID_API_KEY"}, status=401)
             if request.method == "GET":
+                if protocol == "google":
+                    return web.json_response({"models": [{"name": "models/relay-model"}]})
                 return web.json_response({"data": [{"id": "relay-model"}]})
             if "model" in body:
                 return web.json_response(
@@ -3710,8 +3715,13 @@ def test_api_key_setup_does_not_schedule_a_model(
             )
 
         upstream_app = web.Application()
-        upstream_app.router.add_post(paths[protocol], upstream)
-        upstream_app.router.add_get("/v1/models", upstream)
+        if protocol == "google":
+            # An unexpected generation request must be observed, not hidden by
+            # a 404: explicit Google observation has only a listing witness.
+            upstream_app.router.add_post("/{path:.*}", upstream)
+        else:
+            upstream_app.router.add_post(paths[protocol], upstream)
+        upstream_app.router.add_get(listing_path, upstream)
         web_runner = web.AppRunner(upstream_app)
         await web_runner.setup()
         site = web.TCPSite(web_runner, "127.0.0.1", 0)
@@ -3758,7 +3768,7 @@ def test_api_key_setup_does_not_schedule_a_model(
                 # The explicit save observes nothing. Its one request is the
                 # best-effort inventory, which fills the Source without
                 # answering the credential question the listing left open.
-                assert requests[before:] == [("GET", "/v1/models", None)]
+                assert requests[before:] == [("GET", listing_path, None)]
             assert len(store.config.sources) == 1
             h.source = store.config.sources[0].to_payload()
             assert h.source["protocol"] == protocol
@@ -3793,10 +3803,13 @@ def test_api_key_setup_does_not_schedule_a_model(
                 # all, which is what tells a gated inventory from a public one.
                 "",
             }
-            assert all(
-                path == (paths[protocol] if method == "POST" else "/v1/models")
-                for method, path, _ in requests
-            )
+            if protocol == "google":
+                assert all((method, path, body) == ("GET", listing_path, None) for method, path, body in requests)
+            else:
+                assert all(
+                    path == (paths[protocol] if method == "POST" else "/v1/models")
+                    for method, path, _ in requests
+                )
             assert all("model" not in body for _, _, body in requests if body is not None)
         finally:
             await web_runner.cleanup()

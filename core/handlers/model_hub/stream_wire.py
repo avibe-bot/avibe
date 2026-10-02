@@ -523,6 +523,7 @@ class ProtocolStreamTaxonomy:
     # Project only these finite selectors and the result container's shape.
     buffered_success_selectors: tuple[tuple[JSONPath, tuple[str, ...]], ...] = ()
     buffered_output_array_path: JSONPath | None = None
+    buffered_terminal_string_paths: tuple[JSONPath, ...] = ()
 
 
 PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
@@ -546,6 +547,7 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
         sequence_number_path=None,
         buffered_error_envelope_paths=(("error",),),
         buffered_output_array_path=("candidates",),
+        buffered_terminal_string_paths=(("promptFeedback", "blockReason"),),
         terminal_event_name=None,
         render_terminal_event=_google_terminal_event,
         usage=ProtocolUsageTaxonomy(
@@ -927,6 +929,7 @@ def _protocol_projection_paths(protocol: str) -> frozenset[JSONPath]:
     taxonomy = PROTOCOL_STREAM_TAXONOMY[protocol]
     paths: set[JSONPath] = {()}
     paths.update(path for path, _values in taxonomy.buffered_success_selectors)
+    paths.update(taxonomy.buffered_terminal_string_paths)
     if taxonomy.buffered_output_array_path is not None:
         paths.add(taxonomy.buffered_output_array_path)
     for envelope in (*taxonomy.terminal_envelopes, *taxonomy.model_output_envelopes):
@@ -958,10 +961,14 @@ def _buffered_recovery_verified(
     taxonomy: ProtocolStreamTaxonomy,
     scalars: Mapping[JSONPath, object],
     arrays: AbstractSet[JSONPath],
+    nonempty: AbstractSet[JSONPath],
 ) -> bool:
     """Recognize a completed native result without validating every body field."""
 
-    return (
+    return any(
+        path in scalars and path in nonempty and (isinstance(scalars[path], str) or scalars[path] is None)
+        for path in taxonomy.buffered_terminal_string_paths
+    ) or (
         taxonomy.buffered_output_array_path is not None
         and taxonomy.buffered_output_array_path in arrays
         and all(scalars.get(path) in values for path, values in taxonomy.buffered_success_selectors)
@@ -1068,7 +1075,7 @@ class ProtocolFactProjector:
                 error_code_candidates=(code_candidates if matched_paths else ()),
                 recovery_verified=(
                     not matched_paths
-                    and _buffered_recovery_verified(self.taxonomy, self._scalars, self._arrays)
+                    and _buffered_recovery_verified(self.taxonomy, self._scalars, self._arrays, self._nonempty)
                 ),
             )
 

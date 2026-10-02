@@ -436,7 +436,10 @@ class EngineClient:
             # CPA (MIT), sdk/api/handlers/gemini/gemini_handlers.go at
             # c404af96: model/action live in the path; alt=sse selects framing.
             action = "streamGenerateContent" if stream else "generateContent"
-            endpoint = f"/v1beta/models/{urllib.parse.quote(routed_model, safe='/')}:{action}"
+            endpoint = (
+                f"/v1beta/models/{urllib.parse.quote(source.prefix, safe='')}/"
+                f"{urllib.parse.quote(model_id, safe='')}:{action}"
+            )
             if stream:
                 endpoint += "?alt=sse"
             body.pop("model", None)

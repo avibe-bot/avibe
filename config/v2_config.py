@@ -205,6 +205,12 @@ def normalize_model_hub_vendor_id(value: object) -> str:
     return vendor
 
 
+def validate_model_hub_protocol_vendor(vendor: str, protocol: str) -> None:
+    """Keep Google's v12 explicit custom admission consistent across consumers."""
+    if protocol == "google" and vendor != "custom":
+        raise ValueError("Google Sources require the custom vendor")
+
+
 def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
     """Return the bundled fixed-menu ids used by persisted Hub routes."""
 
@@ -2357,6 +2363,7 @@ class ModelHubSourceConfig:
             "google",
         }:
             raise ValueError("Config 'model_hub.sources.protocol' is invalid")
+        validate_model_hub_protocol_vendor(vendor, protocol)
         if not isinstance(supply_channel, str) or supply_channel not in {"native_cli", "hub"}:
             raise ValueError("Config 'model_hub.sources.supply_channel' is invalid")
         if not isinstance(billing, str) or billing not in {"monthly", "metered"}:

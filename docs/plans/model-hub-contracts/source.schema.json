@@ -486,6 +486,10 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "protocol": { "const": "google" } } },
+      "then": { "properties": { "vendor": { "const": "custom" } } }
+    },
+    {
       "$comment": "v2 (07-29, review round 4): EXHAUSTIVE SWEEP of the kind / channel / credential correlations this file states in prose. Round 4 named two instances of the class (`projected_exhaust_at` unconstrained by `kind`, native-CLI reauth able to acquire a `credential_ref`); patching only those two would leave the rest of the same class writable, so every 'X only' / 'null for Y' sentence in this file is now a conditional. Three correlations are deliberately NOT constrained, recorded here so a later reader can tell judgement from oversight: `account_label` (display identity, may be populated for either kind by a later adapter rev — the prose scopes its PURPOSE to subscriptions, it does not forbid the field elsewhere); `usage.cycle_used_pct` / `month_spend_cents` against `billing` (a metered relay can bill in monthly cycles, and no rule here says otherwise); and `billing` against `kind` (a prepaid subscription and a monthly-invoiced key both exist upstream). Constraining those would be inventing product rules under cover of a review fix.",
       "if": {
         "properties": {

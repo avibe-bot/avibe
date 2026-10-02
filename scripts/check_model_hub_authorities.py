@@ -130,13 +130,25 @@ def _schema_property_names(source: AuthorityInput, relative: str) -> set[str]:
     return names
 
 
-def _schema_decision_tokens(source: AuthorityInput, relative: str) -> set[str]:
+def _schema_decision_tokens(
+    source: AuthorityInput,
+    relative: str,
+    *,
+    allowed_property_values: dict[tuple[str | int, ...], set[str]] | None = None,
+) -> set[str]:
     """Collect schema-controlled field names and closed values, never prose."""
 
     tokens: set[str] = set()
 
-    def walk(node: Any) -> None:
+    def walk(node: Any, path: tuple[str | int, ...] = ()) -> None:
         if isinstance(node, dict):
+            # Exceptions name an exact property schema, never a global token.
+            # Field names/required entries stay guarded even at that location.
+            allowed = (
+                (allowed_property_values or {}).get(path, set())
+                if len(path) >= 2 and path[-2] == "properties"
+                else set()
+            )
             properties = node.get("properties")
             if isinstance(properties, dict):
                 tokens.update(properties)
@@ -145,15 +157,15 @@ def _schema_decision_tokens(source: AuthorityInput, relative: str) -> set[str]:
                 tokens.update(value for value in required if isinstance(value, str))
             enum = node.get("enum")
             if isinstance(enum, list):
-                tokens.update(value for value in enum if isinstance(value, str))
+                tokens.update(value for value in enum if isinstance(value, str) and value not in allowed)
             const = node.get("const")
-            if isinstance(const, str):
+            if isinstance(const, str) and const not in allowed:
                 tokens.add(const)
-            for value in node.values():
-                walk(value)
+            for key, value in node.items():
+                walk(value, (*path, key))
         elif isinstance(node, list):
-            for value in node:
-                walk(value)
+            for index, value in enumerate(node):
+                walk(value, (*path, index))
 
     walk(source.json(relative))
     return tokens
@@ -706,7 +718,14 @@ def check(root: Path = ROOT) -> dict[str, Any]:
         for pattern in absence["scope_globs"]:
             for path in source.glob(pattern):
                 relative = path.relative_to(root).as_posix()
-                tokens = _schema_decision_tokens(source, relative)
+                tokens = _schema_decision_tokens(
+                    source, relative,
+                    allowed_property_values={
+                        tuple(item["property_path"]): set(item["values"])
+                        for item in absence.get("allowed_property_values", ())
+                        if item["file"] == relative
+                    },
+                )
                 for term in sorted(terms & tokens):
                     findings.append(
                         {

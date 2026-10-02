@@ -6,6 +6,12 @@
   "type": "object",
   "required": ["vendor", "key"],
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": { "required": ["protocol"], "properties": { "protocol": { "const": "google" } } },
+      "then": { "properties": { "vendor": { "const": "custom" } } }
+    }
+  ],
   "properties": {
     "save_unverified": {
       "type": "boolean",
