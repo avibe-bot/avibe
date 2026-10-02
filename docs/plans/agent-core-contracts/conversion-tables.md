@@ -184,6 +184,6 @@ Gemini stop reasons:
 | --- | --- |
 | `STOP` or absent | `stop` |
 | `MAX_TOKENS` | `length` |
-| `SAFETY`, `IMAGE_SAFETY`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `RECITATION` | `safety` |
-| `MALFORMED_FUNCTION_CALL`, `OTHER_ERROR` | `error` |
-| Any function call in the response | `tool_use` |
+| `SAFETY`, `IMAGE_SAFETY`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `RECITATION`, `SPII`, `IMAGE_PROHIBITED_CONTENT` | `safety` |
+| `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, `TOO_MANY_TOOL_CALLS`, `OTHER_ERROR`, `FINISH_REASON_UNSPECIFIED`, `IMAGE_RECITATION`, `IMAGE_OTHER`, `LANGUAGE`, `NO_IMAGE`, `OTHER`, or any unknown non-normal value | `error` |
+| A normal `STOP` response containing function calls | `tool_use` |

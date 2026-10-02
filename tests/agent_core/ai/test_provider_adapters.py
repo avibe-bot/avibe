@@ -345,6 +345,12 @@ async def test_gemini_malformed_function_call_is_error_even_with_partial_call() 
     [
         ("SPII", "safety"),
         ("IMAGE_PROHIBITED_CONTENT", "safety"),
+        ("IMAGE_RECITATION", "error"),
+        ("IMAGE_OTHER", "error"),
+        ("LANGUAGE", "error"),
+        ("NO_IMAGE", "error"),
+        ("FINISH_REASON_UNSPECIFIED", "error"),
+        ("OTHER", "error"),
         ("UNEXPECTED_TOOL_CALL", "error"),
         ("TOO_MANY_TOOL_CALLS", "error"),
     ],

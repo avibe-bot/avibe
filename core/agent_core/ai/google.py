@@ -526,6 +526,8 @@ def _thinking_config(model: str, effort: str | None) -> dict[str, Any] | None:
 
 
 def _normalize_stop(reason: str | None, has_tools: bool) -> str:
+    if reason in {"STOP", None}:
+        return "tool_use" if has_tools else "stop"
     if reason in {"MAX_TOKENS", "LENGTH"}:
         return "length"
     if reason in {
@@ -543,9 +545,15 @@ def _normalize_stop(reason: str | None, has_tools: bool) -> str:
         "UNEXPECTED_TOOL_CALL",
         "TOO_MANY_TOOL_CALLS",
         "OTHER_ERROR",
+        "FINISH_REASON_UNSPECIFIED",
+        "IMAGE_RECITATION",
+        "IMAGE_OTHER",
+        "LANGUAGE",
+        "NO_IMAGE",
+        "OTHER",
     }:
         return "error"
-    return "tool_use" if has_tools else "stop"
+    return "error"
 
 
 def _sanitize_schema(value: Any) -> Any:

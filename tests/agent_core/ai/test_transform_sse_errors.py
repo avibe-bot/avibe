@@ -150,6 +150,13 @@ def test_error_json_without_message_redacts_sensitive_values() -> None:
     assert "[redacted]" in error.message
 
 
+def test_error_message_redacts_quoted_json_nested_in_message() -> None:
+    error = classify_error(body='{"message":"{\\"token\\":\\"secret-token\\"}"}')
+
+    assert "secret-token" not in error.message
+    assert "[redacted]" in error.message
+
+
 @pytest.mark.parametrize("source", _PROTOCOL_ORIGINS)
 @pytest.mark.parametrize("target", _PROTOCOL_ORIGINS)
 def test_history_from_each_protocol_can_be_replayed_without_foreign_opaque_state(

@@ -53,8 +53,13 @@ _NON_OVERFLOW_RE = (
     re.compile(r"too many requests", re.IGNORECASE),
 )
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
-_NAMED_SECRET_RE = re.compile(
-    r"(?i)\b(?:authorization|api[_-]?key|x-api-key|token|secret)\s*([:=])\s*([^\s,;\"']+)"
+_QUOTED_NAMED_SECRET_RE = re.compile(
+    r"(?i)(?P<key>\"?(?:authorization|api[_-]?key|x-api-key|token|secret)\"?)"
+    r"(?P<separator>\s*[:=]\s*)(?P<quote>[\"'])[^\"']*(?P=quote)"
+)
+_BARE_NAMED_SECRET_RE = re.compile(
+    r"(?i)(?P<key>\"?(?:authorization|api[_-]?key|x-api-key|token|secret)\"?)"
+    r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;}\"']+)"
 )
 _QUERY_SECRET_RE = re.compile(r"(?i)([?&](?:key|token|api[_-]?key)=)[^&\s]+")
 _SENSITIVE_KEYS = {
@@ -227,7 +232,17 @@ def _error_message(body: str, exc: BaseException | None) -> str:
 
 def _redact(value: str) -> str:
     value = _BEARER_RE.sub("Bearer [redacted]", value)
-    value = _NAMED_SECRET_RE.sub(r"\1[redacted]", value)
+    value = _QUOTED_NAMED_SECRET_RE.sub(
+        lambda match: (
+            f"{match.group('key')}{match.group('separator')}"
+            f"{match.group('quote')}[redacted]{match.group('quote')}"
+        ),
+        value,
+    )
+    value = _BARE_NAMED_SECRET_RE.sub(
+        lambda match: f"{match.group('key')}{match.group('separator')}[redacted]",
+        value,
+    )
     return _QUERY_SECRET_RE.sub(r"\1[redacted]", value)
 
 
