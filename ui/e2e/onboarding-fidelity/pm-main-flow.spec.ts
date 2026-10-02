@@ -18,7 +18,7 @@ for (const [width,chosen] of [[1200,"claude"],[390,"claude"],[1200,"codex"]] as 
   const config=()=>({version:'v2',mode:'self_host',setup_completed:completed,setup_state:{needs_setup:!completed},capabilities:{model_hub:{enabled:true}},platforms:{primary:'slack',enabled:[]},runtime:{},agents:Object.fromEntries(['claude','codex','opencode'].map(b=>[b,{enabled:b!=='opencode',cli_path:b}])),agent:{default_cwd:'/fixture/work'},model_hub:{enabled:true,runtime_default_applied:true}});
   const source={id:'src_fixture',kind:'api_key',vendor:'openai',display_name:'Fixture source',protocol:'openai_chat',supply_channel:'hub',billing:'metered',state:{status:'active'},masked_credential:'fixture-only',models:hops.map(h=>({id:h.model_id,display_name:h.model_id==='gpt-5'?'GPT-5':undefined,origin:'discovered',reasoning_efforts:[],reasoning_efforts_source:null})),last_discovered_at:null};
   const supply=(b:string)=>({backend:b,cli_present:true,mode:'hub',menu_kind:'fixed',sources:{order:[source.id],eligibility:[{source_id:source.id,eligible:true}]},routes:{},builtin_models:[],catalog_models:[],menu:null,model_supply:[],named_agents:[{name:b,effective_model_id:agent(b).model,supply_status:saved[b].length?'ok':'unavailable'}],supply_status:saved[b].length?'ok':'unavailable'});
-  const chain=(b:string,hs=saved[b])=>({contract_version:10,backend:b,model_id:agent(b).model,manual_override:hs.length?{hops:hs}:null,route_origin:hs.length?'manual':'automatic',current:hs[0]??null,chain:hs.map(h=>({...h,channel:'hub',health:'healthy',runnable:true,reason:null,retry_at:null})),supply_state:hs.length?'ok':'unavailable'});
+  const chain=(b:string,hs=saved[b])=>({contract_version:11,backend:b,model_id:agent(b).model,manual_override:hs.length?{hops:hs}:null,route_origin:hs.length?'manual':'automatic',current:hs[0]??null,chain:hs.map(h=>({...h,channel:'hub',health:'healthy',runnable:true,reason:null,retry_at:null})),supply_state:hs.length?'ok':'unavailable'});
   await page.addInitScript(()=>localStorage.setItem('i18nextLng','en'));
   await page.route(`${ORIGIN}/api/**`,async route=>{
    const req=route.request(),path=new URL(req.url()).pathname;
@@ -34,7 +34,7 @@ for (const [width,chosen] of [[1200,"claude"],[390,"claude"],[1200,"codex"]] as 
    }
    if(path==='/api/agents')return answer({ok:true,default_agent_name:defaultName,agents:[agent('claude'),agent('codex')]});
    if(/^\/api\/agents\/(claude|codex)$/.test(path))return answer({ok:true,agent:agent(path.split('/').at(-1)!),default_agent_name:defaultName});
-   if(path==='/api/models/runtime/status')return answer({ok:true,runtime:{contract_version:10,enabled:true,host_platform:'linux',manifest:{name:'cliproxyapi',resolution:'resolved',version:'fixture',source_sha:'a'.repeat(40),assets:[]},status:{installed_version:'fixture',verified:true,health:'ok'}}});
+   if(path==='/api/models/runtime/status')return answer({ok:true,runtime:{contract_version:11,enabled:true,host_platform:'linux',manifest:{name:'cliproxyapi',resolution:'resolved',version:'fixture',source_sha:'a'.repeat(40),assets:[]},status:{installed_version:'fixture',verified:true,health:'ok'}}});
    if(path==='/api/models/sources')return answer({ok:true,sources:[source]});
    if(path==='/api/models/agents')return answer({ok:true,agents:[supply('claude'),supply('codex')]});
    if(/\/api\/models\/agents\/(claude|codex)\/chains$/.test(path)){

@@ -32,7 +32,7 @@ import { apiFailure, modelsApi } from './modelsApi';
 import { serverText } from './serverCopy';
 import { VendorGlyph } from './vendorGlyph';
 import { ACCENT_ICON, ACCENT_TILE, type Accent } from './vendorMeta';
-import type { AgentBackend, MigrationItem } from './types';
+import type { AgentBackend, MigrationItem, NativeCliBackend } from './types';
 
 // Older payloads cannot identify the exact file or store. Name only the
 // backend's configuration when the server supplies no file locators.
@@ -40,7 +40,7 @@ const SOURCE_KEY = {
   claude: 'settings.models.migration.source.claude',
   codex: 'settings.models.migration.source.codex',
   opencode: 'settings.models.migration.source.opencode',
-} as const satisfies Record<AgentBackend, TranslationKey>;
+} as const satisfies Record<NativeCliBackend, TranslationKey>;
 
 const sourcePaths = (item: MigrationItem): string[] => [...new Set(item.source_paths ?? [])];
 

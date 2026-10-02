@@ -231,7 +231,8 @@ def _config(*sources: ModelHubSourceConfig) -> ModelHubConfig:
             for backend in ("claude", "codex", "opencode")
         },
     )
-    for backend, agent in config.agents.items():
+    for backend in ("claude", "codex", "opencode"):
+        agent = config.agents[backend]
         eligible_sources = tuple(
             source
             for source in sources

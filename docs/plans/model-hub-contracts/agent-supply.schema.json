@@ -7,7 +7,7 @@
   "required": ["backend", "mode", "menu_kind"],
   "additionalProperties": false,
   "properties": {
-    "backend": { "enum": ["claude", "codex", "opencode"] },
+    "backend": { "enum": ["claude", "codex", "opencode", "avibe"] },
     "cli_present": {
       "type": "boolean",
       "description": "Server-authoritative fact that this backend's configured CLI executable is present on the Avibe host. It does not prove login, process readiness, or Source health. OPTIONAL in the reusable schema and REQUIRED on AgentSupply API payloads."
@@ -353,8 +353,12 @@
       "then": { "properties": { "menu_kind": { "const": "open" } } }
     },
     {
-      "if": { "properties": { "backend": { "enum": ["claude", "codex"] } }, "required": ["backend"] },
+      "if": { "properties": { "backend": { "enum": ["claude", "codex", "avibe"] } }, "required": ["backend"] },
       "then": { "properties": { "menu_kind": { "const": "fixed" } } }
+    },
+    {
+      "if": { "properties": { "backend": { "const": "avibe" } }, "required": ["backend"] },
+      "then": { "properties": { "mode": { "const": "hub" }, "cli_present": { "const": false } } }
     },
     {
       "$comment": "BackendModel has no discriminator, so the containing catalog owns native_protocol presence.",

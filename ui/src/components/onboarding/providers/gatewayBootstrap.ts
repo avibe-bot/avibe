@@ -20,7 +20,7 @@
 //    `_recover_runtime_owners()` with the installer admission that belongs on the
 //    server. This observes that outcome; asking for a second unconditional install
 //    would race the recovery that is still finishing.
-import type { AgentBackend, RuntimeDependency } from '@/components/settings/models/types';
+import type { NativeCliBackend, RuntimeDependency } from '@/components/settings/models/types';
 import type { BackendConnectionState } from '@/context/ApiContext';
 import {
   errorDetail,
@@ -68,7 +68,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 export type GatewayBootstrapDeps = {
   /** The CSRF-aware `apiFetch`, injected so the sequence is testable as itself. */
   fetch: (input: string, init?: RequestInit) => Promise<Response>;
-  getBackendConnection: (backend: AgentBackend) => Promise<BackendConnectionState>;
+  getBackendConnection: (backend: NativeCliBackend) => Promise<BackendConnectionState>;
   /** `useStatus().control`, which already rejects a non-2xx response. */
   control: (action: string) => Promise<unknown>;
   getRuntimeStatus: () => Promise<RuntimeDependency>;
@@ -83,7 +83,7 @@ export type GatewayBootstrapResult = { config: SetupConfigSnapshot; runtime: Run
  */
 export async function bootstrapGateway(
   deps: GatewayBootstrapDeps,
-  backend: AgentBackend,
+  backend: NativeCliBackend,
 ): Promise<GatewayBootstrapResult> {
   // 1. Seed, exactly once. A definitive refusal throws from inside it; anything else
   //    leaves a write to account for, and accounting for a write is reading.
@@ -226,7 +226,7 @@ async function seedConfig(deps: GatewayBootstrapDeps): Promise<GatewayBootstrapE
 
 async function readConnection(
   deps: GatewayBootstrapDeps,
-  backend: AgentBackend,
+  backend: NativeCliBackend,
 ): Promise<BackendConnectionState> {
   let connection: BackendConnectionState;
   try {

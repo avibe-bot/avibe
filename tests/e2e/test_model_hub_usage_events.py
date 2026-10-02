@@ -32,12 +32,12 @@ def usage_analytics_app(model_hub_app_factory):
                 "-c",
                 """
 from config.v2_config import (
-    MODEL_HUB_BACKENDS, ModelHubModelConfig, ModelHubSourceConfig,
+    ModelHubModelConfig, ModelHubSourceConfig,
     ModelHubSourceStateConfig, V2Config,
 )
 config = V2Config.default()
 config.model_hub.enabled = False
-for backend in MODEL_HUB_BACKENDS:
+for backend in ("claude", "codex", "opencode"):
     config.model_hub.agents[backend].mode = "direct"
 config.model_hub.sources = [
     ModelHubSourceConfig(

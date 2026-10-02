@@ -24,7 +24,7 @@ import { routeChainMatchesAttempt } from './routeChainDraft';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
-import { modelsSurfaceKindFromReads } from './modelHubSurfaceState';
+import { agentUsesHubRuntime, modelsSurfaceKindFromReads } from './modelHubSurfaceState';
 import { focusDialogReturn, focusModelHubProjection } from './modelHubFocus';
 import { MODEL_HUB_MANAGE_PARAM } from './modelHubRoutes';
 import { buildSupplyRelations } from './supplyRelations';
@@ -73,7 +73,7 @@ import { groupMigrationCandidates } from './migrationGrouping';
 import { SUBSCRIPTION_MENU_ROWS } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
 import { backendVisual } from './vendorMeta';
-import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentMode, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
+import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentMode, type AgentSupply, type NativeCliBackend, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
@@ -346,7 +346,7 @@ const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ t
 };
 
 const DirectHome: React.FC<{
-  agents: AgentSupply[];
+  agents: (AgentSupply & { backend: NativeCliBackend })[];
   switchFailures: ReadonlySet<string>;
   connectingBackend: string | null;
   onSwitch: (agent: AgentSupply) => void;
@@ -1155,8 +1155,10 @@ export const SettingsModelsPage: React.FC = () => {
     ? failRegionRead(supplyRead)
     : supplyRead;
   const directEmpty = modelsSurfaceKindFromReads(supplyDisplayRead, sourcesDisplayRead) === 'direct_empty';
-  const installedAgents = agents.filter((agent) => agent.cli_present);
-  const hubBackends = agents.filter((agent) => agent.mode === 'hub').map((agent) => agent.backend);
+  const installedAgents = agents.filter(
+    (agent): agent is AgentSupply & { backend: NativeCliBackend } => agent.backend !== 'avibe' && agent.cli_present,
+  );
+  const hubBackends = agents.filter(agentUsesHubRuntime).map((agent) => agent.backend);
   const activeBackends = supplyRead.kind === 'ready' ? new Set(hubBackends) : undefined;
   const stopBlocked = runtimeEnabled && (supplyRead.kind !== 'ready' || hubBackends.length > 0);
   const runtimeSwitchUnsupported = !runtimeEnabled
@@ -1170,7 +1172,9 @@ export const SettingsModelsPage: React.FC = () => {
     || stopBlocked;
   const runtimeSwitchLabel = stopBlocked
     ? supplyRead.kind === 'ready'
-      ? t('settings.models.shell.toggle.stopBlocked', { names: hubBackends.join(', ') })
+      ? hubBackends.includes('avibe')
+        ? t('settings.models.shell.toggle.stopAvibeBlocked')
+        : t('settings.models.shell.toggle.stopBlocked', { names: hubBackends.join(', ') })
       : t('settings.models.shell.toggle.stopUnavailable')
     : runtimeEnabled
       ? t('settings.models.shell.toggle.turnOff')

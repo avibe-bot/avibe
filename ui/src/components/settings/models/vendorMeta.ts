@@ -73,18 +73,21 @@ export const BACKEND_IDENTITY_ACCENT = {
   claude: 'cyan',
   codex: 'mint',
   opencode: 'violet',
+  avibe: 'muted',
 } as const satisfies Record<AgentBackend, Accent>;
 
 const BACKEND_ICON: Record<AgentBackend, IconType> = {
   claude: Sparkles,
   codex: Bot,
   opencode: Terminal,
+  avibe: Bot,
 };
 
 const BACKEND_VISUAL: Record<AgentBackend, BackendVisual> = {
   claude: { Icon: BACKEND_ICON.claude, accent: BACKEND_IDENTITY_ACCENT.claude },
   codex: { Icon: BACKEND_ICON.codex, accent: BACKEND_IDENTITY_ACCENT.codex },
   opencode: { Icon: BACKEND_ICON.opencode, accent: BACKEND_IDENTITY_ACCENT.opencode },
+  avibe: { Icon: BACKEND_ICON.avibe, accent: BACKEND_IDENTITY_ACCENT.avibe },
 };
 
 export function backendVisual(backend: AgentBackend): BackendVisual {

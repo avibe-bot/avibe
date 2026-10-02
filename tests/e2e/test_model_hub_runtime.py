@@ -57,11 +57,11 @@ def _seed_stopped_runtime(app: ModelHubTestApp) -> None:
     """Keep installation from inheriting the fresh-install runtime intent."""
 
     script = """
-from config.v2_config import MODEL_HUB_BACKENDS, V2Config
+from config.v2_config import V2Config
 
 config = V2Config.default()
 config.model_hub.enabled = False
-for backend in MODEL_HUB_BACKENDS:
+for backend in ("claude", "codex", "opencode"):
     config.model_hub.agents[backend].mode = "direct"
 config.update.auto_update = False
 config.update.check_interval_minutes = 0
@@ -684,7 +684,7 @@ def test_a1_feature_flag_disables_the_complete_models_api(
         assert response.status == 404, (method, path, body)
         assert body == {
             "ok": False,
-            "contract_version": 10,
+            "contract_version": 11,
             "error": "feature_disabled",
         }
 

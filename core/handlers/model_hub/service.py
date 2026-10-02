@@ -134,12 +134,14 @@ from .provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
     ExactHopBlocker,
+    HopOrigin,
+    ServedHopHeaderTooLarge,
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
     no_candidate_decision,
     produce_turn_outcome,
 )
-from .request import ModelHubRequest
+from .request import ModelHubRequest, without_opaque_history
 from .reasoning_tiers import resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState
 from .resolver import (
@@ -169,7 +171,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 10
+CONTRACT_VERSION = 11
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -271,8 +273,8 @@ _MODELS_DEV_CANDIDATE_FIELDS = (
 )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 10
-PROBE_RESULT_CONTRACT_VERSION = 10
+AGENT_CHAIN_CONTRACT_VERSION = 11
+PROBE_RESULT_CONTRACT_VERSION = 11
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 _REORDER_ORDER_UNSET = object()
@@ -364,6 +366,7 @@ class ModelHubError(Exception):
         blockers: Iterable[ExactHopBlocker] = (),
         turn_outcome: TurnOutcomeProjectionInput | None = None,
         local_error_detail: str | None = None,
+        origin: HopOrigin | None = None,
     ):
         detail_key = detail or f"modelHub.errors.{code}"
         super().__init__(detail_key)
@@ -375,6 +378,9 @@ class ModelHubError(Exception):
         self.blockers = tuple(blockers)
         self.turn_outcome = turn_outcome
         self.local_error_detail = local_error_detail
+        # Only surfaced upstream responses carry an admitted, immutable origin.
+        # Local refusals/exhaustion must not inherit the last attempted hop.
+        self.origin = origin
 
 
 def turn_refusal(error: BaseException | None) -> TurnOutcomeProjectionInput | None:
@@ -625,6 +631,7 @@ class ResolvedInvocation:
     credential_ref: Optional[str] = None
     settlement_generation: Optional[int] = None
     verification_pending: Optional[str] = None
+    origin: HopOrigin | None = None
 
 
 @dataclass(frozen=True)
@@ -647,6 +654,7 @@ AttemptObserver = Callable[
         Optional[ResolutionDecision],
         tuple[str, ...],
         tuple[str, ...],
+        Optional[HopOrigin],
     ],
     None,
 ]
@@ -918,7 +926,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 10,
+        "contract_version": 11,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1697,7 +1705,7 @@ class ModelHubService:
         except (TakeoverStateError, OSError):
             # Unknown recovery state cannot authorize any native credential
             # writer or native launch. Controller recovery preserves this gate.
-            self.migration_blocked_backends.update(MODEL_HUB_BACKENDS)
+            self.migration_blocked_backends.update(("claude", "codex", "opencode"))
             raise ModelHubError("migration_item_conflict", status=409) from None
         task = self._runtime_resume_task
         if task is None or task.done():
@@ -4784,6 +4792,7 @@ class ModelHubService:
         # Suppliers speak first, models.dev fills what they left unsaid, and
         # an unstated ladder falls back to the tiers the backend's request
         # protocol accepts, unless models.dev says the model cannot reason.
+        # Avibe has no native protocol pin and must not receive guessed tiers.
         enrichment = (
             {field: match[field] for field in _MODELS_DEV_CANDIDATE_FIELDS}
             if match is not None
@@ -4796,7 +4805,7 @@ class ModelHubService:
         display_name = display_name or (match or {}).get("display_name")
         if not reasoning_efforts and match is not None:
             reasoning_efforts = list(match["reasoning_efforts"])
-        if not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
+        if backend != "avibe" and not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
             request_protocol = _FIXED_BACKEND_PROTOCOLS.get(
                 backend
             ) or native_protocol_for_model_id(model_id)
@@ -4965,7 +4974,7 @@ class ModelHubService:
         live_recovery = self.recovery.annotations(config)
         return [
             self._agent_payload(config, config.agents[backend], live_recovery=live_recovery)
-            for backend in ("claude", "codex", "opencode")
+            for backend in MODEL_HUB_BACKENDS
         ]
 
     def refresh_cli_presence(
@@ -4982,6 +4991,8 @@ class ModelHubService:
             logger.warning("Model Hub CLI presence refresh failed", exc_info=True)
 
     def _cli_present(self, backend: BackendName) -> bool:
+        if backend == "avibe":
+            return False
         if self.cli_present_override is None:
             return False
         try:
@@ -5071,7 +5082,7 @@ class ModelHubService:
             )
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
-        if mode not in {"hub", "direct"}:
+        if mode not in {"hub", "direct"} or (backend == "avibe" and mode != "hub"):
             raise ModelHubError("mode_switch_blocked")
         from core.backend_restart import NativeMigrationBlockedError
 
@@ -7201,6 +7212,7 @@ class ModelHubService:
                     backend
                     for backend, agent in previous.agents.items()
                     if agent.mode == "hub"
+                    and (backend != "avibe" or agent.models)
                 )
                 if hub_backends:
                     raise ModelHubError(
@@ -7242,7 +7254,7 @@ class ModelHubService:
                     clean_native_stores=(self.migration_journal.completed() or {}).get("clean_native_stores"),
                     retained_native_ids=(self.migration_journal.completed() or {}).get("retained_native_ids"),
                     legacy_auth=(
-                        self.store.native_auth_snapshot(MODEL_HUB_BACKENDS)
+                        self.store.native_auth_snapshot(("claude", "codex", "opencode"))
                         if isinstance(self.store, V2ModelHubConfigStore) else None
                     ),
                 )
@@ -7296,7 +7308,7 @@ class ModelHubService:
             try:
                 pending = self.migration_journal.load()
             except (TakeoverStateError, OSError):
-                self.migration_blocked_backends.update(MODEL_HUB_BACKENDS)
+                self.migration_blocked_backends.update(("claude", "codex", "opencode"))
                 raise ModelHubError("migration_configuration_blocked", status=409) from None
             if pending is not None and pending["phase"] == "exposed":
                 raise ModelHubError("migration_recovery_pending", status=409) from None
@@ -7857,6 +7869,18 @@ class ModelHubService:
                     or candidate.model_id != model_id
                 ):
                     raise _InvocationPlanChanged
+                attempt_request = request
+                if backend == "avibe":
+                    # Validate the exact rechecked admission snapshot for every
+                    # hop, including fallback/refresh. Persisted ids stay intact;
+                    # refusal must precede a transport, attempt, or recovery slot.
+                    try:
+                        origin = HopOrigin(source.vendor, source.protocol, model_id)
+                        origin.response_headers()
+                    except ServedHopHeaderTooLarge:
+                        raise ModelHubError("served_hop_too_large", status=422) from None
+                    if getattr(request, "primary_origin", None) != origin:
+                        attempt_request = without_opaque_history(request)
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:
                         raise _RecoveryWindowClosed
@@ -7866,7 +7890,7 @@ class ModelHubService:
                     # Lock order matches config sync. The adapter hands exclusion
                     # back only after owning the transport that sync must drain.
                     return await self._engine_call(self.adapter.invoke(
-                        source.id, model_id, request, stream, backend, on_admitted=admitted,
+                        source.id, model_id, attempt_request, stream, backend, on_admitted=admitted,
                     ))
             except BaseException:
                 self.recovery.release(source.id, generation)
@@ -8011,6 +8035,7 @@ class ModelHubService:
                 decision,
                 (),
                 (),
+                HopOrigin(source.vendor, source.protocol, source_model_id) if backend == "avibe" else None,
             )
         if decision.action == "fallback" or (
             decision.action == "surface"
@@ -8141,7 +8166,7 @@ class ModelHubService:
         attempt_observer: Optional[AttemptObserver] = None,
         recovery_request: RecoveryRequest | None = None,
     ) -> ResolvedInvocation:
-        if backend not in {"claude", "codex", "opencode"}:
+        if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
         engine_prepared = False
         if self.revocations.list():
@@ -8208,6 +8233,7 @@ class ModelHubService:
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
             verification_pending = source.verification_pending
+            origin = HopOrigin(source.vendor, source.protocol, target_model) if backend == "avibe" else None
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
@@ -8247,6 +8273,7 @@ class ModelHubService:
                         None,
                         (),
                         (),
+                        origin,
                     )
 
             try:
@@ -8289,6 +8316,7 @@ class ModelHubService:
                     credential_ref=source.credential_ref,
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
+                    origin=origin,
                 )
             decision = await self._classify_source_outcome(source, outcome)
             if cancelled is not None:
@@ -8323,7 +8351,7 @@ class ModelHubService:
                     )
                 except _InvocationPlanChanged:
                     if attempt_observer is not None:
-                        attempt_observer(source.id, target_model, "hub", False, outcome, decision, (), ())
+                        attempt_observer(source.id, target_model, "hub", False, outcome, decision, (), (), origin)
                     continue
                 except _RecoveryWindowClosed:
                     window_closed = not non_retryable_failure
@@ -8350,6 +8378,7 @@ class ModelHubService:
                         credential_ref=source.credential_ref,
                         settlement_generation=settlement_generation,
                         verification_pending=verification_pending,
+                        origin=origin,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
                 if cancelled is not None:
@@ -8374,6 +8403,7 @@ class ModelHubService:
                     decision,
                     (),
                     (),
+                    origin,
                 )
             if decision.action == "return":
                 if self._verified_recovery_outcome(outcome):
@@ -8402,6 +8432,7 @@ class ModelHubService:
                     credential_ref=source.credential_ref,
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
+                    origin=origin,
                 )
             if decision.action == "surface":
                 self.recovery.release(source.id, settlement_generation)
@@ -8418,6 +8449,11 @@ class ModelHubService:
                     )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
+                    origin=(
+                        origin if settlement_generation is not None
+                        and terminal_outcome_category(outcome, decision) != "engine_down"
+                        else None
+                    ),
                     local_error_detail=format_os_errno(outcome.os_errno),
                     status=decision.downstream_status or (
                         outcome.http_status
