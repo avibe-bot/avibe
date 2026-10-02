@@ -108,6 +108,7 @@ def test_assistant_message_exposes_tool_calls_in_order():
         {**TOOL_RESULT, "tool_name": ""},
         {**ASSISTANT, "usage": {**ASSISTANT["usage"], "cache_read_tokens": -1}},
         {**ASSISTANT, "content": [{"type": "tool_call", "id": "t", "name": "bash", "arguments": {}, "signature": ""}]},
+        {**ASSISTANT, "content": [{"type": "tool_call", "id": "t", "name": "bash", "arguments": {"x": float("nan")}}]},
         {**REDACTED, "content": [{"type": "thinking", "text": "", "redacted": True}]},
         {**REDACTED, "content": [{"type": "thinking", "text": "visible", "signature": "opaque", "redacted": True}]},
     ],
@@ -116,7 +117,7 @@ def test_assistant_message_exposes_tool_calls_in_order():
         "unknown-ref-field", "string-flag", "integer-flag", "string-redacted", "string-count", "boolean-count",
         "string-arguments", "number-text", "content-not-list", "null-signature", "null-name", "null-error",
         "null-usage", "explicit-not-redacted", "digest-newline", "empty-call-id", "empty-tool-name", "negative-count",
-        "empty-call-signature", "redacted-without-payload", "redacted-with-text",
+        "empty-call-signature", "nan-argument", "redacted-without-payload", "redacted-with-text",
     ],
 )
 def test_reader_refuses_shapes_it_does_not_know(payload):
@@ -141,8 +142,15 @@ def test_text_block_holds_exactly_one_form():
         lambda: ToolCallBlock(id="c", name="bash", arguments=[]),
         lambda: UserMessage(content=[TextBlock(text="list, not tuple")]),
         lambda: Origin(provider="openai", api="openai_chat", model=5),
+        lambda: ToolCallBlock(id="c", name="bash", arguments={"items": (1, 2)}),
+        lambda: ToolCallBlock(id="c", name="bash", arguments={"data": b"raw"}),
+        lambda: ToolCallBlock(id="c", name="bash", arguments={"n": {1: "x"}}),
+        lambda: ToolCallBlock(id="c", name="bash", arguments={"x": float("nan")}),
     ],
-    ids=["bool-count", "float-count", "int-flag", "int-redacted", "list-arguments", "list-content", "int-model"],
+    ids=[
+        "bool-count", "float-count", "int-flag", "int-redacted", "list-arguments", "list-content", "int-model",
+        "nested-tuple", "nested-bytes", "nested-int-key", "nested-nan",
+    ],
 )
 def test_construction_refuses_what_the_reader_would_refuse(build):
     # The writer must never produce a row its own reader rejects.
