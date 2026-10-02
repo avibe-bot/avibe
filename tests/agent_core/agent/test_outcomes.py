@@ -60,6 +60,7 @@ async def collect(agent, row="input"):
         ("hook_end", "ended_by_hook", None),
         ("refusal", "error", "refusal"),
         ("safety", "error", "safety"),
+        ("empty_response", "error", "empty_response"),
     ],
 )
 @pytest.mark.parametrize("cleanup", ["clean", "aclose", "after_run", "cancelled", "aclose_cancelled", "kill"])
@@ -133,6 +134,8 @@ async def test_primary_outcome_cross_cleanup_keeps_reason_rows_and_event_order(
                 terminal = ProviderError("overflow", "primary error", False)
             elif primary in {"refusal", "safety"}:
                 terminal = Done(assistant("", stop_reason=primary))
+            elif primary == "empty_response":
+                terminal = Done(assistant(""))
             return Stream(terminal)
 
     async def execute(arguments, ctx):
@@ -298,7 +301,18 @@ async def test_hook_end_is_a_directive_until_required_commits_succeed(stage, fau
 
 @pytest.mark.parametrize(
     "source,invalid",
-    [(source, invalid) for source in ("response", "partial") for invalid in ("duplicate_calls", "large_ref")]
+    [
+        (source, invalid)
+        for source in ("response", "partial")
+        for invalid in (
+            "duplicate_calls",
+            "large_ref",
+            "arguments_key",
+            "arguments_tuple",
+            "arguments_nonfinite",
+            "arguments_nested",
+        )
+    ]
     + [(source, "large_ref") for source in ("tool", "after_tool", "terminating_tool", "input", "steer", "follow_up")],
 )
 async def test_message_admission_matches_projection_and_a_fresh_agent_can_resume(source, invalid):
@@ -315,12 +329,23 @@ async def test_message_admission_matches_projection_and_a_fresh_agent_can_resume
     message = assistant(calls=[ToolCallBlock("same", "echo"), ToolCallBlock("same", "echo")])
     if invalid == "large_ref":
         message = replace(message, content=content)
+    elif invalid.startswith("arguments_"):
+        # Shallow-frozen blocks still expose mutable arguments. Construct a
+        # valid value first so this remains a boundary test after foundation sync.
+        call = ToolCallBlock("bad", "echo")
+        call.arguments["nested"] = {
+            "arguments_key": {1: "value"},
+            "arguments_tuple": (1, 2),
+            "arguments_nonfinite": float("inf"),
+            "arguments_nested": [{"value": b"not JSON"}],
+        }[invalid]
+        message = assistant(calls=[call])
     bad_result = ToolResult(content, terminate=source == "terminating_tool")
     has_tools = source in {"tool", "after_tool", "terminating_tool"}
     queued = source in {"steer", "follow_up"}
 
     async def execute(arguments, ctx):
-        if ctx.tool_call_id == "bad" and source != "after_tool":
+        if has_tools and ctx.tool_call_id == "bad" and source != "after_tool":
             return bad_result
         return ToolResult((text(ctx.tool_call_id),))
 
@@ -344,7 +369,7 @@ async def test_message_admission_matches_projection_and_a_fresh_agent_can_resume
         terminal = (
             ProviderError("server", "partial error", False, partial=message) if source == "partial" else Done(message)
         )
-        scripts = [[terminal]]
+        scripts = [[terminal], [Done(assistant())]]
     provider, tool = ScriptedProvider(scripts), FakeTool(execute=execute)
     agent = agent_for(provider, store=store, tools=[tool], hooks=[Override()])
     incoming = bad_input if source == "input" else input_row("input", "hello")

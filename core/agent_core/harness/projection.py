@@ -20,6 +20,7 @@ from core.agent_core.messages import (
     TextBlock,
     ToolCallBlock,
     ToolResultMessage,
+    require_json_value,
     text,
 )
 
@@ -64,6 +65,16 @@ def _ordered(entries: Sequence[ContextEntry], fork_point: Optional[int] = None) 
             isinstance(block, TextBlock) and block.ref is not None for block in row.message.content
         ):
             raise ProjectionError(f"large-content references are not supported (row {row.row_id})")
+        if isinstance(row.message, AssistantMessage):
+            for call in row.message.tool_calls:
+                try:
+                    # Arguments remain mutable on a frozen block. Reuse the
+                    # foundation's value invariant at admission and load time.
+                    require_json_value(call.arguments, "arguments")
+                except (ValueError, RecursionError) as error:
+                    raise ProjectionError(
+                        f"invalid arguments for tool call {call.id} (row {row.row_id}): {error}"
+                    ) from error
     return rows
 
 

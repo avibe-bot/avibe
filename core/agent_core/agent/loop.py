@@ -549,18 +549,14 @@ class Agent:
                         message=message.error_message or f"Model stopped with {message.stop_reason}.",
                     )
                 final = await self._commit_model_message(message, emit)
-                empty_refusal = (
-                    final
-                    and message.stop_reason in {"refusal", "safety"}
-                    and not any(
-                        isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content
-                    )
+                empty_reply = final and not any(
+                    isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content
                 )
-                if empty_refusal:
+                if empty_reply:
                     self._outcome.primary("error")
                     await emit(
                         AgentError,
-                        kind=message.stop_reason,
+                        kind=message.stop_reason if message.stop_reason in {"refusal", "safety"} else "empty_response",
                         message=message.error_message or f"Model stopped with {message.stop_reason} without a reply.",
                     )
             # aclose failures are diagnostics, never a reason to discard the
@@ -577,7 +573,7 @@ class Agent:
                 return "aborted" if message.stop_reason == "aborted" else "error"
             if not message.tool_calls:
                 await self._save_state()
-                if empty_refusal:
+                if empty_reply:
                     return "error"
                 if end:
                     return "ended_by_hook"

@@ -56,3 +56,16 @@ def test_malformed_or_duplicate_results_are_not_silently_dropped():
     response = ContextEntry("session", 1, "response", "response", assistant(calls=[ToolCallBlock("a", "echo")]))
     with pytest.raises(ProjectionError, match="duplicate tool result"):
         project([response, result, ContextEntry("session", 3, "tool_result", "duplicate", result.message)])
+
+
+@pytest.mark.parametrize("arguments", [{"nested": {1: "value"}}, {"nested": (1, 2)}])
+def test_projection_revalidates_mutable_arguments_in_loaded_ancestry(arguments):
+    # Admission cannot protect rows supplied by a store/fork loader from later
+    # mutation. Projection must reject them without normalizing the input.
+    call = ToolCallBlock("call", "echo")
+    call.arguments.update(arguments)
+    rows = [ContextEntry("parent", 1, "response", "response", assistant(calls=[call]))]
+    original = deepcopy(rows)
+    with pytest.raises(ProjectionError, match="call.*response"):
+        project(rows)
+    assert rows == original

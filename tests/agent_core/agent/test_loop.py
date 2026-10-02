@@ -743,32 +743,51 @@ async def test_reasoning_effort_must_be_declared_by_the_route():
     assert provider.requests[0].reasoning_effort is None
 
 
-@pytest.mark.parametrize("stop_reason", ["refusal", "safety"])
-@pytest.mark.parametrize("reply", ["", " \n", "I cannot help with that."])
-async def test_final_refusal_or_safety_is_committed_and_empty_reply_is_explained(stop_reason, reply):
-    # Thinking is not a surface reply. Existing terminal tests cover provider
-    # errors, not successful Done messages with safety/refusal stop reasons.
-    message = assistant(reply, stop_reason=stop_reason)
-    message = replace(message, content=(ThinkingBlock("private reasoning"), *message.content))
-    provider = ScriptedProvider([[Done(message)]])
+@pytest.mark.parametrize("stop_reason", ["stop", "length", "refusal", "safety"])
+@pytest.mark.parametrize("shape", ["empty", "whitespace", "thinking", "visible"])
+@pytest.mark.parametrize("continuation", ["final", "steer", "follow_up"])
+async def test_tool_free_final_reply_is_committed_and_empty_success_is_an_error(stop_reason, shape, continuation):
+    # The old refusal/safety-only table missed empty successful finals.
+    # Pending-input responses are non-final and must still be allowed to continue.
+    content = {
+        "empty": (),
+        "whitespace": (text(" \n"),),
+        "thinking": (ThinkingBlock("private reasoning"),),
+        "visible": (ThinkingBlock("private reasoning"), text("visible reply")),
+    }[shape]
+    message = replace(assistant(stop_reason=stop_reason), content=content)
+
+    async def first(request, cancel):
+        if continuation != "final":
+            assert await getattr(agent, continuation)(input_row("pending", "continue"))
+        yield Done(message)
+
+    provider = ScriptedProvider([first, [Done(assistant("next visible reply"))]])
     agent = make_agent(provider)
     events = await collect(agent)
-    response = (await agent.store.load("session"))[-1]
-    assert response.message == message
-    assert agent.store.final[response.row_id] is True
-    committed = next(event for event in events if isinstance(event, MessageCommitted))
-    assert committed.final is True
-    assert committed.message_id == response.row_id
+    rows = await agent.store.load("session")
+    responses = [row for row in rows if row.kind == "response"]
+    assert responses[0].message == message
+    committed = [event for event in events if isinstance(event, MessageCommitted)]
+    expected_finals = [True] if continuation == "final" else [False, True]
+    assert [agent.store.final[row.row_id] for row in responses] == expected_finals
+    assert [event.final for event in committed] == expected_finals
+    assert [event.message_id for event in committed] == [row.row_id for row in responses]
+    assert len(provider.requests) == provider.closed_streams == len(expected_finals)
+    assert [row.row_id for row in rows if row.kind == "input"] == (
+        ["input"] if continuation == "final" else ["input", "pending"]
+    )
     errors = [event for event in events if isinstance(event, AgentError)]
-    if reply.strip():
+    if shape == "visible" or continuation != "final":
         assert errors == []
         assert events[-1].reason == "completed"
     else:
         assert len(errors) == 1
-        assert errors[0].kind == stop_reason
+        assert errors[0].kind == (stop_reason if stop_reason in {"refusal", "safety"} else "empty_response")
         assert errors[0].message
-        assert committed.seq < errors[0].seq < events[-1].seq
+        assert committed[0].seq < errors[0].seq < events[-1].seq
         assert events[-1].reason == "error"
+    project(rows)
 
 
 @pytest.mark.parametrize("source", ["provider", "tool", "before_model", "after_run"])

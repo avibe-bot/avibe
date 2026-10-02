@@ -63,6 +63,9 @@ The store/adapter owns fork ancestry; the engine does not copy parent rows.
 The adapter owns Session language, maps kinds to `vibe/i18n` messages, and tests
 English/Chinese rendering at its delivery boundary. Model-facing tool result
 text is separate from localized user-facing error delivery.
+The stable `empty_response` kind means a tool-free final response had no
+non-whitespace reply text (including thinking-only output); the adapter must
+localize that error rather than deliver a silent success.
 
 ## Invariants and evidence
 
@@ -75,6 +78,10 @@ text is separate from localized user-facing error delivery.
   A final response closes admission; a competing late steer is refused.
   A final refusal/safety stop retains the provider's text. Without a visible
   reply, it still commits a final result, then emits a typed error and ends.
+  Other empty successful finals likewise stay committed, but emit
+  `empty_response` and end as error. A received terminal is never retried.
+  Empty non-final responses with queued inputs can still continue to a reply;
+  tool calls, explicit hook end, and tool termination retain their contracts.
 - A tool batch runs sequentially and commits results in call order. Steers
   enter after the whole batch. Follow-ups enter at natural termination after
   steers have been consumed. A terminating tool still finishes its batch.
@@ -110,6 +117,10 @@ text is separate from localized user-facing error delivery.
   An invalid tool/hook result ends the run with an error; its call remains open
   for deterministic projection and T2 settlement. Recovery rejects invalid
   renderer output before append, so a corrected retry can finish settlement.
+  The projector also rechecks every call's mutable arguments using the
+  foundation's public `require_json_value`. Invalid JSON shapes raise
+  `ProjectionError` with call and row context, before admission or replay;
+  there is no separate loop-owned JSON argument validator.
 - Every tool execution exit releases that `(Session, tool call)`'s remaining
   foreground handles, including success and failure. Final cleanup sweeps all
   remaining Session-owned handles on every terminal path. Handed-over jobs are
@@ -150,6 +161,10 @@ The admission source matrix checks provider responses/partials, tools, result
 rewrites, terminating tools, initial inputs and queued steer/follow-up inputs.
 Recovery separately checks invalid renderer output after a prior good commit.
 Both boundaries prove a fresh Agent can continue over the same store.
+Valid-then-mutated argument cases cover Done and partial responses, with a
+separate loaded-ancestry check. The final-reply table covers empty, whitespace,
+thinking-only and visible replies across stop/length/refusal/safety and
+pending-input continuation. The primary/cleanup table includes empty_response.
 These are in-memory engine checks; production provider/store/Watch integration
 is a later layer.
 
