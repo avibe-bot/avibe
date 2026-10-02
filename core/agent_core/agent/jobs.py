@@ -64,6 +64,9 @@ class TrackingJobHost:
     def output(self, job_id: str, since: int = 0) -> tuple[bytes, int]:
         return self.host.output(job_id, since)
 
+    def output_path(self, job_id: str) -> str:
+        return self.host.output_path(job_id)
+
     async def kill(self, job_id: str) -> None:
         await self.host.kill(job_id)
         self._foreground.pop(job_id, None)

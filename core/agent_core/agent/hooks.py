@@ -39,7 +39,7 @@ class Snapshot:
 @dataclass
 class RunContext:
     session_id: str
-    run_id: str
+    turn_id: str
     cancel: CancelToken
     state: dict[str, Any] = field(default_factory=dict)
 
@@ -77,7 +77,7 @@ class AlterResult:
 
 @dataclass(frozen=True)
 class RunOutcome:
-    run_id: str
+    turn_id: str
     reason: RunEndReason
     snapshot: Snapshot
 

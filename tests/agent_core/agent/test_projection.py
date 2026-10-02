@@ -4,48 +4,23 @@ from copy import deepcopy
 
 import pytest
 
-from core.agent_core.harness.projection import INTERRUPTED, JobOrphanSettler, ProjectionError, project
+from core.agent_core.harness.projection import INTERRUPTED, ProjectionError, project
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import ToolCallBlock, ToolResultMessage, text
-from core.agent_core.tools.base import JobStatus
-from tests.agent_core.fakes import FakeJobHost, assistant, user
+from tests.agent_core.fakes import assistant, user
 
 
-@pytest.mark.parametrize("state", ["missing", "running", "exited", "gone"])
-def test_orphan_settlement_uses_status_without_starting_or_killing_a_job(state):
-    jobs = FakeJobHost()
-    call = ToolCallBlock("call", "bash")
+def test_unsettled_projection_is_deterministic_and_preserves_signed_calls():
+    call = ToolCallBlock("call", "bash", signature="opaque Gemini signature")
     owner = ContextEntry("parent", 1, "response", "response", assistant(calls=[call]))
-    job_ids = {}
-    if state != "missing":
-        job_ids[("parent", "call")] = "job_1"
-        jobs.states["job_1"] = JobStatus(state, exit_code=7 if state == "exited" else None)
-        jobs.outputs["job_1"] = b"final output"
-
-    def running(job_id, call):
-        return ToolResultMessage(call.id, call.name, (text("still running, now Watch w1"),))
-
-    def exited(job_id, status, call):
-        output, _ = jobs.output(job_id)
-        return ToolResultMessage(
-            call.id, call.name, (text(f"{output.decode()}; exit={status.exit_code}"),), is_error=status.exit_code != 0
-        )
-
     rows = [owner]
     before = deepcopy(rows)
-    projected = project(rows, settle_orphan=JobOrphanSettler(jobs, job_ids, running, exited))
-    assert (
-        projected.messages[1].content[0].text
-        == {
-            "missing": INTERRUPTED,
-            "gone": INTERRUPTED,
-            "running": "still running, now Watch w1",
-            "exited": "final output; exit=7",
-        }[state]
-    )
-    assert projected.messages[1].is_error == (state != "running")
+    projected = project(rows)
+    assert projected == project(rows)
+    assert projected.messages[0].tool_calls[0].signature == "opaque Gemini signature"
+    assert projected.messages[1].content[0].text == INTERRUPTED
+    assert projected.messages[1].is_error
     assert rows == before
-    assert jobs.starts == jobs.killed == []
 
 
 def test_projection_sorts_rows_cuts_at_fork_restores_state_and_places_results_in_call_order():

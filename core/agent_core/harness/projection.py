@@ -3,14 +3,15 @@
 The store supplies rows including fork ancestry. Projection sorts and copies
 them, restores hook state, and repairs orphan calls without executing tools or
 writing rows. System text and rehydrated messages are supplied by the caller.
-Job lookup/Watch handover and output governance stay outside this pure transform.
+No job host or external settler is consulted. Resume settlement is the separate
+write step in ``agent.recovery``; any remaining orphan gets deterministic text.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
@@ -21,11 +22,9 @@ from core.agent_core.messages import (
     ToolResultMessage,
     text,
 )
-from core.agent_core.tools.base import JobHost, JobStatus
 
 # C-1 cross-provider.md; also Pi (MIT), packages/ai/src/utils/transform-messages.ts.
 INTERRUPTED = "[tool call interrupted; no result recorded]"
-OrphanSettler = Callable[[ContextEntry, ToolCallBlock], Optional[ToolResultMessage]]
 
 
 class ProjectionError(ValueError):
@@ -44,25 +43,11 @@ def interrupted_result(call: ToolCallBlock) -> ToolResultMessage:
     return ToolResultMessage(call.id, call.name, (text(INTERRUPTED),), is_error=True)
 
 
-def project(
-    entries: Sequence[ContextEntry],
-    *,
-    system: str = "",
-    rehydrated: Sequence[Message] = (),
-    settle_orphan: Optional[OrphanSettler] = None,
-    fork_point: Optional[int] = None,
-) -> Projection:
-    """Project resolved ancestry; ``fork_point`` is an optional inclusive cut.
-
-    Orphan results are placed in call order immediately after their response.
-    The injected settler must return an already governed result, or None when
-    the call never ran. All returned objects are detached from stored objects.
-    """
+def _ordered(entries: Sequence[ContextEntry], fork_point: Optional[int] = None) -> list[ContextEntry]:
     rows = sorted(
         (entry for entry in entries if fork_point is None or entry.context_seq <= fork_point),
         key=lambda entry: entry.context_seq,
     )
-    state: dict[str, Any] = {}
     previous_seq = -1
     for row in rows:
         if row.context_seq <= previous_seq:
@@ -73,74 +58,79 @@ def project(
         if row.kind == "agent_state":
             if row.payload.get("version") != 1 or not isinstance(row.payload.get("state"), dict):
                 raise ProjectionError(f"unsupported agent_state payload (row {row.row_id})")
-            state = deepcopy(row.payload["state"])
         elif row.message is None:
             raise ProjectionError(f"{row.kind} has no message (row {row.row_id})")
         if row.message is not None and any(
             isinstance(block, TextBlock) and block.ref is not None for block in row.message.content
         ):
             raise ProjectionError(f"large-content references are not supported (row {row.row_id})")
+    return rows
 
-    messages: list[Message] = list(rehydrated)
-    pending: list[tuple[ContextEntry, ToolCallBlock]] = []
-    results: dict[str, ToolResultMessage] = {}
 
-    def flush() -> None:
-        for owner, call in pending:
-            result = results.pop(call.id, None)
-            if result is None and settle_orphan is not None:
-                result = settle_orphan(deepcopy(owner), deepcopy(call))
-            if result is None:
-                result = interrupted_result(call)
-            if result.tool_call_id != call.id or result.tool_name != call.name:
-                raise ProjectionError(f"result identity does not match call {call.id}")
-            messages.append(result)
-        pending.clear()
+def _index_results(
+    rows: Sequence[ContextEntry],
+) -> tuple[dict[tuple[int, str], ToolResultMessage], dict[str, tuple[ContextEntry, ToolCallBlock]]]:
+    """Associate late recovery rows with their original response, in row order."""
+    pending: dict[str, tuple[ContextEntry, ToolCallBlock]] = {}
+    results: dict[tuple[int, str], ToolResultMessage] = {}
+    seen: set[str] = set()
 
     for row in rows:
         if row.kind == "agent_state":
             continue
         message = row.message
         if isinstance(message, ToolResultMessage):
-            if message.tool_call_id not in {call.id for _, call in pending}:
+            owner = pending.pop(message.tool_call_id, None)
+            if owner is None:
+                if message.tool_call_id in seen:
+                    raise ProjectionError(f"duplicate tool result: {message.tool_call_id}")
                 raise ProjectionError(f"tool result has no preceding call: {message.tool_call_id}")
-            if message.tool_call_id in results:
-                raise ProjectionError(f"duplicate tool result: {message.tool_call_id}")
-            results[message.tool_call_id] = message
+            response, call = owner
+            if message.tool_name != call.name:
+                raise ProjectionError(f"result identity does not match call {call.id}")
+            results[response.context_seq, call.id] = message
+        elif isinstance(message, AssistantMessage):
+            for call in message.tool_calls:
+                if call.id in pending:
+                    raise ProjectionError(f"duplicate open tool call id: {call.id}")
+                seen.add(call.id)
+                pending[call.id] = (row, call)
+    return results, pending
+
+
+def open_tool_calls(entries: Sequence[ContextEntry]) -> tuple[tuple[ContextEntry, ToolCallBlock], ...]:
+    """Return uncommitted outcomes in call order for the resume writer."""
+    _, pending = _index_results(_ordered(entries))
+    return tuple(deepcopy(list(pending.values())))
+
+
+def project(
+    entries: Sequence[ContextEntry],
+    *,
+    system: str = "",
+    rehydrated: Sequence[Message] = (),
+    fork_point: Optional[int] = None,
+) -> Projection:
+    """Project committed ancestry, with an optional inclusive fork cut.
+
+    Results (including late recovery rows) are placed immediately after their
+    response in call order. A missing result always gets INTERRUPTED. Neither
+    projection nor the returned detached objects can change persisted rows.
+    """
+    rows = _ordered(entries, fork_point)
+    results, _ = _index_results(rows)
+    messages: list[Message] = list(rehydrated)
+    state: Mapping[str, Any] = {}
+    for row in rows:
+        if row.kind == "agent_state":
+            state = row.payload["state"]
             continue
-        flush()
+        message = row.message
+        if isinstance(message, ToolResultMessage):
+            continue
         if message is not None:
             messages.append(message)
         if isinstance(message, AssistantMessage):
-            ids = [call.id for call in message.tool_calls]
-            if len(set(ids)) != len(ids):
-                raise ProjectionError(f"duplicate tool call id in response {row.row_id}")
-            pending.extend((row, call) for call in message.tool_calls)
-    flush()
-    return Projection(system, tuple(deepcopy(messages)), rows[-1].context_seq if rows else 0, state)
-
-
-@dataclass(frozen=True)
-class JobOrphanSettler:
-    """Read an externally resolved job map; never spawn or hand over a job.
-
-    ``job_ids`` keys include the original row's session, so forks settle their
-    parent's jobs. The adapter supplies Watch text and final governed output.
-    Missing/gone jobs yield the canonical interrupted result.
-    """
-
-    jobs: JobHost
-    job_ids: Mapping[tuple[str, str], str]
-    running_result: Callable[[str, ToolCallBlock], ToolResultMessage]
-    exited_result: Callable[[str, JobStatus, ToolCallBlock], ToolResultMessage]
-
-    def __call__(self, owner: ContextEntry, call: ToolCallBlock) -> Optional[ToolResultMessage]:
-        job_id = self.job_ids.get((owner.session_id, call.id))
-        if job_id is None:
-            return None
-        status = self.jobs.status(job_id)
-        if status.state == "running":
-            return self.running_result(job_id, call)
-        if status.state == "exited":
-            return self.exited_result(job_id, status, call)
-        return None
+            for call in message.tool_calls:
+                messages.append(results.get((row.context_seq, call.id), interrupted_result(call)))
+    return Projection(system, tuple(deepcopy(messages)), rows[-1].context_seq if rows else 0, deepcopy(state))

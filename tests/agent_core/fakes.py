@@ -13,8 +13,8 @@ from copy import deepcopy
 from typing import AsyncIterator, Callable, Mapping, Optional, Sequence
 
 from core.agent_core.agent.hooks import AgentInput, Snapshot
-from core.agent_core.agent.models import ModelCapabilities, ModelSelection
-from core.agent_core.ai.provider import ModelEndpoint, ModelRequest, ProviderEvent
+from core.agent_core.agent.models import ModelSelection
+from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelRequest, ProviderEvent
 from core.agent_core.cancel import CancelToken
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import AssistantMessage, Origin, ToolResultMessage, UserMessage, text
@@ -22,7 +22,9 @@ from core.agent_core.tools.base import JobStatus, ToolContext, ToolResult, ToolS
 
 ORIGIN = Origin("test-provider", "anthropic", "test-model")
 ENDPOINT = ModelEndpoint("anthropic", "http://model.invalid", "test-model", "", provider="test-provider")
-SELECTION = ModelSelection(ENDPOINT, ModelCapabilities(32000, 4096))
+SELECTION = ModelSelection(
+    ENDPOINT, ModelCapabilities(context_window=32000, max_output_tokens=4096, supports_tools=True, supports_images=True)
+)
 Script = Sequence[ProviderEvent] | Callable[[ModelRequest, CancelToken], AsyncIterator[ProviderEvent]]
 
 
@@ -178,6 +180,9 @@ class FakeJobHost:
     def output(self, job_id, since=0) -> tuple[bytes, int]:
         output = self.outputs[job_id]
         return output[since:], len(output)
+
+    def output_path(self, job_id) -> str:
+        return f"/test-owned/jobs/{job_id}/output.log"
 
     async def kill(self, job_id) -> None:
         self.killed.append(job_id)

@@ -36,9 +36,10 @@ from core.agent_core.agent.hooks import (
 )
 from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import RetryPolicy
-from core.agent_core.ai.provider import Done, ProviderError, TextDelta, ThinkingDelta, ToolCallStart
+from core.agent_core.ai.provider import Done, ModelCapabilities, ProviderError, TextDelta, ThinkingDelta, ToolCallStart
+from core.agent_core.agent.models import ModelSelection
 from core.agent_core.harness.projection import project
-from core.agent_core.messages import ToolCallBlock, ToolResultMessage, UserMessage, text
+from core.agent_core.messages import ThinkingBlock, ToolCallBlock, ToolResultMessage, UserMessage, text
 from core.agent_core.tools.base import ToolResult
 from tests.agent_core.fakes import (
     FakeJobHost,
@@ -46,6 +47,7 @@ from tests.agent_core.fakes import (
     FakeTool,
     InMemoryTranscriptStore,
     ScriptedProvider,
+    ENDPOINT,
     assistant,
     input_row,
     user,
@@ -65,8 +67,8 @@ def make_agent(provider, *, store=None, session_id="session", tools=(), hooks=()
     )
 
 
-async def collect(agent, row_id="input", value="hello", run_id="turn"):
-    return [event async for event in agent.run(input_row(row_id, value), run_id=run_id)]
+async def collect(agent, row_id="input", value="hello", turn_id="turn"):
+    return [event async for event in agent.run(input_row(row_id, value), turn_id=turn_id)]
 
 
 def user_texts(request):
@@ -371,13 +373,13 @@ async def test_before_run_setup_applies_to_one_run_and_after_run_state_is_durabl
 
         async def after_run(self, outcome, ctx):
             outcomes.append(outcome)
-            ctx.state["finished"] = outcome.run_id
+            ctx.state["finished"] = outcome.turn_id
 
     provider = ScriptedProvider([[Done(assistant())], [Done(assistant())]])
     agent = make_agent(provider, hooks=[Setup()], tools=[FakeTool("base")], system="base system")
-    await collect(agent, "first", run_id="first-turn")
+    await collect(agent, "first", turn_id="first-turn")
     assert agent.snapshot().state == {"finished": "first-turn"}
-    await collect(agent, "second", run_id="second-turn")
+    await collect(agent, "second", turn_id="second-turn")
     assert [(r.system, [t.name for t in r.tools]) for r in provider.requests] == [
         ("first system", ["first"]),
         ("base system", ["base"]),
@@ -439,7 +441,7 @@ async def test_C9_events_reference_committed_rows_and_progress_precedes_tool_fin
     )
     agent = make_agent(provider, tools=[FakeTool(execute=execute)])
     events = []
-    async for event in agent.run(input_row("input", "hello"), run_id="the-turn-id"):
+    async for event in agent.run(input_row("input", "hello"), turn_id="the-turn-id"):
         rows = await agent.store.load("session")
         if isinstance(event, MessageCommitted):
             assert any(row.row_id == event.message_id and row.context_seq == event.context_seq for row in rows)
@@ -458,7 +460,7 @@ async def test_C9_events_reference_committed_rows_and_progress_precedes_tool_fin
         RunEnded,
     ]
     assert [event.seq for event in events] == list(range(len(events)))
-    assert {event.run_id for event in events} == {"the-turn-id"}
+    assert {event.turn_id for event in events} == {"the-turn-id"}
     assert len(next(event for event in events if isinstance(event, ToolStarted)).preview) <= 500
 
 
@@ -531,7 +533,7 @@ async def test_abort_closes_provider_stream_and_allows_a_new_turn():
     assert events[-1].reason == "aborted"
     assert provider.closed_streams == 1
     assert [row.kind for row in await agent.store.load("session")] == ["input"]
-    next_events = await collect(agent, "next", run_id="next-turn")
+    next_events = await collect(agent, "next", turn_id="next-turn")
     assert next_events[0].seq == 0
     assert next_events[-1].reason == "completed"
 
@@ -627,7 +629,7 @@ async def test_abort_interrupts_retry_backoff_without_an_extra_provider_request(
 async def test_closing_event_consumer_cancels_work_and_releases_run_ownership():
     provider = ScriptedProvider([[Done(assistant())]])
     agent = make_agent(provider)
-    stream = agent.run(input_row("input", "hello"), run_id="turn")
+    stream = agent.run(input_row("input", "hello"), turn_id="turn")
     assert isinstance(await anext(stream), RunStarted)
     await stream.aclose()
     assert await agent.steer(input_row("late", "no")) is False
@@ -645,6 +647,255 @@ async def test_concurrent_run_is_refused_without_interrupting_the_owner():
     run = asyncio.create_task(collect(agent))
     await entered.wait()
     with pytest.raises(RuntimeError, match="active run"):
-        await collect(agent, "other", run_id="other")
+        await collect(agent, "other", turn_id="other")
     release.set()
     assert (await run)[-1].reason == "completed"
+
+
+@pytest.mark.parametrize("capability", [None, False, True])
+async def test_resolved_nullable_capabilities_gate_each_request(capability):
+    provider = ScriptedProvider([[Done(assistant())]])
+    agent = make_agent(provider, tools=[FakeTool()], reasoning_effort="high", max_tokens=2000)
+    agent.models = FakeModelRouter(
+        provider,
+        [
+            ModelSelection(
+                ENDPOINT,
+                ModelCapabilities(
+                    supports_tools=None,
+                    supports_images=capability,
+                    supports_reasoning=capability,
+                    max_output_tokens=1000 if capability is True else None,
+                    reasoning_efforts=("low", "high"),
+                ),
+            )
+        ],
+    )
+    await collect(agent)
+    request = provider.requests[0]
+    assert request.supports_images is (capability is True)
+    assert [spec.name for spec in request.tools] == ["echo"]
+    assert request.reasoning_effort == ("high" if capability is True else None)
+    assert request.max_tokens == (1000 if capability is True else 2000)
+
+
+@pytest.mark.parametrize("initial", [True, False])
+async def test_tool_incapable_route_is_refused_before_execution_or_any_request(initial):
+    hooks = []
+
+    class RecordHook(Hooks):
+        async def before_run(self, input, ctx):
+            hooks.append("before_run")
+
+    provider = ScriptedProvider([[Done(assistant(calls=[ToolCallBlock("a", "echo")]))]])
+    tool = FakeTool()
+    agent = make_agent(provider, tools=[tool], hooks=[RecordHook()])
+    denied = ModelSelection(ENDPOINT, ModelCapabilities(supports_tools=False))
+    agent.models = FakeModelRouter(
+        provider,
+        [denied] if initial else [ModelSelection(ENDPOINT, ModelCapabilities(supports_tools=True)), denied],
+    )
+    events = await collect(agent)
+    assert events[-1].reason == "error"
+    assert [(event.kind, event.message) for event in events if isinstance(event, AgentError)] == [
+        ("UnsupportedModelRoute", "The selected model does not support tools; the agent requires tool support.")
+    ]
+    assert len(provider.requests) == (0 if initial else 1)
+    if initial:
+        assert hooks == tool.calls == []
+        assert await agent.store.load("session") == []
+    else:
+        assert len(tool.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "configured,maximum,expected",
+    [(None, None, 8192), (20000, None, 8192), (1000, None, 1000), (20000, 16000, 16000)],
+)
+async def test_output_budget_uses_configured_budget_and_known_or_default_provider_limit(configured, maximum, expected):
+    provider = ScriptedProvider([[Done(assistant())]])
+    agent = make_agent(provider, **({"max_tokens": configured} if configured is not None else {}))
+    agent.models = FakeModelRouter(provider, [ModelSelection(ENDPOINT, ModelCapabilities(max_output_tokens=maximum))])
+    await collect(agent)
+    assert provider.requests[0].max_tokens == expected
+
+
+@pytest.mark.parametrize("window,expected", [(None, 128000), (32000, 32000)])
+def test_router_selection_exposes_effective_context_budget_without_forging_capabilities(window, expected):
+    selection = ModelSelection(ENDPOINT, ModelCapabilities(context_window=window))
+    assert selection.context_window == expected
+    assert selection.capabilities.context_window == window
+
+
+async def test_reasoning_effort_must_be_declared_by_the_route():
+    provider = ScriptedProvider([[Done(assistant())]])
+    agent = make_agent(provider, reasoning_effort="high")
+    agent.models = FakeModelRouter(
+        provider,
+        [
+            ModelSelection(
+                ENDPOINT,
+                ModelCapabilities(supports_reasoning=True, reasoning_efforts=("low",)),
+            )
+        ],
+    )
+    await collect(agent)
+    assert provider.requests[0].reasoning_effort is None
+
+
+@pytest.mark.parametrize("stop_reason", ["refusal", "safety"])
+@pytest.mark.parametrize("reply", ["", " \n", "I cannot help with that."])
+async def test_final_refusal_or_safety_is_committed_and_empty_reply_is_explained(stop_reason, reply):
+    # Thinking is not a surface reply. Existing terminal tests cover provider
+    # errors, not successful Done messages with safety/refusal stop reasons.
+    message = assistant(reply, stop_reason=stop_reason)
+    message = replace(message, content=(ThinkingBlock("private reasoning"), *message.content))
+    provider = ScriptedProvider([[Done(message)]])
+    agent = make_agent(provider)
+    events = await collect(agent)
+    response = (await agent.store.load("session"))[-1]
+    assert response.message == message
+    assert agent.store.final[response.row_id] is True
+    committed = next(event for event in events if isinstance(event, MessageCommitted))
+    assert committed.final is True
+    assert committed.message_id == response.row_id
+    errors = [event for event in events if isinstance(event, AgentError)]
+    if reply.strip():
+        assert errors == []
+        assert events[-1].reason == "completed"
+    else:
+        assert len(errors) == 1
+        assert errors[0].kind == stop_reason
+        assert errors[0].message
+        assert committed.seq < errors[0].seq < events[-1].seq
+        assert events[-1].reason == "error"
+
+
+@pytest.mark.parametrize("source", ["provider", "tool", "before_model", "after_run"])
+async def test_dependency_cancelled_error_emits_a_terminal_event_and_preserves_consumer(source):
+    class CancelHook(Hooks):
+        async def before_model(self, request, ctx):
+            if source == "before_model":
+                raise asyncio.CancelledError()
+
+        async def after_run(self, outcome, ctx):
+            if source == "after_run":
+                raise asyncio.CancelledError()
+
+    async def stream(request, cancel):
+        if source == "provider":
+            raise asyncio.CancelledError()
+        yield Done(assistant(calls=[ToolCallBlock("a", "echo")] if source == "tool" else []))
+
+    async def execute(arguments, ctx):
+        raise asyncio.CancelledError()
+
+    agent = make_agent(ScriptedProvider([stream]), hooks=[CancelHook()], tools=[FakeTool(execute=execute)])
+    events = await collect(agent)
+    assert isinstance(events[-1], RunEnded)
+    assert events[-1].reason == "aborted"
+    assert any(isinstance(event, AgentError) and event.kind == "dependency_cancelled" for event in events)
+
+
+@pytest.mark.parametrize("step", ["response", "tool_result"])
+async def test_every_committed_output_is_announced_even_when_hook_state_cannot_be_saved(step):
+    class FailingStore(InMemoryTranscriptStore):
+        async def append_payload(self, session_id, kind, payload):
+            raise OSError("state persistence unavailable")
+
+    class DirtyState(Hooks):
+        async def before_model(self, request, ctx):
+            if step == "response":
+                ctx.state["dirty"] = True
+
+        async def after_tool(self, call, result, ctx):
+            if step == "tool_result":
+                ctx.state["dirty"] = True
+
+    store = FailingStore()
+    provider = ScriptedProvider([[Done(assistant(calls=[ToolCallBlock("a", "echo")]))]])
+    agent = make_agent(provider, store=store, hooks=[DirtyState()], tools=[FakeTool()])
+    events = await collect(agent)
+    committed = [row for row in await store.load("session") if row.kind in {"response", "tool_result"}]
+    announced = [
+        event.message_id if isinstance(event, MessageCommitted) else event.event_id
+        for event in events
+        if isinstance(event, (MessageCommitted, ToolFinished))
+    ]
+    assert [row.row_id for row in committed] == announced
+    assert events[-1].reason == "error"
+
+
+@pytest.mark.parametrize("termination", ["terminate", "hook", "abort", "provider_error"])
+async def test_early_termination_returns_accepted_unconsumed_inputs_to_adapter(termination):
+    class StopHook(Hooks):
+        async def after_tool(self, call, result, ctx):
+            if termination == "hook":
+                return End()
+
+    async def accept():
+        assert await agent.steer(input_row("steer", "steer"))
+        assert await agent.follow_up(input_row("follow", "follow"))
+
+    async def stream(request, cancel):
+        if termination == "provider_error":
+            await accept()
+            yield ProviderError("auth", "denied", False)
+        else:
+            yield Done(assistant(calls=[ToolCallBlock("a", "echo")]))
+
+    async def execute(arguments, ctx):
+        await accept()
+        if termination == "abort":
+            agent.abort()
+            await ctx.cancel.wait()
+        return ToolResult((text("done"),), terminate=termination == "terminate")
+
+    agent = make_agent(ScriptedProvider([stream]), tools=[FakeTool(execute=execute)], hooks=[StopHook()])
+    await collect(agent)
+    with pytest.raises(RuntimeError, match="unconsumed"):
+        await collect(agent, "new")
+    pending = await agent.take_pending_inputs()
+    assert [item.message_id for item in pending] == ["steer", "follow"]
+    assert await agent.take_pending_inputs() == ()
+    assert [row.row_id for row in await agent.store.load("session") if row.kind == "input"] == ["input"]
+
+
+async def test_failed_queued_input_commit_keeps_pending_input_and_announces_prior_commits():
+    class Store(InMemoryTranscriptStore):
+        async def consume_input(self, session_id, message_id, message):
+            if message_id == "second":
+                raise OSError("input unavailable")
+            return await super().consume_input(session_id, message_id, message)
+
+    async def stream(request, cancel):
+        assert await agent.steer(input_row("first", "first"))
+        assert await agent.steer(input_row("second", "second"))
+        yield Done(assistant())
+
+    store = Store()
+    agent = make_agent(ScriptedProvider([stream]), store=store)
+    events = await collect(agent)
+    durable_response = next(row for row in await store.load("session") if row.kind == "response")
+    assert [event.message_id for event in events if isinstance(event, MessageCommitted)] == [durable_response.row_id]
+    assert [event.message_id for event in events if isinstance(event, SteerApplied)] == ["first"]
+    assert [item.message_id for item in await agent.take_pending_inputs()] == ["second"]
+
+
+async def test_partial_response_commit_failure_still_emits_a_terminal_error():
+    class Store(InMemoryTranscriptStore):
+        async def append_response(self, session_id, message, *, final):
+            raise OSError("response persistence unavailable")
+
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderError("server", "stream failed", False, partial=assistant("partial", stop_reason="error")),
+            ]
+        ]
+    )
+    events = await collect(make_agent(provider, store=Store()))
+    assert events[-1].reason == "error"
+    assert any(
+        isinstance(event, AgentError) and event.message == "response persistence unavailable" for event in events
+    )

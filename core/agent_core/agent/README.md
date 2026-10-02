@@ -6,7 +6,8 @@ The change contract is C-3 plus C-5 projection steps 1, 2, 5, and 6 from
 ## Integration
 
 Import `Agent` from `agent.loop`, input/snapshot/hook types from `agent.hooks`,
-and `ModelRouter`, `ModelSelection`, `ModelCapabilities` from `agent.models`.
+`ModelRouter` and `ModelSelection` from `agent.models`, and the shared
+`ModelCapabilities` from `ai.provider`.
 The adapter supplies the Session id, working directory, explicit environment,
 rebuilt system prompt, providers, transcript store, and job host.
 
@@ -17,18 +18,31 @@ agent = Agent(
 )
 # Job-backed tools receive this exact wrapper, not the unwrapped host.
 agent.set_tools(build_tools(jobs=agent.jobs))
-async for event in agent.run(AgentInput(message_id, rendered_input), run_id=turn_id):
+async for event in agent.run(AgentInput(message_id, rendered_input), turn_id=turn_id):
     await deliver(event)
+# Return accepted but unconsumed inputs after an early end, abort, or error.
+pending = await agent.take_pending_inputs()
 ```
 
 `steer` and `follow_up` are async and return whether the active run accepted the
 input. `False` means the adapter keeps the persisted input in the P3 queue.
+An accepted input remains owned by the Agent until consumed or returned by
+`take_pending_inputs()`. Early termination preserves those queues; the adapter
+returns their durable rows to P3. A new run is refused until they are collected.
 `abort`, `set_tools`, and `snapshot` are synchronous on the same event loop.
 Only one run can use an Agent at a time. The adapter remains responsible for
 excluding multiple Agent instances writing the same Session.
 
 The router resolves endpoint and capabilities before each model attempt;
 `provider_for(protocol)` selects transport after request hooks have run.
+An explicitly tool-incapable route is refused during preflight, before hooks or
+input consumption. The run yields a clear error and terminal event without a
+provider request. Unknown tool support still sends tools. Unknown/false image
+and reasoning support is disabled; reasoning also requires a declared effort.
+The configured output budget defaults to 8,192 and is capped by the provider's
+maximum (8,192 when unknown). `ModelSelection.context_window` exposes the C-9
+budget (128,000 when unknown); context management itself remains P3.
+The shared nullable source capabilities are not changed into guessed values.
 Before-model rewrites affect a detached request only. Tools execute against the
 registry captured for that request, restricted to its advertised names.
 A before-run setup affects that run only; `set_tools` changes the configured
@@ -43,9 +57,14 @@ The store/adapter owns fork ancestry; the engine does not copy parent rows.
 ## Invariants and evidence
 
 - Responses are committed before `MessageCommitted`, and tool results before
-  `ToolFinished`. Event sequences start at zero per Turn and increase strictly.
+  `ToolFinished`. Hook state is written before the associated context entry, so
+  a failed state write cannot hide a committed reply. A later input-write failure
+  still announces prior committed rows. Event sequences start at zero per Turn
+  and increase strictly; their identity field is `turn_id`.
 - Finality is decided with input admission locked before inserting the response.
   A final response closes admission; a competing late steer is refused.
+  A final refusal/safety stop retains the provider's text. Without a visible
+  reply, it still commits a final result, then emits a typed error and ends.
 - A tool batch runs sequentially and commits results in call order. Steers
   enter after the whole batch. Follow-ups enter at natural termination after
   steers have been consumed. A terminating tool still finishes its batch.
@@ -54,19 +73,25 @@ The store/adapter owns fork ancestry; the engine does not copy parent rows.
 - Abort cancels the pending provider/tool/hook/backoff operation, waits for its
   cleanup, and kills tracked foreground jobs through `JobHost.kill`. Jobs
   handed to Watch survive. Closing the event iterator also cleans up its worker.
+  A dependency that independently raises cancellation produces an error and a
+  terminal aborted event; it is not mistaken for a closed iterator.
 - Transient retries have a fixed attempt budget, exponential backoff, and honor
   Retry-After. Any streamed event or partial response forbids retry. Overflow
   emits an error and ends as `context_exhausted`.
 - Projection consumes store-resolved ancestry, sorts by sequence, restores hook
-  state, and settles orphan calls without executing commands or editing rows.
-  The caller supplies rebuilt system/state messages and a read-only orphan
-  settler. `JobOrphanSettler` reads JobHost status and caller-rendered governed
-  results; Watch creation remains outside the pure projection.
+  state, and answers orphans with deterministic interrupted text. It has no job
+  host or external settler. The caller supplies rebuilt system/state messages.
+- Before resume, the adapter calls `agent.recovery.settle_open_calls` under its
+  Session writer lock. It appends a governed result for each open call: exited
+  output, a running job handed to Watch, or synthetic interrupted text. Each
+  committed outcome is skipped on retry. Late settlement rows are projected
+  alongside their original call, and fork cuts only see included outcomes.
 
 `tests/agent_core/agent/` verifies C1, transient C2, C3, C4, C5, resume C6, and
 C9 against the actual requests recorded by `tests/agent_core/fakes.py`.
 It also covers each orphan job state, retry classification, cancellation during
-job ownership transitions, and event consumer closure. These are in-memory
+job ownership transitions, settlement crash/retry windows, and event consumer
+closure. These are in-memory
 engine checks; production provider/store/Watch integration is a later layer.
 
 ## Known by design
@@ -77,8 +102,11 @@ engine checks; production provider/store/Watch integration is a later layer.
   for v1 by the orchestrator). A crash between a non-final response and input
   consumption leaves that input queued for adapter recovery.
 - Input rendering/environment deltas, delivery outbox, actual Session forking,
-  job-to-call lookup, Watch creation, and output governance belong to the adapter
-  or tools. The injected orphan callbacks return already governed content.
+  job-to-call lookup, Watch implementation, and output governance belong to the
+  adapter or tools. Recovery's renderer receives `(call, job_id, status, watch_id)`
+  and returns a governed `ToolResult`; job keys include the original Session.
+  The adapter serializes recovery with active runs. `JobHost.hand_over` must
+  reuse a job's existing Watch when recovery retries an interrupted commit.
 - A stream error may persist its partial response as non-final evidence, but no
   partial tool call executes. A later projection settles missing results.
 - This lane validates engine boundaries with fakes. No live service, credentials,

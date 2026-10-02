@@ -7,28 +7,32 @@ from typing import Optional, Protocol
 
 from core.agent_core.ai.provider import (
     RETRYABLE_ERROR_KINDS,
+    ModelCapabilities,
     ModelEndpoint,
     ProviderAdapter,
     ProviderError,
 )
 from core.agent_core.messages import ProtocolName
 
-
-@dataclass(frozen=True)
-class ModelCapabilities:
-    context_window: int
-    max_output_tokens: int
-    input_limit: Optional[int] = None
-    supports_tools: bool = True
-    supports_images: bool = True
-    supports_reasoning: bool = False
-    reasoning_efforts: tuple[str, ...] = ()
+DEFAULT_CONTEXT_WINDOW = 128_000
+DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 
 
 @dataclass(frozen=True)
 class ModelSelection:
     endpoint: ModelEndpoint
     capabilities: ModelCapabilities
+
+    @property
+    def context_window(self) -> int:
+        """Effective C-9 budget; preserve nullable source capabilities."""
+        value = self.capabilities.context_window
+        return DEFAULT_CONTEXT_WINDOW if value is None else value
+
+    @property
+    def max_output_tokens(self) -> int:
+        value = self.capabilities.max_output_tokens
+        return DEFAULT_MAX_OUTPUT_TOKENS if value is None else value
 
 
 class ModelRouter(Protocol):
