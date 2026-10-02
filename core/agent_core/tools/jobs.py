@@ -51,6 +51,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 import psutil
 
 from core.agent_core.tools.base import JobStatus
+from core.agent_core.tools.paths import os_reason
 from core.process_isolation import (
     DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
     KILL_SIGNAL,
@@ -306,7 +307,7 @@ class LocalJobHost:
             )
         except OSError as exc:
             self._create_decision(job_id, _ABANDON)
-            raise JobStartError(f"Could not start the command: {exc}") from exc
+            raise JobStartError(f"Could not start the command: {os_reason(exc)}.") from exc
         finally:
             os.close(diagnostics)
         self._children[job_id] = proc

@@ -112,6 +112,19 @@ async def test_text_copied_from_read_edits_a_file_with_invalid_bytes(tmp_path, m
     assert (tmp_path / "f.txt").read_bytes() == b"fixed\nkeep\x80\n"
 
 
+async def test_text_copied_from_read_edits_the_first_line_of_a_bom_file(tmp_path, make_ctx):
+    """read does not show the BOM, edit does not match it, and the BOM survives."""
+    (tmp_path / "f.txt").write_bytes(b"\xef\xbb\xbfalpha\r\nbeta\r\n")
+    shown = result_text(await ReadTool().execute({"path": "f.txt"}, make_ctx()))
+    first_line = shown.split("\n")[0]
+
+    result = await _edit(make_ctx, "f.txt", {"oldText": first_line, "newText": "ALPHA"})
+
+    assert shown == "alpha\nbeta\n"
+    assert not result.is_error, result_text(result)
+    assert (tmp_path / "f.txt").read_bytes() == b"\xef\xbb\xbfALPHA\r\nbeta\r\n"
+
+
 async def test_a_planned_result_over_the_limit_is_refused_and_its_diff_skipped(tmp_path, make_ctx, monkeypatch):
     (tmp_path / "small.txt").write_text("seed\n")
     monkeypatch.setattr(edit_module, "MAX_EDIT_BYTES", 1000)

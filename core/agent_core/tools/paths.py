@@ -8,11 +8,13 @@ Mario Zechner).
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import re
+import stat
 import unicodedata
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 from urllib.parse import unquote, urlparse
 
 from core.agent_core.tools.args import ToolInputError
@@ -96,6 +98,34 @@ def resolve_read_path(path: str, cwd: str) -> str:
         if candidate != resolved and os.path.exists(candidate):
             return candidate
     return resolved
+
+
+FileKind = Literal["regular", "directory", "other"]
+
+#: Why a tool refuses a file that exists but is not a regular file.
+KIND_REASON = {"directory": "it is a directory", "other": "it is not a regular file"}
+
+
+def target_kind(path: str) -> FileKind:
+    """What ``path`` names, following symlinks. ``stat`` never opens the file, so a FIFO cannot block it.
+
+    Raises ``OSError`` as ``stat`` does: missing or dangling (ENOENT), a loop (ELOOP), a file used as a
+    directory (ENOTDIR), no search permission (EACCES).
+    """
+    mode = os.stat(path).st_mode
+    if stat.S_ISREG(mode):
+        return "regular"
+    return "directory" if stat.S_ISDIR(mode) else "other"
+
+
+def os_reason(error: OSError) -> str:
+    """``No such file or directory`` → ``no such file or directory``, for ``Cannot … {path}: {reason}.``"""
+    text = error.strerror or str(error) or type(error).__name__
+    return text[:1].lower() + text[1:]
+
+
+def errno_name(error: OSError) -> str:
+    return errno.errorcode.get(error.errno or 0, "EIO")
 
 
 class _PathLock:

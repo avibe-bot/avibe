@@ -22,14 +22,12 @@ from core.agent_core.messages import IMAGE_MIME_TYPES, ImageBlock, TextBlock
 from core.agent_core.tools.args import (
     ToolInputError,
     error_result,
-    format_number,
     optional_line_arg,
-    os_error_text,
     str_arg,
     text_result,
 )
 from core.agent_core.tools.base import MAX_BYTES, MAX_LINES, ToolContext, ToolResult, ToolSpec
-from core.agent_core.tools.paths import resolve_read_path
+from core.agent_core.tools.paths import KIND_REASON, os_reason, resolve_read_path, target_kind
 from core.agent_core.tools.text import decode_file, shown
 from core.agent_core.tools.truncate import format_size, truncate_head
 
@@ -41,6 +39,7 @@ ImageSink = Callable[[bytes, str, str], Union[str, Awaitable[str]]]
 MAX_INLINE_IMAGE_BYTES = int(4.5 * 1024 * 1024) * 3 // 4
 _IMAGE_SNIFF_BYTES = 4100
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_BOM = b"\xef\xbb\xbf"
 _READ_CHUNK_BYTES = 1024 * 1024
 
 READ_DESCRIPTION = (
@@ -81,6 +80,9 @@ class ReadTool:
 
         try:
             absolute = resolve_read_path(path, ctx.cwd)
+            refusal = await asyncio.to_thread(_refusal, absolute)
+            if refusal:
+                return error_result(f"Cannot read {path}: {refusal}.")
             mime_type = await asyncio.to_thread(_sniff_image, absolute)
             if mime_type is not None:
                 return await self._read_image(absolute, mime_type)
@@ -89,7 +91,7 @@ class ReadTool:
         except _Aborted:
             return error_result("Operation aborted")
         except OSError as exc:
-            return error_result(os_error_text(exc))
+            return error_result(f"Cannot read {path}: {os_reason(exc)}.")
         except ToolInputError as exc:
             return error_result(str(exc))
 
@@ -125,6 +127,19 @@ class ReadTool:
 
 class _Aborted(Exception):
     pass
+
+
+def _refusal(absolute: str) -> Optional[str]:
+    """Why ``read`` will not open ``absolute``, checked without opening it (a FIFO would block)."""
+    try:
+        kind = target_kind(absolute)
+    except OSError as exc:
+        return os_reason(exc)
+    if kind != "regular":
+        return KIND_REASON[kind]
+    if not os.access(absolute, os.R_OK):
+        return "permission denied"
+    return None
 
 
 def _sniff_image(path: str) -> Optional[str]:
@@ -165,7 +180,7 @@ def _read_text(
     if truncation.first_line_exceeds_limit:
         text = (
             f"[Line {start_display} is {format_size(first_line_bytes)}, exceeds {format_size(MAX_BYTES)} limit. "
-            f"Use bash: sed -n '{start_display}p' {shlex.quote(path)} | head -c {MAX_BYTES}]"
+            f"Use bash: sed -n '{start_display}p' {shlex.quote(absolute)} | head -c {MAX_BYTES}]"
         )
         details["truncation"] = truncation.to_details()
     elif truncation.truncated:
@@ -192,8 +207,11 @@ def _read_text(
 def _scan_lines(
     path: str, start: int, stop: Optional[int], cancelled: Callable[[], bool] = lambda: False
 ) -> tuple[list[str], int, int]:
-    """Lines ``[start, stop)`` as Pi's ``text.split("\\n")`` gives them, the file's line count, and the
-    raw size of line ``start``.
+    """Lines ``[start, stop)`` as Pi's ``text.split("\\n")`` gives them, without the ``\\r`` of a CRLF break,
+    the file's line count, and the raw size of line ``start``.
+
+    Avibe drops the ``\\r`` (as tau does; Pi shows it) so read's text is edit's matching view: a copied line
+    can no longer end in a bare ``\\r`` that edit would read as a line break.
 
     Collection stops once the kept lines pass either cap, so the kept prefix exceeds a cap exactly when
     the whole selection does: decoding with replacement never makes text shorter than its bytes, and
@@ -206,17 +224,21 @@ def _scan_lines(
     first_line_bytes = 0
     collecting = stop is None or start < stop
 
-    def collect(segment: bytes) -> None:
+    def collect(segment: bytes, ends_line: bool) -> None:
         nonlocal kept, opened, collecting
         if opened != index:
             if lines:
                 kept += 1
             lines.append(bytearray())
             opened = index
-        room = MAX_BYTES + 1 - kept
+        # One more byte at a line end, for a "\r" that is dropped below.
+        room = MAX_BYTES + 1 - kept + (1 if ends_line else 0)
         if room > 0:
             lines[-1] += segment[:room]
             kept += min(len(segment), room)
+            if ends_line and len(segment) <= room and lines[-1].endswith(b"\r"):
+                del lines[-1][-1]
+                kept -= 1
         # One line beyond the cap: a final empty piece does not count as a line.
         if kept > MAX_BYTES or len(lines) > MAX_LINES + 1:
             collecting = False
@@ -229,6 +251,9 @@ def _scan_lines(
         index += chunk.count(b"\n", pos)
 
     with open(path, "rb") as handle:
+        # A UTF-8 BOM is not shown, as edit does not match it, so text read shows can be edited.
+        if handle.read(len(_BOM)) != _BOM:
+            handle.seek(0)
         while chunk := handle.read(_READ_CHUNK_BYTES):
             if cancelled():
                 raise _Aborted
@@ -242,7 +267,7 @@ def _scan_lines(
                 if index == start:
                     first_line_bytes += end - pos
                 if index >= start:
-                    collect(chunk[pos:end])
+                    collect(chunk[pos:end], newline != -1)
                 if newline == -1:
                     pos = len(chunk)
                     break

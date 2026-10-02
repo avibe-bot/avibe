@@ -9,16 +9,15 @@ replaceAll is true" clause are Avibe's.
 from __future__ import annotations
 
 import asyncio
-import errno
 import json
 import os
 import re
 from typing import Any, Mapping
 
-from core.agent_core.tools.args import ToolInputError, error_result, os_error_text, str_arg, text_result
+from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.edit_diff import Edit, EditError, apply_edits, generate_diff_string, generate_unified_patch
-from core.agent_core.tools.paths import file_mutation_lock, resolve_to_cwd
+from core.agent_core.tools.paths import errno_name, file_mutation_lock, resolve_to_cwd, target_kind
 from core.agent_core.tools.text import decode_file, encode_file
 from core.agent_core.tools.truncate import format_size
 from core.agent_core.tools.write import write_bytes
@@ -150,9 +149,17 @@ class EditTool:
         async with file_mutation_lock(absolute):
             if ctx.cancel.cancelled:
                 return error_result("Operation aborted")
+            # Pi's access check, extended to every kind of file and checked without opening it (a FIFO would block).
+            try:
+                kind = target_kind(absolute)
+            except OSError as exc:
+                return error_result(f"Could not edit file: {path}. Error code: {errno_name(exc)}.")
+            if kind == "directory":
+                return error_result(f"Could not edit file: {path}. Error code: EISDIR.")
+            if kind == "other":
+                return error_result(f"Could not edit file: {path}. It is not a regular file.")
             if not os.access(absolute, os.R_OK | os.W_OK):
-                code = errno.errorcode.get(errno.ENOENT if not os.path.exists(absolute) else errno.EACCES, "EACCES")
-                return error_result(f"Could not edit file: {path}. Error code: {code}.")
+                return error_result(f"Could not edit file: {path}. Error code: EACCES.")
             try:
                 size = os.path.getsize(absolute)
                 if size > MAX_EDIT_BYTES:
@@ -174,7 +181,7 @@ class EditTool:
             except EditError as exc:
                 return error_result(str(exc))
             except OSError as exc:
-                return error_result(os_error_text(exc))
+                return error_result(f"Could not edit file: {path}. Error code: {errno_name(exc)}.")
 
         result = f"Successfully replaced {len(edits)} block(s) in {path}."
         if max(size, len(data)) > MAX_DIFF_BYTES:

@@ -7,6 +7,7 @@ import os
 import time
 
 import psutil
+import pytest
 
 from core.agent_core.cancel import CancelToken
 from core.agent_core.tools.bash import BashTool, settle_bash_call
@@ -105,6 +106,39 @@ async def test_only_the_recorded_reason_makes_a_gone_job_a_timeout(tmp_path, mak
     assert host.stop_reason(job_id) == "wrapper_error"
     assert result.is_error
     assert result_text(result).endswith("Command terminated without an exit code")
+
+
+@pytest.mark.parametrize("failure", ["cwd_missing", "cwd_not_accessible", "jobs_dir_not_writable", "shell_missing"])
+async def test_a_command_that_cannot_start_has_a_defined_result(tmp_path, make_ctx, failure):
+    if failure != "cwd_missing" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores file modes")
+    cwd, jobs_dir, shell = tmp_path, tmp_path / "jobs", None
+    if failure == "cwd_missing":
+        cwd = tmp_path / "gone"
+    elif failure == "cwd_not_accessible":
+        cwd = tmp_path / "locked"
+        cwd.mkdir(mode=0o000)
+    elif failure == "jobs_dir_not_writable":
+        jobs_dir.mkdir(mode=0o555)
+    else:
+        shell = str(tmp_path / "no-such-shell")
+    locked = {"cwd_not_accessible": cwd, "jobs_dir_not_writable": jobs_dir}.get(failure)
+    try:
+        host = LocalJobHost(str(jobs_dir), shell=shell)
+        result = await BashTool(host).execute({"command": f"touch {tmp_path / 'ran'}"}, make_ctx(cwd=str(cwd)))
+    finally:
+        if locked is not None:
+            os.chmod(locked, 0o755)
+
+    expected = {
+        "cwd_missing": f"Working directory does not exist: {cwd}\nCannot execute bash commands.",
+        "cwd_not_accessible": f"Working directory is not accessible: {cwd}\nCannot execute bash commands.",
+        "jobs_dir_not_writable": "Could not start the command: permission denied.",
+        # The wrapper cannot spawn the shell: it records wrapper_error and the job ends without an exit code.
+        "shell_missing": "(no output)\n\nCommand terminated without an exit code",
+    }[failure]
+    assert (result.is_error, result_text(result)) == (True, expected)
+    assert not (tmp_path / "ran").exists()
 
 
 async def test_stdin_is_closed(tmp_path, make_ctx):

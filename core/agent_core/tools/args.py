@@ -67,7 +67,3 @@ def optional_bool_arg(arguments: Mapping[str, Any], name: str) -> bool:
 def format_number(value: float) -> str:
     """``5`` for 5.0 and ``0.5`` for 0.5, as JavaScript prints numbers in Pi's messages."""
     return str(int(value)) if float(value).is_integer() else repr(float(value))
-
-
-def os_error_text(error: OSError) -> str:
-    return str(error) or type(error).__name__

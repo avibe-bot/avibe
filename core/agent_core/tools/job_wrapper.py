@@ -20,6 +20,10 @@ skips site-packages.
 6. If the deadline passes before the shell exits, or the wrapper itself fails,
    write ``stopped`` (``timeout`` or ``wrapper_error``) and end the whole
    process group: SIGTERM, then SIGKILL after 3 s.
+
+Every wait is bounded or watches the deadline: the decision wait (30 s), the
+check just before the shell is spawned, the read loop, the wait after the
+command closes its output, and the 3 s grace before SIGKILL.
 """
 
 from __future__ import annotations
@@ -138,10 +142,13 @@ def _run(job_dir: str, proc: subprocess.Popen, log: _BoundedLog, deadline: Optio
         code = proc.returncode
         _write_atomic(os.path.join(job_dir, "exit"), b"%d\n" % (code if code >= 0 else 128 - code))
 
-    while not eof:
+    def enforce_deadline() -> None:
+        # J3: the deadline holds even when no host is there to enforce it.
         if not exit_written and deadline is not None and time.time() >= deadline:
-            # J3: the deadline holds even when no host is there to enforce it.
             _stop_group(job_dir, "timeout", proc)
+
+    while not eof:
+        enforce_deadline()
         ready, _, _ = select.select([fd], [], [], 0.05)
         if ready:
             chunk = os.read(fd, 65536)
@@ -163,8 +170,11 @@ def _run(job_dir: str, proc: subprocess.Popen, log: _BoundedLog, deadline: Optio
             exit_written = True
         log.snapshot()
     log.snapshot(force=True)
+    # The command closed its output but may still run (``exec >/dev/null``): keep the deadline while waiting.
+    while not exit_written and proc.poll() is None:
+        enforce_deadline()
+        time.sleep(0.05)
     if not exit_written:
-        proc.wait()
         write_exit()
 
 
@@ -189,8 +199,10 @@ def main(argv: list[str]) -> int:
         _run(job_dir, proc, log, deadline)
     except BaseException:
         # A wrapper that cannot follow its command (a full disk, a bug) must not leave it running unmanaged.
-        traceback.print_exc()
-        sys.stderr.flush()
+        # The diagnostics may fail for the same reason (ENOSPC), so they can never stand in the way.
+        with contextlib.suppress(BaseException):
+            traceback.print_exc()
+            sys.stderr.flush()
         _stop_group(job_dir, "wrapper_error", proc)
     return 0
 

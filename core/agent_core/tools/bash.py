@@ -28,6 +28,7 @@ from core.agent_core.tools.args import (
 )
 from core.agent_core.tools.base import MAX_BYTES, MAX_LINES, JobHost, JobStatus, ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.jobs import STOP_ABORTED, STOP_TIMEOUT, JobStartError, LocalJobHost
+from core.agent_core.tools.paths import os_reason
 from core.agent_core.tools.output import JobOutput
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,8 @@ class BashTool:
             return error_result(str(exc))
         if not os.path.isdir(ctx.cwd):
             return error_result(f"Working directory does not exist: {ctx.cwd}\nCannot execute bash commands.")
+        if not os.access(ctx.cwd, os.X_OK):
+            return error_result(f"Working directory is not accessible: {ctx.cwd}\nCannot execute bash commands.")
         if ctx.cancel.cancelled:
             return error_result("Command aborted")
 
@@ -193,7 +196,7 @@ class BashTool:
             return error_result(str(exc))
         except OSError as exc:
             logger.warning("Could not start a bash job", exc_info=True)
-            return error_result(f"Could not start the command: {exc}")
+            return error_result(f"Could not start the command: {os_reason(exc)}.")
 
         output = JobOutput(self._jobs, job_id)
         # watch=true still lets a command that ends at once report its own result instead of becoming a Watch.

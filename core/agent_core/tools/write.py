@@ -13,9 +13,9 @@ import secrets
 import stat
 from typing import Any, Mapping, Optional
 
-from core.agent_core.tools.args import ToolInputError, error_result, os_error_text, str_arg, text_result
+from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
-from core.agent_core.tools.paths import file_mutation_lock, resolve_to_cwd
+from core.agent_core.tools.paths import KIND_REASON, file_mutation_lock, os_reason, resolve_to_cwd, target_kind
 
 WRITE_DESCRIPTION = (
     "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates "
@@ -53,13 +53,36 @@ class WriteTool:
             if ctx.cancel.cancelled:
                 return error_result("Operation aborted")
             try:
-                await asyncio.to_thread(os.makedirs, os.path.dirname(absolute), exist_ok=True)
+                refusal = await asyncio.to_thread(_prepare_target, absolute)
+                if refusal:
+                    return error_result(f"Cannot write {path}: {refusal}.")
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
                 await asyncio.to_thread(write_text, absolute, content)
             except OSError as exc:
-                return error_result(os_error_text(exc))
+                return error_result(f"Cannot write {path}: {os_reason(exc)}.")
         return text_result(f"Successfully wrote to {path}")
+
+
+def _prepare_target(absolute: str) -> Optional[str]:
+    """Why ``write`` will not replace what ``absolute`` names, or ``None`` once it may.
+
+    The target is what the path names after symlinks: only a writable regular file is replaced; a
+    missing target gets its parent directories (also behind a dangling symlink); anything else
+    (a directory, FIFO, socket, device, or a file this user cannot write) is left as it is.
+    """
+    target = os.path.realpath(absolute)
+    try:
+        kind = target_kind(target)
+    except FileNotFoundError:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        return None
+    if kind != "regular":
+        return KIND_REASON[kind]
+    # A rename checks the directory, not the file, so a read-only file must be refused here.
+    if not os.access(target, os.W_OK):
+        return "permission denied"
+    return None
 
 
 def write_text(path: str, content: str) -> None:

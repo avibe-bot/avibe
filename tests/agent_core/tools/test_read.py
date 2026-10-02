@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import random
+import shlex
 import struct
 import zlib
 
@@ -68,12 +70,23 @@ async def test_offset_and_limit_are_integers_of_at_least_one(tmp_path, make_ctx,
     assert result_text(result) == f"{message} must be an integer of at least 1"
 
 
-async def test_an_over_long_first_line_points_at_bash(tmp_path, make_ctx):
-    (tmp_path / "big file.txt").write_text("short\n" + "x" * 61_440 + "\nafter\n")
+@pytest.mark.parametrize(
+    "spelling", ["big file.txt", "~/big file.txt", "file://{home}/big%20file.txt", "@big file.txt"]
+)
+async def test_an_over_long_first_line_points_at_bash_with_the_file_read_opened(tmp_path, make_ctx, spelling):
+    """The suggested command names the resolved file, so it runs whatever spelling the model used."""
+    home = os.path.expanduser("~")
+    os.makedirs(home, exist_ok=True)
+    target = os.path.join(home, "big file.txt")
+    with open(target, "w") as handle:
+        handle.write("short\n" + "x" * 61_440 + "\nafter\n")
 
-    text = result_text(await _read(make_ctx, path="big file.txt", offset=2))
+    result = await ReadTool().execute({"path": spelling.format(home=home), "offset": 2}, make_ctx(cwd=home))
+    text = result_text(result)
 
-    assert text == "[Line 2 is 60.0KB, exceeds 50.0KB limit. Use bash: sed -n '2p' 'big file.txt' | head -c 51200]"
+    assert text == (
+        f"[Line 2 is 60.0KB, exceeds 50.0KB limit. Use bash: sed -n '2p' {shlex.quote(target)} | head -c 51200]"
+    )
 
 
 class _CancelledAfter(CancelToken):
@@ -102,6 +115,8 @@ async def test_cancel_stops_a_long_scan(tmp_path, make_ctx, monkeypatch):
 def _whole_file_read(data: bytes, start: int, stop):
     """Pi's algorithm on the whole file, as the oracle for the streamed reader."""
     lines = data.decode("utf-8", "replace").split("\n")
+    # The "\r" of a CRLF break is not shown.
+    lines = [line[:-1] if line.endswith("\r") and i < len(lines) - 1 else line for i, line in enumerate(lines)]
     return truncate_head("\n".join(lines[start:stop]), max_lines=5, max_bytes=20), len(lines)
 
 

@@ -9,6 +9,7 @@ production.
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import subprocess
 import time
@@ -276,6 +277,50 @@ async def test_a_deadline_that_passed_during_the_launch_never_starts_the_command
 
     assert _wait_until(lambda: _wrapper_gone(host.job_dir(job_id)))
     assert host.stop_reason(job_id) == "timeout"
+
+
+async def test_the_deadline_holds_after_the_command_closes_its_output(tmp_path):
+    """A command that closes stdout and stderr and keeps running is still stopped at its deadline (J3)."""
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    job_id = await _start(
+        host, tmp_path, f"echo $$ > {tmp_path / 'sh.pid'}; exec >/dev/null 2>&1; sleep 20", timeout_s=0.5
+    )
+    del host  # nobody waits on the job from here on
+
+    stopped = _wait_until(lambda: _wrapper_gone(str(tmp_path / "jobs" / job_id)), timeout_s=6)
+    restarted = LocalJobHost(str(tmp_path / "jobs"))
+    if not stopped:
+        await restarted.kill(job_id)
+    assert stopped
+    assert restarted.stop_reason(job_id) == "timeout"
+
+
+def test_the_wrapper_stops_its_group_even_when_its_diagnostics_fail(tmp_path, monkeypatch):
+    """The wrapper's own failure handler must stop the command even if writing the traceback fails (ENOSPC)."""
+    import core.agent_core.tools.job_wrapper as wrapper
+
+    class Stopped(BaseException):
+        pass
+
+    def full_disk(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    stops = []
+
+    def stop_group(job_dir, reason, proc):
+        stops.append(reason)
+        raise Stopped  # the real one ends the process group and never returns
+
+    monkeypatch.setattr(wrapper, "_wait_for_decision", lambda job_dir, timeout_s: "go")
+    monkeypatch.setattr(wrapper, "_BoundedLog", full_disk)
+    monkeypatch.setattr(wrapper.traceback, "print_exc", full_disk)
+    monkeypatch.setattr(wrapper, "_stop_group", stop_group)
+    argv = ["job_wrapper.py", "avibe-job", str(tmp_path), "/bin/sh", "true", "30", "10", "10", "-"]
+
+    with pytest.raises(Stopped):
+        wrapper.main(argv)
+
+    assert stops == ["wrapper_error"]
 
 
 async def test_job_files_stay_until_the_call_is_settled(tmp_path):
