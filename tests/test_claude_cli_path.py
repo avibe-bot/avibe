@@ -2699,6 +2699,63 @@ def test_runtime_gen_006_a_client_connecting_when_claude_is_disabled_never_serve
     assert handler.claude_sessions == {}
 
 
+def test_runtime_gen_006_a_turn_cancelled_while_its_client_connects_stops_the_cli(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """RUNTIME-GEN-006 (Claude): a disable cancels a turn whose client is still
+    connecting, and so is not among the clients it captured. The connect's own
+    cleanup can drop the CLI without stopping it, so the turn stops the CLI
+    process it spawned before the cancellation reaches the caller."""
+    started = asyncio.Event()
+    spawned: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self._transport = None
+
+        async def connect(self) -> None:
+            # The CLI spawns, then the handshake waits.
+            self._transport = SimpleNamespace(_process=spawned["process"])
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except BaseException:
+                # Like the SDK before its query exists: the transport is
+                # dropped without closing the process.
+                self._transport = None
+                raise
+
+        async def disconnect(self) -> None:
+            self._transport = None
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    handler = SessionHandler(controller)
+
+    async def scenario():
+        # A test-owned child stands in for the Claude CLI.
+        process = await asyncio.create_subprocess_exec("sleep", "30")
+        spawned["process"] = process
+        try:
+            turn = asyncio.create_task(
+                handler.get_or_create_claude_session(MessageContext(user_id="U123", channel_id="C123"))
+            )
+            await asyncio.wait_for(started.wait(), 1)
+            turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await turn
+            return process.returncode
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
+    assert asyncio.run(scenario()) is not None
+    assert handler.claude_sessions == {}
+
+
 def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 

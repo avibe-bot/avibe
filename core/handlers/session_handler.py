@@ -95,6 +95,11 @@ CLAUDE_REMOTE_PERMISSION_MODE = "bypassPermissions"
 CLAUDE_REMOTE_SANDBOX = {"enabled": False}
 
 
+# How long a cancelled turn waits for its client's connect to unwind before
+# stopping the CLI process directly.
+CLAUDE_ABANDONED_CONNECT_TIMEOUT_SECONDS = 10.0
+
+
 class ClaudeSessionNotFoundError(RuntimeError):
     """Claude Code could not resume a persisted session in the current cwd."""
 
@@ -581,6 +586,43 @@ class SessionHandler(BaseHandler):
                 end_runtime("claude", composite_key)
             else:
                 end_runtime("claude", composite_key, reason=reason)
+
+    async def _connect_claude_client(self, client) -> None:
+        """Connect a client so that no exit leaves its CLI running unowned.
+
+        The client is not in ``claude_sessions`` yet, so no disable capture
+        can reach it. The connect runs shielded: a cancelled turn, such as one
+        a disable interrupts, reads the CLI's process off the client while the
+        connect is still in flight, cancels the connect once so the SDK's own
+        cleanup runs undisturbed, and then stops that process whatever the
+        cleanup achieved.
+        """
+        connect = asyncio.ensure_future(client.connect())
+        try:
+            await asyncio.shield(connect)
+        except asyncio.CancelledError:
+            process = get_claude_client_process(client)
+            connect.cancel()
+            await asyncio.shield(self._stop_abandoned_connect(client, connect, process))
+            raise
+
+    async def _stop_abandoned_connect(self, client, connect: asyncio.Future, process: Any) -> None:
+        try:
+            await asyncio.wait_for(connect, timeout=CLAUDE_ABANDONED_CONNECT_TIMEOUT_SECONDS)
+        except BaseException:
+            # Cancelled or failed: the SDK's connect already ran its cleanup.
+            pass
+        else:
+            # It connected as the turn was cancelled.
+            try:
+                await client.disconnect()
+            except Exception:
+                logger.warning("Failed to disconnect an abandoned Claude client", exc_info=True)
+        if not await stop_claude_process(process, logger=logger):
+            logger.warning(
+                "Claude CLI pid=%s of an abandoned connect survived its stop",
+                getattr(process, "pid", None),
+            )
 
     def _claude_disabled(self) -> bool:
         return getattr(getattr(self.config, "claude", None), "enabled", True) is False
@@ -1780,7 +1822,7 @@ class SessionHandler(BaseHandler):
 
         # Connect the client
         try:
-            await client.connect()
+            await self._connect_claude_client(client)
             governor_from_controller(self.controller).apply_to_pid(
                 get_claude_client_pid(client),
                 label="claude",
