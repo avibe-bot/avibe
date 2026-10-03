@@ -25,9 +25,11 @@ from core.agent_core.ai._common import (
     join_endpoint_url,
     json_object,
     prepare_messages,
+    request_credential_values,
     StreamAssembler,
     validate_wire_shape,
     WireField,
+    WireDispatchError,
     usage_counter_error,
 )
 from core.agent_core.ai.provider import (
@@ -290,6 +292,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             protocol=self.protocol,
             verified_origin=not self._gateway,
             endpoint_url=request.endpoint.base_url,
+            sensitive_values=request_credential_values(request.endpoint),
         )
         if cancel.cancelled:
             terminal = assembler.terminal(assembler.aborted(cancel.reason))
@@ -346,11 +349,20 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         if terminal is not None:
                             yield terminal
                         return
-                    event_type = dispatch_wire_event(
-                        chunk,
-                        known=_KNOWN_RESPONSE_EVENTS,
-                        aliases={"response.done": "response.completed"},
-                    )
+                    try:
+                        event_type = dispatch_wire_event(
+                            chunk,
+                            known=_KNOWN_RESPONSE_EVENTS,
+                            event_name=event.event,
+                            aliases={"response.done": "response.completed"},
+                        )
+                    except WireDispatchError as exc:
+                        terminal = assembler.terminal(
+                            assembler.error(str(exc), kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if event_type is None:
                         continue
                     shape_error = validate_wire_shape(
@@ -601,6 +613,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 call_id=call_id,
                                 native_id=item_id or None,
                                 name=name,
+                                defer_start=not call_id,
                             )
                             if start is not None:
                                 yield start
@@ -609,13 +622,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 yield emitted
                         elif item_type == "reasoning":
                             reasoning.add(output_index)
-                            state = assembler.merge_reasoning_item(output_index, item)
-                            assembler.ensure_thinking_slot(output_index)
-                            if state["encrypted_content"]:
-                                assembler.set_thinking_signature(
-                                    output_index,
-                                    _reasoning_signature_json(state),
-                                )
+                            assembler.merge_reasoning_item(output_index, item)
                         elif item_type == "message":
                             assembler.ensure_text_slot(output_index)
                     elif event_type == "response.reasoning_summary_text.done":
@@ -682,7 +689,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             key = assembler.fallback_tool_key(native_id=item_id, allocate=False)
                             if key is None:
                                 continue
-                        if not assembler.has_tool(key):
+                        if not assembler.tool_name(key):
                             continue
                         value = _string(chunk.get("delta"))
                         emitted = assembler.tool_arguments(key, value)
@@ -721,7 +728,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             key = assembler.fallback_tool_key(native_id=item_id, allocate=False)
                             if key is None:
                                 continue
-                        if not assembler.has_tool(key):
+                        if not assembler.tool_name(key):
                             continue
                         if "arguments" in chunk:
                             complete_arguments = chunk.get("arguments")
@@ -835,13 +842,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             assembler.bind_tool_alias(key, _string(item.get("call_id")) or None)
                             if item.get("type") == "reasoning":
                                 reasoning.add(output_index)
-                                state = assembler.merge_reasoning_item(output_index, item)
-                                assembler.ensure_thinking_slot(output_index)
-                                if state["encrypted_content"]:
-                                    assembler.set_thinking_signature(
-                                        output_index,
-                                        _reasoning_signature_json(state),
-                                    )
+                                assembler.merge_reasoning_item(output_index, item)
                                 summary_text = _reasoning_summary_text(item)
                                 if summary_text is not None:
                                     emitted = assembler.replace_thinking(output_index, summary_text)
@@ -887,6 +888,9 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 )
                                 if start is not None:
                                     yield start
+                                    pending = assembler.pending_tool_arguments(key)
+                                    if pending is not None:
+                                        yield pending
                                 if raw_arguments is not None:
                                     emitted = assembler.tool_arguments_snapshot(key, raw_arguments)
                                     if emitted is not None:
@@ -1096,6 +1100,9 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                     if terminal is not None:
                                         yield terminal
                                     return
+                            elif stop in {"length", "safety", "refusal", "error"}:
+                                for pending in assembler.interrupted_tool_events():
+                                    yield pending
                             final = assembler.finalize(stop)
                             terminal = assembler.terminal(
                                 final if isinstance(final, ProviderError) else Done(final)
@@ -1443,9 +1450,7 @@ def _apply_terminal_output_items(
                 state_index = index
             if state_index is None:
                 continue
-            state = assembler.merge_reasoning_item(state_index, item)
-            if state["encrypted_content"]:
-                assembler.set_thinking_signature(state_index, _reasoning_signature_json(state))
+            assembler.merge_reasoning_item(state_index, item, terminal_backfill=True)
         elif item_type == "message":
             content_error = _message_content_error(item)
             if content_error is not None:
@@ -1521,14 +1526,6 @@ def _append_message_text(
     if snapshot_parts:
         emitted = assembler.merge_text_snapshot(index, "".join(snapshot_parts))
     return refusal, emitted
-
-
-def _reasoning_signature_json(state: Mapping[str, Any]) -> str:
-    return json.dumps(
-        dict(state),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
 
 
 def _responses_usage(value: Any) -> Any:

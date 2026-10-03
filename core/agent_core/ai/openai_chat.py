@@ -21,6 +21,7 @@ from core.agent_core.ai._common import (
     join_endpoint_url,
     json_object,
     prepare_messages,
+    request_credential_values,
     StreamAssembler,
     validate_wire_shape,
     WireField,
@@ -175,6 +176,7 @@ class OpenAIChatAdapter(ProviderAdapter):
             protocol=self.protocol,
             verified_origin=not self._gateway,
             endpoint_url=request.endpoint.base_url,
+            sensitive_values=request_credential_values(request.endpoint),
         )
         if cancel.cancelled:
             terminal = assembler.terminal(assembler.aborted(cancel.reason))

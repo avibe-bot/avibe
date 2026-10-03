@@ -23,8 +23,10 @@ from core.agent_core.ai._common import (
     join_endpoint_url,
     json_object,
     prepare_messages,
+    request_credential_values,
     StreamAssembler,
     WireField,
+    WireDispatchError,
     usage_counter_error,
     validate_wire_shape,
 )
@@ -193,6 +195,7 @@ class AnthropicAdapter(ProviderAdapter):
             protocol=self.protocol,
             verified_origin=not self._gateway,
             endpoint_url=request.endpoint.base_url,
+            sensitive_values=request_credential_values(request.endpoint),
         )
         if cancel.cancelled:
             terminal = assembler.terminal(assembler.aborted(cancel.reason))
@@ -219,7 +222,6 @@ class AnthropicAdapter(ProviderAdapter):
             if terminal is not None:
                 yield terminal
             return
-        block_state: dict[int, dict[str, Any]] = {}
         stop_reason: str | None = None
         message_started = False
         message_stopped = False
@@ -238,27 +240,12 @@ class AnthropicAdapter(ProviderAdapter):
                         return
                     if event.data == "[DONE]" or not event.data:
                         continue
+                    if event.event == "ping":
+                        continue
                     if event.event == "error":
-                        error_chunk = json_object(event.data)
-                        if isinstance(error_chunk, Mapping):
-                            shape_error = validate_wire_shape(
-                                error_chunk,
-                                "error",
-                                _ANTHROPIC_WIRE_SHAPES,
-                            )
-                            shape_error = shape_error or _error_event_shape_error(error_chunk)
-                            if shape_error is not None:
-                                terminal = assembler.terminal(
-                                    assembler.error(shape_error, kind="invalid_request")
-                                )
-                            else:
-                                terminal = assembler.terminal(
-                                    assembler.error(
-                                        json.dumps(dict(error_chunk), ensure_ascii=False),
-                                    )
-                                )
-                        else:
-                            terminal = assembler.terminal(assembler.error(event.data))
+                        # Pi 7fbbd5f iterateAnthropicEvents handles named
+                        # errors before JSON parsing; these may be plain text.
+                        terminal = assembler.terminal(assembler.error(event.data))
                         if terminal is not None:
                             yield terminal
                         return
@@ -283,7 +270,19 @@ class AnthropicAdapter(ProviderAdapter):
                         if terminal is not None:
                             yield terminal
                         return
-                    event_type = dispatch_wire_event(chunk, known=_KNOWN_STREAM_EVENTS)
+                    try:
+                        event_type = dispatch_wire_event(
+                            chunk,
+                            known=_KNOWN_STREAM_EVENTS,
+                            event_name=event.event,
+                        )
+                    except WireDispatchError as exc:
+                        terminal = assembler.terminal(
+                            assembler.error(str(exc), kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if event_type is None:
                         continue
                     shape_error = validate_wire_shape(
@@ -379,7 +378,7 @@ class AnthropicAdapter(ProviderAdapter):
                                 return
                             continue
                         if kind == "text":
-                            block_state[index] = {"kind": "text"}
+                            assembler.set_block_kind(index, "text")
                             assembler.ensure_text_slot(index)
                             initial = block.get("text")
                             if initial is not None and not isinstance(initial, str):
@@ -410,7 +409,7 @@ class AnthropicAdapter(ProviderAdapter):
                                 return
                             signature = raw_signature
                             signature = signature if isinstance(signature, str) and signature else None
-                            block_state[index] = {"kind": "thinking"}
+                            assembler.set_block_kind(index, "thinking")
                             assembler.ensure_thinking_slot(index, signature=signature)
                             initial = block.get("thinking")
                             if initial is not None and not isinstance(initial, str):
@@ -440,7 +439,7 @@ class AnthropicAdapter(ProviderAdapter):
                                     yield terminal
                                 return
                             assembler.redacted_thinking(index, signature)
-                            block_state[index] = {"kind": "redacted"}
+                            assembler.set_block_kind(index, "redacted")
                         elif kind == "tool_use":
                             raw_id = block.get("id")
                             if raw_id is not None and not isinstance(raw_id, str):
@@ -473,7 +472,7 @@ class AnthropicAdapter(ProviderAdapter):
                                 if terminal is not None:
                                     yield terminal
                                 return
-                            block_state[index] = {"kind": "tool"}
+                            assembler.set_block_kind(index, "tool")
                             start = assembler.tool_start(index, name=name, native_id=native_id)
                             if start is not None:
                                 yield start
@@ -518,14 +517,14 @@ class AnthropicAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
-                        state = block_state.get(index)
-                        if state is None:
+                        block_kind = assembler.block_kind(index)
+                        if block_kind is None:
                             # Pi ignores content deltas for block kinds it
                             # does not know yet; preserve that forward-
                             # compatible policy instead of inventing text.
                             continue
                         if delta_type == "text_delta":
-                            if state.get("kind") != "text":
+                            if block_kind != "text":
                                 continue
                             raw_text = delta.get("text")
                             if "text" in delta and not isinstance(raw_text, str):
@@ -544,7 +543,7 @@ class AnthropicAdapter(ProviderAdapter):
                                 if emitted is not None:
                                     yield emitted
                         elif delta_type == "thinking_delta":
-                            if state.get("kind") != "thinking":
+                            if block_kind != "thinking":
                                 continue
                             raw_thinking = delta.get("thinking")
                             if "thinking" in delta and not isinstance(raw_thinking, str):
@@ -563,7 +562,7 @@ class AnthropicAdapter(ProviderAdapter):
                                 if emitted is not None:
                                     yield emitted
                         elif delta_type == "signature_delta":
-                            if state.get("kind") != "thinking":
+                            if block_kind != "thinking":
                                 continue
                             raw_signature = delta.get("signature")
                             if "signature" in delta and not isinstance(raw_signature, str):
@@ -580,7 +579,7 @@ class AnthropicAdapter(ProviderAdapter):
                             if value:
                                 assembler.append_thinking_signature(index, value)
                         elif delta_type == "input_json_delta":
-                            if state.get("kind") != "tool":
+                            if block_kind != "tool":
                                 continue
                             raw_partial_json = delta.get("partial_json")
                             if "partial_json" in delta and not isinstance(raw_partial_json, str):

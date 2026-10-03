@@ -11,11 +11,12 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, TypeVar
-from urllib.parse import parse_qsl, unquote_to_bytes, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, unquote_to_bytes, urlencode, urlsplit, urlunsplit
 
 import httpx
 
 from core.agent_core.ai.errors import (
+    _is_sensitive_key,
     classify_error,
     parse_retry_after,
     redact_provider_error,
@@ -49,10 +50,6 @@ ServedHopResolver = Callable[
     [Mapping[str, str]], Origin | None | Awaitable[Origin | None]
 ]
 _T = TypeVar("_T")
-_URL_RE = re.compile(
-    r"""https?://(?:\[[^\]\s]+\]|[^\s"'<>()[\],]+)[^\s"'<>)}\],]*""",
-    re.IGNORECASE,
-)
 WireTranslator = Callable[[AsyncIterator[SSEEvent]], AsyncIterator[Any]]
 
 
@@ -76,10 +73,18 @@ TIME_TO_FIRST_BYTE_TIMEOUT_S = 30.0
 IDLE_CHUNK_TIMEOUT_S = 30.0
 CLEANUP_TIMEOUT_S = 10.0
 MAX_CUMULATIVE_OUTPUT_CHARS = 32 * 1024 * 1024
+# Conservative structural allowances, not a one-byte item counter. These cover
+# block/tool objects and their indexing sets/maps in addition to payload bytes.
+BLOCK_SLOT_OVERHEAD_BYTES = 2048
+TOOL_ALIAS_OVERHEAD_BYTES = 512
 
 
 class OutputBudgetExceeded(ValueError):
     """A provider exceeded the shared cumulative assembled-output budget."""
+
+
+class WireDispatchError(ValueError):
+    """A known wire frame has an invalid or missing type discriminator."""
 
 
 def _string_buffer(value: str = "") -> io.StringIO:
@@ -133,21 +138,30 @@ class StreamAssembler:
         protocol: str,
         verified_origin: bool = True,
         endpoint_url: str | None = None,
+        sensitive_values: tuple[str, ...] = (),
     ) -> None:
         self.origin = origin
         self.protocol = protocol
         self.verified_origin = verified_origin
         self._endpoint_url = endpoint_url
+        self._sensitive_values = tuple(value for value in sensitive_values if value)
         self.content: list[AssistantContent] = []
         self.usage: Any = None
         self._terminal_seen = False
         self._emitted_output = False
         self._closed_indices: set[int] = set()
         self._slots: dict[tuple[str, Hashable], int] = {}
+        self._block_kinds: dict[Hashable, str] = {}
+        self._thinking_key_by_index: dict[int, Hashable] = {}
         self._visible_blocks: set[int] = set()
         self._tools: dict[Hashable, dict[str, Any]] = {}
         self._tool_order: list[Hashable] = []
+        self._tool_order_set: set[Hashable] = set()
+        self._tool_id_owners: dict[str, set[Hashable]] = {}
+        self._allocated_tool_ids: set[str] = set()
+        self._next_tool_id = 0
         self._tool_keys_by_native_id: dict[str, Hashable] = {}
+        self._charged_native_ids: set[str] = set()
         self._fallback_tool_sequence = 0
         self._latest_fallback_tool_key: Hashable | None = None
         self._driver_mode = False
@@ -158,6 +172,8 @@ class StreamAssembler:
         self._thinking_details: dict[Hashable, list[dict[str, Any]]] = {}
         self._thinking_detail_buffers: dict[tuple[Hashable, int, str], io.StringIO] = {}
         self._reasoning_items: dict[Hashable, dict[str, Any]] = {}
+        self._reasoning_key_by_id: dict[str, Hashable] = {}
+        self._closed_reasoning_keys: set[Hashable] = set()
         self._tool_argument_buffers: dict[Hashable, io.StringIO] = {}
 
     @property
@@ -223,10 +239,9 @@ class StreamAssembler:
         return block.text if isinstance(block, ThinkingBlock) else ""
 
     def _thinking_signature_value(self, index: int) -> str:
-        for key, candidate_index in self._slots.items():
-            if candidate_index == index and key[0] == "thinking":
-                self._materialize_thinking_details(key[1])
-                break
+        key = self._thinking_key_by_index.get(index)
+        if key is not None:
+            self._materialize_thinking_details(key)
         buffer = self._thinking_signature_buffers.get(index)
         if buffer is not None:
             return buffer.getvalue()
@@ -359,41 +374,6 @@ class StreamAssembler:
             return ThinkingDelta(index=index, delta=suffix) if suffix else None
         return None
 
-    def set_latest_thinking_signature(
-        self,
-        signature: str,
-        *,
-        fallback_key: Hashable | None = None,
-    ) -> None:
-        for index in range(len(self.content) - 1, -1, -1):
-            block = self.content[index]
-            if isinstance(block, ThinkingBlock):
-                key = next(
-                    (
-                        slot_key[1]
-                        for slot_key, slot_index in self._slots.items()
-                        if slot_index == index and slot_key[0] == "thinking"
-                    ),
-                    None,
-                )
-                if key is not None:
-                    self._materialize_thinking_details(key)
-                    block = self.content[index]
-                    if not isinstance(block, ThinkingBlock):
-                        continue
-                if block.signature is not None:
-                    return
-                self._account_replacement(self._thinking_signature_value(index), signature)
-                self.content[index] = ThinkingBlock(
-                    text=self._thinking_value(index),
-                    signature=signature,
-                    redacted=block.redacted,
-                )
-                self._thinking_signature_buffers[index] = _string_buffer(signature)
-                return
-        key = fallback_key if fallback_key is not None else ("thinking-signature", len(self.content))
-        self.ensure_thinking_slot(key, signature=signature)
-
     def ensure_thinking_slot(
         self,
         key: Hashable,
@@ -431,11 +411,6 @@ class StreamAssembler:
             previous_signature = self._thinking_signature_value(index)
             self._account_replacement(previous_signature, signature)
             self._thinking_signature_buffers[index] = _string_buffer(signature)
-            self.content[index] = ThinkingBlock(
-                text=self._thinking_value(index),
-                signature=signature,
-                redacted=block.redacted,
-            )
 
     def append_thinking_signature(self, key: Hashable, value: str) -> None:
         if not value:
@@ -447,16 +422,11 @@ class StreamAssembler:
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
             self._account_output(value)
-            buffer = self._thinking_signature_buffers.setdefault(
-                index,
-                _string_buffer(self._thinking_signature_value(index)),
-            )
+            buffer = self._thinking_signature_buffers.get(index)
+            if buffer is None:
+                buffer = _string_buffer(block.signature or "")
+                self._thinking_signature_buffers[index] = buffer
             buffer.write(value)
-            self.content[index] = ThinkingBlock(
-                text=self._thinking_value(index),
-                signature=block.signature,
-                redacted=block.redacted,
-            )
 
     def merge_thinking_details(self, key: Hashable, details: list[Any]) -> None:
         valid = [detail for detail in details if isinstance(detail, Mapping)]
@@ -508,33 +478,47 @@ class StreamAssembler:
             )
             accumulated.append(item)
 
-    def merge_reasoning_item(self, key: Hashable, item: Mapping[str, Any]) -> Mapping[str, Any]:
-        """Retain one Responses reasoning item inside the budgeted assembler."""
+    def merge_reasoning_item(
+        self, key: Hashable, item: Mapping[str, Any], *, terminal_backfill: bool = False,
+    ) -> None:
+        """Budget and serialize changed reasoning once, including terminal backfill."""
 
-        state = self._reasoning_items.setdefault(
-            key,
-            {"type": "reasoning", "id": "", "encrypted_content": ""},
-        )
-        before = json.dumps(state, ensure_ascii=False, separators=(",", ":")) if state else ""
+        if key in self._closed_reasoning_keys and not terminal_backfill:
+            return
+        state = self._reasoning_items.get(key, {"type": "reasoning", "id": "", "encrypted_content": ""})
+        changed = key not in self._reasoning_items
+        for name, value in item.items():
+            if name == "encrypted_content" and not value:
+                continue
+            if state.get(name) != value:
+                changed = True
+                break
+        if not changed:
+            return
         merged = dict(state)
         for name, value in item.items():
             if name == "encrypted_content" and not value:
                 continue
             merged[name] = value
         merged["type"] = "reasoning"
-        state.clear()
-        state.update(merged)
-        after = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
-        self._account_replacement(before, after)
-        return state
+        after = json.dumps(merged, ensure_ascii=False, separators=(",", ":"))
+        self._account_output(after)
+        previous_id = state.get("id")
+        state = merged
+        self._reasoning_items[key] = state
+        if isinstance(previous_id, str) and previous_id and self._reasoning_key_by_id.get(previous_id) == key:
+            del self._reasoning_key_by_id[previous_id]
+        item_id = state.get("id")
+        if isinstance(item_id, str) and item_id:
+            self._reasoning_key_by_id[item_id] = key
+        self.ensure_thinking_slot(key)
+        if state["encrypted_content"]:
+            self.set_thinking_signature(key, after)
 
     def reasoning_key_for_id(self, item_id: str | None) -> Hashable | None:
         if not item_id:
             return None
-        for key, item in self._reasoning_items.items():
-            if item.get("id") == item_id:
-                return key
-        return None
+        return self._reasoning_key_by_id.get(item_id)
 
     def has_tools(self) -> bool:
         return any(isinstance(block, ToolCallBlock) for block in self.content)
@@ -544,6 +528,14 @@ class StreamAssembler:
 
     def has_text_slot(self, key: Hashable) -> bool:
         return ("text", key) in self._slots
+
+    def set_block_kind(self, key: Hashable, kind: str) -> None:
+        if key not in self._block_kinds:
+            self._account_output(BLOCK_SLOT_OVERHEAD_BYTES)
+        self._block_kinds[key] = kind
+
+    def block_kind(self, key: Hashable) -> str | None:
+        return self._block_kinds.get(key)
 
     def tool_count(self) -> int:
         return len(self._tool_order)
@@ -556,48 +548,38 @@ class StreamAssembler:
         call_id: str | None = None,
         native_id: str | None = None,
         signature: str | None = None,
+        defer_start: bool = False,
     ) -> ToolCallStart | None:
-        state = self._tools.setdefault(
-            key,
-            {
-                "id": "",
-                "native_id": None,
-                "name": "",
-                "arguments": "",
-                "signature": None,
-            },
-        )
-        if key not in self._tool_order:
-            self._tool_order.append(key)
+        state = self.tool_state(key)
+        if "content_index" in state and state["content_index"] in self._closed_indices:
+            return None
         if call_id:
-            if "content_index" in state:
-                self._account_replacement(state["id"], call_id)
-            state["id"] = call_id
+            # Canonical identity is immutable after ToolCallStart. A late wire
+            # ID is an alias, never a new allocated canonical ID.
+            if "content_index" not in state:
+                self._account_pending_tool_identity(state, "id", call_id)
+                self._set_tool_id(key, state, call_id)
         if native_id:
-            if "content_index" in state:
-                self._account_replacement(state["native_id"] or "", native_id)
+            self._account_pending_tool_identity(state, "native_id", native_id)
             state["native_id"] = native_id
-            if native_id not in self._tool_keys_by_native_id:
-                self._tool_keys_by_native_id[native_id] = key
+            self.bind_tool_alias(key, native_id)
         if name and not state["name"]:
-            if "content_index" in state:
-                self._account_output(name)
+            self._account_pending_tool_identity(state, "name", name)
             state["name"] = name
             native_id = state["native_id"]
-            native_is_unique = native_id and not any(
-                other is not state and other.get("id") == native_id
-                for other in self._tools.values()
-            )
+            owners = self._tool_id_owners.get(native_id or "", set())
+            native_is_unique = bool(native_id) and (not owners or (len(owners) == 1 and key in owners))
             if "content_index" not in state and not state["id"] and native_is_unique:
-                state["id"] = state["native_id"]
+                self._set_tool_id(key, state, state["native_id"])
         if signature and signature != state.get("signature"):
             previous_signature = state.get("signature") or ""
             self._account_replacement(previous_signature, signature)
             state["signature"] = signature
-        if not state["name"]:
+        if not state["name"] or defer_start:
             return None
         if "content_index" not in state:
-            state["id"] = state["id"] or self._new_tool_id()
+            if not state["id"]:
+                self._set_tool_id(key, state, self._new_tool_id())
             native = state["native_id"]
             state["content_index"] = len(self.content)
             self.content.append(
@@ -611,12 +593,10 @@ class StreamAssembler:
             )
             self._visible_blocks.add(state["content_index"])
             self._emitted_output = True
-            self._account_output(state["id"])
-            self._account_output(state["name"])
-            if state["native_id"]:
-                self._account_output(state["native_id"])
-            if state.get("item_id"):
-                self._account_output(state["item_id"])
+            self._account_output(BLOCK_SLOT_OVERHEAD_BYTES)
+            self._account_tool_identity_block(state)
+            if native:
+                self.bind_tool_alias(key, native)
             return ToolCallStart(
                 index=state["content_index"],
                 id=state["id"],
@@ -636,6 +616,26 @@ class StreamAssembler:
             )
         return None
 
+    def _account_pending_tool_identity(
+        self,
+        state: dict[str, Any],
+        field: str,
+        value: str,
+    ) -> None:
+        charged = state.setdefault("_charged_identity", set())
+        previous = str(state.get(field) or "")
+        if field not in charged:
+            self._account_output(value)
+            charged.add(field)
+        elif previous != value:
+            self._account_replacement(previous, value)
+
+    def _account_tool_identity_block(self, state: dict[str, Any]) -> None:
+        for field in ("id", "name", "native_id", "item_id"):
+            value = state.get(field)
+            if value:
+                self._account_pending_tool_identity(state, field, str(value))
+
     def tool_key(self, default: Hashable, *, native_id: str | None = None) -> Hashable:
         if native_id:
             return self._tool_keys_by_native_id.get(native_id, default)
@@ -643,11 +643,10 @@ class StreamAssembler:
 
     def bind_tool_alias(self, key: Hashable, native_id: str | None) -> None:
         if native_id:
-            previous = self._tool_keys_by_native_id.get(native_id)
-            if previous != key:
-                state = self._tools.get(key)
-                if state is not None and "content_index" in state:
-                    self._account_output(native_id)
+            if native_id not in self._charged_native_ids:
+                self._account_output(native_id)
+                self._account_output(TOOL_ALIAS_OVERHEAD_BYTES)
+                self._charged_native_ids.add(native_id)
             self._tool_keys_by_native_id[native_id] = key
 
     def fallback_tool_key(
@@ -668,9 +667,11 @@ class StreamAssembler:
             state = self._tools.get(key)
             if (
                 state is not None
-                and "content_index" in state
-                and state["content_index"] not in self._closed_indices
                 and not state.get("finished")
+                and (
+                    "content_index" not in state
+                    or state["content_index"] not in self._closed_indices
+                )
             ):
                 return key
             return None
@@ -685,17 +686,17 @@ class StreamAssembler:
         if state is not None and "content_index" in state and state["content_index"] in self._closed_indices:
             return None
         if value:
-            state = self._tools.setdefault(key, self._new_tool_state())
-            previous = self._tool_arguments_value(key)
+            state = self.tool_state(key)
             if replace:
+                previous = self._tool_arguments_value(key)
                 self._account_replacement(previous, value)
                 self._tool_argument_buffers[key] = _string_buffer(value)
             else:
                 self._account_output(value)
-                buffer = self._tool_argument_buffers.setdefault(
-                    key,
-                    _string_buffer(previous),
-                )
+                buffer = self._tool_argument_buffers.get(key)
+                if buffer is None:
+                    buffer = _string_buffer()
+                    self._tool_argument_buffers[key] = buffer
                 buffer.write(value)
         state = self._tools.get(key)
         if not value or state is None or "content_index" not in state:
@@ -707,7 +708,10 @@ class StreamAssembler:
         """Replace a provider's final argument snapshot and emit only its suffix."""
 
         state = self._tools.get(key)
-        if state is None or "content_index" not in state:
+        if state is None:
+            return None
+        if "content_index" not in state:
+            self.tool_arguments(key, value, replace=True)
             return None
         if state["content_index"] in self._closed_indices:
             return None
@@ -743,18 +747,6 @@ class StreamAssembler:
             arguments_delta=arguments,
         )
 
-    def tool_arguments_object(self, key: Hashable, value: Mapping[str, Any]) -> ToolCallDelta | None:
-        state = self.tool_state(key)
-        existing = state.get("arguments_obj")
-        merged = dict(existing) if isinstance(existing, dict) else {}
-        merged.update(value)
-        state["arguments_obj"] = merged
-        return self.tool_arguments(
-            key,
-            json.dumps(merged, ensure_ascii=False, separators=(",", ":")),
-            replace=True,
-        )
-
     def set_tool_arguments_object(self, key: Hashable, value: Mapping[str, Any]) -> None:
         """Store an initial object without corrupting later JSON deltas."""
 
@@ -763,10 +755,15 @@ class StreamAssembler:
         self.tool_state(key)["arguments_obj"] = dict(value)
 
     def tool_state(self, key: Hashable) -> dict[str, Any]:
-        return self._tools.setdefault(
-            key,
-            self._new_tool_state(),
-        )
+        state = self._tools.get(key)
+        if state is None:
+            state = self._new_tool_state()
+            self._tools[key] = state
+            self._account_output(BLOCK_SLOT_OVERHEAD_BYTES)
+        if key not in self._tool_order_set:
+            self._tool_order_set.add(key)
+            self._tool_order.append(key)
+        return state
 
     @staticmethod
     def _new_tool_state() -> dict[str, Any]:
@@ -776,6 +773,7 @@ class StreamAssembler:
             "name": "",
             "arguments": "",
             "signature": None,
+            "_charged_identity": set(),
         }
 
     def set_tool_item_id(self, key: Hashable, item_id: str) -> None:
@@ -783,6 +781,12 @@ class StreamAssembler:
         state = self._tools.get(key)
         if previous != item_id and state is not None and "content_index" in state:
             self._account_replacement(str(previous or ""), item_id)
+        elif previous != item_id:
+            self._account_pending_tool_identity(
+                self.tool_state(key),
+                "item_id",
+                item_id,
+            )
         self.tool_state(key)["item_id"] = item_id
 
     def tool_item_id(self, key: Hashable) -> str:
@@ -810,12 +814,30 @@ class StreamAssembler:
                 unfinished.append(block)
         return tuple(unfinished)
 
+    def interrupted_tool_events(self) -> tuple[ToolCallStart | ToolCallDelta, ...]:
+        """Expose pending calls for a non-tool stop so the loop can settle them."""
+
+        events: list[ToolCallStart | ToolCallDelta] = []
+        for key, state in self._tools.items():
+            if "content_index" in state or not state.get("name"):
+                continue
+            start = self.tool_start(key)
+            if start is not None:
+                events.append(start)
+            arguments = self.pending_tool_arguments(key)
+            if arguments is not None:
+                events.append(arguments)
+        return tuple(events)
+
     def block_end_events(self) -> tuple[BlockEnd, ...]:
         events: list[BlockEnd] = []
         for index in sorted(self._visible_blocks):
             if index in self._closed_indices:
                 continue
             self._closed_indices.add(index)
+            key = self._thinking_key_by_index.get(index)
+            if key is not None:
+                self._closed_reasoning_keys.add(key)
             events.append(BlockEnd(index=index))
         return tuple(events)
 
@@ -827,8 +849,12 @@ class StreamAssembler:
                     return None
                 if index not in self._visible_blocks:
                     self._closed_indices.add(index)
+                    if kind == "thinking":
+                        self._closed_reasoning_keys.add(key)
                     return None
                 self._closed_indices.add(index)
+                if kind == "thinking":
+                    self._closed_reasoning_keys.add(key)
                 return BlockEnd(index=index)
         state = self._tools.get(key)
         if state is not None and "content_index" in state:
@@ -844,6 +870,8 @@ class StreamAssembler:
         for state in self._tools.values():
             if not state.get("name"):
                 return self.error("tool call name is missing", kind="invalid_request")
+            if "content_index" not in state:
+                return self.error("tool call ended before its identity was complete", kind="invalid_request")
         if stop_reason == "stop" and self.has_tools():
             stop_reason = "tool_use"
         final: list[AssistantContent] = []
@@ -921,7 +949,11 @@ class StreamAssembler:
         status: int | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> ProviderError:
-        partial = self.partial() if self.streamed or self.usage is not None else None
+        partial = (
+            self.partial()
+            if self.streamed or self.usage is not None
+            else None
+        )
         if kind == "invalid_request":
             error = ProviderError(
                 kind="invalid_request",
@@ -930,7 +962,7 @@ class StreamAssembler:
                 status=status,
                 partial=partial,
             )
-            return self._sanitize_error(error)
+            return error
         if kind is not None:
             error = ProviderError(
                 kind=kind,
@@ -940,7 +972,7 @@ class StreamAssembler:
                 status=status,
                 partial=partial,
             )
-            return self._sanitize_error(error)
+            return error
         error = classify_error(
             body=message,
             code=code,
@@ -949,9 +981,8 @@ class StreamAssembler:
             streamed=self.streamed,
             partial=partial,
             protocol=self.protocol,
-            redact=False,
         )
-        return self._sanitize_error(error)
+        return error
 
     def exception(
         self,
@@ -966,18 +997,15 @@ class StreamAssembler:
             headers=headers,
             streamed=self.streamed,
             partial=self.partial() if self.streamed or self.usage is not None else None,
-            redact=False,
         )
-        return self._sanitize_error(error)
+        return error
 
     def aborted(self, reason: str | None = None) -> ProviderError:
-        return redact_provider_error(
-            ProviderError(
-                kind="aborted",
-                message=reason or "provider request aborted",
-                retryable=False,
-                partial=self.partial(stop_reason="aborted"),
-            )
+        return ProviderError(
+            kind="aborted",
+            message=reason or "provider request aborted",
+            retryable=False,
+            partial=self.partial(stop_reason="aborted"),
         )
 
     def incomplete(self) -> ProviderError:
@@ -987,50 +1015,64 @@ class StreamAssembler:
         )
 
     def terminal(self, event: Done | ProviderError) -> Done | ProviderError | None:
-        if isinstance(event, ProviderError):
-            event = self._sanitize_error(event)
         if self._driver_mode:
             return event
         if self._terminal_seen:
             return None
+        if isinstance(event, ProviderError):
+            event = self._sanitize_error(event)
         self._terminal_seen = True
         return event
 
     def _sanitize_error(self, error: ProviderError) -> ProviderError:
-        partial = error.partial
-        if partial is not None and partial.error_message is not None:
-            partial = replace(
-                partial,
-                error_message=sanitize_endpoint_text(
-                    partial.error_message,
-                    self._endpoint_url,
-                ),
-            )
-        error = replace(
+        return redact_provider_error(
             error,
-            message=sanitize_endpoint_text(error.message, self._endpoint_url),
-            partial=partial,
+            literal_secrets=self._sensitive_values,
+            endpoint_url=self._endpoint_url,
         )
-        return redact_provider_error(error)
 
     def _ensure_slot(self, kind: str, key: Hashable, block: AssistantContent) -> int:
         slot = (kind, key)
         index = self._slots.get(slot)
         if index is not None:
             return index
+        self._account_output(BLOCK_SLOT_OVERHEAD_BYTES)
         index = len(self.content)
         self._slots[slot] = index
+        if kind == "thinking":
+            self._thinking_key_by_index[index] = key
         self.content.append(block)
         return index
 
     def _new_tool_id(self) -> str:
-        used = {state.get("id") for state in self._tools.values()}
-        index = max(0, len(self._tool_order) - 1)
-        candidate = f"call_{index}"
-        while candidate in used:
-            index += 1
-            candidate = f"call_{index}"
+        self._next_tool_id = max(self._next_tool_id, len(self._tool_order) - 1)
+        candidate = f"call_{self._next_tool_id}"
+        while candidate in self._allocated_tool_ids:
+            self._next_tool_id += 1
+            candidate = f"call_{self._next_tool_id}"
+        self._next_tool_id += 1
         return candidate
+
+    def _set_tool_id(
+        self,
+        key: Hashable,
+        state: dict[str, Any],
+        value: str | None,
+    ) -> None:
+        previous = state.get("id") or ""
+        if previous == (value or ""):
+            return
+        if previous:
+            owners = self._tool_id_owners.get(previous)
+            if owners is not None:
+                owners.discard(key)
+                if not owners:
+                    del self._tool_id_owners[previous]
+                    self._allocated_tool_ids.discard(previous)
+        state["id"] = value or ""
+        if value:
+            self._tool_id_owners.setdefault(value, set()).add(key)
+            self._allocated_tool_ids.add(value)
 
 
 def endpoint_origin(endpoint: ModelEndpoint) -> Origin:
@@ -1063,7 +1105,7 @@ def credential_free_endpoint_identity(base_url: str) -> str:
             host = f"{host}:{port}"
         path = parsed.path or "/"
         return f"{parsed.scheme}://{host}{path.rstrip('/') or '/'}"
-    return base_url.split("?", 1)[0].split("#", 1)[0].rstrip("/") or "unknown"
+    return _fallback_endpoint_identity(base_url)
 
 
 def join_endpoint_url(base_url: str, suffix: str) -> str:
@@ -1116,23 +1158,11 @@ def _fallback_endpoint_identity(base_url: str) -> str:
     return f"{scheme}://{authority}{('/' + path) if slash else '/'}"
 
 
-def sanitize_endpoint_text(text: str, endpoint_url: str | None = None) -> str:
-    """Remove endpoint credentials and query strings from diagnostics."""
-
-    def sanitize(match: re.Match[str]) -> str:
-        return credential_free_endpoint_identity(match.group(0))
-
-    sanitized = text
-    if endpoint_url:
-        sanitized = sanitized.replace(endpoint_url, credential_free_endpoint_identity(endpoint_url))
-    sanitized = _URL_RE.sub(sanitize, sanitized)
-    return sanitized
-
-
 def dispatch_wire_event(
     event: Any,
     *,
     known: frozenset[str],
+    event_name: str | None = None,
     default: str | None = None,
     aliases: Mapping[str, str] | None = None,
 ) -> str | None:
@@ -1145,7 +1175,17 @@ def dispatch_wire_event(
 
     if not isinstance(event, Mapping):
         return None
-    raw_type = event.get("type", default)
+    named_type = (aliases or {}).get(event_name, event_name)
+    if "type" in event:
+        raw_type = event["type"]
+        if not isinstance(raw_type, str):
+            if named_type not in known:
+                return None
+            raise WireDispatchError(f"{event_name}.type must be a string")
+    elif named_type in known:
+        raise WireDispatchError(f"{event_name}.type is required")
+    else:
+        raw_type = default
     if not isinstance(raw_type, str):
         return None
     normalized = (aliases or {}).get(raw_type, raw_type)
@@ -1288,6 +1328,26 @@ def auth_headers(endpoint: ModelEndpoint, *, provider: str, gateway: bool) -> di
     return headers
 
 
+def request_credential_values(endpoint: ModelEndpoint) -> tuple[str, ...]:
+    """Return endpoint credentials that may appear in transport diagnostics."""
+
+    values = [endpoint.token] if endpoint.token else []
+    for name, value in endpoint.request_headers.items():
+        if _is_sensitive_key(str(name)):
+            values.append(str(value))
+    try:
+        parsed = urlsplit(endpoint.base_url)
+    except ValueError:
+        parsed = None
+    if parsed is not None:
+        values.extend(unquote(value) for value in (parsed.username, parsed.password) if value)
+        values.extend(
+            value for name, value in parse_qsl(parsed.query)
+            if _is_sensitive_key(name)
+        )
+    return tuple(dict.fromkeys(values))
+
+
 async def iter_sse_events(
     response: httpx.Response,
     cancel: CancelToken,
@@ -1419,6 +1479,9 @@ async def drive_sse_stream(
             candidate = assembler.exception(exc)
 
         if candidate is not None:
+            # Translator terminals are candidates, not public errors. Commit
+            # and sanitize exactly once at the shared driver boundary.
+            assembler.end_driver()
             terminal = assembler.terminal(candidate)
             if terminal is not None:
                 yield terminal
@@ -1581,15 +1644,15 @@ async def prepare_messages(
         )
         loaded_images = await load_images(transformed.messages, media_loader, cancel)
     except _CancelledDependency:
-        return redact_provider_error(
-            ProviderError(
-                kind="aborted",
-                message=cancel.reason or "provider request aborted",
-                retryable=False,
-            )
+        return ProviderError(
+            kind="aborted",
+            message=cancel.reason or "provider request aborted",
+            retryable=False,
         )
     except Exception as exc:
-        return classify_error(body=f"request preparation failed: {type(exc).__name__}: {exc}")
+        return classify_error(
+            body=f"request preparation failed: {type(exc).__name__}: {exc}",
+        )
     return transformed.messages, loaded_images
 
 
@@ -1705,12 +1768,10 @@ def parsed_arguments(raw: str, *, tool_name: str = "") -> dict[str, Any] | Provi
 
 def _malformed_arguments(tool_name: str) -> ProviderError:
     suffix = f" for tool {tool_name}" if tool_name else ""
-    return redact_provider_error(
-        ProviderError(
-            kind="invalid_request",
-            message=f"malformed tool arguments{suffix}: expected a JSON object",
-            retryable=False,
-        )
+    return ProviderError(
+        kind="invalid_request",
+        message=f"malformed tool arguments{suffix}: expected a JSON object",
+        retryable=False,
     )
 
 

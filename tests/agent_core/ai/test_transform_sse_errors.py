@@ -6,8 +6,8 @@ import json
 import httpx
 import pytest
 
-from core.agent_core.ai._common import endpoint_origin, sanitize_endpoint_text
-from core.agent_core.ai.errors import classify_error
+from core.agent_core.ai._common import endpoint_origin
+from core.agent_core.ai.errors import classify_error, redact_provider_error, sanitize_endpoint_text
 from core.agent_core.ai.provider import ModelEndpoint
 from core.agent_core.ai.sse import SSEParseError, SSEParser
 from core.agent_core.ai.transform import SYNTHETIC_TOOL_RESULT, transform_messages
@@ -27,6 +27,10 @@ _PROTOCOL_ORIGINS = (
     Origin("openai", "openai_chat", "model"),
     Origin("openai", "openai_responses", "model"),
 )
+
+
+def _redacted_error(**kwargs: object):
+    return redact_provider_error(classify_error(**kwargs))
 
 
 def test_sse_parser_handles_split_crlf_comments_and_multiline_data() -> None:
@@ -278,10 +282,10 @@ def test_auth_statuses_are_not_retryable(status: int) -> None:
     ],
 )
 def test_error_message_redacts_password_named_and_query_values(body: str) -> None:
-    error = classify_error(body=body)
+    error = _redacted_error(body=body)
 
     assert "super-secret" not in error.message
-    assert "[redacted]" in error.message
+    assert "[redacted]" in error.message or error.message == "provider rejected https://model.test/v1"
 
 
 @pytest.mark.parametrize(
@@ -322,7 +326,7 @@ def test_network_errors_are_retryable_before_any_streamed_output() -> None:
 
 
 def test_error_json_without_message_redacts_sensitive_values() -> None:
-    error = classify_error(body='{"token":"secret-token","api_key":"sk-secret"}')
+    error = _redacted_error(body='{"token":"secret-token","api_key":"sk-secret"}')
 
     assert "secret-token" not in error.message
     assert "sk-secret" not in error.message
@@ -330,14 +334,14 @@ def test_error_json_without_message_redacts_sensitive_values() -> None:
 
 
 def test_error_message_redacts_quoted_json_nested_in_message() -> None:
-    error = classify_error(body='{"message":"{\\"token\\":\\"secret-token\\"}"}')
+    error = _redacted_error(body='{"message":"{\\"token\\":\\"secret-token\\"}"}')
 
     assert "secret-token" not in error.message
     assert "[redacted]" in error.message
 
 
 def test_error_message_redacts_basic_authorization_credentials() -> None:
-    error = classify_error(body="provider echoed Authorization: Basic dXNlcjpwYXNz")
+    error = _redacted_error(body="provider echoed Authorization: Basic dXNlcjpwYXNz")
 
     assert "dXNlcjpwYXNz" not in error.message
     assert "Basic [redacted]" in error.message
@@ -351,12 +355,38 @@ def test_error_message_redacts_basic_authorization_credentials() -> None:
         ("Authorization: Token token-secret", "token-secret"),
         ("Authorization: Custom custom-secret", "custom-secret"),
         ("Authorization: Custom realm=x, sig=sig-secret", "sig-secret"),
+        ("Authorization: abcdef0123456789secret", "abcdef0123456789secret"),
+        ("Authorization: abcdefghijk12345 (expired)", "abcdefghijk12345"),
+        ("OPENAI_API_KEY=abcdefghijk12345", "abcdefghijk12345"),
+        ("x-litellm-api-key: abcdefghijk12345", "abcdefghijk12345"),
+        ("Invalid X-Portkey-Api-Key: pk_abcdef123456", "pk_abcdef123456"),
+        ("X-Authorization-Token: plainsecret1", "plainsecret1"),
+        ("authorization_token=plainsecret1", "plainsecret1"),
+        ("cookie_secret=plainsecret1", "plainsecret1"),
+        ("access_key=plainsecret1", "plainsecret1"),
+        ("client_key=plainsecret1", "plainsecret1"),
+        ('"access_key": "plainsecret1"', "plainsecret1"),
+        ('"Authorization":"rawkey-secret"', "rawkey-secret"),
+        ("X-Authorization: plain-secret", "plain-secret"),
+        ("Helicone-Auth: Bearer helicone-secret", "helicone-secret"),
+        ("Access Key: AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"),
+        ("X-Auth-Token: Bearer abc123SECRET", "abc123SECRET"),
+        ("X-Api-Key: Bearer abc123SECRET", "abc123SECRET"),
+        ("client_secret: two words SECRET", "two words SECRET"),
+        ('Authorization: Digest username="u", response="digest-secret"', "digest-secret"),
         ('password=hunter2SECRET is wrong', "hunter2SECRET"),
+        ("provider failed: password=secret", "secret"),
+        ("api_key='QUOTEDSECRET'", "QUOTEDSECRET"),
+        ('password="hunter2SECRET"', "hunter2SECRET"),
+        ('token = "quoted-token"', "quoted-token"),
         ("X-API-Key: abc123SECRET\r\nContent-Type: application/json", "abc123SECRET"),
         ("Proxy-Authorization: Custom proxy-secret", "proxy-secret"),
         ("X-Goog-Api-Key: AIza-header-secret", "AIza-header-secret"),
         ("Ocp-Apim-Subscription-Key: subscription-secret", "subscription-secret"),
         ("Invalid API Key: gsk_live-secret", "gsk_live-secret"),
+        ('{"detail":{"secretKey":"SKSECRET1"}}', "SKSECRET1"),
+        ('{"detail":{"aws_secret_access_key":"AWSSECRET"}}', "AWSSECRET"),
+        ('{"detail":{"upstream_access_token_v2":"TOKSECRET"}}', "TOKSECRET"),
         ('{"message":"access_token=access-secret"}', "access-secret"),
         ('{"message":"refresh_token: refresh-secret"}', "refresh-secret"),
         ('{"message":"client_secret=client-secret"}', "client-secret"),
@@ -366,6 +396,7 @@ def test_error_message_redacts_basic_authorization_credentials() -> None:
         ("provider returned sk-live-token", "sk-live-token"),
         ("provider returned AIza-live-token", "AIza-live-token"),
         ("provider returned ghp_live-token", "ghp_live-token"),
+        ("upstream rejected Bearer abc123XYZsecretval", "abc123XYZsecretval"),
         (
             "provider returned "
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature",
@@ -374,7 +405,7 @@ def test_error_message_redacts_basic_authorization_credentials() -> None:
     ],
 )
 def test_error_redactor_covers_key_scheme_and_token_shapes(body: str, secret: str) -> None:
-    error = classify_error(body=body)
+    error = _redacted_error(body=body)
 
     assert secret not in error.message
     assert "[redacted]" in error.message
@@ -387,10 +418,72 @@ def test_error_redactor_covers_key_scheme_and_token_shapes(body: str, secret: st
         "thinking.budget_tokens: Input should be positive",
         "model token limit exceeded",
         "Basic validation failed",
+        "token_limit: 8192",
+        "token_count: 8192",
+        '{"token_limit":8192,"token_count":8192}',
     ],
 )
 def test_error_redactor_does_not_garble_non_credentials(body: str) -> None:
-    assert classify_error(body=body).message == body
+    assert _redacted_error(body=body).message == body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "https://gw.example/v1?filter[a]=1&sig=SIGSECRET",
+        "https://gw.example/v1?fields=a,b&sig=SIGSECRET",
+        "https://gw.example/v1?q=(a)&sig=SIGSECRET",
+        "https://user:pw@/x?token=SECRET",
+    ],
+)
+def test_error_redactor_strips_complete_credential_bearing_urls(body: str) -> None:
+    error = _redacted_error(body=body)
+
+    assert "SIGSECRET" not in error.message
+    assert "SECRET" not in error.message
+    assert "user:pw@" not in error.message
+
+
+def test_structured_json_redaction_preserves_sibling_fields() -> None:
+    error = _redacted_error(
+        body='{"error":{"type":"invalid_request_error","api_key":"zzz","param":"model"}}'
+    )
+
+    assert error.message == (
+        '{"error":{"type":"invalid_request_error","api_key":"[redacted]","param":"model"}}'
+    )
+
+
+def test_configured_literal_is_replaced_before_token_shape_redaction() -> None:
+    from core.agent_core.ai.errors import redact_provider_text
+
+    redacted = redact_provider_text(
+        r"Illegal header value b'opaque.private~value\n'",
+        literal_secrets=("opaque.private~value\n",),
+    )
+
+    assert redacted == "Illegal header value b'[redacted]'"
+
+
+@pytest.mark.parametrize(
+    ("diagnostic", "expected"),
+    [
+        ("request at https://x.example/chat. retry", "request at https://x.example/chat. retry"),
+        ("request (https://x.example/chat?sig=secret).", "request (https://x.example/chat)."),
+        (
+            json.dumps({"detail": '"https://x.example/y?sig=secret"'}),
+            json.dumps({"detail": '"https://x.example/y"'}, separators=(",", ":")),
+        ),
+    ],
+)
+def test_diagnostic_url_redaction_preserves_surrounding_syntax(
+    diagnostic: str, expected: str,
+) -> None:
+    from core.agent_core.ai._common import StreamAssembler
+
+    assembler = StreamAssembler(origin=Origin("p", "openai_chat", "m"), protocol="openai_chat")
+    error = assembler.terminal(assembler.error(diagnostic, kind="invalid_request"))
+    assert error.message == expected
 
 
 def test_endpoint_is_sanitized_before_diagnostic_redaction() -> None:
@@ -402,14 +495,77 @@ def test_endpoint_is_sanitized_before_diagnostic_redaction() -> None:
         protocol="openai_chat",
         endpoint_url=endpoint,
     )
-    error = assembler.error(
+    error = assembler.terminal(assembler.error(
         f"request failed at {endpoint}/chat/completions",
         kind="invalid_request",
-    )
+    ))
 
     assert "SIGSECRET" not in error.message
     assert "x=1" not in error.message
     assert "https://gw.example/v1/chat/completions" in error.message
+
+
+@pytest.mark.parametrize(
+    ("configured", "diagnostic"),
+    [
+        (
+            "plainSECRETvalue123",
+            "Illegal header value b'Bearer plainSECRETvalue123\\n'",
+        ),
+        (
+            "TOKENSECRET77\n",
+            "Illegal header value b'Bearer TOKENSECRET77\\n'",
+        ),
+    ],
+)
+def test_boundary_redacts_configured_request_credentials_in_transport_errors(
+    configured: str,
+    diagnostic: str,
+) -> None:
+    from core.agent_core.ai._common import StreamAssembler
+
+    assembler = StreamAssembler(
+        origin=Origin("openai", "openai_chat", "model"),
+        protocol="openai_chat",
+        sensitive_values=(configured,),
+    )
+    error = assembler.terminal(assembler.exception(ValueError(diagnostic)))
+
+    assert configured.strip() not in error.message
+    assert "Bearer [redacted]" in error.message
+
+
+def test_request_credential_values_uses_shared_sensitive_key_vocabulary() -> None:
+    from core.agent_core.ai._common import request_credential_values
+    from core.agent_core.ai.provider import ModelEndpoint
+
+    endpoint = ModelEndpoint(
+        protocol="openai_chat",
+        base_url="https://gateway.example/v1",
+        model_id="model",
+        token="endpoint-token-value",
+        request_headers={
+            "Ocp-Apim-Subscription-Key": "subscription-value",
+            "X-Credential": "credential-value",
+            "X-Private-Key": "private-value",
+        },
+    )
+
+    assert request_credential_values(endpoint) == (
+        "endpoint-token-value",
+        "subscription-value",
+        "credential-value",
+        "private-value",
+    )
+
+
+def test_short_configured_placeholders_do_not_redact_diagnostic_text() -> None:
+    from core.agent_core.ai.errors import redact_provider_text
+
+    assert redact_provider_text(
+        "model none-large uses token budget",
+        literal_secrets=("token", "key", "none"),
+    ) == "model none-large uses token budget"
 
 
 @pytest.mark.parametrize("source", _PROTOCOL_ORIGINS)

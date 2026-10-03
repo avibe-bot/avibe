@@ -22,7 +22,7 @@ rules on top of those mappings.
 | Network timeouts | The shared lifecycle driver bounds connect/open at 10 seconds, time-to-first-byte at 30 seconds, and idle time between chunks at 30 seconds. Each timeout is a classified `ProviderError(kind="network")`, retryable only when no model output was emitted; a provider that never sends response headers cannot hang a turn. A bounded 10-second cancellation join detaches a non-cooperative transport task instead of extending the timeout indefinitely. |
 | HTTP response status | Only 2xx responses enter an SSE translator. Redirects (3xx) are terminal `invalid_request` errors and are never followed implicitly; 4xx/5xx bodies use the shared status-aware classifier. |
 | SSE memory and scan bounds | `SSEParser` caps an unfinished line at 8 MiB of decoded characters and an unfinished event's combined `data:` fields at 32 MiB of decoded characters. It scans each buffer with a cursor and compacts once per feed, so many short fields remain linear rather than repeatedly copying the suffix. Exceeding either bound is one terminal `invalid_request` provider error, with any assembled partial preserved. |
-| Cumulative assembled-output bound | `StreamAssembler._account_output` is the only byte-accounting function. It covers text, thinking, signatures, opaque/reasoning details, tool arguments, and serialized initial tool inputs; append-only deltas and non-prefix snapshots both charge the newly retained bytes. It caps retained cumulative assembly at 32 MiB across the whole stream; an over-budget mutation raises one terminal `invalid_request` error from `drive_sse_stream`, preserving the assembled partial. |
+| Cumulative assembled-output bound | `StreamAssembler._account_output` is the only byte-accounting function. It covers text, thinking, signatures, opaque/reasoning details, tool arguments, serialized initial tool inputs, tool-call identities and aliases. Each content slot, tool state, or Anthropic block-kind entry adds a conservative 2048-byte structure allowance; each alias adds 512 bytes, plus its string payload. The cumulative accounting budget is 32 MiB across the stream, not an exact process-RSS promise (transport/parser buffers and transient materialization have separate costs). An over-budget mutation raises one terminal `invalid_request` error, preserving the assembled partial. |
 | Error-body read failure | If a known HTTP error body raises or times out while being read, the shared driver classifies from the already-known status and headers, preserving `Retry-After`; the failure remains one terminal provider error with any partial. |
 | Response cleanup | The shared driver closes every response after committing its one terminal event and bounds `response.aclose()` at 10 seconds. A stalled close is cleanup-only and cannot replace or duplicate the terminal outcome. |
 | Retry boundary | `ProviderError.retryable` is false once any model content delta or tool-call start/delta was emitted. A Responses `ToolCallStart` therefore makes a later provider failure non-retryable. |
@@ -46,10 +46,10 @@ construct partials, mark terminal state, or parse final tool arguments.
 | Usage and early usage retention | `set_usage` | Anthropic `message_start`/`message_delta`; Chat usage chunks; Responses terminal response |
 | Partial on every error and abort | `StreamAssembler.partial`, `error`, `exception`, `aborted`, `incomplete` | `drive_sse_stream` owns HTTP, transport-read, error-body, cancellation, and translator exceptions; protocol translators only request assembler errors |
 | Exactly one terminal event before response cleanup | `drive_sse_stream` → `StreamAssembler.terminal` | The driver commits the translator's candidate or its own transport/incomplete outcome before `response.aclose`; cleanup cannot replace a consumer/task cancellation |
-| Endpoint redaction | URL stripping in `StreamAssembler._sanitize_error` before `redact_provider_error` | Includes preparation errors, HTTP error bodies, stream errors, network errors, and close failures; URL queries are removed before redaction markers are inserted |
-| Provider diagnostic redaction | `redact_provider_error` at the single `ProviderError` boundary, backed by `redact_provider_text` | Every provider error message is redacted for credential keys/header names, whole Authorization values with the scheme preserved, cookie pairs, and known token shapes before it leaves the ai package; partial error text is covered too |
-| Unknown wire event policy | `dispatch_wire_event` plus protocol frame validation | Anthropic and Responses use explicit protocol event sets; Chat uses implicit frame kinds and validates its payload shapes directly. Unknown explicit types are ignored like Pi. Anthropic also accepts a valid data-only SSE frame whose JSON `type` is known; this is a rule (b) data-loss prevention deviation because SSE `event` is optional. |
-| Cumulative output budget | `StreamAssembler._account_output`; `drive_sse_stream` catches `OutputBudgetExceeded` | One byte-accounting function covers text, thinking, opaque/reasoning details, tool arguments, tool-call signatures, and serialized initial tool inputs; no adapter owns the limit or converts the overflow into a protocol-specific result |
+| Endpoint redaction | `errors.sanitize_endpoint_text`, called inside `redact_provider_text` | Includes preparation errors, HTTP error bodies, stream errors, network errors, and close failures. JSON is decoded before sanitizing its string values, so escaped quotes remain valid; URL userinfo, queries and fragments are removed before credential markers are inserted. Surrounding punctuation is preserved. |
+| Provider diagnostic redaction | `StreamAssembler.terminal` → `_sanitize_error` → `redact_provider_error` | Classification/preparation and translator candidates stay internal and unredacted; the driver sanitizes once when committing its terminal. `_is_sensitive_key` alone decides sensitivity for JSON keys, generic free-text key/value syntax and configured request headers/query keys. Prefix scanning is iterative, without rescanning the suffix after non-sensitive keys. Whole unquoted credential/header values are removed for both `:` and `=`; only recognizable Authorization scheme labels survive. Configured literals include endpoint userinfo and credential query values (original, stripped and escaped forms of at least eight characters), before token-shape redaction. Usage counters and partial error text are handled by the same boundary. |
+| Unknown wire event policy | `dispatch_wire_event` plus protocol frame validation | For data-bearing events, a known SSE name (including the `response.done` alias) requires a string payload `type`; missing/null/non-string discriminators are malformed. A valid payload type wins; unknown types are ignored. Anthropic's named `error` and `ping` are explicit Pi-parity control-frame exceptions: error data goes directly to classification and ping is ignored before parsing. Unknown Anthropic SSE names are also ignored before parsing. Valid data-only Anthropic JSON is accepted under rule (b) data-loss prevention because SSE `event` is optional. |
+| Cumulative output budget | `StreamAssembler._account_output`; `drive_sse_stream` catches `OutputBudgetExceeded` | One byte-accounting function covers text, thinking, opaque/reasoning details, tool arguments, tool-call signatures, serialized initial tool inputs, tool identities/aliases, and block/alias overhead; no adapter owns the limit or converts the overflow into a protocol-specific result |
 
 The shared dispatch helper only identifies a known event. Each adapter then
 validates the shape of that known event and emits exactly one terminal
@@ -64,6 +64,14 @@ field is present in every valid frame. An optional field may be omitted or
 `null` only where the table says so. A present field with the wrong JSON type is
 a terminal `ProviderError(kind="invalid_request")`; unknown event types and
 unknown fields follow Pi and are ignored.
+For explicitly named known data events (after alias normalization), `type` is
+required and must be a non-null string. Otherwise, the frame is terminal
+malformed input. Unknown named events with a non-string discriminator remain
+ignored. When both discriminators are strings, the payload `type` wins.
+Anthropic named `error` and `ping` bypass data dispatch, as Pi does in
+`packages/ai/src/api/anthropic-messages.ts:543-549` at `7fbbd5f`:
+error data is classified without requiring JSON or a discriminator; ping is
+ignored without parsing.
 
 ### Anthropic Messages
 
@@ -75,8 +83,9 @@ unknown fields follow Pi and are ignored.
 | `content_block_stop` | `index: non-negative integer` | none |
 | `message_delta` | none | `delta: object`, `delta.stop_reason: string`, `usage: object` |
 | `message_stop` | none | none |
-| `error` (named SSE or data-only) | `error: object` when an envelope is present | `error.type`/`error.message: string`; provider extension fields such as `code` are ignored |
-| `ping` | none | none |
+| named SSE `error` | none: plain text or JSON error envelope accepted | classified before data-event dispatch, matching Pi |
+| data-only `error` | `error: object` when an envelope is present | `error.type`/`error.message: string`; provider extension fields such as `code` are ignored |
+| named SSE `ping` | none; payload not parsed | ignored before dispatch, matching Pi |
 
 ### OpenAI Chat Completions
 
@@ -140,11 +149,50 @@ provider field is empty.
 | Path that can carry endpoint text | Redaction owner | Proof |
 | --- | --- | --- |
 | Origin construction for an unnamed endpoint | `endpoint_origin` → `credential_free_endpoint_identity` | `test_unnamed_custom_endpoint_origin_is_credential_free` |
-| HTTP/provider error body | `StreamAssembler.error` → `sanitize_endpoint_text` | `test_error_message_redacts_quoted_json_nested_in_message` plus adapter error cases |
-| Network, cancellation, parser, and close exceptions | `StreamAssembler.exception`/`terminal` → `sanitize_endpoint_text` | `test_adapter_error_redaction_preserves_json_classification`, `test_close_failure_cannot_emit_a_second_terminal_event`, `test_all_adapters_cancel_at_every_http_lifecycle_phase` |
-| Extracted diagnostic credentials | `errors.redact_provider_text` plus `_redact_json` | One boundary redacts credential-key vocabulary (including OAuth token names, cookies, and proxy authorization), any authorization scheme, and known token shapes (`sk-`, `AIza`, GitHub tokens, JWTs) before diagnostics reach `ProviderError.message`; `test_error_redactor_covers_key_scheme_and_token_shapes` |
+| HTTP/provider error body | `StreamAssembler.error` classifies; `terminal` → `_sanitize_error` redacts once | `test_long_error_diagnostics_are_redacted_once_without_recursive_rescanning`, `test_adapter_error_redaction_preserves_json_classification` |
+| Network, cancellation, parser, and close exceptions | internal error candidate → `terminal` → `_sanitize_error` | `test_configured_literal_credentials_cross_the_real_adapter_boundary`, `test_close_failure_cannot_emit_a_second_terminal_event`, `test_all_adapters_cancel_at_every_http_lifecycle_phase` |
+| Extracted diagnostic credentials | `errors.redact_provider_text` plus `_redact_json` | One key predicate handles OAuth tokens, compound gateway API-key headers, cookies and Authorization. `request_credential_values` uses that predicate to include configured secrets, including escaped transport echoes. Shape rules cover `sk-`, `AIza`, GitHub tokens and JWTs; no internal classification/preparation path pre-redacts. |
 | Media preparation and served-hop resolver failures | adapter preflight plus `drive_sse_stream` | `test_media_loader_failure_is_a_provider_error` and cancellation lifecycle matrix |
 | Adapter logs | none: adapters do not log endpoint URLs | source audit of all three adapter modules |
+
+Retained output has one accounting owner, `StreamAssembler._account_output`.
+Reasoning items are serialized only when changed; the serialized snapshot is
+reused for the replay signature. Closed reasoning ignores later streamed
+snapshots but permits the documented terminal backfill. Thinking-signature
+fragments append without materializing thinking text. Tool IDs use a monotonic
+fallback cursor and constant-time owner checks; canonical IDs stop changing
+after `ToolCallStart`, and replaced pending IDs are not retained as history.
+Boundary regressions: `test_responses_reasoning_state_has_one_serialization_owner`,
+`test_signature_fragments_do_not_materialize_thinking_text`,
+`test_tool_id_allocation_has_linear_lookup_cost`,
+`test_shared_tool_id_uniqueness_does_not_copy_owners`, and
+`test_closed_tool_identity_does_not_retain_unused_history`.
+The table-driven budget test asserts that one actual content/argument delta
+was delivered before the next exceeds the cap; identity overhead cannot make
+an argument-accounting test pass early.
+
+### Final local pre-push review dispositions
+
+Per the owner's bounded-loop instruction, this was the last local review.
+Confirmed P1/P2 defects were reproduced test-first and fixed in one head; Codex
+is the reviewer of record after push. No P3 is silently treated as fixed.
+
+| Finding | Decision rule / disposition | Evidence |
+| --- | --- | --- |
+| P1 recursive/repeated diagnostic redaction | Hang harm + C-2 classification: iterative prefix scan, one terminal redaction | `test_long_error_diagnostics_are_redacted_once_without_recursive_rescanning` covers HTTP and stream errors through all three adapters; 1200 colons no longer lose HTTP 503/retry metadata |
+| P2 `authorization=Scheme credential` leak | Security harm: remove whole unquoted credential assignments, not one token | `test_adapter_diagnostics_redact_assignments_and_endpoint_credentials` |
+| P2 relative endpoint URL/query credential leak | Security harm: bare `key` is sensitive; configured URL userinfo/query credentials join the literal set | same three-adapter table, relative URL and schemeless password rows |
+| P2 pending Responses call masks length/safety | C-2 stop handling: emit a stable fallback start and buffered arguments for interrupted pending calls so the loop settles them without execution | `test_responses_interrupted_pending_identity_preserves_provider_stop` |
+| P2 Anthropic control-frame dispatch regression | Pi parity: named error classification and unparsed ping restored | Pi `7fbbd5f`, `anthropic-messages.ts:543-549`; `test_anthropic_named_error_uses_pi_name_first_handling`, `test_anthropic_ignores_named_ping_without_parsing_payload` |
+| P2 one-byte structural overhead | Hang/memory harm: 2048-byte state/slot/kind and 512-byte alias allowances; Anthropic kind state moves into the assembler | `test_empty_wire_states_consume_a_realistic_structural_budget` across all three adapters |
+| P3 complexity tests couple to private representations | Recorded/deferred test-strengthening limitation, not a runtime fix: these guards check the current cursor/set implementation but do not prove asymptotic cost for arbitrary alternative implementations. The current code retains its monotonic cursor and O(1) owner check; no current runtime defect was found here. Do not claim the prior mutation tests establish a general complexity bound. | Final local reviewer restored alternative linear scans and both guards passed; subsequent exact-head Codex review remains required |
+
+Sandboxed measurements for the P1/P2 fixes: 4,052,250 / 8,104,500-byte
+non-sensitive colon-rich diagnostics took 0.199 / 0.393 seconds to redact,
+with less than 50 KiB additional traced peak memory. At 1000 entries, empty
+tool states retained about 0.59 MB against 2.05 MB charged; empty text slots
+0.23 MB against 2.05 MB; started tools 1.20 MB against 4.64 MB. These are
+measurements of this runtime, not portable RSS guarantees.
 
 The driver call sites are exactly `AnthropicAdapter._stream`,
 `OpenAIChatAdapter._stream`, and `OpenAIResponsesAdapter._stream`. The delayed
@@ -386,10 +434,11 @@ Responses stream events:
 | `response.reasoning_summary_part.added` | state | Recognized no-op lifecycle marker; future unknown event types remain ignored. |
 | `response.reasoning_summary_part.done` | delta | Adds the Pi-compatible `"\n\n"` separator to the current reasoning block. |
 | `response.output_item.added` (`reasoning`) | state | Captures reasoning item id and encrypted content; does not mark output streamed by itself. |
-| `response.output_item.added` (`function_call`) | delta/state | `ToolCallStart`; missing `output_index` uses a distinct internal fallback per consecutive call and later `item_id` events rebind to it; a later error is non-retryable under C-2. |
-| `response.function_call_arguments.delta` | delta | `ToolCallDelta`. |
+| `response.output_item.added` (`function_call`) | delta/state | `ToolCallStart` when `call_id` is available; otherwise retains budgeted identity/argument state until `output_item.done` supplies the call ID, preserving C-2 ID stability and correct replay (rule (b)). Missing `output_index` uses a distinct internal fallback per consecutive call and later `item_id` events rebind to it. After a start, a later error is non-retryable under C-2. Proof: `test_responses_late_call_id_is_stable_and_replayable`. |
+| interrupted pending function call | delta/state before non-tool terminal | A length/safety/refusal/error stop exposes the pending call with a stable fallback ID and buffered arguments; it retains that stop reason instead of failing missing-identity validation. The loop settles, but never executes, the interrupted call. |
+| `response.function_call_arguments.delta` | delta/state | `ToolCallDelta`, or budgeted buffering while the call identity is pending. |
 | `response.function_call_arguments.done` | delta/state | Emits any suffix not already seen and replaces the final argument buffer. |
-| `response.output_item.done` | delta/state | Completes reasoning signatures, replaces the final message snapshot, emits unseen text/thinking and argument suffixes, and emits one `BlockEnd`; later deltas for the closed slot are ignored. |
+| `response.output_item.done` | delta/state | Completes reasoning signatures, replaces the final message snapshot, emits unseen text/thinking and argument suffixes, and emits one `BlockEnd`; later streamed reasoning snapshots/deltas for the closed slot are ignored without re-serialization. Terminal `response.output` still backfills encrypted reasoning. |
 | `response.content_part.added/done`, `response.output_text.done`, reasoning `*.done` | state | Recognized no-op completion markers. |
 | `response.completed.response.usage` | Done | `Usage`; cached read/write tokens are excluded from `input_tokens`. Terminal status is normalized. Function calls and ordinary message/reasoning items listed only in terminal `response.output` are not adopted; existing reasoning signatures are backfilled and refusal status is detected. |
 | `response.incomplete.response.usage` without an error | Done or terminal `ProviderError` | The outer `response.incomplete` event always takes the incomplete path even when nested `response.status` is absent or stale. `max_output_tokens`/length becomes `length`; safety/content filtering becomes `safety`; other, missing, or unknown reasons become terminal `error`. |

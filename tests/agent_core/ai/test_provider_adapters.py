@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -85,6 +86,321 @@ def test_each_known_wire_event_has_a_declarative_shape_row() -> None:
 
 async def _events(adapter: Any, request: ModelRequest, cancel: CancelToken | None = None) -> list[Any]:
     return [event async for event in adapter.stream(request, cancel or CancelToken())]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["anthropic", "openai_chat", "openai_responses"])
+@pytest.mark.parametrize("header", [None, "X-Portkey-Api-Key", "x-litellm-api-key"])
+async def test_configured_literal_credentials_cross_the_real_adapter_boundary(
+    protocol: str, header: str | None,
+) -> None:
+    # No recognizable key/scheme/shape in the exception: only configured literals
+    # can protect the diagnostic emitted by a rejecting transport.
+    secret = "opaque.private~value\n"
+    request = _request(protocol)
+    request = replace(request, endpoint=replace(
+        request.endpoint,
+        token=secret if header is None else "token",
+        request_headers={} if header is None else {header: secret},
+    ))
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise httpx.LocalProtocolError(f"Illegal header value {secret.encode()!r}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_class(protocol)(client), request)
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.message == "Illegal header value b'[redacted]'"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["open", "closed", "terminal-backfill"])
+async def test_responses_reasoning_state_has_one_serialization_owner(
+    monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    item = {"type": "reasoning", "id": "rs", "encrypted_content": "ENC"}
+    initial = item if stage != "terminal-backfill" else {"type": "reasoning", "id": "rs"}
+    frames = [{"type": "response.output_item.added", "output_index": 0, "item": initial}]
+    if stage != "open":
+        frames.append({"type": "response.output_item.done", "output_index": 0, "item": initial})
+    if stage != "terminal-backfill":
+        frames.extend({
+            "type": "response.output_item.added" if stage == "open" else "response.output_item.done",
+            "output_index": 0,
+            # Closed items must ignore changes, not just identical snapshots.
+            "item": {"type": "reasoning", "id": "rs", **({"noise": str(i)} if stage == "closed" else {})},
+        } for i in range(20))
+    frames.append({"type": "response.completed", "response": {"status": "completed", "output": [item]}})
+    body = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+    dumps = json.dumps
+    encoded_reasoning = []
+
+    def count_reasoning(value: Any, *args: Any, **kwargs: Any) -> str:
+        if isinstance(value, dict) and value.get("type") == "reasoning":
+            encoded_reasoning.append(value.copy())
+        return dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(json, "dumps", count_reasoning)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _: httpx.Response(200, text=body),
+    )) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+    assert isinstance(events[-1], Done)
+    block = events[-1].message.content[0]
+    assert isinstance(block, ThinkingBlock)
+    assert json.loads(block.signature)["encrypted_content"] == "ENC"
+    assert len(encoded_reasoning) == (2 if stage == "terminal-backfill" else 1)
+
+
+def test_signature_fragments_do_not_materialize_thinking_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    assembler = StreamAssembler(origin=Origin("p", "anthropic", "m"), protocol="anthropic")
+    assembler.thinking_delta(0, "long thinking")
+
+    def unexpected(_: int) -> str:
+        pytest.fail("signature append copied unrelated thinking text")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(assembler, "_thinking_value", unexpected)
+        for _ in range(20):
+            assembler.append_thinking_signature(0, "s")
+    message = assembler.finalize("stop")
+    assert message.content == (ThinkingBlock("long thinking", "s" * 20),)
+
+
+@pytest.mark.parametrize(
+    ("event_name", "payload", "expected"),
+    [
+        ("response.done", {}, "malformed"),
+        ("response.done", {"type": None}, "malformed"),
+        ("response.output_text.delta", {"type": "response.completed"}, "response.completed"),
+        ("future", {"type": None}, None),
+        ("future", {"type": 5}, None),
+    ],
+)
+def test_dispatch_discriminator_contract(event_name: str, payload: dict, expected: str | None) -> None:
+    kwargs = dict(
+        known=responses_module._KNOWN_RESPONSE_EVENTS,
+        event_name=event_name,
+        aliases={"response.done": "response.completed"},
+    )
+    if expected == "malformed":
+        with pytest.raises(common_module.WireDispatchError):
+            common_module.dispatch_wire_event(payload, **kwargs)
+    else:
+        assert common_module.dispatch_wire_event(payload, **kwargs) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [
+    "event: error\ndata: Overloaded\n\n",
+    'event: error\ndata: {"error":{"type":"overloaded_error","message":"Overloaded"}}\n\n',
+    'event: error\ndata: {"type":null,"error":{"type":"overloaded_error"}}\n\n',
+])
+async def test_anthropic_named_error_uses_pi_name_first_handling(body: str) -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _: httpx.Response(200, text=body),
+    )) as client:
+        events = await _events(AnthropicAdapter(client), _request("anthropic"))
+    assert isinstance(events[-1], ProviderError)
+    assert events[-1].kind == "overloaded"
+    assert events[-1].retryable is True
+
+
+@pytest.mark.asyncio
+async def test_anthropic_ignores_named_ping_without_parsing_payload() -> None:
+    body = (
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"kept"}}\n\n'
+        'event: ping\ndata: {}\n\n'
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+        'data: {"type":"message_stop"}\n\n'
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))) as client:
+        events = await _events(AnthropicAdapter(client), _request("anthropic"))
+    assert isinstance(events[-1], Done)
+    assert events[-1].message.content == (TextBlock("kept"),)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["anthropic", "openai_chat", "openai_responses"])
+@pytest.mark.parametrize("source", ["http", "stream"])
+async def test_long_error_diagnostics_are_redacted_once_without_recursive_rescanning(
+    monkeypatch: pytest.MonkeyPatch, protocol: str, source: str,
+) -> None:
+    diagnostic = "<html><style>" + "".join(f"a{i}:b;" for i in range(1200)) + "</style>Service Unavailable</html>"
+    calls = []
+    original = common_module.redact_provider_error
+
+    def record(error: ProviderError, **kwargs: Any) -> ProviderError:
+        calls.append(error)
+        return original(error, **kwargs)
+
+    monkeypatch.setattr(common_module, "redact_provider_error", record)
+    if source == "http":
+        status, body = 503, diagnostic
+    else:
+        status = 200
+        body = "data: " + json.dumps({
+            "type": "error", "error": {"type": "api_error", "message": diagnostic},
+        }) + "\n\n"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(status, text=body))) as client:
+        events = await _events(adapter_class(protocol)(client), _request(protocol))
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "server"
+    assert error.retryable is True
+    assert error.status == (503 if source == "http" else None)
+    assert error.message == diagnostic
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["anthropic", "openai_chat", "openai_responses"])
+@pytest.mark.parametrize("source", ["authorization_assignment", "relative_url", "bare_url_password"])
+async def test_adapter_diagnostics_redact_assignments_and_endpoint_credentials(
+    protocol: str, source: str,
+) -> None:
+    request = _request(protocol)
+    if source == "authorization_assignment":
+        secret = "dXNlcjpwYXNz"
+        request = replace(request, endpoint=replace(
+            request.endpoint, request_headers={"Authorization": "Basic " + secret},
+        ))
+        diagnostic = f"upstream proxy rejected {{Authorization=Basic {secret}}}"
+    elif source == "relative_url":
+        secret = "OPAQUEKEYVALUE9"
+        request = replace(request, endpoint=replace(request.endpoint, base_url=f"https://gw.example/v1?key={secret}"))
+        diagnostic = f"no route for /v1/chat/completions?key={secret}"
+    else:
+        secret = "opaquepassword9"
+        request = replace(request, endpoint=replace(request.endpoint, base_url=f"https://user:{secret}@gw.example/v1"))
+        diagnostic = f"connection failed for user:{secret}@gw.example"
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        if source == "authorization_assignment":
+            raise httpx.LocalProtocolError(diagnostic)
+        return httpx.Response(404, text=diagnostic)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_class(protocol)(client), request)
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert secret not in error.message
+    assert "[redacted]" in error.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("reason", "stop"), [("max_output_tokens", "length"), ("content_filter", "safety")])
+async def test_responses_interrupted_pending_identity_preserves_provider_stop(reason: str, stop: str) -> None:
+    frames = [
+        {"type": "response.output_item.added", "output_index": 0, "item": {"type": "message"}},
+        {"type": "response.output_text.delta", "output_index": 0, "delta": "kept"},
+        {"type": "response.output_item.added", "output_index": 1,
+         "item": {"type": "function_call", "id": "fc_1", "name": "read"}},
+        {"type": "response.function_call_arguments.delta", "output_index": 1, "delta": '{"path":'},
+        {"type": "response.incomplete", "response": {"incomplete_details": {"reason": reason}}},
+    ]
+    body = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+    assert isinstance(events[-1], Done)
+    message = events[-1].message
+    assert message.stop_reason == stop
+    assert message.content[0] == TextBlock("kept")
+    assert message.tool_calls[0].id == next(event.id for event in events if isinstance(event, ToolCallStart))
+    assert message.tool_calls[0].name == "read"
+    assert message.tool_calls[0].arguments == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["anthropic", "openai_chat", "openai_responses"])
+async def test_empty_wire_states_consume_a_realistic_structural_budget(monkeypatch: pytest.MonkeyPatch, protocol: str) -> None:
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 8192)
+    frames = []
+    for index in range(100):
+        if protocol == "anthropic":
+            frame = {"type": "content_block_start", "index": index, "content_block": {"type": "text"}}
+        elif protocol == "openai_chat":
+            frame = {"choices": [{"delta": {"tool_calls": [{"index": index, "function": {}}]}}]}
+        else:
+            frame = {"type": "response.output_item.added", "output_index": index, "item": {"type": "message"}}
+        frames.append(f"data: {json.dumps(frame)}\n\n")
+    body = "".join(frames)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))) as client:
+        events = await _events(adapter_class(protocol)(client), _request(protocol))
+    assert isinstance(events[-1], ProviderError)
+    assert events[-1].kind == "invalid_request"
+    assert "output budget" in events[-1].message
+
+
+def test_tool_id_allocation_has_linear_lookup_cost() -> None:
+    class CountingSet(set):
+        lookups = 0
+
+        def __contains__(self, value: object) -> bool:
+            self.lookups += 1
+            return super().__contains__(value)
+
+    assembler = StreamAssembler(origin=Origin("p", "openai_chat", "m"), protocol="openai_chat")
+    allocated = CountingSet()
+    assembler._allocated_tool_ids = allocated
+    count = 100
+    for index in range(count):
+        assembler.tool_start(index, name="read", native_id=f"call_{count + index}")
+    for index in range(count, count * 2):
+        assembler.tool_start(index, name="read")
+    assert len(allocated) == count * 2
+    assert allocated.lookups <= count * 3
+
+
+def test_shared_tool_id_uniqueness_does_not_copy_owners() -> None:
+    class Owners(set):
+        def __sub__(self, _: object) -> set:
+            pytest.fail("tool uniqueness copied the complete owner set")
+
+    assembler = StreamAssembler(origin=Origin("p", "openai_responses", "m"), protocol="openai_responses")
+    assembler.tool_start(0, call_id="dup")
+    assembler._tool_id_owners["dup"] = Owners({0})
+    assembler.tool_start(1, name="read", native_id="dup")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("indexed", [False, True])
+@pytest.mark.parametrize("item_id", ["fc_1", None])
+async def test_responses_late_call_id_is_stable_and_replayable(indexed: bool, item_id: str | None) -> None:
+    address = {"output_index": 0} if indexed else {}
+    identity = {"id": item_id} if item_id else {}
+    delta_identity = {"item_id": item_id} if item_id else {}
+    frames = [
+        {"type": "response.output_item.added", **address,
+         "item": {"type": "function_call", **identity, "name": "read"}},
+        {"type": "response.function_call_arguments.delta", **address,
+         **delta_identity, "delta": '{"path":"x"}'},
+        {"type": "response.output_item.done", **address,
+         "item": {"type": "function_call", **identity, "call_id": "call_1", "name": "read"}},
+        {"type": "response.completed", "response": {"status": "completed"}},
+    ]
+    body = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+    assert isinstance(events[-1], Done)
+    message = events[-1].message
+    call = message.tool_calls[0]
+    start = next(event for event in events if isinstance(event, ToolCallStart))
+    assert start.id == call.id == "call_1"
+    assert call.native_id == item_id
+    assert call.arguments == {"path": "x"}
+    replay = build_responses_payload(_request("openai_responses", messages=(message,)), (message,))
+    assert replay["input"][0]["call_id"] == "call_1"
+
+
+def test_closed_tool_identity_does_not_retain_unused_history() -> None:
+    assembler = StreamAssembler(origin=Origin("p", "openai_responses", "m"), protocol="openai_responses")
+    assembler.tool_start(0, name="read", call_id="call", native_id="fc")
+    assembler.block_end(0)
+    for index in range(100):
+        assembler.tool_start(0, name="read", call_id="call" + "x" * index, native_id="fc")
+    assert assembler._allocated_tool_ids == {"call"}
 
 
 @pytest.mark.asyncio
@@ -976,7 +1292,11 @@ async def test_cumulative_output_budget_covers_text_thinking_and_tool_arguments(
     protocol: str,
     body: str,
 ) -> None:
-    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 3)
+    # Fixed wire data, independent of the code's computed accounting. The cap
+    # admits identity/slot overhead and the first delta, but not the second.
+    body = body.replace('"ab"', '"' + "a" * 8192 + '"')
+    body = body.replace('"cd"', '"' + "b" * 8192 + '"')
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 16384)
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
@@ -990,14 +1310,25 @@ async def test_cumulative_output_budget_covers_text_thinking_and_tool_arguments(
     assert error.retryable is False
     assert "output budget" in error.message.lower()
     assert error.partial is not None
+    delta_type = {
+        AnthropicAdapter: ThinkingDelta,
+        OpenAIChatAdapter: TextDelta,
+        OpenAIResponsesAdapter: ToolCallDelta,
+    }[adapter_type]
+    deltas = [event for event in events if isinstance(event, delta_type)]
+    assert len(deltas) == 1
+    if adapter_type is OpenAIResponsesAdapter:
+        assert deltas[0].arguments_delta == "a" * 8192
+    else:
+        assert deltas[0].delta == "a" * 8192
 
 
 @pytest.mark.asyncio
 async def test_cumulative_output_budget_covers_opaque_reasoning_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 32)
-    opaque = "x" * 64
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 4096)
+    opaque = "x" * 8192
     body = (
         "data: "
         + json.dumps(
@@ -1032,7 +1363,7 @@ async def test_cumulative_output_budget_covers_opaque_reasoning_details(
 def test_cumulative_output_budget_covers_tool_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 32)
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 8192)
     assembler = StreamAssembler(
         origin=Origin("openai", "openai_chat", "model"),
         protocol="openai_chat",
@@ -1040,7 +1371,7 @@ def test_cumulative_output_budget_covers_tool_identity(
     with pytest.raises(OutputBudgetExceeded):
         assembler.tool_start(
             "tool",
-            name="n" * 64,
+            name="n" * 16384,
             call_id="call",
             native_id="native",
         )
@@ -1049,7 +1380,7 @@ def test_cumulative_output_budget_covers_tool_identity(
 def test_cumulative_output_budget_covers_raw_responses_reasoning_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 32)
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 8192)
     assembler = StreamAssembler(
         origin=Origin("openai", "openai_responses", "model"),
         protocol="openai_responses",
@@ -1061,9 +1392,54 @@ def test_cumulative_output_budget_covers_raw_responses_reasoning_items(
                 "type": "reasoning",
                 "id": "rs_1",
                 "summary": [],
-                "content": [{"type": "summary_text", "text": "x" * 64}],
+                "content": [{"type": "summary_text", "text": "x" * 16384}],
             },
         )
+
+
+def test_cumulative_output_budget_covers_unstarted_tool_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 4096)
+    assembler = StreamAssembler(
+        origin=Origin("openai", "openai_chat", "model"),
+        protocol="openai_chat",
+    )
+    with pytest.raises(OutputBudgetExceeded):
+        for index in range(4):
+            assembler.bind_tool_alias(
+                ("tool", index),
+                f"call-{index}-" + ("x" * 2048),
+            )
+
+
+def test_cumulative_output_budget_covers_empty_tool_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 8192)
+    assembler = StreamAssembler(
+        origin=Origin("openai", "openai_chat", "model"),
+        protocol="openai_chat",
+    )
+
+    with pytest.raises(OutputBudgetExceeded):
+        for index in range(5):
+            assembler.tool_start(("tool", index))
+
+
+def test_cumulative_output_budget_charges_empty_content_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 4096)
+    assembler = StreamAssembler(
+        origin=Origin("anthropic", "anthropic", "model"),
+        protocol="anthropic",
+    )
+    assembler.ensure_text_slot(0)
+    assembler.ensure_text_slot(1)
+    assert assembler._output_chars == 4096
+    with pytest.raises(OutputBudgetExceeded):
+        assembler.ensure_text_slot(2)
 
 
 @pytest.mark.asyncio
@@ -1430,6 +1806,26 @@ async def test_responses_failed_server_code_is_retryable_before_streaming() -> N
     assert isinstance(error, ProviderError)
     assert error.kind == "server"
     assert error.retryable is True
+
+
+@pytest.mark.asyncio
+async def test_responses_reasoning_only_failure_has_no_partial() -> None:
+    body = (
+        'data: {"type":"response.output_item.added","output_index":0,'
+        '"item":{"type":"reasoning","id":"rs_1","summary":[],"content":[]}}\n\n'
+        'data: {"type":"response.failed","response":{"status":"failed",'
+        '"error":{"code":"server_error","message":"upstream failed"}}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.partial is None
 
 
 @pytest.mark.asyncio
@@ -2163,6 +2559,34 @@ async def test_media_loader_failure_is_a_provider_error() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("adapter_type", "protocol"),
+    [
+        (AnthropicAdapter, "anthropic"),
+        (OpenAIChatAdapter, "openai_chat"),
+        (OpenAIResponsesAdapter, "openai_responses"),
+    ],
+)
+async def test_adapter_error_bodies_use_shared_json_redaction(
+    adapter_type: Any,
+    protocol: str,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            text='{"detail":{"secretKey":"SKSECRET1","aws_secret_access_key":"AWSSECRET"}}',
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert "SKSECRET1" not in error.message
+    assert "AWSSECRET" not in error.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("event_type", "fields"),
     [
         ("response.output_text.delta", {"output_index": 0}),
@@ -2191,6 +2615,81 @@ async def test_responses_delta_events_require_string_payload(
     assert error.kind == "invalid_request"
     assert event_type in error.message
     assert events[-1].retryable is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"output_index": 0, "delta": "lost"},
+        {"type": None, "output_index": 0, "delta": "lost"},
+    ],
+)
+async def test_responses_named_event_requires_string_payload_type(
+    payload: dict[str, Any],
+) -> None:
+    body = "event: response.output_text.delta\n" + f"data: {json.dumps(payload)}\n\n"
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=body,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert "type" in error.message
+
+
+@pytest.mark.asyncio
+async def test_anthropic_named_event_requires_string_payload_type() -> None:
+    body = (
+        "event: content_block_delta\n"
+        'data: {"type":5,"index":0,"delta":{"type":"text_delta","text":"lost"}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=body,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(AnthropicAdapter(client), _request("anthropic"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert "type" in error.message
+
+
+@pytest.mark.asyncio
+async def test_anthropic_named_event_rejects_null_payload_type() -> None:
+    body = (
+        "event: content_block_delta\n"
+        'data: {"type":null,"index":0,"delta":{"type":"text_delta","text":"lost"}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=body,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(AnthropicAdapter(client), _request("anthropic"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert "type" in error.message
 
 
 @pytest.mark.asyncio
