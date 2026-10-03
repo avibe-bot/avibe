@@ -39,7 +39,7 @@ from core.agent_core.agent.models import RetryPolicy
 from core.agent_core.ai.provider import Done, ModelCapabilities, ProviderError, TextDelta, ThinkingDelta, ToolCallStart
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.harness.projection import project
-from core.agent_core.messages import ThinkingBlock, ToolCallBlock, ToolResultMessage, UserMessage, text
+from core.agent_core.messages import AssistantMessage, ThinkingBlock, ToolCallBlock, ToolResultMessage, Usage, UserMessage, text
 from core.agent_core.tools.base import ToolResult
 from tests.agent_core.fakes import (
     FakeJobHost,
@@ -256,6 +256,120 @@ async def test_C3_skip_tools_and_terminate_have_distinct_batch_semantics():
     assert len([row for row in await agent.store.load("session") if row.kind == "tool_result"]) == 2
 
 
+@pytest.mark.parametrize(
+    ("stop_reason", "run_reason"),
+    [("safety", "error"), ("error", "error"), ("aborted", "aborted")],
+)
+async def test_non_tool_stop_settles_calls_without_executing_tools(stop_reason, run_reason):
+    tool = FakeTool()
+    response = assistant(
+        calls=[ToolCallBlock("blocked-a", "echo"), ToolCallBlock("blocked-b", "echo")],
+        stop_reason=stop_reason,
+    )
+    agent = make_agent(ScriptedProvider([[Done(response)]]), tools=[tool])
+
+    events = await collect(agent)
+    rows = await agent.store.load("session")
+    results = [row.message for row in rows if row.kind == "tool_result"]
+
+    assert tool.calls == []
+    assert len(results) == 2
+    assert all(result.is_error for result in results)
+    assert all(stop_reason in result.content[0].text for result in results)
+    assert events[-1].reason == run_reason
+
+
+async def test_length_stop_settles_calls_and_retries_the_model_turn():
+    tool = FakeTool()
+    provider = ScriptedProvider(
+        [
+            [Done(assistant(calls=[ToolCallBlock("truncated", "echo", {"x": 1})], stop_reason="length"))],
+            [Done(assistant("reissued"))],
+        ]
+    )
+
+    events = await collect(make_agent(provider, tools=[tool]))
+
+    assert tool.calls == []
+    assert len(provider.requests) == 2
+    results = [message for message in provider.requests[1].messages if isinstance(message, ToolResultMessage)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert "re-issue" in results[0].content[0].text
+    assert events[-1].reason == "completed"
+
+
+async def test_length_stop_honors_end_hook_after_settling_calls():
+    class Stop(Hooks):
+        async def after_model(self, message, ctx):
+            return End()
+
+    tool = FakeTool()
+    provider = ScriptedProvider(
+        [[Done(assistant(calls=[ToolCallBlock("truncated", "echo", {"x": 1})], stop_reason="length"))]]
+    )
+    agent = make_agent(provider, tools=[tool], hooks=[Stop()])
+
+    events = await collect(agent)
+
+    assert tool.calls == []
+    assert len(provider.requests) == 1
+    assert events[-1].reason == "ended_by_hook"
+    assert len([row for row in await agent.store.load("session") if row.kind == "tool_result"]) == 1
+
+
+async def test_length_stop_applies_steer_before_reissued_model_call():
+    holder = {}
+
+    async def first(request, cancel):
+        assert await holder["agent"].steer(input_row("steer", "steered"))
+        yield Done(assistant(calls=[ToolCallBlock("truncated", "echo", {"x": 1})], stop_reason="length"))
+
+    provider = ScriptedProvider([first, [Done(assistant("done"))]])
+    holder["agent"] = make_agent(provider, tools=[FakeTool()])
+
+    events = await collect(holder["agent"])
+
+    assert len(provider.requests) == 2
+    assert user_texts(provider.requests[1]) == ["hello", "steered"]
+    assert events[-1].reason == "completed"
+
+
+async def test_length_stop_does_not_consume_steer_when_retry_budget_is_exhausted():
+    holder = {}
+
+    async def first(request, cancel):
+        del request, cancel
+        assert await holder["agent"].steer(input_row("steer", "preserve me"))
+        yield Done(assistant(calls=[ToolCallBlock("truncated", "echo", {"x": 1})], stop_reason="length"))
+
+    holder["agent"] = make_agent(
+        ScriptedProvider([first]),
+        tools=[FakeTool()],
+        retry=RetryPolicy(max_retries=0, initial_delay_s=0),
+    )
+    events = await collect(holder["agent"])
+
+    assert events[-1].reason == "error"
+    pending = await holder["agent"].take_pending_inputs()
+    assert [item.message.content[0].text for item in pending] == ["preserve me"]
+
+
+async def test_repeated_length_tool_stops_are_bounded():
+    tool = FakeTool()
+    response = Done(assistant(calls=[ToolCallBlock("truncated", "echo", {"x": 1})], stop_reason="length"))
+    provider = ScriptedProvider([[response], [response], [response]])
+
+    events = await collect(make_agent(provider, tools=[tool], retry=RetryPolicy(initial_delay_s=0)))
+
+    assert tool.calls == []
+    assert len(provider.requests) == 3
+    assert events[-1].reason == "error"
+    assert [(event.kind, event.message) for event in events if isinstance(event, AgentError)] == [
+        ("length", "The model repeatedly exceeded its output limit while emitting a tool call.")
+    ]
+
+
 async def test_C4_steer_waits_for_the_batch_and_follow_up_waits_for_natural_end():
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -465,7 +579,7 @@ async def test_C9_events_reference_committed_rows_and_progress_precedes_tool_fin
 
 
 @pytest.mark.parametrize("streamed", [False, "text", "tool", "partial"])
-async def test_retry_only_before_output_and_re_resolves_the_route(streamed, monkeypatch):
+async def test_retry_obeys_provider_flag_and_allows_usage_only_partial(streamed, monkeypatch):
     sleeps = []
     real_sleep = asyncio.sleep
 
@@ -477,7 +591,7 @@ async def test_retry_only_before_output_and_re_resolves_the_route(streamed, monk
     error = ProviderError(
         "rate_limit",
         "busy",
-        True,
+        streamed not in {"text", "tool"},
         retry_after_s=3.0,
         partial=assistant("partial", stop_reason="error") if streamed == "partial" else None,
     )
@@ -487,21 +601,92 @@ async def test_retry_only_before_output_and_re_resolves_the_route(streamed, monk
     provider = ScriptedProvider([prefix + [error], [Done(assistant())]])
     agent = make_agent(provider)
     events = await collect(agent)
-    if streamed:
+    if streamed in {"text", "tool"}:
         assert len(provider.requests) == 1
         assert events[-1].reason == "error"
         assert sleeps == []
     else:
+        # A usage-only partial is persisted as a non-final model response, not
+        # merged into the successful attempt. The provider owns retryability.
         assert len(provider.requests) == agent.models.resolutions == 2
         assert sleeps == [3.0]
         assert events[-1].reason == "completed"
+
+
+async def test_retry_preserves_usage_only_partial_in_successful_response():
+    store = InMemoryTranscriptStore()
+    first_partial = AssistantMessage(
+        content=(),
+        origin=assistant().origin,
+        stop_reason="error",
+        usage=Usage(input_tokens=5, output_tokens=2, cache_write_tokens=1),
+    )
+    successful = AssistantMessage(
+        content=assistant("done").content,
+        origin=assistant().origin,
+        stop_reason="stop",
+        usage=Usage(input_tokens=7, output_tokens=3, cache_read_tokens=4),
+    )
+    provider = ScriptedProvider(
+        [
+            [ProviderError("rate_limit", "busy", True, partial=first_partial)],
+            [Done(successful)],
+        ]
+    )
+
+    events = await collect(
+        make_agent(provider, store=store, retry=RetryPolicy(initial_delay_s=0))
+    )
+
+    assert events[-1].reason == "completed"
+    responses = [row.message for row in await store.load("session") if row.kind == "response"]
+    assert len(responses) == 2
+    assert responses[0].usage == Usage(input_tokens=5, output_tokens=2, cache_write_tokens=1)
+    assert responses[1].usage == Usage(
+        input_tokens=7,
+        output_tokens=3,
+        cache_read_tokens=4,
+    )
+
+
+async def test_retry_usage_partial_is_not_committed_twice_when_budget_expires(monkeypatch):
+    real_sleep = asyncio.sleep
+
+    async def slow_sleep(delay):
+        del delay
+        await real_sleep(0.01)
+
+    monkeypatch.setattr("core.agent_core.agent.loop.asyncio.sleep", slow_sleep)
+    partial = AssistantMessage(
+        content=(),
+        origin=assistant().origin,
+        stop_reason="error",
+        usage=Usage(input_tokens=5),
+    )
+    provider = ScriptedProvider(
+        [[ProviderError("rate_limit", "busy", True, partial=partial)], [Done(assistant("done"))]]
+    )
+    store = InMemoryTranscriptStore()
+    agent = make_agent(
+        provider,
+        store=store,
+        retry=RetryPolicy(initial_delay_s=0, max_elapsed_s=0.005),
+    )
+
+    events = await collect(agent)
+
+    responses = [row.message for row in await store.load("session") if row.kind == "response"]
+    assert len(provider.requests) == 1
+    assert len(responses) == 1
+    assert responses[0].usage == Usage(input_tokens=5)
+    assert events[-1].reason == "error"
 
 
 @pytest.mark.parametrize(
     "kind,retryable,reason,count",
     [
         ("server", True, "error", 3),
-        ("unknown", True, "error", 1),
+        ("unknown", True, "error", 3),
         ("auth", False, "error", 1),
         ("overflow", False, "context_exhausted", 1),
         ("aborted", False, "aborted", 1),

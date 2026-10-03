@@ -5,7 +5,7 @@ about Model Hub routing.
 
 ```python
 class ProviderAdapter(Protocol):
-    protocol: Literal["anthropic", "openai_chat", "openai_responses", "google"]
+    protocol: Literal["anthropic", "openai_chat", "openai_responses"]
 
     def stream(self, request: ModelRequest, cancel: CancelToken) -> AsyncIterator[ProviderEvent]: ...
 
