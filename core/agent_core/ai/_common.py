@@ -10,7 +10,7 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Mapping
 from dataclasses import replace
 from typing import Any, TypeVar
-from urllib.parse import unquote_to_bytes, urlsplit
+from urllib.parse import parse_qsl, unquote_to_bytes, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -555,6 +555,8 @@ class StreamAssembler:
         for state in self._tools.values():
             if not state.get("name"):
                 return self.error("tool call name is missing", kind="invalid_request")
+        if stop_reason == "stop" and self.has_tools():
+            stop_reason = "tool_use"
         final: list[AssistantContent] = []
         state_by_index = {
             state.get("content_index"): state
@@ -572,10 +574,17 @@ class StreamAssembler:
             else:
                 arguments = parsed_arguments(raw_arguments, tool_name=block.name)
             if isinstance(arguments, ProviderError):
-                return self.error(
-                    arguments.message,
-                    kind="invalid_request",
-                )
+                if stop_reason == "tool_use":
+                    return self.error(
+                        arguments.message,
+                        kind="invalid_request",
+                    )
+                # A length, safety, refusal, or error stop must still carry
+                # every model-emitted call so the loop can settle it as an
+                # unsuccessful tool result. The arguments are incomplete and
+                # must not turn a provider stop into a malformed-request
+                # failure.
+                arguments = {}
             final.append(
                 ToolCallBlock(
                     id=block.id,
@@ -644,6 +653,7 @@ class StreamAssembler:
             headers=headers,
             streamed=self.streamed,
             partial=partial,
+            protocol=self.protocol,
         )
         return replace(error, message=sanitize_endpoint_text(error.message, self._endpoint_url))
 
@@ -732,6 +742,46 @@ def credential_free_endpoint_identity(base_url: str) -> str:
         path = parsed.path or "/"
         return f"{parsed.scheme}://{host}{path.rstrip('/') or '/'}"
     return base_url.split("?", 1)[0].split("#", 1)[0].rstrip("/") or "unknown"
+
+
+def join_endpoint_url(base_url: str, suffix: str) -> str:
+    """Append a protocol path while preserving the endpoint's query string.
+
+    The endpoint may already be a complete protocol URL (useful for custom
+    gateways), and the protocol suffix may add its own query parameters, as
+    Gemini does with ``alt=sse``. URL parsing keeps credentials out of this
+    operation's string manipulation and prevents a base query from becoming
+    part of the request path.
+    """
+
+    base = urlsplit(base_url)
+    extra = urlsplit(suffix)
+    base_path = base.path.rstrip("/")
+    suffix_path = extra.path.strip("/")
+    base_leaf = base_path.rsplit("/", 1)[-1]
+    suffix_leaf = suffix_path.rsplit("/", 1)[-1]
+    same_operation = (
+        ":" in base_leaf
+        and ":" in suffix_leaf
+        and base_leaf.split(":", 1)[1] == suffix_leaf.split(":", 1)[1]
+    )
+    already_joined = suffix_path and (
+        base_path == suffix_path
+        or base_path.endswith(f"/{suffix_path}")
+        or same_operation
+    )
+    if suffix_path and not already_joined:
+        path = f"{base_path}/{suffix_path}" if base_path else f"/{suffix_path}"
+    else:
+        path = base_path or "/"
+    query = list(parse_qsl(base.query, keep_blank_values=True))
+    query_keys = {key for key, _ in query}
+    for key, value in parse_qsl(extra.query, keep_blank_values=True):
+        if key in query_keys:
+            continue
+        query.append((key, value))
+        query_keys.add(key)
+    return urlunsplit((base.scheme, base.netloc, path, urlencode(query), ""))
 
 
 def _fallback_endpoint_identity(base_url: str) -> str:

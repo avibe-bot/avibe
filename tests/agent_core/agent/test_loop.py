@@ -256,6 +256,100 @@ async def test_C3_skip_tools_and_terminate_have_distinct_batch_semantics():
     assert len([row for row in await agent.store.load("session") if row.kind == "tool_result"]) == 2
 
 
+@pytest.mark.parametrize(
+    ("stop_reason", "run_reason"),
+    [("safety", "error"), ("error", "error"), ("aborted", "aborted")],
+)
+async def test_non_tool_stop_settles_calls_without_executing_tools(stop_reason, run_reason):
+    tool = FakeTool()
+    response = assistant(
+        calls=[ToolCallBlock("blocked-a", "echo"), ToolCallBlock("blocked-b", "echo")],
+        stop_reason=stop_reason,
+    )
+    agent = make_agent(ScriptedProvider([[Done(response)]]), tools=[tool])
+
+    events = await collect(agent)
+    rows = await agent.store.load("session")
+    results = [row.message for row in rows if row.kind == "tool_result"]
+
+    assert tool.calls == []
+    assert len(results) == 2
+    assert all(result.is_error for result in results)
+    assert all(stop_reason in result.content[0].text for result in results)
+    assert events[-1].reason == run_reason
+
+
+async def test_length_stop_settles_calls_and_retries_the_model_turn():
+    tool = FakeTool()
+    provider = ScriptedProvider(
+        [
+            [Done(assistant(calls=[ToolCallBlock("truncated", "echo", {"x": 1})], stop_reason="length"))],
+            [Done(assistant("reissued"))],
+        ]
+    )
+
+    events = await collect(make_agent(provider, tools=[tool]))
+
+    assert tool.calls == []
+    assert len(provider.requests) == 2
+    results = [message for message in provider.requests[1].messages if isinstance(message, ToolResultMessage)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert "re-issue" in results[0].content[0].text
+    assert events[-1].reason == "completed"
+
+
+async def test_length_stop_honors_end_hook_after_settling_calls():
+    class Stop(Hooks):
+        async def after_model(self, message, ctx):
+            return End()
+
+    tool = FakeTool()
+    provider = ScriptedProvider(
+        [[Done(assistant(calls=[ToolCallBlock("truncated", "echo", {"x": 1})], stop_reason="length"))]]
+    )
+    agent = make_agent(provider, tools=[tool], hooks=[Stop()])
+
+    events = await collect(agent)
+
+    assert tool.calls == []
+    assert len(provider.requests) == 1
+    assert events[-1].reason == "ended_by_hook"
+    assert len([row for row in await agent.store.load("session") if row.kind == "tool_result"]) == 1
+
+
+async def test_length_stop_applies_steer_before_reissued_model_call():
+    holder = {}
+
+    async def first(request, cancel):
+        assert await holder["agent"].steer(input_row("steer", "steered"))
+        yield Done(assistant(calls=[ToolCallBlock("truncated", "echo", {"x": 1})], stop_reason="length"))
+
+    provider = ScriptedProvider([first, [Done(assistant("done"))]])
+    holder["agent"] = make_agent(provider, tools=[FakeTool()])
+
+    events = await collect(holder["agent"])
+
+    assert len(provider.requests) == 2
+    assert user_texts(provider.requests[1]) == ["hello", "steered"]
+    assert events[-1].reason == "completed"
+
+
+async def test_repeated_length_tool_stops_are_bounded():
+    tool = FakeTool()
+    response = Done(assistant(calls=[ToolCallBlock("truncated", "echo", {"x": 1})], stop_reason="length"))
+    provider = ScriptedProvider([[response], [response], [response]])
+
+    events = await collect(make_agent(provider, tools=[tool], retry=RetryPolicy(initial_delay_s=0)))
+
+    assert tool.calls == []
+    assert len(provider.requests) == 3
+    assert events[-1].reason == "error"
+    assert [(event.kind, event.message) for event in events if isinstance(event, AgentError)] == [
+        ("length", "The model repeatedly exceeded its output limit while emitting a tool call.")
+    ]
+
+
 async def test_C4_steer_waits_for_the_batch_and_follow_up_waits_for_natural_end():
     entered, release = asyncio.Event(), asyncio.Event()
 

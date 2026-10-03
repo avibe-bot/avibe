@@ -22,6 +22,7 @@ from core.agent_core.ai._common import (
     drive_sse_stream,
     dispatch_wire_event,
     endpoint_origin,
+    join_endpoint_url,
     json_object,
     prepare_messages,
     StreamAssembler,
@@ -141,7 +142,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             payload = build_responses_payload(request, transformed_messages, loaded_images=loaded_images)
             headers = auth_headers(request.endpoint, provider="openai", gateway=self._gateway)
             headers.setdefault("content-type", "application/json")
-            url = _endpoint_url(request.endpoint.base_url, "/responses")
+            url = join_endpoint_url(request.endpoint.base_url, "/responses")
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal status, incomplete_reason, refusal
                 async for event in events:
@@ -183,7 +184,18 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 yield terminal
                             return
                         if isinstance(response_body, Mapping):
-                            status = _string(response_body.get("status")) or status
+                            response_status = response_body.get("status")
+                            if response_status is not None and not isinstance(response_status, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        f"{event_type} response status must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            status = response_status or status
                     elif event_type == "response.output_text.delta":
                         if "delta" in chunk and not isinstance(chunk.get("delta"), str):
                             terminal = assembler.terminal(
@@ -299,8 +311,42 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
-                        item_type = _string(item.get("type"))
+                        item_type_value = item.get("type")
+                        if not isinstance(item_type_value, str):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "response.output_item.added item type must be a string",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        raw_id = item.get("id")
+                        if raw_id is not None and not isinstance(raw_id, str):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "response.output_item.added id must be a string",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        item_type = item_type_value
                         if item_type == "function_call":
+                            for field in ("call_id", "name", "arguments"):
+                                value = item.get(field)
+                                if value is not None and not isinstance(value, str):
+                                    terminal = assembler.terminal(
+                                        assembler.error(
+                                            f"response.output_item.added {field} must be a string",
+                                            kind="invalid_request",
+                                        )
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
                             raw_arguments = item.get("arguments")
                             if raw_arguments is not None and not isinstance(raw_arguments, str):
                                 terminal = assembler.terminal(
@@ -410,7 +456,18 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
-                        item_id = _string(chunk.get("item_id")) or None
+                        raw_item_id = chunk.get("item_id")
+                        if raw_item_id is not None and not isinstance(raw_item_id, str):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "response.function_call_arguments.delta item_id must be a string",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        item_id = _string(raw_item_id) or None
                         if "output_index" in chunk:
                             output_index = _output_index(chunk)
                             if output_index is None:
@@ -438,7 +495,18 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         if emitted is not None:
                             yield emitted
                     elif event_type == "response.function_call_arguments.done":
-                        item_id = _string(chunk.get("item_id")) or None
+                        raw_item_id = chunk.get("item_id")
+                        if raw_item_id is not None and not isinstance(raw_item_id, str):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "response.function_call_arguments.done item_id must be a string",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        item_id = _string(raw_item_id) or None
                         if "output_index" in chunk:
                             output_index = _output_index(chunk)
                             if output_index is None:
@@ -497,7 +565,40 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 yield terminal
                             return
                         if isinstance(item, Mapping):
+                            if "type" not in item or not isinstance(item.get("type"), str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "response.output_item.done item type must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            if item.get("id") is not None and not isinstance(item.get("id"), str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "response.output_item.done item id must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
                             item_id = _string(item.get("id"))
+                            if item.get("type") == "function_call":
+                                for field in ("call_id", "name", "arguments"):
+                                    value = item.get(field)
+                                    if value is not None and not isinstance(value, str):
+                                        terminal = assembler.terminal(
+                                            assembler.error(
+                                                f"response.output_item.done {field} must be a string",
+                                                kind="invalid_request",
+                                            )
+                                        )
+                                        if terminal is not None:
+                                            yield terminal
+                                        return
                             if item.get("type") == "function_call" and "output_index" not in chunk:
                                 call_id = _string(item.get("call_id")) or None
                                 key = assembler.fallback_tool_key(
@@ -601,6 +702,18 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 if end is not None:
                                     yield end
                             elif item.get("type") == "message":
+                                if "content" in item and item.get("content") is not None and not isinstance(
+                                    item.get("content"), list
+                                ):
+                                    terminal = assembler.terminal(
+                                        assembler.error(
+                                            "response.output_item.done message content must be an array",
+                                            kind="invalid_request",
+                                        )
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
                                 assembler.ensure_text_slot(output_index)
                                 message_refusal, emitted = _append_message_text(
                                     assembler,
@@ -623,16 +736,95 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 yield terminal
                             return
                         response_error: Mapping[str, Any] | None = None
-                        status = _string(response_body.get("status")) or status
+                        response_status = response_body.get("status")
+                        if response_status is not None and not isinstance(response_status, str):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    f"{event_type} response status must be a string",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        if response_status is not None:
+                            status = response_status
                         incomplete = response_body.get("incomplete_details")
+                        if incomplete is not None and not isinstance(incomplete, Mapping):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    f"{event_type} incomplete_details must be an object",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         if isinstance(incomplete, Mapping):
+                            if incomplete.get("reason") is not None and not isinstance(
+                                incomplete.get("reason"), str
+                            ):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        f"{event_type} incomplete_details reason must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
                             incomplete_reason = _string(incomplete.get("reason")) or incomplete_reason
+                        if "usage" in response_body and response_body.get("usage") is not None and not isinstance(
+                            response_body.get("usage"), Mapping
+                        ):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    f"{event_type} response usage must be an object",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         usage = _responses_usage(response_body.get("usage"))
                         assembler.set_usage(usage)
-                        if isinstance(response_body.get("error"), Mapping):
-                            response_error = response_body["error"]
+                        response_value = response_body.get("error")
+                        if response_value is not None and not isinstance(response_value, Mapping):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    f"{event_type} response error must be an object",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        if isinstance(response_value, Mapping):
+                            shape_error = _responses_error_shape_error(
+                                response_value,
+                                f"{event_type} response error",
+                            )
+                            if shape_error is not None:
+                                terminal = assembler.terminal(
+                                    assembler.error(shape_error, kind="invalid_request")
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            response_error = response_value
+                        output = response_body.get("output")
+                        if output is not None and not isinstance(output, list):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    f"{event_type} response output must be an array",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         terminal_output_error, terminal_refusal = _apply_terminal_output_items(
-                            response_body.get("output"),
+                            output,
                             assembler,
                             reasoning,
                         )
@@ -645,9 +837,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         if response_error is not None:
                             terminal = assembler.terminal(
                                 assembler.error(
-                                    _string(response_error.get("message"))
-                                    or "OpenAI Responses response failed",
-                                    code=_string(response_error.get("code")) or None,
+                                    _responses_error_body(response_error),
                                 )
                             )
                             if terminal is not None:
@@ -718,13 +908,91 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             return
                         error = response_body.get("error") if isinstance(response_body, Mapping) else chunk.get("error")
                         if isinstance(response_body, Mapping):
+                            response_status = response_body.get("status")
+                            if response_status is not None and not isinstance(response_status, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "response.failed response status must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            error_value = response_body.get("error")
+                            if error_value is not None and not isinstance(error_value, Mapping):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "response.failed error must be an object",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            if isinstance(error_value, Mapping):
+                                shape_error = _responses_error_shape_error(
+                                    error_value,
+                                    "response.failed error",
+                                )
+                                if shape_error is not None:
+                                    terminal = assembler.terminal(
+                                        assembler.error(shape_error, kind="invalid_request")
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
+                            usage_value = response_body.get("usage")
+                            if usage_value is not None and not isinstance(usage_value, Mapping):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "response.failed usage must be an object",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
                             assembler.set_usage(_responses_usage(response_body.get("usage")))
-                        message = _string(error.get("message")) if isinstance(error, Mapping) else json.dumps(dict(chunk), ensure_ascii=False)
-                        code = _string(error.get("code")) if isinstance(error, Mapping) else ""
+                        elif "error" in chunk and chunk.get("error") is not None and not isinstance(
+                            chunk.get("error"), Mapping
+                        ):
+                            terminal = assembler.terminal(
+                                assembler.error("response.failed error must be an object", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        if isinstance(error, Mapping):
+                            shape_error = _responses_error_shape_error(error, "response.failed error")
+                            if shape_error is not None:
+                                terminal = assembler.terminal(
+                                    assembler.error(shape_error, kind="invalid_request")
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                        if isinstance(error, Mapping):
+                            message = _responses_error_body(error)
+                        else:
+                            incomplete_details = (
+                                response_body.get("incomplete_details")
+                                if isinstance(response_body, Mapping)
+                                else None
+                            )
+                            reason = (
+                                incomplete_details.get("reason")
+                                if isinstance(incomplete_details, Mapping)
+                                else None
+                            )
+                            message = (
+                                f"OpenAI Responses response failed: {reason}"
+                                if isinstance(reason, str) and reason
+                                else "OpenAI Responses response failed"
+                            )
                         terminal = assembler.terminal(
                             assembler.error(
                                 message,
-                                code=code or None,
                             )
                         )
                         if terminal is not None:
@@ -732,20 +1000,27 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         return
                     elif event_type == "error":
                         nested_error = chunk.get("error")
-                        error_message = (
-                            _string(nested_error.get("message"))
-                            if isinstance(nested_error, Mapping)
-                            else _string(chunk.get("message"))
-                        )
-                        error_code = (
-                            _string(nested_error.get("code"))
-                            if isinstance(nested_error, Mapping)
-                            else _string(chunk.get("code"))
-                        )
+                        if nested_error is not None and not isinstance(nested_error, Mapping):
+                            terminal = assembler.terminal(
+                                assembler.error("OpenAI Responses error must be an object", kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        if isinstance(nested_error, Mapping):
+                            shape_error = _responses_error_shape_error(nested_error, "OpenAI Responses error")
+                        else:
+                            shape_error = _responses_error_shape_error(chunk, "OpenAI Responses error")
+                        if shape_error is not None:
+                            terminal = assembler.terminal(
+                                assembler.error(shape_error, kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         terminal = assembler.terminal(
                             assembler.error(
-                                error_message or json.dumps(dict(chunk), ensure_ascii=False),
-                                code=error_code or None,
+                                json.dumps(dict(chunk), ensure_ascii=False),
                             )
                         )
                         if terminal is not None:
@@ -1056,6 +1331,28 @@ def _responses_usage(value: Any) -> Any:
     )
 
 
+def _responses_error_shape_error(value: Any, label: str) -> str | None:
+    if not isinstance(value, Mapping):
+        return f"{label} must be an object"
+    for field in ("type", "code", "message"):
+        raw = value.get(field)
+        if field == "code":
+            if raw is not None and (
+                isinstance(raw, str)
+                or (isinstance(raw, int) and not isinstance(raw, bool))
+            ):
+                continue
+            if raw is not None:
+                return f"{label} code must be a string or integer"
+        elif raw is not None and not isinstance(raw, str):
+            return f"{label} {field} must be a string"
+    return None
+
+
+def _responses_error_body(error: Mapping[str, Any]) -> str:
+    return json.dumps({"error": dict(error)}, ensure_ascii=False)
+
+
 def _reasoning_summary_text(item: Mapping[str, Any]) -> str | None:
     summary = item.get("summary")
     if summary is None:
@@ -1069,11 +1366,6 @@ def _reasoning_summary_text(item: Mapping[str, Any]) -> str | None:
             if text:
                 parts.append(text)
     return "\n\n".join(parts) if parts else None
-
-
-def _endpoint_url(base_url: str, suffix: str) -> str:
-    base = base_url.rstrip("/")
-    return base if base.endswith(suffix) else f"{base}{suffix}"
 
 
 def _openai_effort(value: str) -> str:

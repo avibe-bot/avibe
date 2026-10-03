@@ -85,12 +85,22 @@ def classify_error(
     partial: AssistantMessage | None = None,
     exc: BaseException | None = None,
     code: str | None = None,
+    protocol: str | None = None,
 ) -> ProviderError:
     """Classify one HTTP, provider-body, or network failure."""
 
     message = _error_message(body, exc)
     retry_after = parse_retry_after(_header_value(headers, "retry-after"))
-    kind = _classify_kind(status=status, message=f"{body}\n{message}", exc=exc, code=code)
+    extracted_code = _extract_code(body, protocol=protocol)
+    effective_code = code
+    if not effective_code or _is_generic_code(effective_code):
+        effective_code = extracted_code or effective_code
+    kind = _classify_kind(
+        status=status,
+        message=f"{body}\n{message}",
+        exc=exc,
+        code=effective_code,
+    )
     retryable = kind in {"rate_limit", "overloaded", "network", "server"} and not streamed
     return ProviderError(
         kind=kind,
@@ -171,7 +181,23 @@ def _classify_kind(
         return "server"
     if status in {408, 409, 425}:
         return "server"
-    normalized_code = (code or "").lower()
+    normalized_code = (code or "").lower().replace("-", "_")
+    if normalized_code in {
+        "authentication_error",
+        "authentication",
+        "auth_error",
+        "invalid_api_key",
+        "invalid_api_key_error",
+        "api_key_invalid",
+        "api_key_invalid_error",
+        "permission",
+        "permission_error",
+        "permission_denied",
+        "unauthenticated",
+        "unauthorized",
+        "forbidden",
+    }:
+        return "auth"
     if normalized_code in {
         "rate_limit",
         "rate_limited",
@@ -196,8 +222,6 @@ def _classify_kind(
         return "server"
     if normalized_code in {"context_length_exceeded", "request_too_large"}:
         return "overflow"
-    if normalized_code in {"permission_denied", "unauthenticated"}:
-        return "auth"
     if is_overflow_message(message, status=status):
         return "overflow"
     if exc is not None:
@@ -262,6 +286,65 @@ def _extract_message(value: Any) -> str | None:
     if isinstance(value, list):
         for item in value:
             nested = _extract_message(item)
+            if nested:
+                return nested
+    return None
+
+
+def _extract_code(body: str, *, protocol: str | None = None) -> str | None:
+    """Extract the provider's standard code from any common error envelope."""
+
+    try:
+        value = json.loads(body)
+    except (TypeError, ValueError):
+        return None
+    return _find_code(value, protocol=protocol)
+
+
+def _is_generic_code(code: str) -> bool:
+    return code.lower().replace("-", "_") in {
+        "error",
+        "provider_error",
+        "invalid_argument",
+        "invalid_request",
+        "bad_request",
+    }
+
+
+def _find_code(value: Any, *, protocol: str | None = None) -> str | None:
+    if isinstance(value, Mapping):
+        # Prefer a specific code on the current envelope. Generic wrapper
+        # statuses such as INVALID_ARGUMENT still defer to nested provider
+        # details (for example Gemini's API_KEY_INVALID reason).
+        key_order = {
+            "anthropic": ("type", "status"),
+            "google": ("status", "type"),
+            "openai_chat": ("code", "type"),
+            "openai_responses": ("code", "type"),
+        }.get(protocol, ("code", "status", "type"))
+        for key in key_order:
+            candidate = value.get(key)
+            if (
+                isinstance(candidate, str)
+                and not _is_generic_code(candidate)
+                and not candidate.lstrip("-").isdigit()
+            ):
+                return candidate
+        for key in ("error", "details", "cause"):
+            if key in value:
+                nested = _find_code(value[key], protocol=protocol)
+                if nested:
+                    return nested
+        for key in key_order:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and not candidate.lstrip("-").isdigit():
+                return candidate
+        candidate = value.get("reason")
+        if isinstance(candidate, str):
+            return candidate
+    elif isinstance(value, list):
+        for item in value:
+            nested = _find_code(item, protocol=protocol)
             if nested:
                 return nested
     return None

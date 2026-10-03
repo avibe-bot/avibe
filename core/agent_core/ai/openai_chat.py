@@ -18,6 +18,7 @@ from core.agent_core.ai._common import (
     content_parts,
     drive_sse_stream,
     endpoint_origin,
+    join_endpoint_url,
     json_object,
     prepare_messages,
     StreamAssembler,
@@ -105,7 +106,7 @@ class OpenAIChatAdapter(ProviderAdapter):
             payload = build_chat_payload(request, transformed_messages, loaded_images=loaded_images)
             headers = auth_headers(request.endpoint, provider="openai", gateway=self._gateway)
             headers.setdefault("content-type", "application/json")
-            url = _endpoint_url(request.endpoint.base_url, "/chat/completions")
+            url = join_endpoint_url(request.endpoint.base_url, "/chat/completions")
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal finish_reason, refusal_seen, protocol_terminal
                 async for event in events:
@@ -126,6 +127,13 @@ class OpenAIChatAdapter(ProviderAdapter):
                         if terminal is not None:
                             yield terminal
                         return
+                    if "usage" in chunk and chunk.get("usage") is not None and not isinstance(chunk.get("usage"), Mapping):
+                        terminal = assembler.terminal(
+                            assembler.error("OpenAI Chat usage must be an object", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if isinstance(chunk.get("usage"), Mapping):
                         assembler.set_usage(_openai_usage(chunk["usage"]))
                     top_level_error = chunk.get("error")
@@ -137,12 +145,23 @@ class OpenAIChatAdapter(ProviderAdapter):
                             yield terminal
                         return
                     if isinstance(top_level_error, Mapping):
+                        for field in ("type", "code", "message"):
+                            value = top_level_error.get(field)
+                            if field == "code" and isinstance(value, int) and not isinstance(value, bool):
+                                continue
+                            if value is not None and not isinstance(value, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        f"OpenAI Chat error {field} must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
                         terminal = assembler.terminal(
                             assembler.error(
-                                _error_text(top_level_error, chunk),
-                                code=_string(top_level_error.get("code"))
-                                or _string(top_level_error.get("type"))
-                                or None,
+                                json.dumps(dict(chunk), ensure_ascii=False),
                             )
                         )
                         if terminal is not None:
@@ -168,6 +187,13 @@ class OpenAIChatAdapter(ProviderAdapter):
                         return
                     if not isinstance(chunk.get("usage"), Mapping) and isinstance(choice.get("usage"), Mapping):
                         assembler.set_usage(_openai_usage(choice["usage"]))
+                    if choice.get("usage") is not None and not isinstance(choice.get("usage"), Mapping):
+                        terminal = assembler.terminal(
+                            assembler.error("OpenAI Chat choice usage must be an object", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if choice.get("finish_reason") is not None:
                         if not isinstance(choice.get("finish_reason"), str):
                             terminal = assembler.terminal(
@@ -207,6 +233,18 @@ class OpenAIChatAdapter(ProviderAdapter):
                         if emitted is not None:
                             yield emitted
                     reasoning_field, reasoning = _first_reasoning_delta(delta)
+                    for field in ("reasoning_content", "reasoning", "reasoning_text"):
+                        raw_reasoning = delta.get(field)
+                        if raw_reasoning is not None and not isinstance(raw_reasoning, str):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    f"OpenAI Chat {field} must be a string",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                     if reasoning:
                         emitted = assembler.thinking_delta("chat-thinking", reasoning, signature=reasoning_field)
                         if emitted is not None:
@@ -229,7 +267,27 @@ class OpenAIChatAdapter(ProviderAdapter):
                         if emitted is not None:
                             yield emitted
                     details = delta.get("reasoning_details")
+                    if details is not None and not isinstance(details, list):
+                        terminal = assembler.terminal(
+                            assembler.error(
+                                "OpenAI Chat reasoning_details must be an array",
+                                kind="invalid_request",
+                            )
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if isinstance(details, list):
+                        if any(not isinstance(detail, Mapping) for detail in details):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "OpenAI Chat reasoning_details entries must be objects",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         assembler.merge_thinking_details("chat-thinking", details)
                     raw_tool_calls = delta.get("tool_calls")
                     if raw_tool_calls is not None and not isinstance(raw_tool_calls, list):
@@ -249,7 +307,29 @@ class OpenAIChatAdapter(ProviderAdapter):
                                     yield terminal
                                 return
                             raw_id = _string(raw.get("id"))
+                            if raw.get("id") is not None and not isinstance(raw.get("id"), str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "OpenAI Chat tool call id must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
                             index_value = raw.get("index")
+                            if index_value is not None and (
+                                not isinstance(index_value, int) or isinstance(index_value, bool)
+                            ):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "OpenAI Chat tool call index must be an integer",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
                             if isinstance(index_value, int) and not isinstance(index_value, bool):
                                 key = ("chat-tool", index_value)
                             else:
@@ -268,6 +348,16 @@ class OpenAIChatAdapter(ProviderAdapter):
                                         yield terminal
                                     return
                             function = raw.get("function")
+                            if function is not None and not isinstance(function, Mapping):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "OpenAI Chat tool call function must be an object",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
                             if isinstance(function, Mapping):
                                 raw_name = function.get("name")
                                 if raw_name is not None and not isinstance(raw_name, str):
@@ -557,16 +647,6 @@ def _signature_details(signature: str) -> Any:
     except (TypeError, ValueError):
         return None
     return value if isinstance(value, (list, dict)) else None
-
-
-def _error_text(error: Mapping[str, Any], chunk: Mapping[str, Any]) -> str:
-    message = _string(error.get("message"))
-    return message or json.dumps(dict(chunk), ensure_ascii=False)
-
-
-def _endpoint_url(base_url: str, suffix: str) -> str:
-    base = base_url.rstrip("/")
-    return base if base.endswith(suffix) else f"{base}{suffix}"
 
 
 def _openai_effort(value: str) -> str:

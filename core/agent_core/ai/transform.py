@@ -80,14 +80,18 @@ def transform_messages(
     used_tool_ids: set[str] = set()
     tool_id_occurrences: dict[str, int] = {}
     pending_tool_ids: dict[str, list[str]] = {}
+    suppressed_tool_result_ids: set[str] = set()
     transformed: list[Message] = []
 
     for message in messages:
         if isinstance(message, UserMessage):
             pending_tool_ids.clear()
+            suppressed_tool_result_ids.clear()
             transformed.append(_transform_user(message, supports_images=supports_images))
             continue
         if isinstance(message, ToolResultMessage):
+            if message.tool_call_id in suppressed_tool_result_ids:
+                continue
             pending = pending_tool_ids.get(message.tool_call_id)
             if pending:
                 wire_id = pending.pop(0)
@@ -157,6 +161,7 @@ def transform_messages(
 
         # An aborted/error response is not a valid provider turn to replay.
         if message.stop_reason in {"aborted", "error"}:
+            suppressed_tool_result_ids.update(turn_tool_ids)
             continue
         for source_id, wire_ids in turn_tool_ids.items():
             pending_tool_ids.setdefault(source_id, []).extend(wire_ids)

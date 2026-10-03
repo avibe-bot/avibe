@@ -48,11 +48,12 @@ def _request(
     supports_images: bool = False,
     tools: tuple[ToolSpec, ...] = (),
     model_id: str = "model-x",
+    base_url: str = "https://model.test/v1",
 ) -> ModelRequest:
     return ModelRequest(
         endpoint=ModelEndpoint(
             protocol,
-            "https://model.test/v1",
+            base_url,
             model_id,
             "token",
             provider={"anthropic": "anthropic", "openai_chat": "openai", "openai_responses": "openai", "google": "google"}[protocol],
@@ -100,6 +101,144 @@ async def test_anthropic_streams_thinking_tool_arguments_and_usage() -> None:
         ToolCallBlock("toolu_1", "read", {"path": "x"}, native_id="toolu_1"),
     )
     assert [event.index for event in events if isinstance(event, BlockEnd)] == [0, 1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "body", "expected_path"),
+    [
+        (
+            AnthropicAdapter,
+            "anthropic",
+            'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+            'data: {"type":"message_stop"}\n\n',
+            "/v1/messages",
+        ),
+        (
+            OpenAIChatAdapter,
+            "openai_chat",
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            "data: [DONE]\n\n",
+            "/v1/chat/completions",
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+            "/v1/responses",
+        ),
+        (
+            GoogleAdapter,
+            "google",
+            'data: {"candidates":[{"finishReason":"STOP"}]}\n\n',
+            "/v1/models/model-x:streamGenerateContent",
+        ),
+    ],
+)
+async def test_adapters_join_protocol_path_before_existing_query(
+    adapter_type: Any,
+    protocol: str,
+    body: str,
+    expected_path: str,
+) -> None:
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(
+            adapter_type(client),
+            _request(protocol, base_url="https://model.test/v1?tenant=blue"),
+        )
+
+    assert isinstance(events[-1], Done)
+    assert seen[0].path == expected_path
+    assert seen[0].query == b"tenant=blue" + (b"&alt=sse" if protocol == "google" else b"")
+
+
+@pytest.mark.asyncio
+async def test_google_full_protocol_endpoint_is_not_joined_twice_or_duplicated() -> None:
+    body = 'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(
+            GoogleAdapter(client),
+            _request(
+                "google",
+                base_url=(
+                    "https://gateway.test/models/real-model:streamGenerateContent"
+                    "?alt=sse&tenant=blue"
+                ),
+            ),
+        )
+
+    assert isinstance(events[-1], Done)
+    assert seen[0].path == "/models/real-model:streamGenerateContent"
+    assert seen[0].query == b"alt=sse&tenant=blue"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "body"),
+    [
+        (
+            OpenAIChatAdapter,
+            "openai_chat",
+            (
+                'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+                '"function":{"name":"read","arguments":"{\\"path\\":\\"x"}}]}}]}\n\n'
+                'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
+                "data: [DONE]\n\n"
+            ),
+        ),
+        (
+            AnthropicAdapter,
+            "anthropic",
+            (
+                'data: {"type":"content_block_start","index":0,'
+                '"content_block":{"type":"tool_use","id":"toolu_1","name":"read"}}\n\n'
+                'data: {"type":"content_block_delta","index":0,'
+                '"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"x"}}\n\n'
+                'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}\n\n'
+                'data: {"type":"message_stop"}\n\n'
+            ),
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            (
+                'data: {"type":"response.output_item.added","output_index":0,'
+                '"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read"}}\n\n'
+                'data: {"type":"response.function_call_arguments.delta","output_index":0,'
+                '"delta":"{\\"path\\":\\"x"}\n\n'
+                'data: {"type":"response.incomplete","response":{"status":"incomplete",'
+                '"incomplete_details":{"reason":"max_output_tokens"}}}\n\n'
+            ),
+        ),
+    ],
+)
+async def test_non_tool_stop_preserves_truncated_tool_calls_for_settlement(
+    adapter_type: Any,
+    protocol: str,
+    body: str,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    terminal = events[-1]
+    assert isinstance(terminal, Done)
+    assert terminal.message.stop_reason == "length"
+    assert [call.arguments for call in terminal.message.tool_calls] == [{}]
 
 
 @pytest.mark.asyncio
@@ -247,6 +386,25 @@ async def test_anthropic_ignores_unknown_sse_event_before_parsing_like_pi() -> N
         events = await _events(AnthropicAdapter(client), _request("anthropic"))
 
     assert isinstance(events[-1], Done)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_named_error_frame_uses_nested_error_code() -> None:
+    body = (
+        'event: error\n'
+        'data: {"type":"error","error":{"type":"api_error","message":"busy"}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(AnthropicAdapter(client), _request("anthropic"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "server"
+    assert error.retryable is True
 
 
 @pytest.mark.asyncio
@@ -558,6 +716,195 @@ async def test_responses_top_level_error_frame_is_classified() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_accepts_integer_error_code_from_openai_compatible_servers() -> None:
+    body = (
+        'data: {"error":{"type":"InternalServerError","code":500,'
+        '"message":"Internal server error"}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "server"
+    assert error.retryable is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "expected_kind"),
+    [
+        (
+            'data: {"type":"error","error":{"type":"context_length_exceeded"}}\n\n',
+            "overflow",
+        ),
+        (
+            'data: {"type":"response.failed","response":{"status":"failed","error":{"type":"context_length_exceeded"}}}\n\n',
+            "overflow",
+        ),
+        (
+            'data: {"type":"response.completed","response":{"status":"failed","error":{"type":"context_length_exceeded"}}}\n\n',
+            "overflow",
+        ),
+    ],
+)
+async def test_responses_error_classification_uses_the_complete_envelope(
+    body: str,
+    expected_kind: str,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == expected_kind
+
+
+@pytest.mark.asyncio
+async def test_responses_error_message_excludes_response_request_metadata() -> None:
+    body = (
+        'data: {"type":"response.failed","response":{"status":"failed",'
+        '"error":{"code":"server_error","message":"upstream failed"},'
+        '"instructions":"secret system prompt","tools":[{"name":"secret"}]}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "server"
+    assert error.message == "upstream failed"
+    assert "secret system prompt" not in error.message
+
+
+@pytest.mark.asyncio
+async def test_responses_failed_without_error_details_has_safe_fixed_message() -> None:
+    body = (
+        'data: {"type":"response.failed","response":{"status":"failed","error":null,'
+        '"instructions":"If you hit a rate limit, wait.","tools":[{"name":"secret"}]}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "unknown"
+    assert error.retryable is False
+    assert error.message == "OpenAI Responses response failed"
+
+
+@pytest.mark.asyncio
+async def test_responses_completed_without_status_follows_pi_default() -> None:
+    body = 'data: {"type":"response.completed","response":{"output":[]}}\n\n'
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    final = events[-1]
+    assert isinstance(final, Done)
+    assert final.message.stop_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_responses_completed_with_null_output_follows_pi_default() -> None:
+    body = (
+        'data: {"type":"response.output_item.added","output_index":0,'
+        '"item":{"type":"message","id":"msg_1"}}\n\n'
+        'data: {"type":"response.output_text.delta","output_index":0,"delta":"hi"}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed","output":null}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    final = events[-1]
+    assert isinstance(final, Done)
+    assert final.message.stop_reason == "stop"
+    assert final.message.content == (TextBlock("hi"),)
+
+
+@pytest.mark.asyncio
+async def test_responses_ignores_unread_fields_on_non_function_output_items() -> None:
+    body = (
+        'data: {"type":"response.output_item.added","output_index":0,'
+        '"item":{"type":"tool_search_call","arguments":{}}}\n\n'
+        'data: {"type":"response.output_item.done","output_index":0,'
+        '"item":{"type":"tool_search_call","arguments":{}}}\n\n'
+        'data: {"type":"response.output_item.added","output_index":1,'
+        '"item":{"type":"message","id":"msg_1"}}\n\n'
+        'data: {"type":"response.output_text.delta","output_index":1,"delta":"hi"}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed","output":null}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    final = events[-1]
+    assert isinstance(final, Done)
+    assert final.message.content == (TextBlock("hi"),)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "body", "expected_kind"),
+    [
+        (
+            AnthropicAdapter,
+            "anthropic",
+            'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","code":529,"message":"Overloaded"}}\n\n',
+            "overloaded",
+        ),
+        (
+            GoogleAdapter,
+            "google",
+            'data: {"error":{"status":"RESOURCE_EXHAUSTED","code":"429","message":"busy"}}\n\n',
+            "rate_limit",
+        ),
+    ],
+)
+async def test_provider_error_ignores_unconsumed_code_types(
+    adapter_type: Any,
+    protocol: str,
+    body: str,
+    expected_kind: str,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == expected_kind
+    assert error.retryable is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [("content_filter", "safety"), ("unknown_reason", "error")],
@@ -596,6 +943,24 @@ async def test_responses_failed_or_cancelled_status_is_terminal_provider_error(s
     error = events[-1]
     assert isinstance(error, ProviderError)
     assert error.kind == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_responses_non_array_terminal_output_is_malformed() -> None:
+    body = (
+        'data: {"type":"response.completed","response":{"status":"completed","output":{}}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert "output" in error.message
 
 
 def test_responses_replay_preserves_output_item_order() -> None:
@@ -1488,6 +1853,32 @@ async def test_gemini_malformed_function_call_is_error_even_with_partial_call() 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("finish_reason", "expected_stop"),
+    [("SAFETY", "safety"), ("MAX_TOKENS", "length"), ("OTHER_ERROR", "error")],
+)
+async def test_gemini_non_tool_stop_preserves_calls_for_loop_settlement(
+    finish_reason: str,
+    expected_stop: str,
+) -> None:
+    body = (
+        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{"path":"x"}}}]}}]}\n\n'
+        f'data: {{"candidates":[{{"finishReason":"{finish_reason}"}}]}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(GoogleAdapter(client), _request("google"))
+
+    final = events[-1]
+    assert isinstance(final, Done)
+    assert final.message.stop_reason == expected_stop
+    assert len(final.message.tool_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("reason", "expected"),
     [
         ("SPII", "safety"),
@@ -2213,6 +2604,15 @@ _WIRE_EVENT_CASES = (
     (
         AnthropicAdapter,
         "anthropic",
+        'event: error\ndata: {"type":"error","error":{"type":"authentication_error","message":"bad key"}}\n\n',
+        "error",
+        None,
+        "auth",
+        False,
+    ),
+    (
+        AnthropicAdapter,
+        "anthropic",
         (
             'data: {"type":"message_start","message":{"usage":{"input_tokens":4}}}\n\n'
             'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n'
@@ -2240,6 +2640,15 @@ _WIRE_EVENT_CASES = (
         "error",
         None,
         "rate_limit",
+        False,
+    ),
+    (
+        OpenAIChatAdapter,
+        "openai_chat",
+        'data: {"error":{"type":"invalid_api_key","message":"bad key"}}\n\n',
+        "error",
+        None,
+        "auth",
         False,
     ),
     (
@@ -2310,12 +2719,30 @@ _WIRE_EVENT_CASES = (
         False,
     ),
     (
+        OpenAIResponsesAdapter,
+        "openai_responses",
+        'data: {"type":"error","error":{"code":"permission","message":"denied"}}\n\n',
+        "error",
+        None,
+        "auth",
+        False,
+    ),
+    (
         GoogleAdapter,
         "google",
         'data: {"error":{"status":"RESOURCE_EXHAUSTED","message":"busy"}}\n\n',
         "error",
         None,
         "rate_limit",
+        False,
+    ),
+    (
+        GoogleAdapter,
+        "google",
+        'data: {"error":{"status":"UNAUTHENTICATED","message":"bad key"}}\n\n',
+        "error",
+        None,
+        "auth",
         False,
     ),
     (
@@ -2346,6 +2773,175 @@ _WIRE_EVENT_CASES = (
         None,
     ),
 )
+
+
+_WIRE_SHAPE_CASES = (
+    (
+        AnthropicAdapter,
+        "anthropic",
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","signature":7}}\n\n',
+    ),
+    (
+        OpenAIChatAdapter,
+        "openai_chat",
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":[]}\n\n',
+    ),
+    (
+        OpenAIResponsesAdapter,
+        "openai_responses",
+        'data: {"type":"response.completed","response":{"status":"completed","usage":[]}}\n\n',
+    ),
+    (
+        GoogleAdapter,
+        "google",
+        'data: {"candidates":[{"content":{"parts":[{"text":"x","thought":"yes"}]}}]}\n\n',
+    ),
+    (
+        AnthropicAdapter,
+        "anthropic",
+        (
+            'data: {"type":"content_block_start","index":0,'
+            '"content_block":{"type":7}}\n\n'
+            'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+            'data: {"type":"message_stop"}\n\n'
+        ),
+    ),
+    (
+        AnthropicAdapter,
+        "anthropic",
+        (
+            'data: {"type":"content_block_start","index":0,'
+            '"content_block":{"type":"text"}}\n\n'
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":7}}\n\n'
+        ),
+    ),
+    (
+        AnthropicAdapter,
+        "anthropic",
+        (
+            'data: {"type":"message_delta","delta":{"stop_reason":7}}\n\n'
+            'data: {"type":"message_stop"}\n\n'
+        ),
+    ),
+    (
+        AnthropicAdapter,
+        "anthropic",
+        (
+            'data: {"type":"content_block_start","index":0,'
+            '"content_block":{"type":"tool_use","id":7,"name":"read"}}\n\n'
+        ),
+    ),
+    (
+        OpenAIChatAdapter,
+        "openai_chat",
+        (
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":"read"}]},'
+            '"finish_reason":"tool_calls"}]}\n\n'
+        ),
+    ),
+    (
+        OpenAIChatAdapter,
+        "openai_chat",
+        (
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":7,'
+            '"function":{"name":"read","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\n'
+        ),
+    ),
+    (
+        OpenAIChatAdapter,
+        "openai_chat",
+        'data: {"choices":[{"delta":{"reasoning_content":7},"finish_reason":"stop"}]}\n\n',
+    ),
+    (
+        OpenAIChatAdapter,
+        "openai_chat",
+        'data: {"choices":[{"delta":{"reasoning_details":{}},"finish_reason":"stop"}]}\n\n',
+    ),
+    (
+        OpenAIResponsesAdapter,
+        "openai_responses",
+        'data: {"type":"response.completed","response":{"status":5}}\n\n',
+    ),
+    (
+        OpenAIResponsesAdapter,
+        "openai_responses",
+        (
+            'data: {"type":"response.completed","response":'
+            '{"status":"completed","error":"boom"}}\n\n'
+        ),
+    ),
+    (
+        OpenAIResponsesAdapter,
+        "openai_responses",
+        (
+            'data: {"type":"response.incomplete","response":'
+            '{"status":"incomplete","incomplete_details":"max_output_tokens"}}\n\n'
+        ),
+    ),
+    (
+        GoogleAdapter,
+        "google",
+        'data: {"promptFeedback":{"blockReason":{"reason":"SAFETY"}}}\n\n',
+    ),
+    *(
+        (adapter, protocol, f"data: {json.dumps(frame)}\n\n")
+        for adapter, protocol, frame in [
+            (AnthropicAdapter, "anthropic", {"type": "error", "error": []}),
+            (AnthropicAdapter, "anthropic", {"type": "error", "error": {"message": 7}}),
+            (OpenAIChatAdapter, "openai_chat", {"choices": [{"usage": [], "finish_reason": "stop"}]}),
+            (OpenAIChatAdapter, "openai_chat", {"choices": [{"delta": {"reasoning": 2}, "finish_reason": "stop"}]}),
+            (OpenAIChatAdapter, "openai_chat", {"choices": [{"delta": {"reasoning_text": 2}, "finish_reason": "stop"}]}),
+            (OpenAIChatAdapter, "openai_chat", {"choices": [{"delta": {"tool_calls": [{"index": "0", "function": {"name": "read"}}]}, "finish_reason": "tool_calls"}]}),
+            (OpenAIResponsesAdapter, "openai_responses", {"type": "response.created", "response": {"status": 2}}),
+            (OpenAIResponsesAdapter, "openai_responses", {"type": "error", "error": {"code": []}}),
+            (OpenAIResponsesAdapter, "openai_responses", {"type": "error", "error": {"type": 7}}),
+            (OpenAIResponsesAdapter, "openai_responses", {"type": "response.output_item.added", "item": {"type": 2}}),
+            (OpenAIResponsesAdapter, "openai_responses", {"type": "response.output_item.done", "item": {"type": "message", "content": {}}}),
+            (OpenAIResponsesAdapter, "openai_responses", {"type": "response.function_call_arguments.delta", "item_id": 2, "delta": "{}"}),
+            (OpenAIResponsesAdapter, "openai_responses", {"type": "response.failed", "error": {"message": 7, "code": []}}),
+            (OpenAIResponsesAdapter, "openai_responses", {"type": "response.failed", "response": {"error": {"message": 7}}}),
+            (OpenAIResponsesAdapter, "openai_responses", {"type": "response.failed", "response": {"error": [], "usage": {"input_tokens": 4}}}),
+            (OpenAIResponsesAdapter, "openai_responses", {"type": "response.failed", "response": {"usage": []}}),
+            (OpenAIResponsesAdapter, "openai_responses", {"type": "response.incomplete", "response": {"status": "incomplete", "incomplete_details": {"reason": 2}}}),
+            (GoogleAdapter, "google", {"promptFeedback": "blocked", "candidates": [{"finishReason": "STOP"}]}),
+            (GoogleAdapter, "google", {"error": {"message": 7}}),
+            (GoogleAdapter, "google", {"usageMetadata": {"promptTokenCount": -1}}),
+            (GoogleAdapter, "google", {"usageMetadata": {"candidatesTokenCount": "2"}}),
+            (GoogleAdapter, "google", {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"functionCall": {"id": 2, "name": "read"}}]}}]}),
+        ]
+    ),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["http", "named", "data"])
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "error", "kind"),
+    [
+        (AnthropicAdapter, "anthropic", {"type": "permission_error", "message": "denied"}, "auth"),
+        (OpenAIChatAdapter, "openai_chat", {"code": "invalid_api_key", "message": "denied"}, "auth"),
+        (OpenAIResponsesAdapter, "openai_responses", {"code": "server_error", "message": "busy"}, "server"),
+        (GoogleAdapter, "google", {"status": "INVALID_ARGUMENT", "message": "denied", "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_INVALID"}]}, "auth"),
+    ],
+)
+async def test_provider_error_envelope_is_classified_identically_from_every_source(
+    source: str, adapter_type: Any, protocol: str, error: dict[str, Any], kind: str,
+) -> None:
+    envelope = json.dumps({"type": "error", "error": error})
+    body = envelope if source == "http" else (
+        ("event: error\n" if source == "named" else "") + f"data: {envelope}\n\n"
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(400 if source == "http" else 200, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    assert len(events) == 1
+    assert isinstance(events[0], ProviderError)
+    assert events[0].kind == kind
+    assert events[0].retryable == (kind == "server")
 
 
 @pytest.mark.asyncio
@@ -2381,6 +2977,25 @@ async def test_wire_event_matrix_has_one_explicit_outcome(
             assert terminal.partial is not None
         elif partial is False:
             assert terminal.partial is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("adapter_type", "protocol", "body"), _WIRE_SHAPE_CASES)
+async def test_known_wire_fields_with_wrong_types_are_terminal_malformed(
+    adapter_type: Any,
+    protocol: str,
+    body: str,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    terminals = [event for event in events if isinstance(event, (Done, ProviderError))]
+    assert len(terminals) == 1
+    assert isinstance(terminals[0], ProviderError)
+    assert terminals[0].kind == "invalid_request"
 
 
 @pytest.mark.asyncio

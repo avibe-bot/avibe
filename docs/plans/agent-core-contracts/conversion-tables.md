@@ -12,6 +12,7 @@ rules on top of those mappings.
 | Concern | Rule |
 | --- | --- |
 | Request model | `ModelRequest.endpoint.model_id` is sent as the runtime model. The endpoint token is used only for request authentication. |
+| Request URL | `join_endpoint_url` parses the endpoint with `urllib.parse`, joins the protocol path before any existing query, preserves the base query, and appends protocol query fields such as Gemini `alt=sse` only when that key is not already present. A complete protocol URL is reused by operation suffix. Adapters do not concatenate endpoint strings. |
 | System prompt | Sent from `ModelRequest.system`; it is never added to the persisted message history. |
 | Images | `ImageBlock.media_token` is resolved by `MediaLoader` immediately before the request. Unknown `supports_images` is false, so the cross-provider transform replaces each image with `[image: <name or mime>]`. |
 | Tool ids | A safe stored id is preserved when accepted by the target. Otherwise the per-request map uses `call_` plus the first 24 hex characters of SHA-256. The same map rewrites tool results. |
@@ -21,6 +22,7 @@ rules on top of those mappings.
 | Retry boundary | `ProviderError.retryable` is false once any model content delta or tool-call start/delta was emitted. A Responses `ToolCallStart` therefore makes a later provider failure non-retryable. |
 | Partial and abort | The shared `partial_message` policy is used by all four adapters. Usage captured before the first visible delta is retained, and errors/abort carry an assembled `AssistantMessage` whenever visible content or usage exists; empty placeholder slots alone do not count as streamed output, while non-empty terminal snapshots do. Consumer/task cancellation is preserved even if response cleanup fails. |
 | Retry admission | `RetryPolicy.delay` in `core/agent_core/agent/models.py` applies only the bounded retry count/time budget and obeys `ProviderError.retryable`; it does not reject a usage-only partial or infer a second streamed-output boundary. `test_retry_obeys_provider_flag_and_allows_usage_only_partial` is the loop proof. |
+| Tool-call stop normalization | `StreamAssembler.finalize` changes only `stop` with one or more tool calls to canonical `tool_use`, following Pi. The loop admits execution only for `stop_reason="tool_use"`; calls attached to `length`, `safety`, `refusal`, or `error` are settled as `is_error` results explaining the stop reason. |
 
 ## Shared stream assembler and dispatch ledger
 
@@ -46,6 +48,91 @@ validates the shape of that known event and emits exactly one terminal
 `invalid_request` error for malformed metadata. Thus a future event type is
 forward-compatible, while a known event with an invalid payload cannot become a
 successful response.
+
+## Wire-shape validation tables
+
+These tables enumerate every known event handled by each adapter. A required
+field is present in every valid frame. An optional field may be omitted or
+`null` only where the table says so. A present field with the wrong JSON type is
+a terminal `ProviderError(kind="invalid_request")`; unknown event types and
+unknown fields follow Pi and are ignored.
+
+### Anthropic Messages
+
+| Event | Required fields and types | Optional fields and types |
+| --- | --- | --- |
+| `message_start` | `message: object` | `message.usage: object` |
+| `content_block_start` | `index: non-negative integer`, `content_block: object`, `content_block.type: string` | text/thinking `text`/`thinking`/`signature: string`; redacted `data: non-empty string`; tool `id`/`name: string`, `input: object` |
+| `content_block_delta` | `index: non-negative integer`, `delta: object`, `delta.type: string` | `text_delta.text`, `thinking_delta.thinking`, `signature_delta.signature`, `input_json_delta.partial_json: string` |
+| `content_block_stop` | `index: non-negative integer` | none |
+| `message_delta` | none | `delta: object`, `delta.stop_reason: string`, `usage: object` |
+| `message_stop` | none | none |
+| `error` (named SSE or data-only) | `error: object` when an envelope is present | `error.type`/`error.message: string`; provider extension fields such as `code` are ignored |
+| `ping` | none | none |
+
+### OpenAI Chat Completions
+
+| Wire frame | Required fields and types | Optional fields and types |
+| --- | --- | --- |
+| normal chunk | JSON object | `choices: array`, `usage: object`, `error: object` |
+| choice | `choice: object` | `delta: object`, `finish_reason: string`, `usage: object` |
+| delta text/refusal/reasoning | `content`/`refusal`/`reasoning_content`/`reasoning`/`reasoning_text: string` | each field may be omitted or `null` |
+| `reasoning_details` | array when present | entries are provider objects |
+| `tool_calls` | array when present | entries: `object`; `index: integer`, `id: string`, `function: object`; function `name`/`arguments: string` |
+| legacy `function_call` | object when present | `name`/`arguments: string` |
+| top-level `error` | object when present | `type`/`message: string`, `code: string or integer` (integer codes are ignored for classification) |
+| `[DONE]` | sentinel data | no JSON fields |
+
+### OpenAI Responses
+
+| Event | Required fields and types | Optional fields and types |
+| --- | --- | --- |
+| `response.created`, `response.in_progress` | `type: string` | `response: object`, `response.status: string` |
+| `response.queued` | `type: string` | none |
+| output/refusal/reasoning delta | `type: string`, `delta: string` | `output_index: non-negative integer` |
+| `response.output_item.added` | `item: object`; `item.type: string` | `output_index: non-negative integer`; function item `id`/`call_id`/`name`/`arguments: string` |
+| `response.output_item.done` | `item: object` when present; `item.type: string` | same function fields; `output_index: non-negative integer` |
+| function-call argument delta/done | `delta` or `arguments: string` when present | `item_id: string`, `output_index: non-negative integer` |
+| custom-tool input delta/done | `type: string` | provider-specific fields are ignored |
+| content/output/reasoning done events | `type: string` | `output_index: non-negative integer` |
+| `response.completed`, `response.incomplete` | `response: object` | `response.status: string`, `output: array`, `usage: object`, `incomplete_details: object`, `error: object` |
+| `response.failed` | `type: string` | `response: object`, `response.error: object`, `response.usage: object` |
+| top-level `error` | `error: object` or `message: string` | `error.type`/`error.message: string`, `error.code: string or integer` |
+
+`response.output` is validated even when empty. If it is present and is not an
+array, the terminal is malformed rather than a successful empty response.
+
+### Google Gemini
+
+| Wire shape | Required fields and types | Optional fields and types |
+| --- | --- | --- |
+| normal frame | JSON object | `candidates: array`, `usageMetadata: object`, `promptFeedback: object` |
+| top-level `error` | object when present | `status`/`message: string`; provider `code` is preserved in the envelope but ignored for classification |
+| candidate | object | `finishReason: string`, `content: object` |
+| candidate content | `parts: array` when present | none |
+| part | object | `text: string`, `thought: boolean`, `thoughtSignature: string`, `functionCall: object` |
+| function call | object when present | `id`/`name: string`, `args: object` or JSON string |
+| prompt feedback | object when present | `blockReason: string` |
+| `usageMetadata` | object when present | token counters are non-negative integers |
+
+### Provider error classification
+
+All four adapters route named error frames, data-only error frames, and HTTP
+error bodies through `StreamAssembler.error` and the shared `ProviderError`
+classifier. Each protocol translator supplies the provider-specific envelope
+or extracted message/code pair that its wire format makes available.
+
+| Protocol | Auth | Rate limit | Overload/server | Overflow/context |
+| --- | --- | --- | --- | --- |
+| Anthropic | `authentication_error`, `invalid_api_key`, `permission_error`, `permission` | `rate_limit_error` | `overloaded_error` → `overloaded`; `api_error` → `server` | `invalid_request_error` with context text; `context_length_exceeded` → `overflow` |
+| OpenAI Chat | `authentication_error`, `invalid_api_key`, `permission` | `rate_limit_error`, `too_many_requests` | `server_error`, `api_error` | `context_length_exceeded`, `request_too_large` |
+| OpenAI Responses | `unauthenticated`, `permission_denied`, `invalid_api_key` | `rate_limit`, `rate_limit_error` | `overloaded`, `server_error`, `service_unavailable` | `context_length_exceeded`, `request_too_large` |
+| Gemini | `UNAUTHENTICATED`, `PERMISSION_DENIED`, `API_KEY_INVALID` (including nested `ErrorInfo.reason`) | `RESOURCE_EXHAUSTED` | `UNAVAILABLE`, `DEADLINE_EXCEEDED`, `INTERNAL` | `context_length_exceeded`, `INVALID_ARGUMENT` with overflow text |
+
+HTTP `401/403` always map to `auth`, `413` to `overflow`, `429` to
+`rate_limit` with `Retry-After`, and `5xx` to `server` or `overloaded`.
+Transport errors map to `network`. Every classification is non-retryable once
+the assembler has emitted visible content or a tool-call event.
 
 ## Endpoint identity and redaction ledger
 
@@ -86,6 +173,7 @@ origin, retry, cancellation, media, or message-shape rules.
 | Responses | `:655-671` function-call argument delta/done | `OpenAIResponsesAdapter._stream` → argument branches | Same suffix and replacement rules; malformed metadata is canonical `invalid_request`. |
 | Responses | `:683-742` output-item finalization | `OpenAIResponsesAdapter._stream` and `_apply_terminal_output_items` | `output_item.done` follows Pi for arrival-order slots, argument finalization, and reasoning signatures; consecutive calls with omitted `output_index` are rebound by item id to prevent call loss (rule (b)); terminal `response.output` only backfills an existing reasoning signature, while refusal status is a C-2 deviation. |
 | Responses | `:743-744` completed/incomplete | `OpenAIResponsesAdapter._stream` → completed/incomplete branch | Same terminal response ownership; canonical stop reasons and usage, with cached read/write tokens excluded from `input_tokens`. |
+| Responses | terminal `response.output` shape | `OpenAIResponsesAdapter._stream` → terminal response validation | Same successful output-array contract; a present non-array output is a terminal malformed error, preventing a false empty success (rule (b), false information prevention). |
 | Responses | `:745-757` provider error/failed | `OpenAIResponsesAdapter._stream` → failed/error branches | Same classification, with Avibe's streamed retry boundary and partial message. |
 | Responses | `:759-777` missing terminal/unfinished call | `OpenAIResponsesAdapter._stream` → `StreamAssembler.unfinished_tool_calls` | Same terminal requirement; Avibe emits canonical `ProviderError`. |
 | Responses | unknown event fallthrough | `dispatch_wire_event` and `_KNOWN_RESPONSE_EVENTS` | Same: ignored for forward compatibility. |
@@ -108,6 +196,7 @@ origin, retry, cancellation, media, or message-shape rules.
 | Google | `google-generative-ai.ts:130-173` text/thought parts | `GoogleAdapter._stream` → candidate parts | Same thought marker; thought signatures are retained on the originating thinking block, or on an empty canonical thinking block when a signed non-thinking text part has no thinking block (canonical schema has no text signature field). A later text signature cannot replace an existing signed thinking block. |
 | Google | `:175-220` function-call parts | `GoogleAdapter._stream` → function-call parts | Same call emission; ID-less parallel parts remain distinct as required by C-2 canonical history. |
 | Google | `:224-251` finish reason and usage | `GoogleAdapter._stream` → finish/usage branches | Usage subtracts cached-content tokens from `input_tokens`; Avibe retains canonical `safety` for safety finishes under C-2 while Pi maps the safety family to `error`; unknown/failure reasons become canonical `Done(stop_reason="error")` instead of Pi's provider error. |
+| All | known event field shape | each adapter's dispatch branch and the wire-shape tables above | Present wrong-type fields are terminal `invalid_request`; optional fields may be absent or null; unknown event types remain ignored like Pi. |
 | Google | `:254-283` final block/abort checks | `GoogleAdapter._stream` → final/cleanup branches | Same terminal requirement and assembled partial policy. |
 | Google | top-level error/prompt feedback | `GoogleAdapter._stream` → error/prompt feedback | Same provider error classification with retryable transient status codes; prompt blocking is canonical `safety` under C-2 although Pi has no equivalent prompt-feedback branch. |
 | Google | unknown fields/parts | `dispatch_wire_event` and candidate-part branches | Same permissive ignore behavior for fields Pi does not consume. |

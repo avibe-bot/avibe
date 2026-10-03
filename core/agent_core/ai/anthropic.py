@@ -20,6 +20,7 @@ from core.agent_core.ai._common import (
     drive_sse_stream,
     dispatch_wire_event,
     endpoint_origin,
+    join_endpoint_url,
     json_object,
     prepare_messages,
     StreamAssembler,
@@ -125,7 +126,7 @@ class AnthropicAdapter(ProviderAdapter):
             payload = build_messages_payload(request, transformed_messages, loaded_images=loaded_images)
             headers = auth_headers(request.endpoint, provider="anthropic", gateway=self._gateway)
             headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
-            url = _endpoint_url(request.endpoint.base_url, "/messages")
+            url = join_endpoint_url(request.endpoint.base_url, "/messages")
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal message_started, message_stopped, stop_reason
                 async for event in events:
@@ -137,7 +138,21 @@ class AnthropicAdapter(ProviderAdapter):
                     if event.data == "[DONE]" or not event.data:
                         continue
                     if event.event == "error":
-                        terminal = assembler.terminal(assembler.error(event.data))
+                        error_chunk = json_object(event.data)
+                        if isinstance(error_chunk, Mapping):
+                            shape_error = _error_event_shape_error(error_chunk)
+                            if shape_error is not None:
+                                terminal = assembler.terminal(
+                                    assembler.error(shape_error, kind="invalid_request")
+                                )
+                            else:
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        json.dumps(dict(error_chunk), ensure_ascii=False),
+                                    )
+                                )
+                        else:
+                            terminal = assembler.terminal(assembler.error(event.data))
                         if terminal is not None:
                             yield terminal
                         return
@@ -203,6 +218,16 @@ class AnthropicAdapter(ProviderAdapter):
                                 yield terminal
                             return
                         kind = block.get("type")
+                        if not isinstance(kind, str):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "content_block type must be a string",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         if kind == "fallback":
                             if assembler.has_content():
                                 terminal = assembler.terminal(
@@ -235,7 +260,18 @@ class AnthropicAdapter(ProviderAdapter):
                                 if emitted is not None:
                                     yield emitted
                         elif kind == "thinking":
-                            signature = block.get("signature")
+                            raw_signature = block.get("signature")
+                            if raw_signature is not None and not isinstance(raw_signature, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "thinking signature must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            signature = raw_signature
                             signature = signature if isinstance(signature, str) and signature else None
                             block_state[index] = {"kind": "thinking"}
                             assembler.ensure_thinking_slot(index, signature=signature)
@@ -269,8 +305,30 @@ class AnthropicAdapter(ProviderAdapter):
                             assembler.redacted_thinking(index, signature)
                             block_state[index] = {"kind": "redacted"}
                         elif kind == "tool_use":
-                            native_id = _string(block.get("id")) or None
-                            name = _string(block.get("name"))
+                            raw_id = block.get("id")
+                            if raw_id is not None and not isinstance(raw_id, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "tool_use id must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            raw_name = block.get("name")
+                            if raw_name is not None and not isinstance(raw_name, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        "tool_use name must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            native_id = _string(raw_id) or None
+                            name = _string(raw_name)
                             if not name:
                                 terminal = assembler.terminal(
                                     assembler.error("tool_use name must not be empty", kind="invalid_request")
@@ -313,6 +371,16 @@ class AnthropicAdapter(ProviderAdapter):
                                 yield terminal
                             return
                         delta_type = delta.get("type")
+                        if not isinstance(delta_type, str):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "content_block_delta type must be a string",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         state = block_state.get(index)
                         if state is None:
                             # Pi ignores content deltas for block kinds it
@@ -428,14 +496,30 @@ class AnthropicAdapter(ProviderAdapter):
                             return
                         if isinstance(delta, Mapping):
                             if delta.get("stop_reason") is not None:
+                                if not isinstance(delta.get("stop_reason"), str):
+                                    terminal = assembler.terminal(
+                                        assembler.error(
+                                            "message_delta stop_reason must be a string",
+                                            kind="invalid_request",
+                                        )
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
                                 stop_reason = _normalize_stop_reason(delta.get("stop_reason"))
                         assembler.set_usage(_merge_anthropic_usage(assembler.usage, usage))
                     elif event_type == "error":
-                        message = _error_event_message(chunk)
+                        shape_error = _error_event_shape_error(chunk)
+                        if shape_error is not None:
+                            terminal = assembler.terminal(
+                                assembler.error(shape_error, kind="invalid_request")
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                         terminal = assembler.terminal(
                             assembler.error(
-                                message,
-                                code=_error_event_code(chunk),
+                                json.dumps(dict(chunk), ensure_ascii=False),
                             )
                         )
                         if terminal is not None:
@@ -637,9 +721,16 @@ def _mark_message_breakpoints(messages: list[dict[str, Any]]) -> None:
                 last["cache_control"] = {"type": "ephemeral"}
 
 
-def _error_event_code(chunk: Mapping[str, Any]) -> str | None:
+def _error_event_shape_error(chunk: Mapping[str, Any]) -> str | None:
     error = chunk.get("error")
-    return _string(error.get("type")) if isinstance(error, Mapping) else None
+    if error is not None and not isinstance(error, Mapping):
+        return "Anthropic error must be an object"
+    if isinstance(error, Mapping):
+        for field in ("type", "message"):
+            value = error.get(field)
+            if value is not None and not isinstance(value, str):
+                return f"Anthropic error {field} must be a string"
+    return None
 
 
 def _anthropic_usage(value: Any) -> Any:
@@ -703,18 +794,6 @@ def _normalize_stop_reason(value: Any) -> str:
 
 def _anthropic_effort(effort: str) -> str:
     return {"minimal": "low", "xhigh": "max"}.get(effort, effort)
-
-
-def _endpoint_url(base_url: str, suffix: str) -> str:
-    base = base_url.rstrip("/")
-    return base if base.endswith(suffix) else f"{base}{suffix}"
-
-
-def _error_event_message(chunk: Mapping[str, Any]) -> str:
-    error = chunk.get("error")
-    if isinstance(error, Mapping) and isinstance(error.get("message"), str):
-        return error["message"]
-    return json.dumps(dict(chunk), ensure_ascii=False)
 
 
 def _string(value: Any) -> str:

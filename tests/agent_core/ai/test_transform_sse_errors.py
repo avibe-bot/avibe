@@ -98,6 +98,31 @@ def test_cross_provider_transform_drops_opaque_payload_and_answers_orphaned_call
     assert synthetic.is_error is True  # type: ignore[attr-defined]
 
 
+def test_cross_provider_transform_drops_results_for_failed_tool_turns() -> None:
+    history = (
+        UserMessage((TextBlock(text="request"),)),
+        AssistantMessage(
+            content=(ToolCallBlock("failed-call", "read", {}),),
+            origin=Origin("openai", "openai_chat", "model"),
+            stop_reason="error",
+        ),
+        ToolResultMessage(
+            tool_call_id="failed-call",
+            tool_name="read",
+            content=(TextBlock(text="settled"),),
+            is_error=True,
+        ),
+        UserMessage((TextBlock(text="next request"),)),
+    )
+
+    transformed = transform_messages(history, Origin("anthropic", "anthropic", "model"))
+
+    assert not any(
+        isinstance(message, ToolResultMessage) and message.tool_call_id == "failed-call"
+        for message in transformed.messages
+    )
+
+
 def test_transform_keeps_normalized_tool_ids_unique_per_request() -> None:
     unsafe_id = "bad:id"
     colliding_safe_id = "call_" + hashlib.sha256(unsafe_id.encode()).hexdigest()[:24]
@@ -215,6 +240,50 @@ def test_overflow_classifies_cerebras_bodyless_status() -> None:
 def test_auth_statuses_are_not_retryable(status: int) -> None:
     error = classify_error(status=status, body="denied")
     assert error.kind == "auth"
+    assert error.retryable is False
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "authentication_error",
+        "invalid_api_key",
+        "permission_error",
+        "permission",
+        "permission_denied",
+        "unauthenticated",
+    ],
+)
+def test_provider_auth_codes_are_not_retryable(code: str) -> None:
+    error = classify_error(code=code, body=f'{{"error":{{"code":"{code}"}}}}')
+
+    assert error.kind == "auth"
+    assert error.retryable is False
+
+
+def test_google_invalid_api_key_reason_overrides_invalid_argument_status() -> None:
+    error = classify_error(
+        status=400,
+        body=(
+            '{"error":{"status":"INVALID_ARGUMENT",'
+            '"details":[{"reason":"API_KEY_INVALID"}]}}'
+        ),
+    )
+
+    assert error.kind == "auth"
+    assert error.retryable is False
+
+
+def test_specific_provider_code_precedes_nested_detail_code() -> None:
+    error = classify_error(
+        status=400,
+        body=(
+            '{"error":{"code":"context_length_exceeded",'
+            '"details":[{"type":"rate_limit"}]}}'
+        ),
+    )
+
+    assert error.kind == "overflow"
     assert error.retryable is False
 
 

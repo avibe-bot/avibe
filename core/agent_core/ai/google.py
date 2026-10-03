@@ -18,6 +18,7 @@ from core.agent_core.ai._common import (
     content_parts,
     drive_sse_stream,
     endpoint_origin,
+    join_endpoint_url,
     json_object,
     prepare_messages,
     StreamAssembler,
@@ -107,7 +108,10 @@ class GoogleAdapter(ProviderAdapter):
             payload = build_google_payload(request, transformed_messages, loaded_images=loaded_images)
             headers = auth_headers(request.endpoint, provider="google", gateway=self._gateway)
             headers.setdefault("content-type", "application/json")
-            url = _google_url(request.endpoint.base_url, request.endpoint.model_id)
+            url = join_endpoint_url(
+                request.endpoint.base_url,
+                f"/models/{request.endpoint.model_id}:streamGenerateContent?alt=sse",
+            )
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal finish_reason, protocol_terminal, part_sequence
                 nonlocal text_key, thinking_key, last_part_kind
@@ -136,26 +140,63 @@ class GoogleAdapter(ProviderAdapter):
                             yield terminal
                         return
                     if isinstance(top_level_error, Mapping):
+                        for field in ("status", "message"):
+                            value = top_level_error.get(field)
+                            if value is not None and not isinstance(value, str):
+                                terminal = assembler.terminal(
+                                    assembler.error(
+                                        f"Gemini error {field} must be a string",
+                                        kind="invalid_request",
+                                    )
+                                )
+                                if terminal is not None:
+                                    yield terminal
+                                return
                         terminal = assembler.terminal(
                             assembler.error(
-                                _string(top_level_error.get("message"))
-                                or json.dumps(dict(chunk), ensure_ascii=False),
-                                code=_string(top_level_error.get("status"))
-                                or _string(top_level_error.get("code"))
-                                or None,
+                                json.dumps(dict(chunk), ensure_ascii=False),
                             )
                         )
                         if terminal is not None:
                             yield terminal
                         return
-                    if chunk.get("usageMetadata") is not None and not isinstance(chunk.get("usageMetadata"), Mapping):
+                    raw_usage = chunk.get("usageMetadata")
+                    if raw_usage is not None and not isinstance(raw_usage, Mapping):
                         terminal = assembler.terminal(
                             assembler.error("Gemini usageMetadata must be an object", kind="invalid_request")
                         )
                         if terminal is not None:
                             yield terminal
                         return
-                    assembler.set_usage(_gemini_usage(chunk.get("usageMetadata")))
+                    usage_shape_error = _gemini_usage_shape_error(raw_usage)
+                    if usage_shape_error is not None:
+                        terminal = assembler.terminal(
+                            assembler.error(usage_shape_error, kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    assembler.set_usage(_gemini_usage(raw_usage))
+                    feedback = chunk.get("promptFeedback")
+                    if feedback is not None and not isinstance(feedback, Mapping):
+                        terminal = assembler.terminal(
+                            assembler.error("Gemini promptFeedback must be an object", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    if isinstance(feedback, Mapping):
+                        block_reason = feedback.get("blockReason")
+                        if block_reason is not None and not isinstance(block_reason, str):
+                            terminal = assembler.terminal(
+                                assembler.error(
+                                    "Gemini blockReason must be a string",
+                                    kind="invalid_request",
+                                )
+                            )
+                            if terminal is not None:
+                                yield terminal
+                            return
                     candidates = chunk.get("candidates")
                     if candidates is not None and not isinstance(candidates, list):
                         terminal = assembler.terminal(
@@ -165,7 +206,6 @@ class GoogleAdapter(ProviderAdapter):
                             yield terminal
                         return
                     if not isinstance(candidates, list) or not candidates:
-                        feedback = chunk.get("promptFeedback")
                         if isinstance(feedback, Mapping) and feedback.get("blockReason"):
                             finish_reason = "SAFETY"
                             protocol_terminal = True
@@ -210,6 +250,14 @@ class GoogleAdapter(ProviderAdapter):
                                 if not isinstance(part, Mapping):
                                     terminal = assembler.terminal(
                                         assembler.error("Gemini part must be an object", kind="invalid_request")
+                                    )
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
+                                raw_thought = part.get("thought")
+                                if raw_thought is not None and not isinstance(raw_thought, bool):
+                                    terminal = assembler.terminal(
+                                        assembler.error("Gemini thought must be a boolean", kind="invalid_request")
                                     )
                                     if terminal is not None:
                                         yield terminal
@@ -276,6 +324,28 @@ class GoogleAdapter(ProviderAdapter):
                                     if last_part_kind != "tool":
                                         part_sequence += 1
                                     last_part_kind = "tool"
+                                    raw_id = function_call.get("id")
+                                    if raw_id is not None and not isinstance(raw_id, str):
+                                        terminal = assembler.terminal(
+                                            assembler.error(
+                                                "Gemini functionCall id must be a string",
+                                                kind="invalid_request",
+                                            )
+                                        )
+                                        if terminal is not None:
+                                            yield terminal
+                                        return
+                                    raw_name = function_call.get("name")
+                                    if raw_name is not None and not isinstance(raw_name, str):
+                                        terminal = assembler.terminal(
+                                            assembler.error(
+                                                "Gemini functionCall name must be a string",
+                                                kind="invalid_request",
+                                            )
+                                        )
+                                        if terminal is not None:
+                                            yield terminal
+                                        return
                                     explicit_id = _string(function_call.get("id"))
                                     name = _string(function_call.get("name"))
                                     if not name:
@@ -502,6 +572,26 @@ def _gemini_usage(value: Any) -> Any:
     )
 
 
+def _gemini_usage_shape_error(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        return "Gemini usageMetadata must be an object"
+    for field in (
+        "promptTokenCount",
+        "candidatesTokenCount",
+        "totalTokenCount",
+        "cachedContentTokenCount",
+        "thoughtsTokenCount",
+    ):
+        raw = value.get(field)
+        if raw is not None and (
+            not isinstance(raw, int) or isinstance(raw, bool) or raw < 0
+        ):
+            return f"Gemini usageMetadata {field} must be a non-negative integer"
+    return None
+
+
 def _thinking_config(model: str, effort: str | None) -> dict[str, Any] | None:
     if effort is None:
         return None
@@ -569,12 +659,6 @@ def _sanitize_schema(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_schema(item) for item in value]
     return value
-
-
-def _google_url(base_url: str, model: str) -> str:
-    base = base_url.rstrip("/")
-    suffix = f"/models/{model}:streamGenerateContent?alt=sse"
-    return base if base.endswith(":streamGenerateContent?alt=sse") else f"{base}{suffix}"
 
 
 def _string(value: Any) -> str:
