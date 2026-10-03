@@ -22,12 +22,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional, Sequence
+from typing import Any, AsyncIterator, Callable, Optional, Sequence
 
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Engine
@@ -66,7 +67,9 @@ from core.services.agent_steering import (
 from core.backend_failure import emit_backend_failure
 from core.message_output import MessageOutput, stop_output_for, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import process_reply, strip_silent_blocks
+from core.skill_observability import accept_catalog
 from modules.agents.avibe.errors import error_text
 from modules.agents.avibe.media import MediaSnapshots
 from modules.agents.avibe.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
@@ -100,6 +103,19 @@ _PROCESS_STARTED_AT = datetime.now(timezone.utc)
 _JOB_PRUNE_INTERVAL_S = 3600.0
 
 
+def _relative_to(cwd: str) -> Callable[[str], str]:
+    """Tool-call paths relative to the run's cwd, as the Claude backend shows them."""
+
+    def relative(path: str) -> str:
+        absolute = os.path.abspath(os.path.expanduser(path))
+        if not cwd:
+            return absolute
+        shown = os.path.relpath(absolute, cwd)
+        return absolute if shown.startswith("../..") else shown
+
+    return relative
+
+
 def _instant(value: Any) -> Optional[datetime]:
     """A stored UTC timestamp (``...Z``) as an aware ``datetime``, or ``None``."""
     text = str(value or "").strip()
@@ -123,7 +139,6 @@ class _Run:
     session_id: str
     turn_id: str
     cwd: str
-    started_at: float = field(default_factory=time.monotonic)
     reason: Optional[str] = None
     errors: list[tuple[str, str]] = field(default_factory=list)
     final_row: Optional[str] = None
@@ -209,17 +224,25 @@ class AvibeAgent(BaseAgent):
             except Exception as error:
                 await self._fail_preflight(request, error)
                 return
-            run = self._new_run(request, session_id, turn_id, cwd, router, await self._avibe_sections(request, cwd))
+            sections, skill_catalog = await self._avibe_sections(request, cwd)
+            run = self._new_run(request, session_id, turn_id, cwd, router, sections)
             runtime.cwd = cwd
             runtime.run = run
             try:
+                try:
+                    # Prepared before anything is dispatched (``core.native_dispatch_phase``).
+                    message = await self._render_input(
+                        session_id, request.message, request.files, request.input_metadata
+                    )
+                except Exception as error:
+                    logger.exception("Avibe Agent could not prepare the input for Session %s", session_id)
+                    await self._fail(request, "generic", f"input preparation failed: {error}", cause=error)
+                    return
                 # Native acceptance materializes the input row the loop consumes.
                 self.bind_agent_session_id(request, session_id)
                 mark_backend_dispatch_attempted(context)
                 self.mark_runtime_turn_started(context)
-                message = await self._render_input(
-                    session_id, request.message, request.files, request.input_metadata
-                )
+                accept_catalog(self.controller, context, skill_catalog, backend=BACKEND)
                 agent_input: Optional[AgentInput] = AgentInput(input_id, message)
                 while agent_input is not None:
                     if run.stop_requested:
@@ -232,6 +255,7 @@ class AvibeAgent(BaseAgent):
                         await self._on_event(run, event)
                     agent_input = await self._continuing_input(run)
                 await self._settle(run)
+                self._maybe_backfill_session_title(request, session_id)
             finally:
                 runtime.run = None
                 await self._admit_returned_inputs(run)
@@ -507,7 +531,7 @@ class AvibeAgent(BaseAgent):
                     context,
                     body,
                     subtype="error" if failed else "success",
-                    started_at=run.started_at,
+                    started_at=request.started_at,
                     request=request,
                     output=replace(terminal_output_for(request), persisted_row_id=run.final_row),
                 )
@@ -518,6 +542,8 @@ class AvibeAgent(BaseAgent):
                 )
             return
         if run.stop_requested and reason == "aborted":
+            # The stop receipt IM shows, as for the other backends.
+            await self._remove_ack_reaction(request, terminal_emoji=STOPPED_REACTION_EMOJI)
             await self.controller.emit_agent_message(
                 context, "result", "", level="silent", output=stop_output_for(request)
             )
@@ -581,7 +607,15 @@ class AvibeAgent(BaseAgent):
         input renders after a restart exactly as it would have live.
         """
         owner = getattr(getattr(self.controller, "session_turns", None), "_steer_input_metadata", None)
-        return await owner([delivery]) if callable(owner) else None
+        if not callable(owner):
+            return None
+        try:
+            return await owner([delivery])
+        except Exception:
+            # The input is admitted regardless (T3 never drops one): a recovered input whose
+            # sender facts cannot be rebuilt must not stop every later Turn of the Session.
+            logger.exception("Avibe Agent could not rebuild sender facts for input %s", delivery.get("id"))
+            return None
 
     async def _settle_open_calls(self, runtime: _SessionRuntime) -> None:
         """T2: one committed result for every open tool call, chosen from its job's state."""
@@ -645,6 +679,8 @@ class AvibeAgent(BaseAgent):
                     messages.c.content_text,
                     messages.c.content_json,
                     message_deliveries.c.id.label("delivery_id"),
+                    message_deliveries.c.turn_role,
+                    session_turns.c.dispatch_text.label("turn_dispatch_text"),
                 )
                 .select_from(
                     messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
@@ -673,9 +709,15 @@ class AvibeAgent(BaseAgent):
                     conn, session_id=session_id, attachments=list(content.get("attachments") or [])
                 )
                 delivery = delivery_store.get_delivery(conn, row["delivery_id"])
-                inputs.append(
-                    (row["id"], row["content_text"] or "", list(file_attachments_from_specs(specs) or ()), delivery)
+                # A Turn's initial input is sent as the Turn's dispatch text, which the Turn owner
+                # derived from its Delivery batch (attachment notes, merged scheduled inputs) and
+                # keeps after acceptance; the row's display text omits that.
+                text_value = (
+                    row["turn_dispatch_text"]
+                    if row["turn_role"] == "initial" and row["turn_dispatch_text"]
+                    else row["content_text"] or ""
                 )
+                inputs.append((row["id"], text_value, list(file_attachments_from_specs(specs) or ()), delivery))
         return inputs
 
     # --- rendering ---------------------------------------------------------------
@@ -700,14 +742,18 @@ class AvibeAgent(BaseAgent):
                 continue
             mime = (attachment.mimetype or "").split(";", 1)[0].strip().lower()
             if mime in IMAGE_MIME_TYPES:
-                images.append(
-                    await self.media.snapshot_file(
-                        attachment.local_path, mime, session_id=session_id, name=attachment.name or None
+                try:
+                    images.append(
+                        await self.media.snapshot_file(
+                            attachment.local_path, mime, session_id=session_id, name=attachment.name or None
+                        )
                     )
-                )
-            else:
-                size = f", {attachment.size} bytes" if attachment.size else ""
-                listed.append(f"- File: {attachment.local_path} ({attachment.mimetype}{size})")
+                    continue
+                except OSError:
+                    # Unreadable now: listed by path, as the native backends pass every attachment.
+                    logger.warning("Avibe Agent lists an image it could not snapshot: %s", attachment.local_path)
+            size = f", {attachment.size} bytes" if attachment.size else ""
+            listed.append(f"- File: {attachment.local_path} ({attachment.mimetype}{size})")
         body = message or ""
         if listed:
             body = "\n".join([body, "", "[User Attachments]", *listed]) if body.strip() else "\n".join(
@@ -731,16 +777,18 @@ class AvibeAgent(BaseAgent):
             return error_text(kind, self._language())
         return strip_silent_blocks(value)
 
-    async def _avibe_sections(self, request: AgentRequest, cwd: str) -> str:
-        """Avibe's injected prompt sections, built off the event loop as the other backends build them.
+    async def _avibe_sections(self, request: AgentRequest, cwd: str) -> tuple[str, Optional[dict]]:
+        """Avibe's injected prompt sections and the skill catalog they offered.
 
-        Skill resolution scans the filesystem and may run ``claude plugin list``.
+        Built off the event loop as the other backends build them: skill resolution
+        scans the filesystem and may run ``claude plugin list``.
         """
         from core.managed_skills import managed_skill_claude_cli_path, managed_skill_project_base
         from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 
         context = request.context
-        return await asyncio.to_thread(
+        skill_catalog_sink: list[dict] = []
+        sections = await asyncio.to_thread(
             build_system_prompt_injection,
             agent_instructions=request.vibe_agent_system_prompt or "",
             backend=BACKEND,
@@ -752,12 +800,16 @@ class AvibeAgent(BaseAgent):
             skills_cwd=cwd or None,
             skills_project_base=managed_skill_project_base(context),
             skills_claude_cli_path=managed_skill_claude_cli_path(self.config),
+            skill_catalog_sink=skill_catalog_sink,
         )
+        return sections, (skill_catalog_sink[0] if skill_catalog_sink else None)
 
     def _environment(self, session_id: str) -> dict[str, str]:
         runtime = self._runtimes.get(session_id)
         cwd = runtime.run.cwd if runtime is not None and runtime.run is not None else (runtime.cwd if runtime else "")
-        return current_environment(cwd, self._watch_lines(session_id))
+        return current_environment(
+            cwd, self._watch_lines(session_id), include_time=getattr(self.config, "include_time_info", True)
+        )
 
     def _watch_lines(self, session_id: str) -> list[str]:
         service = getattr(self.controller, "watch_service", None)
@@ -800,12 +852,13 @@ class AvibeAgent(BaseAgent):
         call = run.tool_calls.get(event.tool_call_id)
         arguments = dict(call.arguments) if call is not None else {}
         formatter = self._get_formatter(run.request.context)
+        relative = _relative_to(run.cwd)
         try:
             await self.controller.emit_agent_message(
                 run.request.context,
                 "toolcall",
-                formatter.format_toolcall(event.name, arguments),
-                status_label=formatter.format_toolcall_label(event.name, arguments),
+                formatter.format_toolcall(event.name, arguments, get_relative_path=relative),
+                status_label=formatter.format_toolcall_label(event.name, arguments, get_relative_path=relative),
             )
         except Exception:
             logger.exception("Avibe Agent could not show tool %s", event.name)
@@ -839,6 +892,8 @@ class AvibeAgent(BaseAgent):
         reason: Optional[str] = None,
         cause: Optional[BaseException] = None,
     ) -> None:
+        # A failure after Model Hub served the route replaces that served attempt, as for the other backends.
+        await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
         await emit_backend_failure(
             self.controller,
             request.context,

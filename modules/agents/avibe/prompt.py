@@ -102,15 +102,18 @@ def local_timezone() -> str:
     return time.tzname[0] if time.tzname else "UTC"
 
 
-def current_environment(cwd: str, watches: Sequence[str], *, now: Optional[datetime] = None) -> dict[str, str]:
+def current_environment(
+    cwd: str, watches: Sequence[str], *, include_time: bool = True, now: Optional[datetime] = None
+) -> dict[str, str]:
+    """The environment fields; the clock ones follow ``include_time_info``, as every input prefix does."""
     fields = {
         "cwd": str(Path(cwd).resolve()) if cwd else "",
         "os": operating_system(),
         "shell": os.environ.get("SHELL") or "/bin/sh",
-        "date": (now or datetime.now()).date().isoformat(),
-        "timezone": local_timezone(),
-        "watches": "; ".join(watches) if watches else "none",
     }
+    if include_time:
+        fields.update(date=(now or datetime.now()).date().isoformat(), timezone=local_timezone())
+    fields["watches"] = "; ".join(watches) if watches else "none"
     # One line per field: a value never carries the block's own line structure.
     return {name: " ".join(value.split()) if "\n" in value else value for name, value in fields.items()}
 

@@ -74,10 +74,10 @@ def published(monkeypatch) -> list[tuple[str, dict]]:
 
 
 class _Formatter:
-    def format_toolcall(self, name: str, arguments: Optional[dict] = None) -> str:
+    def format_toolcall(self, name: str, arguments: Optional[dict] = None, get_relative_path=None) -> str:
         return f"🔧 {name} {json.dumps(arguments or {}, sort_keys=True)}"
 
-    def format_toolcall_label(self, name: str, arguments: Optional[dict] = None) -> str:
+    def format_toolcall_label(self, name: str, arguments: Optional[dict] = None, get_relative_path=None) -> str:
         return f"🔧 {name}"
 
     def format_result_footer(self, subtype: str, *_args: Any, **_kwargs: Any) -> str:
@@ -458,6 +458,8 @@ async def test_a_turn_commits_its_context_once_and_shows_the_reply_once(
     assert [entry.kind for entry in rows] == ["input", "response", "tool_result", "response"]
     environment, typed = rows[0].message.content
     assert environment.text.startswith("<environment>\ncwd: ") and typed == TextBlock(text="看一下目录")
+    # The clock fields follow include_time_info (off here), as every input prefix does.
+    assert "date:" not in environment.text and "timezone:" not in environment.text
     # The steer identity existed when the Turn owner bound the native start.
     assert harness.controller.started == [f"avibe:{_turn(request.context)}"]
     # A10: every request is the context rebuilt from the tables at that point.
@@ -549,7 +551,7 @@ async def test_reconcile_reports_a_steer_attempt_only_from_evidence(engine, sess
     async def vanished(*_args, **_kwargs):
         preparing.set()
         await fail.wait()
-        raise OSError("the attachment is gone")
+        raise RuntimeError("the snapshot store refused the image")
 
     # The steer's image is still being snapshotted when the Turn owner reconciles the attempt.
     harness.agent.media.snapshot_file = vanished
@@ -658,6 +660,12 @@ async def test_stop_aborts_the_running_tool_and_settles_the_turn_as_stopped(
         return ToolResult((text("Command aborted"),), is_error=True)
 
     harness = _Harness(engine, tmp_path, "telegram", _tool_turn(), tools=[FakeTool("echo", execute=wait_for_cancel)])
+    receipts: list[Optional[str]] = []
+
+    async def finish(_request, *, terminal_emoji=None) -> None:
+        receipts.append(terminal_emoji)
+
+    harness.controller.processing_indicator = SimpleNamespace(finish=finish)
     request = harness.request("run it")
     stop = AgentRequest(**{**request.__dict__, "message": "stop"})
     assert await harness.agent.handle_stop(stop) is False
@@ -670,6 +678,8 @@ async def test_stop_aborts_the_running_tool_and_settles_the_turn_as_stopped(
 
     assert observed == [True]
     assert len(harness.provider.requests) == 1
+    # IM's stop receipt, as the other backends leave it.
+    assert receipts[:1] == ["⏹️"]
     assert harness.controller.terminals == [
         {"turn": _turn(request.context), "is_error": False, "settled_by": "stopped"}
     ]
@@ -966,6 +976,81 @@ async def test_a_failed_run_shows_localized_copy_and_a_refusal_shows_its_explana
     assert sent == [empty_copy, refusal_copy]
     assert sorted(row["content_text"] for row in harness.rows("error")) == sorted([empty_copy, refusal_copy])
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [True, True]
+
+
+async def test_a_run_failure_is_reported_to_model_hub_like_the_other_backends(engine, session, tmp_path, published) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    reported: list[str] = []
+
+    async def record_native_failure(context, diagnostic) -> bool:
+        reported.append(diagnostic)
+        return False
+
+    harness = _Harness(
+        engine, tmp_path, "telegram", [[ProviderError("invalid_request", "the served response broke its protocol", False)]]
+    )
+    harness.controller.model_hub_runtime.record_native_failure = record_native_failure
+
+    await harness.agent.handle_message(harness.request("hello"))
+
+    # The served attempt is replaced by the backend's terminal failure, so the Hub's copy can apply.
+    assert len(reported) == 1 and harness.controller.terminals[-1]["is_error"] is True
+
+
+async def test_an_unreadable_image_is_listed_by_path_and_the_turn_runs(engine, session, tmp_path, published) -> None:
+    from modules.im.base import FileAttachment
+
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("seen"))], [Done(assistant("still here"))]])
+    request = harness.request("look")
+    gone = str(tmp_path / "deleted.png")
+    request.files = [FileAttachment(name="deleted.png", mimetype="image/png", local_path=gone)]
+
+    await harness.agent.handle_message(request)
+    await harness.agent.handle_message(harness.request("and now?"))
+
+    # Listed by path as the native backends pass it; the Session is not stuck on it.
+    first = (await harness.context_rows())[0]
+    assert f"- File: {gone} (image/png)" in first.message.content[-1].text
+    assert harness.controller.im_client.sent == ["seen", "still here"]
+
+
+async def test_resume_sends_a_recovered_initial_input_as_its_turns_dispatch_text(
+    engine, session, tmp_path, published
+) -> None:
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))]])
+    first = harness.request("deploy it")
+    turn_id = _turn(first.context)
+    with engine.begin() as conn:
+        # What the Turn owner dispatches carries notes the displayed row does not.
+        conn.execute(
+            update(session_turns).where(session_turns.c.id == turn_id).values(
+                dispatch_text="deploy it\n\n[Attachment download errors]\n- notes.pdf: timed out"
+            )
+        )
+    # The process exits after native acceptance, before the loop consumed the input.
+    harness.controller._native_start(first.context)
+
+    harness.new_agent()
+    await harness.agent.handle_message(harness.request("well?"))
+
+    recovered = (await harness.context_rows())[0]
+    assert recovered.row_id == first.context.platform_specific["delivery_id"]
+    assert "[Attachment download errors]" in recovered.message.content[-1].text
+
+
+async def test_a_session_is_titled_from_its_first_prompt(engine, session, tmp_path, published) -> None:
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("done"))]])
+
+    await harness.agent.handle_message(harness.request("Refactor the parser"))
+
+    def title() -> Optional[str]:
+        with engine.connect() as conn:
+            return conn.execute(select(agent_sessions.c.title).where(agent_sessions.c.id == SESSION)).scalar()
+
+    # As the native backends title a session without metadata: derived from the first prompt.
+    await _until(lambda: bool(title()), "the Session was never titled")
+    assert title().startswith("Refactor")
 
 
 async def test_a_refused_model_route_fails_before_the_input_is_written(engine, session, tmp_path, published) -> None:
