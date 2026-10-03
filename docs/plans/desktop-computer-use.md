@@ -110,15 +110,18 @@ running. The tray keeps the shell alive after the window closes.
   the next launch and the live Runtime can never disagree.
 - **Runtime compatibility.** The shell adopts a running Runtime as-is, so after
   a desktop update that Runtime can be older than the shell.
-  - `GET /ready` stays byte-for-byte unchanged, because released shells
-    parse it with an exact key set (`runtime-host/src/health.rs`). A new
-    `GET /desktop/capabilities` returns `computer_use_schema`, the newest `D`
+  - `GET /ready` stays byte-for-byte unchanged, because released shells parse it
+    with an exact key set (`runtime-host/src/health.rs`). A new `GET
+    /desktop/capabilities` returns `computer_use_schema`, the newest `D`
     `schema_version` the Runtime can read. The UI process obtains it from the
-    Controller over the existing internal IPC socket and does not derive it
-    from its own package version. The Controller is what reads `D`, and
-    `/ready` may pair a newer UI with an older Controller. If that IPC call
-    fails, the answer is unsupported. Any other answer, including a 404
-    from a pre-feature Runtime, means unsupported.
+    Controller over the existing internal IPC socket and does not derive it from
+    its own package version. The Controller is what reads `D`, and `/ready` may
+    pair a newer UI with an older Controller. Only a definitive answer means
+    unsupported: a 404, or a schema below the one the shell writes. A transport
+    error, such as an IPC timeout or a reset, keeps the last known answer. A
+    transient failure therefore never stops a healthy daemon. Losing the Runtime
+    itself is already handled by the `/ready` monitor. Any other answer,
+    including a 404 from a pre-feature Runtime, means unsupported.
   - Turning the toggle on requires that value to cover the schema the shell
     writes. Otherwise the shell refuses to turn it on, and the menu text says
     the Avibe service must restart to support computer use.
@@ -204,13 +207,15 @@ running. The tray keeps the shell alive after the window closes.
   - **No indirection.** Every row names its target state and action. `error`
     leaves only through toggle off (the first row), and a later toggle on
     starts from `off`.
-  - **Health.** Call `health_report` and read its `checks` array. Require
-    `tcc_accessibility` and `tcc_screen_recording` to pass, and require the
-    `bundle_identity` check to pass with `identity_source: parent_application`.
-    That is the host-attribution evidence Phase 0 Q1 recorded.
-    `source.attribution` belongs to `check_permissions`, which the policy
-    excludes, so it is never read. The menu shows the localized reason for
-    `needs_permission` and `error`.
+  - **Health (macOS).** Call `health_report` and read its `checks` array.
+    Require `tcc_accessibility` and `tcc_screen_recording` to pass, and require
+    the `bundle_identity` check to pass with `identity_source:
+    parent_application`. That is the host-attribution evidence Phase 0 Q1
+    recorded. `source.attribution` belongs to `check_permissions`, which the
+    policy excludes, so it is never read. Windows emits different checks
+    (`ax_capability`, `screen_capture_capability`), so its predicate is set by
+    the Windows Q6 run, not by reusing these. The menu shows the localized
+    reason for `needs_permission` and `error`.
   - **Orderly quit.** Write `stopped`, then stop the daemon. `D` keeps
     `enabled`, and the effective-status table reads `stopped` as
     `shell_not_running`, the same as a released shell lock after a crash.
@@ -377,7 +382,9 @@ running. The tray keeps the shell alive after the window closes.
     - Acquisition, refresh, and release run under an exclusive OS lock on
       `computer-lease.lock`, next to `D` (`flock` on macOS, `LockFileEx` on
       Windows). Inside that lock the server reads and writes the lease
-      record: holder session id and last refresh time.
+      record: holder session id, last refresh time, a lease `epoch` that
+      increases with each new holder, and the daemon key (`instance_id`,
+      `generation`) it was taken under.
     - Two first calls from different processes therefore serialize. One
       wins, and the other gets `desktop_busy` naming the holder.
     - The holder refreshes the lease when each call starts, and every 10 s
@@ -386,6 +393,14 @@ running. The tray keeps the shell alive after the window closes.
     - The lease lapses 60 s after the last refresh. A holder that crashed,
       even mid-call, stops refreshing and frees the desktop within a minute,
       without any PID check. Calling `end_session` releases it at once.
+    - A lease whose daemon key differs from `D`'s current one is void. A
+      native stop, a toggle off and on, or a respawn therefore clears every
+      lease without waiting out the 60 s.
+    - Each session remembers the epoch it last held. A session that
+      reacquires the lease under a newer epoch, because another session held
+      the desktop in between, gets `observe_first` for any action call until
+      it makes one observation call. It can never act on stale observations
+      or element tokens.
   - This isolation is cooperative. Every caller is the same user's agent;
     it is not a security boundary.
   - Tool restriction stays in the driver's managed policy, not in this server.
@@ -672,16 +687,17 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 
 ## Validation
 
-- Rust: one case per lifecycle-table row, with grant checks, spawn, socket, and
-  health faked. Each case asserts the resulting `D` and that no prompt is raised
-  outside the toggle-on row. Stale-preflight cases: a grant that the shell's
-  preflight misses reaches `ready` after one activation; a truly missing grant
-  spawns once per activation. Also: `generation` bumps on each spawn, nothing is
-  spawned through LaunchServices, and the toggle persists. A daemon that ignores
-  EOF is killed after 3 s. A killed shell takes its daemon down and releases its
-  lock, and the next launch reclaims the endpoint. A Runtime without a covering
-  `computer_use_schema` never gets a daemon. A failed `D` write still stops the
-  daemon.
+- Rust: one case per lifecycle-table row; a capabilities transport error keeps
+  the last answer, and only a 404 or a lower schema means unsupported; with
+  grant checks, spawn, socket, and health faked. Each case asserts the resulting
+  `D` and that no prompt is raised outside the toggle-on row. Stale-preflight
+  cases: a grant that the shell's preflight misses reaches `ready` after one
+  activation; a truly missing grant spawns once per activation. Also:
+  `generation` bumps on each spawn, nothing is spawned through LaunchServices,
+  and the toggle persists. A daemon that ignores EOF is killed after 3 s. A
+  killed shell takes its daemon down and releases its lock, and the next launch
+  reclaims the endpoint. A Runtime without a covering `computer_use_schema`
+  never gets a daemon. A failed `D` write still stops the daemon.
 - Python, configuration: the spec and the prompt section exist exactly when
   `enabled` is true and the snapshot verifies; a missing or mismatched snapshot
   yields neither, plus `snapshot_invalid`. Each backend translation is checked;
@@ -699,7 +715,9 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   advertised schema requires `session`. Two sessions get separate Cua sessions
   on one upstream connection. A session that called `end_session` works again on
   its next call. Simultaneous first calls from two processes yield exactly one
-  holder, a 120 s call keeps its lease, and the other gets `desktop_busy` until
+  holder, a 120 s call keeps its lease, a session that lost the lease
+  in between gets `observe_first` before acting, a stop-and-re-enable voids
+  every lease, and the other gets `desktop_busy` until
   `end_session` or 60 s idle. Tests stay hermetic: the `D` path and the upstream
   command are redirected to test-owned fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
