@@ -10,9 +10,11 @@ import httpx
 import pytest
 
 import core.agent_core.ai._common as common_module
+import core.agent_core.ai.anthropic as anthropic_module
 import core.agent_core.ai.sse as sse_module
+import core.agent_core.ai.openai_responses as responses_module
 from core.agent_core.ai.anthropic import AnthropicAdapter, build_messages_payload
-from core.agent_core.ai._common import read_response_body
+from core.agent_core.ai._common import OutputBudgetExceeded, StreamAssembler, read_response_body
 from core.agent_core.ai.openai_chat import OpenAIChatAdapter, build_chat_payload
 from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter, build_responses_payload
 from core.agent_core.ai.provider import (
@@ -74,6 +76,11 @@ def test_registry_exposes_only_v1_protocols() -> None:
     assert set(ADAPTERS) == {"anthropic", "openai_chat", "openai_responses"}
     with pytest.raises(ValueError, match="unsupported provider protocol: google"):
         adapter_class("google")
+
+
+def test_each_known_wire_event_has_a_declarative_shape_row() -> None:
+    assert set(anthropic_module._KNOWN_STREAM_EVENTS) <= set(anthropic_module._ANTHROPIC_WIRE_SHAPES)
+    assert set(responses_module._KNOWN_RESPONSE_EVENTS) <= set(responses_module._RESPONSES_WIRE_SHAPES)
 
 
 async def _events(adapter: Any, request: ModelRequest, cancel: CancelToken | None = None) -> list[Any]:
@@ -325,6 +332,7 @@ async def test_anthropic_mid_output_fallback_is_terminal_like_pi() -> None:
 
     assert isinstance(events[-1], ProviderError)
     assert events[-1].kind == "unknown"
+    assert events[-1].retryable is False
     assert events[-1].partial is not None
 
 
@@ -982,6 +990,80 @@ async def test_cumulative_output_budget_covers_text_thinking_and_tool_arguments(
     assert error.retryable is False
     assert "output budget" in error.message.lower()
     assert error.partial is not None
+
+
+@pytest.mark.asyncio
+async def test_cumulative_output_budget_covers_opaque_reasoning_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 32)
+    opaque = "x" * 64
+    body = (
+        "data: "
+        + json.dumps(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_details": [
+                                {"type": "reasoning.encrypted", "data": opaque}
+                            ]
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+        )
+        + "\n\n"
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert "output budget" in error.message.lower()
+
+
+def test_cumulative_output_budget_covers_tool_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 32)
+    assembler = StreamAssembler(
+        origin=Origin("openai", "openai_chat", "model"),
+        protocol="openai_chat",
+    )
+    with pytest.raises(OutputBudgetExceeded):
+        assembler.tool_start(
+            "tool",
+            name="n" * 64,
+            call_id="call",
+            native_id="native",
+        )
+
+
+def test_cumulative_output_budget_covers_raw_responses_reasoning_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 32)
+    assembler = StreamAssembler(
+        origin=Origin("openai", "openai_responses", "model"),
+        protocol="openai_responses",
+    )
+    with pytest.raises(OutputBudgetExceeded):
+        assembler.merge_reasoning_item(
+            0,
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [],
+                "content": [{"type": "summary_text", "text": "x" * 64}],
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -2077,6 +2159,37 @@ async def test_media_loader_failure_is_a_provider_error() -> None:
 
     assert isinstance(events[-1], ProviderError)
     assert events[-1].kind == "unknown"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "fields"),
+    [
+        ("response.output_text.delta", {"output_index": 0}),
+        ("response.refusal.delta", {"output_index": 0}),
+        ("response.reasoning_summary_text.delta", {"output_index": 0}),
+        ("response.reasoning_text.delta", {"output_index": 0}),
+        ("response.function_call_arguments.delta", {"output_index": 0}),
+    ],
+)
+async def test_responses_delta_events_require_string_payload(
+    event_type: str,
+    fields: dict[str, Any],
+) -> None:
+    body = f"data: {json.dumps({'type': event_type, **fields})}\n\n"
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
+    ) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert event_type in error.message
     assert events[-1].retryable is False
 
 

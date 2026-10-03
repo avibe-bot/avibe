@@ -343,6 +343,75 @@ def test_error_message_redacts_basic_authorization_credentials() -> None:
     assert "Basic [redacted]" in error.message
 
 
+@pytest.mark.parametrize(
+    ("body", "secret"),
+    [
+        ("Authorization: Bearer bearer-secret", "bearer-secret"),
+        ("Authorization: Basic basic-secret", "basic-secret"),
+        ("Authorization: Token token-secret", "token-secret"),
+        ("Authorization: Custom custom-secret", "custom-secret"),
+        ("Authorization: Custom realm=x, sig=sig-secret", "sig-secret"),
+        ('password=hunter2SECRET is wrong', "hunter2SECRET"),
+        ("X-API-Key: abc123SECRET\r\nContent-Type: application/json", "abc123SECRET"),
+        ("Proxy-Authorization: Custom proxy-secret", "proxy-secret"),
+        ("X-Goog-Api-Key: AIza-header-secret", "AIza-header-secret"),
+        ("Ocp-Apim-Subscription-Key: subscription-secret", "subscription-secret"),
+        ("Invalid API Key: gsk_live-secret", "gsk_live-secret"),
+        ('{"message":"access_token=access-secret"}', "access-secret"),
+        ('{"message":"refresh_token: refresh-secret"}', "refresh-secret"),
+        ('{"message":"client_secret=client-secret"}', "client-secret"),
+        ('{"X-API-Key":"header-secret"}', "header-secret"),
+        ("Cookie: theme=dark; JSESSIONID=cookie-secret", "cookie-secret"),
+        ("Set-Cookie: session=set-cookie-secret; Path=/", "set-cookie-secret"),
+        ("provider returned sk-live-token", "sk-live-token"),
+        ("provider returned AIza-live-token", "AIza-live-token"),
+        ("provider returned ghp_live-token", "ghp_live-token"),
+        (
+            "provider returned "
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature",
+        ),
+    ],
+)
+def test_error_redactor_covers_key_scheme_and_token_shapes(body: str, secret: str) -> None:
+    error = classify_error(body=body)
+
+    assert secret not in error.message
+    assert "[redacted]" in error.message
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "max_tokens: 200000 > 64000",
+        "thinking.budget_tokens: Input should be positive",
+        "model token limit exceeded",
+        "Basic validation failed",
+    ],
+)
+def test_error_redactor_does_not_garble_non_credentials(body: str) -> None:
+    assert classify_error(body=body).message == body
+
+
+def test_endpoint_is_sanitized_before_diagnostic_redaction() -> None:
+    endpoint = "https://gw.example/v1?key=K&sig=SIGSECRET&x=1"
+    from core.agent_core.ai._common import StreamAssembler
+
+    assembler = StreamAssembler(
+        origin=Origin("openai", "openai_chat", "model"),
+        protocol="openai_chat",
+        endpoint_url=endpoint,
+    )
+    error = assembler.error(
+        f"request failed at {endpoint}/chat/completions",
+        kind="invalid_request",
+    )
+
+    assert "SIGSECRET" not in error.message
+    assert "x=1" not in error.message
+    assert "https://gw.example/v1/chat/completions" in error.message
+
+
 @pytest.mark.parametrize("source", _PROTOCOL_ORIGINS)
 @pytest.mark.parametrize("target", _PROTOCOL_ORIGINS)
 def test_history_from_each_protocol_can_be_replayed_without_foreign_opaque_state(

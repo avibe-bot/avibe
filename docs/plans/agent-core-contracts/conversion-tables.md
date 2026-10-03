@@ -22,7 +22,7 @@ rules on top of those mappings.
 | Network timeouts | The shared lifecycle driver bounds connect/open at 10 seconds, time-to-first-byte at 30 seconds, and idle time between chunks at 30 seconds. Each timeout is a classified `ProviderError(kind="network")`, retryable only when no model output was emitted; a provider that never sends response headers cannot hang a turn. A bounded 10-second cancellation join detaches a non-cooperative transport task instead of extending the timeout indefinitely. |
 | HTTP response status | Only 2xx responses enter an SSE translator. Redirects (3xx) are terminal `invalid_request` errors and are never followed implicitly; 4xx/5xx bodies use the shared status-aware classifier. |
 | SSE memory and scan bounds | `SSEParser` caps an unfinished line at 8 MiB of decoded characters and an unfinished event's combined `data:` fields at 32 MiB of decoded characters. It scans each buffer with a cursor and compacts once per feed, so many short fields remain linear rather than repeatedly copying the suffix. Exceeding either bound is one terminal `invalid_request` provider error, with any assembled partial preserved. |
-| Cumulative assembled-output bound | `StreamAssembler` uses append-only fragment buffers for text, thinking, signatures, and tool arguments, materializing canonical blocks only at snapshots or stream boundaries. It caps retained cumulative assembly at 32 MiB across the whole stream; a delta that would exceed the shared budget raises one terminal `invalid_request` error from `drive_sse_stream`, preserving the assembled partial. |
+| Cumulative assembled-output bound | `StreamAssembler._account_output` is the only byte-accounting function. It covers text, thinking, signatures, opaque/reasoning details, tool arguments, and serialized initial tool inputs; append-only deltas and non-prefix snapshots both charge the newly retained bytes. It caps retained cumulative assembly at 32 MiB across the whole stream; an over-budget mutation raises one terminal `invalid_request` error from `drive_sse_stream`, preserving the assembled partial. |
 | Error-body read failure | If a known HTTP error body raises or times out while being read, the shared driver classifies from the already-known status and headers, preserving `Retry-After`; the failure remains one terminal provider error with any partial. |
 | Response cleanup | The shared driver closes every response after committing its one terminal event and bounds `response.aclose()` at 10 seconds. A stalled close is cleanup-only and cannot replace or duplicate the terminal outcome. |
 | Retry boundary | `ProviderError.retryable` is false once any model content delta or tool-call start/delta was emitted. A Responses `ToolCallStart` therefore makes a later provider failure non-retryable. |
@@ -46,9 +46,10 @@ construct partials, mark terminal state, or parse final tool arguments.
 | Usage and early usage retention | `set_usage` | Anthropic `message_start`/`message_delta`; Chat usage chunks; Responses terminal response |
 | Partial on every error and abort | `StreamAssembler.partial`, `error`, `exception`, `aborted`, `incomplete` | `drive_sse_stream` owns HTTP, transport-read, error-body, cancellation, and translator exceptions; protocol translators only request assembler errors |
 | Exactly one terminal event before response cleanup | `drive_sse_stream` → `StreamAssembler.terminal` | The driver commits the translator's candidate or its own transport/incomplete outcome before `response.aclose`; cleanup cannot replace a consumer/task cancellation |
-| Endpoint redaction | `sanitize_endpoint_text` in `StreamAssembler.terminal`, `error`, and `exception` | Includes preparation errors, HTTP error bodies, stream errors, network errors, and close failures |
+| Endpoint redaction | URL stripping in `StreamAssembler._sanitize_error` before `redact_provider_error` | Includes preparation errors, HTTP error bodies, stream errors, network errors, and close failures; URL queries are removed before redaction markers are inserted |
+| Provider diagnostic redaction | `redact_provider_error` at the single `ProviderError` boundary, backed by `redact_provider_text` | Every provider error message is redacted for credential keys/header names, whole Authorization values with the scheme preserved, cookie pairs, and known token shapes before it leaves the ai package; partial error text is covered too |
 | Unknown wire event policy | `dispatch_wire_event` plus protocol frame validation | Anthropic and Responses use explicit protocol event sets; Chat uses implicit frame kinds and validates its payload shapes directly. Unknown explicit types are ignored like Pi. Anthropic also accepts a valid data-only SSE frame whose JSON `type` is known; this is a rule (b) data-loss prevention deviation because SSE `event` is optional. |
-| Cumulative output budget | `StreamAssembler._reserve_output`; `drive_sse_stream` catches `OutputBudgetExceeded` | `text_delta`, `thinking_delta`, thinking-signature updates, and tool-argument assembly reserve through the shared assembler; no adapter owns the limit or converts the overflow into a protocol-specific result |
+| Cumulative output budget | `StreamAssembler._account_output`; `drive_sse_stream` catches `OutputBudgetExceeded` | One byte-accounting function covers text, thinking, opaque/reasoning details, tool arguments, tool-call signatures, and serialized initial tool inputs; no adapter owns the limit or converts the overflow into a protocol-specific result |
 
 The shared dispatch helper only identifies a known event. Each adapter then
 validates the shape of that known event and emits exactly one terminal
@@ -70,7 +71,7 @@ unknown fields follow Pi and are ignored.
 | --- | --- | --- |
 | `message_start` | `message: object` | `message.usage: object` |
 | `content_block_start` | `index: non-negative integer`, `content_block: object`, `content_block.type: string` | text/thinking `text`/`thinking`/`signature: string`; redacted `data: non-empty string`; tool `id`/`name: string`, `input: object` |
-| `content_block_delta` | `index: non-negative integer`, `delta: object`, `delta.type: string` | `text_delta.text`, `thinking_delta.thinking`, `signature_delta.signature`, `input_json_delta.partial_json: string` |
+| `content_block_delta` | `index: non-negative integer`, `delta: object`, `delta.type: string` | `text_delta.text`, `thinking_delta.thinking`, `signature_delta.signature`, `input_json_delta.partial_json: string`; present fields with a wrong type are terminal |
 | `content_block_stop` | `index: non-negative integer` | none |
 | `message_delta` | none | `delta: object`, `delta.stop_reason: string`, `usage: object` |
 | `message_stop` | none | none |
@@ -98,10 +99,13 @@ unknown fields follow Pi and are ignored.
 | `response.queued` | `type: string` | none |
 | output/refusal/reasoning delta | `type: string`, `delta: string` | `output_index: non-negative integer` |
 | `response.output_item.added` | `item: object`; `item.type: string` | `output_index: non-negative integer`; function item `id`/`call_id`/`name`/`arguments: string` |
-| `response.output_item.done` | `item: object` when present; `item.type: string` | same function fields; `output_index: non-negative integer` |
-| function-call argument delta/done | `delta` or `arguments: string` when present | `item_id: string`, `output_index: non-negative integer` |
-| custom-tool input delta/done | `type: string` | provider-specific fields are ignored |
-| content/output/reasoning done events | `type: string` | `output_index: non-negative integer` |
+| `response.output_item.done` | `item: object`; `item.type: string` | same function fields; `output_index: non-negative integer` |
+| `response.function_call_arguments.delta` | `delta: string` | `item_id: string`, `output_index: non-negative integer` |
+| `response.function_call_arguments.done` | none | `arguments: string`, `item_id: string`, `output_index: non-negative integer` |
+| `response.custom_tool_call_input.delta` | `delta: string` | `item_id: string`, `output_index: non-negative integer`; provider-specific fields are ignored |
+| `response.custom_tool_call_input.done` | none | `item_id: string`, `output_index: non-negative integer`; provider-specific fields are ignored |
+| `response.output_text.done`, `response.reasoning_summary_text.done`, `response.reasoning_text.done` | none | `output_index: non-negative integer` |
+| `response.content_part.added`, `response.content_part.done` | none | `output_index: non-negative integer`, `part: object` |
 | `response.completed`, `response.incomplete` | `response: object` | `response.status: string`, `output: array`, `usage: object`, `incomplete_details: object`, `error: object` |
 | `response.failed` | `type: string` | `response: object`, `response.error: object`, `response.usage: object` |
 | top-level `error` | `error: object` or `message: string` | `error.type`/`error.message: string`, `error.code: string or integer` |
@@ -138,7 +142,7 @@ provider field is empty.
 | Origin construction for an unnamed endpoint | `endpoint_origin` → `credential_free_endpoint_identity` | `test_unnamed_custom_endpoint_origin_is_credential_free` |
 | HTTP/provider error body | `StreamAssembler.error` → `sanitize_endpoint_text` | `test_error_message_redacts_quoted_json_nested_in_message` plus adapter error cases |
 | Network, cancellation, parser, and close exceptions | `StreamAssembler.exception`/`terminal` → `sanitize_endpoint_text` | `test_adapter_error_redaction_preserves_json_classification`, `test_close_failure_cannot_emit_a_second_terminal_event`, `test_all_adapters_cancel_at_every_http_lifecycle_phase` |
-| Extracted diagnostic credentials | `errors._redact` | Named/query secrets and Basic/Bearer Authorization credentials are redacted before a provider diagnostic reaches `ProviderError.message`; `test_error_message_redacts_password_named_and_query_values` and `test_error_message_redacts_basic_authorization_credentials` |
+| Extracted diagnostic credentials | `errors.redact_provider_text` plus `_redact_json` | One boundary redacts credential-key vocabulary (including OAuth token names, cookies, and proxy authorization), any authorization scheme, and known token shapes (`sk-`, `AIza`, GitHub tokens, JWTs) before diagnostics reach `ProviderError.message`; `test_error_redactor_covers_key_scheme_and_token_shapes` |
 | Media preparation and served-hop resolver failures | adapter preflight plus `drive_sse_stream` | `test_media_loader_failure_is_a_provider_error` and cancellation lifecycle matrix |
 | Adapter logs | none: adapters do not log endpoint URLs | source audit of all three adapter modules |
 

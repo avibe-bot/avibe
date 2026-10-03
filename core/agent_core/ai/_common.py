@@ -9,13 +9,17 @@ import inspect
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, TypeVar
 from urllib.parse import parse_qsl, unquote_to_bytes, urlencode, urlsplit, urlunsplit
 
 import httpx
 
-from core.agent_core.ai.errors import classify_error, parse_retry_after
+from core.agent_core.ai.errors import (
+    classify_error,
+    parse_retry_after,
+    redact_provider_error,
+)
 from core.agent_core.ai.sse import SSEEvent, SSEParseError, SSEParser
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -50,6 +54,18 @@ _URL_RE = re.compile(
     re.IGNORECASE,
 )
 WireTranslator = Callable[[AsyncIterator[SSEEvent]], AsyncIterator[Any]]
+
+
+@dataclass(frozen=True)
+class WireField:
+    """Declarative JSON field shape used at native protocol boundaries."""
+
+    name: str
+    expected: type | tuple[type, ...]
+    required: bool = False
+    nullable: bool = True
+    children: tuple["WireField", ...] = ()
+    item_children: tuple["WireField", ...] = ()
 
 # A provider that never produces headers or pauses forever between chunks must
 # not hold an agent turn indefinitely. These bounds are deliberately shared by
@@ -141,6 +157,7 @@ class StreamAssembler:
         self._thinking_signature_buffers: dict[int, io.StringIO] = {}
         self._thinking_details: dict[Hashable, list[dict[str, Any]]] = {}
         self._thinking_detail_buffers: dict[tuple[Hashable, int, str], io.StringIO] = {}
+        self._reasoning_items: dict[Hashable, dict[str, Any]] = {}
         self._tool_argument_buffers: dict[Hashable, io.StringIO] = {}
 
     @property
@@ -165,15 +182,31 @@ class StreamAssembler:
         if usage is not None:
             self.usage = usage
 
-    def _reserve_output(self, chars: int) -> None:
-        if chars <= 0:
+    def _account_output(self, value: str | bytes | int) -> None:
+        """Account every byte retained by the canonical stream state."""
+
+        if isinstance(value, int):
+            size = value
+        elif isinstance(value, bytes):
+            size = len(value)
+        else:
+            size = len(value.encode("utf-8"))
+        if size <= 0:
             return
-        if self._output_chars + chars > MAX_CUMULATIVE_OUTPUT_CHARS:
+        if self._output_chars + size > MAX_CUMULATIVE_OUTPUT_CHARS:
             raise OutputBudgetExceeded(
                 "provider cumulative output budget exceeded "
-                f"({MAX_CUMULATIVE_OUTPUT_CHARS} characters)"
+                f"({MAX_CUMULATIVE_OUTPUT_CHARS} bytes)"
             )
-        self._output_chars += chars
+        self._output_chars += size
+
+    def _account_replacement(self, previous: str, value: str) -> None:
+        """Charge the bytes newly retained by a snapshot replacement."""
+
+        if value.startswith(previous):
+            self._account_output(value[len(previous) :])
+        else:
+            self._account_output(value)
 
     def _text_value(self, index: int) -> str:
         buffer = self._text_buffers.get(index)
@@ -253,7 +286,7 @@ class StreamAssembler:
         block = self.content[index]
         if not isinstance(block, TextBlock):
             return None
-        self._reserve_output(len(value))
+        self._account_output(value)
         buffer = self._text_buffers.setdefault(index, _string_buffer(block.text or ""))
         buffer.write(value)
         self._visible_blocks.add(index)
@@ -273,7 +306,7 @@ class StreamAssembler:
         if not isinstance(block, TextBlock):
             return None
         previous = self._text_value(index)
-        self._reserve_output(max(0, len(value) - len(previous)))
+        self._account_replacement(previous, value)
         self._text_buffers[index] = _string_buffer(value)
         self._visible_blocks.add(index)
         self._emitted_output = True
@@ -290,7 +323,7 @@ class StreamAssembler:
         if not value:
             return None
         if ("thinking", key) not in self._slots and signature:
-            self._reserve_output(len(signature))
+            self._account_output(signature)
         index = self._ensure_slot(
             "thinking",
             key,
@@ -301,7 +334,7 @@ class StreamAssembler:
             return None
         if not isinstance(block, ThinkingBlock):
             return None
-        self._reserve_output(len(value))
+        self._account_output(value)
         buffer = self._thinking_buffers.setdefault(index, _string_buffer(block.text))
         buffer.write(value)
         self._visible_blocks.add(index)
@@ -317,7 +350,7 @@ class StreamAssembler:
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
             previous = self._thinking_value(index)
-            self._reserve_output(max(0, len(value) - len(previous)))
+            self._account_replacement(previous, value)
             self._thinking_buffers[index] = _string_buffer(value)
             if value:
                 self._visible_blocks.add(index)
@@ -350,6 +383,7 @@ class StreamAssembler:
                         continue
                 if block.signature is not None:
                     return
+                self._account_replacement(self._thinking_signature_value(index), signature)
                 self.content[index] = ThinkingBlock(
                     text=self._thinking_value(index),
                     signature=signature,
@@ -368,7 +402,7 @@ class StreamAssembler:
         redacted: bool = False,
     ) -> int:
         if ("thinking", key) not in self._slots and signature:
-            self._reserve_output(len(signature))
+            self._account_output(signature)
         return self._ensure_slot(
             "thinking",
             key,
@@ -379,6 +413,9 @@ class StreamAssembler:
         index = self.ensure_thinking_slot(key, signature=signature, redacted=True)
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
+            previous = self._thinking_signature_value(index)
+            if signature != previous:
+                self._account_replacement(previous, signature)
             self._thinking_buffers.pop(index, None)
             self._thinking_signature_buffers[index] = _string_buffer(signature)
             self.content[index] = ThinkingBlock(text="", signature=signature, redacted=True)
@@ -391,9 +428,8 @@ class StreamAssembler:
         self._materialize_thinking_details(key)
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
-            self._reserve_output(
-                max(0, len(signature) - len(self._thinking_signature_value(index)))
-            )
+            previous_signature = self._thinking_signature_value(index)
+            self._account_replacement(previous_signature, signature)
             self._thinking_signature_buffers[index] = _string_buffer(signature)
             self.content[index] = ThinkingBlock(
                 text=self._thinking_value(index),
@@ -410,7 +446,7 @@ class StreamAssembler:
         self._materialize_thinking_details(key)
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
-            self._reserve_output(len(value))
+            self._account_output(value)
             buffer = self._thinking_signature_buffers.setdefault(
                 index,
                 _string_buffer(self._thinking_signature_value(index)),
@@ -458,18 +494,47 @@ class StreamAssembler:
                     (key, detail_index, field),
                     _string_buffer(str(previous[field])),
                 )
-                self._reserve_output(len(item[field]))
+                self._account_output(
+                    json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+                )
                 buffer.write(item[field])
                 previous[field] = ""
                 for name in ("id", "format", "index", "signature"):
                     if previous.get(name) in (None, "") and name in item:
                         previous[name] = item[name]
                 continue
-            for field in ("text", "summary"):
-                value = item.get(field)
-                if isinstance(value, str):
-                    self._reserve_output(len(value))
+            self._account_output(
+                json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+            )
             accumulated.append(item)
+
+    def merge_reasoning_item(self, key: Hashable, item: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Retain one Responses reasoning item inside the budgeted assembler."""
+
+        state = self._reasoning_items.setdefault(
+            key,
+            {"type": "reasoning", "id": "", "encrypted_content": ""},
+        )
+        before = json.dumps(state, ensure_ascii=False, separators=(",", ":")) if state else ""
+        merged = dict(state)
+        for name, value in item.items():
+            if name == "encrypted_content" and not value:
+                continue
+            merged[name] = value
+        merged["type"] = "reasoning"
+        state.clear()
+        state.update(merged)
+        after = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+        self._account_replacement(before, after)
+        return state
+
+    def reasoning_key_for_id(self, item_id: str | None) -> Hashable | None:
+        if not item_id:
+            return None
+        for key, item in self._reasoning_items.items():
+            if item.get("id") == item_id:
+                return key
+        return None
 
     def has_tools(self) -> bool:
         return any(isinstance(block, ToolCallBlock) for block in self.content)
@@ -505,11 +570,18 @@ class StreamAssembler:
         if key not in self._tool_order:
             self._tool_order.append(key)
         if call_id:
+            if "content_index" in state:
+                self._account_replacement(state["id"], call_id)
             state["id"] = call_id
         if native_id:
+            if "content_index" in state:
+                self._account_replacement(state["native_id"] or "", native_id)
             state["native_id"] = native_id
-            self._tool_keys_by_native_id.setdefault(native_id, key)
+            if native_id not in self._tool_keys_by_native_id:
+                self._tool_keys_by_native_id[native_id] = key
         if name and not state["name"]:
+            if "content_index" in state:
+                self._account_output(name)
             state["name"] = name
             native_id = state["native_id"]
             native_is_unique = native_id and not any(
@@ -518,7 +590,9 @@ class StreamAssembler:
             )
             if "content_index" not in state and not state["id"] and native_is_unique:
                 state["id"] = state["native_id"]
-        if signature:
+        if signature and signature != state.get("signature"):
+            previous_signature = state.get("signature") or ""
+            self._account_replacement(previous_signature, signature)
             state["signature"] = signature
         if not state["name"]:
             return None
@@ -537,6 +611,12 @@ class StreamAssembler:
             )
             self._visible_blocks.add(state["content_index"])
             self._emitted_output = True
+            self._account_output(state["id"])
+            self._account_output(state["name"])
+            if state["native_id"]:
+                self._account_output(state["native_id"])
+            if state.get("item_id"):
+                self._account_output(state["item_id"])
             return ToolCallStart(
                 index=state["content_index"],
                 id=state["id"],
@@ -563,6 +643,11 @@ class StreamAssembler:
 
     def bind_tool_alias(self, key: Hashable, native_id: str | None) -> None:
         if native_id:
+            previous = self._tool_keys_by_native_id.get(native_id)
+            if previous != key:
+                state = self._tools.get(key)
+                if state is not None and "content_index" in state:
+                    self._account_output(native_id)
             self._tool_keys_by_native_id[native_id] = key
 
     def fallback_tool_key(
@@ -603,10 +688,10 @@ class StreamAssembler:
             state = self._tools.setdefault(key, self._new_tool_state())
             previous = self._tool_arguments_value(key)
             if replace:
-                self._reserve_output(max(0, len(value) - len(previous)))
+                self._account_replacement(previous, value)
                 self._tool_argument_buffers[key] = _string_buffer(value)
             else:
-                self._reserve_output(len(value))
+                self._account_output(value)
                 buffer = self._tool_argument_buffers.setdefault(
                     key,
                     _string_buffer(previous),
@@ -630,10 +715,10 @@ class StreamAssembler:
         if not value:
             return None
         if not value.startswith(previous):
-            self._reserve_output(len(value))
+            self._account_replacement(previous, value)
             self._tool_argument_buffers[key] = _string_buffer(value)
             return None
-        self._reserve_output(len(value) - len(previous))
+        self._account_replacement(previous, value)
         self._tool_argument_buffers[key] = _string_buffer(value)
         suffix = value[len(previous) :]
         if not suffix:
@@ -674,7 +759,7 @@ class StreamAssembler:
         """Store an initial object without corrupting later JSON deltas."""
 
         encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        self._reserve_output(len(encoded))
+        self._account_output(encoded)
         self.tool_state(key)["arguments_obj"] = dict(value)
 
     def tool_state(self, key: Hashable) -> dict[str, Any]:
@@ -694,6 +779,10 @@ class StreamAssembler:
         }
 
     def set_tool_item_id(self, key: Hashable, item_id: str) -> None:
+        previous = self._tools.get(key, {}).get("item_id")
+        state = self._tools.get(key)
+        if previous != item_id and state is not None and "content_index" in state:
+            self._account_replacement(str(previous or ""), item_id)
         self.tool_state(key)["item_id"] = item_id
 
     def tool_item_id(self, key: Hashable) -> str:
@@ -841,7 +930,7 @@ class StreamAssembler:
                 status=status,
                 partial=partial,
             )
-            return replace(error, message=sanitize_endpoint_text(error.message, self._endpoint_url))
+            return self._sanitize_error(error)
         if kind is not None:
             error = ProviderError(
                 kind=kind,
@@ -851,7 +940,7 @@ class StreamAssembler:
                 status=status,
                 partial=partial,
             )
-            return replace(error, message=sanitize_endpoint_text(error.message, self._endpoint_url))
+            return self._sanitize_error(error)
         error = classify_error(
             body=message,
             code=code,
@@ -860,8 +949,9 @@ class StreamAssembler:
             streamed=self.streamed,
             partial=partial,
             protocol=self.protocol,
+            redact=False,
         )
-        return replace(error, message=sanitize_endpoint_text(error.message, self._endpoint_url))
+        return self._sanitize_error(error)
 
     def exception(
         self,
@@ -876,15 +966,18 @@ class StreamAssembler:
             headers=headers,
             streamed=self.streamed,
             partial=self.partial() if self.streamed or self.usage is not None else None,
+            redact=False,
         )
-        return replace(error, message=sanitize_endpoint_text(error.message, self._endpoint_url))
+        return self._sanitize_error(error)
 
     def aborted(self, reason: str | None = None) -> ProviderError:
-        return ProviderError(
-            kind="aborted",
-            message=reason or "provider request aborted",
-            retryable=False,
-            partial=self.partial(stop_reason="aborted"),
+        return redact_provider_error(
+            ProviderError(
+                kind="aborted",
+                message=reason or "provider request aborted",
+                retryable=False,
+                partial=self.partial(stop_reason="aborted"),
+            )
         )
 
     def incomplete(self) -> ProviderError:
@@ -895,16 +988,30 @@ class StreamAssembler:
 
     def terminal(self, event: Done | ProviderError) -> Done | ProviderError | None:
         if isinstance(event, ProviderError):
-            event = replace(
-                event,
-                message=sanitize_endpoint_text(event.message, self._endpoint_url),
-            )
+            event = self._sanitize_error(event)
         if self._driver_mode:
             return event
         if self._terminal_seen:
             return None
         self._terminal_seen = True
         return event
+
+    def _sanitize_error(self, error: ProviderError) -> ProviderError:
+        partial = error.partial
+        if partial is not None and partial.error_message is not None:
+            partial = replace(
+                partial,
+                error_message=sanitize_endpoint_text(
+                    partial.error_message,
+                    self._endpoint_url,
+                ),
+            )
+        error = replace(
+            error,
+            message=sanitize_endpoint_text(error.message, self._endpoint_url),
+            partial=partial,
+        )
+        return redact_provider_error(error)
 
     def _ensure_slot(self, kind: str, key: Hashable, block: AssistantContent) -> int:
         slot = (kind, key)
@@ -1043,6 +1150,75 @@ def dispatch_wire_event(
         return None
     normalized = (aliases or {}).get(raw_type, raw_type)
     return normalized if normalized in known else None
+
+
+def validate_wire_shape(
+    event: Mapping[str, Any],
+    event_type: str,
+    table: Mapping[str, tuple[WireField, ...]],
+) -> str | None:
+    """Validate one known event against its declarative protocol row."""
+
+    fields = table.get(event_type)
+    if fields is None:
+        return None
+    return _validate_wire_fields(event, fields, event_type)
+
+
+def _validate_wire_fields(
+    value: Mapping[str, Any],
+    fields: tuple[WireField, ...],
+    path: str,
+) -> str | None:
+    for field in fields:
+        field_path = f"{path}.{field.name}"
+        if field.name not in value:
+            if field.required:
+                return f"{field_path} is required"
+            continue
+        current = value[field.name]
+        if current is None:
+            if field.nullable:
+                continue
+            return f"{field_path} must not be null"
+        if not _wire_value_matches(current, field.expected):
+            return f"{field_path} must be {_wire_type_name(field.expected)}"
+        if field.children:
+            child_error = _validate_wire_fields(current, field.children, field_path)
+            if child_error is not None:
+                return child_error
+        if field.item_children:
+            for index, item in enumerate(current):
+                item_path = f"{field_path}[{index}]"
+                if not isinstance(item, Mapping):
+                    return f"{item_path} must be an object"
+                item_error = _validate_wire_fields(item, field.item_children, item_path)
+                if item_error is not None:
+                    return item_error
+    return None
+
+
+def _wire_value_matches(value: Any, expected: type | tuple[type, ...]) -> bool:
+    expected_types = expected if isinstance(expected, tuple) else (expected,)
+    for expected_type in expected_types:
+        if expected_type is int:
+            if isinstance(value, int) and not isinstance(value, bool):
+                return True
+        elif expected_type is Mapping:
+            if isinstance(value, Mapping):
+                return True
+        elif isinstance(value, expected_type):
+            return True
+    return False
+
+
+def _wire_type_name(expected: type | tuple[type, ...]) -> str:
+    expected_types = expected if isinstance(expected, tuple) else (expected,)
+    names = [
+        "object" if item is Mapping else "integer" if item is int else item.__name__
+        for item in expected_types
+    ]
+    return " or ".join(names)
 
 
 async def resolve_served_origin(
@@ -1405,10 +1581,12 @@ async def prepare_messages(
         )
         loaded_images = await load_images(transformed.messages, media_loader, cancel)
     except _CancelledDependency:
-        return ProviderError(
-            kind="aborted",
-            message=cancel.reason or "provider request aborted",
-            retryable=False,
+        return redact_provider_error(
+            ProviderError(
+                kind="aborted",
+                message=cancel.reason or "provider request aborted",
+                retryable=False,
+            )
         )
     except Exception as exc:
         return classify_error(body=f"request preparation failed: {type(exc).__name__}: {exc}")
@@ -1527,10 +1705,12 @@ def parsed_arguments(raw: str, *, tool_name: str = "") -> dict[str, Any] | Provi
 
 def _malformed_arguments(tool_name: str) -> ProviderError:
     suffix = f" for tool {tool_name}" if tool_name else ""
-    return ProviderError(
-        kind="invalid_request",
-        message=f"malformed tool arguments{suffix}: expected a JSON object",
-        retryable=False,
+    return redact_provider_error(
+        ProviderError(
+            kind="invalid_request",
+            message=f"malformed tool arguments{suffix}: expected a JSON object",
+            retryable=False,
+        )
     )
 
 

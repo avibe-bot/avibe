@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Mapping
@@ -52,34 +53,68 @@ _NON_OVERFLOW_RE = (
     re.compile(r"rate limit", re.IGNORECASE),
     re.compile(r"too many requests", re.IGNORECASE),
 )
-_BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
-_BASIC_RE = re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/]+={0,2}")
-_AUTHORIZATION_SCHEME_RE = re.compile(
-    r"(?i)(?P<key>\"?authorization\"?)(?P<separator>\s*[:=]\s*)"
-    r"(?P<scheme>Basic|Bearer)\s+[A-Za-z0-9._~+/=-]+"
+_SECRET_KEY_PATTERN = (
+    r"(?:authorization|proxy[-_ ]?authorization|"
+    r"api[-_ ]?key|x[-_ ]?api[-_ ]?key|x[-_ ]?goog[-_ ]?api[-_ ]?key|"
+    r"ocp[-_ ]?apim[-_ ]?subscription[-_ ]?key|"
+    r"password|cookie|set[-_ ]?cookie|credential[s]?|private[-_ ]?key|"
+    r"client[-_ ]?secret|"
+    r"(?:oauth|access|refresh|id|auth|session|csrf|bearer)[-_ ]?token"
+    r"(?:[-_ ]?(?:name|value))?|"
+    r"token|secret)"
 )
-_QUOTED_NAMED_SECRET_RE = re.compile(
-    r"(?i)(?P<key>\"?(?:authorization|api[_-]?key|x-api-key|x-goog-api-key|token|secret|password)\"?)"
-    r"(?P<separator>\s*[:=]\s*)(?P<quote>[\"'])[^\"']*(?P=quote)"
+_AUTHORIZATION_HEADER_RE = re.compile(
+    rf"(?im)(?P<key>[\"']?(?:proxy[-_ ]?authorization|authorization)[\"']?)"
+    r"(?P<separator>\s*[:=]\s*)(?P<value>[^\r\n]*)"
 )
-_BARE_NAMED_SECRET_RE = re.compile(
-    r"(?i)(?P<key>\"?(?:authorization|api[_-]?key|x-api-key|x-goog-api-key|token|secret|password)\"?)"
-    r"(?P<separator>\s*[:=]\s*)(?P<value>(?!(?:Basic|Bearer)\b)[^\s,;}\"']+)"
+_COOKIE_HEADER_RE = re.compile(
+    r"(?im)(?P<key>[\"']?(?:set[-_ ]?cookie|cookie)[\"']?)"
+    r"(?P<separator>\s*[:=]\s*)(?P<value>[^\r\n]*)"
 )
-_QUERY_SECRET_RE = re.compile(r"(?i)([?&](?:key|token|api[_-]?key|password)=)[^&\s]+")
+_CREDENTIAL_HEADER_RE = re.compile(
+    rf"(?im)(?P<key>[\"']?(?!(?:proxy[-_ ]?authorization|authorization|"
+    rf"set[-_ ]?cookie|cookie)\b){_SECRET_KEY_PATTERN}[\"']?)"
+    r"(?P<separator>\s*:\s*)(?P<value>[^\r\n]*)"
+)
+_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    rf"(?i)(?P<key>[\"']?{_SECRET_KEY_PATTERN}[\"']?)"
+    r"(?P<separator>\s*=\s*)(?P<value>[^\s,;}\"']+)"
+)
+_QUERY_SECRET_RE = re.compile(
+    rf"(?i)([?&](?:key|api[-_ ]?key|token|secret|password|"
+    rf"[A-Za-z0-9_.-]*(?:token|secret)[A-Za-z0-9_.-]*)=)[^&\s]+"
+)
+_TOKEN_SHAPE_RE = re.compile(
+    r"(?ix)(?<![A-Za-z0-9_-])(?:"
+    r"sk-[A-Za-z0-9][A-Za-z0-9_-]*|"
+    r"AIza[A-Za-z0-9_-]+|"
+    r"gsk_[A-Za-z0-9_-]+|"
+    r"gh[pousr]_[A-Za-z0-9_-]+|"
+    r"eyJ[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}"
+    r")(?![A-Za-z0-9_-])"
+)
 _SENSITIVE_KEYS = {
     "authorization",
+    "proxy_authorization",
     "api_key",
     "apikey",
     "x-api-key",
     "x_api_key",
     "x-goog-api-key",
     "x_goog_api_key",
+    "ocp_apim_subscription_key",
     "token",
     "secret",
     "password",
+    "cookie",
+    "set_cookie",
+    "credential",
+    "credentials",
+    "private_key",
+    "client_secret",
     "access_token",
     "refresh_token",
+    "oauth_token",
 }
 
 
@@ -93,10 +128,11 @@ def classify_error(
     exc: BaseException | None = None,
     code: str | None = None,
     protocol: str | None = None,
+    redact: bool = True,
 ) -> ProviderError:
     """Classify one HTTP, provider-body, or network failure."""
 
-    message = _error_message(body, exc)
+    message = _error_message(body, exc, redact=redact)
     retry_after = parse_retry_after(_header_value(headers, "retry-after"))
     extracted_code = _extract_code(body, protocol=protocol)
     effective_code = code
@@ -109,7 +145,7 @@ def classify_error(
         code=effective_code,
     )
     retryable = kind in {"rate_limit", "overloaded", "network", "server"} and not streamed
-    return ProviderError(
+    error = ProviderError(
         kind=kind,
         message=message,
         retryable=retryable,
@@ -117,6 +153,7 @@ def classify_error(
         status=status,
         partial=partial,
     )
+    return redact_provider_error(error) if redact else error
 
 
 def classify_http_error(
@@ -260,43 +297,80 @@ def _classify_kind(
     return "unknown"
 
 
-def _error_message(body: str, exc: BaseException | None) -> str:
+def _error_message(body: str, exc: BaseException | None, *, redact: bool) -> str:
     if body:
         try:
             value = json.loads(body)
         except (TypeError, ValueError):
-            return _redact(body.strip() or "provider request failed")
+            message = body.strip() or "provider request failed"
+            return redact_provider_text(message) if redact else message
         extracted = _extract_message(value)
         if extracted:
-            return _redact(extracted)
-        return _redact(json.dumps(_redact_json(value), ensure_ascii=False, separators=(",", ":")))
+            return redact_provider_text(extracted) if redact else extracted
+        value = _redact_json(value) if redact else value
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     if exc is not None:
-        return _redact(str(exc) or type(exc).__name__)
+        message = str(exc) or type(exc).__name__
+        return redact_provider_text(message) if redact else message
     return "provider request failed"
 
 
-def _redact(value: str) -> str:
-    value = _AUTHORIZATION_SCHEME_RE.sub(
+def redact_provider_text(value: str) -> str:
+    """Redact credentials from any provider diagnostic text."""
+
+    def redact_authorization(match: re.Match[str]) -> str:
+        raw = match.group("value").strip().strip("\"'")
+        scheme = re.match(r"[A-Za-z][A-Za-z0-9_-]*", raw)
+        replacement = f"{scheme.group(0)} [redacted]" if scheme else "[redacted]"
+        return f"{match.group('key')}{match.group('separator')}{replacement}"
+
+    def redact_cookie(match: re.Match[str]) -> str:
+        parts = []
+        for part in match.group("value").split(";"):
+            stripped = part.strip()
+            if not stripped:
+                continue
+            if "=" in stripped:
+                name, _ = stripped.split("=", 1)
+                parts.append(f"{name.strip()}=[redacted]")
+            else:
+                parts.append("[redacted]")
+        return f"{match.group('key')}{match.group('separator')}{'; '.join(parts)}"
+
+    value = _AUTHORIZATION_HEADER_RE.sub(redact_authorization, value)
+    value = _COOKIE_HEADER_RE.sub(redact_cookie, value)
+    value = _CREDENTIAL_HEADER_RE.sub(
         lambda match: (
-            f"{match.group('key')}{match.group('separator')}"
-            f"{match.group('scheme')} [redacted]"
+            f"{match.group('key')}{match.group('separator')}[redacted]"
         ),
         value,
     )
-    value = _BEARER_RE.sub("Bearer [redacted]", value)
-    value = _BASIC_RE.sub("Basic [redacted]", value)
-    value = _QUOTED_NAMED_SECRET_RE.sub(
-        lambda match: (
-            f"{match.group('key')}{match.group('separator')}"
-            f"{match.group('quote')}[redacted]{match.group('quote')}"
-        ),
-        value,
-    )
-    value = _BARE_NAMED_SECRET_RE.sub(
+    value = _CREDENTIAL_ASSIGNMENT_RE.sub(
         lambda match: f"{match.group('key')}{match.group('separator')}[redacted]",
         value,
     )
-    return _QUERY_SECRET_RE.sub(r"\1[redacted]", value)
+    value = _QUERY_SECRET_RE.sub(r"\1[redacted]", value)
+    return _TOKEN_SHAPE_RE.sub("[redacted]", value)
+
+
+def redact_provider_error(error: ProviderError) -> ProviderError:
+    """Apply the single provider-diagnostic redaction boundary."""
+
+    partial = error.partial
+    if partial is not None and partial.error_message is not None:
+        partial = replace(
+            partial,
+            error_message=redact_provider_text(partial.error_message),
+        )
+    return replace(
+        error,
+        message=redact_provider_text(error.message),
+        partial=partial,
+    )
 
 
 def _extract_message(value: Any) -> str | None:
@@ -376,13 +450,27 @@ def _find_code(value: Any, *, protocol: str | None = None) -> str | None:
 
 
 def _redact_json(value: Any, *, key: str | None = None) -> Any:
-    if key is not None and key.lower().replace("-", "_") in _SENSITIVE_KEYS:
+    if key is not None and _is_sensitive_key(key):
         return "[redacted]"
     if isinstance(value, Mapping):
         return {str(item_key): _redact_json(item_value, key=str(item_key)) for item_key, item_value in value.items()}
     if isinstance(value, list):
         return [_redact_json(item) for item in value]
     return value
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+    if normalized in _SENSITIVE_KEYS:
+        return True
+    if normalized.endswith("_tokens") or normalized in {
+        "max_tokens",
+        "budget_tokens",
+        "token_limit",
+        "context_tokens",
+    }:
+        return False
+    return "token" in normalized or "secret" in normalized
 
 
 def _header_value(headers: Mapping[str, str] | None, name: str) -> str | None:

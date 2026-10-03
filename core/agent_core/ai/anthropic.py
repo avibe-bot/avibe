@@ -24,7 +24,9 @@ from core.agent_core.ai._common import (
     json_object,
     prepare_messages,
     StreamAssembler,
+    WireField,
     usage_counter_error,
+    validate_wire_shape,
 )
 from core.agent_core.ai.provider import (
     Done,
@@ -66,6 +68,96 @@ _KNOWN_STREAM_EVENTS = frozenset(
         "ping",
     }
 )
+_ANTHROPIC_USAGE_FIELDS = (
+    WireField("input_tokens", int),
+    WireField("output_tokens", int),
+    WireField("cache_read_input_tokens", int),
+    WireField("cache_creation_input_tokens", int),
+    WireField(
+        "cache_creation",
+        Mapping,
+        children=(
+            WireField("ephemeral_5m_input_tokens", int),
+            WireField("ephemeral_1h_input_tokens", int),
+        ),
+    ),
+    WireField(
+        "output_tokens_details",
+        Mapping,
+        children=(WireField("thinking_tokens", int),),
+    ),
+)
+_ANTHROPIC_WIRE_SHAPES = {
+    "message_start": (
+        WireField(
+            "message",
+            Mapping,
+            required=True,
+            nullable=False,
+            children=(
+                WireField("usage", Mapping, children=_ANTHROPIC_USAGE_FIELDS),
+            ),
+        ),
+    ),
+    "content_block_start": (
+        WireField("index", int, required=True, nullable=False),
+        WireField(
+            "content_block",
+            Mapping,
+            required=True,
+            nullable=False,
+            children=(
+                WireField("type", str, required=True, nullable=False),
+                WireField("id", str),
+                WireField("name", str),
+                WireField("signature", str),
+                WireField("data", str),
+                WireField("text", str),
+                WireField("thinking", str),
+                WireField("input", Mapping),
+            ),
+        ),
+    ),
+    "content_block_delta": (
+        WireField("index", int, required=True, nullable=False),
+        WireField(
+            "delta",
+            Mapping,
+            required=True,
+            nullable=False,
+            children=(
+                WireField("type", str, required=True, nullable=False),
+                WireField("text", str),
+                WireField("thinking", str),
+                WireField("signature", str),
+                WireField("partial_json", str),
+            ),
+        ),
+    ),
+    "content_block_stop": (
+        WireField("index", int, required=True, nullable=False),
+    ),
+    "message_delta": (
+        WireField(
+            "delta",
+            Mapping,
+            children=(WireField("stop_reason", str),),
+        ),
+        WireField("usage", Mapping, children=_ANTHROPIC_USAGE_FIELDS),
+    ),
+    "error": (
+        WireField(
+            "error",
+            Mapping,
+            children=(
+                WireField("type", str),
+                WireField("message", str),
+            ),
+        ),
+    ),
+    "message_stop": (),
+    "ping": (),
+}
 
 
 class AnthropicAdapter(ProviderAdapter):
@@ -149,7 +241,12 @@ class AnthropicAdapter(ProviderAdapter):
                     if event.event == "error":
                         error_chunk = json_object(event.data)
                         if isinstance(error_chunk, Mapping):
-                            shape_error = _error_event_shape_error(error_chunk)
+                            shape_error = validate_wire_shape(
+                                error_chunk,
+                                "error",
+                                _ANTHROPIC_WIRE_SHAPES,
+                            )
+                            shape_error = shape_error or _error_event_shape_error(error_chunk)
                             if shape_error is not None:
                                 terminal = assembler.terminal(
                                     assembler.error(shape_error, kind="invalid_request")
@@ -189,6 +286,18 @@ class AnthropicAdapter(ProviderAdapter):
                     event_type = dispatch_wire_event(chunk, known=_KNOWN_STREAM_EVENTS)
                     if event_type is None:
                         continue
+                    shape_error = validate_wire_shape(
+                        chunk,
+                        event_type,
+                        _ANTHROPIC_WIRE_SHAPES,
+                    )
+                    if shape_error is not None:
+                        terminal = assembler.terminal(
+                            assembler.error(shape_error, kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if event_type == "message_start":
                         message_started = True
                         message = chunk.get("message")

@@ -22,6 +22,8 @@ from core.agent_core.ai._common import (
     json_object,
     prepare_messages,
     StreamAssembler,
+    validate_wire_shape,
+    WireField,
     usage_counter_error,
 )
 from core.agent_core.ai.provider import (
@@ -41,6 +43,104 @@ from core.agent_core.messages import (
     ToolResultMessage,
     UserMessage,
 )
+
+
+_CHAT_USAGE_FIELDS = (
+    WireField("prompt_tokens", int),
+    WireField("completion_tokens", int),
+    WireField("prompt_cache_hit_tokens", int),
+    WireField("cached_tokens", int),
+    WireField(
+        "prompt_tokens_details",
+        Mapping,
+        children=(
+            WireField("cached_tokens", int),
+            WireField("cache_write_tokens", int),
+        ),
+    ),
+    WireField(
+        "completion_tokens_details",
+        Mapping,
+        children=(WireField("reasoning_tokens", int),),
+    ),
+)
+_CHAT_REASONING_DETAIL_FIELDS = (
+    WireField("type", str),
+    WireField("text", str),
+    WireField("summary", str),
+    WireField("id", str),
+    WireField("format", str),
+    WireField("index", int),
+    WireField("signature", str),
+    WireField("data", str),
+    WireField("encrypted_content", str),
+)
+_CHAT_TOOL_CALL_FIELDS = (
+    WireField("id", str),
+    WireField("index", int),
+    WireField(
+        "function",
+        Mapping,
+        children=(
+            WireField("name", str),
+            WireField("arguments", str),
+        ),
+    ),
+)
+_CHAT_DELTA_FIELDS = (
+    WireField("content", str),
+    WireField("reasoning_content", str),
+    WireField("reasoning", str),
+    WireField("reasoning_text", str),
+    WireField("refusal", str),
+    WireField(
+        "reasoning_details",
+        list,
+        item_children=_CHAT_REASONING_DETAIL_FIELDS,
+    ),
+    WireField(
+        "tool_calls",
+        list,
+        item_children=_CHAT_TOOL_CALL_FIELDS,
+    ),
+    WireField(
+        "function_call",
+        Mapping,
+        children=(
+            WireField("name", str),
+            WireField("arguments", str),
+        ),
+    ),
+)
+_CHAT_WIRE_SHAPES = {
+    "chunk": (
+        WireField("usage", Mapping, children=_CHAT_USAGE_FIELDS),
+        WireField(
+            "error",
+            Mapping,
+            children=(
+                WireField("type", str),
+                WireField("code", (str, int)),
+                WireField("message", str),
+            ),
+        ),
+        WireField(
+            "choices",
+            list,
+            item_children=(
+                WireField("finish_reason", str),
+                WireField("native_finish_reason", str),
+                WireField("usage", Mapping, children=_CHAT_USAGE_FIELDS),
+                WireField(
+                    "delta",
+                    Mapping,
+                    children=_CHAT_DELTA_FIELDS,
+                ),
+            ),
+        ),
+    ),
+}
+
 
 class OpenAIChatAdapter(ProviderAdapter):
     """Adapter for OpenAI-compatible ``/chat/completions`` endpoints."""
@@ -125,6 +225,14 @@ class OpenAIChatAdapter(ProviderAdapter):
                     if chunk is None:
                         terminal = assembler.terminal(
                             assembler.error("Provider returned invalid OpenAI Chat JSON", kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    shape_error = validate_wire_shape(chunk, "chunk", _CHAT_WIRE_SHAPES)
+                    if shape_error is not None:
+                        terminal = assembler.terminal(
+                            assembler.error(shape_error, kind="invalid_request")
                         )
                         if terminal is not None:
                             yield terminal

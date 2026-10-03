@@ -26,6 +26,8 @@ from core.agent_core.ai._common import (
     json_object,
     prepare_messages,
     StreamAssembler,
+    validate_wire_shape,
+    WireField,
     usage_counter_error,
 )
 from core.agent_core.ai.provider import (
@@ -74,6 +76,185 @@ _KNOWN_RESPONSE_EVENTS = frozenset(
         "error",
     }
 )
+_RESPONSES_USAGE_FIELDS = (
+    WireField("input_tokens", int),
+    WireField("output_tokens", int),
+    WireField(
+        "input_tokens_details",
+        Mapping,
+        children=(
+            WireField("cached_tokens", int),
+            WireField("cache_write_tokens", int),
+        ),
+    ),
+    WireField(
+        "output_tokens_details",
+        Mapping,
+        children=(WireField("reasoning_tokens", int),),
+    ),
+)
+_RESPONSES_ERROR_FIELDS = (
+    WireField("type", str),
+    WireField("code", (str, int)),
+    WireField("message", str),
+)
+_RESPONSES_CONTENT_PART_FIELDS = (
+    WireField("type", str),
+    WireField("text", str),
+    WireField("refusal", str),
+)
+_RESPONSES_ITEM_FIELDS = (
+    WireField("type", str, required=True, nullable=False),
+    WireField("id", str),
+    WireField("call_id", str),
+    WireField("name", str),
+    WireField("arguments", (str, Mapping)),
+    WireField("input", str),
+    WireField("encrypted_content", str),
+    WireField(
+        "summary",
+        list,
+        item_children=(
+            WireField("type", str),
+            WireField("text", str),
+            WireField("summary", str),
+        ),
+    ),
+    WireField(
+        "content",
+        list,
+        item_children=_RESPONSES_CONTENT_PART_FIELDS,
+    ),
+)
+_RESPONSES_RESPONSE_FIELDS = (
+    WireField("status", str),
+    WireField(
+        "incomplete_details",
+        Mapping,
+        children=(WireField("reason", str),),
+    ),
+    WireField(
+        "usage",
+        Mapping,
+        children=_RESPONSES_USAGE_FIELDS,
+    ),
+    WireField(
+        "error",
+        Mapping,
+        children=_RESPONSES_ERROR_FIELDS,
+    ),
+    WireField(
+        "output",
+        list,
+        item_children=_RESPONSES_ITEM_FIELDS,
+    ),
+)
+_RESPONSES_WIRE_SHAPES = {
+    "response.created": (
+        WireField("response", Mapping, children=_RESPONSES_RESPONSE_FIELDS),
+    ),
+    "response.in_progress": (
+        WireField("response", Mapping, children=_RESPONSES_RESPONSE_FIELDS),
+    ),
+    "response.queued": (
+        WireField("response", Mapping, children=_RESPONSES_RESPONSE_FIELDS),
+    ),
+    "response.output_text.delta": (
+        WireField("delta", str, required=True, nullable=False),
+        WireField("output_index", int),
+    ),
+    "response.refusal.delta": (
+        WireField("delta", str, required=True, nullable=False),
+        WireField("output_index", int),
+    ),
+    "response.reasoning_summary_text.delta": (
+        WireField("delta", str, required=True, nullable=False),
+        WireField("output_index", int),
+    ),
+    "response.reasoning_text.delta": (
+        WireField("delta", str, required=True, nullable=False),
+        WireField("output_index", int),
+    ),
+    "response.reasoning_summary_part.added": (
+        WireField("output_index", int),
+        WireField("part", Mapping),
+    ),
+    "response.reasoning_summary_part.done": (
+        WireField("output_index", int),
+    ),
+    "response.output_item.added": (
+        WireField("output_index", int),
+        WireField("item", Mapping, required=True, nullable=False, children=_RESPONSES_ITEM_FIELDS),
+    ),
+    "response.output_item.done": (
+        WireField("output_index", int),
+        WireField("item", Mapping, required=True, nullable=False, children=_RESPONSES_ITEM_FIELDS),
+    ),
+    "response.function_call_arguments.delta": (
+        WireField("delta", str, required=True, nullable=False),
+        WireField("item_id", str),
+        WireField("output_index", int),
+    ),
+    "response.function_call_arguments.done": (
+        WireField("arguments", str),
+        WireField("item_id", str),
+        WireField("output_index", int),
+    ),
+    "response.custom_tool_call_input.delta": (
+        WireField("delta", str, required=True, nullable=False),
+        WireField("item_id", str),
+        WireField("output_index", int),
+    ),
+    "response.custom_tool_call_input.done": (
+        WireField("item_id", str),
+        WireField("output_index", int),
+    ),
+    "response.output_text.done": (
+        WireField("output_index", int),
+    ),
+    "response.reasoning_summary_text.done": (
+        WireField("output_index", int),
+    ),
+    "response.reasoning_text.done": (
+        WireField("output_index", int),
+    ),
+    "response.content_part.added": (
+        WireField("output_index", int),
+        WireField("part", Mapping),
+    ),
+    "response.content_part.done": (
+        WireField("output_index", int),
+        WireField("part", Mapping),
+    ),
+    "response.completed": (
+        WireField(
+            "response",
+            Mapping,
+            required=True,
+            nullable=False,
+            children=_RESPONSES_RESPONSE_FIELDS,
+        ),
+    ),
+    "response.incomplete": (
+        WireField(
+            "response",
+            Mapping,
+            required=True,
+            nullable=False,
+            children=_RESPONSES_RESPONSE_FIELDS,
+        ),
+    ),
+    "response.failed": (
+        WireField("response", Mapping, children=_RESPONSES_RESPONSE_FIELDS),
+        WireField("error", Mapping, children=_RESPONSES_ERROR_FIELDS),
+    ),
+    "error": (
+        WireField("error", Mapping, children=_RESPONSES_ERROR_FIELDS),
+        WireField("type", str),
+        WireField("code", (str, int)),
+        WireField("message", str),
+    ),
+}
 
 
 class OpenAIResponsesAdapter(ProviderAdapter):
@@ -134,7 +315,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             if terminal is not None:
                 yield terminal
             return
-        reasoning: dict[int, dict[str, Any]] = {}
+        reasoning: set[int] = set()
         status: str | None = None
         incomplete_reason: str | None = None
         refusal = False
@@ -172,6 +353,18 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     )
                     if event_type is None:
                         continue
+                    shape_error = validate_wire_shape(
+                        chunk,
+                        event_type,
+                        _RESPONSES_WIRE_SHAPES,
+                    )
+                    if shape_error is not None:
+                        terminal = assembler.terminal(
+                            assembler.error(shape_error, kind="invalid_request")
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if event_type in {"response.created", "response.in_progress"}:
                         response_body = chunk.get("response")
                         if "response" in chunk and not isinstance(response_body, Mapping):
@@ -415,8 +608,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             if emitted is not None:
                                 yield emitted
                         elif item_type == "reasoning":
-                            state = reasoning.setdefault(output_index, {"id": "", "encrypted_content": ""})
-                            _merge_reasoning_item(state, item)
+                            reasoning.add(output_index)
+                            state = assembler.merge_reasoning_item(output_index, item)
                             assembler.ensure_thinking_slot(output_index)
                             if state["encrypted_content"]:
                                 assembler.set_thinking_signature(
@@ -641,8 +834,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             assembler.bind_tool_alias(key, item_id)
                             assembler.bind_tool_alias(key, _string(item.get("call_id")) or None)
                             if item.get("type") == "reasoning":
-                                state = reasoning.setdefault(output_index, {"id": "", "encrypted_content": ""})
-                                _merge_reasoning_item(state, item)
+                                reasoning.add(output_index)
+                                state = assembler.merge_reasoning_item(output_index, item)
                                 assembler.ensure_thinking_slot(output_index)
                                 if state["encrypted_content"]:
                                     assembler.set_thinking_signature(
@@ -1229,7 +1422,7 @@ def _reasoning_signature(signature: str) -> dict[str, Any] | None:
 def _apply_terminal_output_items(
     items: Any,
     assembler: StreamAssembler,
-    reasoning: dict[int, dict[str, Any]],
+    reasoning: set[int],
 ) -> tuple[ProviderError | None, bool]:
     if not isinstance(items, list):
         return None, False
@@ -1245,17 +1438,12 @@ def _apply_terminal_output_items(
             ), refusal
         if item_type == "reasoning":
             item_id = _string(item.get("id"))
-            state_index, state = next(
-                (
-                    (candidate_index, candidate)
-                    for candidate_index, candidate in reasoning.items()
-                    if item_id and candidate.get("id") == item_id
-                ),
-                (index, reasoning.get(index)),
-            )
-            if state is None:
+            state_index = assembler.reasoning_key_for_id(item_id)
+            if state_index is None and index in reasoning:
+                state_index = index
+            if state_index is None:
                 continue
-            _merge_reasoning_item(state, item)
+            state = assembler.merge_reasoning_item(state_index, item)
             if state["encrypted_content"]:
                 assembler.set_thinking_signature(state_index, _reasoning_signature_json(state))
         elif item_type == "message":
@@ -1270,24 +1458,6 @@ def _apply_terminal_output_items(
             if message_refusal and assembler.has_text_slot(index):
                 _append_message_refusal(assembler, index, item)
     return None, refusal
-
-
-def _merge_reasoning_item(state: dict[str, Any], item: Mapping[str, Any]) -> None:
-    previous = state.get("item")
-    merged = dict(previous) if isinstance(previous, Mapping) else {}
-    for key, value in item.items():
-        if key == "encrypted_content" and not value:
-            continue
-        merged[key] = value
-    merged["type"] = "reasoning"
-    state["item"] = merged
-    state["id"] = _string(item.get("id")) or state.get("id", "")
-    encrypted_content = _string(item.get("encrypted_content"))
-    state["encrypted_content"] = encrypted_content or state.get("encrypted_content", "")
-    if state["id"]:
-        merged["id"] = state["id"]
-    if state["encrypted_content"]:
-        merged["encrypted_content"] = state["encrypted_content"]
 
 
 def _message_has_refusal(item: Mapping[str, Any]) -> bool:
@@ -1354,15 +1524,8 @@ def _append_message_text(
 
 
 def _reasoning_signature_json(state: Mapping[str, Any]) -> str:
-    item = state.get("item")
-    if isinstance(item, Mapping):
-        return json.dumps(dict(item), ensure_ascii=False, separators=(",", ":"))
     return json.dumps(
-        {
-            "type": "reasoning",
-            "id": state.get("id", ""),
-            "encrypted_content": state.get("encrypted_content", ""),
-        },
+        dict(state),
         ensure_ascii=False,
         separators=(",", ":"),
     )
