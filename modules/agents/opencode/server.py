@@ -69,7 +69,9 @@ _UNRECORDED_RUNTIME_ID = object()
 # Generations a runtime of this process is starting or has attached, with the
 # process each one runs. Adoption leaves them to that runtime, for example the
 # one of an OpenCode backend disabled and enabled again while its turn still
-# runs; it stops them once their work drains.
+# runs; it stops them once their work drains. A started process is owned from
+# its spawn, before its record is written, until a stop proves it gone or its
+# start proves it exited, so this controller's shutdown stops it, recorded or not.
 _OWNED_HERE: dict[str, tuple[int, Optional[float]]] = {}
 # A busy server after a controller crash can miss one health probe; adoption
 # gives it this many before stopping it.
@@ -1782,6 +1784,8 @@ async def start_generation(
     A start that fails after spawning stops its process. When the process
     survives that stop, ``on_survivor`` receives it, still owned here, so its
     runtime keeps retrying the stop; its record and overlay stay meanwhile.
+    The process is owned here from its spawn, so even one whose record was
+    never written is stopped by this controller's shutdown.
     """
 
     generation_id = f"ocg_{secrets.token_hex(8)}"
@@ -1817,12 +1821,15 @@ async def start_generation(
                 raise OpenCodeGenerationStartError(
                     f"OpenCode CLI not found at '{spec.binary}'. Please install OpenCode or set OPENCODE_CLI_PATH."
                 ) from exc
+            # Owned before anything else can fail, the record write included.
+            created_at = runtime.process_create_time(process.pid)
+            _OWNED_HERE[generation_id] = (process.pid, created_at)
             generation = OpenCodeGeneration(
                 generation_id=generation_id,
                 pid=process.pid,
                 port=port,
                 spec_digest=spec.digest,
-                process_created_at=runtime.process_create_time(process.pid),
+                process_created_at=created_at,
                 binary=spec.binary,
                 binary_version=spec.binary_version,
                 caller_context_path=caller_context_path,
@@ -1836,13 +1843,12 @@ async def start_generation(
                 # Written before readiness, so a controller that dies during
                 # the start leaves a record its successor cleans up.
                 generation.write_record()
-                _OWNED_HERE[generation_id] = (process.pid, generation.process_created_at)
                 apply_resource_governance(resource_governor, process.pid)
                 outcome = await _wait_until_ready(generation, process)
             except BaseException:
                 await generation.close_http_session()
                 if await _terminate_started_process(process, "start interrupted"):
-                    _remove_quietly(generation.record_path)
+                    _disown_ended_start(generation)
                 else:
                     survivor = generation
                 raise
@@ -1852,13 +1858,13 @@ async def start_generation(
             await generation.close_http_session()
             if outcome == "exited":
                 # Most often another process took the port first.
-                _remove_quietly(generation.record_path)
+                _disown_ended_start(generation)
                 exited_pid, exit_code = process.pid, process.returncode
                 continue
             # A late-starting process must not become a healthy server that
             # nothing records.
             if await _terminate_started_process(process, "startup timeout"):
-                _remove_quietly(generation.record_path)
+                _disown_ended_start(generation)
             else:
                 survivor = generation
             raise OpenCodeGenerationStartError(
@@ -1872,12 +1878,16 @@ async def start_generation(
         if survivor is not None and on_survivor is not None:
             # Still owned here: the runtime that started it retries its stop.
             on_survivor(survivor)
-        else:
-            # A survivor nobody tracks is no runtime's; a later adoption may stop it.
-            _OWNED_HERE.pop(generation_id, None)
         if overlay_path is not None and survivor is None:
             _remove_quietly(overlay_path)
         raise
+
+
+def _disown_ended_start(generation: OpenCodeGeneration) -> None:
+    """A start's process exited: it is no longer owned here, and its record goes."""
+
+    _OWNED_HERE.pop(generation.generation_id, None)
+    _remove_quietly(generation.record_path)
 
 
 async def stop_generation(generation: OpenCodeGeneration) -> None:
@@ -2212,14 +2222,43 @@ def stop_recorded_servers_sync(runtime_ids: frozenset[str] = frozenset()) -> lis
 
 
 def stop_owned_generations_sync() -> None:
-    """Stop every generation a runtime of this controller started or adopted.
+    """Stop every process a runtime of this controller started or adopted.
 
-    An explicit Avibe shutdown runs it. A record no runtime here owns, such as
-    one of another desktop Runtime sharing this state directory, is left alone.
+    An explicit Avibe shutdown runs it. A recorded process stops through its
+    record. One owned here whose record is missing, such as a start whose
+    record write failed, stops by its process identity. A record no runtime
+    here owns, such as one of another desktop Runtime sharing this state
+    directory, is left alone.
     """
 
+    recorded: set[str] = set()
     for path, info in _recorded_processes():
         if _owned_here(info):
             stop_recorded_server_sync(path, info)
+            if isinstance(info.get("generation_id"), str):
+                recorded.add(info["generation_id"])
+    for generation_id, (pid, created_at) in list(_OWNED_HERE.items()):
+        if generation_id not in recorded:
+            _stop_unrecorded_process_sync(generation_id, pid, created_at)
+
+
+def _stop_unrecorded_process_sync(generation_id: str, pid: int, created_at: Optional[float]) -> None:
+    """Stop an owned process no record names, proven by its pid and create time.
+
+    A process whose create time is unknown or cannot be read now is never
+    signalled: its pid may have been reused. One whose pid is gone, or now
+    names another process, has ended, and is no longer owned here.
+    """
+
+    if _pid_exists(pid):
+        current = runtime.process_create_time(pid)
+        if created_at is None or current is None:
+            logger.warning("Leaving OpenCode generation %s pid=%s: its process cannot be proven", generation_id, pid)
+            return
+        if current == created_at and not terminate_pid_tree_sync(pid):
+            logger.warning("OpenCode generation %s pid=%s survived its stop", generation_id, pid)
+            return
+    _OWNED_HERE.pop(generation_id, None)
+    _remove_quietly(generation_records_dir() / f"{generation_id}.overlay.json")
 
 

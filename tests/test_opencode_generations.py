@@ -1825,6 +1825,53 @@ def test_a_failed_start_whose_process_survives_is_reaped_until_it_is_gone(isolat
     assert list(isolated_launch.records.iterdir()) == []
 
 
+def test_service_shutdown_stops_a_started_process_whose_record_was_never_written(isolated_launch, monkeypatch):
+    """A start's record write fails and its process survives the stop. Avibe
+    stops before any reap retries it: the controller's shutdown still stops
+    that process, proven by its pid and create time, and drops its Hub
+    overlay. It never signals a pid whose create time changed or cannot be read."""
+
+    proven, reused, unreadable = fake_pid(67), fake_pid(68), fake_pid(69)
+    isolated_launch.processes.extend(_Process(pid) for pid in (proven, reused, unreadable))
+    create_times = {proven: 1.0, reused: 2.0, unreadable: 3.0}
+    monkeypatch.setattr(opencode_server.runtime, "process_create_time", create_times.get)
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid in create_times)
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
+
+    def disk_full(_generation):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(OpenCodeGeneration, "write_record", disk_full)
+    monkeypatch.setattr(opencode_server, "_terminate_started_process", AsyncMock(return_value=False))
+    stopped: list[int] = []
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: stopped.append(pid) or True)
+    overlay = _overlay()
+    spec = OpenCodeLaunchSpec(
+        digest="hub",
+        binary="/bin/opencode",
+        overlay_hash=overlay.content_hash,
+        overlay_file_content=overlay.content,
+        overlay_inline_content=opencode_server._managed_runtime_config_content(overlay.content),
+    )
+    survivors: list[OpenCodeGeneration] = []
+
+    async def start_three():
+        for _ in range(3):
+            with pytest.raises(OSError, match="No space"):
+                await opencode_server.start_generation(spec, on_survivor=survivors.append)
+
+    asyncio.run(start_three())
+    create_times[reused] = 9.0
+    create_times[unreadable] = None
+
+    opencode_server.stop_owned_generations_sync()
+
+    assert stopped == [proven]
+    kept = next(generation for generation in survivors if generation.pid == unreadable)
+    assert list(opencode_server._OWNED_HERE) == [kept.generation_id]
+    assert [path.name for path in isolated_launch.records.iterdir()] == [kept.overlay_path.name]
+
+
 def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
     """An ``agents.opencode`` save lands after a turn's admission snapshot and
     before the turn resolves its model. The turn runs on the generation its

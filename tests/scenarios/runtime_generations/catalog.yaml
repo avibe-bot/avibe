@@ -236,4 +236,5 @@ scenarios:
     test: tests/test_opencode_generations.py::test_a_controller_starting_with_opencode_disabled_stops_a_crashed_controllers_servers
     related_tests:
       - tests/test_opencode_generations.py::test_shutdown_stops_only_the_generations_this_controller_owns
+      - tests/test_opencode_generations.py::test_service_shutdown_stops_a_started_process_whose_record_was_never_written
       - tests/test_opencode_generations.py::test_adoption_leaves_every_record_of_another_desktop_runtime_alone
