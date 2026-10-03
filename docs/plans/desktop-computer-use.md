@@ -318,13 +318,12 @@ running. The tray keeps the shell alive after the window closes.
     path, and tests redirect it.
 - **Tool policy.** Ship a YAML allow-list as the driver's managed policy
   (Phase 0 finding). It is pinned with the driver version, because the list
-  must be reviewed against each new tool surface. The v1 list has exactly 29
+  must be reviewed against each new tool surface. The v1 list has exactly 28
   tools, and the bundled tool snapshot must equal it:
   - Observation: `list_apps`, `list_windows`, `get_window_state`,
     `verify_state`, `get_accessibility_tree`, `get_screen_size`,
     `get_desktop_state`, `get_cursor_position`, `zoom`.
-  - Apps and windows: `launch_app`, `kill_app`, `set_window_frame`,
-    `invoke_menu`.
+  - Apps and windows: `launch_app`, `kill_app`, `set_window_frame`.
   - Input: `click`, `double_click`, `right_click`, `drag`, `scroll`,
     `type_text`, `press_key`, `hotkey`, `set_value`.
   - Clipboard: `clipboard_read`, `clipboard_write`.
@@ -335,16 +334,23 @@ running. The tray keeps the shell alive after the window closes.
     dialogs, and only the native toggle-on action may prompt. The policy
     applies to every caller, the shell included, so the shell's health check
     uses `health_report` instead.
-  - `bring_to_front` and `move_cursor` are excluded. The first persistently
-    takes the foreground, and the second can move the user's real pointer. Both
-    break the promise that background work leaves focus and pointer alone. On
-    macOS the computer MCP server also admits an input call only when it
-    addresses one window: a `pid` with a `window_id`, or an element token. It
-    rejects any other targeting, including a desktop target (`target.kind:
-    "desktop"` or `scope: "desktop"`), `delivery_mode: "foreground"`, and
-    anything it does not recognise. This is an allow rule, so a targeting option
-    added in a later driver is refused until it is reviewed. The Windows Q6 run
-    decides the Windows policy, where some surfaces work only in the foreground.
+  - `bring_to_front`, `move_cursor`, and `invoke_menu` are excluded. The first
+    persistently takes the foreground, and the second can move the user's real
+    pointer. `invoke_menu` temporarily activates the target and restores the
+    previous app only on a best-effort basis. All three break the promise that
+    background work leaves focus and pointer alone. The remaining 28 were
+    checked against the driver's macOS guide (`MACOS.md` at the pinned tag).
+    Only foreground delivery activates a window, and the server rejects it on
+    macOS. `launch_app` launches without activation. `set_window_frame` moves a
+    window without focusing it. The release check repeats this review for every
+    new driver version. On macOS the computer MCP server also admits an input
+    call only when it addresses one window: a `pid` with a `window_id`, or an
+    element token. It rejects any other targeting, including a desktop target
+    (`target.kind: "desktop"` or `scope: "desktop"`), `delivery_mode:
+    "foreground"`, and anything it does not recognise. This is an allow rule, so
+    a targeting option added in a later driver is refused until it is reviewed.
+    The Windows Q6 run decides the Windows policy, where some surfaces work only
+    in the foreground.
 
   It omits config, update,
   extension, recording/replay, cursor-theme, legacy `page`, the typed browser
@@ -638,21 +644,20 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 - **Tool surface: restrict with a managed tool policy, not a manifest.** The
   server exposes 58 tools, including `install_extension`, `set_config`,
   `check_for_update`, and `replay_trajectory`. Agents must not change driver
-  config, install extensions (`cua-perception` is AGPL), or update the driver.
-  A capability manifest does not fit general computer use: it is deny by
-  default for resources too, so every app would have to be listed by bundle
-  id. The driver's YAML tool policy only names tools. Set as
+  config, install extensions (`cua-perception` is AGPL), or update the driver. A
+  capability manifest does not fit general computer use: it is deny by default
+  for resources too, so every app would have to be listed by bundle id. The
+  driver's YAML tool policy only names tools. Set as
   `CUA_DRIVER_MANAGED_POLICY_FILE` on the embedded daemon, a 30-tool draft
-  allow-list shrank `tools/list` to 30 through the proxy. The final v1 list
-  (see Tool policy) adds `health_report` and removes `bring_to_front` and
-  `move_cursor`, giving 29. A 32-tool draft that
-  also allowed `check_permissions` listed exactly its 32 tools under the
-  policy. Omitted tools returned
-  `permission_denied`, and allowed ones worked. Agent-side environment on the
-  proxy could not widen it: a widening user policy, a widening managed policy,
-  and `unrestricted` mode variables each left the daemon's surface unchanged.
-  `kill_app` stays allowed, because standard mode only terminates processes
-  this runtime launched.
+  allow-list shrank `tools/list` to 30 through the proxy. The final v1 list (see
+  Tool policy) adds `health_report` and removes `bring_to_front`, `move_cursor`,
+  and `invoke_menu`, giving 28. A 32-tool draft that also allowed
+  `check_permissions` listed exactly its 32 tools under the policy. Omitted
+  tools returned `permission_denied`, and allowed ones worked. Agent-side
+  environment on the proxy could not widen it: a widening user policy, a
+  widening managed policy, and `unrestricted` mode variables each left the
+  daemon's surface unchanged. `kill_app` stays allowed, because standard mode
+  only terminates processes this runtime launched.
 - **End to end.** `launch_app` started Calculator in the background
   (`self_activation_suppressed: true`). `get_window_state` returned a PNG plus a
   154-element AX tree in about 1.9 s. Five AX `click`s by `element_token` gave
