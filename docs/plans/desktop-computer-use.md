@@ -315,23 +315,29 @@ running. The tray keeps the shell alive after the window closes.
     path, and tests redirect it.
 - **Tool policy.** Ship a YAML allow-list as the driver's managed policy
   (Phase 0 finding). It is pinned with the driver version, because the list
-  must be reviewed against each new tool surface. The v1 list has exactly 31
+  must be reviewed against each new tool surface. The v1 list has exactly 29
   tools, and the bundled tool snapshot must equal it:
   - Observation: `list_apps`, `list_windows`, `get_window_state`,
     `verify_state`, `get_accessibility_tree`, `get_screen_size`,
     `get_desktop_state`, `get_cursor_position`, `zoom`.
-  - Apps and windows: `launch_app`, `kill_app`, `bring_to_front`,
-    `set_window_frame`, `invoke_menu`.
+  - Apps and windows: `launch_app`, `kill_app`, `set_window_frame`,
+    `invoke_menu`.
   - Input: `click`, `double_click`, `right_click`, `drag`, `scroll`,
-    `type_text`, `press_key`, `hotkey`, `set_value`, `move_cursor`.
+    `type_text`, `press_key`, `hotkey`, `set_value`.
   - Clipboard: `clipboard_read`, `clipboard_write`.
   - Sessions: `start_session`, `end_session`, `get_session`,
     `list_sessions`.
-    - Diagnostics: `health_report`.
+      - Diagnostics: `health_report`.
   - `check_permissions` is excluded. Its `prompt: true` raises system
     dialogs, and only the native toggle-on action may prompt. The policy
     applies to every caller, the shell included, so the shell's health check
     uses `health_report` instead.
+  - `bring_to_front` and `move_cursor` are excluded. The first persistently
+    takes the foreground, and the second can move the user's real pointer.
+    Both break the promise that background work leaves focus and pointer
+    alone. The computer MCP server also rejects `delivery_mode:
+    "foreground"` on macOS. The Windows Q6 run decides the Windows policy,
+    where some surfaces work only in the foreground.
 
   It omits config, update,
   extension, recording/replay, cursor-theme, legacy `page`, the typed browser
@@ -495,7 +501,9 @@ running. The tray keeps the shell alive after the window closes.
   observe state before retrying any action, since an error result does not prove
   the action failed. If every window comes back AX-unresolved and the desktop
   shows no apps, the screen is likely locked: stop and tell the user. On
-  Windows, use foreground delivery only for the action that needs it.
+  macOS, no tool may take focus or move the pointer; if only a foreground action
+  would work, the agent tells the user. On Windows, the Q6 run decides
+  foreground use.
 
 ### Workbench
 
@@ -627,7 +635,8 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   id. The driver's YAML tool policy only names tools. Set as
   `CUA_DRIVER_MANAGED_POLICY_FILE` on the embedded daemon, a 30-tool draft
   allow-list shrank `tools/list` to 30 through the proxy. The final v1 list
-  (see Tool policy) adds `health_report`, giving 31. A 32-tool draft that
+  (see Tool policy) adds `health_report` and removes `bring_to_front` and
+  `move_cursor`, giving 29. A 32-tool draft that
   also allowed `check_permissions` listed exactly its 32 tools under the
   policy. Omitted tools returned
   `permission_denied`, and allowed ones worked. Agent-side environment on the
