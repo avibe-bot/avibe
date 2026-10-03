@@ -798,6 +798,12 @@ def _normalize_stop(
 
 
 def _openai_usage(value: Mapping[str, Any]) -> Any:
+    """Project CompletionUsage according to conversion-tables.md's field ledger.
+
+    Audio/image/text and prediction details are subsets of inclusive totals;
+    they and the redundant total_tokens must not be counted a second time.
+    """
+
     from core.agent_core.messages import Usage
 
     prompt_details = value.get("prompt_tokens_details")

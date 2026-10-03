@@ -605,9 +605,6 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                     if terminal is not None:
                                         yield terminal
                                     return
-                            assembler.bind_tool_alias(key, item_id)
-                            assembler.bind_tool_alias(key, call_id)
-                            assembler.set_tool_item_id(key, item_id)
                             start = assembler.tool_start(
                                 key,
                                 call_id=call_id,
@@ -681,16 +678,14 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 if terminal is not None:
                                     yield terminal
                                 return
-                            key = assembler.tool_key(
-                                ("responses-tool", output_index),
-                                native_id=item_id,
-                            )
+                            key = ("responses-tool", output_index)
                         else:
                             key = assembler.fallback_tool_key(native_id=item_id, allocate=False)
                             if key is None:
                                 continue
                         if not assembler.tool_name(key):
                             continue
+                        assembler.bind_tool_identity(key, item_id)
                         value = _string(chunk.get("delta"))
                         emitted = assembler.tool_arguments(key, value)
                         if emitted is not None:
@@ -720,16 +715,14 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 if terminal is not None:
                                     yield terminal
                                 return
-                            key = assembler.tool_key(
-                                ("responses-tool", output_index),
-                                native_id=item_id,
-                            )
+                            key = ("responses-tool", output_index)
                         else:
                             key = assembler.fallback_tool_key(native_id=item_id, allocate=False)
                             if key is None:
                                 continue
                         if not assembler.tool_name(key):
                             continue
+                        assembler.bind_tool_identity(key, item_id)
                         if "arguments" in chunk:
                             complete_arguments = chunk.get("arguments")
                             if not isinstance(complete_arguments, str):
@@ -838,8 +831,6 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                     if item.get("type") == "function_call"
                                     else output_index
                                 )
-                            assembler.bind_tool_alias(key, item_id)
-                            assembler.bind_tool_alias(key, _string(item.get("call_id")) or None)
                             if item.get("type") == "reasoning":
                                 reasoning.add(output_index)
                                 assembler.merge_reasoning_item(output_index, item)
@@ -852,10 +843,6 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 if end is not None:
                                     yield end
                             elif item.get("type") == "function_call":
-                                key = assembler.tool_key(
-                                    key,
-                                    native_id=item_id or _string(item.get("call_id")) or None,
-                                )
                                 name = _string(item.get("name")) or assembler.tool_name(key)
                                 if not name:
                                     terminal = assembler.terminal(
@@ -1529,6 +1516,12 @@ def _append_message_text(
 
 
 def _responses_usage(value: Any) -> Any:
+    """Project ResponseUsage once; inclusive totals own the ignored breakdowns.
+
+    See the full documented field inventory in conversion-tables.md. Total
+    tokens are redundant with the canonical components, not another counter.
+    """
+
     if not isinstance(value, Mapping):
         return None
     from core.agent_core.messages import Usage

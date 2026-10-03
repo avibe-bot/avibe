@@ -905,7 +905,11 @@ def _error_event_shape_error(chunk: Mapping[str, Any]) -> str | None:
 
 
 def _anthropic_usage(value: Any, *, current: Any = None) -> Any:
-    """Normalize both initial and delta usage with one non-null field mapping."""
+    """Normalize start/delta with the field policy in conversion-tables.md.
+
+    Tool request counts, tier and geography are not canonical token counters.
+    Output already includes thinking; TTLs decompose, never add to, cache writes.
+    """
 
     if not isinstance(value, Mapping):
         return current
@@ -928,10 +932,13 @@ def _anthropic_cache_write_tokens(value: Mapping[str, Any], fallback: int = 0) -
         return _nonnegative(aggregate)
     breakdown = value.get("cache_creation")
     if isinstance(breakdown, Mapping):
-        return sum(
-            _nonnegative(breakdown.get(key))
+        counters = [
+            breakdown[key]
             for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
-        )
+            if breakdown.get(key) is not None
+        ]
+        if counters:
+            return sum(_nonnegative(counter) for counter in counters)
     return fallback
 
 

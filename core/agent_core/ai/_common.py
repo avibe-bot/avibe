@@ -90,6 +90,10 @@ class WireDispatchError(ValueError):
     """A known wire frame has an invalid or missing type discriminator."""
 
 
+class ToolIdentityError(ValueError):
+    """A wire frame attempts to rebind an open tool slot to another call."""
+
+
 def _string_buffer(value: str = "") -> io.StringIO:
     buffer = io.StringIO()
     buffer.write(value)
@@ -560,15 +564,13 @@ class StreamAssembler:
         state = self.tool_state(key)
         if "content_index" in state and state["content_index"] in self._closed_indices:
             return None
+        self.bind_tool_identity(key, native_id)
         if call_id:
             # Canonical identity is immutable after ToolCallStart. A late wire
             # ID is an alias, never a new allocated canonical ID.
             if "content_index" not in state:
                 self._set_tool_id(key, state, call_id)
-        if native_id:
-            self._account_pending_tool_identity(state, "native_id", native_id)
-            state["native_id"] = native_id
-            self.bind_tool_alias(key, native_id)
+            self.bind_tool_alias(key, call_id)
         if name and not state["name"]:
             self._account_pending_tool_identity(state, "name", name)
             state["name"] = name
@@ -637,15 +639,26 @@ class StreamAssembler:
             self._account_replacement(previous, value)
 
     def _account_tool_identity_block(self, state: dict[str, Any]) -> None:
-        for field in ("id", "name", "native_id", "item_id"):
+        for field in ("id", "name", "native_id"):
             value = state.get(field)
             if value:
                 self._account_pending_tool_identity(state, field, str(value))
 
-    def tool_key(self, default: Hashable, *, native_id: str | None = None) -> Hashable:
-        if native_id:
-            return self._tool_keys_by_native_id.get(native_id, default)
-        return default
+    def bind_tool_identity(self, key: Hashable, native_id: str | None) -> None:
+        """Bind once to the stream slot; aliases never override an explicit index."""
+
+        if not native_id:
+            return
+        state = self.tool_state(key)
+        if "content_index" in state and state["content_index"] in self._closed_indices:
+            return
+        previous = state["native_id"]
+        if previous and previous != native_id:
+            raise ToolIdentityError("tool slot received a conflicting native ID")
+        if not previous:
+            self._account_pending_tool_identity(state, "native_id", native_id)
+            state["native_id"] = native_id
+        self.bind_tool_alias(key, native_id)
 
     def bind_tool_alias(self, key: Hashable, native_id: str | None) -> None:
         if native_id:
@@ -782,21 +795,8 @@ class StreamAssembler:
             "_charged_identity": set(),
         }
 
-    def set_tool_item_id(self, key: Hashable, item_id: str) -> None:
-        previous = self._tools.get(key, {}).get("item_id")
-        state = self._tools.get(key)
-        if previous != item_id and state is not None and "content_index" in state:
-            self._account_replacement(str(previous or ""), item_id)
-        elif previous != item_id:
-            self._account_pending_tool_identity(
-                self.tool_state(key),
-                "item_id",
-                item_id,
-            )
-        self.tool_state(key)["item_id"] = item_id
-
     def tool_item_id(self, key: Hashable) -> str:
-        return str(self._tools.get(key, {}).get("item_id", ""))
+        return str(self._tools.get(key, {}).get("native_id") or "")
 
     def tool_name(self, key: Hashable) -> str:
         return str(self._tools.get(key, {}).get("name", ""))
@@ -1434,6 +1434,28 @@ async def drive_sse_stream(
                 )
                 if response is None:
                     candidate = assembler.aborted(cancel.reason)
+                elif not 200 <= response.status_code < 300:
+                    # HTTP errors already identify their outcome. Resolving a
+                    # served hop first could mask auth/rate limits (or stall).
+                    try:
+                        body = await read_response_body(response, cancel)
+                    except (GeneratorExit, asyncio.CancelledError):
+                        raise
+                    except Exception as exc:
+                        candidate = assembler.exception(
+                            exc,
+                            status=response.status_code,
+                            headers=response.headers,
+                        )
+                    else:
+                        if body is None:
+                            candidate = assembler.aborted(cancel.reason)
+                        else:
+                            candidate = assembler.error(
+                                body or f"provider endpoint returned HTTP {response.status_code}",
+                                status=response.status_code,
+                                headers=response.headers,
+                            )
                 else:
                     resolved_origin = await resolve_served_origin(
                         endpoint,
@@ -1446,49 +1468,20 @@ async def drive_sse_stream(
                         candidate = assembler.aborted(cancel.reason)
                     else:
                         assembler.set_origin(*resolved_origin)
-                        if not 200 <= response.status_code < 300:
-                            try:
-                                body = await read_response_body(response, cancel)
-                            except (GeneratorExit, asyncio.CancelledError):
-                                raise
-                            except Exception as exc:
-                                candidate = assembler.exception(
-                                    exc,
-                                    status=response.status_code,
-                                    headers=response.headers,
-                                )
-                            else:
-                                if body is None:
-                                    candidate = assembler.aborted(cancel.reason)
-                                elif 300 <= response.status_code < 400:
-                                    candidate = assembler.error(
-                                        body or f"provider endpoint returned HTTP {response.status_code} redirect",
-                                        status=response.status_code,
-                                        headers=response.headers,
-                                    )
-                                else:
-                                    candidate = assembler.error(
-                                        body,
-                                        status=response.status_code,
-                                        headers=response.headers,
-                                    )
-                        else:
-                            async for item in translate(iter_sse_events(response, cancel)):
-                                if isinstance(item, (Done, ProviderError)):
-                                    candidate = item
-                                    break
-                                yield item
-                            if candidate is None:
-                                candidate = (
-                                    assembler.aborted(cancel.reason)
-                                    if cancel.cancelled
-                                    else assembler.incomplete()
-                                )
+                        async for item in translate(iter_sse_events(response, cancel)):
+                            if isinstance(item, (Done, ProviderError)):
+                                candidate = item
+                                break
+                            yield item
+                        if candidate is None:
+                            candidate = (
+                                assembler.aborted(cancel.reason)
+                                if cancel.cancelled
+                                else assembler.incomplete()
+                            )
         except (GeneratorExit, asyncio.CancelledError):
             raise
-        except OutputBudgetExceeded as exc:
-            candidate = assembler.error(str(exc), kind="invalid_request")
-        except SSEParseError as exc:
+        except (OutputBudgetExceeded, SSEParseError, ToolIdentityError) as exc:
             candidate = assembler.error(str(exc), kind="invalid_request")
         except Exception as exc:
             candidate = assembler.exception(exc)

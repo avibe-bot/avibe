@@ -404,6 +404,112 @@ def test_closed_tool_identity_does_not_retain_unused_history() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("conflicting", [True, False])
+@pytest.mark.parametrize("case", [
+    "chat-start", "chat-pending", "chat-id-only", "anthropic-start",
+    "responses-added", "responses-done", "responses-delta", "responses-arguments-done",
+])
+async def test_open_tool_slot_rejects_conflicting_native_identity(case: str, conflicting: bool) -> None:
+    # A second identity must not borrow the first call's name/arguments. Prior
+    # tests cover late/missing IDs, but not an index reused by a different call.
+    later_id = "second" if conflicting else "first"
+    if case.startswith("chat"):
+        protocol = "openai_chat"
+        first = {"name": "read", "arguments": "{}"} if case != "chat-pending" else {}
+        second = {"name": "read", "arguments": "{}" if case == "chat-pending" else " "}
+        if case == "chat-id-only":
+            second = None
+        frames = [
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "first", "function": first}]}}]},
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": later_id, **({"function": second} if second is not None else {})},
+            ]}, "finish_reason": "tool_calls"}]},
+        ]
+    elif case.startswith("anthropic"):
+        protocol = "anthropic"
+        frames = [
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": identity, "name": "read", "input": {}}}
+            for identity in ("first", later_id)
+        ] + [
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+            {"type": "message_stop"},
+        ]
+    else:
+        protocol = "openai_responses"
+        frames = [
+            {"type": "response.output_item.added", "output_index": 0, "item": {
+                "type": "function_call", "id": "first", "call_id": "call_first",
+                "name": "read", "arguments": "{}",
+            }},
+        ]
+        if case in {"responses-added", "responses-done"}:
+            frames.append({
+                "type": f"response.output_item.{case.removeprefix('responses-')}", "output_index": 0,
+                "item": {"type": "function_call", "id": later_id, "name": "read", "arguments": "{}"},
+            })
+        else:
+            # Already-known alias for another slot must not redirect index 0.
+            frames.append({"type": "response.output_item.added", "output_index": 1, "item": {
+                "type": "function_call", "id": later_id, "call_id": "call_second", "name": "read",
+            }})
+            is_delta = case == "responses-delta"
+            frames.append({
+                "type": f"response.function_call_arguments.{'delta' if is_delta else 'done'}",
+                "output_index": 0, "item_id": later_id, "delta" if is_delta else "arguments": " ",
+            })
+        for index in range(2 if case in {"responses-delta", "responses-arguments-done"} else 1):
+            frames.append({
+                "type": "response.output_item.done", "output_index": index,
+                "item": {"type": "function_call", "name": "read", "arguments": "{}"},
+            })
+        frames.append({"type": "response.completed", "response": {"status": "completed"}})
+    body = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+    if protocol == "openai_chat":
+        body += "data: [DONE]\n\n"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))) as client:
+        events = await _events(adapter_class(protocol)(client), _request(protocol))
+    if not conflicting:
+        assert isinstance(events[-1], Done)
+        assert events[-1].message.tool_calls[0].native_id == "first"
+        return
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert "conflicting native ID" in error.message
+    assert error.retryable is False
+    assert len([event for event in events if isinstance(event, (Done, ProviderError))]) == 1
+    if error.partial and error.partial.tool_calls:
+        assert error.partial.tool_calls[0].native_id == "first"
+
+
+@pytest.mark.asyncio
+async def test_responses_explicit_indexes_override_shared_native_aliases() -> None:
+    # Duplicate provider IDs across distinct slots may be normalized; they must
+    # not cause indexed argument frames to merge into the alias's latest owner.
+    frames = [
+        {"type": "response.output_item.added", "output_index": index, "item": {
+            "type": "function_call", "id": "shared", "call_id": f"call_{index}", "name": "read",
+        }}
+        for index in range(2)
+    ]
+    for index in range(2):
+        frames.extend([
+            {"type": "response.function_call_arguments.delta", "output_index": index,
+             "item_id": "shared", "delta": json.dumps({"path": str(index)})},
+            {"type": "response.output_item.done", "output_index": index,
+             "item": {"type": "function_call", "id": "shared"}},
+        ])
+    frames.append({"type": "response.completed", "response": {"status": "completed"}})
+    body = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+    assert isinstance(events[-1], Done)
+    assert [call.arguments for call in events[-1].message.tool_calls] == [{"path": "0"}, {"path": "1"}]
+    assert [call.id for call in events[-1].message.tool_calls] == ["call_0", "call_1"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("identity_at", ["added", "done"])
 async def test_responses_parallel_calls_have_unique_explicit_canonical_ids(identity_at: str) -> None:
     frames = []
@@ -2316,6 +2422,18 @@ async def test_anthropic_abort_after_message_start_keeps_usage_in_partial() -> N
           "cache_creation_input_tokens": None, "output_tokens_details": None}, Usage(7, 9, 3, 5, 6)),
         ({"output_tokens_details": {}}, Usage(7, 9, 3, 5, 6)),
         ({"output_tokens_details": {"thinking_tokens": None}}, Usage(7, 9, 3, 5, 6)),
+        ({"cache_creation": {}}, Usage(7, 9, 3, 5, 6)),
+        ({"cache_creation": None}, Usage(7, 9, 3, 5, 6)),
+        ({"cache_creation_input_tokens": None, "cache_creation": {
+            "ephemeral_5m_input_tokens": None, "ephemeral_1h_input_tokens": None}}, Usage(7, 9, 3, 5, 6)),
+        ({"cache_creation": {"ephemeral_5m_input_tokens": None}}, Usage(7, 9, 3, 5, 6)),
+        ({"cache_creation": {"ephemeral_1h_input_tokens": None}}, Usage(7, 9, 3, 5, 6)),
+        ({"cache_creation": {"ephemeral_5m_input_tokens": 2}}, Usage(7, 9, 3, 2, 6)),
+        ({"cache_creation": {"ephemeral_1h_input_tokens": 3}}, Usage(7, 9, 3, 3, 6)),
+        ({"cache_creation": {"ephemeral_5m_input_tokens": 0,
+                             "ephemeral_1h_input_tokens": 0}}, Usage(7, 9, 3, 0, 6)),
+        ({"cache_creation_input_tokens": 0, "cache_creation": {
+            "ephemeral_5m_input_tokens": 2, "ephemeral_1h_input_tokens": 3}}, Usage(7, 9, 3, 0, 6)),
         ({"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
           "cache_creation_input_tokens": 0, "output_tokens_details": {"thinking_tokens": 0}},
          Usage(0, 0, 0, 0, 0)),
@@ -2348,6 +2466,56 @@ async def test_anthropic_usage_fields_share_start_and_delta_normalization(
     final = events[-1]
     assert isinstance(final, Done)
     assert final.message.usage == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("protocol", "usage", "expected"), [
+    ("anthropic", {
+        "input_tokens": 7, "output_tokens": 9, "cache_read_input_tokens": 3,
+        "cache_creation_input_tokens": 5,
+        "cache_creation": {"ephemeral_5m_input_tokens": 2, "ephemeral_1h_input_tokens": 3},
+        "output_tokens_details": {"thinking_tokens": 6},
+        "server_tool_use": {"web_fetch_requests": 1, "web_search_requests": 2},
+        "inference_geo": "us", "service_tier": "standard",
+    }, Usage(7, 9, 3, 5, 6)),
+    ("openai_chat", {
+        "prompt_tokens": 100, "completion_tokens": 33, "total_tokens": 133,
+        "prompt_tokens_details": {
+            "audio_tokens": 1, "image_tokens": 2, "text_tokens": 97,
+            "cached_tokens": 50, "cache_write_tokens": 30,
+        },
+        "completion_tokens_details": {
+            "accepted_prediction_tokens": 3, "rejected_prediction_tokens": 4,
+            "audio_tokens": 1, "text_tokens": 11, "reasoning_tokens": 21,
+        },
+    }, Usage(20, 33, 50, 30, 21)),
+    ("openai_responses", {
+        "input_tokens": 10, "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": 2},
+        "output_tokens": 4, "output_tokens_details": {"reasoning_tokens": 2}, "total_tokens": 14,
+    }, Usage(5, 4, 3, 2, 2)),
+])
+async def test_documented_usage_objects_map_totals_without_double_counting_breakdowns(
+    protocol: str, usage: dict[str, Any], expected: Usage,
+) -> None:
+    # Official Usage/CompletionUsage/ResponseUsage fields, including ignored
+    # subcategories: they must not be added on top of inclusive token totals.
+    if protocol == "anthropic":
+        frames = [
+            {"type": "message_start", "message": {"usage": usage}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+            {"type": "message_stop"},
+        ]
+    elif protocol == "openai_chat":
+        frames = [{"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": usage}]
+    else:
+        frames = [{"type": "response.completed", "response": {"status": "completed", "usage": usage}}]
+    body = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+    if protocol == "openai_chat":
+        body += "data: [DONE]\n\n"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))) as client:
+        events = await _events(adapter_class(protocol)(client), _request(protocol))
+    assert isinstance(events[-1], Done)
+    assert events[-1].message.usage == expected
 
 
 def test_chat_reasoning_models_use_completion_token_limit() -> None:
@@ -3431,6 +3599,49 @@ async def test_all_adapters_cancel_during_served_hop_resolution(
     assert len(events) == 1
     assert isinstance(events[0], ProviderError)
     assert events[0].kind == "aborted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["anthropic", "openai_chat", "openai_responses"])
+@pytest.mark.parametrize(("status", "kind", "retryable"), [
+    (302, "invalid_request", False), (401, "auth", False), (403, "auth", False),
+    (429, "rate_limit", True), (503, "server", True),
+])
+@pytest.mark.parametrize("broken_body", [False, True])
+async def test_http_error_classification_precedes_served_hop_resolution(
+    protocol: str, status: int, kind: str, retryable: bool, broken_body: bool,
+) -> None:
+    # A resolver failure must not replace an already-known HTTP error. This
+    # also protects status/Retry-After when the error body itself cannot be read.
+    resolver_calls = []
+    closed = []
+
+    async def resolver(headers: Mapping[str, str]) -> Origin | None:
+        resolver_calls.append(headers)
+        raise RuntimeError("served-hop resolution failed")
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if broken_body:
+                raise OSError("body read failed")
+            yield b'{"error":{"message":"upstream unavailable"}}'
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda _: httpx.Response(status, headers={"retry-after": "7"}, stream=Body()),
+    )) as client:
+        events = await _events(
+            adapter_class(protocol)(client, served_hop_resolver=resolver, gateway=True), _request(protocol),
+        )
+    assert len(events) == 1
+    error = events[0]
+    assert isinstance(error, ProviderError)
+    assert (error.kind, error.status, error.retryable) == (kind, status, retryable)
+    assert error.retry_after_s == 7
+    assert resolver_calls == []
+    assert closed
 
 
 @pytest.mark.asyncio

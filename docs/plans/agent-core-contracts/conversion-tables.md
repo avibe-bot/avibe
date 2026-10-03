@@ -41,12 +41,13 @@ construct partials, mark terminal state, or parse final tool arguments.
 | Concern | Single owner | Adapter call sites |
 | --- | --- | --- |
 | Content accumulation and visible-output flag | `StreamAssembler.text_delta`, `thinking_delta`, `tool_start`, `tool_arguments` | `anthropic.py` content-block branches; `openai_chat.py` delta branches; `openai_responses.py` output/reasoning/tool branches |
-| Stable tool id and native id map | `StreamAssembler.tool_start` → `_set_tool_id`, `tool_state` | The three adapters' tool-call translation branches only; explicit canonical IDs consult the same ownership map as native/fallback IDs. A collision receives a fresh monotonic fallback ID before `ToolCallStart`; native item aliases and arguments stay separate. |
+| Stable tool id and native id map | `StreamAssembler.bind_tool_identity`, `tool_start` → `_set_tool_id` | The stream index owns the slot. A non-empty native ID binds once; a different ID on an open slot raises a terminal `invalid_request` before identity/argument mutation. Missing IDs use the unique monotonic allocator. Identical repeats and the first late ID are accepted; closed slots ignore late data. Explicit canonical IDs use the same ownership map and receive a fresh fallback on collision. Native aliases route only indexless frames, never override an explicit index; Responses argument delta/done use the same bind-once check as item added/done. |
 | Final JSON argument validation | `StreamAssembler.finalize` → `parsed_arguments` | The three adapters call `finalize` once after their protocol terminator; malformed arguments are a C-2 terminal `invalid_request` deviation from Pi's permissive partial parser |
 | Usage and early usage retention | `set_usage` | Anthropic `message_start`/`message_delta`; Chat usage chunks; Responses terminal response |
 | Per-protocol usage field normalization | `_anthropic_usage`, `_openai_usage`, `_responses_usage` | One normalizer per adapter. Anthropic start and delta share the same non-null merge; Chat chunk and choice usage share the same counter-level fallback order. See the field ledger below. |
 | Partial on every error and abort | `StreamAssembler.partial`, `error`, `exception`, `aborted`, `incomplete` | `drive_sse_stream` owns HTTP, transport-read, error-body, cancellation, and translator exceptions; protocol translators only request assembler errors |
 | Exactly one terminal event before response cleanup | `drive_sse_stream` → `StreamAssembler.terminal` | The driver commits the translator's candidate or its own transport/incomplete outcome before `response.aclose`; cleanup cannot replace a consumer/task cancellation |
+| HTTP status → served hop → streaming | `drive_sse_stream` | Classify non-2xx status/body first, retaining headers and `Retry-After` even if body reading fails. Only successful HTTP responses resolve/set the served origin and then translate SSE. Error responses never call the resolver; its failure/stall cannot replace a known auth/rate-limit/server error. |
 | Endpoint redaction | `errors.sanitize_endpoint_text`, called inside `redact_provider_text` | Includes preparation errors, HTTP error bodies, stream errors, network errors, and close failures. JSON is decoded before sanitizing its string values, so escaped quotes remain valid; URL userinfo, queries and fragments are removed before credential markers are inserted. Surrounding punctuation is preserved. |
 | Provider diagnostic redaction | `StreamAssembler.terminal` → `_sanitize_error` → `redact_provider_error` | Classification/preparation and translator candidates stay internal and unredacted; the driver sanitizes once when committing its terminal. `_is_sensitive_key` alone decides sensitivity for JSON keys, generic free-text key/value syntax and configured request headers/query keys. Prefix scanning is iterative, without rescanning the suffix after non-sensitive keys. Whole unquoted credential/header values are removed for both `:` and `=`; only recognizable Authorization scheme labels survive. Configured literals include endpoint userinfo and credential query values (original, stripped and escaped forms of at least eight characters), before token-shape redaction. Usage counters and partial error text are handled by the same boundary. |
 | Unknown wire event policy | `dispatch_wire_event` plus protocol frame validation | For data-bearing events, a known SSE name (including the `response.done` alias) requires a string payload `type`; missing/null/non-string discriminators are malformed. A valid payload type wins; unknown types are ignored. Anthropic's named `error` and `ping` are explicit Pi-parity control-frame exceptions: error data goes directly to classification and ping is ignored before parsing. Unknown Anthropic SSE names are also ignored before parsing. Valid data-only Anthropic JSON is accepted under rule (b) data-loss prevention because SSE `event` is optional. |
@@ -202,6 +203,7 @@ delivery precedes response cleanup.
 
 | Shared driver branch | Canonical outcome | Recorded proof |
 | --- | --- | --- |
+| non-2xx headers, with a throwing served-hop resolver and either readable or failing body | classify HTTP status/body without resolver invocation; preserve status, retryability and `Retry-After`, close response | `test_http_error_classification_precedes_served_hop_resolution`: all three adapters × 302/401/403/429/503 × readable/failing body |
 | transport read raises after a visible delta, while response close is observable | one non-retryable `ProviderError(kind="network", partial=...)`, delivered before `response.aclose`; no second terminal | `test_delayed_transport_read_emits_terminal_before_close` across all three adapters |
 
 ### Round 13 exact-head Codex dispositions
@@ -242,39 +244,135 @@ or credentials were used. The only difference in the seven Anthropic
 projections is the explicitly preserved initial reasoning count when later
 delta usage omits it. No local reviewer was launched.
 
-### Usage field ledger (Pi `7fbbd5f`)
+### Round 15 class-level dispositions
 
-Each normalizer maps all five canonical `Usage` fields. There is no separate
-initial-only mapper. Declared wire validation still rejects wrong types and
-negative counters before normalization. Missing optional reasoning remains
-unknown in canonical usage instead of inventing Pi's default zero; reported
-reasoning is a subset of output, never added to it. Pi's cost, `totalTokens`
-and separate `cacheWrite1h` fields have no canonical counterparts and do not
-introduce new catalog or message fields.
+All three P2s on `46740df49` belong to existing classes. The usage inventory
+below now enumerates provider fields, not just the five canonical destinations.
+Tool identity had competing routing owners (explicit stream index and native
+alias); explicit indexes now own their slots, with one bind-once check in the
+assembler. The driver admits served-hop resolution only after HTTP success.
+These are C-2 data integrity/classification fixes, not new model capabilities.
+No local reviewer was launched; exact-head Codex remains the reviewer of record.
 
-| Adapter / normalizer | Canonical field | Wire mapping and precedence | Pi source / recorded fixture |
-| --- | --- | --- | --- |
-| Anthropic / `_anthropic_usage` | `input_tokens` | `input_tokens`; no cache subtraction. Start defaults to zero; missing/null delta preserves current. | `anthropic-messages.ts:682,831-832`; start/delta table: `7 → 11`, explicit zero and null controls |
-| Anthropic / `_anthropic_usage` | `output_tokens` | `output_tokens`, already including reasoning; same non-null merge. | `:683,834-835`; start/delta table: `9 → 18` |
-| Anthropic / `_anthropic_usage` | `cache_read_tokens` | `cache_read_input_tokens`; same non-null merge. | `:684,837-838`; start/delta table: `3 → 4` |
-| Anthropic / `_anthropic_usage` | `cache_write_tokens` | `cache_creation_input_tokens` is the aggregate, never added to its TTL breakdown. Existing C-2 data-preservation fallback sums `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens` only when the aggregate is absent/null. | `:685-686,840-847`; start/delta table: `5 → 8`; existing aggregate/TTL cache-write fixtures |
-| Anthropic / `_anthropic_usage` | `reasoning_tokens` | `output_tokens_details.thinking_tokens`; missing/null delta preserves current, explicit zero replaces it. The same mapping now preserves an admitted initial value (C-2 deviation from Pi's initial parser). | `:849-853`; start/delta table: initial `6`, explicit delta `12` or `0`; usage-only abort retains `6` |
-| Chat / `_openai_usage` | `input_tokens` | `max(0, prompt_tokens - cache_read_tokens - cache_write_tokens)` | `openai-completions.ts:1522,1537`; Pi upstream `openai-completions-tool-choice.test.ts:1676-1760`: `100 - 50 - 30 = 20` |
-| Chat / `_openai_usage` | `output_tokens` | `completion_tokens`, already including reasoning | `:1539-1543`; upstream reasoning fixture `:1641-1673`: output `33`, reasoning `21`, not output `54` |
-| Chat / `_openai_usage` | `cache_read_tokens` | First non-null of `prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens`, `cached_tokens`, then zero; explicit zero stops fallback | `:1523-1524`; actual-parser fixture matrix: partial object + `80`, top-level `90`, and nested/top-level zero controls |
-| Chat / `_openai_usage` | `cache_write_tokens` | `prompt_tokens_details.cache_write_tokens`, otherwise zero; separate from cache reads | `:1525,1545`; upstream `50` read / `30` write fixture and partial-object `5` write fixture |
-| Chat / `_openai_usage` | `reasoning_tokens` | `completion_tokens_details.reasoning_tokens`; absent field is canonical `None` | `:1546`; upstream explicit `0` and `21` fixtures |
-| Responses / `_responses_usage` | `input_tokens` | `max(0, input_tokens - cache_read_tokens - cache_write_tokens)` | `openai-responses-shared.ts:561-568`; combined actual-parser fixture `10 - 3 - 2 = 5` |
-| Responses / `_responses_usage` | `output_tokens` | `output_tokens`, already including reasoning | `:569`; same fixture: `4` |
-| Responses / `_responses_usage` | `cache_read_tokens` | `input_tokens_details.cached_tokens`, otherwise zero | `:564,570`; same fixture: `3` |
-| Responses / `_responses_usage` | `cache_write_tokens` | `input_tokens_details.cache_write_tokens`, otherwise zero | `:565,571`; same fixture: `2` |
-| Responses / `_responses_usage` | `reasoning_tokens` | `output_tokens_details.reasoning_tokens`; absent field is canonical `None` | `:572`; same fixture: `2`; `test_provider_usage_excludes_cached_input_tokens` |
+| Finding | Single-owner fix | Boundary regression |
+| --- | --- | --- |
+| P2 conflicting native IDs in an open tool slot | `bind_tool_identity` checks before mutation. Removed duplicate Responses item-ID state and alias-first indexed lookup. | `test_open_tool_slot_rejects_conflicting_native_identity`: Chat started/pending/id-only, Anthropic start, Responses added/done/argument delta/done, with identical-ID controls. `test_responses_explicit_indexes_override_shared_native_aliases` keeps two indexed calls separate. Existing late-ID, missing-ID, collision and closed-slot fixtures remain. |
+| P2 empty/null Anthropic TTL breakdown overwrites prior cache writes | `_anthropic_usage` keeps Pi's aggregate-first/non-null precedence; fallback sums a reported TTL snapshot only when at least one counter is non-null, otherwise preserves current. Explicit zero still updates. | Expanded `test_anthropic_usage_fields_share_start_and_delta_normalization`; all documented fields in `test_documented_usage_objects_map_totals_without_double_counting_breakdowns`. |
+| P2 served-hop failure masks HTTP classification | driver classifies non-2xx first; only 2xx proceeds to origin resolution and SSE | 30-case HTTP/resolver matrix in the driver ledger above |
 
-Anthropic's [Messages API reference](https://platform.claude.com/docs/en/api/typescript/messages)
-defines `output_tokens_details.thinking_tokens` as the internal-reasoning
-decomposition of billed output tokens. The preservation rule applies when
-that optional field is supplied; it does not assume every message start
-contains a final reasoning count.
+The initial test-first selection produced 43 failures and 15 passing controls
+before production changes. Every failure was at the asserted identity,
+cache-write preservation or status/classification boundary. Full usage fixtures
+reuse the round-14 pinned-Pi projections; additional documented decomposition
+fields prove that inclusive totals are not counted twice.
+
+### Complete documented usage field inventory
+
+Sources fetched on 2026-10-04:
+
+- [Anthropic Messages / Usage](https://platform.claude.com/docs/en/api/typescript/messages#usage)
+- [OpenAI Chat Completions / CompletionUsage](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+- [OpenAI Responses / ResponseUsage](https://developers.openai.com/api/reference/resources/responses/methods/create)
+
+Every top-level and nested field in these usage objects has a row below.
+There is one normalizer per adapter, not separate initial/delta/choice mappers.
+Mapped counters are shape-validated before normalization. Ignored fields are
+not revalidated or retained: they do not influence canonical usage. The
+canonical schema deliberately has no per-modality, TTL, request-count, tier,
+geography, cost or redundant-total field. This inventory does not add any.
+Reasoning is already included in output, never added to it; a missing optional
+reasoning count remains `None`, unlike Pi's default zero.
+
+#### Anthropic: `_anthropic_usage`
+
+Pi `7fbbd5f`, `anthropic-messages.ts:680-688,829-854`: initial counters and
+non-null delta merge. Missing/null mapped fields preserve current values;
+initial numeric totals default to zero. TTL fallback and initial reasoning
+preservation are explicit existing C-2 data-preservation deviations from Pi.
+Pi's separate `cacheWrite1h` (`:840-847`) has no canonical counterpart.
+
+| Documented wire field | Canonical mapping or ignore policy |
+| --- | --- |
+| `input_tokens` | `input_tokens`, already excludes cache read/write; no subtraction |
+| `output_tokens` | `output_tokens`, inclusive of thinking |
+| `cache_read_input_tokens` | `cache_read_tokens` |
+| `cache_creation_input_tokens` | `cache_write_tokens`; non-null aggregate wins over every TTL value, including when aggregate is zero |
+| `cache_creation` | Nullable TTL breakdown container. If aggregate is missing/null, sum its non-null counters as the reported snapshot; missing/null/empty/all-null breakdown preserves current aggregate. Do not add a TTL snapshot to previous usage. |
+| `cache_creation.ephemeral_5m_input_tokens` | Part of fallback `cache_write_tokens` sum only; absent/null contributes nothing. Explicit zero is a reported value. No separate TTL field. |
+| `cache_creation.ephemeral_1h_input_tokens` | Same fallback policy as 5m; never added on top of an aggregate. No separate 1h billing field. |
+| `output_tokens_details` | Nullable decomposition container; not itself a count |
+| `output_tokens_details.thinking_tokens` | `reasoning_tokens`; non-null merge at both message start and delta. This observability subset does not increase `output_tokens`. |
+| `server_tool_use` | Ignored: server-side request-count metadata, not tokens or canonical tool calls |
+| `server_tool_use.web_fetch_requests` | Ignored: request count has no canonical usage field; cannot be added to token totals |
+| `server_tool_use.web_search_requests` | Ignored for the same unit/schema reason |
+| `inference_geo` | Ignored: geography metadata is not a usage counter or a verified served-hop identity |
+| `service_tier` | Ignored: tier/pricing metadata has no canonical usage field |
+
+Fixtures: the start/delta table protects `7/9/3/5/6`, non-null updates,
+missing/null/zero controls, each TTL alone, an empty/all-null TTL object, and
+zero aggregate overriding a nonzero TTL sum. Existing initial fixtures keep
+`15 + 10 = 25` without adding the aggregate again. The complete-object fixture
+adds both server request counts, geography and tier without changing usage.
+
+#### OpenAI Chat: `_openai_usage`
+
+Pi `7fbbd5f`, `openai-completions.ts:1522-1546`: nested cache-read value,
+then `prompt_cache_hit_tokens`, then top-level `cached_tokens`, using nullish
+precedence per counter. Explicit zero stops fallback. Missing numeric totals
+and cache values default to zero. Both chunk and choice usage use this mapper.
+
+| Documented wire field | Canonical mapping or ignore policy |
+| --- | --- |
+| `prompt_tokens` | `input_tokens = max(0, prompt_tokens - cache_read_tokens - cache_write_tokens)` |
+| `completion_tokens` | `output_tokens`, inclusive of reasoning and billed rejected prediction tokens |
+| `total_tokens` | Ignored: redundant prompt + completion total; canonical components already retain it without double counting |
+| `prompt_tokens_details` | Optional breakdown container; an empty/partial/null object does not suppress per-counter fallbacks |
+| `prompt_tokens_details.cached_tokens` | First-choice `cache_read_tokens` |
+| `prompt_tokens_details.cache_write_tokens` | `cache_write_tokens`, default zero; distinct from cache reads |
+| `prompt_tokens_details.audio_tokens` | Ignored: modality subset already in prompt total; no canonical audio count |
+| `prompt_tokens_details.image_tokens` | Ignored: modality subset already in prompt total; no canonical image count |
+| `prompt_tokens_details.text_tokens` | Ignored: modality subset already in prompt total; no canonical text count |
+| `completion_tokens_details` | Optional decomposition container; not itself a count |
+| `completion_tokens_details.reasoning_tokens` | `reasoning_tokens`; absent field is `None`. Accepted compatible null counter normalizes to zero, matching Pi. |
+| `completion_tokens_details.audio_tokens` | Ignored: output modality subset, already included in completion total |
+| `completion_tokens_details.text_tokens` | Ignored: output modality subset, already included in completion total |
+| `completion_tokens_details.accepted_prediction_tokens` | Ignored: accepted-prediction subset already accounted in completion total; no canonical prediction dimension |
+| `completion_tokens_details.rejected_prediction_tokens` | Ignored: billed rejected prediction tokens already included in completion total; neither add again nor subtract |
+
+Compatibility fields (not fields of the official OpenAI usage object):
+
+| Wire field | Mapping |
+| --- | --- |
+| `prompt_cache_hit_tokens` | Second-choice cache-read count, after a null/missing nested value |
+| `cached_tokens` | Third-choice cache-read count, then zero |
+
+Fixtures: pinned-Pi upstream `openai-completions-tool-choice.test.ts:1641-1760`
+projects `100 - 50 - 30 = 20`, output `33`, reasoning `21`. The recorded
+nullish-precedence matrix covers partial objects and zeros on both ingestion
+paths. The complete-object fixture adds every modality/prediction/total field
+without changing these canonical values.
+
+#### OpenAI Responses: `_responses_usage`
+
+Pi `7fbbd5f`, `openai-responses-shared.ts:560-575`: project the terminal
+response's usage once. Missing input/output/cache counts default to zero;
+reasoning follows the canonical optional-field rule.
+
+| Documented wire field | Canonical mapping or ignore policy |
+| --- | --- |
+| `input_tokens` | `input_tokens = max(0, input_tokens - cache_read_tokens - cache_write_tokens)` |
+| `input_tokens_details` | Input breakdown container; not itself a count |
+| `input_tokens_details.cached_tokens` | `cache_read_tokens`, default zero |
+| `input_tokens_details.cache_write_tokens` | `cache_write_tokens`, default zero; distinct from cache reads |
+| `output_tokens` | `output_tokens`, inclusive of reasoning |
+| `output_tokens_details` | Output decomposition container; not itself a count |
+| `output_tokens_details.reasoning_tokens` | `reasoning_tokens`; absent field is `None`. Accepted compatible null counter normalizes to zero, matching Pi. |
+| `total_tokens` | Ignored: redundant inclusive input + output; canonical components already preserve the total |
+
+Fixture: actual pinned-Pi projection `10 - 3 - 2 = 5`, output `4`, reasoning
+`2`; the full documented object also supplies `total_tokens: 14`. Pi's old
+Chat source comment calls cache writes a compatibility extension; the current
+official Chat and Responses schemas fetched above now document that counter.
 
 ## Pi branch audit
 
