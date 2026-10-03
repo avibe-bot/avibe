@@ -335,6 +335,26 @@ async def test_length_stop_applies_steer_before_reissued_model_call():
     assert events[-1].reason == "completed"
 
 
+async def test_length_stop_does_not_consume_steer_when_retry_budget_is_exhausted():
+    holder = {}
+
+    async def first(request, cancel):
+        del request, cancel
+        assert await holder["agent"].steer(input_row("steer", "preserve me"))
+        yield Done(assistant(calls=[ToolCallBlock("truncated", "echo", {"x": 1})], stop_reason="length"))
+
+    holder["agent"] = make_agent(
+        ScriptedProvider([first]),
+        tools=[FakeTool()],
+        retry=RetryPolicy(max_retries=0, initial_delay_s=0),
+    )
+    events = await collect(holder["agent"])
+
+    assert events[-1].reason == "error"
+    pending = await holder["agent"].take_pending_inputs()
+    assert [item.message.content[0].text for item in pending] == ["preserve me"]
+
+
 async def test_repeated_length_tool_stops_are_bounded():
     tool = FakeTool()
     response = Done(assistant(calls=[ToolCallBlock("truncated", "echo", {"x": 1})], stop_reason="length"))
@@ -627,6 +647,39 @@ async def test_retry_preserves_usage_only_partial_in_successful_response():
         output_tokens=3,
         cache_read_tokens=4,
     )
+
+
+async def test_retry_usage_partial_is_not_committed_twice_when_budget_expires(monkeypatch):
+    real_sleep = asyncio.sleep
+
+    async def slow_sleep(delay):
+        del delay
+        await real_sleep(0.01)
+
+    monkeypatch.setattr("core.agent_core.agent.loop.asyncio.sleep", slow_sleep)
+    partial = AssistantMessage(
+        content=(),
+        origin=assistant().origin,
+        stop_reason="error",
+        usage=Usage(input_tokens=5),
+    )
+    provider = ScriptedProvider(
+        [[ProviderError("rate_limit", "busy", True, partial=partial)], [Done(assistant("done"))]]
+    )
+    store = InMemoryTranscriptStore()
+    agent = make_agent(
+        provider,
+        store=store,
+        retry=RetryPolicy(initial_delay_s=0, max_elapsed_s=0.005),
+    )
+
+    events = await collect(agent)
+
+    responses = [row.message for row in await store.load("session") if row.kind == "response"]
+    assert len(provider.requests) == 1
+    assert len(responses) == 1
+    assert responses[0].usage == Usage(input_tokens=5)
+    assert events[-1].reason == "error"
 
 
 @pytest.mark.parametrize(

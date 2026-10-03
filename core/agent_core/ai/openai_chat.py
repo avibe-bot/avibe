@@ -385,13 +385,8 @@ class OpenAIChatAdapter(ProviderAdapter):
                                 )
                                 key = assembler.fallback_tool_key(
                                     native_id=raw_id or None,
-                                    allocate=False,
+                                    allocate=has_new_identity,
                                 )
-                                if key is None:
-                                    key = assembler.fallback_tool_key(
-                                        native_id=raw_id or None,
-                                        allocate=has_new_identity,
-                                    )
                                 if key is None:
                                     terminal = assembler.terminal(
                                         assembler.error(
@@ -580,7 +575,7 @@ def build_chat_payload(
             }
             for tool in request.tools
         ]
-    if request.reasoning_effort and request.reasoning_effort.lower() not in {"none", "off", "disabled"}:
+    if request.reasoning_effort and request.reasoning_effort.lower() not in {"off", "disabled"}:
         payload["reasoning_effort"] = _openai_effort(request.reasoning_effort)
     return payload
 

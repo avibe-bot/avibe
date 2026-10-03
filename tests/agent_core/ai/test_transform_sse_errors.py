@@ -83,6 +83,16 @@ def test_sse_parser_caps_pending_line_and_event_data() -> None:
         SSEParser(max_line_size=0)
 
 
+def test_sse_parser_scans_many_short_lines_without_changing_event_shape() -> None:
+    parser = SSEParser()
+    line_count = 10_000
+
+    events = parser.feed(("data: x\n" * line_count) + "\n")
+
+    assert len(events) == 1
+    assert events[0].data == "\n".join(["x"] * line_count)
+
+
 def test_cross_provider_transform_drops_opaque_payload_and_answers_orphaned_calls() -> None:
     source = Origin("openai", "openai_chat", "foreign-test")
     target = Origin("anthropic", "anthropic", "claude-test")

@@ -495,6 +495,10 @@ class Agent:
                         context_seq=row.context_seq,
                         final=False,
                     )
+                # This attempt has already been durably announced. Keep the
+                # retry decision, but do not carry the same partial through a
+                # later expiry path where _loop would commit it again.
+                terminal = replace(terminal, partial=None)
             retry_error = terminal
             retries += 1
             await self._scope.call(lambda: asyncio.sleep(delay))
@@ -601,7 +605,6 @@ class Agent:
                 if reason == "length":
                     if end:
                         return "ended_by_hook"
-                    await self._drain_steers(emit)
                     length_tool_retries += 1
                     # Reuse the bounded loop retry budget so an impossible
                     # tool call cannot spin forever after repeated truncation.
@@ -614,6 +617,7 @@ class Agent:
                             message="The model repeatedly exceeded its output limit while emitting a tool call.",
                         )
                         return "error"
+                    await self._drain_steers(emit)
                     continue
                 self._open = False
                 if not failed:

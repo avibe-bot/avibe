@@ -8,12 +8,14 @@ split a UTF-8 code point, a CRLF pair, or a ``data:`` field at any boundary.
 from __future__ import annotations
 
 import codecs
+import re
 from dataclasses import dataclass
 from typing import Iterable
 
 
 DEFAULT_MAX_PENDING_LINE_SIZE = 8 * 1024 * 1024
 DEFAULT_MAX_PENDING_EVENT_SIZE = 32 * 1024 * 1024
+_LINE_END_RE = re.compile(r"[\r\n]")
 
 
 class SSEParseError(ValueError):
@@ -61,6 +63,7 @@ class SSEParser:
         self._event_id: str | None = None
         self._retry: int | None = None
         self._at_stream_start = True
+        self._line_start = 0
         self._scan_position = 0
 
     def feed(self, chunk: bytes | bytearray | memoryview | str) -> list[SSEEvent]:
@@ -82,6 +85,7 @@ class SSEParser:
                 continue
             self._check_line_size(line)
             self._parse_line(line)
+        self._compact_buffer()
         self._check_pending_line_size()
         return events
 
@@ -92,13 +96,24 @@ class SSEParser:
         decoded_tail = self._decoder.decode(b"", final=True)
         if decoded_tail:
             self._buffer += decoded_tail
+        while True:
+            line = self._take_line()
+            if line is None:
+                break
+            if line == "":
+                event = self._dispatch()
+                if event is not None:
+                    events.append(event)
+                continue
+            self._check_line_size(line)
+            self._parse_line(line)
+        self._compact_buffer()
         if self._buffer:
             self._check_pending_line_size()
-            if self._buffer.endswith("\r"):
-                self._parse_line(self._buffer[:-1])
-            else:
-                self._parse_line(self._buffer)
+            line = self._buffer[:-1] if self._buffer.endswith("\r") else self._buffer
+            self._parse_line(line)
             self._buffer = ""
+            self._line_start = 0
             self._scan_position = 0
         event = self._dispatch()
         if event is not None:
@@ -124,19 +139,17 @@ class SSEParser:
             )
 
     def _check_pending_line_size(self) -> None:
-        if len(self._buffer) > self.max_line_size:
+        if len(self._buffer) - self._line_start > self.max_line_size:
             raise SSEParseError(
                 f"SSE pending line exceeds {self.max_line_size} characters"
             )
 
     def _take_line(self) -> str | None:
-        carriage_return = self._buffer.find("\r", self._scan_position)
-        line_feed = self._buffer.find("\n", self._scan_position)
-        positions = [position for position in (carriage_return, line_feed) if position >= 0]
-        if not positions:
+        match = _LINE_END_RE.search(self._buffer, self._scan_position)
+        if match is None:
             self._scan_position = len(self._buffer)
             return None
-        index = min(positions)
+        index = match.start()
         character = self._buffer[index]
         # A CR may be the first half of a CRLF pair split across HTTP chunks.
         # Wait for the next chunk so that the blank-line dispatch cannot happen
@@ -144,13 +157,19 @@ class SSEParser:
         if character == "\r" and index + 1 == len(self._buffer):
             self._scan_position = index
             return None
-        line = self._buffer[:index]
+        line = self._buffer[self._line_start : index]
         if character == "\r" and index + 1 < len(self._buffer) and self._buffer[index + 1] == "\n":
-            self._buffer = self._buffer[index + 2 :]
+            self._line_start = index + 2
         else:
-            self._buffer = self._buffer[index + 1 :]
-        self._scan_position = 0
+            self._line_start = index + 1
+        self._scan_position = self._line_start
         return line
+
+    def _compact_buffer(self) -> None:
+        if self._line_start:
+            self._buffer = self._buffer[self._line_start :]
+            self._line_start = 0
+            self._scan_position = 0
 
     def _parse_line(self, line: str) -> None:
         if line.startswith(":"):

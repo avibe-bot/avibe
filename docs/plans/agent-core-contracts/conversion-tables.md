@@ -21,7 +21,7 @@ rules on top of those mappings.
 | Cancellation | `CancelToken` ends the HTTP stream and yields one non-retryable `ProviderError(kind="aborted")`. Opening, stream reads, error-body reads, media loads, and served-hop resolution all use the shared cancellation-aware await owner. |
 | Network timeouts | The shared lifecycle driver bounds connect/open at 10 seconds, time-to-first-byte at 30 seconds, and idle time between chunks at 30 seconds. Each timeout is a classified `ProviderError(kind="network")`, retryable only when no model output was emitted; a provider that never sends response headers cannot hang a turn. A bounded 10-second cancellation join detaches a non-cooperative transport task instead of extending the timeout indefinitely. |
 | HTTP response status | Only 2xx responses enter an SSE translator. Redirects (3xx) are terminal `invalid_request` errors and are never followed implicitly; 4xx/5xx bodies use the shared status-aware classifier. |
-| SSE memory bounds | `SSEParser` caps an unfinished line at 8 MiB of decoded characters and an unfinished event's combined `data:` fields at 32 MiB of decoded characters. Exceeding either bound is one terminal `invalid_request` provider error, with any assembled partial preserved. |
+| SSE memory and scan bounds | `SSEParser` caps an unfinished line at 8 MiB of decoded characters and an unfinished event's combined `data:` fields at 32 MiB of decoded characters. It scans each buffer with a cursor and compacts once per feed, so many short fields remain linear rather than repeatedly copying the suffix. Exceeding either bound is one terminal `invalid_request` provider error, with any assembled partial preserved. |
 | Error-body read failure | If a known HTTP error body raises or times out while being read, the shared driver classifies from the already-known status and headers, preserving `Retry-After`; the failure remains one terminal provider error with any partial. |
 | Response cleanup | The shared driver closes every response after committing its one terminal event and bounds `response.aclose()` at 10 seconds. A stalled close is cleanup-only and cannot replace or duplicate the terminal outcome. |
 | Retry boundary | `ProviderError.retryable` is false once any model content delta or tool-call start/delta was emitted. A Responses `ToolCallStart` therefore makes a later provider failure non-retryable. |
@@ -324,7 +324,7 @@ Anthropic stop reasons:
 | Tool call | `tool_calls[].type="function"` with `id`, `function.name`, and JSON `function.arguments`. |
 | Tool result | `role="tool"` with `tool_call_id` and text content. |
 | Tools | `tools[].type="function"` with `function.name`, `description`, and `parameters`. |
-| Reasoning effort | `reasoning_effort`, with `xhigh/max` mapped to `high`; disabled values are omitted. |
+| Reasoning effort | `reasoning_effort`; supported declared values, including explicit `none`, are forwarded unchanged, while `off`/`disabled` are omitted. |
 | Usage request | `stream_options.include_usage=true`. |
 
 Chat stream events:
@@ -366,7 +366,7 @@ Chat stop reasons:
 | Tool call | Input `function_call` item with `id`, `call_id`, `name`, and JSON `arguments`. |
 | Tool result | Input `function_call_output` with `call_id` and `output`. |
 | Tools | `tools[]` with `type="function"`, `name`, `description`, and `parameters`. |
-| Reasoning effort | `reasoning.effort`, with `xhigh/max` mapped to `high`, and `summary="auto"`. |
+| Reasoning effort | `reasoning.effort`, with supported declared values, including explicit `none`, forwarded unchanged, and `summary="auto"`; `off`/`disabled` are omitted. |
 | Client-side state | `store=false`; `previous_response_id` is never sent. |
 
 Responses stream events:

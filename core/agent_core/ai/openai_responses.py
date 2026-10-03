@@ -1126,9 +1126,10 @@ def build_responses_payload(
             }
             for tool in request.tools
         ]
-    if request.reasoning_effort and request.reasoning_effort.lower() not in {"none", "off", "disabled"}:
+    if request.reasoning_effort and request.reasoning_effort.lower() not in {"off", "disabled"}:
         payload["reasoning"] = {"effort": _openai_effort(request.reasoning_effort), "summary": "auto"}
-        payload["include"] = ["reasoning.encrypted_content"]
+        if request.reasoning_effort.lower() != "none":
+            payload["include"] = ["reasoning.encrypted_content"]
     return payload
 
 
@@ -1234,7 +1235,13 @@ def _apply_terminal_output_items(
     for index, item in enumerate(items):
         if not isinstance(item, Mapping):
             return assembler.error("response output item must be an object", kind="invalid_request"), refusal
-        if item.get("type") == "reasoning":
+        item_type = item.get("type")
+        if not isinstance(item_type, str):
+            return assembler.error(
+                "response output item type must be a string",
+                kind="invalid_request",
+            ), refusal
+        if item_type == "reasoning":
             item_id = _string(item.get("id"))
             state_index, state = next(
                 (
@@ -1249,7 +1256,7 @@ def _apply_terminal_output_items(
             _merge_reasoning_item(state, item)
             if state["encrypted_content"]:
                 assembler.set_thinking_signature(state_index, _reasoning_signature_json(state))
-        elif item.get("type") == "message":
+        elif item_type == "message":
             content_error = _message_content_error(item)
             if content_error is not None:
                 return assembler.error(

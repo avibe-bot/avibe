@@ -50,6 +50,7 @@ def _request(
     tools: tuple[ToolSpec, ...] = (),
     model_id: str = "model-x",
     base_url: str = "https://model.test/v1",
+    reasoning_effort: str | None = "high",
 ) -> ModelRequest:
     return ModelRequest(
         endpoint=ModelEndpoint(
@@ -63,7 +64,7 @@ def _request(
         messages=messages or (UserMessage((TextBlock(text="hello"),)),),
         tools=tools,
         max_tokens=128,
-        reasoning_effort="high",
+        reasoning_effort=reasoning_effort,
         supports_images=supports_images,
     )
 
@@ -932,6 +933,25 @@ async def test_responses_non_array_terminal_output_is_malformed() -> None:
     assert "output" in error.message
 
 
+@pytest.mark.asyncio
+async def test_responses_terminal_output_item_type_must_be_a_string() -> None:
+    body = (
+        'data: {"type":"response.completed","response":{"status":"completed",'
+        '"output":[{"type":7}]}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert "type" in error.message
+
+
 def test_responses_replay_preserves_output_item_order() -> None:
     history = (
         AssistantMessage(
@@ -1501,6 +1521,10 @@ async def test_chat_reuses_indexless_tool_slot_for_argument_only_delta() -> None
             {"id": "call_a", "function": {"name": "read"}},
             {"index": 0, "id": "call_b", "function": {"name": "write", "arguments": '{"q":2}'}},
         ),
+        (
+            {"id": "call_a", "function": {"name": "read"}},
+            {"id": "call_b", "function": {"name": "write", "arguments": '{"q":2}'}},
+        ),
     ],
 )
 async def test_chat_indexed_and_indexless_tool_calls_do_not_collide(
@@ -1690,6 +1714,27 @@ def test_chat_reasoning_models_use_completion_token_limit() -> None:
 
     assert payload["max_completion_tokens"] == 128
     assert "max_tokens" not in payload
+
+
+@pytest.mark.parametrize(
+    ("builder", "protocol", "field"),
+    [
+        (build_chat_payload, "openai_chat", "reasoning_effort"),
+        (build_responses_payload, "openai_responses", "reasoning"),
+    ],
+)
+def test_openai_payloads_forward_explicit_none_reasoning_effort(
+    builder: Any,
+    protocol: str,
+    field: str,
+) -> None:
+    payload = builder(_request(protocol, reasoning_effort="none"), ())
+
+    if field == "reasoning_effort":
+        assert payload[field] == "none"
+    else:
+        assert payload[field] == {"effort": "none", "summary": "auto"}
+        assert "include" not in payload
 
 
 def test_chat_tool_result_images_become_explicit_placeholders() -> None:
