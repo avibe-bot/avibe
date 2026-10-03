@@ -37,6 +37,8 @@ scenarios:
     layer: unit
     backend: shared
     test: tests/test_runtime_generations.py::test_runtime_gen_003_at_the_cap_the_oldest_retiring_generation_gives_way
+    related_tests:
+      - tests/test_opencode_generations.py::test_a_cap_forced_stop_settles_the_activities_of_the_sessions_it_interrupts
   - id: RUNTIME-GEN-004
     name: A routine restart request renews in place and never drains, holds a turn, or interrupts
     status: covered
@@ -66,6 +68,7 @@ scenarios:
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_disabling_codex_ends_every_app_server_and_admits_nothing
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_disable_whose_stop_fails_is_retried_until_the_app_server_is_gone
       - tests/test_opencode_generations.py::test_runtime_gen_006_disabling_opencode_stops_every_generation_now_and_refuses_a_late_turn
+      - tests/test_opencode_generations.py::test_a_disable_shutdown_that_leaves_a_process_raises_and_its_retry_finishes
   - id: RUNTIME-GEN-007
     name: Re-enabling a backend registers a fresh agent at once; disabling already stopped the old one
     status: covered

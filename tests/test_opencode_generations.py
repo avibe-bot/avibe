@@ -1254,16 +1254,112 @@ def test_an_adoption_cut_short_leaves_every_record_to_its_retry(isolated_launch,
 # ---------------------------------------------- lifecycle audit regressions
 
 
-def test_disabling_the_backend_stops_a_previous_controllers_generations(fake_processes, monkeypatch):
-    leftover = _generation("ocg_leftover", 47, "spec-old")
-    fake_processes.alive.add(leftover.generation_id)
-    monkeypatch.setattr(client_manager, "adopt_recorded_generations", AsyncMock(return_value=[leftover]))
+def _leftover_record(records: Path, monkeypatch, generation_id: str, index: int) -> tuple[Path, int]:
+    """A server a crashed controller recorded, proven live by its record."""
+
+    pid = fake_pid(index)
+    record = _record(records, generation_id, pid, 50000 + index)
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: records / "absent.json")
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda candidate: candidate == pid)
+    monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda candidate: 100.0 + candidate)
+    monkeypatch.setattr(
+        opencode_server.runtime,
+        "get_process_command",
+        lambda candidate: f"/bin/opencode serve --port={50000 + index}",
+    )
+    return record, pid
+
+
+def test_disabling_the_backend_stops_a_previous_controllers_generations(fake_processes, tmp_path, monkeypatch):
+    record, pid = _leftover_record(tmp_path / "generations", monkeypatch, "ocg_leftover", 47)
+    stopped: list[int] = []
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda candidate, timeout=5.0: stopped.append(candidate) or True)
 
     # The backend is disabled before anything used OpenCode since a crash.
     asyncio.run(_runtime().shutdown())
 
-    assert fake_processes.stopped == [leftover]
+    assert stopped == [pid] and not record.exists()
 
+
+def test_a_disable_shutdown_that_leaves_a_process_raises_and_its_retry_finishes(fake_processes, tmp_path, monkeypatch):
+    """A disable's teardown owner retries a shutdown only if it raises: one
+    whose forced stop or leftover stop left a process must not report success.
+    The retry stops what is left."""
+
+    record, leftover_pid = _leftover_record(tmp_path / "generations", monkeypatch, "ocg_leftover", 48)
+    survives = {"attached": True, "leftover": True}
+    stop = client_manager.stop_generation
+
+    async def stop_generation(generation):
+        if survives["attached"]:
+            raise RuntimeError("process did not exit")
+        await stop(generation)
+
+    monkeypatch.setattr(client_manager, "stop_generation", stop_generation)
+    monkeypatch.setattr(
+        opencode_server,
+        "terminate_pid_tree_sync",
+        lambda candidate, timeout=5.0: not survives["leftover"],
+    )
+    runtime = _runtime()
+
+    async def scenario():
+        turn = await runtime.acquire(OpenCodeLaunchSpec(digest="v1", binary="opencode"))
+        attached = turn.generation.runtime
+        with pytest.raises(RuntimeError, match="incomplete"):
+            await runtime.shutdown()
+        incomplete = (attached in runtime.generations(), record.exists())
+        survives.update(attached=False, leftover=False)
+        await runtime.shutdown()
+        return attached, incomplete
+
+    attached, incomplete = asyncio.run(scenario())
+
+    assert incomplete == (True, True)
+    assert fake_processes.stopped == [attached]
+    assert runtime.generations() == () and not record.exists()
+
+
+def test_a_cap_forced_stop_settles_the_activities_of_the_sessions_it_interrupts(fake_processes):
+    """A fourth launch spec force-stops the oldest busy generation: the
+    sessions on it get their turns and their background Activities settled,
+    by the runtime keys the ownership snapshot gives them."""
+
+    from modules.agents.opencode.session import OpenCodeSessionManager
+
+    interrupted: list[dict] = []
+
+    async def force_end_runtime_work(backend, *, base_session_ids, activity_runtime_keys):
+        interrupted.append(
+            {"backend": backend, "sessions": set(base_session_ids), "keys": set(activity_runtime_keys)}
+        )
+
+    agent = object.__new__(OpenCodeAgent)
+    agent.controller = SimpleNamespace(agent_service=SimpleNamespace(force_end_runtime_work=force_end_runtime_work))
+    agent._session_manager = OpenCodeSessionManager(SimpleNamespace(sessions=None), "opencode")
+    agent._session_generations = {}
+    agent._active_requests = {}
+    agent._steering_states = {}
+    agent._settling_request_tasks = set()
+    agent._runtime = _runtime()
+    agent._runtime.on_generation_stopping = agent._on_generation_stopping
+
+    async def scenario():
+        bindings = []
+        for index, digest in enumerate(("v1", "v2", "v3")):
+            binding = await agent._runtime.acquire(OpenCodeLaunchSpec(digest=digest, binary="opencode"))
+            base = f"base-{index}"
+            agent._session_generations[base] = binding.generation.runtime
+            agent._session_manager.set_request_session(base, f"ses-{index}", f"/work/{index}", "slack::channel::C1")
+            bindings.append(binding)
+        await agent._runtime.acquire(OpenCodeLaunchSpec(digest="v4", binary="opencode"))
+        await agent._runtime._generations.settled()
+        return bindings[0].generation.runtime
+
+    oldest = asyncio.run(scenario())
+
+    assert fake_processes.stopped == [oldest]
+    assert interrupted == [{"backend": "opencode", "sessions": {"base-0"}, "keys": {"base-0:/work/0"}}]
 
 def test_adoption_takes_a_converted_legacy_server_once(isolated_launch, tmp_path, monkeypatch):
     converted = _record(isolated_launch.records, "ocg_converted", fake_pid(48), 4096)

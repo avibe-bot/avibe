@@ -32,6 +32,8 @@ from vibe.opencode_config import (
 )
 
 from .caller_context import PLUGIN_SOURCE, server_environment
+from vibe.desktop_runtime import desktop_caller_provenance
+
 from .server import (
     _MANAGED_RUNTIME_POLICY_REVISION,
     OpenCodeGeneration,
@@ -44,6 +46,7 @@ from .server import (
     own_generation,
     start_generation,
     stop_generation,
+    stop_recorded_servers_sync,
 )
 
 logger = logging.getLogger(__name__)
@@ -539,17 +542,25 @@ class OpenCodeRuntime:
         return {wrapper.runtime.generation_id: _stop_outcome(wrapper) for wrapper in wrappers}
 
     async def shutdown(self) -> None:
-        """Admit nothing more and stop every generation now, bound work included.
+        """Admit nothing more and stop every OpenCode process now, bound work included.
 
-        A previous controller's generations are adopted first, so they stop
-        too. A failed adoption leaves their records for ``vibe stop`` and the
-        next controller.
+        Every generation this runtime attached is force-stopped. Then every
+        recorded server no runtime here owns, such as one a crashed controller
+        left, is stopped by its record, as a disabled startup stops them. The
+        set admits no adoption once stopping, and a disable needs none.
+
+        Raises while any process survives, so the caller's teardown owner
+        retries it. A retry repeats both steps and is safe at any point.
         """
-        try:
-            await self.ensure_adopted(None)
-        except Exception:
-            logger.warning("Could not adopt OpenCode generations before stopping the backend", exc_info=True)
         await self._generations.stop_all(force=True)
+        leftovers = await asyncio.to_thread(stop_recorded_servers_sync, desktop_caller_provenance())
+        survivors = [generation.generation_id for generation in self.generations()]
+        failed = sum(outcome is StopOutcome.FAILED for outcome in leftovers)
+        if survivors or failed:
+            raise RuntimeError(
+                f"OpenCode shutdown is incomplete: {len(survivors)} generation(s) and "
+                f"{failed} recorded server(s) survived their stop"
+            )
 
     async def retire_all(self) -> None:
         """Admit nothing more to any live generation; each stops once its work drains.

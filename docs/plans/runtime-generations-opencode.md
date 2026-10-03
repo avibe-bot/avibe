@@ -651,8 +651,8 @@ and the corrected cells came from an independent agent that checked every
 | Retire: renewal | `renew()` persists the epoch first; the next turn's spec installs a new current and the old one retires | S1 holds. W: renewal raises without effect. |
 | Retire: End-idle and strict migration | `retire_confirmed()` waits for the reconciler and reports stopped, draining, or failed | B3, O4 hold. |
 | Retire: forced refresh | `_cancel_active_requests()` then `retire_all()` | B3 holds; leases keep their generation until released. |
-| Disable | the core interrupts the backend's work, unregisters the agent, and awaits `shutdown_runtime()` → `OpenCodeRuntime.shutdown()`: adopt if never adopted, then a forced `stop_all` | B3 holds by the user's own interruption. L3 holds: a later UI release reaches the holder. **Gap G2:** a runtime that never adopted stopped without adopting, so a crashed predecessor's generations ran until shutdown (O2). Gap G1, a closed runtime that was never swept, ended with the drain path. |
-| Cap force-stop | core `_next_victim` forces the oldest retiring generation; `_on_generation_stopping(force)` settles bound turns; `stop_generation` | B3 holds; a lease holder sees its process end, by design. **Known K3:** the cap counts per runtime, so while a disabled backend's runtime drains next to a re-enabled one, up to 3 + 3 processes may run. |
+| Disable | the core interrupts the backend's work, unregisters the agent, and runs `shutdown_runtime()` → `OpenCodeRuntime.shutdown()` inside `AgentService.run_teardown`: a forced `stop_all` of every attached generation, then `stop_recorded_servers_sync()` for every recorded server no runtime here owns. It raises while any process survives, so the idle sweep retries it; a retry repeats both steps | B3 holds by the user's own interruption. L3 holds: a later UI release reaches the holder. W/D: a survivor fails the teardown, which is retried until it stops. **Gap G2:** a runtime that never adopted stopped without adopting, so a crashed predecessor's generations ran until shutdown (O2). Gap G1, a closed runtime that was never swept, ended with the drain path. **Gap G10:** an incomplete shutdown returned normally, so the teardown's retry was lost. |
+| Cap force-stop | core `_next_victim` forces the oldest retiring generation; `_on_generation_stopping(force)` → `_interrupt_generation_work` settles the bound sessions' turns and, by the runtime keys the ownership snapshot gives them, their Activities; `stop_generation` | B3 holds; a lease holder sees its process end, by design. **Gap G11:** the forced stop passed no runtime keys, so the interrupted sessions' Activities and Runs stayed active after the process was killed. Every forced stop of the adapter goes through this one hook; `forget()` handles a process that already died, and the record-based stops touch only records no runtime here owns. |
 | Controller restart | explicit: shutdown stops every generation this controller owns; next start adopts and restores polls on a new current. After a crash with OpenCode disabled, startup runs `stop_recorded_servers_sync()` | R2, B1 hold. **Gap S-1:** after a crash, a restart with OpenCode disabled never stopped its leftovers, which ran until the next stop or enable (O2). |
 | Crash between steps | spawn→record (K1); record→ready (adopted or stopped); lease grant→hand-out (the successor honors it until TTL); marker→durable poll (marker reconciled away); kill→record removal (unproven, removed later); legacy write→legacy removal (G3) | R1–R3 hold except K1 and G3. |
 | Process death | `acquire` replaces a dead current (`forget` → `stop_generation` cleans up); a dead retiring generation is cleaned on its last release | R2, B1 hold. |
@@ -664,7 +664,9 @@ and the corrected cells came from an independent agent that checked every
 | Gap | Fix | Regression |
 | --- | --- | --- |
 | G1 | moot: disabling stops every generation at once, so no closed runtime waits for a sweep. `reap()` still does not wait for a completed adoption | — |
-| G2 | `shutdown()` adopts, with no current spec, before its forced stop; a failed adoption still stops what is attached and leaves the records for `vibe stop` and the next controller | `test_disabling_the_backend_stops_a_previous_controllers_generations` |
+| G2 | `shutdown()` stops a previous controller's servers by their records, after its forced stop of what it attached | `test_disabling_the_backend_stops_a_previous_controllers_generations` |
+| G10 | `shutdown()` raises while any attached generation or recorded server survives | `test_a_disable_shutdown_that_leaves_a_process_raises_and_its_retry_finishes` |
+| G11 | `_interrupt_generation_work` passes `base_session_id:working_path` runtime keys | `test_a_cap_forced_stop_settles_the_activities_of_the_sessions_it_interrupts` |
 | G3 | adoption skips and removes a legacy record whose process a converted record already named | `test_adoption_takes_a_converted_legacy_server_once` |
 | G4 | `_outside_turn_admission()`: work outside a turn waits while the backend drains; it is counted, in one step with the readiness check, until it is bound; `runtime_has_active_turns()` reports it | `test_a_native_migration_never_overlaps_an_opencode_start_outside_a_turn` |
 | G5 | `_bind_restored_poll` rewrites the poll's `opencode_generation_id` whenever it binds a different generation | `test_runtime_gen_022_a_restored_poll_resumes_on_the_generation_that_runs_it` |
@@ -714,8 +716,6 @@ Every reader goes through `_recorded_processes()`, which applies the gate.
   record write leaves one unrecorded process.
 - **K2.** A start whose process survives SIGKILL for 5 s stays recorded but
   untracked, until `vibe stop`, shutdown, or the next adoption.
-- **K3.** During a disable and re-enable, each runtime enforces its own cap
-  until the closed one drains.
 - **M2 pin.** A turn whose marker clear fails keeps its generation, through
   marker and durable poll, until the next restore or cap pressure. This is
   master's contract. In the reverse case, a cleared marker whose poll removal

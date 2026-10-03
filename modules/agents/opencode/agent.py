@@ -1029,7 +1029,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._interrupt_generation_work(generation)
 
     async def _interrupt_generation_work(self, generation: OpenCodeGeneration) -> None:
-        """Settle every turn bound to a generation that is being force-stopped."""
+        """Settle every turn and Activity bound to a generation being force-stopped."""
 
         sessions = {
             base_session_id
@@ -1048,9 +1048,20 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await force_end(
                 self.name,
                 base_session_ids=sessions,
-                activity_runtime_keys=set(),
+                # The runtime keys the ownership snapshot gives these sessions,
+                # so their Activities and Runs settle with the process.
+                activity_runtime_keys=self._activity_runtime_keys(sessions),
             )
         await self._cancel_active_requests(base_session_ids=sessions)
+
+    def _activity_runtime_keys(self, base_session_ids: set[str]) -> set[str]:
+        keys = set()
+        for base_session_id in base_session_ids:
+            request_session = self._session_manager.get_request_session(base_session_id)
+            working_path = request_session[1] if request_session and len(request_session) >= 2 else None
+            if working_path:
+                keys.add(f"{base_session_id}:{working_path}")
+        return keys
 
     def _bound_generation(self, base_session_id: str | None) -> OpenCodeGeneration | None:
         return self._session_generations.get(str(base_session_id or ""))
