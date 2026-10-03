@@ -1976,7 +1976,13 @@ def _generation_from_record(
     request_timeout_seconds: int,
 ) -> OpenCodeGeneration:
     binary = info.get("binary") if isinstance(info.get("binary"), dict) else {}
-    created_at = info.get("process_created_at")
+    recorded_created_at = info.get("process_created_at")
+    created_at = (
+        float(recorded_created_at)
+        if isinstance(recorded_created_at, (int, float)) and not isinstance(recorded_created_at, bool)
+        else runtime.process_create_time(int(info["pid"]))
+    )
+    started_at = info.get("started_at")
     leases = info.get("leases") if isinstance(info.get("leases"), dict) else {}
     caller_context_path = info.get("caller_context_path")
     overlay_hash = info.get("model_hub_overlay_hash")
@@ -1986,11 +1992,7 @@ def _generation_from_record(
         port=int(info["port"]),
         host=str(info.get("host") or DEFAULT_OPENCODE_HOST),
         spec_digest=spec_digest,
-        process_created_at=(
-            float(created_at)
-            if isinstance(created_at, (int, float)) and not isinstance(created_at, bool)
-            else runtime.process_create_time(int(info["pid"]))
-        ),
+        process_created_at=created_at,
         binary=str(binary.get("path") or ""),
         binary_version=binary.get("version") if isinstance(binary.get("version"), str) else None,
         caller_context_path=caller_context_path if isinstance(caller_context_path, str) else None,
@@ -2002,7 +2004,13 @@ def _generation_from_record(
             for key, value in leases.items()
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         },
-        started_at=info.get("started_at") if isinstance(info.get("started_at"), (int, float)) else None,
+        # The process's age: a record without a start time, such as the
+        # legacy one, started when its process did, never at its adoption.
+        started_at=(
+            float(started_at)
+            if isinstance(started_at, (int, float)) and not isinstance(started_at, bool)
+            else created_at
+        ),
         desktop_runtime_id=info.get("desktop_runtime_id") if "desktop_runtime_id" in info else _UNRECORDED_RUNTIME_ID,
         request_timeout_seconds=request_timeout_seconds,
     )
@@ -2049,6 +2057,32 @@ def _recorded_processes(runtime_ids: Optional[frozenset[str]] = None) -> list[tu
     """
 
     ids = desktop_caller_provenance() if runtime_ids is None else runtime_ids
+    found = _every_recorded_process()
+    ours = [(path, info) for path, info in found if _record_is_ours(info, ids)]
+    if len(ours) < len(found):
+        logger.debug("Leaving %s OpenCode record(s) of another desktop Runtime alone", len(found) - len(ours))
+    return ours
+
+
+def other_runtimes_live_records() -> list[Dict[str, Any]]:
+    """Records of another desktop Runtime whose process is proven running.
+
+    Durable state naming such a process, such as the poll of a run it
+    executes, is that Runtime's: nothing here resumes, rewrites, or settles it,
+    and its controller resumes it when it runs here again. Once the process
+    is gone, the state names nothing to protect and any controller here
+    settles it, as after a restart.
+    """
+
+    runtime_ids = desktop_caller_provenance()
+    return [
+        info
+        for _path, info in _every_recorded_process()
+        if not _record_is_ours(info, runtime_ids) and _record_proves_process(info, require_port=False)
+    ]
+
+
+def _every_recorded_process() -> list[tuple[Path, Dict[str, Any]]]:
     found: list[tuple[Path, Dict[str, Any]]] = []
     records_dir = generation_records_dir()
     if records_dir.is_dir():
@@ -2061,10 +2095,7 @@ def _recorded_processes(runtime_ids: Optional[frozenset[str]] = None) -> list[tu
     legacy = _read_json_object(legacy_pid_file())
     if legacy is not None:
         found.append((legacy_pid_file(), legacy))
-    ours = [(path, info) for path, info in found if _record_is_ours(info, ids)]
-    if len(ours) < len(found):
-        logger.debug("Leaving %s OpenCode record(s) of another desktop Runtime alone", len(found) - len(ours))
-    return ours
+    return found
 
 
 async def _serves_after_restart(generation: OpenCodeGeneration) -> bool:

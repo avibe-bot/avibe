@@ -1535,6 +1535,39 @@ def test_runtime_gen_006_a_disable_retried_after_a_re_enable_settles_only_the_di
     assert fake_processes.stopped == [old]
     assert enabled._runtime.current() is new and new.generation_id in fake_processes.alive
 
+def test_the_cap_stops_the_oldest_adopted_generation_whatever_its_record_order(fake_processes, monkeypatch):
+    """After a restart, records come in filename order, which says nothing
+    about age. Adoption keeps process age, so when a new turn's generation
+    takes the unit past the cap, the oldest adopted process gives way."""
+
+    def recorded(generation_id: str, index: int, started_at: float) -> OpenCodeGeneration:
+        generation = OpenCodeGeneration(
+            generation_id=generation_id,
+            pid=fake_pid(80 + index),
+            port=50180 + index,
+            spec_digest=f"old-{index}",
+            process_created_at=started_at,
+            started_at=started_at,
+            # Each still runs a restored turn, so none stops on its own.
+            active_run_sessions=(f"ses-{index}",),
+        )
+        fake_processes.alive.add(generation_id)
+        return generation
+
+    young, middle, old = recorded("ocg_0a", 0, 300.0), recorded("ocg_1b", 1, 200.0), recorded("ocg_2c", 2, 100.0)
+    monkeypatch.setattr(client_manager, "adopt_recorded_generations", AsyncMock(return_value=[young, middle, old]))
+    runtime = _runtime()
+
+    async def scenario():
+        await runtime.acquire(OpenCodeLaunchSpec(digest="new", binary="opencode"))
+        await runtime._generations.settled()
+
+    asyncio.run(scenario())
+
+    assert [generation.generation_id for generation in fake_processes.stopped] == [old.generation_id]
+    assert set(runtime.generations()) == {young, middle, *fake_processes.started}
+
+
 def test_adoption_takes_a_converted_legacy_server_once(isolated_launch, tmp_path, monkeypatch):
     converted = _record(isolated_launch.records, "ocg_converted", fake_pid(48), 4096)
     # The crash came after the converted record was written and before the

@@ -1496,3 +1496,75 @@ def test_two_overlapping_restores_of_one_durable_poll_start_exactly_one_loop() -
         return started
 
     assert asyncio.run(run()) == ["oc-1"]
+
+
+def test_restore_leaves_every_poll_whose_run_another_desktop_runtimes_live_server_executes(
+    tmp_path, monkeypatch
+) -> None:
+    """Two desktop Runtimes share this state directory, and the other one's
+    OpenCode server still runs two native turns: one its poll names by
+    generation, one from before generations that its record marks as running.
+    Restore here binds, rewrites, and settles neither, so that Runtime's
+    controller resumes both. A poll naming that Runtime's server after it
+    exited is resumed here, as after any restart."""
+
+    import json
+
+    from modules.agents.opencode import server as opencode_server
+
+    other_runtime, this_runtime = "a" * 64, "b" * 64
+    live_pid, gone_pid = 4_100_001, 4_100_002
+    records = tmp_path / "generations"
+    records.mkdir()
+    for generation_id, pid, port, runs in (
+        ("ocg_live", live_pid, 50201, ["oc-legacy"]),
+        ("ocg_exited", gone_pid, 50202, []),
+    ):
+        (records / f"{generation_id}.json").write_text(
+            json.dumps(
+                {
+                    "generation_id": generation_id,
+                    "pid": pid,
+                    "port": port,
+                    "process_created_at": 100.0 + pid,
+                    "desktop_runtime_id": other_runtime,
+                    "active_run_sessions": runs,
+                }
+            ),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: records)
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: tmp_path / "absent.json")
+    monkeypatch.setattr(opencode_server, "desktop_caller_provenance", lambda: frozenset({this_runtime}))
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid == live_pid)
+    monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda pid: 100.0 + pid)
+    monkeypatch.setattr(
+        opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=50201"
+    )
+
+    def poll(native_session_id: str, generation_id: str | None = None) -> ActivePollInfo:
+        info = _make_poll(platform="slack", base_session_id=f"base-{native_session_id}", opencode_session_id=native_session_id)
+        info.processing_indicator = {"opencode_generation_id": generation_id} if generation_id else {}
+        return info
+
+    polls = {
+        "oc-live": poll("oc-live", "ocg_live"),
+        "oc-legacy": poll("oc-legacy"),
+        "oc-exited": poll("oc-exited", "ocg_exited"),
+    }
+    agent, _status_writes, removed, request_sessions = _build_agent(polls)
+    rewritten: list[str] = []
+    agent.sessions.update_active_poll_state = lambda session_id, *, processing_indicator: rewritten.append(session_id)
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    restored = asyncio.run(run())
+
+    assert restored == 1
+    assert [entry[1] for entry in request_sessions] == ["oc-exited"]
+    assert rewritten == ["oc-exited"]
+    # The exited server's poll settled here; the live server's two stay durable.
+    assert removed == ["oc-exited"] and set(polls) == {"oc-live", "oc-legacy"}

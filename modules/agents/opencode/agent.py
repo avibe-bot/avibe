@@ -104,6 +104,7 @@ from .server import (
     OpenCodePromptRejectedError,
     OpenCodeRuntimeConfigInvalidError,
     native_part_id_for_attempt,
+    other_runtimes_live_records,
 )
 from .session import (
     OpenCodeResumeUnavailableError,
@@ -158,6 +159,23 @@ def _poll_generation_id(poll_info: Any) -> str | None:
     snapshot = getattr(poll_info, "processing_indicator", None)
     value = snapshot.get(_GENERATION_SNAPSHOT_KEY) if isinstance(snapshot, dict) else None
     return value if isinstance(value, str) and value else None
+
+
+def _poll_runs_in(poll_info: Any, records: list[dict[str, Any]]) -> bool:
+    """Whether one of ``records`` names the process executing a poll's run.
+
+    That is the generation the poll names; a poll from before generations
+    names none, and the process marking its native session as running does.
+    """
+
+    generation_id = _poll_generation_id(poll_info)
+    if generation_id is not None:
+        return any(record.get("generation_id") == generation_id for record in records)
+    return any(
+        isinstance(record.get("active_run_sessions"), list)
+        and poll_info.opencode_session_id in record["active_run_sessions"]
+        for record in records
+    )
 
 
 def _log_lifecycle_failure(task: asyncio.Task) -> None:
@@ -2691,6 +2709,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         if not active_polls:
             logger.debug("No active polls to restore")
             return 0
+        # A run another desktop Runtime's live process executes is that
+        # Runtime's: its poll is never bound, rewritten, or settled here.
+        foreign_records = await asyncio.to_thread(other_runtimes_live_records)
 
         restored_count = 0
         stale_poll_ids = []
@@ -2704,6 +2725,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 continue
             existing_task = self._active_requests.get(poll_info.base_session_id)
             if existing_task is not None and not existing_task.done():
+                continue
+            if _poll_runs_in(poll_info, foreign_records):
+                logger.info(
+                    "Leaving OpenCode poll %s to the desktop Runtime whose server runs it",
+                    session_id,
+                )
                 continue
             processing_snapshot = (
                 poll_info.processing_indicator

@@ -367,14 +367,19 @@ class OpenCodeRuntime:
         async with self._adopt_lock:
             if self._adopted:
                 return
-            adopted = await adopt_recorded_generations(
-                request_timeout_seconds=self.config.request_timeout_seconds,
+            # Oldest first, so the set's serials follow process age and the cap
+            # gives way from the oldest work; records come in no order.
+            adopted = sorted(
+                await adopt_recorded_generations(
+                    request_timeout_seconds=self.config.request_timeout_seconds,
+                ),
+                key=lambda item: item.started_at,
             )
             durable = self._durable_polls()
             serving = next(
                 (
                     generation
-                    for generation in sorted(adopted, key=lambda item: item.started_at, reverse=True)
+                    for generation in reversed(adopted)
                     if current_spec is not None and generation.spec_digest == current_spec.digest
                 ),
                 None,

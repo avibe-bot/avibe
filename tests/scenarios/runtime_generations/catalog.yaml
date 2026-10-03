@@ -40,6 +40,7 @@ scenarios:
     test: tests/test_runtime_generations.py::test_runtime_gen_003_at_the_cap_the_oldest_retiring_generation_gives_way
     related_tests:
       - tests/test_opencode_generations.py::test_a_cap_forced_stop_settles_the_activities_of_the_sessions_it_interrupts
+      - tests/test_opencode_generations.py::test_the_cap_stops_the_oldest_adopted_generation_whatever_its_record_order
   - id: RUNTIME-GEN-004
     name: A routine restart request renews in place and never drains, holds a turn, or interrupts
     status: covered
@@ -229,7 +230,7 @@ scenarios:
     backend: opencode
     test: tests/test_opencode_generations.py::test_runtime_gen_024_a_mode_switch_during_a_hub_run_moves_new_turns_to_direct
   - id: RUNTIME-GEN-025
-    name: A controller that starts with OpenCode disabled stops the OpenCode servers a crashed controller recorded and leaves them for adoption when OpenCode is enabled; shutdown stops only what this controller owns, and nothing adopts, stops, forgets, or cleans another desktop Runtime's records
+    name: A controller that starts with OpenCode disabled stops the OpenCode servers a crashed controller recorded and leaves them for adoption when OpenCode is enabled; shutdown stops only what this controller owns, nothing adopts, stops, forgets, or cleans another desktop Runtime's records, and restore never binds, rewrites, or settles a poll whose run another desktop Runtime's live server executes
     status: covered
     kind: recovery
     layer: unit
@@ -239,3 +240,4 @@ scenarios:
       - tests/test_opencode_generations.py::test_shutdown_stops_only_the_generations_this_controller_owns
       - tests/test_opencode_generations.py::test_service_shutdown_stops_a_started_process_whose_record_was_never_written
       - tests/test_opencode_generations.py::test_adoption_leaves_every_record_of_another_desktop_runtime_alone
+      - tests/test_opencode_restore_polls.py::test_restore_leaves_every_poll_whose_run_another_desktop_runtimes_live_server_executes
