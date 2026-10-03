@@ -204,9 +204,12 @@ running. The tray keeps the shell alive after the window closes.
   - **No indirection.** Every row names its target state and action. `error`
     leaves only through toggle off (the first row), and a later toggle on
     starts from `off`.
-  - **Health.** Call `health_report`, which already reports Accessibility,
-    Screen Recording, and `bundle_identity`, and require
-    `source.attribution == "host"`. The menu shows the localized reason for
+  - **Health.** Call `health_report` and read its `checks` array. Require
+    `tcc_accessibility` and `tcc_screen_recording` to pass, and require the
+    `bundle_identity` check to pass with `identity_source: parent_application`.
+    That is the host-attribution evidence Phase 0 Q1 recorded.
+    `source.attribution` belongs to `check_permissions`, which the policy
+    excludes, so it is never read. The menu shows the localized reason for
     `needs_permission` and `error`.
   - **Orderly quit.** Write `stopped`, then stop the daemon. `D` keeps
     `enabled`, and the effective-status table reads `stopped` as
@@ -374,12 +377,15 @@ running. The tray keeps the shell alive after the window closes.
     - Acquisition, refresh, and release run under an exclusive OS lock on
       `computer-lease.lock`, next to `D` (`flock` on macOS, `LockFileEx` on
       Windows). Inside that lock the server reads and writes the lease
-      record: holder session id and last call time.
+      record: holder session id and last refresh time.
     - Two first calls from different processes therefore serialize. One
       wins, and the other gets `desktop_busy` naming the holder.
-    - The lease lapses after 60 s with no call from its holder, so a holder
-      that crashed frees the desktop within a minute without any PID check.
-      Calling `end_session` releases it at once.
+    - The holder refreshes the lease when each call starts, and every 10 s
+      while a call is still running. A long call, such as a 120 s
+      `get_accessibility_tree`, therefore keeps it.
+    - The lease lapses 60 s after the last refresh. A holder that crashed,
+      even mid-call, stops refreshing and frees the desktop within a minute,
+      without any PID check. Calling `end_session` releases it at once.
   - This isolation is cooperative. Every caller is the same user's agent;
     it is not a security boundary.
   - Tool restriction stays in the driver's managed policy, not in this server.
@@ -406,11 +412,15 @@ running. The tray keeps the shell alive after the window closes.
   injected unconditionally. Only availability is absorbed at call time.
 - **Configuration reconciliation.** `core/computer_use.py` owns the one change
   that alters backend configuration. A controller background task reads
-  `enabled` and the `tool_snapshot` hash every 2 s, the same polling model as
-  `RuntimeCommandWatcher`. It compares that pair with the pair each live
-  consumer was built from. A desktop update that ships a new driver
-  therefore reaches running sessions the same way a toggle flip does. On a
-  mismatch it reconciles every consumer that caches MCP configuration:
+  `enabled`, the `tool_snapshot` hash, and whether the snapshot file currently
+  verifies, every 2 s. This is the same polling model as
+  `RuntimeCommandWatcher`. The hash is recomputed only when the file's size or
+  mtime changes. The task compares this triple with the triple each live
+  consumer was built from. A deleted, corrupted, or restored snapshot therefore
+  reconciles even when the expected hash in `D` is unchanged. A desktop update
+  that ships a new driver therefore reaches running sessions the same way a
+  toggle flip does. On a mismatch it reconciles every consumer that caches MCP
+  configuration:
   - Codex and OpenCode: the same `AgentAuthService._refresh_backend_runtime`
     handler that restart markers call.
   - Cached Claude clients: marked stale, then retired and recreated at their
@@ -677,9 +687,10 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   yields neither, plus `snapshot_invalid`. Each backend translation is checked;
   Codex also carries the approval override. Reconciliation brings every live
   consumer (Codex, OpenCode, cached Claude clients) to the final (`enabled`,
-  snapshot hash) pair. Claude clients are recreated only between turns. The
-  reconciliation sees no change when availability moves or when the pair returns
-  to its old value between polls.
+  snapshot hash, snapshot valid) triple. Claude clients are recreated only
+  between turns. The reconciliation sees no change when availability moves or
+  when the triple returns to its old value between polls. Deleting and then
+  restoring the snapshot file reconciles both ways.
 - Python, server: one case per row of the effective-status table, asserting both
   status and reason, plus a home-independence case: a Runtime with `AVIBE_HOME`
   set reads the same `D`. A call while not ready returns the named state and
@@ -688,9 +699,9 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   advertised schema requires `session`. Two sessions get separate Cua sessions
   on one upstream connection. A session that called `end_session` works again on
   its next call. Simultaneous first calls from two processes yield exactly one
-  holder, and the other gets `desktop_busy` until `end_session` or 60 s idle.
-  Tests stay hermetic: the `D` path and the upstream command are redirected to
-  test-owned fakes.
+  holder, a 120 s call keeps its lease, and the other gets `desktop_busy` until
+  `end_session` or 60 s idle. Tests stay hermetic: the `D` path and the upstream
+  command are redirected to test-owned fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
   check confirms that the pinned driver's `tools/list`, under that policy,
   equals the bundled tool snapshot. For a Runtime without a covering
