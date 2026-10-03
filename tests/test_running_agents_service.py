@@ -1200,6 +1200,51 @@ def test_end_idle_opencode_reports_only_a_confirmed_stop_as_killed(outcome, expe
     assert {key: result.get(key) for key in expected} == expected
 
 
+def test_end_active_opencode_reports_a_retirement_that_failed():
+    """End stops the active turn, then retires the server it was the last user
+    of. A server that survives its stop is reported, not hidden behind the
+    successful turn stop."""
+
+    class _Task:
+        finished = False
+
+        def done(self):
+            return self.finished
+
+        def cancel(self):
+            self.finished = True
+
+    task = _Task()
+    manager = types.SimpleNamespace(
+        get_request_session=lambda base: ("oc-1", "/work", "channel-1") if base == "b1" else None,
+        pop_request_session=lambda base: None,
+        list_all=lambda: {},
+    )
+    agent = types.SimpleNamespace(
+        _active_requests={"b1": task},
+        _session_manager=manager,
+        retire_current_generation=_AsyncFlag(ret="failed"),
+    )
+
+    async def _handle_stop(_context):
+        # The canonical stop ends the native poll.
+        task.finished = True
+        return True
+
+    controller = _make_controller(opencode=agent)
+    controller.session_turns = types.SimpleNamespace(is_in_flight=lambda sid: False)
+    controller.command_handler = types.SimpleNamespace(handle_stop=_handle_stop)
+
+    result = asyncio.run(
+        running_agents.end_running_agent(
+            controller, backend="opencode", state="active", session_id="oc-s", base_session_id="b1"
+        )
+    )
+
+    assert agent.retire_current_generation.called
+    assert {key: result.get(key) for key in ("ok", "error")} == {"ok": False, "error": "runtime_retirement_failed"}
+
+
 def test_end_idle_opencode_clears_disposable_session_caches():
     from modules.agents.opencode.session import OpenCodeSessionManager
 

@@ -1301,7 +1301,12 @@ async def end_running_agent(
         if not stop_ok:
             return stop_result
         if backend == "opencode":
-            await _end_opencode(controller, base_session_id)
+            teardown = await _end_opencode(controller, base_session_id)
+            if isinstance(teardown, dict) and not teardown.get("ok"):
+                # The turn stopped, but the runtime End asked to retire survived.
+                return teardown
+            if isinstance(teardown, dict) and teardown.get("process_killed"):
+                stop_result["process_killed"] = True
         elif backend == "claude" and isinstance(claude_pid, int):
             # Claude's client is already removed by the stop path (so its row clears,
             # and calling _end_claude here would wrongly report ``session_not_live``);
