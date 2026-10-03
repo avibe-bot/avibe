@@ -2036,7 +2036,7 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
 
                 served = iter([bad, fresh])
 
-                async def acquire(cwd, launch=None, *, config=None):
+                async def acquire(cwd, launch=None, *, inputs=None):
                     generation = install_codex_transport(
                         agent, cwd, next(served), digest=f"spec-{agent._acquire_generation.await_count}"
                     )
@@ -2047,6 +2047,8 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual([binding.session_id for binding in target.bindings], ["ses-durable"])
                     return bind_installed(agent, generation)
 
+                # Acquisition is stubbed, so the launch load it alone consumes is too.
+                agent._launch_inputs = lambda cwd, *, hub_config=None: SimpleNamespace(hub_config=hub_config)
                 agent._acquire_generation = AsyncMock(side_effect=acquire)
                 await agent.handle_message(request)
                 bad.stop.assert_awaited_once()
@@ -2333,15 +2335,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             env["PATH"] = f"/managed/git/bin:{base_env['PATH']}"
             return True
 
-        with (
-            patch.object(
-                _MODULE,
-                "desktop_backend_subprocess_environment",
-                return_value=managed_env,
-            ),
-            patch("core.git_runtime.prepend_vendored_git_to_path", side_effect=inject_git),
-        ):
-            agent._inject_caller_env_config(params, request)
+        with patch("core.git_runtime.prepend_vendored_git_to_path", side_effect=inject_git):
+            agent._inject_caller_env_config(params, request, managed_env)
 
         self.assertEqual(
             params["config"]["shell_environment_policy"]["set"]["PATH"],
@@ -2364,7 +2359,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             return True
 
         with patch("core.git_runtime.prepend_vendored_git_to_path", side_effect=inject_git):
-            agent._inject_caller_env_config(params, request)
+            agent._inject_caller_env_config(params, request, os.environ)
 
         set_env = params["config"]["shell_environment_policy"]["set"]
         self.assertEqual(set_env["PATH"], "/managed/git/bin")
@@ -2390,7 +2385,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("core.git_runtime.prepend_vendored_git_to_path", return_value=False):
-            agent._inject_caller_env_config(params, request)
+            agent._inject_caller_env_config(params, request, os.environ)
 
         set_env = params["config"]["shell_environment_policy"]["set"]
         self.assertEqual(set_env["KEEP"], "1")

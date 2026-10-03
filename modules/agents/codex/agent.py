@@ -137,12 +137,16 @@ class CodexLaunchSpec:
 
 @dataclass(frozen=True, eq=False)
 class _LaunchInputs:
-    """What a launch spec reads from mutable state, captured at one instant.
+    """A turn's whole configuration, captured in one synchronous step at admission.
 
-    A save or renewal that lands while a Hub catalog is prepared then changes
-    nothing about the spec being built; the directory's next turn moves.
+    Its Model Hub launch resolution, Hub catalog, launch spec digest, and
+    process all derive from this load, so a save or renewal that lands while
+    any of them is awaited changes nothing about the turn; the directory's
+    next turn moves. Nothing on the turn path reads the mutable source again.
     """
 
+    # The Model Hub snapshot the launch resolves against; None without a router.
+    hub_config: Any = field(repr=False)
     binary: str
     extra_args: tuple[str, ...]
     env: Mapping[str, str] = field(repr=False)
@@ -634,7 +638,7 @@ class CodexAgent(BaseAgent):
         bindings: list[RuntimeBinding[CodexLaunchSpec, _CodexRuntime]],
     ) -> None:
         launch = None
-        config = None
+        inputs: _LaunchInputs | None = None
         try:
             if self._shutting_down:
                 # Past the agent lookup already: refuse before anything is
@@ -647,13 +651,17 @@ class CodexAgent(BaseAgent):
             self._session_mgr.set_cwd(request.base_session_id, request.working_path)
             self._bind_runtime_agent_session_id(request)
             router = getattr(self.controller, "model_hub_runtime", None)
+            hub_snapshot = getattr(router, "snapshot", None)
+            # The turn's whole configuration is one load, taken here before
+            # anything awaits: its Hub launch, catalog, spec, and process all
+            # derive from it, so a concurrent save or renewal cannot split them.
+            inputs = self._launch_inputs(
+                request.working_path,
+                hub_config=hub_snapshot() if callable(hub_snapshot) else None,
+            )
             if router is not None:
                 from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
 
-                # One load serves this turn's launch and its runtime's catalog,
-                # so a concurrent catalog edit cannot split them.
-                snapshot = getattr(router, "snapshot", None)
-                config = snapshot() if callable(snapshot) else None
                 _, requested_model, _, _ = self._resolve_codex_agent_settings(request)
                 launch = await resolve_model_hub_launch(
                     self.controller,
@@ -661,10 +669,10 @@ class CodexAgent(BaseAgent):
                     requested_model or "",
                     process_scope=request.working_path,
                     context=request.context,
-                    config=config,
+                    config=inputs.hub_config,
                 )
                 bind_launch(request.context, launch)
-            binding = await self._acquire_generation(request.working_path, launch, config=config)
+            binding = await self._acquire_generation(request.working_path, launch, inputs=inputs)
             bindings.append(binding)
             await self._move_session_to(binding.generation, request)
         except FileNotFoundError:
@@ -799,8 +807,9 @@ class CodexAgent(BaseAgent):
                 )
                 if await self._drop_generation_after_failure(generation, request, binding):
                     try:
+                        # The retry keeps the turn's admission load.
                         binding = await self._acquire_generation(
-                            request.working_path, launch, config=config
+                            request.working_path, launch, inputs=inputs
                         )
                         bindings.append(binding)
                         generation = binding.generation
@@ -2080,8 +2089,13 @@ class CodexAgent(BaseAgent):
         has_pending_turn_start = getattr(self._turn_registry, "has_pending_turn_start", None)
         return bool(callable(has_pending_turn_start) and has_pending_turn_start(base_session_id))
 
-    def _launch_inputs(self, cwd: str) -> _LaunchInputs:
-        """Read every mutable launch input for ``cwd`` in one step, with no await."""
+    def _launch_inputs(self, cwd: str, *, hub_config: Any = None) -> _LaunchInputs:
+        """Read every mutable launch input for ``cwd`` in one step, with no await.
+
+        The directory is created first, so its inode is the one the process
+        will run in.
+        """
+        os.makedirs(cwd, exist_ok=True)
         codex_config = self.codex_config
         binary = codex_config.binary
         env = dict(self._codex_runtime_environment())
@@ -2090,6 +2104,7 @@ class CodexAgent(BaseAgent):
             ".codex",
         )
         return _LaunchInputs(
+            hub_config=hub_config,
             binary=binary,
             extra_args=tuple(codex_config.extra_args),
             env=env,
@@ -2144,23 +2159,22 @@ class CodexAgent(BaseAgent):
         cwd: str,
         launch: "ModelHubLaunch | None" = None,
         *,
-        config: Any = None,
+        inputs: _LaunchInputs | None = None,
     ) -> CodexLaunchSpec:
-        """Capture once every process-level input an app-server for ``cwd`` needs.
+        """Every process-level input an app-server for ``cwd`` needs, from one load.
 
-        The turn loads its launch inputs once, before the Hub catalog is
-        awaited; the catalog, the process, and the digest all derive from that
-        load.
+        ``inputs`` is the turn's admission snapshot. A caller outside a turn
+        passes none, and one is taken here before anything awaits.
         """
-        os.makedirs(cwd, exist_ok=True)
-        inputs = self._launch_inputs(cwd)
+        if inputs is None:
+            inputs = self._launch_inputs(cwd)
         env = dict(inputs.env)
         args: list[str] = []
         catalog: CodexHubCatalog | None = None
         if launch is not None and launch.channel == "hub":
             from modules.agents.model_hub import build_codex_hub_launch
 
-            catalog = (await self.prepare_model_hub_runtime(config, inputs=inputs)).retain()
+            catalog = (await self.prepare_model_hub_runtime(inputs.hub_config, inputs=inputs)).retain()
             try:
                 args, hub_env = build_codex_hub_launch(
                     [],
@@ -2196,12 +2210,18 @@ class CodexAgent(BaseAgent):
         cwd: str,
         launch: "ModelHubLaunch | None" = None,
         *,
-        config: Any = None,
+        inputs: _LaunchInputs | None = None,
     ) -> RuntimeBinding[CodexLaunchSpec, _CodexRuntime]:
-        """Bind a new turn to the generation serving this turn's launch spec."""
+        """Bind a new turn to the generation serving this turn's launch spec.
+
+        A turn passes its admission snapshot as ``inputs``; work outside a
+        turn passes none, and one is taken here before anything awaits.
+        """
+        if inputs is None:
+            inputs = self._launch_inputs(cwd)
         unit = self._unit(cwd)
         await self._retire_unusable_generations(unit)
-        spec = await self._launch_spec(cwd, launch, config=config)
+        spec = await self._launch_spec(cwd, launch, inputs=inputs)
         try:
             binding = await unit.acquire(spec)
             if not binding.generation.runtime.transport.is_initialized:
@@ -3068,13 +3088,19 @@ class CodexAgent(BaseAgent):
         self,
         params: Dict[str, Any],
         request: AgentRequest,
+        process_env: Mapping[str, str],
         *,
         force_path: bool = False,
     ) -> tuple[str, bool]:
+        """Set the turn's shell environment on top of ``process_env``.
+
+        ``process_env`` is the environment of the app-server that runs the
+        turn, which its shell inherits; see ``_process_environment``.
+        """
         from core.git_runtime import prepend_vendored_git_to_path
 
         env = self._caller_env_for_request(request)
-        runtime_env = self._codex_runtime_environment()
+        runtime_env = process_env
         config = dict(params.get("config") or {})
         config["skills.include_instructions"] = False
         params["config"] = config
@@ -3100,10 +3126,10 @@ class CodexAgent(BaseAgent):
         params["config"] = config
         return git_path_state, path_managed
 
-    def _git_path_state_for_request(self, request: AgentRequest) -> str:
+    def _git_path_state_for_request(self, request: AgentRequest, process_env: Mapping[str, str]) -> str:
         from core.git_runtime import prepend_vendored_git_to_path
 
-        runtime_env = self._codex_runtime_environment()
+        runtime_env = process_env
         env: dict[str, str] = {}
         prepend_vendored_git_to_path(
             env,
@@ -3111,6 +3137,16 @@ class CodexAgent(BaseAgent):
             working_dir=getattr(request, "working_path", None),
         )
         return env["PATH"] if "PATH" in env else runtime_env.get("PATH", "")
+
+    @staticmethod
+    def _process_environment(transport: CodexTransport) -> Mapping[str, str]:
+        """The environment an app-server runs with, which its shell inherits.
+
+        It comes from the launch the process was started from, never from the
+        current configuration, so a save during a turn cannot split them.
+        """
+        env = getattr(transport, "runtime_env", None)
+        return env if env is not None else os.environ
 
     def _codex_runtime_environment(self) -> Mapping[str, str]:
         base_env = os.environ
@@ -3140,7 +3176,9 @@ class CodexAgent(BaseAgent):
             params["developerInstructions"] = await self._native_thread_prompt(
                 transport, request, developer_instructions
             )
-        git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
+        git_path_state, git_path_managed = self._inject_caller_env_config(
+            params, request, self._process_environment(transport)
+        )
 
         resp = await transport.send_request("thread/start", params)
         # thread/start returns Thread directly OR may nest under "thread"
@@ -3275,7 +3313,9 @@ class CodexAgent(BaseAgent):
             params["developerInstructions"] = None
         if effective_model:
             params["model"] = effective_model
-        git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
+        git_path_state, git_path_managed = self._inject_caller_env_config(
+            params, request, self._process_environment(transport)
+        )
 
         self._mark_fork_correction_pending(request.base_session_id)
         try:
@@ -3699,6 +3739,7 @@ class CodexAgent(BaseAgent):
                 git_path_state, git_path_managed = self._inject_caller_env_config(
                     resume_params,
                     request,
+                    self._process_environment(transport),
                 )
                 model_provider = await self._resolve_resume_model_provider_override(
                     transport,
@@ -3962,7 +4003,7 @@ class CodexAgent(BaseAgent):
         # Refresh caller environment and git path after prompt rendering,
         # without rendering the prompt a second time.
         caller_env = self._caller_env_for_request(request)
-        git_path_state = self._git_path_state_for_request(request)
+        git_path_state = self._git_path_state_for_request(request, self._process_environment(transport))
 
         if not hasattr(self, "_thread_caller_env_configs"):
             self._thread_caller_env_configs = {}
@@ -3987,6 +4028,7 @@ class CodexAgent(BaseAgent):
             git_path_state, git_path_managed = self._inject_caller_env_config(
                 resume_params,
                 request,
+                self._process_environment(transport),
                 force_path=git_path_managed,
             )
         model_provider = await self._resolve_resume_model_provider_override(transport, request, thread_id)

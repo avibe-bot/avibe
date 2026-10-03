@@ -358,6 +358,8 @@ async def test_codex_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(t
     agent.ensure_agent_session_id = Mock()
     agent._bind_runtime_agent_session_id = Mock()
     agent._resolve_codex_agent_settings = Mock(return_value=(None, UNLISTED_MODEL, None, None))
+    # Acquisition is stubbed, so the launch load it alone consumes is too.
+    agent._launch_inputs = lambda cwd, *, hub_config=None: SimpleNamespace(hub_config=hub_config)
     agent._acquire_generation = AsyncMock()
     agent._remove_ack_reaction = AsyncMock()
     agent._event_handler = SimpleNamespace(_release_stream_turn=Mock())

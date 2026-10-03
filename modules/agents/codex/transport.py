@@ -9,7 +9,7 @@ import os
 import signal
 from asyncio.subprocess import Process
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Optional
 
 from core.process_diagnostics import log_process_snapshot, process_identity
 from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
@@ -332,6 +332,11 @@ class CodexTransport:
         if self._reader_task is not None and self._reader_task.done():
             return False
         return True
+
+    @property
+    def runtime_env(self) -> Mapping[str, str] | None:
+        """The environment the process runs with; None inherits this process's."""
+        return self._runtime_env
 
     @property
     def is_initialized(self) -> bool:

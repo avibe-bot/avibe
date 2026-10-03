@@ -137,6 +137,7 @@ scenarios:
       - tests/test_codex_runtime_generations.py::test_runtime_gen_015_a_dead_retiring_generation_is_never_reused
       - tests/test_codex_runtime_generations.py::test_runtime_gen_015_a_generation_that_dies_while_its_spec_is_prepared_is_not_reused
       - tests/test_codex_runtime_generations.py::test_runtime_gen_015_a_renewal_during_hub_catalog_preparation_leaves_one_coherent_spec
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_015_a_renewal_during_hub_launch_resolution_leaves_one_coherent_spec
   - id: RUNTIME-GEN-016
     name: Retiring a Codex Hub app-server, by renewal or a switch to Direct, keeps the directory's gateway credential until the last Hub app-server stops, and a switch to Direct never holds a new turn behind a running Hub turn
     status: covered

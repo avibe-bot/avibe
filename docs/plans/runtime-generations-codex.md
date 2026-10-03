@@ -127,12 +127,16 @@ same load the launch resolution used. It is cached by `(binary identity,
 models digest)`, with the two most recent entries kept. Each Hub generation
 holds its own pin while it runs.
 
-The spec's mutable inputs (the Codex config's binary and extra arguments, the
-runtime environment, the renewal epoch, and the binary, credential, and cwd
-identities) are read in one step before the catalog is awaited
-(`_launch_inputs`). Catalog preparation and the digest use only that snapshot,
-so a save or renewal that lands while the catalog is exported changes nothing
-about the turn's spec; the directory's next turn moves (RUNTIME-GEN-015).
+A turn's whole configuration is one load, taken in one synchronous step at
+admission, before anything awaits (`_launch_inputs`): the Model Hub snapshot,
+the Codex config's binary and extra arguments, the runtime environment, the
+renewal epoch, and the binary, credential, and cwd identities. The Hub launch
+resolution, catalog preparation, the spec digest, acquisition, and a failure
+retry all use only that load, so a save or renewal that lands while any of them
+is awaited changes nothing about the turn; the directory's next turn moves
+(RUNTIME-GEN-015). The turn's shell environment builds on the environment its
+app-server was launched with, never on the current config. A probe takes its
+own load the same way, at its own start.
 
 ## Lifecycle invariants
 

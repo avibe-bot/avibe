@@ -11,6 +11,7 @@ import asyncio
 import itertools
 from collections import OrderedDict
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from modules.agents.codex.agent import CodexAgent, _CodexRuntime
@@ -119,14 +120,17 @@ def acquire_returning(agent: Any, *transports: Any, session: str | None = "sessi
     """A mock ``_acquire_generation`` that serves each transport in turn.
 
     Each call adopts the next transport as the directory's current generation
-    with ``session`` already loaded there, so the turn needs no move.
+    with ``session`` already loaded there, so the turn needs no move. The
+    launch load a turn takes at admission only feeds acquisition, so it is
+    stubbed too, keeping its Model Hub snapshot.
     """
     from unittest.mock import AsyncMock
 
+    agent._launch_inputs = lambda cwd, *, hub_config=None: SimpleNamespace(hub_config=hub_config)
     queue = list(transports)
     served = itertools.count(1)
 
-    async def acquire(cwd: str, launch: Any = None, *, config: Any = None) -> Any:
+    async def acquire(cwd: str, launch: Any = None, *, inputs: Any = None) -> Any:
         generation = install_codex_transport(
             agent,
             cwd,
