@@ -526,7 +526,7 @@ async def test_a_steer_enters_after_the_tool_batch_even_when_its_row_arrives_lat
     assert late.outcome is SteerOutcome.NOT_ACTIVE
 
 
-async def test_reconcile_reports_a_steer_only_as_the_run_received_it(engine, session, tmp_path, published) -> None:
+async def test_reconcile_reports_a_steer_attempt_only_from_evidence(engine, session, tmp_path, published) -> None:
     from core.services.agent_steering import SteerReconcileRequest
     from modules.im.base import FileAttachment
 
@@ -563,15 +563,41 @@ async def test_reconcile_reports_a_steer_only_as_the_run_received_it(engine, ses
     await preparing.wait()
     reconcile = SteerReconcileRequest(SESSION, turn_id, native, attempt_id)
     try:
-        # The run has not received the steer: it is neither accepted nor gone.
+        # No evidence the run has the steer: neither accepted nor a negative.
         assert (await harness.agent.reconcile_steer_attempt(reconcile, None)).outcome is SteerOutcome.UNKNOWN
         fail.set()
         assert (await steering).outcome is SteerOutcome.REFUSED
-        assert (await harness.agent.reconcile_steer_attempt(reconcile, None)).outcome is SteerOutcome.REFUSED
+        # The live attempt owns its refusal; a reconcile never issues a second negative receipt.
+        assert (await harness.agent.reconcile_steer_attempt(reconcile, None)).outcome is SteerOutcome.UNKNOWN
     finally:
         fail.set()
         release.set()
         await running
+    # Its run is gone, but this process opened the attempt: still the live path's to settle.
+    assert (await harness.agent.reconcile_steer_attempt(reconcile, None)).outcome is SteerOutcome.UNKNOWN
+
+
+async def test_reconcile_settles_an_attempt_a_previous_process_opened(engine, session, tmp_path, published) -> None:
+    from core.services.agent_steering import SteerReconcileRequest
+    from storage.models import message_deliveries as delivery_rows
+
+    harness = _Harness(engine, tmp_path, "avibe", [])
+    request = harness.request("long task")
+    turn_id = _turn(request.context)
+    harness.controller._native_start(request.context)
+    native = f"avibe:{turn_id}"
+    _delivery_id, attempt_id = harness.open_steer("and this", turn_id, native)
+    with engine.begin() as conn:
+        # The steer was in flight when the previous process died; no live call can answer it now.
+        conn.execute(
+            update(delivery_rows)
+            .where(delivery_rows.c.current_attempt_id == attempt_id)
+            .values(current_attempt_opened_at="2026-01-01T00:00:00.000000Z")
+        )
+
+    receipt = await harness.agent.reconcile_steer_attempt(SteerReconcileRequest(SESSION, turn_id, native, attempt_id), None)
+
+    assert receipt.outcome is SteerOutcome.NOT_ACTIVE
 
 
 async def test_a_run_ended_by_design_still_answers_the_steer_its_turn_accepted(
@@ -779,6 +805,63 @@ async def test_a_fork_settles_a_call_it_inherited_open_with_the_sources_result(
     # The child settles with what the source recorded, not with an uncertain effect.
     assert rows[2].message.content == (text("release 1.2.0 published"),)
     assert child.provider.requests[0].messages == project(rows[:4]).messages
+
+
+async def test_a_nested_fork_takes_the_result_of_its_own_call_instance(engine, session, tmp_path, published) -> None:
+    # Grandparent SESSION -> parent ses_parent -> child ses_child; providers reuse the call id.
+    reused = ToolCallBlock(id="call_1", name="bash", arguments={})
+    grandparent = _Harness(
+        engine, tmp_path, "avibe",
+        [[Done(assistant("hello"))], [Done(assistant("", calls=(reused,)))], [Done(assistant("checked"))]],
+        tools=[FakeTool("bash", result=ToolResult((text("the grandparent's own check"),)))],
+    )
+    await grandparent.agent.handle_message(grandparent.request("hi"))
+    [anchor] = grandparent.rows("result")
+    with engine.begin() as conn:
+        _insert_session(conn, "ses_parent", _SCOPES["avibe"], {
+            "created_via": "session_fork",
+            "fork_source_session_id": SESSION,
+            "fork_source_message_id": anchor["id"],
+            "fork_source_context_seq": resolve_fork_anchor_seq(conn, SESSION, anchor["id"]),
+        })
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def release_build(arguments, ctx):
+        started.set()
+        await release.wait()
+        return ToolResult((text("release 1.2.0 published"),))
+
+    parent = _Harness(
+        engine, tmp_path, "avibe",
+        [[Done(assistant("Releasing.", calls=(reused,)))], [Done(assistant("Released."))]],
+        tools=[FakeTool("bash", execute=release_build)], session_id="ses_parent",
+    )
+    running = asyncio.create_task(parent.agent.handle_message(parent.request("ship it")))
+    await started.wait()
+    # The grandparent continues on its own and settles its own call_1 first.
+    await grandparent.agent.handle_message(grandparent.request("check something"))
+    release.set()
+    await running
+    narration = next(entry for entry in await parent.context_rows() if entry.session_id == "ses_parent"
+                     and entry.kind == "response")
+    with engine.begin() as conn:
+        _insert_session(conn, "ses_child", _SCOPES["avibe"], {
+            "created_via": "session_fork",
+            "fork_source_session_id": "ses_parent",
+            "fork_source_message_id": narration.row_id,
+            "fork_source_context_seq": resolve_fork_anchor_seq(conn, "ses_parent", narration.row_id),
+        })
+    suite = ToolSuite(
+        jobs=FakeJobHost(), create_tools=lambda jobs_, sink: [FakeTool("bash")],
+        render_recovered=_unused_renderer, find_job=lambda *_args, **_kwargs: None,
+    )
+    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))]], suite=suite, session_id="ses_child")
+
+    await child.agent.handle_message(child.request("what happened?"))
+
+    [settled] = [entry for entry in await child.context_rows()
+                 if entry.session_id == "ses_child" and entry.kind == "tool_result"]
+    assert settled.message.content == (text("release 1.2.0 published"),)
 
 
 async def test_a_google_hop_is_called_over_chat_at_the_gateway_prefix(engine, session, tmp_path, published) -> None:

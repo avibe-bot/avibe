@@ -94,6 +94,9 @@ BACKEND = "avibe"
 # Final responses whose empty text is explained by the stop itself (loop-control.md section 2).
 _EXPLAINED_STOPS = ("refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
+# When this process loaded the backend, before any of its runs: a steer attempt
+# opened earlier belongs to a previous process, so no live call can settle it.
+_PROCESS_STARTED_AT = datetime.now(timezone.utc)
 _JOB_PRUNE_INTERVAL_S = 3600.0
 
 
@@ -127,8 +130,8 @@ class _Run:
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
     # This run's committed responses by row id, for delivering them; released with the run.
     responses: dict[str, AssistantMessage] = field(default_factory=dict)
-    # Each steer attempt this run has seen: UNKNOWN while it is prepared, then its receipt.
-    steers: dict[str, SteerOutcome] = field(default_factory=dict)
+    # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
+    accepted_steers: set[str] = field(default_factory=set)
     stop_requested: bool = False
 
     @property
@@ -365,23 +368,19 @@ class AvibeAgent(BaseAgent):
         run = self._run_for(request.target_session_id, request.expected_logical_turn_id)
         if run is None or request.expected_native_turn_id != run.native_turn_id:
             return steer_result(SteerOutcome.NOT_ACTIVE, reason="not_active")
-        run.steers[request.attempt_id] = SteerOutcome.UNKNOWN
         try:
             message_id = await asyncio.to_thread(self._attempt_leader_id, request.attempt_id)
             if message_id is None:
-                run.steers[request.attempt_id] = SteerOutcome.REFUSED
                 return steer_result(SteerOutcome.REFUSED, reason="attempt_unknown")
             message = await self._render_input(
                 request.target_session_id, request.text, request.files, request.input_metadata
             )
         except Exception:
             logger.exception("Avibe Agent could not prepare a steer for Session %s", request.target_session_id)
-            run.steers[request.attempt_id] = SteerOutcome.REFUSED
             return steer_result(SteerOutcome.REFUSED, reason="preparation_failed")
         if await run.agent.steer(AgentInput(message_id, message)):
-            run.steers[request.attempt_id] = SteerOutcome.ACCEPTED
+            run.accepted_steers.add(request.attempt_id)
             return steer_result(SteerOutcome.ACCEPTED, turn_id=run.turn_id)
-        run.steers[request.attempt_id] = SteerOutcome.REFUSED
         return steer_result(SteerOutcome.REFUSED, reason="run_closed")
 
     def reconciliation_steer_target(self, request: SteerReconcileRequest) -> ActiveSteerTarget:
@@ -394,25 +393,28 @@ class AvibeAgent(BaseAgent):
         )
 
     async def reconcile_steer_attempt(self, request: SteerReconcileRequest, target: Any) -> SteerResult:
-        """A steer is in-process: its evidence is the consumed row, or the live run's own receipt.
+        """Evidence about a prior steer attempt, as the Codex and OpenCode reconcilers give it.
 
-        While the run lives, the answer is what that run recorded for the attempt:
-        ACCEPTED only once ``Agent.steer`` accepted it, UNKNOWN while it is still
-        being prepared (or not yet seen), REFUSED once the run refused it.
+        ACCEPTED when its row was consumed or the live run accepted it; otherwise
+        UNKNOWN, because the live attempt in this process owns its definitive
+        negative receipt. Only an attempt a previous process opened is NOT_ACTIVE:
+        no call can still settle it.
         """
-        message_id = await asyncio.to_thread(self._attempt_leader_id, request.attempt_id)
+        leader = await asyncio.to_thread(self._attempt_leader, request.attempt_id)
+        message_id, opened_at = leader if leader is not None else (None, None)
         if message_id is not None and await asyncio.to_thread(self._consumed, message_id):
             return steer_result(SteerOutcome.ACCEPTED, turn_id=request.expected_logical_turn_id)
         run = self._run_for(request.target_session_id, request.expected_logical_turn_id)
-        if run is None or run.native_turn_id != request.expected_native_turn_id:
-            return steer_result(SteerOutcome.NOT_ACTIVE, reason="not_active")
-        outcome = run.steers.get(request.attempt_id, SteerOutcome.UNKNOWN)
-        if outcome is SteerOutcome.ACCEPTED:
+        if (
+            run is not None
+            and run.native_turn_id == request.expected_native_turn_id
+            and request.attempt_id in run.accepted_steers
+        ):
             # The accepted steer is still queued in the live run that owns it.
             return steer_result(SteerOutcome.ACCEPTED, turn_id=run.turn_id)
-        if outcome is SteerOutcome.REFUSED:
-            return steer_result(SteerOutcome.REFUSED, reason="run_closed")
-        return steer_result(SteerOutcome.UNKNOWN, reason="in_progress")
+        if opened_at is not None and opened_at < _PROCESS_STARTED_AT:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="previous_process")
+        return steer_result(SteerOutcome.UNKNOWN, reason="no_attempt_evidence")
 
     # --- one run ---------------------------------------------------------------
 
@@ -576,19 +578,20 @@ class AvibeAgent(BaseAgent):
         suite = self._tools()
 
         def evidence() -> tuple[list[ContextEntry], dict[tuple[str, str], str]]:
-            # A call's job started after the response carrying the call committed; a job an
-            # earlier call with a reused id started is older (one rule with J5). A call this
-            # Session inherited open from a fork source that settled it takes that result.
+            # A call is its instance, the owning response plus its id (providers reuse ids).
+            # A call this Session inherited open takes the result its owner committed, matched
+            # in context order. Only a job file falls back to the clock: its job started after
+            # the owning response committed (one rule with J5).
             committed = self._committed_at([owner.row_id for owner, _ in open_calls])
             inherited, found = [], {}
             with self._engine.connect() as conn:
                 for owner, call in open_calls:
-                    since = committed.get(owner.row_id)
-                    if owner.session_id != session_id and since is not None:
-                        result = source_tool_result(conn, session_id, call.id, committed_since=_microsecond_text(since))
+                    if owner.session_id != session_id:
+                        result = source_tool_result(conn, owner.session_id, owner.context_seq, call.id)
                         if result is not None:
                             inherited.append(result)
                             continue
+                    since = committed.get(owner.row_id)
                     job_id = suite.find_job(owner.session_id, call.id, created_since=since)
                     if job_id is not None:
                         found[(owner.session_id, call.id)] = job_id
@@ -899,11 +902,18 @@ class AvibeAgent(BaseAgent):
 
     def _attempt_leader_id(self, attempt_id: str) -> Optional[str]:
         """The ``messages.id`` a steer attempt materializes as: its first Delivery."""
+        leader = self._attempt_leader(attempt_id)
+        return leader[0] if leader is not None else None
+
+    def _attempt_leader(self, attempt_id: str) -> Optional[tuple[str, Optional[datetime]]]:
+        """The attempt's first Delivery id, and when the attempt was opened."""
         if not attempt_id:
             return None
         with self._engine.connect() as conn:
             rows = delivery_store.attempt_deliveries(conn, attempt_id)
-        return str(rows[0]["id"]) if rows else None
+        if not rows:
+            return None
+        return str(rows[0]["id"]), _instant(rows[0].get("current_attempt_opened_at"))
 
     def _consumed(self, message_id: str) -> bool:
         with self._engine.connect() as conn:

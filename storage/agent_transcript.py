@@ -416,19 +416,19 @@ def resolve_fork_anchor_seq(conn: Connection, source_session_id: str, anchor_mes
 
 
 def source_tool_result(
-    conn: Connection, session_id: str, tool_call_id: str, *, committed_since: str
+    conn: Connection, owner_session_id: str, response_seq: int, tool_call_id: str
 ) -> Optional[ContextEntry]:
-    """The result a fork source committed for a call ``session_id`` inherited open.
+    """The result its owner committed for a call instance a fork inherited open.
 
     A fork anchored between a response and its tool results inherits those calls
-    open. A source's own result, the earliest one committed for the call at or after
-    ``committed_since`` (the response's commit time, so a reused call id cannot
-    match an earlier call), records what happened; the child settles with it
-    instead of re-deriving it from job state that J5 may since have pruned.
+    open. A call's identity is its instance: the response that carries it
+    (``owner_session_id`` at ``response_seq``) plus its id, because providers may
+    reuse ids. Its result is the first ``tool_result`` for that id after the
+    response in the owner's own rows, in context order: every call is settled
+    before the next model call, so a later reuse of the id comes after it. The
+    child settles with that result instead of re-deriving it from job state that
+    J5 may since have pruned.
     """
-    sources = [member for member, _bound in _ancestry(conn, session_id)[1:]]
-    if not sources:
-        return None
     row = (
         conn.execute(
             select(
@@ -440,14 +440,13 @@ def source_tool_result(
                 agent_events.c.visibility,
             )
             .where(
-                agent_events.c.session_id.in_(sources),
+                agent_events.c.session_id == owner_session_id,
                 agent_events.c.event_type == _EVENT_TYPE_BY_KIND["tool_result"],
                 agent_events.c.visibility == CONTEXT_VISIBILITY,
-                agent_events.c.context_seq.is_not(None),
-                agent_events.c.created_at >= committed_since,
+                agent_events.c.context_seq > response_seq,
                 func.json_extract(agent_events.c.content_json, "$.message.tool_call_id") == tool_call_id,
             )
-            .order_by(agent_events.c.created_at, agent_events.c.id)
+            .order_by(agent_events.c.context_seq)
             .limit(1)
         )
         .mappings()
