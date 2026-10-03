@@ -606,6 +606,7 @@ and the corrected cells came from an independent agent that checked every
 | --- | --- |
 | R1 | Every `opencode serve` process Avibe started has a record on disk before it can serve, until it is confirmed gone. |
 | R2 | A record is removed only once its process is confirmed gone: stopped by Avibe, dead, or proven not ours. A record that cannot be read is kept. |
+| R6 | A record of another desktop Runtime sharing this state directory is never adopted, stopped, forgotten, or overlay-cleaned here. `_record_is_ours()`, applied in `_recorded_processes()`, is the one gate every reader goes through. |
 | R3 | A record never protects less than its process runs. A run marker or lease is written before its work starts. A release may lag, but a sweep rewrites it. |
 | R4 | A generation's overlay copy lives and goes with its record. |
 | R5 | No write recreates the record of a process that has stopped. |
@@ -655,7 +656,7 @@ and the corrected cells came from an independent agent that checked every
 | Controller restart | explicit: shutdown stops every generation this controller owns; next start adopts and restores polls on a new current. After a crash with OpenCode disabled, startup runs `stop_recorded_servers_sync()` | R2, B1 hold. **Gap S-1:** after a crash, a restart with OpenCode disabled never stopped its leftovers, which ran until the next stop or enable (O2). |
 | Crash between steps | spawn→record (K1); record→ready (adopted or stopped); lease grant→hand-out (the successor honors it until TTL); marker→durable poll (marker reconciled away); kill→record removal (unproven, removed later); legacy write→legacy removal (G3) | R1–R3 hold except K1 and G3. |
 | Process death | `acquire` replaces a dead current (`forget` → `stop_generation` cleans up); a dead retiring generation is cleaned on its last release | R2, B1 hold. |
-| CLI stop | `forget_dead_records()`, then each proven record: desktop-claim check, `stop_recorded_server_sync` | R2, R4 hold; a survivor keeps its record; exit stays non-fatal (#2242). |
+| CLI stop | `stop_recorded_servers_sync(provenance)`: `forget_dead_records()`, then each proven record, through the one ownership gate, `stop_recorded_server_sync` | R2, R4 hold; a survivor keeps its record; exit stays non-fatal (#2242). |
 | Shutdown | `stop_owned_generations_sync()`: stop each generation a runtime of this controller owns; another desktop Runtime's records are left alone | R2, R4 hold. **Known K5:** the loop keeps running briefly after this call, and a lease expiry or sweep there can rewrite a record of a process just killed (R5). The next adoption or `vibe stop` removes it as dead. |
 
 ### Fixes
@@ -672,6 +673,40 @@ and the corrected cells came from an independent agent that checked every
 | G8 | the restore loop releases the binding if anything raises before the poll task takes it; the task rebinds when a forced stop took the generation it was handed | `test_restore_releases_a_poll_binding_its_task_never_took`, `test_a_restored_poll_whose_generation_was_force_stopped_rebinds_before_registering` |
 | G9 | an adopted lease is re-held for at most `MAX_LEASE_SECONDS` | `test_adoption_never_holds_a_recorded_lease_longer_than_any_lease_is_granted` |
 | S-1 | controller startup with OpenCode not registered runs `stop_recorded_servers_sync(desktop_caller_provenance())` | `test_a_controller_starting_with_opencode_disabled_stops_a_crashed_controllers_servers` (RUNTIME-GEN-025) |
+
+### Desktop Runtime ownership
+
+Several desktop Runtimes can share one Avibe state directory, so every record
+names the Runtime whose controller wrote it (`desktop_runtime_id`, written at
+spawn: the one Runtime this process acts for, or null). `_record_is_ours()` is
+the one ownership predicate:
+
+- A caller with no desktop provenance acts on any record, as `vibe stop`
+  always has.
+- A record that names a Runtime is ours only when this caller acts for exactly
+  that Runtime. Null counts as a Runtime too, so it is foreign to a desktop
+  caller.
+- A record from a release or build before the field existed, including the
+  legacy single-server record, is judged by its live process. This is the same
+  check as `refuse_foreign_desktop_process`: a process carrying another or no
+  Runtime id, or one whose environment cannot be read, is foreign; a process
+  that is gone belongs to nobody, so its record can be forgotten. Adopting such
+  a record keeps it without the field, so the check stays the same on every
+  later read.
+
+Every reader goes through `_recorded_processes()`, which applies the gate.
+
+| Path | Disposition |
+| --- | --- |
+| Adoption, including legacy conversion and dedupe, unproven-record removal, and the unhealthy-server stop | gated |
+| Adoption's sweep of overlays without a record | removed: another Runtime writes its overlay before it spawns and records the process |
+| `ensure_adopted` lease re-hold, marker reconciliation, `reap()` flush, and `_stop` | act only on generations this runtime attached, so they are ours |
+| `stop_owned_generations_sync()` (controller shutdown) | gated, and limited to generations owned here |
+| `stop_recorded_servers_sync(runtime_ids)` (`vibe stop` and a disabled startup) | gated for the caller's ids; the inline refusal moved into the gate |
+| `forget_dead_records(runtime_ids)` and `recorded_servers(runtime_ids)` | gated |
+| Status: `vibe/api.py` `_opencode_process_status` → `recorded_servers()` | gated by the UI process's provenance, so another Runtime's servers do not count |
+| Lease release | reaches only the holder or the registered agent, so it is ours |
+| `start_generation` | writes `desktop_runtime_id` |
 
 ### Known by design
 

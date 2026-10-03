@@ -32,7 +32,7 @@ from core.handlers.model_hub.identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROT
 from core.process_isolation import isolated_subprocess_kwargs
 from modules.agents.opencode.caller_context import ensure_plugin_installed, server_environment
 from vibe import runtime
-from vibe.desktop_runtime import DESKTOP_OPENCODE_ROLE, DESKTOP_ROLE_ENV
+from vibe.desktop_runtime import DESKTOP_OPENCODE_ROLE, DESKTOP_ROLE_ENV, desktop_caller_provenance
 from vibe.opencode_config import (
     OPENCODE_REASONING_VARIANTS,
     OpenCodeRuntimeConfigInvalidError,
@@ -64,6 +64,8 @@ GENERATION_RECORD_SCHEMA = 1
 # The spec of a server adopted from the single-server record of a release
 # before generations. No new turn's spec ever equals it.
 LEGACY_SPEC_DIGEST = "legacy"
+# A record written before the desktop Runtime id was recorded.
+_UNRECORDED_RUNTIME_ID = object()
 # Generations a runtime of this process is starting or has attached, with the
 # process each one runs. Adoption leaves them to that runtime, for example the
 # one of an OpenCode backend disabled and enabled again while its turn still
@@ -1535,6 +1537,7 @@ class OpenCodeGeneration(OpenCodeServerClient):
         active_run_sessions: Iterable[str] = (),
         leases: Optional[Mapping[str, float]] = None,
         started_at: float | None = None,
+        desktop_runtime_id: Any = None,
         process: Optional[Process] = None,
         request_timeout_seconds: int = 60,
     ) -> None:
@@ -1557,6 +1560,9 @@ class OpenCodeGeneration(OpenCodeServerClient):
         # Expiry of each lease held by a caller in another process.
         self.leases: dict[str, float] = dict(leases or {})
         self.started_at = time.time() if started_at is None else started_at
+        # The desktop Runtime this process serves, or None for none; a record
+        # written before Runtime ids were recorded keeps omitting it.
+        self.desktop_runtime_id = desktop_runtime_id
         # Set when a change took effect but its record write failed.
         self.record_stale = False
         # Set once the process stopped and its record was removed.
@@ -1596,6 +1602,11 @@ class OpenCodeGeneration(OpenCodeServerClient):
             "model_hub_overlay_provider_ids": list(self.model_hub_provider_ids),
             "active_run_sessions": sorted(self.active_run_sessions),
             "leases": dict(self.leases),
+            **(
+                {}
+                if self.desktop_runtime_id is _UNRECORDED_RUNTIME_ID
+                else {"desktop_runtime_id": self.desktop_runtime_id}
+            ),
         }
 
     def write_record(self) -> None:
@@ -1809,6 +1820,7 @@ async def start_generation(
                 caller_context_path=caller_context_path,
                 model_hub_overlay_hash=spec.overlay_hash,
                 model_hub_provider_ids=spec.overlay_provider_ids,
+                desktop_runtime_id=_this_desktop_runtime_id(),
                 process=process,
                 request_timeout_seconds=request_timeout_seconds,
             )
@@ -1969,13 +1981,52 @@ def _generation_from_record(
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         },
         started_at=info.get("started_at") if isinstance(info.get("started_at"), (int, float)) else None,
+        desktop_runtime_id=info.get("desktop_runtime_id") if "desktop_runtime_id" in info else _UNRECORDED_RUNTIME_ID,
         request_timeout_seconds=request_timeout_seconds,
     )
 
 
-def _recorded_processes() -> list[tuple[Path, Dict[str, Any]]]:
-    """Every generation record, then the legacy single-server record."""
+def _this_desktop_runtime_id() -> Optional[str]:
+    """The one desktop Runtime this process acts for, or None."""
 
+    runtime_ids = desktop_caller_provenance()
+    return next(iter(runtime_ids)) if len(runtime_ids) == 1 else None
+
+
+def _record_is_ours(info: Mapping[str, Any], runtime_ids: frozenset[str]) -> bool:
+    """Whether a caller acting for ``runtime_ids`` may act on a record at all.
+
+    It is the one ownership gate for every path that reads or acts on records.
+    A caller with no desktop provenance acts on any record, as ``vibe stop``
+    always has. A record names the desktop Runtime whose controller wrote it;
+    a record from before Runtime ids were recorded is judged by its live
+    process, exactly as ``refuse_foreign_desktop_process`` judges one, and a
+    record whose process is gone belongs to nobody.
+    """
+
+    if not runtime_ids:
+        return True
+    if "desktop_runtime_id" in info:
+        return runtime_ids == {info["desktop_runtime_id"]}
+    pid = info.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return True
+    try:
+        runtime.refuse_foreign_desktop_process(pid, "opencode", runtime_ids)
+    except runtime.DesktopRuntimeClaimRefused:
+        return False
+    return True
+
+
+def _recorded_processes(runtime_ids: Optional[frozenset[str]] = None) -> list[tuple[Path, Dict[str, Any]]]:
+    """This caller's generation records, then the legacy single-server record.
+
+    Records of another desktop Runtime sharing this state directory are left
+    out, so nothing here adopts, stops, forgets, or cleans them.
+    ``runtime_ids`` defaults to this process's desktop provenance.
+    """
+
+    ids = desktop_caller_provenance() if runtime_ids is None else runtime_ids
     found: list[tuple[Path, Dict[str, Any]]] = []
     records_dir = generation_records_dir()
     if records_dir.is_dir():
@@ -1988,7 +2039,10 @@ def _recorded_processes() -> list[tuple[Path, Dict[str, Any]]]:
     legacy = _read_json_object(legacy_pid_file())
     if legacy is not None:
         found.append((legacy_pid_file(), legacy))
-    return found
+    ours = [(path, info) for path, info in found if _record_is_ours(info, ids)]
+    if len(ours) < len(found):
+        logger.debug("Leaving %s OpenCode record(s) of another desktop Runtime alone", len(found) - len(ours))
+    return ours
 
 
 async def _serves_after_restart(generation: OpenCodeGeneration) -> bool:
@@ -2054,14 +2108,8 @@ async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> li
         logger.info("Adopted OpenCode generation %s pid=%s", generation.generation_id, generation.pid)
         adopted.append(generation)
         adopted_processes.add((generation.pid, generation.process_created_at))
-    records_dir = generation_records_dir()
-    if records_dir.is_dir():
-        live = {generation.generation_id for generation in adopted}
-        for path in records_dir.glob("*.overlay.json"):
-            if path.name.removesuffix(".overlay.json") not in live and not (
-                records_dir / path.name.replace(".overlay.json", ".json")
-            ).exists():
-                _remove_quietly(path)
+    # No sweep of overlays without a record: another desktop Runtime writes
+    # its overlay before it spawns and records the process.
     return adopted
 
 
@@ -2096,20 +2144,20 @@ def forget_record(path: Path) -> None:
         _remove_quietly(path.with_name(path.name.removesuffix(".json") + ".overlay.json"))
 
 
-def forget_dead_records() -> None:
-    """Forget every record no live process of ours backs, with its overlay."""
+def forget_dead_records(runtime_ids: Optional[frozenset[str]] = None) -> None:
+    """Forget every record of this caller no live process backs, with its overlay."""
 
-    for path, info in _recorded_processes():
+    for path, info in _recorded_processes(runtime_ids):
         if not _record_proves_process(info, require_port=False):
             forget_record(path)
 
 
-def recorded_servers() -> list[tuple[int, Path, Dict[str, Any]]]:
-    """The live, proven OpenCode servers Avibe recorded, for status and ``vibe stop``."""
+def recorded_servers(runtime_ids: Optional[frozenset[str]] = None) -> list[tuple[int, Path, Dict[str, Any]]]:
+    """This caller's live, proven OpenCode servers, for status and ``vibe stop``."""
 
     return [
         (int(info["pid"]), path, info)
-        for path, info in _recorded_processes()
+        for path, info in _recorded_processes(runtime_ids)
         if _record_proves_process(info, require_port=False)
     ]
 
@@ -2130,25 +2178,22 @@ def stop_recorded_server_sync(path: Path, info: Mapping[str, Any]) -> StopOutcom
 
 
 def stop_recorded_servers_sync(runtime_ids: frozenset[str] = frozenset()) -> list[StopOutcome]:
-    """Stop every recorded server no runtime of this process owns.
+    """Stop every recorded server of ``runtime_ids`` no runtime of this process owns.
 
     ``vibe stop`` runs it, as does a controller that starts with OpenCode
-    disabled: no agent there would adopt what a crashed controller left.
+    disabled: no agent there would adopt what a crashed controller left. A
+    record whose process already ended is forgotten with its overlay. A record
+    of another desktop Runtime is left alone. OpenCode starts each tool
+    command in its own session, so each stop takes the whole process tree.
 
-    A record whose process already ended is forgotten with its overlay. A server of another desktop Runtime than ``runtime_ids`` is left
-    running. OpenCode starts each tool command in its own session, so each
-    stop takes the whole process tree.
+    The result holds one outcome per stop it ran; ``StopOutcome.FAILED`` means
+    a process survived, its record stays, and the caller should retry.
     """
 
-    forget_dead_records()
+    forget_dead_records(runtime_ids)
     outcomes: list[StopOutcome] = []
-    for pid, path, info in recorded_servers():
+    for _pid, path, info in recorded_servers(runtime_ids):
         if _owned_here(info):
-            continue
-        try:
-            runtime.refuse_foreign_desktop_process(pid, "opencode", runtime_ids)
-        except runtime.DesktopRuntimeClaimRefused as refusal:
-            logger.warning("Leaving the OpenCode server pid=%s running: %s", pid, refusal)
             continue
         outcomes.append(stop_recorded_server_sync(path, info))
     return outcomes

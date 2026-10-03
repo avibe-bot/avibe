@@ -213,7 +213,7 @@ scenarios:
     backend: opencode
     test: tests/test_opencode_generations.py::test_runtime_gen_024_a_mode_switch_during_a_hub_run_moves_new_turns_to_direct
   - id: RUNTIME-GEN-025
-    name: A controller that starts with OpenCode disabled stops the OpenCode servers a crashed controller recorded and leaves them for adoption when OpenCode is enabled; shutdown stops only what this controller owns
+    name: A controller that starts with OpenCode disabled stops the OpenCode servers a crashed controller recorded and leaves them for adoption when OpenCode is enabled; shutdown stops only what this controller owns, and nothing adopts, stops, forgets, or cleans another desktop Runtime's records
     status: covered
     kind: recovery
     layer: unit
@@ -221,3 +221,4 @@ scenarios:
     test: tests/test_opencode_generations.py::test_a_controller_starting_with_opencode_disabled_stops_a_crashed_controllers_servers
     related_tests:
       - tests/test_opencode_generations.py::test_shutdown_stops_only_the_generations_this_controller_owns
+      - tests/test_opencode_generations.py::test_adoption_leaves_every_record_of_another_desktop_runtime_alone

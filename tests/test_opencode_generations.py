@@ -1534,3 +1534,47 @@ def test_shutdown_stops_only_the_generations_this_controller_owns(isolated_launc
 
     assert stopped == [fake_pid(56)]
     assert not own.exists() and foreign.exists()
+
+
+def test_adoption_leaves_every_record_of_another_desktop_runtime_alone(isolated_launch, monkeypatch):
+    """Two desktop Runtimes share this state directory. After a restart, this
+    controller adopts the server it started, known by the Runtime id its record
+    carries, and never adopts, stops, forgets, or cleans another Runtime's
+    records: a live one recorded with that Runtime's id, a live one recorded
+    before ids were recorded, whose process says it is that Runtime's, and a
+    dead one."""
+
+    records = isolated_launch.records
+    own_pid, foreign_pid, released_pid, dead_pid = fake_pid(62), fake_pid(63), fake_pid(64), fake_pid(65)
+    monkeypatch.setattr(opencode_server, "desktop_caller_provenance", lambda: frozenset({"rt-a"}))
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: records / "absent.json")
+    isolated_launch.processes.append(_Process(own_pid))
+    started = asyncio.run(opencode_server.start_generation(OpenCodeLaunchSpec(digest="v1", binary="/bin/opencode")))
+    foreign = _record(records, "ocg_foreign", foreign_pid, 50063, desktop_runtime_id="rt-b")
+    released = _record(records, "ocg_released", released_pid, 50064)
+    dead = _record(records, "ocg_dead", dead_pid, 50065, desktop_runtime_id="rt-b")
+    overlay = records / "ocg_foreign.overlay.json"
+    overlay.write_text("{}", encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in records.iterdir()}
+    ports = {own_pid: started.port, foreign_pid: 50063, released_pid: 50064}
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid in ports)
+    monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: f"/bin/opencode serve --port={ports[pid]}")
+    # A process environment carries its Runtime id; the released record's
+    # process belongs to the other Runtime, and so would this controller's own
+    # process to a check that read only environments.
+    monkeypatch.setattr(
+        opencode_server.runtime,
+        "_desktop_runtime_mismatch",
+        lambda pid, runtime_ids: "runtime_id_mismatch" if pid in (released_pid, own_pid) else None,
+    )
+    stopped: list[int] = []
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: stopped.append(pid) or True)
+    # The restarted controller owns nothing yet.
+    opencode_server._OWNED_HERE.clear()
+
+    adopted = asyncio.run(opencode_server.adopt_recorded_generations())
+
+    assert [generation.generation_id for generation in adopted] == [started.generation_id]
+    assert stopped == []
+    for path in (foreign, released, dead, overlay):
+        assert path.read_bytes() == before[path.name]
