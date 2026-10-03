@@ -206,6 +206,16 @@ class RuntimeGenerationSet(Generic[_S, _R]):
             pass
         await self.settled()
 
+    async def reopen(self) -> None:
+        """Admit new work again after a graceful stop-all, for example on re-enable.
+
+        Generations retired by the stop-all stay closed and keep draining; the
+        next turn starts a fresh generation.
+        """
+        if self._force_all:
+            raise RuntimeError("a unit stopped by force cannot reopen")
+        self._stopping = False
+
     async def settled(self) -> None:
         """Wait until the reconciler has no stop left to run."""
         while self._reconciler is not None and not self._reconciler.done():

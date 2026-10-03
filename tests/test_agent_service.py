@@ -2441,12 +2441,39 @@ def test_runtime_gen_006_clearing_a_session_reaches_a_disabled_backends_retired_
 
     async def run() -> None:
         service = AgentService(controller=SimpleNamespace())
-        retired, fresh = _Agent(), _Agent()
+        retired = _Agent()
         service.register(retired)
         await service.retire_backend("codex")
-        service.register(fresh)
 
-        assert await service.clear_sessions("slack::C1") == {"codex": 2}
-        assert retired.cleared == ["slack::C1"] and fresh.cleared == ["slack::C1"]
+        assert await service.clear_sessions("slack::C1") == {"codex": 1}
+        assert retired.cleared == ["slack::C1"]
+
+    asyncio.run(run())
+
+
+def test_a_cancelled_disable_still_closes_every_runtime_unit() -> None:
+    """Retiring finishes even when its requester is cancelled midway.
+
+    A half-retired agent would keep an idle current process that nothing reaps.
+    """
+
+    async def run() -> None:
+        gate = asyncio.Event()
+        closed: list[str] = []
+
+        async def retire_runtime() -> None:
+            await gate.wait()
+            closed.append("every unit")
+
+        service = AgentService(controller=SimpleNamespace())
+        service.register(SimpleNamespace(name="codex", retire_runtime=retire_runtime))
+        disabling = asyncio.create_task(service.retire_backend("codex"))
+        await asyncio.sleep(0)
+        disabling.cancel()
+        await asyncio.sleep(0)
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await disabling
+        assert closed == ["every unit"]
 
     asyncio.run(run())

@@ -52,9 +52,10 @@ class AgentService:
     ):
         self.controller = controller
         self.agents: Dict[str, BaseAgent] = {}
-        # Agents of disabled backends whose running work has not finished yet,
-        # with the backend each one was registered under.
-        self._retired_agents: list[tuple[str, BaseAgent]] = []
+        # The one agent per backend that owns its runtime: every registered
+        # agent, plus a disabled backend's agent while its work still runs.
+        # ``agents`` is only the routing view of the enabled ones.
+        self._runtime_owners: Dict[str, BaseAgent] = {}
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
         self.activities = activities or SessionActivityRegistry()
@@ -229,6 +230,11 @@ class AgentService:
         return completed
 
     def register(self, agent: BaseAgent):
+        owner = self._runtime_owners.get(agent.name)
+        if owner is not None and owner is not agent:
+            # One agent owns a backend's runtime; re-enabling reopens it.
+            raise RuntimeError(f"{agent.name} already has a runtime owner")
+        self._runtime_owners[agent.name] = agent
         self.agents[agent.name] = agent
         logger.info(f"Registered agent backend: {agent.name}")
 
@@ -242,38 +248,57 @@ class AgentService:
         agent = self.agents.pop(backend, None)
         if agent is None:
             return False
-        await self.retire_agent(backend, agent)
+        await self._retire_runtime(backend, agent)
         return True
 
     async def retire_agent(self, backend: str, agent: BaseAgent) -> None:
-        """Keep an unregistered agent until its running work finishes.
+        """Own a disabled backend's runtime with an agent that only drains.
 
-        Besides a disabled backend's agent, this serves an agent built only to
-        adopt and drain a previous controller's processes for a backend that is
-        disabled now; it never admits new work.
+        It adopts what a previous controller left running and never admits new
+        work. Re-enabling the backend reopens this same agent.
         """
-        self._retired_agents.append((backend, agent))
+        if backend in self._runtime_owners:
+            raise RuntimeError(f"{backend} already has a runtime owner")
+        self._runtime_owners[backend] = agent
+        await self._retire_runtime(backend, agent)
+
+    async def reopen_backend(self, backend: str, runtime_config: Any) -> bool:
+        """Re-enable a backend whose agent still owns its runtime.
+
+        The agent admits new work again with ``runtime_config``; what it
+        retired keeps draining. Returns False when no such agent exists.
+        """
+        agent = self._runtime_owners.get(backend)
+        if agent is None or backend in self.agents:
+            return False
+        await agent.reopen_runtime(runtime_config)
+        self.agents[backend] = agent
+        logger.info("Reopened agent backend %s", backend)
+        return True
+
+    async def _retire_runtime(self, backend: str, agent: BaseAgent) -> None:
         retire = getattr(agent, "retire_runtime", None)
         if callable(retire):
-            await retire()
+            # Admission closes on every runtime unit even if the requester is
+            # cancelled meanwhile; a half-retired unit would keep a process.
+            from core.backend_restart import finish_native_operation
+
+            await finish_native_operation(retire())
         logger.info("Retired agent backend %s; its running work finishes in place", backend)
 
     def runtime_agents(self, backend: str | None = None) -> list[BaseAgent]:
-        """Registered agents and retired ones whose work still runs."""
-        return [
-            agent
-            for name, agent in (*self.agents.items(), *self._retired_agents)
-            if backend is None or name == backend
-        ]
+        """The agent owning each backend's runtime, disabled ones included."""
+        owners = {**self._runtime_owners, **self.agents}
+        return [agent for name, agent in owners.items() if backend is None or name == backend]
 
     def forget_retired_agents(self) -> None:
-        """Drop retired agents that no longer run any process."""
-
-        def retired(agent: BaseAgent) -> bool:
+        """Drop disabled backends' agents that no longer run any process."""
+        for name, agent in list(self._runtime_owners.items()):
+            if name in self.agents:
+                continue
             probe = getattr(agent, "runtime_retired", None)
-            return not callable(probe) or bool(probe())
-
-        self._retired_agents = [(name, agent) for name, agent in self._retired_agents if not retired(agent)]
+            if not callable(probe) or probe():
+                del self._runtime_owners[name]
 
     def _on_activity_output_settled(self, activity: Any) -> None:
         backend = str(getattr(activity, "backend", "") or "")
@@ -592,7 +617,7 @@ class AgentService:
 
     async def clear_sessions(self, session_key: str) -> Dict[str, int]:
         cleared: Dict[str, int] = {}
-        for name in dict.fromkeys(name for name, _agent in (*self.agents.items(), *self._retired_agents)):
+        for name in list({**self._runtime_owners, **self.agents}):
             count = await self.clear_backend_sessions(name, session_key)
             if count:
                 cleared[name] = count

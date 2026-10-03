@@ -2258,10 +2258,19 @@ class AgentAuthService:
         self._sync_builtin_default_agents()
         return retired
 
-    def _register_missing_backend_agent(self, backend: str, runtime_config: Any) -> bool:
+    async def _register_missing_backend_agent(self, backend: str, runtime_config: Any) -> bool:
         agent_service = getattr(self.controller, "agent_service", None)
         if agent_service is None or backend in getattr(agent_service, "agents", {}):
             return False
+
+        # A disabled backend's agent may still own its runtime while its work
+        # drains; re-enabling reopens it rather than starting a second owner.
+        reopen = getattr(agent_service, "reopen_backend", None)
+        if callable(reopen) and await reopen(backend, runtime_config):
+            setattr(self.controller.config, backend, runtime_config)
+            self._sync_builtin_default_agents()
+            logger.info("Reopened %s backend after runtime config refresh", backend)
+            return True
 
         if backend == "codex":
             from modules.agents.codex import CodexAgent
@@ -2294,7 +2303,7 @@ class AgentAuthService:
         if runtime_config is None:
             await self._retire_disabled_backend_agent(backend)
             return
-        if self._register_missing_backend_agent(backend, runtime_config):
+        if await self._register_missing_backend_agent(backend, runtime_config):
             return
         agent_service = getattr(self.controller, "agent_service", None)
         agent = getattr(agent_service, "agents", {}).get(backend) if agent_service else None
@@ -2325,7 +2334,7 @@ class AgentAuthService:
                 if runtime_config is None:
                     await self._retire_disabled_backend_agent(backend)
                     return
-                if runtime_config is not None and self._register_missing_backend_agent(
+                if runtime_config is not None and await self._register_missing_backend_agent(
                     backend,
                     runtime_config,
                 ):

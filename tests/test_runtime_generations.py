@@ -473,6 +473,31 @@ def test_a_stopping_unit_still_binds_recovered_work_to_a_live_generation():
     asyncio.run(run())
 
 
+def test_a_unit_reopened_after_a_graceful_stop_all_admits_while_old_work_drains():
+    runtimes = _Runtimes()
+    generations = runtimes.generation_set()
+
+    async def run():
+        running = await generations.acquire(_Spec("a"))
+        await generations.stop_all(force=False)
+        await generations.reopen()
+
+        fresh = await generations.acquire(_Spec("a"))
+        # The retired generation never serves again, even for an equal spec.
+        assert fresh.generation is not running.generation
+        assert running.generation.runtime in runtimes.live
+
+        await running.release()
+        await generations.settled()
+        assert runtimes.live == [fresh.generation.runtime]
+
+        await generations.stop_all(force=True)
+        with pytest.raises(RuntimeError):
+            await generations.reopen()
+
+    asyncio.run(run())
+
+
 def test_a_failed_start_leaves_the_current_generation_serving():
     runtimes = _Runtimes()
     generations = runtimes.generation_set()

@@ -284,6 +284,7 @@ class _RetiringAgent:
         self.running = True
         self.stops: list = []
         self.retire_runtime = AsyncMock()
+        self.reopen_runtime = AsyncMock()
 
     def runtime_retired(self) -> bool:
         return self.retire_runtime.await_count > 0 and not self.running
@@ -343,28 +344,31 @@ def test_runtime_gen_006_disabling_a_backend_holds_no_message_and_interrupts_not
     asyncio.run(run())
 
 
-def test_runtime_gen_007_re_enabling_starts_a_new_agent_beside_the_retired_one(monkeypatch):
-    """RUNTIME-GEN-007: re-enabling never waits for the retired instance's work."""
+def test_runtime_gen_007_re_enabling_reopens_the_agent_that_still_drains(monkeypatch):
+    """RUNTIME-GEN-007: re-enabling never waits for, nor duplicates, the retired agent.
+
+    The disabled backend's agent still owns its runtime, so re-enabling reopens
+    that same agent: new turns are admitted at once while the work it retired
+    keeps running. No second agent ever owns the backend.
+    """
     import modules.agents.codex as codex_module
 
     async def run() -> None:
-        retired = _RetiringAgent("codex")
-        controller, auth, coordinator = _disabling_controller(retired)
+        agent = _RetiringAgent("codex")
+        controller, auth, coordinator = _disabling_controller(agent)
         await coordinator.request_restart("codex", config_save=True)
 
         runtime_config = SimpleNamespace(enabled=True)
         auth._load_backend_runtime_config = Mock(return_value=runtime_config)
-        monkeypatch.setattr(
-            codex_module, "CodexAgent", lambda _controller, config: SimpleNamespace(name="codex", config=config)
-        )
+        monkeypatch.setattr(codex_module, "CodexAgent", Mock(side_effect=AssertionError("second owner")))
 
         assert await asyncio.wait_for(coordinator.request_restart("codex", config_save=True), timeout=1) == "restarted"
 
-        fresh = controller.agent_service.agents["codex"]
-        assert fresh is not retired and fresh.config is runtime_config
-        assert controller.agent_service.runtime_agents("codex") == [fresh, retired]
-        retired.retire_runtime.assert_awaited_once_with()
-        assert retired.running
+        assert controller.agent_service.agents["codex"] is agent
+        assert controller.agent_service.runtime_agents("codex") == [agent]
+        agent.reopen_runtime.assert_awaited_once_with(runtime_config)
+        assert controller.config.codex is runtime_config
+        assert agent.running
         controller.session_turns.begin_backend_drain.assert_not_called()
 
     asyncio.run(run())

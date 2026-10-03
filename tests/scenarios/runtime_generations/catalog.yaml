@@ -69,12 +69,12 @@ scenarios:
       - tests/test_running_agents_service.py::test_runtime_gen_006_a_disabled_backends_running_work_stays_in_running_agents
       - tests/test_opencode_generations.py::test_a_turn_that_races_a_disable_reports_the_localized_retired_error
   - id: RUNTIME-GEN-007
-    name: Re-enabling a backend while its retired agent drains starts new work at once and leaves the retired work running
+    name: Re-enabling a backend while its disabled agent drains reopens that same agent; new work starts at once and the retired work keeps running
     status: covered
     kind: lifecycle
     layer: contract
     backend: shared
-    test: tests/test_backend_restart.py::test_runtime_gen_007_re_enabling_starts_a_new_agent_beside_the_retired_one
+    test: tests/test_backend_restart.py::test_runtime_gen_007_re_enabling_reopens_the_agent_that_still_drains
     related_tests:
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_retired_agent_never_revokes_the_hub_credential_of_its_successor
       - tests/test_opencode_generations.py::test_runtime_gen_007_a_reenabled_opencode_runtime_starts_beside_a_draining_retired_one

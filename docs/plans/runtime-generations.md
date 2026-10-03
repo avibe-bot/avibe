@@ -267,7 +267,7 @@ Defects that the refactor fixes as it touches these paths:
 | Native credential migration, migration recovery, Hub re-authentication | `migration_guard`, unchanged. |
 | Unattended CLI auto-update | `run_when_idle` for the install step only. |
 | Backend disabled | The agent retires: it admits nothing more, and each generation finishes its work, then stops. New messages get the disabled reply at once. |
-| Backend enabled | A new agent registers at once, beside any retired instance still finishing work. |
+| Backend enabled | The backend's agent registers at once; if it is still draining work from a disable, that same agent reopens. |
 
 The `AGENTS.md` rule that an `agents.*` save reconciles "through the backend
 rolling-refresh path" becomes: the save advances the snapshot, and live units
@@ -418,9 +418,18 @@ reply. After this step:
    Activity notifications and liveness probes still reach it.
 3. Every app-server generation retires. When the turn ends, its generation
    stops, the agent reports `runtime_retired()`, and the service forgets it.
-4. If the user turns Codex back on meanwhile, a new agent registers at once.
-   The retired instance keeps its own generations, and each instance enforces
-   its own cap.
+4. If the user turns Codex back on meanwhile, the same agent reopens at
+   once. New turns start fresh generations, and the generations it retired
+   keep draining.
+
+One agent owns a backend's runtime for the whole life of the controller. An
+earlier draft let a re-enabled backend register a second agent beside the
+retired one. Every lookup that serves running work then had to fan out
+across instances, and two instances could each restore the same durable poll
+or revoke each other's credentials. One owner per backend removes that class:
+`AgentService.agents` is only the routing view of the enabled backends, and
+`AgentService.runtime_agents(backend)` returns the backend's one owner,
+enabled or not.
 
 ### Coordinator
 
@@ -433,7 +442,11 @@ reply. After this step:
   - **Claude disabled:** Claude stays registered with `enabled=False`, as
     today. Its `renew_runtime` retires its clients: idle ones now, busy ones
     at the first sweep after they are idle.
-  - **Enabled but not registered:** the agent registers at once.
+  - **Enabled but not registered:** `AgentService.reopen_backend` reopens the
+    agent that still owns the runtime; only a backend with no owner gets a
+    new agent.
+  - Retirement runs to completion even if its requester is cancelled, so no
+    runtime unit is left half closed.
 - `run_when_idle` keeps admission closed for the install step only. Afterwards
   it renews instead of refreshing.
 - `migration_guard` is unchanged except for its reach. Its interruption and
@@ -464,6 +477,7 @@ delivered before the processes stop.
 | --- | --- |
 | `renew_runtime(config, *, config_save)` | Unchanged. |
 | `retire_runtime()` | The backend is disabled. Admit nothing more, and stop each generation once its work drains. It never interrupts, and calling it twice changes nothing. |
+| `reopen_runtime(config)` | The backend is enabled again. Admit new work with `config`; generations retired while disabled stay closed and keep draining. |
 | `runtime_retired() -> bool` | No process of this agent remains. |
 | `reap_runtime_generations()` | Called by the 60 s sweep on registered and retired agents alike. |
 | `shutdown_runtime()` | Service shutdown and probe teardown only. |
