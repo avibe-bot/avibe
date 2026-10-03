@@ -184,7 +184,12 @@ class RuntimeServiceLockTests(unittest.TestCase):
                         return_value=f"{sys.executable} {runtime.get_service_main_path()}",
                     ):
                         with patch("vibe.runtime.service_pid_recorded", return_value=False):
-                            with patch("vibe.runtime.process_create_time", return_value=stale_time):
+                            # The clock was stepped back after this boot's anchor was
+                            # recorded: the process's identity time lies in the future,
+                            # while it started long ago on today's clock.
+                            with patch("vibe.runtime.process_create_time", return_value=runtime.time.time() + 3600), patch(
+                                "vibe.runtime.process_wall_clock_start", return_value=stale_time, create=True
+                            ):
                                 with patch("vibe.runtime.service_instance_lock_available", return_value=(True, None)):
                                     with patch("vibe.runtime.extra_service_process_pids", return_value=[_RECORDED_PID]):
                                         with patch("vibe.runtime.wait_for_service_pid") as wait_for_pid:

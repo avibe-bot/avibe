@@ -88,6 +88,7 @@ def test_a_process_start_time_survives_a_clock_step(monkeypatch: pytest.MonkeyPa
 
     clock = {"boot_time": 1_000.0}
     # The kernel's record: the process started 12345 ticks (123.45 s) after boot.
+    monkeypatch.setattr(process_isolation, "_proc_start_ticks_available", lambda: True)
     monkeypatch.setattr(process_isolation, "_linux_start_ticks", lambda _pid: 12_345)
     monkeypatch.setattr(process_isolation, "_clock_ticks_per_second", lambda: 100)
     monkeypatch.setattr("core.process_isolation.psutil.boot_time", lambda: clock["boot_time"])
@@ -122,6 +123,33 @@ def test_a_process_start_time_survives_a_clock_step(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv(paths.AVIBE_HOME_ENV, str(home))
     boot["id"] = "boot-b"
     assert runtime.process_create_time(4242) == pytest.approx(1_121.45)
+
+
+def test_an_unreadable_stable_start_time_never_falls_back_to_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where /proc records start ticks, a failed read of them is an unreadable
+    identity, never psutil's clock-dependent value: a value recorded from that
+    fallback would stop matching once the clock moves."""
+
+    import core.process_isolation as process_isolation
+    from vibe import runtime
+
+    real_open = open
+
+    def _open(path, *args, **kwargs):
+        if str(path) == "/proc/4242/stat":
+            raise OSError(24, "Too many open files")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(process_isolation, "_proc_start_ticks_available", lambda: True)
+    monkeypatch.setattr(process_isolation, "open", _open, raising=False)
+    monkeypatch.setattr(process_isolation, "_linux_boot_id", lambda: "boot-a")
+    monkeypatch.setattr(
+        "core.process_isolation.psutil.Process",
+        lambda _pid: SimpleNamespace(create_time=lambda: 1_123.45, environ=lambda: {}),
+    )
+
+    assert runtime.process_create_time(4242) is None
+    assert probe_process_liveness(4242) == "unknown"
 
 
 def test_process_identity_reads_inherited_worker_marker(monkeypatch: pytest.MonkeyPatch) -> None:

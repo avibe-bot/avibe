@@ -66,33 +66,51 @@ def process_create_time(pid: int) -> float | None:
 
 
 def read_process_create_time(pid: int) -> float:
-    """``process_create_time``, raising psutil's error when the start time cannot be read.
+    """``process_create_time``, raising when the start time cannot be read.
 
     A caller that must tell a missing process from an unreadable one, such as
-    a liveness probe, keeps psutil's distinction.
+    a liveness probe, keeps the distinction: ``psutil.NoSuchProcess`` for a
+    missing process, any other psutil error or ``OSError`` for one that is
+    there but cannot be read. Where /proc exists, a failure to read the stable
+    value is such an error too, never a fallback to psutil's clock-dependent
+    one: a value recorded once from either source must match every later read.
     """
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         raise psutil.NoSuchProcess(pid)
     process = psutil.Process(pid)
-    # psutil's read proves the pid is there and readable, with psutil's errors.
+    # psutil opens and reads the pid first, with its own errors.
     created = float(process.create_time())
+    if not _proc_start_ticks_available():
+        # This platform records an absolute start time, which never moves.
+        return created
     ticks = _linux_start_ticks(pid)
-    if ticks is not None:
-        anchor = _linux_boot_anchor()
-        if anchor is not None:
-            return anchor + ticks / _clock_ticks_per_second()
-    return created
+    anchor = _linux_boot_anchor()
+    if anchor is None:
+        raise OSError("the boot-time anchor of this Avibe home is unavailable")
+    return anchor + ticks / _clock_ticks_per_second()
 
 
-def _linux_start_ticks(pid: int) -> int | None:
-    """A process's start in clock ticks since boot, from /proc; None off Linux or once it is gone."""
+def _proc_start_ticks_available() -> bool:
+    """Whether this platform's /proc records each process's start in ticks since boot."""
+    return os.path.exists("/proc/self/stat")
+
+
+def _linux_start_ticks(pid: int) -> int:
+    """A process's start in clock ticks since boot, from /proc.
+
+    Raises ``psutil.NoSuchProcess`` once the process is gone, and ``OSError``
+    when it is there but its record cannot be read.
+    """
     try:
         with open(f"/proc/{pid}/stat", "rb") as handle:
             stat = handle.read().decode("utf-8", "replace")
+    except (FileNotFoundError, ProcessLookupError) as exc:
+        raise psutil.NoSuchProcess(pid) from exc
+    try:
         # The command name may contain spaces or parentheses; fields follow its last ')'.
         return int(stat.rsplit(")", 1)[1].split()[19])
-    except (OSError, IndexError, ValueError):
-        return None
+    except (IndexError, ValueError) as exc:
+        raise OSError(f"unreadable /proc/{pid}/stat") from exc
 
 
 def _clock_ticks_per_second() -> int:
