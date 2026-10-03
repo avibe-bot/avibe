@@ -332,6 +332,31 @@ def test_runtime_gen_006_disabling_a_backend_stops_its_work_at_once():
     asyncio.run(run())
 
 
+def test_a_disable_whose_interruption_fails_still_stops_and_retries_the_processes():
+    """Disabling never leaves a backend's processes unowned.
+
+    An interruption failure does not skip the stop, and a stop that fails is
+    retried by the idle sweep, because the agent is already out of routing.
+    """
+
+    async def run() -> None:
+        agent = _DisabledAgent("codex")
+        controller, _auth, coordinator = _disabling_controller(agent)
+        controller.session_turns.release_for_backend_refresh = AsyncMock(side_effect=RuntimeError("db busy"))
+        agent.shutdown_runtime.side_effect = [RuntimeError("process survived"), None]
+
+        assert await coordinator.request_restart("codex", config_save=True) == "restarted"
+
+        assert "codex" not in controller.agent_service.agents
+        assert agent.shutdown_runtime.await_count == 1
+        await controller.agent_service.retry_teardowns()
+        assert agent.shutdown_runtime.await_count == 2
+        await controller.agent_service.retry_teardowns()
+        assert agent.shutdown_runtime.await_count == 2
+
+    asyncio.run(run())
+
+
 def test_runtime_gen_007_re_enabling_starts_a_fresh_agent_at_once(monkeypatch):
     """RUNTIME-GEN-007: re-enabling registers a new agent without waiting.
 

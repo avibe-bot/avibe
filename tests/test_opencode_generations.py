@@ -1423,7 +1423,11 @@ def test_a_controller_starting_with_opencode_disabled_stops_a_crashed_controller
     monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: stopped.append(pid) or True)
     controller = controller_module.Controller.__new__(controller_module.Controller)
     _install_runtime_ready_dependencies(controller, [])
-    controller.agent_service = SimpleNamespace(agents={"opencode": object()} if opencode_enabled else {})
+    from modules.agents.service import AgentService
+
+    controller.agent_service = AgentService(controller=SimpleNamespace())
+    if opencode_enabled:
+        controller.agent_service.agents["opencode"] = object()
     controller._publish_readiness_unless_im_runtime_failed = lambda: None
     controller._start_model_hub_snapshot_reconcile_loop = lambda: None
     controller.periodic_cleanup = AsyncMock()

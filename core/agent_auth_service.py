@@ -2262,26 +2262,33 @@ class AgentAuthService:
         agents = getattr(agent_service, "agents", {})
         agent = agents.pop(backend, None) if unregister else agents.get(backend)
 
-        async def stop() -> None:
+        async def interrupt_work() -> None:
             coordinator = getattr(self.controller, "backend_restart_coordinator", None)
             interrupt = getattr(coordinator, "interrupt_backend", None)
             if callable(interrupt):
                 from core.run_settlement import SETTLED_BY_BACKEND_DISABLED
 
                 await interrupt(backend, reason=SETTLED_BY_BACKEND_DISABLED)
+
+        async def stop_processes() -> None:
             if agent is None:
                 return
-            if unregister:
-                shutdown = getattr(agent, "shutdown_runtime", None)
-                if callable(shutdown):
-                    await shutdown()
-                return
-            close_clients = getattr(agent, "refresh_auth_state", None)
-            if callable(close_clients):
-                await close_clients()
+            stop = getattr(agent, "shutdown_runtime" if unregister else "refresh_auth_state", None)
+            if callable(stop):
+                await stop()
 
-        # A cancelled requester never leaves the backend half stopped.
-        await finish_native_operation(stop())
+        try:
+            # A cancelled requester never leaves the backend half stopped.
+            await finish_native_operation(interrupt_work())
+        except Exception:
+            # Stopping the processes still ends that work; never skip it.
+            logger.warning("Interrupting disabled %s backend's work failed", backend, exc_info=True)
+        run_teardown = getattr(agent_service, "run_teardown", None)
+        if callable(run_teardown):
+            # The agent is out of routing, so this owner retries a failed stop.
+            await run_teardown(f"disabled:{backend}:{id(agent)}", stop_processes)
+        else:
+            await finish_native_operation(stop_processes())
         if unregister:
             setattr(self.controller.config, backend, None)
         self._sync_builtin_default_agents()

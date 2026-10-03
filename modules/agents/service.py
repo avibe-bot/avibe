@@ -3,7 +3,7 @@ import asyncio
 import inspect
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
 from core.session_activities import SessionActivityRegistry
@@ -52,6 +52,9 @@ class AgentService:
     ):
         self.controller = controller
         self.agents: Dict[str, BaseAgent] = {}
+        # Teardowns that must finish even after they failed once, such as a
+        # disabled backend's processes; the idle sweep retries them.
+        self._pending_teardowns: Dict[str, Callable[[], Awaitable[None]]] = {}
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
         self.activities = activities or SessionActivityRegistry()
@@ -227,6 +230,29 @@ class AgentService:
     def register(self, agent: BaseAgent):
         self.agents[agent.name] = agent
         logger.info(f"Registered agent backend: {agent.name}")
+
+    async def run_teardown(self, key: str, teardown: Callable[[], Awaitable[None]]) -> bool:
+        """Run a teardown that must eventually finish; True once it has.
+
+        A failure is logged and kept, and ``retry_teardowns`` runs it again on
+        every idle sweep until it succeeds. Nothing else owns the processes it
+        stops: their agent is already gone. A cancelled requester never leaves
+        a teardown half done.
+        """
+        from core.backend_restart import finish_native_operation
+
+        self._pending_teardowns.pop(key, None)
+        try:
+            await finish_native_operation(teardown())
+        except Exception:
+            logger.warning("Teardown %s failed; the idle sweep retries it", key, exc_info=True)
+            self._pending_teardowns[key] = teardown
+            return False
+        return True
+
+    async def retry_teardowns(self) -> None:
+        for key, teardown in list(self._pending_teardowns.items()):
+            await self.run_teardown(key, teardown)
 
     def _on_activity_output_settled(self, activity: Any) -> None:
         agent = self.agents.get(str(getattr(activity, "backend", "") or ""))

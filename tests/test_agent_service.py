@@ -2422,3 +2422,29 @@ def test_real_child_exit_after_acceptance_recovers_runtime_fifo() -> None:
             service.release_runtime_turn(second.context)
 
     asyncio.run(_run())
+
+
+def test_a_failed_teardown_is_retried_until_it_finishes() -> None:
+    """A disabled backend's processes stop eventually even if the first stop fails.
+
+    The agent is already out of routing, so nothing else would ever stop them.
+    """
+
+    async def run() -> None:
+        attempts: list[int] = []
+
+        async def stop() -> None:
+            attempts.append(len(attempts))
+            if len(attempts) < 3:
+                raise RuntimeError("process survived its stop")
+
+        service = AgentService(controller=SimpleNamespace())
+        assert await service.run_teardown("disabled:codex", stop) is False
+        await service.retry_teardowns()
+        assert len(attempts) == 2
+        await service.retry_teardowns()
+        assert len(attempts) == 3
+        await service.retry_teardowns()
+        assert len(attempts) == 3
+
+    asyncio.run(run())

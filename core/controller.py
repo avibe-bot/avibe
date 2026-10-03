@@ -1113,11 +1113,17 @@ class Controller:
         try:
             if "opencode" not in getattr(agent_service, "agents", {}):
                 # OpenCode is disabled, so no agent will adopt the servers a
-                # crashed controller recorded; disabling stops its work.
-                from modules.agents.opencode.server import stop_recorded_servers_sync
+                # crashed controller recorded; disabling stops its work. The
+                # idle sweep retries a server that survived its stop.
+                from modules.agents.opencode.server import StopOutcome, stop_recorded_servers_sync
                 from vibe.desktop_runtime import desktop_caller_provenance
 
-                await asyncio.to_thread(stop_recorded_servers_sync, desktop_caller_provenance())
+                async def stop_leftover_servers() -> None:
+                    outcomes = await asyncio.to_thread(stop_recorded_servers_sync, desktop_caller_provenance())
+                    if any(outcome is StopOutcome.FAILED for outcome in outcomes):
+                        raise RuntimeError("an OpenCode server a previous controller left did not stop")
+
+                await agent_service.run_teardown("disabled-startup:opencode", stop_leftover_servers)
         except Exception as e:
             logger.error("Failed to stop OpenCode servers a previous controller left: %s", e, exc_info=True)
 
@@ -2202,6 +2208,12 @@ class Controller:
             while True:
                 await asyncio.sleep(_IDLE_SWEEP_INTERVAL_SECONDS)
                 claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
+
+                try:
+                    # A disabled backend's processes whose stop failed.
+                    await self.agent_service.retry_teardowns()
+                except Exception as e:
+                    logger.error("Teardown retry sweep failed: %s", e, exc_info=True)
 
                 # Retiring runtime generations stop once drained, whatever the
                 # idle timeouts say.
