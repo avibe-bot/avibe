@@ -71,6 +71,7 @@ scenarios:
       - tests/test_agent_service.py::test_runtime_gen_006_a_disabled_agents_retried_stop_spares_the_re_enabled_agents_turn
       - tests/test_claude_agent_sessions.py::test_runtime_gen_006_a_turn_reaching_a_disabled_claude_starts_nothing
       - tests/test_claude_cli_path.py::test_runtime_gen_006_a_disabled_claude_client_whose_disconnect_fails_still_exits
+      - tests/test_claude_cli_path.py::test_runtime_gen_006_a_client_connecting_when_claude_is_disabled_never_serves
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_disabling_codex_ends_every_app_server_and_admits_nothing
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_disable_whose_stop_fails_is_retried_until_the_app_server_is_gone
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_retried_disable_settles_only_the_disabled_agents_work

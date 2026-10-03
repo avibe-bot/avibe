@@ -2636,12 +2636,12 @@ def test_runtime_gen_006_a_disabled_claude_client_whose_disconnect_fails_still_e
     controller.agent_service = SimpleNamespace(force_end_runtime_activities=lambda *_args, **_kwargs: None)
     handler = SessionHandler(controller)
     client = _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
-    captured = handler.capture_claude_clients()
 
     async def scenario():
         # A test-owned child stands in for the Claude CLI.
         process = await asyncio.create_subprocess_exec("sleep", "30")
         client._transport = SimpleNamespace(_process=process)
+        captured = handler.capture_claude_clients()
         try:
             await handler.close_captured_claude_clients(captured, reason="backend_disabled")
             return process.returncode
@@ -2652,6 +2652,51 @@ def test_runtime_gen_006_a_disabled_claude_client_whose_disconnect_fails_still_e
 
     assert asyncio.run(scenario()) is not None
     assert f"slack_C123:{tmp_path}" not in handler.claude_sessions
+
+
+def test_runtime_gen_006_a_client_connecting_when_claude_is_disabled_never_serves(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """RUNTIME-GEN-006 (Claude): a client still connecting when the disable
+    captured the live clients is not among them. Once connected it finds
+    Claude disabled, stops its CLI, and refuses the turn instead of serving it."""
+    disconnects: list[str] = []
+    connecting = asyncio.Event()
+    finish_connect = asyncio.Event()
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self) -> None:
+            connecting.set()
+            await finish_connect.wait()
+
+        async def disconnect(self) -> None:
+            disconnects.append("disconnect")
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    handler = SessionHandler(controller)
+
+    async def scenario():
+        turn = asyncio.create_task(
+            handler.get_or_create_claude_session(MessageContext(user_id="U123", channel_id="C123"))
+        )
+        await asyncio.wait_for(connecting.wait(), 1)
+        # The disable: Claude is turned off, then the live clients are captured.
+        controller.config.claude.enabled = False
+        assert handler.capture_claude_clients() == ()
+        finish_connect.set()
+        with pytest.raises(session_handler_module.ClaudeBackendDisabledError):
+            await turn
+
+    asyncio.run(scenario())
+
+    assert disconnects == ["disconnect"]
+    assert handler.claude_sessions == {}
 
 
 def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path) -> None:

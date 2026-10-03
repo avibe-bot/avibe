@@ -31,7 +31,8 @@ from modules.agents.claude_process_reaper import (
     register_claude_owned_process,
     reap_duplicate_claude_resume_processes,
     reap_orphaned_claude_processes,
-    stop_claude_client_process,
+    get_claude_client_process,
+    stop_claude_process,
 )
 from config.v2_config import (
     DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
@@ -104,6 +105,10 @@ class ClaudeSessionNotFoundError(RuntimeError):
         super().__init__(
             f"Claude Code session not found in current working directory: {session_id} ({working_path})"
         )
+
+
+class ClaudeBackendDisabledError(RuntimeError):
+    """Claude was turned off before this turn's client could serve it."""
 
 
 class ClaudeInputNotSentError(RuntimeError):
@@ -577,23 +582,33 @@ class SessionHandler(BaseHandler):
             else:
                 end_runtime("claude", composite_key, reason=reason)
 
-    def capture_claude_clients(self) -> tuple[tuple[str, Any], ...]:
-        """Every live client, by key and identity, for a stop that must close exactly these."""
-        return tuple(self.claude_sessions.items())
+    def _claude_disabled(self) -> bool:
+        return getattr(getattr(self.config, "claude", None), "enabled", True) is False
+
+    def capture_claude_clients(self) -> tuple[tuple[str, Any, Any], ...]:
+        """Every live client, by key, identity, and CLI process, for a stop that must close exactly these.
+
+        The process is read now: a disconnect drops it from the client.
+        """
+        return tuple(
+            (composite_key, client, get_claude_client_process(client))
+            for composite_key, client in self.claude_sessions.items()
+        )
 
     async def close_captured_claude_clients(
-        self, captured: tuple[tuple[str, Any], ...], *, reason: str
+        self, captured: tuple[tuple[str, Any, Any], ...], *, reason: str
     ) -> None:
         """Close exactly the captured clients, busy or idle, settling their work.
 
         A client created after the capture, such as one of a re-enabled
-        backend, is never touched. A captured client counts as closed only once
-        its CLI process has exited: a failed disconnect leaves it running after
-        it left ``claude_sessions``, so its process is stopped directly, on a
-        retry too. Raises while a captured client survives, so a caller can
-        retry.
+        backend, is never touched; one still connecting refuses its turn once
+        connected, because Claude is disabled by then. A captured client
+        counts as closed only once its CLI process has exited: a failed
+        disconnect leaves it running after it left ``claude_sessions``, so its
+        process is stopped directly, on a retry too. Raises while a captured
+        client survives, so a caller can retry.
         """
-        for composite_key, client in captured:
+        for composite_key, client, _process in captured:
             if self.claude_sessions.get(composite_key) is not client:
                 continue
             async with self._claude_runtime_generation_lock(composite_key):
@@ -603,9 +618,9 @@ class SessionHandler(BaseHandler):
                 await self._cleanup_session_locked(composite_key, expected_client=client, reason=reason)
         survivors = [
             key
-            for key, client in captured
+            for key, client, process in captured
             if self.claude_sessions.get(key) is client
-            or not await stop_claude_client_process(client, logger=logger)
+            or not await stop_claude_process(process, logger=logger)
         ]
         if survivors:
             raise RuntimeError(f"{len(survivors)} Claude client(s) survived their close")
@@ -1725,6 +1740,10 @@ class SessionHandler(BaseHandler):
         else:
             logger.info(f"Creating new Claude session")
 
+        if self._claude_disabled():
+            # Turned off after this turn was admitted: start nothing.
+            raise ClaudeBackendDisabledError("claude backend disabled")
+
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
         setattr(client, "_vibe_pending_skill_catalog", skill_catalog_sink[0] if skill_catalog_sink else None)
@@ -1802,6 +1821,18 @@ class SessionHandler(BaseHandler):
                     stderr=stderr_text,
                 ) from exc
             raise
+
+        if self._claude_disabled():
+            # Turned off while this client connected, possibly after the
+            # disable captured the live clients, so nothing else would close it.
+            process = get_claude_client_process(client)
+            try:
+                await client.disconnect()
+            except Exception:
+                logger.warning("Failed to disconnect a Claude client of a disabled backend", exc_info=True)
+            await stop_claude_process(process, logger=logger)
+            self._retire_model_hub_process_scope(composite_key)
+            raise ClaudeBackendDisabledError("claude backend disabled")
 
         self.claude_system_prompts[composite_key] = final_system_prompt
         setattr(client, "_vibe_current_model", effective_model)
