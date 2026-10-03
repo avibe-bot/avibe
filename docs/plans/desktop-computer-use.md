@@ -113,9 +113,14 @@ running. The tray keeps the shell alive after the window closes.
   toggle action; app launch checks silently, because every prompting call while
   a grant is missing queues another system dialog. On macOS 26 an app appears in
   the Screen Recording pane only after a real capture attempt, so the request
-  step also runs one capture probe (the driver's `check_permissions` with
-  `prompt: true` does this as the host). If a grant changes later, restart the
-  daemon, because macOS caches TCC answers per process.
+  step also makes one capture attempt from the shell process itself. A one-pixel
+  ScreenCaptureKit capture whose result is discarded is enough. TCC attributes
+  it to Avibe.app, and it needs no daemon. That matters because the daemon
+  starts only after both grants exist, so a daemon-side probe could never run on
+  a first enable. Verify this shell-side probe on macOS 26 in Phase 1. In the
+  spike the row appeared after the host's daemon attempted a capture. If a grant
+  changes later, restart the daemon, because macOS caches TCC answers per
+  process.
 - **Daemon.** Spawn directly with `posix_spawn`/`Command`, never through
   `open`/LaunchServices. Environment: `CUA_DRIVER_EMBEDDED=1`,
   `CUA_DRIVER_HOST_BUNDLE_ID=<bundle id>`,
