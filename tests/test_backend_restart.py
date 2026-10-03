@@ -17,9 +17,6 @@ class _AgentService:
         self.draining = False
         self.agents: dict = {}
 
-    def runtime_agents(self, backend: str | None = None) -> list:
-        return [agent for name, agent in self.agents.items() if backend in (None, name)]
-
     def begin_backend_drain(self, backend: str) -> None:
         assert backend == "opencode"
         self.draining = True

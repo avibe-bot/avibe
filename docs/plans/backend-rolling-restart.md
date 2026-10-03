@@ -3,10 +3,11 @@
 Status: superseded by `runtime-generations.md`.
 
 Configuration changes, credential flows, manual Restart, CLI installs, and
-enabling or disabling a backend no longer drain or interrupt anything. Each
-runtime unit moves to the new configuration at its next turn, and running work
-finishes on the process it started on. The 300 s drain, its timeout override,
-and the drain-then-interrupt cutover are deleted.
+enabling a backend no longer drain or interrupt anything. Each runtime unit
+moves to the new configuration at its next turn, and running work finishes on
+the process it started on. Disabling a backend stops its work at once, because
+the user asked for that. The 300 s drain, its timeout override, and the
+drain-then-interrupt cutover are deleted.
 
 ## What remains of the barrier
 

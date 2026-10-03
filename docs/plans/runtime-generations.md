@@ -266,8 +266,8 @@ Defects that the refactor fixes as it touches these paths:
 | Explicit "stop running work" | The existing interruption path. |
 | Native credential migration, migration recovery, Hub re-authentication | `migration_guard`, unchanged. |
 | Unattended CLI auto-update | `run_when_idle` for the install step only. |
-| Backend disabled | The agent retires: it admits nothing more, and each generation finishes its work, then stops. New messages get the disabled reply at once. |
-| Backend enabled | The backend's agent registers at once; if it is still draining work from a disable, that same agent reopens. |
+| Backend disabled | Its work stops at once with the interruption notice, and its agent is destroyed. New messages get the disabled reply at once. |
+| Backend enabled | A new agent registers at once. |
 
 The `AGENTS.md` rule that an `agents.*` save reconciles "through the backend
 rolling-refresh path" becomes: the save advances the snapshot, and live units
@@ -400,105 +400,73 @@ it.
 ## One lifecycle: deleting the drain path
 
 Once all three adapters renew in place, no routine trigger needs the drain.
-Enabling and disabling a backend move onto the same rule as every other
-change: running work finishes where it started, and nothing waits.
+Enabling a backend registers it at once. Disabling a backend is the one
+change that stops work, because the user asked for exactly that.
 
 ### Example
 
 Codex is running a long turn in `~/app` when the user turns Codex off in
-Settings. Today, new Codex messages are held for up to 300 s. The running turn
-is then interrupted, and the held messages finally get the "Codex is disabled"
-reply. After this step:
+Settings. Before this step, new Codex messages were held for up to 300 s, then
+the running turn was interrupted, and only then did the held messages get the
+"Codex is disabled" reply. After this step:
 
 1. The save reaches `request_restart("codex", config_save=True)`. The Codex
-   agent leaves the registry at once. Routing therefore treats Codex as
-   disabled immediately, exactly as it does today after the drain. A new
-   message gets the disabled reply without waiting.
-2. The agent is kept as *retired*. Its running turn keeps streaming, and Stop,
-   Activity notifications and liveness probes still reach it.
-3. Every app-server generation retires. When the turn ends, its generation
-   stops, the agent reports `runtime_retired()`, and the service forgets it.
-4. If the user turns Codex back on meanwhile, the same agent reopens at
-   once. New turns start fresh generations, and the generations it retired
-   keep draining.
+   agent leaves the registry at once, so a new message gets the disabled
+   reply without waiting.
+2. The turn in `~/app` and its Activities settle with the
+   runtime-interruption notice, through the coordinator's
+   `interrupt_backend`, which the native credential cutover also uses.
+3. `shutdown_runtime()` stops every app-server of the agent, and the agent is
+   gone. A turn that raced the disable fails visibly with
+   `error.agentRuntimeRetired` and starts nothing.
+4. Turning Codex back on registers a fresh agent at once.
 
-One agent owns a backend's runtime for the whole life of the controller. An
-earlier draft let a re-enabled backend register a second agent beside the
-retired one. Every lookup that serves running work then had to fan out
-across instances, and two instances could each restore the same durable poll
-or revoke each other's credentials. One owner per backend removes that class:
-`AgentService.agents` is only the routing view of the enabled backends, and
-`AgentService.runtime_agents(backend)` returns the backend's one owner,
-enabled or not.
+An earlier draft let a disabled backend's agent keep its running work and
+drain, and let a re-enable reopen it. Every lookup that serves running work
+then had to reach retired agents, and review kept finding the ones that did
+not. The owner decided that a disable, being the user's own action, should
+simply stop the work, and that machinery is gone.
 
 ### Coordinator
 
-- `request_restart(backend, *, config_save)` never drains, holds a message,
-  or interrupts. `AgentAuthService.renew_backend_runtime` owns the three
-  cases:
+- `request_restart(backend, *, config_save)` never drains or holds a message.
+  `AgentAuthService.renew_backend_runtime` owns the cases:
   - **Registered and enabled:** `renew_runtime`, unchanged.
-  - **Codex or OpenCode disabled:** `AgentService.retire_backend(backend)`
-    unregisters the agent and calls its `retire_runtime()`.
+  - **Codex or OpenCode disabled:** unregister, `interrupt_backend`, then
+    `shutdown_runtime()`. A cancelled requester never leaves it half done.
   - **Claude disabled:** Claude stays registered with `enabled=False`, as
-    today. Its `renew_runtime` retires its clients: idle ones now, busy ones
-    at the first sweep after they are idle.
-  - **Enabled but not registered:** `AgentService.reopen_backend` reopens the
-    agent that still owns the runtime; only a backend with no owner gets a
-    new agent.
-  - Retirement runs to completion even if its requester is cancelled, so no
-    runtime unit is left half closed.
+    before. Its work is interrupted the same way and every client closes.
+    Saving again while it is disabled interrupts nothing more.
+  - **Enabled but not registered:** a new agent registers at once.
 - `run_when_idle` keeps admission closed for the install step only. Afterwards
   it renews instead of refreshing.
-- `migration_guard` is unchanged except for its reach. Its interruption and
-  strict retirement also cover retired agents, because their processes may
-  still read the native credential.
+- `migration_guard` is unchanged.
 - Deleted: the 300 s drain, `AVIBE_BACKEND_RESTART_DRAIN_TIMEOUT_SECONDS`,
   `"draining"` as a restart result, and the legacy catalog restart. The
   refresh that tears a runtime down survives only inside `migration_guard`.
-
-Every lookup that serves running work reaches retired agents too: Stop,
-Activity callbacks and output grace, liveness, Running Agents (listing and
-End), session clearing (`/new`), poll restore, config and transport
-propagation, the native credential mirror, the sweep, service shutdown, and
-the native credential cutover. Admitting new work, and steering new input into
-a running turn, use only registered agents, so a disabled backend takes no new
-input. `AgentService.runtime_agents(backend)` is the one lookup for the first
-group; `AgentService.agents` serves only the second.
-
-A controller that starts with OpenCode disabled builds a drain-only agent
-before it restores any poll, and keeps it with `AgentService.retire_agent`
-without registering it. Its restored polls bind the generations they ran on,
-because a stopping unit still binds recovered work, so their results are
-delivered before the processes stop.
 
 ### Adapter hooks
 
 | Hook | Meaning |
 | --- | --- |
 | `renew_runtime(config, *, config_save)` | Unchanged. |
-| `retire_runtime()` | The backend is disabled. Admit nothing more, and stop each generation once its work drains. It never interrupts, and calling it twice changes nothing. |
-| `reopen_runtime(config)` | The backend is enabled again. Admit new work with `config`; generations retired while disabled stay closed and keep draining. |
-| `runtime_retired() -> bool` | No process of this agent remains. |
-| `reap_runtime_generations()` | Called by the 60 s sweep on registered and retired agents alike. |
-| `shutdown_runtime()` | Service shutdown and probe teardown only. |
-
-The sweep is the only sweeper of a retired agent, so adapters keep no
-self-sweep of their own.
+| `reap_runtime_generations()` | Called by the 60 s sweep on every registered agent. |
+| `shutdown_runtime()` | Stop every process of this agent now, with no notice of its own. Disable, service shutdown, and probe teardown call it. |
 
 ### Startup
 
 A controller that starts with OpenCode disabled stops the OpenCode servers
-recorded by a controller that crashed. No other agent would ever adopt them.
-Codex app-servers and Claude clients exit with their parent's stdio, so they
-leave nothing behind.
+recorded by a controller that crashed; no agent would ever adopt them. Their
+durable polls stay durable, and the next controller with OpenCode enabled
+restores them, as before. Codex app-servers and Claude clients exit with their
+parent's stdio, so they leave nothing behind.
 
 ### Scenarios
 
-- **RUNTIME-GEN-006.** Disabling a backend interrupts nothing and holds no
-  message. Running work finishes on its generation, a new message gets the
-  disabled reply at once, and the processes stop once drained.
-- **RUNTIME-GEN-007.** Re-enabling while a retired instance drains starts
-  fresh work at once and leaves the retired work running.
+- **RUNTIME-GEN-006.** Disabling a backend stops its work at once: new
+  messages see it disabled, running work settles with the interruption
+  notice, and every process stops.
+- **RUNTIME-GEN-007.** Re-enabling registers a fresh agent at once.
 - **RUNTIME-GEN-008.** An unattended CLI update renews after the install
   instead of refreshing.
 
@@ -517,3 +485,8 @@ Recorded from the owner, 2026-10-01:
    client is force-replaced only when its snapshot cannot serve the turn.
 5. Lifecycles are unified under generations wherever safety allows. PRs are
    few, and work that can run in parallel does.
+
+Recorded from the owner, 2026-10-03:
+
+6. Disabling a backend is an explicit, user-visible action. It stops that
+   backend's work immediately and destroys its agent; nothing drains.
