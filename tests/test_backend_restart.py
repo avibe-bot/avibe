@@ -315,7 +315,7 @@ def test_runtime_gen_006_disabling_a_backend_stops_its_work_at_once():
             side_effect=lambda backend: order.append(("cancel", backend))
         )
         order: list = []
-        agent.shutdown_runtime.side_effect = lambda: order.append(("stop", "codex"))
+        agent.shutdown_runtime.side_effect = lambda **_kwargs: order.append(("stop", "codex"))
         controller.session_turns.active_runtime_session_ids_for_backend = Mock(return_value={"ses-1"})
 
         assert await asyncio.wait_for(coordinator.request_restart("codex", config_save=True), timeout=1) == "restarted"
@@ -383,7 +383,7 @@ def test_a_cancelled_disable_still_hands_the_process_stop_to_the_teardown_owner(
         with pytest.raises(asyncio.CancelledError):
             await disabling
 
-        agent.shutdown_runtime.assert_awaited_once_with()
+        agent.shutdown_runtime.assert_awaited_once_with(settle_reason="backend_disabled")
         assert controller.config.codex is None
 
     asyncio.run(run())
@@ -401,7 +401,7 @@ def test_runtime_gen_007_re_enabling_starts_a_fresh_agent_at_once(monkeypatch):
         old = _DisabledAgent("codex")
         controller, auth, coordinator = _disabling_controller(old)
         await coordinator.request_restart("codex", config_save=True)
-        old.shutdown_runtime.assert_awaited_once_with()
+        old.shutdown_runtime.assert_awaited_once_with(settle_reason="backend_disabled")
 
         runtime_config = SimpleNamespace(enabled=True)
         auth._load_backend_runtime_config = Mock(return_value=runtime_config)

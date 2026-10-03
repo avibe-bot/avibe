@@ -2282,17 +2282,26 @@ class AgentAuthService:
                 return
             shutdown = getattr(agent, "shutdown_runtime", None)
             if callable(shutdown):
-                await shutdown()
+                from core.run_settlement import SETTLED_BY_BACKEND_DISABLED
+
+                # The adapter settles the work bound to its own processes as it
+                # stops them, scoped to this agent instance, so a retry after a
+                # re-enable still settles the disabled agent's work and nothing else.
+                await shutdown(settle_reason=SETTLED_BY_BACKEND_DISABLED)
+
+        # Claude stays registered while disabled, so its stop closes exactly
+        # the clients live now, busy ones included. A retry after Claude is
+        # enabled again never touches the new backend's clients.
+        session_handler = getattr(self.controller, "session_handler", None)
+        capture = getattr(session_handler, "capture_claude_clients", None)
+        captured_clients = capture() if callable(capture) and not unregister else ()
 
         async def close_claude_clients() -> None:
-            # The renewal that disabled Claude made every client stale, and a
-            # stale idle client is reclaimed by the idle sweep. Reclaim them now;
-            # one that fails or is still settling goes at the next sweep, which
-            # never touches a client created after Claude is enabled again.
-            session_handler = getattr(self.controller, "session_handler", None)
-            evict = getattr(session_handler, "evict_idle_sessions", None)
-            if callable(evict):
-                await evict(0)
+            close = getattr(session_handler, "close_captured_claude_clients", None)
+            if callable(close):
+                from core.run_settlement import SETTLED_BY_BACKEND_DISABLED
+
+                await close(captured_clients, reason=SETTLED_BY_BACKEND_DISABLED)
 
         # The interrupt settles only the work that ran before this disable. A
         # retry after the backend is enabled again must not touch new work, so

@@ -211,8 +211,10 @@ class AgentService:
             self.on_activity_terminal(activity)
         return completed
 
-    def force_end_runtime_activities(self, backend: str, runtime_key: str) -> list[Any]:
-        """End the Activities of one runtime the service replaces itself."""
+    def force_end_runtime_activities(
+        self, backend: str, runtime_key: str, *, reason: str = SETTLED_BY_BACKEND_REFRESH
+    ) -> list[Any]:
+        """End the Activities of one runtime the service replaces or stops itself."""
         # Retained until the Run owner settles them, like a whole-backend stop,
         # so a transient settlement failure leaves something to retry.
         completed = self.activities.end_runtime(
@@ -221,7 +223,7 @@ class AgentService:
             status="killed",
             retain_terminal_snapshots=True,
             force=True,
-            metadata={"interrupt_reason": SETTLED_BY_BACKEND_REFRESH},
+            metadata={"interrupt_reason": reason},
         )
         for activity in completed:
             self.on_activity_terminal(activity)
@@ -1165,12 +1167,14 @@ class AgentService:
         *,
         base_session_ids: set[str],
         activity_runtime_keys: set[str],
+        reason: str = SETTLED_BY_BACKEND_REFRESH,
     ) -> None:
         """Interrupt the work of a runtime the service stops itself.
 
         The scoped form of a forced backend refresh: the named sessions' turns
-        and the named runtimes' Activities settle with the runtime-update
-        notice, and every other session keeps running.
+        and the named runtimes' Activities settle with ``reason``'s notice
+        (a runtime update, or the backend disabled), and every other session
+        keeps running.
         """
         # Only the turns running now: a session's next turn, admitted while the
         # release below awaits, runs elsewhere and is not this runtime's work.
@@ -1184,10 +1188,10 @@ class AgentService:
         manager = getattr(self.controller, "session_turns", None)
         release = getattr(manager, "release_for_backend_refresh", None)
         if callable(release) and base_session_ids:
-            await release(backend=backend, base_session_ids=set(base_session_ids))
+            await release(backend=backend, base_session_ids=set(base_session_ids), settled_by=reason)
         await self._force_cancel_turns(lambda gate: gate.token in tokens)
         for runtime_key in activity_runtime_keys:
-            self.force_end_runtime_activities(backend, runtime_key)
+            self.force_end_runtime_activities(backend, runtime_key, reason=reason)
 
     async def _force_cancel_turns(self, owns: Callable[["_RuntimeTurnGate"], bool]) -> None:
         owned = [

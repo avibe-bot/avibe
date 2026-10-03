@@ -563,12 +563,43 @@ class SessionHandler(BaseHandler):
         )
         return True
 
-    def _interrupt_claude_session_work(self, composite_key: str) -> None:
-        """Settle a replaced client's background work as interrupted by a runtime update."""
+    def _interrupt_claude_session_work(self, composite_key: str, *, reason: str | None = None) -> None:
+        """Settle a replaced or stopped client's background work.
+
+        ``reason`` is the settlement; the default is a runtime update.
+        """
         service = getattr(self.controller, "agent_service", None)
         end_runtime = getattr(service, "force_end_runtime_activities", None)
         if callable(end_runtime):
-            end_runtime("claude", composite_key)
+            if reason is None:
+                end_runtime("claude", composite_key)
+            else:
+                end_runtime("claude", composite_key, reason=reason)
+
+    def capture_claude_clients(self) -> tuple[tuple[str, Any], ...]:
+        """Every live client, by key and identity, for a stop that must close exactly these."""
+        return tuple(self.claude_sessions.items())
+
+    async def close_captured_claude_clients(
+        self, captured: tuple[tuple[str, Any], ...], *, reason: str
+    ) -> None:
+        """Close exactly the captured clients, busy or idle, settling their work.
+
+        A client created after the capture, such as one of a re-enabled
+        backend, is never touched. Raises while a captured client survives, so
+        a caller can retry.
+        """
+        for composite_key, client in captured:
+            if self.claude_sessions.get(composite_key) is not client:
+                continue
+            async with self._claude_runtime_generation_lock(composite_key):
+                if self.claude_sessions.get(composite_key) is not client:
+                    continue
+                self._interrupt_claude_session_work(composite_key, reason=reason)
+                await self._cleanup_session_locked(composite_key, expected_client=client, reason=reason)
+        survivors = [key for key, client in captured if self.claude_sessions.get(key) is client]
+        if survivors:
+            raise RuntimeError(f"{len(survivors)} Claude client(s) survived their close")
 
     async def _reuse_cached_claude_session_if_available(
         self,

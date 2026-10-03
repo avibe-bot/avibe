@@ -2565,6 +2565,51 @@ def test_runtime_gen_005_a_client_from_before_a_renewal_is_reclaimed_once_idle(m
     assert composite_key not in controller.claude_sessions
 
 
+def test_runtime_gen_006_disabling_claude_closes_its_busy_clients_and_only_those(monkeypatch, tmp_path: Path) -> None:
+    """RUNTIME-GEN-006 (Claude): a disable closes every client live at that moment.
+
+    A client still running a turn is closed too, its work settled as disabled.
+    A client created after the capture, such as one of a re-enabled backend, is
+    never touched by a retry.
+    """
+    disconnects: list[str] = []
+    ended: list[tuple[str, str]] = []
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            disconnects.append("disconnect")
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    controller.agent_service = SimpleNamespace(
+        force_end_runtime_activities=lambda backend, key, *, reason: ended.append((key, reason)),
+    )
+    handler = SessionHandler(controller)
+    client = _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.active_sessions.add(composite_key)
+
+    captured = handler.capture_claude_clients()
+    asyncio.run(handler.close_captured_claude_clients(captured, reason="backend_disabled"))
+
+    assert disconnects == ["disconnect"]
+    assert composite_key not in handler.claude_sessions
+    assert ended == [(composite_key, "backend_disabled")]
+
+    fresh = _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+    asyncio.run(handler.close_captured_claude_clients(captured, reason="backend_disabled"))
+    assert handler.claude_sessions[composite_key] is fresh is not client
+    assert disconnects == ["disconnect"]
+
+
 def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 

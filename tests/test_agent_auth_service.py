@@ -147,8 +147,8 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         """RUNTIME-GEN-004 and -006: Claude stays registered and renews in place.
 
         Disabling it is the user's own interruption: its running work settles
-        with the disabled notice, and its now-stale clients are reclaimed.
-        Saving again while it is already disabled interrupts nothing more.
+        with the disabled notice, and every client live at that moment closes,
+        busy ones included. Saving again while it is disabled interrupts nothing.
         """
         for was_enabled, enabled in ((True, True), (True, False), (False, False)):
             controller = _StubController()
@@ -156,7 +156,11 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             agent = SimpleNamespace(renew_runtime=AsyncMock(), refresh_auth_state=AsyncMock())
             controller.agent_service = SimpleNamespace(agents={"claude": agent})
             controller.backend_restart_coordinator = SimpleNamespace(interrupt_backend=AsyncMock())
-            controller.session_handler = SimpleNamespace(evict_idle_sessions=AsyncMock(return_value=0))
+            captured = (("ses:/work", object()),)
+            controller.session_handler = SimpleNamespace(
+                capture_claude_clients=Mock(return_value=captured),
+                close_captured_claude_clients=AsyncMock(),
+            )
             service = AgentAuthService(controller)
             runtime_config = SimpleNamespace(enabled=enabled)
             service._load_backend_runtime_config = lambda _backend, config=runtime_config: config
@@ -168,15 +172,15 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             assert controller.agent_service.agents["claude"] is agent
             stopped = was_enabled and not enabled
             assert controller.backend_restart_coordinator.interrupt_backend.await_count == int(stopped)
-            assert controller.session_handler.evict_idle_sessions.await_args_list == (
-                [((0,),)] if stopped else []
+            assert controller.session_handler.close_captured_claude_clients.await_args_list == (
+                [((captured,), {"reason": "backend_disabled"})] if stopped else []
             )
             agent.refresh_auth_state.assert_not_awaited()
 
-    async def test_a_failed_claude_disable_retry_never_touches_work_after_a_re_enable(self):
-        """A failed Claude disable is retried, but once Claude is enabled again the
-        retry no longer interrupts work, and its client reclamation only takes
-        clients from before the renewal, never the re-enabled backend's."""
+    async def test_a_failed_claude_disable_retry_closes_only_the_clients_it_captured(self):
+        """A failed Claude disable is retried, and once Claude is enabled again the
+        retry no longer interrupts new work; it closes only the clients that were
+        live at the disable, never the re-enabled backend's."""
         from modules.agents.service import AgentService
 
         controller = _StubController()
@@ -187,7 +191,11 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.backend_restart_coordinator = SimpleNamespace(
             interrupt_backend=AsyncMock(side_effect=[RuntimeError("db busy"), None])
         )
-        controller.session_handler = SimpleNamespace(evict_idle_sessions=AsyncMock(return_value=0))
+        captured = (("ses:/work", object()),)
+        controller.session_handler = SimpleNamespace(
+            capture_claude_clients=Mock(return_value=captured),
+            close_captured_claude_clients=AsyncMock(),
+        )
         service = AgentAuthService(controller)
         service._sync_builtin_default_agents = lambda: None
         service._load_backend_runtime_config = lambda _backend: SimpleNamespace(enabled=False)
@@ -199,9 +207,12 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         await controller.agent_service.retry_teardowns()
 
         assert controller.backend_restart_coordinator.interrupt_backend.await_count == 1
-        assert controller.session_handler.evict_idle_sessions.await_args_list == [((0,),), ((0,),)]
+        assert [call.args[0] for call in controller.session_handler.close_captured_claude_clients.await_args_list] == [
+            captured,
+            captured,
+        ]
+        controller.session_handler.capture_claude_clients.assert_called_once_with()
         assert controller.agent_service._pending_teardowns == {}
-        agent.refresh_auth_state.assert_not_awaited()
 
     async def test_enabling_opencode_in_a_running_controller_restores_its_durable_polls(self):
         """Work a crashed controller left while OpenCode was off is delivered
@@ -1803,8 +1814,8 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertEqual(controller.agent_router.global_default, "codex")
         self.assertEqual(controller.agent_router.platform_routes["slack"].default, "codex")
         self.assertEqual(controller.config.default_backend, "codex")
-        # Disabling stops the agent's processes at once.
-        agent.shutdown_runtime.assert_awaited_once_with()
+        # Disabling stops the agent's processes at once, settling their work as disabled.
+        agent.shutdown_runtime.assert_awaited_once_with(settle_reason="backend_disabled")
         service._sync_builtin_default_agents.assert_called_once_with()
 
     async def test_refresh_backend_runtime_does_not_restore_legacy_default_after_late_registration(self):

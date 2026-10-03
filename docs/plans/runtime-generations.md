@@ -437,8 +437,17 @@ simply stop the work, and that machinery is gone.
   - **Codex or OpenCode disabled:** unregister, `interrupt_backend`, then
     `shutdown_runtime()`. A cancelled requester never leaves it half done.
   - **Claude disabled:** Claude stays registered with `enabled=False`, as
-    before. Its work is interrupted the same way and every client closes.
-    Saving again while it is disabled interrupts nothing more.
+    before. Its work is interrupted the same way, and the clients live at
+    that moment, busy ones included, are captured by identity and closed; a
+    retry closes only those, never a client of a re-enabled backend. Saving
+    again while it is disabled interrupts nothing more.
+
+  Disable-teardown ownership: the core's backend-wide interrupt is the fast
+  path, and it is skipped once the backend is enabled again. The guaranteed
+  settlement is scoped to what the disable captured: the disabled agent's own
+  generations (adapter forced stop with `settle_reason`), or Claude's captured
+  clients. A retry after a re-enable therefore still finishes the disabled
+  agent's work and touches nothing new.
   - **Enabled but not registered:** a new agent registers at once.
 - `run_when_idle` keeps admission closed for the install step only. Afterwards
   it renews instead of refreshing.
@@ -453,7 +462,7 @@ simply stop the work, and that machinery is gone.
 | --- | --- |
 | `renew_runtime(config, *, config_save)` | Unchanged. |
 | `reap_runtime_generations()` | Called by the 60 s sweep on every registered agent. |
-| `shutdown_runtime()` | Stop every process of this agent now, with no notice of its own. Disable, service shutdown, and probe teardown call it. It raises when any process survives or leftover adoption failed, so `AgentService.run_teardown` keeps the teardown and the idle sweep retries it; a retry must be idempotent. |
+| `shutdown_runtime(settle_reason=None)` | Stop every process of this agent now. A disable passes `settle_reason="backend_disabled"`, and every forced stop then settles the turns and Activities bound to that process with it, scoped to this agent instance; service shutdown and probe teardown pass nothing and show no notice. It raises when any process survives, so `AgentService.run_teardown` keeps the teardown and the idle sweep retries it; a retry must be idempotent and never touch another instance's work. |
 
 ### Startup
 
