@@ -154,6 +154,7 @@ running. The tray keeps the shell alive after the window closes.
   | From | Event | To | Action |
   | --- | --- | --- | --- |
   | any | toggle off | `off` | stop the daemon if running |
+  | `off` | toggle on, Runtime lacks a covering `computer_use_schema` | `off` | refuse; the menu says the Avibe service must restart |
   | `off` | toggle on, both grants held | `starting` | spawn |
   | `off` | toggle on, a grant missing | `needs_permission` | prompt and run the capture probe (the only prompting path) |
   | shell launch | `D` missing or not `enabled` | `off` | if `D` exists, write `off` with this shell's `instance_id` |
@@ -187,6 +188,10 @@ running. The tray keeps the shell alive after the window closes.
       `ready`, or returns to `needs_permission` with no prompt.
     - A grant that is truly missing therefore costs one short-lived daemon
       per activation, never a loop.
+  - **Support invariant.** Every row that can spawn or prompt sits behind a
+    supported capabilities answer. So any enabled state other than
+    `needs_runtime` implies that the latest probe said supported. An
+    unsupported answer always leads to `needs_runtime` with no daemon.
   - **No indirection.** Every row names its target state and action. `error`
     leaves only through toggle off (the first row), and a later toggle on
     starts from `off`.
