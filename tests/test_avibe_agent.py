@@ -1845,6 +1845,64 @@ async def _until(predicate, what: str, timeout: float = 10.0) -> None:
         await asyncio.sleep(0.05)
 
 
+_TEXT_STREAMS = {
+    "anthropic": (
+        "/avibe/v1/messages",
+        'data: {"type":"message_start","message":{"usage":{}}}\n\n'
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n'
+        'data: {"type":"content_block_stop","index":0}\n\n'
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+        'data: {"type":"message_stop"}\n\n',
+    ),
+    "openai_responses": (
+        "/avibe/v1/responses",
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\n'
+        'data: {"type":"response.output_text.delta","output_index":0,"delta":"hi"}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed","output":null}}\n\n',
+    ),
+    "openai_chat": (
+        "/avibe/v1/chat/completions",
+        'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+        "data: [DONE]\n\n",
+    ),
+}
+
+
+@pytest.mark.parametrize("hub_protocol", ["anthropic", "openai_responses", "openai_chat", "google"])
+async def test_a_turn_runs_through_the_real_provider_registry(engine, session, tmp_path, published, hub_protocol) -> None:
+    import httpx
+
+    from modules.agents.avibe.models import registry_providers
+
+    wire = "openai_chat" if hub_protocol == "google" else hub_protocol
+    path, body = _TEXT_STREAMS[wire]
+    served = json.dumps({"provider": "upstream", "api": wire, "model": "served-model"}, separators=(",", ":"))
+    seen: list[str] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=body
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client)
+        )
+        harness.controller.hub_protocol = hub_protocol
+        await harness.agent.handle_message(harness.request("hello"))
+
+    # Each protocol's adapter from the real registry speaks to its gateway path; a google hop is
+    # called over Chat at the gateway prefix; the served origin comes from x-avibe-served-hop.
+    assert seen == [path]
+    final = (await harness.context_rows())[-1].message
+    assert final.content == (TextBlock(text="hi"),)
+    assert (final.origin.provider, final.origin.api, final.origin.model) == ("upstream", wire, "served-model")
+    assert harness.controller.im_client.sent == ["hi"]
+
+
 async def test_a_turn_runs_bash_through_the_real_job_host(engine, session, tmp_path, published) -> None:
     command = "printf 'hi from bash'"
     call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": command})

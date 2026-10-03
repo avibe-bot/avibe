@@ -21,7 +21,6 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ProviderAdapter
 from core.agent_core.messages import PROTOCOLS, Origin, ProtocolName
-from core.handlers.model_hub.provenance import SERVED_HOP_HEADER, SERVED_HOP_HEADER_MAX_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -92,32 +91,6 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
     return ModelSelection(endpoint=endpoint, capabilities=capabilities)
 
 
-def served_hop_origin(headers: Mapping[str, str]) -> Optional[Origin]:
-    """The served origin Model Hub reports in ``x-avibe-served-hop`` (C-6 item 4), if it is exact.
-
-    Compact ASCII JSON with exactly ``provider``, ``api`` and ``model``. Anything else
-    is an unverified origin: the provider adapter then strips opaque payloads (C-2).
-    """
-    value = next((v for k, v in headers.items() if k.lower() == SERVED_HOP_HEADER), None)
-    if not isinstance(value, str) or not value.isascii() or len(value) > SERVED_HOP_HEADER_MAX_BYTES:
-        return None
-
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        if len({key for key, _ in pairs}) != len(pairs):
-            raise ValueError("duplicate key")
-        return dict(pairs)
-
-    try:
-        report = json.loads(value, object_pairs_hook=unique)
-        if not isinstance(report, dict) or set(report) != {"provider", "api", "model"}:
-            return None
-        if not all(isinstance(item, str) for item in report.values()):
-            return None
-        return Origin(provider=report["provider"], api=report["api"], model=report["model"])
-    except ValueError:
-        return None
-
-
 class HubModelRouter:
     """``ModelRouter`` for one run: a fresh hop for every model attempt (C-6 item 3).
 
@@ -164,7 +137,11 @@ class HubModelRouter:
 
 
 def registry_providers(*, media_loader: Any, client: Any = None) -> ProviderFactory:
-    """Provider adapters from the ``ai`` registry, speaking to the Model Hub gateway."""
+    """Provider adapters from the ``ai`` registry, speaking to the Model Hub gateway.
+
+    In gateway mode each adapter reads the served origin from ``x-avibe-served-hop``
+    with the engine's own resolver, the one owner of that C-6 rule.
+    """
 
     def create(protocol: ProtocolName) -> ProviderAdapter:
         from core.agent_core.ai.registry import create_adapter
@@ -173,7 +150,6 @@ def registry_providers(*, media_loader: Any, client: Any = None) -> ProviderFact
             protocol,
             client=client,
             media_loader=media_loader,
-            served_hop_resolver=served_hop_origin,
             gateway=True,
         )
 
