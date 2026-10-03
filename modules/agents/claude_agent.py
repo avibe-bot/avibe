@@ -568,6 +568,24 @@ class ClaudeAgent(BaseAgent):
         #     await self._handle_question_callback(request)
         #     return
 
+        if getattr(getattr(self.config, "claude", None), "enabled", True) is False:
+            # Claude stays registered while disabled, so a turn queued behind
+            # the one the disable interrupted still reaches it. It must start
+            # nothing and say why, as Codex and OpenCode do.
+            language = str(getattr(getattr(self.controller, "config", None), "language", "en") or "en")
+            await emit_backend_failure(
+                self.controller,
+                context,
+                self.name,
+                "claude backend disabled",
+                display_text=(
+                    f"❌ {i18n_t('error.agentRuntimeRetired', language, agent=i18n_t('backend.claude', language))}"
+                ),
+                request=request,
+            )
+            await self._remove_ack_reaction(request)
+            return
+
         try:
             client = await self.session_handler.get_or_create_claude_session(
                 context,

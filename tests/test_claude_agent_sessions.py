@@ -67,6 +67,34 @@ async def test_skill_catalog_is_offered_once_per_accepted_claude_client(monkeypa
         await task
 
 
+async def test_runtime_gen_006_a_turn_reaching_a_disabled_claude_starts_nothing(monkeypatch):
+    """RUNTIME-GEN-006 (Claude): Claude stays registered while disabled, so a turn
+    queued behind the one a disable interrupted still reaches it. It must start
+    no client and tell the user Claude was turned off."""
+    controller = _StubController()
+    controller.session_handler.get_or_create_claude_session = AsyncMock()
+    agent = ClaudeAgent(controller)
+    agent.config.claude = SimpleNamespace(enabled=False)
+    agent._remove_ack_reaction = AsyncMock()
+    failures = []
+
+    async def emit_backend_failure(_controller, _context, backend, _diagnostic, *, display_text=None, **_kwargs):
+        failures.append((backend, display_text))
+        return False
+
+    monkeypatch.setattr("modules.agents.claude_agent.emit_backend_failure", emit_backend_failure)
+    request = SimpleNamespace(
+        context=SimpleNamespace(platform_specific={}), message="queued", base_session_id="ses",
+        composite_session_id="runtime", session_key="scope",
+    )
+
+    await agent.handle_message(request)
+
+    controller.session_handler.get_or_create_claude_session.assert_not_awaited()
+    assert len(failures) == 1 and failures[0][0] == "claude"
+    assert "ClaudeCode was turned off" in failures[0][1]
+
+
 class _StubSessions:
     @staticmethod
     def list_agent_sessions(settings_key, agent_name):

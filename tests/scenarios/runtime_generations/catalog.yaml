@@ -11,6 +11,7 @@ capability:
     - tests/test_codex_runtime_generations.py
     - tests/test_opencode_generations.py
     - tests/test_internal_server.py
+    - tests/test_claude_agent_sessions.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -66,6 +67,7 @@ scenarios:
     test: tests/test_backend_restart.py::test_runtime_gen_006_disabling_a_backend_stops_its_work_at_once
     related_tests:
       - tests/test_internal_server.py::test_runtime_gen_006_a_disabled_backend_tells_the_turn_it_was_turned_off
+      - tests/test_claude_agent_sessions.py::test_runtime_gen_006_a_turn_reaching_a_disabled_claude_starts_nothing
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_disabling_codex_ends_every_app_server_and_admits_nothing
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_disable_whose_stop_fails_is_retried_until_the_app_server_is_gone
       - tests/test_opencode_generations.py::test_runtime_gen_006_disabling_opencode_stops_every_generation_now_and_refuses_a_late_turn
