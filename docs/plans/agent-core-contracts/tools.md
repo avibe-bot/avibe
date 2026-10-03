@@ -202,6 +202,6 @@ os: macOS 26.0 (arm64)
 shell: /bin/zsh
 date: 2026-10-02
 timezone: Asia/Shanghai
-watches: wch_8f2k "pytest -q" running 6m
+watches: wch_8f2k "nightly sync" command running; wch_3c1d job running
 </environment>
 ```

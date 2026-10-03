@@ -52,7 +52,8 @@
     },
     "created_at": {
       "type": "string",
-      "format": "date-time"
+      "format": "date-time",
+      "description": "UTC creation time at full microsecond precision; recovery compares it with a response's commit time to tell apart jobs a reused tool-call id started."
     },
     "state_dir": {
       "type": "string",
@@ -127,7 +128,7 @@
       "command": "pytest -q",
       "cwd": "/work/repo",
       "timeout_s": null,
-      "created_at": "2026-10-02T04:12:09.512Z",
+      "created_at": "2026-10-02T04:12:09.512345Z",
       "state_dir": "/home/u/.avibe/state/agent_core/jobs/job_31c",
       "process": {
         "pid": 48211,

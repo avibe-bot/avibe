@@ -2303,6 +2303,14 @@ class AgentAuthService:
 
             self.controller.config.opencode = runtime_config
             agent_service.register(OpenCodeAgent(self.controller, runtime_config))
+        elif backend == "avibe":
+            from modules.agents.avibe import AvibeAgent
+
+            if not getattr(runtime_config, "enabled", True):
+                return False
+
+            self.controller.config.avibe = runtime_config
+            agent_service.register(AvibeAgent(self.controller))
         else:
             return False
 
@@ -2310,6 +2318,21 @@ class AgentAuthService:
 
         logger.info("Registered %s backend after runtime config refresh", backend)
         return True
+
+    async def _recover_after_live_registration(self, backend: str) -> None:
+        """A backend registered after startup: its recovery owner hands over to the registered adapter.
+
+        For ``avibe`` the controller's single ``AvibeRecovery`` retires any pending retry
+        (an unregistered adapter's) and runs the next pass on the registered adapter, so
+        two adapters never settle the same Session at once.
+        """
+        recovery = getattr(self.controller, "avibe_recovery", None) if backend == "avibe" else None
+        if recovery is None:
+            return
+        try:
+            await recovery.start()
+        except Exception:
+            logger.exception("Failed to recover %s runtime state after live registration", backend)
 
     async def _refresh_backend_runtime(self, backend: str) -> None:
         coordinator = getattr(self.controller, "backend_restart_coordinator", None)
@@ -2336,6 +2359,7 @@ class AgentAuthService:
                     backend,
                     runtime_config,
                 ):
+                    await self._recover_after_live_registration(backend)
                     return
                 if force and backend == "opencode":
                     agent = getattr(agent_service, "agents", {}).get(backend)

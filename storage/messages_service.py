@@ -99,6 +99,10 @@ def _row_to_payload(
         content = json.loads(row.get("content_json") or "{}")
     except json.JSONDecodeError:
         content = {}
+    if isinstance(content, dict):
+        # A transcript row's model payload (the Avibe Agent's context) is not display:
+        # no reader of a message payload uses it, and it can be large or private.
+        content.pop("model", None)
     link = content.get("failure_retry") if isinstance(content, dict) else None
     if conn is not None and isinstance(link, dict):
         from storage.message_deliveries import failure_retry_state, get_delivery

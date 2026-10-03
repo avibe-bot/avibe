@@ -313,6 +313,10 @@ class Controller:
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
+        from modules.agents.avibe.recovery import AvibeRecovery
+
+        # The single owner of the Avibe Agent's settlement outside a Turn.
+        self.avibe_recovery = AvibeRecovery(self)
         self.trace_retention_task: Optional[asyncio.Task] = None
         self._trace_retention_executor: Optional[Any] = None
         self._trace_retention_cancel_event: Optional[threading.Event] = None
@@ -751,6 +755,14 @@ class Controller:
                 self.agent_service.register(OpenCodeAgent(self, self.config.opencode))
             except Exception as e:
                 logger.error(f"Failed to initialize OpenCode agent: {e}")
+        avibe_config = getattr(self.config, "avibe", None)
+        if avibe_config is not None and getattr(avibe_config, "enabled", True):
+            try:
+                from modules.agents.avibe import AvibeAgent
+
+                self.agent_service.register(AvibeAgent(self))
+            except Exception as e:
+                logger.error(f"Failed to initialize Avibe Agent: {e}")
 
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
@@ -1008,6 +1020,15 @@ class Controller:
             except Exception as e:
                 logger.error(f"Failed to restore active polls: {e}", exc_info=True)
 
+    async def _recover_avibe_agent_runtime_state(self) -> None:
+        """Settle what the previous process left of the Avibe Agent's work (T2, T3 admission, J5).
+
+        Not gated on ``agents.avibe.enabled``: a foreground job the previous process left
+        running must be handed to its Watch even when the backend admits no new Turns.
+        ``avibe_recovery`` is the single owner, retrying until every Session has settled.
+        """
+        await self.avibe_recovery.start()
+
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)
@@ -1085,6 +1106,10 @@ class Controller:
         # A no-op in any process that does not hold the service lock, so the
         # embedded and test paths that run a controller are unaffected.
         self._publish_readiness_unless_im_runtime_failed()
+        try:
+            await self._recover_avibe_agent_runtime_state()
+        except Exception:
+            logger.exception("Failed to recover the Avibe Agent's runtime state")
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
@@ -2329,6 +2354,11 @@ class Controller:
         show_git_checkpoint_service = getattr(self, "show_git_checkpoint_service", None)
         if show_git_checkpoint_service is not None:
             show_git_checkpoint_service.stop()
+
+        # The Avibe Agent's recovery retries end with the service; the next start recovers again.
+        avibe_recovery = getattr(self, "avibe_recovery", None)
+        if avibe_recovery is not None:
+            _stop_loop_coroutine(avibe_recovery.stop(), "Avibe Agent recovery")
 
         try:
             codex_agent = self.agent_service.agents.get("codex")

@@ -765,6 +765,7 @@ class ManagedWatchStore:
         message: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         user_context: Any = None,
+        unverifiable_remote: bool = False,
     ) -> str:
         """The id of the Watch that owns ``job`` (its ``meta.json``), created if none does.
 
@@ -795,6 +796,7 @@ class ManagedWatchStore:
                 message=message,
                 metadata=metadata,
                 user_context=user_context,
+                unverifiable_remote=unverifiable_remote,
             )
         except Exception:
             try:
@@ -816,17 +818,23 @@ class ManagedWatchStore:
         message: Optional[str],
         metadata: Optional[dict[str, Any]],
         user_context: Any,
+        unverifiable_remote: bool = False,
     ) -> str:
         from core.vibe_agents import ensure_agent_name_access
-        from storage.resource_access_service import (
-            ensure_harness_definition_write,
-            metadata_with_resource_user_context,
-        )
+        from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY, ensure_harness_definition_write
 
-        ensure_harness_definition_write(user_context)
-        ensure_agent_name_access(agent_name, user_context=user_context)
         target = _job_target_from_meta(job)
-        watch_metadata = metadata_with_resource_user_context(metadata, user_context)
+        if unverifiable_remote:
+            # The job's Turn was remote but its authorization cannot be verified: the
+            # Watch still owns the job (no command runs without an owner), and it never
+            # follows up (``watch_allows_runtime``).
+            authority = (RESOURCE_USER_CONTEXT_METADATA_KEY, JOB_WATCH_AUTHORIZATION_METADATA_KEY)
+            watch_metadata = {key: value for key, value in (metadata or {}).items() if key not in authority}
+            watch_metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] = dict(UNVERIFIABLE_REMOTE_AUTHORIZATION)
+        else:
+            ensure_harness_definition_write(user_context)
+            ensure_agent_name_access(agent_name, user_context=user_context)
+            watch_metadata = _with_job_watch_authority(metadata, user_context)
         watch_metadata[WATCH_TARGET_METADATA_KEY] = target
         watch = ManagedWatch(
             id=uuid4().hex[:12],
@@ -1069,10 +1077,12 @@ class ManagedWatchStore:
             watch.retry_delay_seconds = retry_delay_seconds
             watch.post_to = post_to
             watch.deliver_key = deliver_key
-            watch.metadata = metadata_with_resource_user_context(
-                metadata if metadata is not None else watch.metadata,
-                user_context,
+            # An update re-authors the Watch to its updater; a job Watch records that
+            # authority explicitly, like its hand-over did.
+            with_authority = (
+                _with_job_watch_authority if watch.job_target is not None else metadata_with_resource_user_context
             )
+            watch.metadata = with_authority(metadata if metadata is not None else watch.metadata, user_context)
             if waiter_lifecycle_changed:
                 watch.metadata = dict(watch.metadata)
                 watch.metadata.pop(RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
@@ -2590,10 +2600,7 @@ class ManagedWatchService:
         await asyncio.sleep(delay)
 
     async def _run_watch(self, watch_id: str) -> None:
-        from storage.resource_access_service import (
-            HARNESS_ACCESS_FORBIDDEN_CODE,
-            metadata_allows_harness_runtime,
-        )
+        from storage.resource_access_service import HARNESS_ACCESS_FORBIDDEN_CODE
 
         lifetime_started: float | None = None
         self._watch_started_at[watch_id] = _utc_now_iso()
@@ -2614,7 +2621,7 @@ class ManagedWatchService:
             watch = self.store.get_watch(watch_id)
             if watch is None or not watch.enabled:
                 return
-            if not metadata_allows_harness_runtime(watch.metadata):
+            if not watch_allows_runtime(watch):
                 self._watch_store_call(
                     watch.id,
                     "suspend_remote_origin",
@@ -3332,6 +3339,50 @@ def _format_elapsed(seconds: float) -> str:
     if minutes:
         return f"{minutes}m {secs}s"
     return f"{secs}s"
+
+
+# A job Watch records whose authority its follow-up runs under: a remote snapshot, or
+# this marker for the installation's own (local) Turns. Never implied by absence.
+JOB_WATCH_AUTHORIZATION_METADATA_KEY = "job_watch_authorization"
+JOB_WATCH_LOCAL_AUTHORIZATION = "local"
+# The snapshot of a remote Turn whose authorization could not be found.
+UNVERIFIABLE_REMOTE_AUTHORIZATION = {"unverifiable": True}
+
+
+def _with_job_watch_authority(metadata: Optional[Mapping[str, Any]], user_context: Any) -> dict[str, Any]:
+    """``metadata`` recording ``user_context`` as a job Watch's authority: its snapshot, or the local marker."""
+    from storage.resource_access_service import metadata_with_resource_user_context, resolve_resource_access_context
+
+    result = metadata_with_resource_user_context(metadata, user_context)
+    result.pop(JOB_WATCH_AUTHORIZATION_METADATA_KEY, None)
+    if not resolve_resource_access_context(user_context).is_remote:
+        result[JOB_WATCH_AUTHORIZATION_METADATA_KEY] = JOB_WATCH_LOCAL_AUTHORIZATION
+    return result
+
+
+def watch_allows_runtime(watch: "ManagedWatch") -> bool:
+    """Whether a Watch may keep running and follow up, under the authority it recorded.
+
+    A legacy (waiter-command) Watch keeps the rule that a missing snapshot means a
+    local definition. A job Watch must carry its authorization explicitly: a remote
+    snapshot that still passes the recheck, or the local marker; anything else,
+    including an unverifiable snapshot, is denied.
+    """
+    from storage.resource_access_service import (
+        RESOURCE_USER_CONTEXT_METADATA_KEY,
+        metadata_allows_harness_runtime,
+        metadata_has_remote_resource_context,
+    )
+
+    metadata = watch.metadata
+    if watch.job_target is None:
+        return metadata_allows_harness_runtime(metadata)
+    if metadata_has_remote_resource_context(metadata):
+        return (
+            metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] != UNVERIFIABLE_REMOTE_AUTHORIZATION
+            and metadata_allows_harness_runtime(metadata)
+        )
+    return isinstance(metadata, dict) and metadata.get(JOB_WATCH_AUTHORIZATION_METADATA_KEY) == JOB_WATCH_LOCAL_AUTHORIZATION
 
 
 async def hand_over_job(

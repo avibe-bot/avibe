@@ -201,6 +201,43 @@ def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path)
     assert metadata["fork_trim_latest_running_turn"] is False
 
 
+def test_reserve_forked_avibe_session_records_its_context_anchor(tmp_path: Path) -> None:
+    # The Avibe Agent's context is the source's rows up to the anchor (C-5 section 4):
+    # resolved once at reservation, so rows the source commits later never enter the prefix.
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path, backend="avibe")
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            turns = (("user", "user", "first question"), ("agent", "result", "first answer"),
+                     ("user", "user", "fyi"), ("agent", "assistant", ""))
+            # The last Turn ended silently: its final is a hidden row no message anchor names.
+            for seq, (author, mtype, text) in enumerate(turns, start=1):
+                row = messages_service.append(
+                    conn, scope_id=scope_id, session_id=source_id, platform="avibe", author=author,
+                    source=author, message_type=mtype, text=text,
+                )
+                conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == result.session_id)).mappings().one()
+    finally:
+        engine.dispose()
+    metadata = json.loads(row["metadata_json"])
+    assert result.fork.source_backend == "avibe"
+    # With no running Turn the child inherits the whole settled context, as a native fork does.
+    assert metadata["fork_source_context_seq"] == 4
+
+
 def test_reserve_forked_codex_running_fork_marks_trim(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     source_id = _seed_source_session(db_path, tmp_path)
@@ -559,9 +596,12 @@ def test_reserve_forked_opencode_running_first_turn_records_user_boundary(
     assert "fork_opencode_fork_empty_history" not in metadata
 
 
-def test_reserve_forked_session_clears_stale_opencode_active_run_boundary(
+def test_reserve_forked_session_clears_stale_fork_boundaries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A source that is itself a fork carries its own boundaries; the child must
+    # never inherit them as its own (OpenCode's native point, the Avibe Agent's
+    # ``fork_source_context_seq`` context anchor).
     db_path = tmp_path / "vibe.sqlite"
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
@@ -583,6 +623,7 @@ def test_reserve_forked_session_clears_stale_opencode_active_run_boundary(
                             "fork_opencode_message_id": "stale-oc-msg",
                             "fork_opencode_fork_empty_history": True,
                             "fork_opencode_boundary_from_active_run": True,
+                            "fork_source_context_seq": 7,
                         }
                     ),
                 )
@@ -605,6 +646,7 @@ def test_reserve_forked_session_clears_stale_opencode_active_run_boundary(
     assert "fork_opencode_message_id" not in metadata
     assert "fork_opencode_fork_empty_history" not in metadata
     assert "fork_opencode_boundary_from_active_run" not in metadata
+    assert "fork_source_context_seq" not in metadata
 
 
 def test_reserve_forked_opencode_missing_boundary_preserves_trim_intent(

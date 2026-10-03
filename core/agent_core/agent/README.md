@@ -27,8 +27,12 @@ pending = await agent.take_pending_inputs()
 `steer` and `follow_up` are async and return whether the active run accepted the
 input. `False` means the adapter keeps the persisted input in the P3 queue.
 An accepted input remains owned by the Agent until consumed or returned by
-`take_pending_inputs()`. Early termination preserves those queues; the adapter
-returns their durable rows to P3. A new run is refused until they are collected.
+`take_pending_inputs()`. Early termination preserves those queues, and a new run
+is refused until they are collected. A returned input belongs to the Turn that
+accepted it and is never re-queued as a new P3 Turn (`recovery.md` T3): after a
+run that ended by design (a terminating tool or a hook `end`), the Avibe adapter
+runs again for the returned inputs within the same Turn; after a stop or an
+error, it admits them into the context, and they share the Turn's outcome.
 `abort`, `set_tools`, and `snapshot` are synchronous on the same event loop.
 Only one run can use an Agent at a time. The adapter remains responsible for
 excluding multiple Agent instances writing the same Session.

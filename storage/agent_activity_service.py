@@ -291,7 +291,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 else "ignore"
             )
         elif activity_role == "activity":
-            kind = "activity"
+            # A row with no text (a response that only called tools, or a hidden silent
+            # final) shows nothing; other backends never persist one.
+            kind = "activity" if str(msg.get("text") or "").strip() else "ignore"
         elif activity_role == "boundary":
             kind = "boundary"
         else:

@@ -121,6 +121,27 @@ def _iso(moment: datetime) -> str:
     return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def instant_text(moment: datetime) -> str:
+    """A UTC instant at full microsecond precision, the form job and transcript times compare in."""
+    return moment.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def instant(value: object) -> Optional[datetime]:
+    """Parse a recorded UTC time (``...Z`` or an offset) at full precision, or ``None``.
+
+    The one parser for every time the job and recovery paths compare: a job's
+    ``created_at``, a response's commit, a tool result's commit.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
 def _ceil_ms(moment: datetime) -> datetime:
     """Round up to the millisecond ``_iso`` keeps, so a recorded deadline is never early."""
     rest = moment.microsecond % 1000
@@ -213,16 +234,30 @@ class LocalJobHost:
     def _write_meta(self, job_id: str, meta: Mapping[str, Any]) -> None:
         _write_atomic(self._path(job_id, "meta.json"), _meta_text(meta))
 
-    def find_job(self, session_id: str, tool_call_id: str) -> Optional[str]:
-        """The job started for a tool call, for settling it at resume."""
+    def find_job(
+        self, session_id: str, tool_call_id: str, *, created_since: Optional[datetime] = None
+    ) -> Optional[str]:
+        """The job started for a tool call, for settling it at resume.
+
+        A provider may reuse a tool-call id in a later response, so several jobs can
+        match: the newest is returned. ``created_since``, the commit time of the
+        response that made the call, excludes jobs an earlier call with the same id
+        started.
+        """
+        newest: Optional[tuple[datetime, str]] = None
         for name in self._job_ids():
             try:
                 meta = self.meta(name)
             except (KeyError, ValueError, OSError):
                 continue
-            if meta.get("session_id") == session_id and meta.get("tool_call_id") == tool_call_id:
-                return name
-        return None
+            if meta.get("session_id") != session_id or meta.get("tool_call_id") != tool_call_id:
+                continue
+            created = instant(meta.get("created_at"))
+            if created is None or (created_since is not None and created < created_since):
+                continue
+            if newest is None or created > newest[0]:
+                newest = (created, name)
+        return newest[1] if newest is not None else None
 
     def _job_ids(self) -> list[str]:
         try:
@@ -325,7 +360,9 @@ class LocalJobHost:
             "command": command,
             "cwd": cwd,
             "timeout_s": timeout_s,
-            "created_at": _iso(created),
+            # Full precision: recovery tells apart jobs a reused tool-call id started
+            # within one millisecond (``find_job``).
+            "created_at": instant_text(created),
             "state_dir": job_dir,
             "process": None,
             "terminal": None,

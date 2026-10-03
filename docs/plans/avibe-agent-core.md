@@ -400,3 +400,12 @@ contracts and checked against the implementing lane's code before they are close
 | P1 | `avibe-agent-core.md` | Keep background descendants inside the job lifecycle |
 | P2 | `loop-control.md` | Avoid delivering refusal errors twice |
 | P2 | `message.schema.json` | Require content in canonical tool results |
+
+## 10. Follow-ups
+
+| Item | Owner | Note |
+| --- | --- | --- |
+| Product-wide media retention | `storage/media_service.py` | No media file is removed from disk today, whether Workbench upload, IM attachment, or Avibe Agent context snapshot (`<state>/agent_core/media`); session deletion only clears or cascades `media_objects` references. Retention needs one owner for every source. It must be fork-aware: a fork descendant keeps replaying the image tokens of a source Session that was deleted. Recorded as a v1 known limit in PR #2345. |
+| Steer receipt fencing in the shared Turn owner | `core/session_turns.py` (`_finish_steer`) | **Done in PR #2345** (orchestrator-authorized cross-lane fix): a negative receipt settles only a current attempt whose Deliveries are still steering or reconciling, and a caller that knows the attempt passes `expected_attempt_id`, so a late or duplicate receipt can no longer pull a Delivery out of a Turn that claimed it. Regression: `test_a_late_negative_steer_receipt_never_moves_a_delivery_its_attempt_no_longer_owns`. |
+| Live partial text and progress | every backend, Workbench and IM | No backend shows streamed partial text or live tool output today; the Avibe Agent drops `text_delta`, `thinking_delta`, and `tool_progress` (`loop-control.md` §6). Showing them needs a new UI surface for every backend, not an Avibe Agent change. |
+| Call-instance identity for job files | `core/agent_core/tools/` (`ToolContext`, job `meta.json`), the adapter | A tool call's identity is its instance: the owning response plus the call id, because providers reuse ids. Rows are matched by context order; job files still fall back to the clock (`find_job(created_since)`, J5's result-after-creation check), which assumes a non-decreasing wall clock between a response's commit and its job's start. Threading the call instance (owning response row and `context_seq`) into `ToolContext` and the job meta would remove that last residual. |
