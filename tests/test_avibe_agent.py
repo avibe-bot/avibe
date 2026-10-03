@@ -1969,6 +1969,34 @@ async def test_a_turn_runs_bash_through_the_real_job_host(engine, session, tmp_p
     assert "hi from bash" in str(harness.provider.requests[1].messages[-1])
 
 
+async def test_bash_runs_with_the_turns_caller_environment(engine, session, tmp_path, published) -> None:
+    from core.caller_context import AVIBE_CALLER_BACKEND_ENV, AVIBE_SESSION_ID_ENV, CALLER_CONTEXT_ENV_NAMES
+
+    # Resolved through PATH, as ordinary project commands and the vibe CLI are.
+    command = "env | sort"
+    call = ToolCallBlock(id="call_env", name="bash", arguments={"command": command})
+    harness = _Harness(
+        engine, tmp_path, "telegram",
+        [[Done(assistant("", calls=(call,)))], [Done(assistant("done"))]],
+        suite=local_tool_suite(str(tmp_path / "jobs")),
+    )
+    request = harness.request("show the environment")
+
+    await harness.agent.handle_message(request)
+
+    output = (await harness.context_rows())[2].message.content[0].text
+    assert not (await harness.context_rows())[2].message.is_error
+    seen = dict(line.split("=", 1) for line in output.splitlines() if "=" in line and line.split("=", 1)[0].isupper())
+    # The service's environment: PATH and HOME, so the command resolved at all.
+    assert seen.get("PATH") and seen.get("HOME")
+    # The Turn's caller provenance, as the other backends give their shells.
+    assert seen[AVIBE_SESSION_ID_ENV] == SESSION
+    assert seen[AVIBE_CALLER_BACKEND_ENV] == "avibe"
+    assert {key for key in seen if key in CALLER_CONTEXT_ENV_NAMES} >= {AVIBE_SESSION_ID_ENV, AVIBE_CALLER_BACKEND_ENV}
+    # The Model Hub gateway token stays in the adapter: never in a command's environment.
+    assert "hub-token" not in output
+
+
 @pytest.mark.parametrize("state", ["exited", "running"])
 async def test_resume_settles_a_real_bash_job_through_the_real_renderer(
     engine, session, tmp_path, published, state

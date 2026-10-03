@@ -29,7 +29,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Optional, Sequence
+from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Engine
@@ -254,7 +254,8 @@ class AvibeAgent(BaseAgent):
         if turn.stop_requested:
             return await self._settle_stopped(turn)
         sections, skill_catalog = await self._avibe_sections(request, cwd)
-        self._start_agent(turn, cwd, sections)
+        environment = await asyncio.to_thread(self._turn_environment, request, cwd)
+        self._start_agent(turn, cwd, sections, environment)
         runtime.cwd = cwd
         # Prepared before anything is dispatched (``core.native_dispatch_phase``).
         message = await self._render_input(session_id, request.message, request.files, request.input_metadata)
@@ -520,8 +521,8 @@ class AvibeAgent(BaseAgent):
 
         return HubModelRouter(resolve, self._providers, first=await resolve())
 
-    def _start_agent(self, turn: _Run, cwd: str, sections: str) -> None:
-        """The Turn's loop, over its router, tools, and system prompt."""
+    def _start_agent(self, turn: _Run, cwd: str, sections: str, environment: Mapping[str, str]) -> None:
+        """The Turn's loop, over its router, tools, system prompt, and the environment its commands run in."""
         request, session_id = turn.request, turn.session_id
         suite = self._tools()
         agent = Agent(
@@ -532,6 +533,7 @@ class AvibeAgent(BaseAgent):
             store=self.store,
             jobs=suite.jobs,
             cwd=cwd,
+            env=environment,
             reasoning_effort=request.subagent_reasoning_effort or request.vibe_agent_reasoning_effort,
         )
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
@@ -876,6 +878,42 @@ class AvibeAgent(BaseAgent):
 
         sections = await asyncio.to_thread(build)
         return sections, (skill_catalog_sink[0] if skill_catalog_sink else None)
+
+    def _turn_environment(self, request: AgentRequest, cwd: str) -> dict[str, str]:
+        """The environment a Turn's commands run in, from the owners the other backends' shells use.
+
+        The service's environment without its own caller provenance, then this Turn's
+        caller context (``AVIBE_SESSION_ID``, ``AVIBE_CALLER_*``, so a ``vibe`` call in a
+        command records where it came from), the managed-skill bindings, and verified
+        Git on ``PATH``, composed as the Codex backend composes its shell environment.
+        The Model Hub gateway token stays in the adapter.
+        """
+        from core.caller_context import caller_env_for_platform_payload, environment_without_caller_context
+        from core.git_runtime import prepend_vendored_git_to_path
+        from core.managed_skills import (
+            managed_skill_claude_cli_path,
+            managed_skill_environment,
+            managed_skill_project_base,
+        )
+
+        context = request.context
+        environment = environment_without_caller_context()
+        environment.update(
+            caller_env_for_platform_payload(
+                getattr(context, "platform_specific", None),
+                message=context,
+                fallback_platform=getattr(self.config, "platform", None),
+            )
+        )
+        environment.update(
+            managed_skill_environment(
+                cwd or None,
+                project_base=managed_skill_project_base(context),
+                claude_cli_path=managed_skill_claude_cli_path(self.config),
+            )
+        )
+        prepend_vendored_git_to_path(environment, base_env=environment, working_dir=cwd or None)
+        return environment
 
     def _environment(self, session_id: str) -> dict[str, str]:
         runtime = self._runtimes.get(session_id)
