@@ -8091,8 +8091,9 @@ class SessionTurnManager:
     ) -> int:
         """Release active Workbench turns whose backend runtime is being refreshed.
 
-        ``settled_by`` names why: a runtime refresh, or the user disabling the
-        backend (``SETTLED_BY_BACKEND_DISABLED``), which also chooses the notice.
+        ``settled_by`` names why: a runtime refresh, the user disabling the
+        backend (``SETTLED_BY_BACKEND_DISABLED``), which also chooses the notice,
+        or the user ending the runtime (``SETTLED_BY_STOPPED``), which needs none.
 
         A backend refresh is a terminal runtime event: Codex/OpenCode/Claude cached
         process state can disappear underneath a Workbench turn before that turn's
@@ -8161,7 +8162,11 @@ class SessionTurnManager:
             else:
                 turn.task.cancel()
                 tasks_to_settle.append(turn.task)
-                if refresh_owns_outcome and not harness_run_identity(turn.context, None):
+                if (
+                    refresh_owns_outcome
+                    and settled_by != SETTLED_BY_STOPPED
+                    and not harness_run_identity(turn.context, None)
+                ):
                     interrupted_turns.append((session_id, turn))
             if backend in self._draining_backends:
                 self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
@@ -8186,11 +8191,12 @@ class SessionTurnManager:
             owned_by_run = bool(self.accepted_agent_run_ids_for_turn(owner_id))
             origin_message_id = self._turn_origin_native_message_id(owner_id)
             if owner["state"] == "starting":
-                # An unresolved start fails on a refresh, but a disable is the
-                # user's own cancellation, whatever stage the start reached.
+                # An unresolved start fails on a refresh, but a disable or an
+                # End is the user's own cancellation, whatever stage the start
+                # reached.
                 terminal = self._terminalize_durable_turn(
                     owner_id,
-                    "canceled" if settled_by == SETTLED_BY_BACKEND_DISABLED else "failed",
+                    "canceled" if settled_by in (SETTLED_BY_BACKEND_DISABLED, SETTLED_BY_STOPPED) else "failed",
                     settled_by=settled_by,
                     evidence_kind="backend_refresh_start_failed",
                     evidence={
@@ -8214,8 +8220,9 @@ class SessionTurnManager:
                 )
             if terminal.get("changed"):
                 released_restored.add(str(owner["session_id"]))
-                # Starting or active, the refresh retired this conversation's input.
-                if not owned_by_run and self.controller is not None:
+                # Starting or active, the refresh retired this conversation's
+                # input. The user's own stop needs no explanation.
+                if not owned_by_run and self.controller is not None and settled_by != SETTLED_BY_STOPPED:
                     self._notify_backend_refresh(
                         str(owner["session_id"]), origin_message_id, owner_id, backend, settled_by=settled_by
                     )

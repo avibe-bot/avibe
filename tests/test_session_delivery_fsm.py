@@ -5471,14 +5471,16 @@ def test_forced_refresh_tells_a_restored_conversation_turn_why_it_stopped(manage
     [
         ("backend_refresh", "failed", "failed", "⚠️ This turn was interrupted — its Agent runtime had to be replaced"),
         ("backend_disabled", "canceled", "idle", "⏹ This turn was stopped because Codex was turned off."),
+        # Running Agents End: the user's own stop, which needs no explanation.
+        ("stopped", "canceled", "idle", None),
     ],
-    ids=["refresh", "disable"],
+    ids=["refresh", "disable", "end"],
 )
 def test_forced_backend_refresh_fails_unresolved_start_instead_of_blocking(
     managers, settled_by, outcome, session_status, notice,
 ) -> None:
-    """A forced refresh fails an unresolved start, and a disable (RUNTIME-GEN-006)
-    cancels it, since the user chose it. Neither leaves the start blocking."""
+    """A forced refresh fails an unresolved start, while a disable (RUNTIME-GEN-006)
+    or an End cancels it, since the user chose it. None leaves the start blocking."""
     manager, _other, engine, _engine_b, _starts = managers
     delivery_id = delivery_store.new_delivery_id()
     turn_id = delivery_store.new_turn_id()
@@ -5526,8 +5528,9 @@ def test_forced_backend_refresh_fails_unresolved_start_instead_of_blocking(
     assert released == 1
     assert _row(engine, delivery_id)["state"] == "retired"
     # MH-MIG-012: the refresh retired this conversation's input, so it says so.
-    assert [kind for kind, _text in emitted] == ["notify"]
-    assert emitted[0][1].startswith(notice)
+    assert [kind for kind, _text in emitted] == (["notify"] if notice else [])
+    if notice:
+        assert emitted[0][1].startswith(notice)
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)
         status = conn.execute(

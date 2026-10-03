@@ -874,7 +874,7 @@ def test_end_codex_settles_clears_and_stops_the_last_users_app_server():
             "codex",
             base_session_ids={"b1"},
             activation_identities={None},
-            reason="backend_refresh",
+            reason="stopped",
             agent=agent,
         )
         transport.stop.assert_awaited_once()

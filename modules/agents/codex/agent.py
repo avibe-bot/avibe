@@ -38,7 +38,7 @@ from core.native_dispatch_phase import (
     mark_prewrite_recovery_required,
 )
 from core.processing_indicator import STOPPED_REACTION_EMOJI
-from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
+from core.run_settlement import SETTLED_BY_BACKEND_REFRESH, SETTLED_BY_STOPPED
 from core.prompt_registry import prompt_text
 from core.services.agent_steering import (
     ActiveSteerTarget,
@@ -1458,9 +1458,10 @@ class CodexAgent(BaseAgent):
                 and generation in unit.generations
                 and not self._serves_another_session(unit, base_session_id)
             ):
-                # End is an explicit request to kill.
+                # End is the user's explicit request to kill, so what it ends
+                # is settled as their stop.
                 await self._stop_generations_now(
-                    unit, unit.generations, require_process_exit=True, settle_reason=SETTLED_BY_BACKEND_REFRESH
+                    unit, unit.generations, require_process_exit=True, settle_reason=SETTLED_BY_STOPPED
                 )
                 process_killed = True
             else:

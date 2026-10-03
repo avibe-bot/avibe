@@ -1282,7 +1282,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             events,
-            [("settle", "codex", set(), {activation}, "backend_refresh"), "stop"],
+            [("settle", "codex", set(), {activation}, "stopped"), "stop"],
         )
 
     async def test_a_forced_stop_settles_activities_its_sessions_no_longer_name(self):
