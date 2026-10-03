@@ -446,8 +446,11 @@ simply stop the work, and that machinery is gone.
   path, and it is skipped once the backend is enabled again. The guaranteed
   settlement is scoped to what the disable captured: the disabled agent's own
   generations (adapter forced stop with `settle_reason`), or Claude's captured
-  clients. A retry after a re-enable therefore still finishes the disabled
-  agent's work and touches nothing new.
+  clients. The core matches that work by owner, never by key: Activities by
+  the disabled agent's activation identities, turns only where that agent
+  holds the Session's turn gate (`force_end_runtime_work(...,
+  activation_identities=, agent=)`). A retry after a re-enable therefore still
+  finishes the disabled agent's work and touches nothing new.
   - **Enabled but not registered:** a new agent registers at once.
 - `run_when_idle` keeps admission closed for the install step only. Afterwards
   it renews instead of refreshing.
