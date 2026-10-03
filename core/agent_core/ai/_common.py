@@ -15,7 +15,7 @@ from urllib.parse import parse_qsl, unquote_to_bytes, urlencode, urlsplit, urlun
 import httpx
 
 from core.agent_core.ai.errors import classify_error, parse_retry_after
-from core.agent_core.ai.sse import SSEEvent, SSEParser
+from core.agent_core.ai.sse import SSEEvent, SSEParseError, SSEParser
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantContent,
@@ -57,6 +57,7 @@ WireTranslator = Callable[[AsyncIterator[SSEEvent]], AsyncIterator[Any]]
 CONNECT_TIMEOUT_S = 10.0
 TIME_TO_FIRST_BYTE_TIMEOUT_S = 30.0
 IDLE_CHUNK_TIMEOUT_S = 30.0
+CLEANUP_TIMEOUT_S = 10.0
 
 
 def usage_counter_error(
@@ -695,9 +696,17 @@ class StreamAssembler:
         )
         return replace(error, message=sanitize_endpoint_text(error.message, self._endpoint_url))
 
-    def exception(self, exc: BaseException) -> ProviderError:
+    def exception(
+        self,
+        exc: BaseException,
+        *,
+        status: int | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> ProviderError:
         error = classify_error(
             exc=exc,
+            status=status,
+            headers=headers,
             streamed=self.streamed,
             partial=self.partial() if self.streamed or self.usage is not None else None,
         )
@@ -1020,15 +1029,25 @@ async def drive_sse_stream(
                     else:
                         assembler.set_origin(*resolved_origin)
                         if response.status_code >= 400:
-                            body = await read_response_body(response, cancel)
-                            if body is None:
-                                candidate = assembler.aborted(cancel.reason)
-                            else:
-                                candidate = assembler.error(
-                                    body,
+                            try:
+                                body = await read_response_body(response, cancel)
+                            except (GeneratorExit, asyncio.CancelledError):
+                                raise
+                            except Exception as exc:
+                                candidate = assembler.exception(
+                                    exc,
                                     status=response.status_code,
                                     headers=response.headers,
                                 )
+                            else:
+                                if body is None:
+                                    candidate = assembler.aborted(cancel.reason)
+                                else:
+                                    candidate = assembler.error(
+                                        body,
+                                        status=response.status_code,
+                                        headers=response.headers,
+                                    )
                         else:
                             async for item in translate(iter_sse_events(response, cancel)):
                                 if isinstance(item, (Done, ProviderError)):
@@ -1043,6 +1062,8 @@ async def drive_sse_stream(
                                 )
         except (GeneratorExit, asyncio.CancelledError):
             raise
+        except SSEParseError as exc:
+            candidate = assembler.error(str(exc), kind="invalid_request")
         except Exception as exc:
             candidate = assembler.exception(exc)
 
@@ -1054,11 +1075,16 @@ async def drive_sse_stream(
         assembler.end_driver()
         if response is not None:
             try:
-                await _await_network(response.aclose(), CancelToken())
-            except BaseException:
+                await _await_network(
+                    response.aclose(),
+                    CancelToken(),
+                    timeout_s=CLEANUP_TIMEOUT_S,
+                )
+            except Exception:
                 # The terminal event has already been delivered. Cleanup is
-                # diagnostic only and must never create a second outcome or
-                # replace consumer/task cancellation.
+                # diagnostic only and must never create a second outcome.
+                # asyncio.CancelledError remains a BaseException so consumer
+                # and task cancellation continues through this cleanup path.
                 pass
 
 

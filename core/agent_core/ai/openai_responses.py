@@ -703,12 +703,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 if end is not None:
                                     yield end
                             elif item.get("type") == "message":
-                                if "content" in item and item.get("content") is not None and not isinstance(
-                                    item.get("content"), list
-                                ):
+                                content_error = _message_content_error(item)
+                                if content_error is not None:
                                     terminal = assembler.terminal(
                                         assembler.error(
-                                            "response.output_item.done message content must be an array",
+                                            f"response.output_item.done {content_error}",
                                             kind="invalid_request",
                                         )
                                     )
@@ -1251,6 +1250,12 @@ def _apply_terminal_output_items(
             if state["encrypted_content"]:
                 assembler.set_thinking_signature(state_index, _reasoning_signature_json(state))
         elif item.get("type") == "message":
+            content_error = _message_content_error(item)
+            if content_error is not None:
+                return assembler.error(
+                    f"response output message {content_error}",
+                    kind="invalid_request",
+                ), refusal
             message_refusal = _message_has_refusal(item)
             refusal = refusal or message_refusal
             if message_refusal and assembler.has_text_slot(index):
@@ -1284,6 +1289,22 @@ def _message_has_refusal(item: Mapping[str, Any]) -> bool:
         isinstance(part, Mapping) and bool(_string(part.get("refusal")))
         for part in value
     )
+
+
+def _message_content_error(item: Mapping[str, Any]) -> str | None:
+    value = item.get("content")
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return "message content must be an array"
+    for index, part in enumerate(value):
+        if not isinstance(part, Mapping):
+            return f"message content part {index} must be an object"
+        for field in ("type", "text", "refusal"):
+            raw = part.get(field)
+            if raw is not None and not isinstance(raw, str):
+                return f"message content part {index} {field} must be a string"
+    return None
 
 
 def _append_message_refusal(assembler: StreamAssembler, index: int, item: Mapping[str, Any]) -> None:

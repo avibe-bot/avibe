@@ -9,7 +9,7 @@ import pytest
 from core.agent_core.ai._common import endpoint_origin, sanitize_endpoint_text
 from core.agent_core.ai.errors import classify_error
 from core.agent_core.ai.provider import ModelEndpoint
-from core.agent_core.ai.sse import SSEParser
+from core.agent_core.ai.sse import SSEParseError, SSEParser
 from core.agent_core.ai.transform import SYNTHETIC_TOOL_RESULT, transform_messages
 from core.agent_core.messages import (
     AssistantMessage,
@@ -63,6 +63,24 @@ def test_sse_parser_strips_one_utf8_bom_at_stream_start() -> None:
     events.extend(parser.feed("data: second\n\n"))
 
     assert [event.data for event in events] == ["first", "second"]
+
+
+def test_sse_parser_caps_pending_line_and_event_data() -> None:
+    parser = SSEParser(max_line_size=8, max_event_size=12)
+
+    with pytest.raises(SSEParseError, match="line"):
+        parser.feed("data: 123")
+
+    parser = SSEParser(max_line_size=128, max_event_size=8)
+    parser.feed("data: 1234\n")
+    with pytest.raises(SSEParseError, match="event"):
+        parser.feed("data: 5678\n")
+
+    large_event = SSEParser().feed(f"data: {'x' * (70 * 1024)}\n\n")
+    assert large_event[0].data == "x" * (70 * 1024)
+
+    with pytest.raises(ValueError, match="positive"):
+        SSEParser(max_line_size=0)
 
 
 def test_cross_provider_transform_drops_opaque_payload_and_answers_orphaned_calls() -> None:

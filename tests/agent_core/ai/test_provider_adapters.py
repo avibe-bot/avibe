@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
+import core.agent_core.ai.sse as sse_module
 from core.agent_core.ai.anthropic import AnthropicAdapter
 from core.agent_core.ai._common import read_response_body
 from core.agent_core.ai.openai_chat import OpenAIChatAdapter, build_chat_payload
@@ -2107,6 +2108,20 @@ class _StalledErrorBody(httpx.AsyncByteStream):
         self.closed.set()
 
 
+class _ErrorBodyReadFailure(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    async def __aiter__(self):
+        self.started.set()
+        raise OSError("error body read failed")
+        yield b""
+
+    async def aclose(self) -> None:
+        self.closed.set()
+
+
 class _StalledLoader(MediaLoader):
     def __init__(self) -> None:
         self.started = asyncio.Event()
@@ -2152,6 +2167,20 @@ class _TrackCloseStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         self.closed.set()
+
+
+class _StalledCloseStream(httpx.AsyncByteStream):
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __aiter__(self):
+        yield self.body
+
+    async def aclose(self) -> None:
+        self.started.set()
+        await self.release.wait()
 
 
 class _DelayedReadErrorStream(httpx.AsyncByteStream):
@@ -2356,6 +2385,165 @@ async def test_consumer_close_suppresses_response_close_failure() -> None:
         first = await anext(stream)
         assert isinstance(first, TextDelta)
         await stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "body"),
+    [
+        (
+            AnthropicAdapter,
+            "anthropic",
+            b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+            b'data: {"type":"message_stop"}\n\n',
+        ),
+        (
+            OpenAIChatAdapter,
+            "openai_chat",
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            b'data: [DONE]\n\n',
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+        ),
+    ],
+)
+async def test_stalled_response_close_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter_type: Any,
+    protocol: str,
+    body: bytes,
+) -> None:
+    import core.agent_core.ai._common as common
+
+    monkeypatch.setattr(common, "CLEANUP_TIMEOUT_S", 0.01)
+    stream = _StalledCloseStream(body)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await asyncio.wait_for(
+            _events(adapter_type(client), _request(protocol)),
+            timeout=1,
+        )
+
+    assert isinstance(events[-1], Done)
+    assert stream.started.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "body"),
+    [
+        (
+            AnthropicAdapter,
+            "anthropic",
+            b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+            b'data: {"type":"message_stop"}\n\n',
+        ),
+        (
+            OpenAIChatAdapter,
+            "openai_chat",
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            b'data: [DONE]\n\n',
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+        ),
+    ],
+)
+async def test_cancellation_during_response_cleanup_is_preserved(
+    adapter_type: Any,
+    protocol: str,
+    body: bytes,
+) -> None:
+    stream = _StalledCloseStream(body)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        task = asyncio.create_task(_events(adapter_type(client), _request(protocol)))
+        await stream.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "status", "kind", "retryable"),
+    [
+        (AnthropicAdapter, "anthropic", 401, "auth", False),
+        (OpenAIChatAdapter, "openai_chat", 401, "auth", False),
+        (OpenAIResponsesAdapter, "openai_responses", 401, "auth", False),
+        (AnthropicAdapter, "anthropic", 429, "rate_limit", True),
+        (OpenAIChatAdapter, "openai_chat", 429, "rate_limit", True),
+        (OpenAIResponsesAdapter, "openai_responses", 429, "rate_limit", True),
+    ],
+)
+async def test_error_body_read_failure_preserves_http_classification(
+    adapter_type: Any,
+    protocol: str,
+    status: int,
+    kind: str,
+    retryable: bool,
+) -> None:
+    stream = _ErrorBodyReadFailure()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status,
+            headers={"Retry-After": "7"},
+            stream=stream,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == kind
+    assert error.retryable is retryable
+    assert error.status == status
+    assert error.retry_after_s == 7
+    assert stream.closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_oversized_sse_pending_line_is_terminal_malformed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sse_module, "DEFAULT_MAX_PENDING_LINE_SIZE", 8)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text="data: too-large-without-a-line-ending",
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert error.retryable is False
+    assert "SSE" in error.message
 
 
 @pytest.mark.asyncio
@@ -3093,6 +3281,26 @@ async def test_chat_requires_finish_reason_before_done_marker() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_prompt_feedback_without_candidates_is_incomplete() -> None:
+    body = (
+        'data: {"promptFeedback":{"blockReason":"SAFETY"}}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "network"
+    assert error.retryable is True
+    assert error.partial is None
+
+
+@pytest.mark.asyncio
 async def test_chat_finish_reason_can_terminate_at_eof_without_done_marker() -> None:
     body = 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
 
@@ -3157,6 +3365,61 @@ async def test_chat_unknown_finish_reason_is_canonical_error() -> None:
 
     assert isinstance(events[-1], Done)
     assert events[-1].message.stop_reason == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        [7],
+        [{"type": "output_text", "text": 7}],
+        [{"type": "refusal", "refusal": 7}],
+    ],
+)
+async def test_responses_rejects_malformed_message_content_parts(content: list[Any]) -> None:
+    body = (
+        'data: {"type":"response.output_item.done","output_index":0,'
+        + json.dumps(
+            {
+                "item": {
+                    "type": "message",
+                    "content": content,
+                }
+            },
+            ensure_ascii=False,
+        )[1:]
+        + "\n\n"
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert error.retryable is False
+
+
+@pytest.mark.asyncio
+async def test_responses_rejects_malformed_terminal_message_content() -> None:
+    body = (
+        'data: {"type":"response.completed","response":{"status":"completed",'
+        '"output":[{"type":"message","content":[{"type":"output_text","text":7}]}]}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert error.retryable is False
 
 
 @pytest.mark.asyncio
