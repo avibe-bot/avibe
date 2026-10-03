@@ -108,6 +108,15 @@ running. The tray keeps the shell alive after the window closes.
   only durable record is `D.enabled`. The shell keeps no second copy in its
   native preferences: it reads `D` at launch and writes `D` on every flip, so
   the next launch and the live Runtime can never disagree.
+- **Runtime compatibility.** The shell adopts a running Runtime as-is, so after
+  a desktop update that Runtime can be older than the shell.
+  - The Runtime's versioned `GET /ready` response gains
+    `computer_use_schema`: the newest `D` `schema_version` it can read.
+  - The shell enables the toggle only when that value covers the schema it
+    writes. Otherwise the item is disabled and its menu text says the Avibe
+    service must restart to support computer use.
+  - The shell never restarts an adopted Runtime itself. A pre-feature
+    Runtime lacks the field and therefore reads as unsupported.
 - **Permission requests (macOS).** The shell requests Accessibility with
   `AXIsProcessTrustedWithOptions` and a prompt. It requests Screen Recording
   with `CGRequestScreenCaptureAccess`, falling back to opening the Settings
@@ -204,8 +213,10 @@ running. The tray keeps the shell alive after the window closes.
   Workbench API process all read the same file.
   - Every write carries `schema_version`, `enabled` (the toggle's only durable
     record and the configuration input), `state`, `reason` (a stable code, or
-    null), `shell_pid`, `instance_id` (random per shell process), and
-    `generation`. `state` is one of these:
+    null), `shell_pid`, `instance_id` (random per shell process),
+    `generation`, `driver_version`, and `tool_snapshot` (the absolute path
+    and SHA-256 of the tool snapshot bundled beside the driver).
+    `state` is one of these:
     - `off`: the toggle is off.
     - `needs_permission`: the toggle is on and a grant is missing.
     - `starting`: the toggle is on, both grants are held, and the daemon is
@@ -215,7 +226,7 @@ running. The tray keeps the shell alive after the window closes.
       grant.
     - `stopped`: the toggle is on and the shell is quitting or has quit.
   - `ready` also carries `socket_path`, `proxy_executable` (absolute path to
-    the bundled binary), `driver_version`, and `host_bundle_id`.
+    the bundled binary) and `host_bundle_id`.
   - `generation` increases with each daemon spawn within one `instance_id`.
     The pair identifies a daemon across shell restarts.
   - The shell writes a non-ready state before stopping the daemon (`off` for
@@ -269,12 +280,15 @@ running. The tray keeps the shell alive after the window closes.
     | `ready`, socket refuses a connection | `unavailable` | `daemon_unreachable` |
     | `ready`, socket accepts | `ready` | null |
 
-    Configuration reads only `enabled`. A missing or invalid file counts as
-    not enabled. Atomic writes keep a half-written file from appearing.
+    Configuration reads only `enabled` and `tool_snapshot`. A missing or invalid
+    file counts as not enabled. Atomic writes keep a half-written file from
+    appearing.
 - **Computer MCP server.** A small Avibe-owned stdio server is the one stable
   endpoint for every backend.
-  - It starts without a daemon. It serves the pinned tool list from a
-    snapshot bundled with the driver version.
+  - It starts without a daemon. It serves the tool list from the snapshot
+    that `D.tool_snapshot` names, and checks the hash. The shell bundles that
+    snapshot with the driver and the policy, so the tools always match the
+    driver the shell runs, whatever version the Runtime is.
   - On each call it reads the effective status. If it is `ready`, the server
     forwards the call through an upstream `cua-driver mcp --embedded --socket
     <S>` child. It respawns that child when the (`instance_id`, `generation`)
@@ -312,8 +326,10 @@ running. The tray keeps the shell alive after the window closes.
   injected unconditionally. Only availability is absorbed at call time.
 - **Configuration reconciliation.** `core/computer_use.py` owns the one change
   that alters backend configuration. A controller background task reads
-  `enabled` every 2 s, the same polling model as `RuntimeCommandWatcher`. It
-  compares that value with the value each live consumer was built from. On a
+  `enabled` and the `tool_snapshot` hash every 2 s, the same polling model as
+  `RuntimeCommandWatcher`. It compares that pair with the pair each live
+  consumer was built from. A desktop update that ships a new driver
+  therefore reaches running sessions the same way a toggle flip does. On a
   mismatch it reconciles every consumer that caches MCP configuration:
   - Codex and OpenCode: the same `AgentAuthService._refresh_backend_runtime`
     handler that restart markers call.
@@ -582,6 +598,8 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   upstream command are redirected to test-owned fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
   check confirms that the pinned driver's `tools/list`, under that policy,
-  equals the bundled tool snapshot.
+  equals the bundled tool snapshot. The toggle is disabled for a Runtime whose
+  `/ready` lacks a covering `computer_use_schema`, and a changed `tool_snapshot`
+  hash reconciles live consumers.
 - Manual on a signed build: Slack → agent → background GUI task completes while
   the user keeps working; the tray toggle stops an in-flight session's access.
