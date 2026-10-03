@@ -62,6 +62,7 @@ scenarios:
     test: tests/test_backend_restart.py::test_runtime_gen_006_disabling_a_backend_stops_its_work_at_once
     related_tests:
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_disabling_codex_ends_every_app_server_and_admits_nothing
+      - tests/test_opencode_generations.py::test_runtime_gen_006_disabling_opencode_stops_every_generation_now_and_refuses_a_late_turn
   - id: RUNTIME-GEN-007
     name: Re-enabling a backend registers a fresh agent at once; disabling already stopped the old one
     status: covered
@@ -201,8 +202,6 @@ scenarios:
     layer: contract
     backend: opencode
     test: tests/test_opencode_generations.py::test_runtime_gen_023_the_ui_process_leases_the_controllers_generation_over_control_ipc
-    related_tests:
-      - tests/test_opencode_generations.py::test_a_lease_released_before_any_runtime_adopted_it_is_never_re_held
   - id: RUNTIME-GEN-024
     name: A Hub-to-Direct mode switch while a Hub run is live moves new OpenCode turns to a Direct generation and lets the Hub one finish its run
     status: covered
@@ -211,11 +210,11 @@ scenarios:
     backend: opencode
     test: tests/test_opencode_generations.py::test_runtime_gen_024_a_mode_switch_during_a_hub_run_moves_new_turns_to_direct
   - id: RUNTIME-GEN-025
-    name: A controller that starts with OpenCode disabled retires a drain-only agent for the servers a crashed controller recorded; an idle one stops at once, a finished turn's poll is restored on its own process, delivered and settled before it stops, a leased one stops once released, and shutdown stops only what this controller owns
+    name: A controller that starts with OpenCode disabled stops the OpenCode servers a crashed controller recorded and leaves them for adoption when OpenCode is enabled; shutdown stops only what this controller owns
     status: covered
     kind: recovery
     layer: unit
     backend: opencode
-    test: tests/test_opencode_generations.py::test_a_disabled_restart_drains_a_crashed_controllers_servers_and_delivers_their_runs
+    test: tests/test_opencode_generations.py::test_a_controller_starting_with_opencode_disabled_stops_a_crashed_controllers_servers
     related_tests:
       - tests/test_opencode_generations.py::test_shutdown_stops_only_the_generations_this_controller_owns

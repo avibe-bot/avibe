@@ -2130,7 +2130,10 @@ def stop_recorded_server_sync(path: Path, info: Mapping[str, Any]) -> StopOutcom
 
 
 def stop_recorded_servers_sync(runtime_ids: frozenset[str] = frozenset()) -> list[StopOutcome]:
-    """Stop every recorded server no runtime of this process owns, for ``vibe stop``.
+    """Stop every recorded server no runtime of this process owns.
+
+    ``vibe stop`` runs it, as does a controller that starts with OpenCode
+    disabled: no agent there would adopt what a crashed controller left.
 
     A record whose process already ended is forgotten with its overlay. A server of another desktop Runtime than ``runtime_ids`` is left
     running. OpenCode starts each tool command in its own session, so each
@@ -2163,13 +2166,3 @@ def stop_owned_generations_sync() -> None:
             stop_recorded_server_sync(path, info)
 
 
-def forget_recorded_lease(lease_id: str) -> bool:
-    """Clear a lease from the record holding it; whether any record did."""
-
-    for path, info in _recorded_processes():
-        leases = info.get("leases")
-        if isinstance(leases, dict) and lease_id in leases:
-            info = {**info, "leases": {key: value for key, value in leases.items() if key != lease_id}}
-            write_atomic(path, json.dumps(info))
-            return True
-    return False

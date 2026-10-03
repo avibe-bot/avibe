@@ -40,7 +40,6 @@ from .server import (
     OpenCodeServerClient,
     StopOutcome,
     adopt_recorded_generations,
-    forget_recorded_lease,
     apply_resource_governance,
     own_generation,
     start_generation,
@@ -59,12 +58,8 @@ _binary_versions: dict[tuple[Any, ...], Optional[str]] = {}
 # A lease outlives no caller: the UI process renews nothing and releases on exit.
 MAX_LEASE_SECONDS = 1800.0
 # The runtime holding each live lease. A release reaches it there even after
-# its backend was disabled and its agent unregistered while the lease drains.
+# its backend was disabled and its agent unregistered.
 _LEASE_HOLDERS: dict[str, "OpenCodeRuntime"] = {}
-# How long a retired runtime keeps a process for a durable poll no restore has
-# bound yet: a transport that is not ready by then gets the poll delivered by
-# the next enabled controller instead.
-UNRESTORED_RUN_GRACE_SECONDS = 600.0
 
 
 def _digest(value: object) -> str:
@@ -290,9 +285,6 @@ class OpenCodeRuntime:
         self._wrappers: dict[str, RuntimeGeneration[Any, OpenCodeGeneration]] = {}
         self._adopted = False
         self._adopt_lock: Optional[asyncio.Lock] = None
-        # Set once the backend is disabled: no generation will serve again.
-        self._closed = False
-        self._restore_deadline = 0.0
         # Work outside a turn admitted but not yet bound; a native migration
         # counts it as active, so it never overlaps a process start.
         self.outside_turn_acquisitions = 0
@@ -305,7 +297,6 @@ class OpenCodeRuntime:
         self.durable_poll_generations: Optional[Callable[[], Mapping[str, Optional[str]]]] = None
         self.on_generation_ready: Optional[Callable[[OpenCodeGeneration], None]] = None
         self.on_generation_stopping: Optional[Callable[[OpenCodeGeneration, bool], Awaitable[None]]] = None
-        self.marked_run_is_live: Optional[Callable[[OpenCodeGeneration], Awaitable[bool]]] = None
 
     def renew(self) -> None:
         """New turns start a new generation; running work stays where it is.
@@ -547,26 +538,18 @@ class OpenCodeRuntime:
         await self._generations.reap()
         return {wrapper.runtime.generation_id: _stop_outcome(wrapper) for wrapper in wrappers}
 
-    async def close(self) -> None:
-        """Admit nothing more; idle generations stop now, bound ones once drained.
+    async def shutdown(self) -> None:
+        """Admit nothing more and stop every generation now, bound work included.
 
-        A previous controller's generations are adopted first, so disabling
-        the backend stops them too. Each later ``reap()`` retries the stops
-        that declined or failed, until ``retired()``.
+        A previous controller's generations are adopted first, so they stop
+        too. A failed adoption leaves their records for ``vibe stop`` and the
+        next controller.
         """
-        self._closed = True
-        self._restore_deadline = time.monotonic() + UNRESTORED_RUN_GRACE_SECONDS
         try:
             await self.ensure_adopted(None)
         except Exception:
-            # Admission closes regardless; whatever stays unadopted keeps its
-            # record for shutdown and ``vibe stop``.
-            logger.warning("Could not adopt OpenCode generations before disabling the backend", exc_info=True)
-        await self._generations.stop_all(force=False)
-
-    def retired(self) -> bool:
-        """Closed, and no process of this runtime remains."""
-        return self._closed and not self._generations.generations
+            logger.warning("Could not adopt OpenCode generations before stopping the backend", exc_info=True)
+        await self._generations.stop_all(force=True)
 
     async def retire_all(self) -> None:
         """Admit nothing more to any live generation; each stops once its work drains.
@@ -615,27 +598,12 @@ class OpenCodeRuntime:
 
         generation = wrapper.runtime
         if not force and generation.process_alive() and not generation.is_drained():
-            if self._closed:
-                # A retired runtime serves no new run. A run marker a durable
-                # poll backs keeps the process for the restore that binds the
-                # poll and settles its run there; after the grace, only while
-                # that run is still live.
-                if generation.has_requests_in_flight():
-                    return False
-                if generation.active_run_sessions:
-                    self._reconcile_run_markers(generation, self._durable_polls())
-                if generation.active_run_sessions and (
-                    time.monotonic() < self._restore_deadline
-                    or (self.marked_run_is_live is not None and await self.marked_run_is_live(generation))
-                ):
-                    return False
-            else:
-                # A run marker that no durable poll backs, left by an adoption
-                # that could not read the durable polls, keeps the process only
-                # until a later sweep's retry of that reconciliation succeeds.
-                self._reconcile_run_markers(generation, self._durable_polls())
-                if not generation.is_drained():
-                    return False
+            # A run marker that no durable poll backs, left by an adoption
+            # that could not read the durable polls, keeps the process only
+            # until a later sweep's retry of that reconciliation succeeds.
+            self._reconcile_run_markers(generation, self._durable_polls())
+            if not generation.is_drained():
+                return False
         if self.on_generation_stopping is not None:
             await self.on_generation_stopping(generation, force)
         await stop_generation(generation)
@@ -732,24 +700,18 @@ async def release_opencode_lease(lease_id: str, *, controller: Any) -> Optional[
     """Release a lease in the runtime holding it, wherever its agent went.
 
     A lease no runtime holds yet, recorded before a controller restart, goes
-    to each runtime agent, registered or retired, which adopts it first. With
-    no agent yet, as before a disabled controller's drain-only agent exists,
-    it is cleared from its record, so the adoption that follows never re-holds
-    it. ``None`` means OpenCode has no agent and no record holds the lease.
+    to the registered agent, which adopts it first. ``None`` means OpenCode is
+    disabled and holds no such lease.
     """
 
     holder = _LEASE_HOLDERS.get(lease_id)
     if holder is not None:
         return await holder.release_lease(lease_id)
-    runtime_agents = getattr(getattr(controller, "agent_service", None), "runtime_agents", None)
-    agents = list(runtime_agents("opencode")) if callable(runtime_agents) else []
-    for agent in agents:
-        release = getattr(agent, "release_generation_lease", None)
-        if callable(release) and await release(lease_id):
-            return True
-    if forget_recorded_lease(lease_id):
-        return True
-    return False if agents else None
+    agent = getattr(getattr(controller, "agent_service", None), "agents", {}).get("opencode")
+    release = getattr(agent, "release_generation_lease", None)
+    if not callable(release):
+        return None
+    return bool(await release(lease_id))
 
 
 @asynccontextmanager
