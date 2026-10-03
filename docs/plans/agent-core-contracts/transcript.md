@@ -32,7 +32,7 @@ Display-only rows keep `context_seq` null: `interim`, `notify`, an `error` that 
   fork's first entry follows its inherited prefix.
 - Inputs already exist as rows when they are submitted. The loop sets `context_seq` and `content_json.model` on that
   row when it consumes the input. Each entry is its own transaction; an input accepted by `steer` but not yet
-  consumed when a crash happens is re-queued by the adapter at resume (`recovery.md` T3).
+  consumed when a crash happens is admitted into the context by the adapter at resume (`recovery.md` T3).
 - A response row is inserted at `message_end` with both `content_json.model` and its commit-time display
   `content_text`.
 - A tool result row is inserted at `tool_finished`. The `tool_call` trace row is inserted at tool start without a
