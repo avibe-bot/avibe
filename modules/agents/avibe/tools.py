@@ -31,7 +31,8 @@ class ToolSuite:
     jobs: JobHost
     create_tools: Callable[[JobHost, Optional[ImageSink]], Sequence[Tool]]
     render_recovered: RecoveryRenderer
-    find_job: Callable[[str, str], Optional[str]]
+    # ``find_job(session_id, tool_call_id, *, created_since)``: the newest job the call started.
+    find_job: Callable[..., Optional[str]]
     prune: Optional[Callable[[CallSettled], list[str]]] = None
 
 

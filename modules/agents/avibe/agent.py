@@ -25,6 +25,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional, Sequence
 
@@ -91,6 +92,21 @@ BACKEND = "avibe"
 # Final responses whose empty text is explained by the stop itself (loop-control.md section 2).
 _EXPLAINED_STOPS = ("refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
+
+
+def _instant(value: Any) -> Optional[datetime]:
+    """A stored UTC timestamp (``...Z``) as an aware ``datetime``, or ``None``."""
+    text = str(value or "").strip()
+    try:
+        instant = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    return instant if instant.tzinfo is not None else instant.replace(tzinfo=timezone.utc)
+
+
+def _microsecond_text(instant: datetime) -> str:
+    """The fixed-width form ``agent_events.created_at`` is written in, so the two compare as text."""
+    return instant.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 @dataclass
@@ -273,11 +289,17 @@ class AvibeAgent(BaseAgent):
             logger.exception("Avibe Agent job pruning failed")
 
     def _job_call_settled(self, meta: Any) -> bool:
-        """Whether the job's tool call has a durable ``tool_result`` row (the adapter's half of J5)."""
+        """Whether the job's tool call has a durable ``tool_result`` row (the adapter's half of J5).
+
+        Only a result committed after the job was created counts: a provider may reuse
+        a tool-call id, and an earlier call's result does not settle a later one. The
+        same rule as T2's job lookup (``_settle_open_calls``).
+        """
         from sqlalchemy import func
 
         session_id, call_id = str(meta.get("session_id") or ""), str(meta.get("tool_call_id") or "")
-        if not session_id or not call_id:
+        created = _instant(meta.get("created_at"))
+        if not session_id or not call_id or created is None:
             return False
         with self._engine.connect() as conn:
             return (
@@ -288,6 +310,7 @@ class AvibeAgent(BaseAgent):
                         agent_events.c.event_type == "tool_result",
                         agent_events.c.context_seq.is_not(None),
                         func.json_extract(agent_events.c.content_json, "$.message.tool_call_id") == call_id,
+                        agent_events.c.created_at >= _microsecond_text(created),
                     )
                     .limit(1)
                 ).first()
@@ -511,9 +534,12 @@ class AvibeAgent(BaseAgent):
         if not open_calls:
             return
         suite = self._tools()
+        # A call's job started after the response carrying the call committed; a job an
+        # earlier call with a reused id started is older (one rule with J5).
+        committed = await asyncio.to_thread(self._committed_at, [owner.row_id for owner, _ in open_calls])
         job_ids = {}
         for owner, call in open_calls:
-            job_id = suite.find_job(owner.session_id, call.id)
+            job_id = suite.find_job(owner.session_id, call.id, created_since=committed.get(owner.row_id))
             if job_id is not None:
                 job_ids[(owner.session_id, call.id)] = job_id
         await settle_open_calls(
@@ -523,6 +549,11 @@ class AvibeAgent(BaseAgent):
             job_ids=job_ids,
             render_result=suite.render_recovered,
         )
+
+    def _committed_at(self, row_ids: Sequence[str]) -> dict[str, datetime]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(select(messages.c.id, messages.c.created_at).where(messages.c.id.in_(set(row_ids))))
+            return {row_id: instant for row_id, created in rows if (instant := _instant(created)) is not None}
 
     def _unconsumed_inputs(self, session_id: str) -> list[tuple[str, str, list[FileAttachment], AgentInputMetadata]]:
         """Inputs accepted into an ``avibe`` Turn but never consumed, in acceptance order.

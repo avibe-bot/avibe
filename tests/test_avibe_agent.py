@@ -290,7 +290,7 @@ class _Harness:
             jobs=self.jobs,
             create_tools=lambda jobs, sink: list(self.tools),
             render_recovered=_unused_renderer,
-            find_job=lambda session_id, call_id: None,
+            find_job=lambda session_id, call_id, **_: None,
         )
         self.agent = self.new_agent()
         self._turns = 0
@@ -616,7 +616,7 @@ async def test_resume_settles_open_calls_and_admits_unconsumed_inputs_before_the
         jobs=jobs,
         create_tools=lambda jobs_, sink: [FakeTool("bash"), FakeTool("edit")],
         render_recovered=render,
-        find_job=lambda session_id, call_id: "job_1" if (session_id, call_id) == (SESSION, "call_bash") else None,
+        find_job=lambda session_id, call_id, **_: "job_1" if (session_id, call_id) == (SESSION, "call_bash") else None,
     )
     harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("resumed"))]], suite=suite)
     # The crashed process: a Turn whose response opened two calls, one with a running job,
@@ -928,7 +928,7 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
         jobs=jobs,
         create_tools=lambda jobs_, sink: [FakeTool("bash")],
         render_recovered=render,
-        find_job=lambda session_id, call_id: "job_1" if (session_id, call_id) == (SESSION, "call_bash") else None,
+        find_job=lambda session_id, call_id, **_: "job_1" if (session_id, call_id) == (SESSION, "call_bash") else None,
     )
     harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
     # The crashed process left a running foreground command, and no Turn will resume this
@@ -1269,6 +1269,53 @@ async def test_resume_settles_a_real_bash_job_through_the_real_renderer(
             await suite.jobs.kill(job_id)
 
 
+async def test_resume_settles_a_reused_call_id_from_the_job_its_own_call_started(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    import secrets
+
+    import core.agent_core.tools.jobs as jobs_module
+    from core.watches import ManagedWatchStore
+
+    # The earlier call's job id sorts first, so a lookup by (session, call id) alone finds it.
+    job_ids, token_hex = iter(["0" * 16, "f" * 16]), secrets.token_hex
+    monkeypatch.setattr(jobs_module.secrets, "token_hex", lambda n=None: next(job_ids) if n == 8 else token_hex(n))
+    suite = local_tool_suite(str(tmp_path / "jobs"))
+    harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
+    first = harness.request("print it")
+    harness.controller._native_start(first.context)
+    await harness.agent.store.consume_input(
+        SESSION, first.context.platform_specific["delivery_id"], UserMessage((text("print it"),))
+    )
+    reused = ToolCallBlock(id="call_0", name="bash", arguments={"command": "printf old"})
+    await harness.agent.store.append_response(SESSION, assistant("", calls=(reused,)), final=False)
+    old = await _real_job(suite, "printf old", call_id="call_0", cwd=tmp_path)
+    await _until(lambda: suite.jobs.status(old).state == "exited", "the first command never exited")
+    await harness.agent.store.append_tool_result(
+        SESSION, ToolResultMessage("call_0", "bash", (text("old"),)), details={"job_id": old}
+    )
+    await harness.agent.store.append_response(SESSION, assistant("printed"), final=True)
+    # The next Turn's provider reuses call_0; the crash leaves its command running.
+    second = harness.request("wait for it")
+    harness.controller._native_start(second.context)
+    await harness.agent.store.consume_input(
+        SESSION, second.context.platform_specific["delivery_id"], UserMessage((text("wait for it"),))
+    )
+    again = ToolCallBlock(id="call_0", name="bash", arguments={"command": "sleep 30"})
+    await harness.agent.store.append_response(SESSION, assistant("", calls=(again,)), final=False)
+    current = await _real_job(suite, "sleep 30", call_id="call_0", cwd=tmp_path)
+    try:
+        harness.new_agent()
+        await harness.agent.recover_runtime_state()
+
+        result = (await harness.context_rows())[-1]
+        watch_id = ManagedWatchStore().find_job_watch(current)
+        assert result.kind == "tool_result" and watch_id and f"now Watch {watch_id}" in result.message.content[0].text
+        assert ManagedWatchStore().find_job_watch(old) is None
+    finally:
+        await suite.jobs.kill(current)
+
+
 async def test_the_default_job_host_lives_in_the_watch_jobs_dir(engine, session, tmp_path) -> None:
     from core.watches import agent_jobs_dir
 
@@ -1303,6 +1350,10 @@ async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(engine
         await harness.agent.store.append_tool_result(
             SESSION, ToolResultMessage(f"call_{name}", "bash", (text("ok"),)), details={"job_id": jobs[name]}
         )
+    # e reuses a's call id after a's result committed (a model call apart): a's result does not settle it.
+    await asyncio.sleep(0.01)
+    jobs["e"] = await _real_job(suite, "printf out", call_id="call_a", cwd=tmp_path)
+    await _until(lambda: suite.jobs.status(jobs["e"]).state == "exited", "a job never exited")
     await suite.jobs.hand_over(jobs["b"])
     assert ManagedWatchStore().job_watch_settled(jobs["b"]) is False
     week_ago = time.time() - 8 * 24 * 3600
@@ -1318,4 +1369,4 @@ async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(engine
     assert c_result.message.tool_call_id == "call_c" and "out" in c_result.message.content[0].text
     present = {name: Path(suite.jobs.output_path(job_id)).parent.exists() for name, job_id in jobs.items()}
     # J5: a job is removed only once its call has a durable result and no Watch still manages it.
-    assert present == {"a": False, "b": True, "c": False, "d": True}
+    assert present == {"a": False, "b": True, "c": False, "d": True, "e": True}
