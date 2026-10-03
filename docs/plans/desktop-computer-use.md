@@ -110,14 +110,19 @@ running. The tray keeps the shell alive after the window closes.
   the next launch and the live Runtime can never disagree.
 - **Runtime compatibility.** The shell adopts a running Runtime as-is, so after
   a desktop update that Runtime can be older than the shell.
-  - The Runtime's versioned `GET /ready` response gains
-    `computer_use_schema`: the newest `D` `schema_version` it can read.
+  - `GET /ready` stays byte-for-byte unchanged, because released shells
+    parse it with an exact key set (`runtime-host/src/health.rs`). A new
+    `GET /desktop/capabilities` returns `computer_use_schema`, the newest `D`
+    `schema_version` the Runtime can read. Any other answer, including a 404
+    from a pre-feature Runtime, means unsupported.
   - Turning the toggle on requires that value to cover the schema the shell
     writes. Otherwise the shell refuses to turn it on, and the menu text says
     the Avibe service must restart to support computer use.
   - Turning it off always works. A toggle that was already on stays on as
-    `needs_runtime`, with no daemon, until the shell's existing `/ready`
-    probe sees support.
+    `needs_runtime`, with no daemon, until a capabilities probe sees
+    support. The shell re-probes on each successful `/ready` check. The
+    checked item stays interactive in every state, so turning it off is
+    always possible.
   - The shell never restarts an adopted Runtime itself. A pre-feature
     Runtime lacks the field and therefore reads as unsupported.
 - **Permission requests (macOS).** The shell requests Accessibility with
@@ -155,7 +160,7 @@ running. The tray keeps the shell alive after the window closes.
   | shell launch | `enabled`, Runtime lacks a covering `computer_use_schema` | `needs_runtime` | none; no spawn |
   | shell launch | `enabled`, both grants held | `starting` | spawn |
   | shell launch | `enabled`, a grant missing | `needs_permission` | none; silent |
-  | `needs_runtime` | the adopted Runtime's `/ready` now covers the schema | as from shell launch | none |
+  | `needs_runtime` | `/desktop/capabilities` now covers the schema | as from shell launch | none |
   | `needs_permission` | grant check passes | `starting` | spawn |
   | `starting` | socket accepts and health passes | `ready` | none |
   | `starting` | health reports a missing grant | `needs_permission` | stop the daemon; no prompt |
@@ -601,7 +606,8 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   nothing is spawned through LaunchServices, and the toggle persists. A
   killed shell takes its daemon down and releases its lock, and the next
   launch reclaims the endpoint. A Runtime without a covering
-  `computer_use_schema` never gets a daemon. A failed `D` write still stops the daemon.
+  `computer_use_schema` never gets a daemon. A failed `D` write still stops
+  the daemon.
 - Python, configuration: the spec and the prompt section exist exactly when
   `enabled` is true. Each backend translation is checked; Codex also carries
   the approval override. Reconciliation brings every live consumer (Codex,
@@ -619,8 +625,9 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   upstream command are redirected to test-owned fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
   check confirms that the pinned driver's `tools/list`, under that policy,
-  equals the bundled tool snapshot. The toggle is disabled for a Runtime whose
-  `/ready` lacks a covering `computer_use_schema`, and a changed `tool_snapshot`
-  hash reconciles live consumers.
+  equals the bundled tool snapshot. For a Runtime without a covering
+  `computer_use_schema`, turning the toggle on is refused while turning it off
+  still works, `/ready` is unchanged for released shells, and a changed
+  `tool_snapshot` hash reconciles live consumers.
 - Manual on a signed build: Slack → agent → background GUI task completes while
   the user keeps working; the tray toggle stops an in-flight session's access.
