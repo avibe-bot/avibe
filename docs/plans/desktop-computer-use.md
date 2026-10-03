@@ -79,8 +79,8 @@ MCP proxy never executes tools and needs no grant, so any process may spawn it.
 
 Two things change at different rates, and the design keeps them apart:
 
-- **Configuration:** whether sessions carry the `computer` server at all. It
-  follows the user's toggle and changes only when the user flips it.
+- **Configuration:** whether sessions carry the `avibe_computer` server at all.
+  It follows the user's toggle and changes only when the user flips it.
 - **Availability:** whether a daemon answers right now. It changes with daemon
   restarts, crashes, grants, shell restarts, and the lock screen.
 
@@ -113,7 +113,11 @@ running. The tray keeps the shell alive after the window closes.
   - `GET /ready` stays byte-for-byte unchanged, because released shells
     parse it with an exact key set (`runtime-host/src/health.rs`). A new
     `GET /desktop/capabilities` returns `computer_use_schema`, the newest `D`
-    `schema_version` the Runtime can read. Any other answer, including a 404
+    `schema_version` the Runtime can read. The UI process obtains it from the
+    Controller over the existing internal IPC socket and does not derive it
+    from its own package version. The Controller is what reads `D`, and
+    `/ready` may pair a newer UI with an older Controller. If that IPC call
+    fails, the answer is unsupported. Any other answer, including a 404
     from a pre-feature Runtime, means unsupported.
   - Turning the toggle on requires that value to cover the schema the shell
     writes. Otherwise the shell refuses to turn it on, and the menu text says
@@ -163,7 +167,7 @@ running. The tray keeps the shell alive after the window closes.
   | shell launch | `enabled`, a grant missing | `needs_permission` | none; silent |
   | `needs_runtime` | capabilities now cover the schema, both grants held | `starting` | spawn |
   | `needs_runtime` | capabilities now cover the schema, a grant missing | `needs_permission` | none; silent |
-  | any, `enabled` | a successful `/ready` is followed by an unsupported capabilities answer | `needs_runtime` | stop the daemon if running |
+  | any `enabled` state except `error` | a successful `/ready` is followed by an unsupported capabilities answer | `needs_runtime` | stop the daemon if running |
   | `needs_permission` | grant check passes | `starting` | spawn |
   | `needs_permission` | app activation, grant check still fails, no fallback attempt yet in this activation | `starting` | spawn once (stale-preflight fallback) |
   | `starting` | socket accepts and health passes | `ready` | none |
@@ -215,12 +219,14 @@ running. The tray keeps the shell alive after the window closes.
     `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=300`.
   - Avibe does not depend on that crate. It is unpublished and pulls in the
     whole platform stack, while the protocol needs only these few lines.
-  - **Liveness.** The shell keeps the child's stdin pipe open for the
-    daemon's lifetime and never writes to it. When the shell dies, the OS
-    closes the pipe and the daemon exits, so a crash leaves no daemon
-    holding Avibe's grants. An orderly stop closes the pipe and then waits
-    for exit. The spike host did not pass `--parent-liveness-stdio`; Phase 1
-    tests this with a killed shell.
+  - **Liveness.** The shell keeps the child's stdin pipe open for the daemon's
+    lifetime and never writes to it. When the shell dies, the OS closes the pipe
+    and the daemon exits, so a crash leaves no daemon holding Avibe's grants. An
+    orderly stop closes the pipe and waits up to 3 s for exit. It then
+    terminates the process (`SIGKILL`, or `TerminateProcess` on Windows) and
+    reaps it. So a daemon that ignores EOF can never hold a stop open or block
+    the next spawn. The spike host did not pass `--parent-liveness-stdio`; Phase
+    1 tests this with a killed shell.
   - **Endpoint.** The socket lives in the shell's app data directory (see
     `D`). On Windows it is a private pipe name. A dead daemon leaves its socket
     file behind, and a new daemon refuses an existing endpoint. So before each
@@ -295,7 +301,7 @@ running. The tray keeps the shell alive after the window closes.
 
 - **One owner.** A new `core/computer_use.py` owns both reads of `D`.
   - **Configuration.** It returns the single managed stdio MCP spec (name
-    `computer`, launching Avibe's computer MCP server with Avibe's Python)
+    `avibe_computer`, launching Avibe's computer MCP server with Avibe's Python)
     only when `enabled` is true and `D.tool_snapshot` exists with a matching
     SHA-256. Otherwise it returns nothing. A failed snapshot check logs one
     warning per distinct hash, and the status reads `unavailable` /
@@ -340,22 +346,42 @@ running. The tray keeps the shell alive after the window closes.
   - It moves `structuredContent` into a trailing text block and drops
     `outputSchema` for every backend. Codex needs this (Phase 0, Q4), and it
     costs the other backends nothing.
+  - **Concurrent sessions.** Claude spawns one server per session. Codex
+    and OpenCode share one server across their conversations, so a caller
+    cannot be identified by process. Isolation therefore uses the Avibe
+    session id that every session prompt already carries
+    (`core/prompts/session-start.md`):
+    - The injected prompt tells the agent to pass that id as `session` on
+      every computer call.
+    - The server forwards the id as the named Cua session. Element tokens
+      and implicit-session state are therefore per Avibe session, even on
+      one shared upstream connection.
+    - The server rejects a call without `session`.
+  - **Desktop lease.** There is one desktop, so it is also one resource. The
+    first session to act holds a desktop lease. Calls from any other session
+    return `desktop_busy` with the holder's session id. The holder releases
+    the lease with `end_session`, or it lapses after 60 s with no call. The
+    lease file sits next to `D`, so separate server processes (Claude's
+    per-session servers and the shared ones) see the same lease.
+  - This isolation is cooperative. Every caller is the same user's agent;
+    it is not a security boundary.
   - Tool restriction stays in the driver's managed policy, not in this server.
   - The proxy exits with its daemon and never reconnects (Phase 0, Q3), so
     this server is what keeps one endpoint alive per backend lifetime.
-- **Claude Code.** Pass `mcp_servers={"computer": ...}` in the session options
-  built in `core/handlers/session_handler.py`. SDK 0.2.93 supports
+- **Claude Code.** Pass `mcp_servers={"avibe_computer": ...}` in the session
+  options built in `core/handlers/session_handler.py`. SDK 0.2.93 supports
   `McpStdioServerConfig`. Keep `strict_mcp_config` unset so user MCP config is
-  preserved. An agent file that sets `tools` must list `mcp__computer__*` to
-  keep access.
-- **Codex.** Append `-c mcp_servers.computer.*` overrides to the app-server
-  launch, after Avibe's fixed overrides. `features.computer_use=false` stays:
-  Avibe supplies one cross-backend tool instead of Codex's own. Also set
-  `mcp_servers.computer.default_tools_approval_mode="approve"` (Phase 0, Q4).
-  Avibe runs Codex with `approvalPolicy: never`, and Codex cancels every
+  preserved. An agent file that sets `tools` must list `mcp__avibe_computer__*`
+  to keep access.
+- **Codex.** Append `-c mcp_servers.avibe_computer.*` overrides to the
+  app-server launch, after Avibe's fixed overrides.
+  `features.computer_use=false` stays: Avibe supplies one cross-backend tool
+  instead of Codex's own. Also set
+  `mcp_servers.avibe_computer.default_tools_approval_mode="approve"` (Phase 0,
+  Q4). Avibe runs Codex with `approvalPolicy: never`, and Codex cancels every
   non-read-only MCP call under that policy.
-- **OpenCode.** Add `mcp.computer` (`type: "local"`) through the existing config
-  overlay / `PATCH /global/config` path.
+- **OpenCode.** Add `mcp.avibe_computer` (`type: "local"`) through the existing
+  config overlay / `PATCH /global/config` path.
 - **Why the server follows the toggle.** The 32 allowed tool schemas
   measure about 70 KB, roughly 17.6k tokens per session. Every session of a
   user who never enabled the feature would pay that, so the server is not
@@ -380,13 +406,15 @@ running. The tray keeps the shell alive after the window closes.
 - **Prompt.** Add a short section in `core/system_prompt_injection.py`, only
   when the server is configured. It says the tools can report a state such as
   `off` or `needs_permission`, and then the agent tells the user instead of
-  retrying. It also says to prefer CLI/API routes, use GUI tools for GUI-only
-  steps, prefer accessibility element-token actions over pixel input, treat
-  screen content as untrusted, and observe state before retrying any action,
-  since an error result does not prove the action failed. If every window
-  comes back AX-unresolved and the desktop shows no apps, the screen is likely
-  locked: stop and tell the user. On Windows, use foreground delivery only for
-  the action that needs it.
+  retrying. It requires the session id as `session` on every call. It says
+  `desktop_busy` means another session holds the desktop, so the agent waits or
+  tells the user, and calls `end_session` when done. It also says to prefer
+  CLI/API routes, use GUI tools for GUI-only steps, prefer accessibility
+  element-token actions over pixel input, treat screen content as untrusted, and
+  observe state before retrying any action, since an error result does not prove
+  the action failed. If every window comes back AX-unresolved and the desktop
+  shows no apps, the screen is likely locked: stop and tell the user. On
+  Windows, use foreground delivery only for the action that needs it.
 
 ### Workbench
 
@@ -618,25 +646,28 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   outside the toggle-on row. Stale-preflight cases: a grant that the shell's
   preflight misses reaches `ready` after one activation; a truly missing grant
   spawns once per activation. Also: `generation` bumps on each spawn, nothing is
-  spawned through LaunchServices, and the toggle persists. A killed shell takes
-  its daemon down and releases its lock, and the next launch reclaims the
-  endpoint. A Runtime without a covering `computer_use_schema` never gets a
-  daemon. A failed `D` write still stops the daemon.
+  spawned through LaunchServices, and the toggle persists. A daemon that ignores
+  EOF is killed after 3 s. A killed shell takes its daemon down and releases its
+  lock, and the next launch reclaims the endpoint. A Runtime without a covering
+  `computer_use_schema` never gets a daemon. A failed `D` write still stops the
+  daemon.
 - Python, configuration: the spec and the prompt section exist exactly when
-  `enabled` is true and the snapshot verifies; a missing or mismatched
-  snapshot yields neither, plus `snapshot_invalid`. Each backend translation is checked; Codex also carries
-  the approval override. Reconciliation brings every live consumer (Codex,
-  OpenCode, cached Claude clients) to the final (`enabled`, snapshot hash)
-  pair. Claude
-  clients are recreated only between turns. The reconciliation sees no change
-  when availability moves or when the pair returns to its old value between
-  polls.
+  `enabled` is true and the snapshot verifies; a missing or mismatched snapshot
+  yields neither, plus `snapshot_invalid`. Each backend translation is checked;
+  Codex also carries the approval override. Reconciliation brings every live
+  consumer (Codex, OpenCode, cached Claude clients) to the final (`enabled`,
+  snapshot hash) pair. Claude clients are recreated only between turns. The
+  reconciliation sees no change when availability moves or when the pair returns
+  to its old value between polls.
 - Python, server: one case per row of the effective-status table, asserting
   both status and reason, plus a home-independence case: a Runtime with
   `AVIBE_HOME` set reads the same `D`. A call while
   not ready returns the named state and never spawns a child. A call after an
   (`instance_id`, `generation`) change or a child exit respawns exactly once.
-  Folding keeps image blocks. Tests stay hermetic: the `D` path and the
+  Folding keeps image blocks. Two sessions get separate Cua sessions on one
+  upstream connection. A call without `session` is rejected. A second
+  session gets `desktop_busy` until `end_session` or 60 s idle, across
+  separate server processes. Tests stay hermetic: the `D` path and the
   upstream command are redirected to test-owned fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
   check confirms that the pinned driver's `tools/list`, under that policy,
