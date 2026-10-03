@@ -1011,6 +1011,20 @@ class Controller:
             except Exception as e:
                 logger.error(f"Failed to restore active polls: {e}", exc_info=True)
 
+    async def restore_polls_on_ready_transports(self) -> None:
+        """Restore durable OpenCode polls on every transport that can deliver now.
+
+        IM-ready events restore polls at startup. OpenCode enabled in a running
+        controller missed them, so this runs once it registers.
+        """
+        platforms = {"avibe"}
+        for platform in list(getattr(self, "im_clients", {}) or {}):
+            if self.is_im_transport_ready(platform):
+                platforms.add(platform)
+        if self.primary_platform in platforms:
+            platforms.add("")
+        await self._restore_active_polls(platforms)
+
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)

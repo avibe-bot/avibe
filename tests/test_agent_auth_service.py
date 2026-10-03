@@ -198,6 +198,51 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         assert agent.refresh_auth_state.await_count == 1
 
+    async def test_saving_claude_again_while_disabled_keeps_its_pending_teardown(self):
+        """Only re-enabling cancels a failed disable teardown; another save while
+        Claude stays disabled leaves the retry that closes the surviving clients."""
+        from modules.agents.service import AgentService
+
+        controller = _StubController()
+        controller.config.claude = SimpleNamespace(enabled=True)
+        agent = SimpleNamespace(
+            name="claude",
+            renew_runtime=AsyncMock(),
+            refresh_auth_state=AsyncMock(side_effect=[RuntimeError("client busy"), None]),
+        )
+        controller.agent_service = AgentService(controller)
+        controller.agent_service.register(agent)
+        controller.backend_restart_coordinator = SimpleNamespace(interrupt_backend=AsyncMock())
+        service = AgentAuthService(controller)
+        service._sync_builtin_default_agents = lambda: None
+        service._load_backend_runtime_config = lambda _backend: SimpleNamespace(enabled=False)
+
+        await service.renew_backend_runtime("claude")
+        controller.config.claude = SimpleNamespace(enabled=False)
+        await service.renew_backend_runtime("claude")
+        await controller.agent_service.retry_teardowns()
+
+        assert agent.refresh_auth_state.await_count == 2
+
+    async def test_enabling_opencode_in_a_running_controller_restores_its_durable_polls(self):
+        """Work a crashed controller left while OpenCode was off is delivered
+        once OpenCode is enabled, without waiting for a restart."""
+        from modules.agents.service import AgentService
+
+        controller = _StubController()
+        controller.config.opencode = None
+        controller.agent_service = AgentService(controller)
+        controller.restore_polls_on_ready_transports = AsyncMock()
+        service = AgentAuthService(controller)
+        service._sync_builtin_default_agents = lambda: None
+        service._load_backend_runtime_config = lambda _backend: SimpleNamespace(enabled=True)
+
+        with patch("modules.agents.opencode.OpenCodeAgent", lambda _controller, config: SimpleNamespace(name="opencode", config=config)):
+            await service.renew_backend_runtime("opencode")
+
+        assert "opencode" in controller.agent_service.agents
+        controller.restore_polls_on_ready_transports.assert_awaited_once_with()
+
     async def test_handle_setup_command_submits_code(self):
         controller = _StubController()
         service = AgentAuthService(controller)

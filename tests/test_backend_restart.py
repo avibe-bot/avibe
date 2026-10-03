@@ -357,6 +357,36 @@ def test_a_disable_whose_interruption_fails_still_stops_and_retries_the_processe
     asyncio.run(run())
 
 
+def test_a_cancelled_disable_still_hands_the_process_stop_to_the_teardown_owner():
+    """A requester cancelled while the disable interrupts work never leaves the
+    disabled backend's processes without an owner."""
+
+    async def run() -> None:
+        agent = _DisabledAgent("codex")
+        controller, _auth, coordinator = _disabling_controller(agent)
+        interrupting = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def slow_release(**_kwargs):
+            interrupting.set()
+            await finish.wait()
+            return 0
+
+        controller.session_turns.release_for_backend_refresh = slow_release
+        disabling = asyncio.create_task(coordinator.request_restart("codex", config_save=True))
+        await interrupting.wait()
+        disabling.cancel()
+        await asyncio.sleep(0)
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await disabling
+
+        agent.shutdown_runtime.assert_awaited_once_with()
+        assert controller.config.codex is None
+
+    asyncio.run(run())
+
+
 def test_runtime_gen_007_re_enabling_starts_a_fresh_agent_at_once(monkeypatch):
     """RUNTIME-GEN-007: re-enabling registers a new agent without waiting.
 

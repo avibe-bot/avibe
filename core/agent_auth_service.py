@@ -2281,24 +2281,42 @@ class AgentAuthService:
             if callable(stop):
                 await stop()
 
-        try:
-            # A cancelled requester never leaves the backend half stopped.
-            await finish_native_operation(interrupt_work())
-        except Exception:
-            # Stopping the processes still ends that work; never skip it.
-            logger.warning("Interrupting disabled %s backend's work failed", backend, exc_info=True)
-        run_teardown = getattr(agent_service, "run_teardown", None)
-        if callable(run_teardown):
-            # The agent is out of routing, so this owner retries a failed stop.
-            await run_teardown(self._disable_teardown_key(backend, agent), stop_processes)
-        else:
-            await finish_native_operation(stop_processes())
-        if unregister:
-            setattr(self.controller.config, backend, None)
-        self._sync_builtin_default_agents()
+        async def disable() -> None:
+            try:
+                await interrupt_work()
+            except Exception:
+                # Stopping the processes still ends that work; never skip it.
+                logger.warning("Interrupting disabled %s backend's work failed", backend, exc_info=True)
+            run_teardown = getattr(agent_service, "run_teardown", None)
+            if callable(run_teardown):
+                # The agent is out of routing, so this owner retries a failed stop.
+                await run_teardown(self._disable_teardown_key(backend, agent), stop_processes)
+            else:
+                await stop_processes()
+            if unregister:
+                setattr(self.controller.config, backend, None)
+            self._sync_builtin_default_agents()
+
+        # The whole disable runs to completion, its process stop handed to the
+        # teardown owner, before a cancelled requester sees its cancellation.
+        await finish_native_operation(disable())
         if agent is not None:
             logger.info("Stopped disabled %s backend", backend)
         return agent is not None
+
+    async def _restore_polls_after_enable(self) -> None:
+        """Deliver OpenCode work a crashed controller left while OpenCode was off.
+
+        A controller that started with OpenCode disabled kept those durable polls
+        but missed their restore; enabling OpenCode in it restores them now.
+        """
+        restore = getattr(self.controller, "restore_polls_on_ready_transports", None)
+        if not callable(restore):
+            return
+        try:
+            await restore()
+        except Exception:
+            logger.warning("Restoring OpenCode polls after enabling it failed", exc_info=True)
 
     def _register_missing_backend_agent(self, backend: str, runtime_config: Any) -> bool:
         agent_service = getattr(self.controller, "agent_service", None)
@@ -2338,6 +2356,8 @@ class AgentAuthService:
         if getattr(runtime_config, "enabled", True) is not False and self._register_missing_backend_agent(
             backend, runtime_config
         ):
+            if backend == "opencode":
+                await self._restore_polls_after_enable()
             return
         agent_service = getattr(self.controller, "agent_service", None)
         agent = getattr(agent_service, "agents", {}).get(backend) if agent_service else None
@@ -2352,7 +2372,8 @@ class AgentAuthService:
             await self._stop_disabled_backend(backend, unregister=False)
             return
         cancel_teardown = getattr(agent_service, "cancel_teardown", None)
-        if agent is not None and callable(cancel_teardown):
+        enabled = getattr(runtime_config, "enabled", True) is not False
+        if enabled and agent is not None and callable(cancel_teardown):
             # Claude keeps its agent while disabled. Once it is enabled again,
             # a disable teardown still pending would close the new clients.
             cancel_teardown(self._disable_teardown_key(backend, agent))

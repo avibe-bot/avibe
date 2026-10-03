@@ -4593,7 +4593,8 @@ class SessionTurnManager:
                 )
                 abandoned_start = bool(
                     abandon_unaccepted_start
-                    and outcome == "failed"
+                    # A disable cancels an unresolved start; a refresh fails it.
+                    and outcome in {"failed", "canceled"}
                     and initial_batch
                     and all(row["state"] == "claimed" for row in initial_batch)
                     and turn.get("start_receipt_outcome") != "accepted"
@@ -8185,9 +8186,11 @@ class SessionTurnManager:
             owned_by_run = bool(self.accepted_agent_run_ids_for_turn(owner_id))
             origin_message_id = self._turn_origin_native_message_id(owner_id)
             if owner["state"] == "starting":
+                # An unresolved start fails on a refresh, but a disable is the
+                # user's own cancellation, whatever stage the start reached.
                 terminal = self._terminalize_durable_turn(
                     owner_id,
-                    "failed",
+                    "canceled" if settled_by == SETTLED_BY_BACKEND_DISABLED else "failed",
                     settled_by=settled_by,
                     evidence_kind="backend_refresh_start_failed",
                     evidence={
