@@ -329,7 +329,10 @@ Implemented in the first PR; the Codex and OpenCode adapters build on it.
   runtime_key)` settles one runtime's Activities as interrupted by a runtime
   update, using the existing backend-refresh notice.
 - **Snapshot discipline.** A turn loads its configuration once. Its launch
-  resolution and its launch spec both derive from that load.
+  resolution and its launch spec both derive from that load. Each adapter
+  reads every mutable launch input (config, renewal epoch, binary and
+  credential identity, Hub snapshot) in one synchronous step before its
+  first await, and nothing after that step reads adapter state.
 
 ## Verification
 
@@ -436,6 +439,12 @@ reply. After this step:
 - Deleted: the 300 s drain, `AVIBE_BACKEND_RESTART_DRAIN_TIMEOUT_SECONDS`,
   `"draining"` as a restart result, and the legacy catalog restart. The
   refresh that tears a runtime down survives only inside `migration_guard`.
+
+Every lookup that serves running work reaches retired agents too: Stop,
+Activity callbacks, liveness, Running Agents (listing and End), the sweep,
+service shutdown, and the native credential cutover. Admitting new work, and
+steering new input into a running turn, use only registered agents, so a
+disabled backend takes no new input.
 
 ### Adapter hooks
 

@@ -2351,9 +2351,10 @@ class Controller:
             show_git_checkpoint_service.stop()
 
         try:
-            codex_agent = self.agent_service.agents.get("codex")
-            if codex_agent and hasattr(codex_agent, "shutdown_runtime"):
-                _stop_loop_coroutine(codex_agent.shutdown_runtime(), "Codex runtime")
+            # A disabled backend's retired agent may still run app-servers.
+            for codex_agent in self.agent_service.runtime_agents("codex"):
+                if hasattr(codex_agent, "shutdown_runtime"):
+                    _stop_loop_coroutine(codex_agent.shutdown_runtime(), "Codex runtime")
         except Exception as e:
             logger.debug(f"Codex runtime cleanup skipped: {e}")
 

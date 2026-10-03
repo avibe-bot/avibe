@@ -200,10 +200,16 @@ def _collect_claude(
 
 
 def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
+    # A disabled backend's retired agent keeps its running work, so it is
+    # listed beside a re-enabled one until that work finishes.
     rows: list[dict[str, Any]] = []
-    agent = _get_agent(controller, "codex")
-    if agent is None:
-        return rows
+    for agent in _get_agents(controller, "codex"):
+        rows.extend(_collect_codex_agent(agent))
+    return rows
+
+
+def _collect_codex_agent(agent: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     session_mgr = getattr(agent, "_session_mgr", None)
     turn_registry = getattr(agent, "_turn_registry", None)
     transport_for_session = getattr(agent, "transport_for_session", None)
@@ -271,9 +277,13 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
 
 def _collect_opencode(controller: "Controller") -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    agent = _get_agent(controller, "opencode")
-    if agent is None:
-        return rows
+    for agent in _get_agents(controller, "opencode"):
+        rows.extend(_collect_opencode_agent(agent))
+    return rows
+
+
+def _collect_opencode_agent(agent: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     # OpenCode has no owned subprocess (HTTP server + poll loop), so no pid.
     # ``_active_requests`` only holds IN-FLIGHT turn tasks (popped in a finally
     # once the turn settles), so OpenCode only ever surfaces as ``active`` here —
@@ -371,6 +381,34 @@ def _get_agent(controller: "Controller", name: str):
         return None
     agents = getattr(service, "agents", {}) or {}
     return agents.get(name)
+
+
+def _get_agents(controller: "Controller", name: str) -> list[Any]:
+    """The registered agent of a backend, then retired ones whose work still runs."""
+    runtime_agents = getattr(getattr(controller, "agent_service", None), "runtime_agents", None)
+    return list(runtime_agents(name)) if callable(runtime_agents) else []
+
+
+def _agent_holds_session(backend: str, agent: Any, base_session_id: str) -> bool:
+    if backend == "codex":
+        session_mgr = getattr(agent, "_session_mgr", None)
+        all_bases = getattr(session_mgr, "all_base_sessions", None)
+        return callable(all_bases) and base_session_id in set(_safe_call(all_bases, []))
+    if base_session_id in (getattr(agent, "_active_requests", {}) or {}):
+        return True
+    get_req = getattr(getattr(agent, "_session_manager", None), "get_request_session", None)
+    return bool(get_req(base_session_id)) if callable(get_req) else False
+
+
+def _session_agents(controller: "Controller", backend: str, base_session_id: str) -> list[Any]:
+    """The agents holding a Session's runtime state, or the registered one when none does.
+
+    After a disable and re-enable, a Session's running turn can live on the
+    retired agent while its next turn already uses the new one.
+    """
+    agents = _get_agents(controller, backend)
+    holding = [agent for agent in agents if _agent_holds_session(backend, agent, base_session_id)]
+    return holding or agents[:1]
 
 
 def _enrich_from_db(rows: list[dict[str, Any]]) -> None:
@@ -645,26 +683,30 @@ async def _end_claude(controller: "Controller", composite_key: Optional[str], ba
 async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -> dict[str, Any]:
     if not base_session_id:
         return {"ok": False, "error": "base_session_id_required"}
-    agent = _get_agent(controller, "codex")
-    if agent is None:
+    agents = _session_agents(controller, "codex", base_session_id)
+    if not agents:
         return {"ok": False, "error": "codex_unavailable"}
-    end_session = getattr(agent, "end_session", None)
-    if not callable(end_session):
-        return {"ok": False, "error": "codex_registries_unavailable"}
-    # The adapter owns End: it serializes it with the Session's turns, releases
-    # the Session's thread on an app-server other Sessions still use, or stops
-    # the directory's app-servers once this was their last user, and clears the
-    # Session only after that succeeded.
-    try:
-        ended = await end_session(base_session_id)
-    except Exception as exc:  # noqa: BLE001
-        released = getattr(exc, "reason", None) == "codex_thread_release_unavailable"
-        logger.warning("end: codex teardown failed for %s", base_session_id, exc_info=True)
-        return {
-            "ok": False,
-            "error": "thread_release_failed" if released else "transport_retire_failed",
-            "detail": str(exc),
-        }
+    interrupted = process_killed = False
+    for agent in agents:
+        end_session = getattr(agent, "end_session", None)
+        if not callable(end_session):
+            return {"ok": False, "error": "codex_registries_unavailable"}
+        # The adapter owns End: it serializes it with the Session's turns, releases
+        # the Session's thread on an app-server other Sessions still use, or stops
+        # the directory's app-servers once this was their last user, and clears the
+        # Session only after that succeeded.
+        try:
+            ended = await end_session(base_session_id)
+        except Exception as exc:  # noqa: BLE001
+            released = getattr(exc, "reason", None) == "codex_thread_release_unavailable"
+            logger.warning("end: codex teardown failed for %s", base_session_id, exc_info=True)
+            return {
+                "ok": False,
+                "error": "thread_release_failed" if released else "transport_retire_failed",
+                "detail": str(exc),
+            }
+        interrupted = interrupted or bool(ended.get("interrupted"))
+        process_killed = process_killed or bool(ended.get("process_killed"))
     # ``interrupted`` is False when there was no active turn to stop (idle/stale):
     # the session state is still cleared, but the caller can tell nothing was
     # actively interrupted.
@@ -672,17 +714,27 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
         "ok": True,
         "action": "ended",
         "backend": "codex",
-        "interrupted": bool(ended.get("interrupted")),
-        "process_killed": bool(ended.get("process_killed")),
+        "interrupted": interrupted,
+        "process_killed": process_killed,
     }
 
 
 async def _end_opencode(controller: "Controller", base_session_id: Optional[str]) -> dict[str, Any]:
     if not base_session_id:
         return {"ok": False, "error": "base_session_id_required"}
-    agent = _get_agent(controller, "opencode")
-    if agent is None:
+    agents = _session_agents(controller, "opencode", base_session_id)
+    if not agents:
         return {"ok": False, "error": "opencode_unavailable"}
+    process_killed = False
+    for agent in agents:
+        result = await _end_opencode_on(agent, base_session_id)
+        if not result.get("ok"):
+            return result
+        process_killed = process_killed or bool(result.get("process_killed"))
+    return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": process_killed}
+
+
+async def _end_opencode_on(agent: Any, base_session_id: str) -> dict[str, Any]:
     active_requests = getattr(agent, "_active_requests", {}) or {}
     task = active_requests.get(base_session_id)
     session_mgr = getattr(agent, "_session_manager", None)
@@ -803,7 +855,7 @@ def _live_workdir_for_backend(
     if workdir or not base_session_id:
         return workdir
     if backend == "codex":
-        agent = _get_agent(controller, "codex")
+        agent = next(iter(_session_agents(controller, "codex", base_session_id)), None)
         session_mgr = getattr(agent, "_session_mgr", None)
         get_cwd = getattr(session_mgr, "get_cwd", None)
         if callable(get_cwd):
@@ -812,7 +864,7 @@ def _live_workdir_for_backend(
             except Exception:  # noqa: BLE001
                 logger.debug("end: failed to resolve codex cwd for %s", base_session_id, exc_info=True)
     elif backend == "opencode":
-        agent = _get_agent(controller, "opencode")
+        agent = next(iter(_session_agents(controller, "opencode", base_session_id)), None)
         session_mgr = getattr(agent, "_session_manager", None)
         get_req = getattr(session_mgr, "get_request_session", None)
         if callable(get_req):
@@ -1188,30 +1240,38 @@ def _resolve_live_state(
         return "active" if ck in active else "idle"
 
     if backend == "codex":
-        agent = _get_agent(controller, "codex")
-        registry = getattr(agent, "_turn_registry", None)
-        if registry is None or not base_session_id:
+        registries = [
+            registry
+            for agent in _get_agents(controller, "codex")
+            if (registry := getattr(agent, "_turn_registry", None)) is not None
+        ]
+        if not registries or not base_session_id:
             return None
         try:
-            if registry.get_active_turn(base_session_id):
-                return "active"
-            if hasattr(registry, "has_pending_turn_start") and registry.has_pending_turn_start(base_session_id):
-                return "active"
+            for registry in registries:
+                if registry.get_active_turn(base_session_id):
+                    return "active"
+                if hasattr(registry, "has_pending_turn_start") and registry.has_pending_turn_start(base_session_id):
+                    return "active"
         except Exception:  # noqa: BLE001
             logger.debug("end: codex live-state check failed for %s", base_session_id, exc_info=True)
             return None
         return "idle"
 
     if backend == "opencode":
-        agent = _get_agent(controller, "opencode")
-        active_requests = getattr(agent, "_active_requests", {}) or {}
-        task = active_requests.get(base_session_id) if base_session_id else None
-        if task is None:
-            return "idle"
-        try:
-            return "idle" if bool(task.done()) else "active"
-        except Exception:  # noqa: BLE001
-            return "active"
+        tasks = [
+            (getattr(agent, "_active_requests", {}) or {}).get(base_session_id) if base_session_id else None
+            for agent in _get_agents(controller, "opencode")
+        ]
+        for task in tasks:
+            if task is None:
+                continue
+            try:
+                if not bool(task.done()):
+                    return "active"
+            except Exception:  # noqa: BLE001
+                return "active"
+        return "idle"
 
     return None
 
