@@ -133,10 +133,12 @@ running. The tray keeps the shell alive after the window closes.
   | shell launch, `enabled` | a grant missing | `needs_permission` | none; silent |
   | `needs_permission` | grant check passes | `starting` | spawn |
   | `starting` | socket accepts and health passes | `ready` | none |
-  | `starting` | spawn, socket, or health fails | `error` | stop the daemon; record the reason |
+  | `starting` | health reports a missing grant | `needs_permission` | stop the daemon; no prompt |
+  | `starting` | spawn, socket, or health fails otherwise | `error` | stop the daemon; record the reason |
   | `ready` | grant check fails | `needs_permission` | stop the daemon |
   | `ready` | daemon exits unexpectedly | `starting` | respawn with backoff; after 3 failures in 5 minutes, go to `error` |
   | `error` | toggle off, then on | as from `off` | none |
+  | any, `enabled` | quit | `stopped` | stop the daemon |
 
   - **Grant check.** Silent, and it runs only while `enabled`. It fires on
     app activation, and every 5 s while in `needs_permission` or `ready`.
@@ -152,8 +154,9 @@ running. The tray keeps the shell alive after the window closes.
     `health_report(include=["bundle_identity"])`, and require
     `source.attribution == "host"`. The menu shows the localized reason for
     `needs_permission` and `error`.
-  - **Orderly quit.** Stop the daemon. `D` keeps `enabled`, and the
-    effective-status table reads it as `shell_not_running`.
+  - **Orderly quit.** Write `stopped`, then stop the daemon. `D` keeps
+    `enabled`, and the effective-status table reads `stopped` as
+    `shell_not_running`, the same as a dead `shell_pid` after a crash.
 - **Daemon.** Spawn directly with `posix_spawn`/`Command`, never through
   `open`/LaunchServices. Environment: `CUA_DRIVER_EMBEDDED=1`,
   `CUA_DRIVER_HOST_BUNDLE_ID=<bundle id>`,
@@ -182,13 +185,15 @@ running. The tray keeps the shell alive after the window closes.
     - `starting`: the toggle is on, both grants are held, and the daemon is
       not yet accepting connections.
     - `ready`: the socket accepts connections.
-    - `error`: start or health failed.
+    - `error`: start or health failed for a reason other than a missing
+      grant.
+    - `stopped`: the toggle is on and the shell is quitting or has quit.
   - `ready` also carries `socket_path`, `proxy_executable` (absolute path to
     the bundled binary), `driver_version`, and `host_bundle_id`.
   - `generation` increases with each daemon spawn within one `instance_id`.
     The pair identifies a daemon across shell restarts.
-  - The shell writes a non-ready state before stopping the daemon. It never
-    deletes the file, so `enabled` survives quits and restarts. A dead
+  - The shell writes a non-ready state before stopping the daemon (`off` for
+    toggle-off, `stopped` for quit). It never deletes the file, so `enabled` survives quits and restarts. A dead
     `shell_pid` reads as unavailable. A missing file means the user never
     enabled the feature.
   - The location belongs to the desktop shell, of which each OS user has
@@ -232,7 +237,7 @@ running. The tray keeps the shell alive after the window closes.
     | --- | --- | --- |
     | missing | `off` | `never_enabled` |
     | unreadable, malformed, or unknown `schema_version` | `unavailable` | `invalid_state_file` |
-    | `shell_pid` not alive | `unavailable` | `shell_not_running` |
+    | `shell_pid` not alive, or `state` is `stopped` | `unavailable` | `shell_not_running` |
     | `state` other than `ready` | that state | its recorded `reason` |
     | `ready`, socket refuses a connection | `unavailable` | `daemon_unreachable` |
     | `ready`, socket accepts | `ready` | null |
