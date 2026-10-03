@@ -48,6 +48,7 @@ from core.resource_governance import (
     governor_from_controller,
     pids_failure_labels,
 )
+from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
     RuntimeResourceTarget,
@@ -765,6 +766,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     """OpenCode Server API integration via HTTP."""
 
     name = "opencode"
+    # How a forced stop settles the work bound to its process: a runtime update,
+    # unless a disable's shutdown named its own reason.
+    _forced_stop_reason: str = SETTLED_BY_BACKEND_REFRESH
 
     def __init__(self, controller, opencode_config):
         super().__init__(controller)
@@ -1034,7 +1038,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._interrupt_generation_work(generation)
 
     async def _interrupt_generation_work(self, generation: OpenCodeGeneration) -> None:
-        """Settle every turn and Activity bound to a generation being force-stopped."""
+        """Settle every turn and Activity bound to a generation being force-stopped.
+
+        Only this agent's bindings name the sessions, so a disabled agent's
+        stop never reaches a re-enabled agent's work. A stop is retried while
+        its process survives, and a retry settles only the sessions no earlier
+        attempt settled: the core settles by session, and a settled session's
+        next turn may already run on the re-enabled agent.
+        """
 
         sessions = {
             base_session_id
@@ -1048,15 +1059,26 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             generation.generation_id,
             len(sessions),
         )
+        unsettled = sessions - generation.interrupted_sessions
         force_end = getattr(getattr(self.controller, "agent_service", None), "force_end_runtime_work", None)
-        if callable(force_end):
+        if unsettled and callable(force_end):
+            # A re-enabled agent's Activities can share these sessions' runtime
+            # keys, so only those started under this agent's processes end.
+            identities = {
+                own.identity
+                for own in (*self._runtime.generations(), generation)
+                if isinstance(own.identity, RuntimeActivationIdentity)
+            }
             await force_end(
                 self.name,
-                base_session_ids=sessions,
+                base_session_ids=unsettled,
                 # The runtime keys the ownership snapshot gives these sessions,
                 # so their Activities and Runs settle with the process.
-                activity_runtime_keys=self._activity_runtime_keys(sessions),
+                activity_runtime_keys=self._activity_runtime_keys(unsettled),
+                activation_identities=identities or {None},
+                reason=self._forced_stop_reason,
             )
+            generation.interrupted_sessions |= unsettled
         await self._cancel_active_requests(base_session_ids=sessions)
 
     def _activity_runtime_keys(self, base_session_ids: set[str]) -> set[str]:
@@ -1332,14 +1354,21 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     async def reap_runtime_generations(self) -> None:
         await self._runtime.reap()
 
-    async def shutdown_runtime(self) -> None:
+    async def shutdown_runtime(self, settle_reason: str | None = None) -> None:
         """The backend is disabled, or the service stops: stop every process now.
 
-        The core interrupted this backend's work before unregistering the
-        agent, so nothing here waits for it to drain. A previous controller's
-        servers are adopted first, so they stop too. Admission closes, and a
-        turn that raced the disable fails with the localized retired error.
+        A disable passes ``settle_reason``, and every forced stop settles the
+        turns and Activities bound to its process with it. The core's
+        backend-wide interrupt may have failed, or been skipped because the
+        backend was enabled again, so this is the settlement a retry relies on.
+        A previous controller's servers stop too. Admission closes, and a turn
+        that raced the disable fails with the localized retired error. Raises
+        while any process survives; a retry is safe at any point.
         """
+        if settle_reason is not None:
+            # This agent never serves again, so every later stop of its
+            # processes, a retry's included, belongs to the same disable.
+            self._forced_stop_reason = settle_reason
         await self._runtime.shutdown()
 
     async def retire_current_generation(self) -> StopOutcome | None:

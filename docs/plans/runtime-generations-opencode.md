@@ -35,13 +35,16 @@ are the Phase 1 design. Their line references are to
   conversion of a legacy record. Adoption applies resource governance to each
   adopted generation, as a start does.
 - Disabling OpenCode is the user's own interruption (owner decision,
-  2026-10-03). The core interrupts the backend's turns and Activities with its
-  refresh notice, unregisters the agent, and awaits `shutdown_runtime()`. That
-  call adopts a previous controller's generations if this agent never did,
-  then stops every generation at once with a forced `stop_all`. A turn that
-  raced the disable fails with the localized `error.agentRuntimeRetired`.
-  Re-enabling builds a new agent. Every other configuration change still
-  renews in place without interrupting anything.
+  2026-10-03). The core interrupts the backend's turns and Activities with the
+  disabled notice, unregisters the agent, and awaits
+  `shutdown_runtime(settle_reason="backend_disabled")`. That call stops every
+  generation at once with a forced `stop_all`, and each forced stop settles
+  the work bound to its process with that reason. The core's backend-wide
+  interrupt is only the fast path: it may fail, and a retry after OpenCode is
+  enabled again skips it, so the adapter's own settlement is the guaranteed
+  one. A turn that raced the disable fails with the localized
+  `error.agentRuntimeRetired`. Re-enabling builds a new agent. Every other
+  configuration change still renews in place without interrupting anything.
 - A controller that starts with OpenCode disabled stops the servers a crashed
   controller recorded, through `stop_recorded_servers_sync()`, the same
   function as `vibe stop`. It honors ownership here, process identity, and the
@@ -398,8 +401,9 @@ The core owns the cap of three and the serialized starts. The adapter declares
 Other lifecycle cases:
 
 - **Backend disabled.** The core interrupts the backend's work, unregisters
-  the agent, and awaits `OpenCodeAgent.shutdown_runtime()`, which stops every
-  generation at once.
+  the agent, and awaits `OpenCodeAgent.shutdown_runtime(settle_reason=...)`,
+  which stops every generation at once and settles the work bound to each with
+  that reason.
 - **Native migration.** `retire_for_native_migration` (`agent.py:1086-1089`,
   `server.py:550-593`) strictly stops every generation. It refuses while any
   generation has requests or runs, and keeps today's ownership proofs.
@@ -634,7 +638,7 @@ and the corrected cells came from an independent agent that checked every
 | L5 | A lease's expiry is in the record before the lease is handed out (R3). |
 | B1 | A turn, a restored poll, a `current_server()` use, and a lease each hold one binding for their whole use, and release it exactly once on every exit. |
 | B2 | No new work binds to a closed or stopped generation. A turn's prompt, status, abort, steering, and stop reach the generation it is bound to. |
-| B3 | A bound generation is stopped only by a forced stop, which first settles the bound work. |
+| B3 | A bound generation is stopped only by a forced stop, which first settles the bound work, each session once across retries, with the stop's reason (a disable's, else a runtime update), and never another agent instance's work. |
 | M1 | A native run is marked on its generation, and that marker persisted, before the run's first native write. |
 | M2 | A turn clears its marker together with its durable poll: both go, or both stay. This is master's contract. |
 | M3 | A marker that no live run or durable poll backs never keeps a process: adoption reconciliation and the re-reconcile in `_stop`. |
@@ -664,7 +668,7 @@ and the corrected cells came from an independent agent that checked every
 | Retire: renewal | `renew()` persists the epoch first; the next turn's spec installs a new current and the old one retires | S1 holds. W: renewal raises without effect. |
 | Retire: End-idle and strict migration | `retire_confirmed()` waits for the reconciler and reports stopped, draining, or failed | B3, O4 hold. |
 | Retire: forced refresh | `_cancel_active_requests()` then `retire_all()` | B3 holds; leases keep their generation until released. |
-| Disable | the core interrupts the backend's work, unregisters the agent, and runs `shutdown_runtime()` → `OpenCodeRuntime.shutdown()` inside `AgentService.run_teardown`: a forced `stop_all` of every attached generation, then `stop_recorded_servers_sync()` for every recorded server no runtime here owns. It raises while any process survives, so the idle sweep retries it; a retry repeats both steps | B3 holds by the user's own interruption. L3 holds: a later UI release reaches the holder. W/D: a survivor fails the teardown, which is retried until it stops. **Gap G2:** a runtime that never adopted stopped without adopting, so a crashed predecessor's generations ran until shutdown (O2). Gap G1, a closed runtime that was never swept, ended with the drain path. **Gap G10:** an incomplete shutdown returned normally, so the teardown's retry was lost. |
+| Disable | the core interrupts the backend's work, unregisters the agent, and runs `shutdown_runtime(settle_reason="backend_disabled")` → `OpenCodeRuntime.shutdown()` inside `AgentService.run_teardown`: a forced `stop_all` of every attached generation, each forced stop settling its bound work with that reason, then `stop_recorded_servers_sync()` for every recorded server no runtime here owns. It raises while any process survives, so the idle sweep retries it; a retry repeats both steps | B3 holds by the user's own interruption. L3 holds: a later UI release reaches the holder. W/D: a survivor fails the teardown, which is retried until it stops. **Gap G2:** a runtime that never adopted stopped without adopting, so a crashed predecessor's generations ran until shutdown (O2). Gap G1, a closed runtime that was never swept, ended with the drain path. **Gap G10:** an incomplete shutdown returned normally, so the teardown's retry was lost. **Gap G13:** the forced stop settled bound work only as a runtime update, so a disable whose core interrupt failed, retried after a re-enable that skips that interrupt, never settled it as disabled; it ended Activities by runtime key, which a re-enabled agent's Activities in the same session share; and a retry settled again a session an earlier attempt had settled, whose next turn may run on the re-enabled agent. |
 | Cap force-stop | core `_next_victim` forces the oldest retiring generation; `_on_generation_stopping(force)` → `_interrupt_generation_work` settles the bound sessions' turns and, by the runtime keys the ownership snapshot gives them, their Activities; `stop_generation` | B3 holds; a lease holder sees its process end, by design. **Gap G11:** the forced stop passed no runtime keys, so the interrupted sessions' Activities and Runs stayed active after the process was killed. Every forced stop of the adapter goes through this one hook; `forget()` handles a process that already died, and the record-based stops touch only records no runtime here owns. |
 | Controller restart | explicit: shutdown stops every generation this controller owns; next start adopts and restores polls on a new current. After a crash with OpenCode disabled, startup runs `stop_recorded_servers_sync()` | R2, B1 hold. **Gap S-1:** after a crash, a restart with OpenCode disabled never stopped its leftovers, which ran until the next stop or enable (O2). |
 | Crash between steps | spawn→record (K1); record→ready (adopted or stopped); lease grant→hand-out (the successor honors it until TTL); marker→durable poll (marker reconciled away); kill→record removal (unproven, removed later); legacy write→legacy removal (G3) | R1–R3 hold except K1 and G3. |
@@ -681,6 +685,7 @@ and the corrected cells came from an independent agent that checked every
 | G10 | `shutdown()` raises while any attached generation or recorded server survives | `test_a_disable_shutdown_that_leaves_a_process_raises_and_its_retry_finishes` |
 | G11 | `_interrupt_generation_work` passes `base_session_id:working_path` runtime keys | `test_a_cap_forced_stop_settles_the_activities_of_the_sessions_it_interrupts` |
 | G12 | a failed start's surviving process stays owned by its runtime, whose `reap()` and `shutdown()` retry its stop until it is gone | `test_a_failed_start_whose_process_survives_is_reaped_until_it_is_gone` |
+| G13 | `shutdown_runtime(settle_reason)` makes the reason this agent's forced-stop settlement for good; `_interrupt_generation_work` names sessions only from this agent's bindings, ends only the Activities started under this agent's own activation identities, and settles each session of a generation once, recorded on the generation, so a retried stop settles only the rest | `test_runtime_gen_006_a_disable_retried_after_a_re_enable_settles_only_the_disabled_agents_work` |
 | G3 | adoption skips and removes a legacy record whose process a converted record already named | `test_adoption_takes_a_converted_legacy_server_once` |
 | G4 | `_outside_turn_admission()`: work outside a turn waits while the backend drains; it is counted, in one step with the readiness check, until it is bound; `runtime_has_active_turns()` reports it | `test_a_native_migration_never_overlaps_an_opencode_start_outside_a_turn` |
 | G5 | `_bind_restored_poll` rewrites the poll's `opencode_generation_id` whenever it binds a different generation | `test_runtime_gen_022_a_restored_poll_resumes_on_the_generation_that_runs_it` |

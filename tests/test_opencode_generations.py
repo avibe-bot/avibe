@@ -1320,46 +1320,148 @@ def test_a_disable_shutdown_that_leaves_a_process_raises_and_its_retry_finishes(
     assert runtime.generations() == () and not record.exists()
 
 
-def test_a_cap_forced_stop_settles_the_activities_of_the_sessions_it_interrupts(fake_processes):
-    """A fourth launch spec force-stops the oldest busy generation: the
-    sessions on it get their turns and their background Activities settled,
-    by the runtime keys the ownership snapshot gives them."""
+def _stopping_agent(agent_service, runtime_activation=None) -> OpenCodeAgent:
+    """An agent whose forced generation stops settle their work through ``agent_service``."""
 
     from modules.agents.opencode.session import OpenCodeSessionManager
 
-    interrupted: list[dict] = []
-
-    async def force_end_runtime_work(backend, *, base_session_ids, activity_runtime_keys):
-        interrupted.append(
-            {"backend": backend, "sessions": set(base_session_ids), "keys": set(activity_runtime_keys)}
-        )
-
     agent = object.__new__(OpenCodeAgent)
-    agent.controller = SimpleNamespace(agent_service=SimpleNamespace(force_end_runtime_work=force_end_runtime_work))
+    agent.controller = SimpleNamespace(agent_service=agent_service, runtime_activation=runtime_activation)
     agent._session_manager = OpenCodeSessionManager(SimpleNamespace(sessions=None), "opencode")
     agent._session_generations = {}
     agent._active_requests = {}
     agent._steering_states = {}
     agent._settling_request_tasks = set()
     agent._runtime = _runtime()
+    agent._runtime.on_generation_ready = agent._attach_generation_activation
     agent._runtime.on_generation_stopping = agent._on_generation_stopping
+    return agent
+
+
+async def _bind_turn(agent: OpenCodeAgent, digest: str, base: str, workdir: str) -> OpenCodeGeneration:
+    binding = await agent._runtime.acquire(OpenCodeLaunchSpec(digest=digest, binary="opencode"))
+    agent._session_generations[base] = binding.generation.runtime
+    agent._session_manager.set_request_session(base, f"ses-{base}", workdir, "slack::channel::C1")
+    return binding.generation.runtime
+
+
+def test_a_cap_forced_stop_settles_the_activities_of_the_sessions_it_interrupts(fake_processes):
+    """A fourth launch spec force-stops the oldest busy generation: the
+    sessions on it get their turns and their background Activities settled
+    as a runtime update, by the runtime keys the ownership snapshot gives them."""
+
+    interrupted: list[dict] = []
+
+    async def force_end_runtime_work(backend, *, base_session_ids, activity_runtime_keys, reason, activation_identities):
+        interrupted.append(
+            {"backend": backend, "sessions": set(base_session_ids), "keys": set(activity_runtime_keys), "reason": reason}
+        )
+
+    agent = _stopping_agent(SimpleNamespace(force_end_runtime_work=force_end_runtime_work))
 
     async def scenario():
-        bindings = []
-        for index, digest in enumerate(("v1", "v2", "v3")):
-            binding = await agent._runtime.acquire(OpenCodeLaunchSpec(digest=digest, binary="opencode"))
-            base = f"base-{index}"
-            agent._session_generations[base] = binding.generation.runtime
-            agent._session_manager.set_request_session(base, f"ses-{index}", f"/work/{index}", "slack::channel::C1")
-            bindings.append(binding)
+        generations = [
+            await _bind_turn(agent, digest, f"base-{index}", f"/work/{index}")
+            for index, digest in enumerate(("v1", "v2", "v3"))
+        ]
         await agent._runtime.acquire(OpenCodeLaunchSpec(digest="v4", binary="opencode"))
         await agent._runtime._generations.settled()
-        return bindings[0].generation.runtime
+        return generations[0]
 
     oldest = asyncio.run(scenario())
 
     assert fake_processes.stopped == [oldest]
-    assert interrupted == [{"backend": "opencode", "sessions": {"base-0"}, "keys": {"base-0:/work/0"}}]
+    assert interrupted == [
+        {"backend": "opencode", "sessions": {"base-0"}, "keys": {"base-0:/work/0"}, "reason": "backend_refresh"}
+    ]
+
+
+def test_runtime_gen_006_a_disable_retried_after_a_re_enable_settles_only_the_disabled_agents_work(
+    fake_processes, monkeypatch
+):
+    """RUNTIME-GEN-006, at the OpenCode adapter: the core's interrupt of a
+    disable failed, and OpenCode was enabled again before the retry, so the
+    retry skips that interrupt. The disabled agent's forced stop settles the
+    work bound to its process as disabled, once across every retry, and never
+    the re-enabled agent's work: not its Activities under the same runtime
+    key, nor the next turn of a session the stop already settled."""
+
+    from core.runtime_activation import RuntimeActivationRegistry
+    from core.session_activities import SessionActivityRegistry
+    from modules.agents.service import AgentService
+
+    releases: list[tuple[set[str], str]] = []
+    terminals = []
+
+    async def release_for_backend_refresh(*, backend, base_session_ids, settled_by):
+        releases.append((set(base_session_ids), settled_by))
+        if len(releases) == 1:
+            # The failure that also made the core's interrupt fail.
+            raise RuntimeError("database is locked")
+
+    activation = RuntimeActivationRegistry()
+    service = AgentService(
+        SimpleNamespace(
+            session_turns=SimpleNamespace(release_for_backend_refresh=release_for_backend_refresh),
+            scheduled_task_service=SimpleNamespace(settle_activity_runs=terminals.append),
+        ),
+        activities=SessionActivityRegistry(activation_registry=activation),
+        activation_registry=activation,
+    )
+    # The process survives the first stop that reaches it.
+    exits = iter([False, True])
+    stop = client_manager.stop_generation
+
+    async def stop_generation(generation):
+        if not next(exits):
+            raise RuntimeError("process did not exit")
+        await stop(generation)
+
+    monkeypatch.setattr(client_manager, "stop_generation", stop_generation)
+
+    def start_task(generation: OpenCodeGeneration, activity_id: str) -> None:
+        service.activities.start(
+            backend="opencode",
+            runtime_key="base-old:/work/old",
+            session_id=None,
+            activity_id=activity_id,
+            kind="task",
+            activation_identity=generation.identity,
+        )
+
+    disabled = _stopping_agent(service, activation)
+
+    async def shutdown() -> None:
+        await disabled.shutdown_runtime(settle_reason="backend_disabled")
+
+    async def scenario():
+        old = await _bind_turn(disabled, "v1", "base-old", "/work/old")
+        start_task(old, "old-task")
+        with pytest.raises(RuntimeError, match="incomplete"):
+            await shutdown()
+        enabled = _stopping_agent(service, activation)
+        new = await _bind_turn(enabled, "v1", "base-new", "/work/new")
+        start_task(new, "new-task")
+        with pytest.raises(RuntimeError, match="incomplete"):
+            await shutdown()
+        # The settled session's next turn runs on the re-enabled agent.
+        await _bind_turn(enabled, "v1", "base-old", "/work/old")
+        start_task(new, "next-task")
+        await shutdown()
+        return old, new, enabled
+
+    old, new, enabled = asyncio.run(scenario())
+
+    assert releases == [({"base-old"}, "backend_disabled")] * 2
+    assert [(task.id, task.status, task.metadata.get("interrupt_reason")) for task in terminals] == [
+        ("old-task", "killed", "backend_disabled")
+    ]
+    assert sorted(task.id for task in service.activities.active_for_runtime("opencode", "base-old:/work/old")) == [
+        "new-task",
+        "next-task",
+    ]
+    assert fake_processes.stopped == [old]
+    assert enabled._runtime.current() is new and new.generation_id in fake_processes.alive
 
 def test_adoption_takes_a_converted_legacy_server_once(isolated_launch, tmp_path, monkeypatch):
     converted = _record(isolated_launch.records, "ocg_converted", fake_pid(48), 4096)

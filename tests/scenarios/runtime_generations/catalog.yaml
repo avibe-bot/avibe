@@ -73,6 +73,7 @@ scenarios:
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_retried_disable_settles_only_the_disabled_agents_work
       - tests/test_opencode_generations.py::test_runtime_gen_006_disabling_opencode_stops_every_generation_now_and_refuses_a_late_turn
       - tests/test_opencode_generations.py::test_a_disable_shutdown_that_leaves_a_process_raises_and_its_retry_finishes
+      - tests/test_opencode_generations.py::test_runtime_gen_006_a_disable_retried_after_a_re_enable_settles_only_the_disabled_agents_work
   - id: RUNTIME-GEN-007
     name: Re-enabling a backend registers a fresh agent at once; disabling already stopped the old one
     status: covered

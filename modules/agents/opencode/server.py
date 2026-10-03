@@ -1571,6 +1571,8 @@ class OpenCodeGeneration(OpenCodeServerClient):
         self._supersedes: Optional[Path] = None
         # The runtime activation identity the agent attached to this process.
         self.identity: Any = None
+        # Sessions whose work a forced stop of this process already settled.
+        self.interrupted_sessions: set[str] = set()
         self._process = process
 
     @property
