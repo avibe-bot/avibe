@@ -149,7 +149,7 @@ author and two independent reviewers.
 | Release proof | A thread loads elsewhere only after `thread/closed`, `notLoaded`, absence from `thread/loaded/list`, or the old process's exit by return code. Anything less raises `CodexThreadReleaseUnavailableError` and changes nothing; every caller propagates it. | `_release_session_thread` |
 | Settlement | Every adapter-initiated kill of a process with bound work settles that work (turns and every bound Session's Activities) with its reason (the runtime-update notice, or a disable's), and only that work: turns running when settlement begins that still own their gate, and Activities started by this agent's own generations. | `_end_bound_work` via `_stop_runtime(settle_reason=)`, `force_end_runtime_work` |
 | Fence | Once a teardown begins, no durable owner commits to its generation: the retirement is reserved before the final drained check, settlement, and stop, and aborted when any of them declines or fails. | `_stop_runtime` |
-| Hub scope | The gateway credential is revoked exactly when the directory's last Hub process is gone, a starting or failed-start one included. | `_runtimes`, `_retire_hub_scope_after` |
+| Hub scope | The gateway credential is revoked exactly when this agent's last Hub process in the directory is gone, a starting or failed-start one included; another agent instance's processes never share it. | `_runtimes`, `_retire_hub_scope_after` |
 | Per generation | A decision about a generation reads only its own Sessions, turns, bindings, and process. | admission, drained check, eviction, End |
 | Session serialization | Turn admission, End, `/new`, and resume preparation run under the Session's lifecycle lock. | `session_lifecycle` |
 | Spec identity | Equal digests are interchangeable processes; the credential identity covers the file store only. | `_launch_spec_digest`, `codex_credential_identity` |
@@ -307,6 +307,12 @@ lifecycle; the core rewrites the mapping right after, with no await between.
 All Hub generations of a directory share its request-scoped gateway
 credential. Per-turn routes ride on `responsesapiClientMetadata`. The scope is
 retired only when the directory's last Hub process ends.
+
+The scope belongs to one agent instance (`<cwd>#<instance>`). A disable whose
+teardown failed keeps the old agent's processes until the idle sweep's retry
+stops them, while a re-enabled agent already runs its own in the same
+directory. The old agent revoking its scope with its last Hub process therefore
+never revokes the credential the new agent's processes hold (RUNTIME-GEN-016).
 
 ## Triggers
 

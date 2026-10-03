@@ -15,6 +15,7 @@ import pytest
 
 import modules.agents.codex.agent as codex_agent_module
 from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, set_dispatch_phase
+from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
 from core.runtime_activation import RuntimeActivationRegistry
 from core.session_activities import SessionActivityRegistry
 from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
@@ -234,12 +235,14 @@ class _Router:
 
     def __init__(self):
         self.launches = {}
+        self.scopes = []
         self.retired = []
 
     def snapshot(self):
         return SimpleNamespace(agents={"codex": SimpleNamespace(models=[])})
 
     async def resolve(self, backend, requested_model, *, process_scope=None, turn_id=None, config=None):
+        self.scopes.append((backend, process_scope))
         return self.launches[requested_model]
 
     def retire_process_scope(self, backend, process_scope, **_kwargs):
@@ -502,6 +505,49 @@ async def test_runtime_gen_006_a_retried_disable_settles_only_the_disabled_agent
     assert turns_settled == [({"s1"}, "backend_disabled")]
     assert old.stopped and new.alive
     assert reenabled._turn_registry.get_active_turn("s1")
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_016_a_retried_disable_never_revokes_a_reenabled_agents_hub_credential(tmp_path):
+    """RUNTIME-GEN-016: a disabled agent's retried teardown retires only its own Hub scope.
+
+    Its first teardown left a Hub app-server running, and the re-enabled
+    agent started its own in the same directory. When the retry stops the old
+    process, the old credential is revoked and the new process's still
+    authenticates at the gateway.
+    """
+    correlation = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "provenance.json"))
+
+    class _GatewayRouter(_Router):
+        async def resolve(self, backend, requested_model, *, process_scope=None, turn_id=None, config=None):
+            token = correlation.credentials(backend, process_scope, None, request_scoped=True)
+            return _launch(requested_model, "hub", token=token)
+
+        def retire_process_scope(self, backend, process_scope, **_kwargs):
+            correlation.retire_scope(backend, process_scope)
+
+    router = _GatewayRouter()
+    catalog = SimpleNamespace(retain=lambda: SimpleNamespace(path=tmp_path / "catalog.json", close=Mock()))
+    disabled, cwd = _agent(tmp_path, router=router)
+    reenabled, _ = _agent(tmp_path, router=router)
+    for agent in (disabled, reenabled):
+        agent.prepare_model_hub_runtime = AsyncMock(return_value=catalog)
+
+    await disabled.handle_message(_request(cwd, "s1"))
+    old = _server_for(disabled, "s1")
+    stop = old.stop
+    old.stop = AsyncMock(side_effect=RuntimeError("the child did not stop"))
+    with pytest.raises(RuntimeError, match="survived shutdown"):
+        await disabled.shutdown_runtime(settle_reason="backend_disabled")
+    await reenabled.handle_message(_request(cwd, "s2"))
+    new = _server_for(reenabled, "s2")
+    old.stop = stop
+
+    await disabled.shutdown_runtime(settle_reason="backend_disabled")
+
+    assert old.stopped and new.alive
+    assert not correlation.authenticates("codex", old.runtime_env["AVIBE_MODEL_HUB_TOKEN"])
+    assert correlation.authenticates("codex", new.runtime_env["AVIBE_MODEL_HUB_TOKEN"])
 
 
 @pytest.mark.asyncio
@@ -940,7 +986,7 @@ async def test_runtime_gen_016_a_failed_hub_start_is_cleaned_up(tmp_path, monkey
         await agent.reap_runtime_generations()
         assert server.stopped
 
-    assert router.retired == [("codex", cwd)]
+    assert router.retired == [router.scopes[0]]
 
 
 @pytest.mark.asyncio
@@ -980,7 +1026,7 @@ async def test_runtime_gen_016_hub_scope_is_revoked_only_with_the_last_hub_gener
     if successor == "hub":
         assert router.retired == []
         await agent.shutdown_runtime()
-    assert router.retired == [("codex", cwd)]
+    assert router.retired == [router.scopes[0]]
 
 
 @pytest.mark.asyncio

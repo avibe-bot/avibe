@@ -158,6 +158,7 @@ scenarios:
     related_tests:
       - tests/test_codex_runtime_generations.py::test_runtime_gen_016_a_starting_hub_process_keeps_the_scope
       - tests/test_codex_runtime_generations.py::test_runtime_gen_016_a_failed_hub_start_is_cleaned_up
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_016_a_retried_disable_never_revokes_a_reenabled_agents_hub_credential
   - id: RUNTIME-GEN-017
     name: A Codex Session that moved app-servers never receives late thread-level events from the one it left
     status: covered
