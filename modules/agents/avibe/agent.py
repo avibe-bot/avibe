@@ -27,7 +27,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Optional, Sequence
 
@@ -35,7 +35,6 @@ from sqlalchemy import and_, select
 from sqlalchemy.engine import Engine
 
 from config import paths
-from config.platform_registry import get_platform_descriptor
 from core.agent_core.agent.events import (
     AgentError,
     AgentEvent,
@@ -49,6 +48,7 @@ from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.harness.store import ContextEntry
+from core.agent_core.tools.jobs import instant
 from core.agent_core.messages import (
     IMAGE_MIME_TYPES,
     AssistantMessage,
@@ -69,7 +69,7 @@ from core.backend_failure import emit_backend_failure
 from core.message_output import MessageOutput, stop_output_for, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
-from core.reply_enhancer import process_reply, strip_silent_blocks
+from core.reply_enhancer import strip_silent_blocks
 from core.skill_observability import accept_catalog
 from modules.agents.avibe.errors import error_text
 from modules.agents.avibe.media import MediaSnapshots
@@ -80,7 +80,6 @@ from modules.agents.avibe.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
 from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
-from storage import messages_service
 from storage.agent_transcript import (
     INPUT_TYPES,
     RESPONSE_TYPES,
@@ -113,21 +112,6 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
         return absolute if shown.startswith("../..") else shown
 
     return relative
-
-
-def _instant(value: Any) -> Optional[datetime]:
-    """A stored UTC timestamp (``...Z``) as an aware ``datetime``, or ``None``."""
-    text = str(value or "").strip()
-    try:
-        instant = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
-    except ValueError:
-        return None
-    return instant if instant.tzinfo is not None else instant.replace(tzinfo=timezone.utc)
-
-
-def _microsecond_text(instant: datetime) -> str:
-    """The fixed-width form ``agent_events.created_at`` is written in, so the two compare as text."""
-    return instant.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 @dataclass
@@ -406,24 +390,19 @@ class AvibeAgent(BaseAgent):
         from sqlalchemy import func
 
         session_id, call_id = str(meta.get("session_id") or ""), str(meta.get("tool_call_id") or "")
-        created = _instant(meta.get("created_at"))
+        created = instant(meta.get("created_at"))
         if not session_id or not call_id or created is None:
             return False
         with self._engine.connect() as conn:
-            return (
-                conn.execute(
-                    select(agent_events.c.id)
-                    .where(
-                        agent_events.c.session_id == session_id,
-                        agent_events.c.event_type == "tool_result",
-                        agent_events.c.context_seq.is_not(None),
-                        func.json_extract(agent_events.c.content_json, "$.message.tool_call_id") == call_id,
-                        agent_events.c.created_at >= _microsecond_text(created),
-                    )
-                    .limit(1)
-                ).first()
-                is not None
-            )
+            committed = conn.execute(
+                select(agent_events.c.created_at).where(
+                    agent_events.c.session_id == session_id,
+                    agent_events.c.event_type == "tool_result",
+                    agent_events.c.context_seq.is_not(None),
+                    func.json_extract(agent_events.c.content_json, "$.message.tool_call_id") == call_id,
+                )
+            ).scalars()
+            return any((moment := instant(value)) is not None and moment >= created for value in committed)
 
     async def shutdown_runtime(self) -> None:
         """Disabling the backend ends its runs; the rolling refresh drains Turns before this."""
@@ -752,7 +731,7 @@ class AvibeAgent(BaseAgent):
     def _committed_at(self, row_ids: Sequence[str]) -> dict[str, datetime]:
         with self._engine.connect() as conn:
             rows = conn.execute(select(messages.c.id, messages.c.created_at).where(messages.c.id.in_(set(row_ids))))
-            return {row_id: instant for row_id, created in rows if (instant := _instant(created)) is not None}
+            return {row_id: moment for row_id, created in rows if (moment := instant(created)) is not None}
 
     def _unconsumed_inputs(self, session_id: str) -> list[tuple[str, str, list[FileAttachment], dict[str, Any]]]:
         """Inputs accepted into an ``avibe`` Turn but never consumed, in acceptance order.
@@ -878,20 +857,24 @@ class AvibeAgent(BaseAgent):
 
         context = request.context
         skill_catalog_sink: list[dict] = []
-        sections = await asyncio.to_thread(
-            build_system_prompt_injection,
-            agent_instructions=request.vibe_agent_system_prompt or "",
-            backend=BACKEND,
-            include_quick_replies=getattr(self.config, "reply_enhancements", True)
-            and context.platform != "wechat",
-            context=context,
-            fallback_platform=context.platform,
-            enabled_agents=get_enabled_agents_for_prompt(self.controller),
-            skills_cwd=cwd or None,
-            skills_project_base=managed_skill_project_base(context),
-            skills_claude_cli_path=managed_skill_claude_cli_path(self.config),
-            skill_catalog_sink=skill_catalog_sink,
-        )
+
+        def build() -> str:
+            # Every lookup runs here, off the loop: the enabled-Agent list reads SQLite.
+            return build_system_prompt_injection(
+                agent_instructions=request.vibe_agent_system_prompt or "",
+                backend=BACKEND,
+                include_quick_replies=getattr(self.config, "reply_enhancements", True)
+                and context.platform != "wechat",
+                context=context,
+                fallback_platform=context.platform,
+                enabled_agents=get_enabled_agents_for_prompt(self.controller),
+                skills_cwd=cwd or None,
+                skills_project_base=managed_skill_project_base(context),
+                skills_claude_cli_path=managed_skill_claude_cli_path(self.config),
+                skill_catalog_sink=skill_catalog_sink,
+            )
+
+        sections = await asyncio.to_thread(build)
         return sections, (skill_catalog_sink[0] if skill_catalog_sink else None)
 
     def _environment(self, session_id: str) -> dict[str, str]:

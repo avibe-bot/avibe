@@ -14,6 +14,7 @@ Pi-specific lines (its docs, ``PI_*`` variables) are left out.
 
 from __future__ import annotations
 
+import functools
 import os
 import platform
 import re
@@ -81,6 +82,7 @@ ENVIRONMENT_FIELDS = ("cwd", "os", "shell", "date", "timezone", "watches")
 _BLOCK = re.compile(r"\A<environment>\n(?P<body>(?:[a-z]+: [^\n]*\n)*)</environment>\Z")
 
 
+@functools.lru_cache(maxsize=1)
 def operating_system() -> str:
     machine = platform.machine() or "unknown"
     if platform.system() == "Darwin":

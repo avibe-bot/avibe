@@ -147,6 +147,36 @@ async def test_a_wrapper_left_without_a_decision_abandons_and_a_late_host_cannot
     assert _counter(tmp_path) == 0
 
 
+async def test_find_job_tells_apart_jobs_a_reused_call_started_within_one_millisecond(tmp_path, monkeypatch):
+    import secrets
+
+    # The earlier call's job, the later response's commit, and the later call's job, all inside one
+    # millisecond; the earlier job's id sorts first, so a tie would pick it.
+    moments = iter([
+        datetime(2026, 10, 4, 4, 30, 0, 123100, tzinfo=timezone.utc),
+        datetime(2026, 10, 4, 4, 30, 0, 123700, tzinfo=timezone.utc),
+    ])
+    real_datetime, token_hex = jobs_module.datetime, secrets.token_hex
+
+    class _Clock(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return next(moments)
+
+    job_ids = iter(["0" * 16, "f" * 16])
+    monkeypatch.setattr(jobs_module, "datetime", _Clock)
+    monkeypatch.setattr(jobs_module.secrets, "token_hex", lambda n=None: next(job_ids) if n == 8 else token_hex(n))
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    earlier = await _start(host, tmp_path, "true", tool_call_id="call_0")
+    later = await _start(host, tmp_path, "true", tool_call_id="call_0")
+    monkeypatch.undo()
+    response_committed = datetime(2026, 10, 4, 4, 30, 0, 123400, tzinfo=timezone.utc)
+
+    assert host.find_job("ses_test", "call_0", created_since=response_committed) == later
+    assert host.find_job("ses_test", "call_0") == later
+    assert _wait_until(lambda: all(host.status(job).state != "running" for job in (earlier, later)))
+
+
 async def test_recovery_reads_exited_running_and_gone(tmp_path):
     jobs_dir = str(tmp_path / "jobs")
     host = LocalJobHost(jobs_dir)

@@ -121,6 +121,27 @@ def _iso(moment: datetime) -> str:
     return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def instant_text(moment: datetime) -> str:
+    """A UTC instant at full microsecond precision, the form job and transcript times compare in."""
+    return moment.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def instant(value: object) -> Optional[datetime]:
+    """Parse a recorded UTC time (``...Z`` or an offset) at full precision, or ``None``.
+
+    The one parser for every time the job and recovery paths compare: a job's
+    ``created_at``, a response's commit, a tool result's commit.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
 def _ceil_ms(moment: datetime) -> datetime:
     """Round up to the millisecond ``_iso`` keeps, so a recorded deadline is never early."""
     rest = moment.microsecond % 1000
@@ -223,8 +244,7 @@ class LocalJobHost:
         response that made the call, excludes jobs an earlier call with the same id
         started.
         """
-        floor = _iso(created_since.astimezone(timezone.utc)) if created_since is not None else ""
-        newest: Optional[tuple[str, str]] = None
+        newest: Optional[tuple[datetime, str]] = None
         for name in self._job_ids():
             try:
                 meta = self.meta(name)
@@ -232,9 +252,10 @@ class LocalJobHost:
                 continue
             if meta.get("session_id") != session_id or meta.get("tool_call_id") != tool_call_id:
                 continue
-            # ``_iso`` strings of one width order chronologically.
-            created = str(meta.get("created_at") or "")
-            if created >= floor and (newest is None or created > newest[0]):
+            created = instant(meta.get("created_at"))
+            if created is None or (created_since is not None and created < created_since):
+                continue
+            if newest is None or created > newest[0]:
                 newest = (created, name)
         return newest[1] if newest is not None else None
 
@@ -339,7 +360,9 @@ class LocalJobHost:
             "command": command,
             "cwd": cwd,
             "timeout_s": timeout_s,
-            "created_at": _iso(created),
+            # Full precision: recovery tells apart jobs a reused tool-call id started
+            # within one millisecond (``find_job``).
+            "created_at": instant_text(created),
             "state_dir": job_dir,
             "process": None,
             "terminal": None,

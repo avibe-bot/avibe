@@ -14,13 +14,12 @@ the agent needs no Gemini transport. The served origin still comes from
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ProviderAdapter
-from core.agent_core.messages import PROTOCOLS, Origin, ProtocolName
+from core.agent_core.messages import PROTOCOLS, ProtocolName
 
 logger = logging.getLogger(__name__)
 
