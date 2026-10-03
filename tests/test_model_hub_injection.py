@@ -250,20 +250,25 @@ def test_claude_catalog_limits_fill_only_absent_environment_values(channel, expl
 
 
 @pytest.mark.parametrize(
-    "explicit", [{}, {"API_TIMEOUT_MS": "900000"}, {"CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS": ""}],
+    "explicit", [{}, {"API_TIMEOUT_MS": "60000"}, {"CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS": "30000"}],
 )
 def test_claude_hub_waits_out_resolution_as_one_streaming_request(explicit):
-    """MH-RUNTIME-010: the Hub owns pre-output waits, so the CLI neither aborts nor replays them."""
+    """MH-RUNTIME-010: the Hub owns pre-output waits, so the CLI neither aborts nor replays them.
+
+    The gateway withholds headers while a resolution is still short of the CLI's
+    default first-byte window, so a shorter native timeout would abort it.
+    """
     timeouts = ("API_TIMEOUT_MS", "CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS")
+    cli_maximum = dict.fromkeys(timeouts, "1800000")
     native = {**explicit, "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "0"}
     launch = hub_launch()
 
     env = build_claude_hub_env(native, launch)
-    assert {key: env[key] for key in timeouts} == {key: explicit.get(key, "1800000") for key in timeouts}
+    assert {key: env[key] for key in timeouts} == cli_maximum
     assert env["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"] == "1"
 
     settings = json.loads(claude_settings_for_launch(json.dumps({"env": native}), launch))
-    assert {key: settings["env"].get(key) for key in timeouts} == {key: explicit.get(key) for key in timeouts}
+    assert {key: settings["env"].get(key) for key in timeouts} == cli_maximum
     assert settings["env"]["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"] == "1"
 
     official = hub_launch(channel="native_cli", gateway_base_url=None, gateway_token=None)

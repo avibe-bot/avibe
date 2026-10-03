@@ -3,7 +3,7 @@ capability: model_hub
 observations:
   - id: MH-OBS-013
     source: claude-cli-2.1.288-thinking-display-relay-rejection-2026-10-03
-    summary: Claude Code 2.1.288 sends thinking.display "updates" with its beta by default, and a relay that rejects it answers HTTP 400. The CLI drops a rejected beta or display value and retries only on an HTTP 400 naming it, but a Hub resolution slower than 2s had already committed a 200 stream, so the rejection arrived as an in-stream error and ended the turn. Claude streams now keep the real status until shortly before the CLI's default first-byte window.
+    summary: Claude Code 2.1.288 sends thinking.display "updates" with its beta by default, and a relay that rejects it answers HTTP 400. The CLI drops a rejected beta or display value and retries only on an HTTP 400 naming it, but a Hub resolution slower than 2s had already committed a 200 stream, so the rejection arrived as an in-stream error and ended the turn. Claude streams now keep the real status until shortly before the CLI's default first-byte window, and Claude hub launches pin both pre-output timeouts to the CLI maximum so no shorter native choice aborts that wait.
     affects:
       - MH-RUNTIME-010
       - MH-RUNTIME-012

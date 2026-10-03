@@ -231,9 +231,6 @@ def claude_settings_for_launch(base_settings: str, launch: ModelHubLaunch | None
     # must not become launch-settings overrides of native user/project/local choices.
     connection_env.pop("CLAUDE_CODE_MAX_CONTEXT_TOKENS", None)
     connection_env.pop("CLAUDE_CODE_MAX_OUTPUT_TOKENS", None)
-    # Timeout defaults likewise yield to an explicit native choice.
-    for key in _CLAUDE_HUB_TIMEOUT_DEFAULTS:
-        connection_env.pop(key, None)
     settings["env"] = {**settings.get("env", {}), **connection_env}
     settings["apiKeyHelper"] = ""
     return json.dumps(settings)
@@ -364,8 +361,10 @@ def _localized_launch_error(
 
 
 # The Hub resolves, waits out recovery, and fails over before a stream's first
-# model output, so Claude's pre-output windows are raised to the CLI's maximum.
-_CLAUDE_HUB_TIMEOUT_DEFAULTS = {
+# model output, so Claude's pre-output windows are pinned to the CLI's maximum.
+# The gateway keeps a slow resolution's HTTP status until shortly before the
+# CLI's default first-byte window; a shorter native choice would abort it first.
+_CLAUDE_HUB_TIMEOUTS = {
     "API_TIMEOUT_MS": "1800000",
     "CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS": "1800000",
 }
@@ -411,8 +410,7 @@ def build_claude_hub_env(
         # first, so a Source that rejects the value would fail the turn instead
         # of the CLI retrying without it. Thinking and effort are unaffected.
         result["CLAUDE_CODE_THINKING_DISPLAY_UPDATES"] = "0"
-        for key, value in _CLAUDE_HUB_TIMEOUT_DEFAULTS.items():
-            result.setdefault(key, value)
+        result.update(_CLAUDE_HUB_TIMEOUTS)
     else:
         # A native_cli hop keeps the user's official CLI authentication.
         result = dict(base_env)
