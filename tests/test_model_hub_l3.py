@@ -85,6 +85,7 @@ from core.handlers.model_hub.turn_gateway import (
 from core.handlers.model_hub.stream_wire import ProtocolSSEState, ProtocolUsageReport
 from core.handlers.model_hub.usage import BoundedUsageLedger, UsageWriter, _ledger_executor
 from core.run_settlement import (
+    SETTLED_BY_BACKEND_DISABLED,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
@@ -1883,8 +1884,11 @@ def test_gateway_attributes_a_request_only_to_a_turn_that_claims_its_model(
     }
 
 
+# Both are the user's own cancellation: a Stop, or turning the backend off.
+@pytest.mark.parametrize("settled_by", [SETTLED_BY_STOPPED, SETTLED_BY_BACKEND_DISABLED])
 def test_a_canceled_turn_reports_the_attempt_it_waited_on_longest(
     tmp_path: Path,
+    settled_by: str,
 ) -> None:
     """A turn holding several requests reports the one in flight the longest.
 
@@ -1925,7 +1929,7 @@ def test_a_canceled_turn_reports_the_attempt_it_waited_on_longest(
             # Cancelled while both are open, before either has settled.
             registry.settle(
                 "turn_live01",
-                settled_by=SETTLED_BY_STOPPED,
+                settled_by=settled_by,
                 ts=NOW.isoformat(),
             )
 
