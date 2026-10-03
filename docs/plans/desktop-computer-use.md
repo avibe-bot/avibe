@@ -191,9 +191,9 @@ running. The tray keeps the shell alive after the window closes.
   | `needs_permission` | app activation, grant check still fails, no fallback attempt yet in this activation | `starting` | spawn once (stale-preflight fallback) |
   | `starting` | socket accepts and the health check returns `pass` | `ready` | none |
   | `starting` | the health check returns `missing_grant` | `needs_permission` | stop the daemon; no prompt |
-  | `starting` | spawn or socket fails, or the health check returns `unhealthy` | `error` | stop the daemon; record the reason |
+  | `starting` | spawn or socket fails, or the health check returns `unhealthy` | `starting` | stop the daemon; count a start failure; respawn after backoff, or go to `error` with the reason once 3 start failures fall within 5 minutes |
   | `ready` | the health check returns `missing_grant` | `needs_permission` | stop the daemon |
-  | `ready` | daemon exits unexpectedly, or its socket refuses or the health check returns `unhealthy` on 2 consecutive ticks | `starting` | stop the daemon if alive; respawn with backoff; after 3 failures in 5 minutes, go to `error` |
+  | `ready` | daemon exits unexpectedly, or its socket refuses or the health check returns `unhealthy` on 2 consecutive ticks | `starting` | stop the daemon if alive; count a start failure; respawn after backoff |
   | any `enabled` state except `error` | quit | `stopped` | stop the daemon |
   | `error` | quit | `error` | none; `error` is kept across relaunch |
 
@@ -221,6 +221,10 @@ running. The tray keeps the shell alive after the window closes.
     leaves only through toggle off (the first row), and a later toggle on
     starts from `off`.
   - **Health check.** One composite operation with one 5 s deadline in total.
+    It runs in two modes. The full mode runs on every start (`starting`) and
+    includes step 4. The light mode is the `ready` heartbeat every 5 s and
+    skips step 4, so an idle `ready` daemon never captures the desktop. A
+    capture failure later surfaces in the agent's own tool results.
     It returns exactly one of `pass`, `missing_grant`, or `unhealthy`, and
     the lifecycle rows refer only to those three outcomes. A check added
     later therefore needs no new row. On macOS, the check runs these steps:
@@ -230,8 +234,8 @@ running. The tray keeps the shell alive after the window closes.
     3. Require `bundle_identity` to pass with `identity_source:
        parent_application`, which is the host-attribution evidence of Phase
        0 Q1. Also require `ax_capability` to pass.
-    4. Call `get_desktop_state` with `max_image_dimension: 64`, and require
-       an image. `health_report` is read-only and skips
+    4. (Full mode only.) Call `get_desktop_state` with `max_image_dimension:
+       64`, and require an image. `health_report` is read-only and skips
        `screen_capture_capability` (Phase 0 output), so capture is proven
        this way.
 
@@ -806,7 +810,9 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   a stale shell preflight does not stop a `ready` daemon, a 500 from
   capabilities keeps the last answer only for the same `controller_id`, a health
   check that hangs or fails on any step returns `unhealthy` at start and in
-  `ready`, an old Controller's unknown-operation error reads as schema `0`, a
+  `ready`, the `ready` heartbeat never captures, a failed respawn retries with
+  backoff and reaches `error` only on the third start failure in 5 minutes, an
+  old Controller's unknown-operation error reads as schema `0`, a
   stop-and-re-enable voids every lease, a desktop-targeted or unrecognised input
   call is rejected on macOS, observing window A does not clear `observe_first`
   for window B, a new server process requires an observation before a session's
