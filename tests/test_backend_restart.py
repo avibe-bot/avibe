@@ -350,10 +350,10 @@ def test_a_disable_whose_interruption_fails_still_stops_and_retries_the_processe
         assert "codex" not in controller.agent_service.agents
         assert agent.shutdown_runtime.await_count == 1
         # The retry settles the work that failed to settle and stops the process.
-        await controller.agent_service.retry_teardowns()
+        await controller.agent_service.retry_pending()
         assert controller.session_turns.release_for_backend_refresh.await_count == 2
         assert agent.shutdown_runtime.await_count == 2
-        await controller.agent_service.retry_teardowns()
+        await controller.agent_service.retry_pending()
         assert agent.shutdown_runtime.await_count == 2
 
     asyncio.run(run())

@@ -472,7 +472,7 @@ simply stop the work, and that machinery is gone.
 | --- | --- |
 | `renew_runtime(config, *, config_save)` | Unchanged. |
 | `reap_runtime_generations()` | Called by the 60 s sweep on every registered agent. |
-| `shutdown_runtime(settle_reason=None)` | Stop every process of this agent now. A disable passes `settle_reason="backend_disabled"`, and every forced stop then settles the turns and Activities bound to that process with it, scoped to this agent instance; service shutdown and probe teardown pass nothing and show no notice. It raises when any process survives, so `AgentService.run_teardown` keeps the teardown and the idle sweep retries it; a retry must be idempotent and never touch another instance's work. |
+| `shutdown_runtime(settle_reason=None)` | Stop every process of this agent now. A disable passes `settle_reason="backend_disabled"`, and every forced stop then settles the turns and Activities bound to that process with it, scoped to this agent instance; service shutdown and probe teardown pass nothing and show no notice. It raises when any process survives, so `AgentService.run_until_done` keeps the teardown and the idle sweep retries it; a retry must be idempotent and never touch another instance's work. |
 
 ### Startup
 

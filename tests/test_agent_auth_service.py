@@ -204,7 +204,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.config.claude = SimpleNamespace(enabled=False)
         service._load_backend_runtime_config = lambda _backend: SimpleNamespace(enabled=True)
         await service.renew_backend_runtime("claude")
-        await controller.agent_service.retry_teardowns()
+        await controller.agent_service.retry_pending()
 
         assert controller.backend_restart_coordinator.interrupt_backend.await_count == 1
         assert [call.args[0] for call in controller.session_handler.close_captured_claude_clients.await_args_list] == [
@@ -212,17 +212,19 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             captured,
         ]
         controller.session_handler.capture_claude_clients.assert_called_once_with()
-        assert controller.agent_service._pending_teardowns == {}
+        assert controller.agent_service._pending_operations == {}
 
     async def test_enabling_opencode_in_a_running_controller_restores_its_durable_polls(self):
         """Work a crashed controller left while OpenCode was off is delivered
-        once OpenCode is enabled, without waiting for a restart."""
+        once OpenCode is enabled, without waiting for a restart. Every
+        transport-ready event already ran, so a restore that fails is retried
+        by the idle sweep until it succeeds."""
         from modules.agents.service import AgentService
 
         controller = _StubController()
         controller.config.opencode = None
         controller.agent_service = AgentService(controller)
-        controller.restore_polls_on_ready_transports = AsyncMock()
+        controller.restore_polls_on_ready_transports = AsyncMock(side_effect=[RuntimeError("database is locked"), None])
         service = AgentAuthService(controller)
         service._sync_builtin_default_agents = lambda: None
         service._load_backend_runtime_config = lambda _backend: SimpleNamespace(enabled=True)
@@ -231,7 +233,11 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             await service.renew_backend_runtime("opencode")
 
         assert "opencode" in controller.agent_service.agents
-        controller.restore_polls_on_ready_transports.assert_awaited_once_with()
+        assert controller.restore_polls_on_ready_transports.await_count == 1
+        await controller.agent_service.retry_pending()
+        assert controller.restore_polls_on_ready_transports.await_count == 2
+        await controller.agent_service.retry_pending()
+        assert controller.restore_polls_on_ready_transports.await_count == 2
 
     async def test_handle_setup_command_submits_code(self):
         controller = _StubController()

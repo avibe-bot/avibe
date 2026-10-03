@@ -908,7 +908,7 @@ def test_cleanup_sync_makes_a_last_attempt_at_pending_backend_teardowns() -> Non
         if len(attempts) == 1:
             raise RuntimeError("app-server survived")
 
-    loop.run_until_complete(controller.agent_service.run_teardown("disabled:codex", stop_disabled_codex))
+    loop.run_until_complete(controller.agent_service.run_until_done("disabled:codex", stop_disabled_codex))
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
     try:
@@ -919,4 +919,4 @@ def test_cleanup_sync_makes_a_last_attempt_at_pending_backend_teardowns() -> Non
         loop.close()
 
     assert attempts == ["stop", "stop"]
-    assert controller.agent_service._pending_teardowns == {}
+    assert controller.agent_service._pending_operations == {}

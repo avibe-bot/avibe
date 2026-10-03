@@ -430,12 +430,12 @@ async def test_runtime_gen_006_a_disable_whose_stop_fails_is_retried_until_the_a
         attempts.append(len(attempts) + 1)
         await agent.shutdown_runtime()
 
-    assert not await service.run_teardown("codex", disable)
+    assert not await service.run_until_done("codex", disable)
     assert server.alive
 
     server.stop = stop
-    await service.retry_teardowns()
-    await service.retry_teardowns()  # A finished teardown is not run again.
+    await service.retry_pending()
+    await service.retry_pending()  # A finished teardown is not run again.
 
     assert server.stopped and not any(agent._runtimes.values())
     assert attempts == [1, 2]

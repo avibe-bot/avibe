@@ -2327,14 +2327,14 @@ class AgentAuthService:
                 raise interrupt_error
 
         async def disable() -> None:
-            run_teardown = getattr(agent_service, "run_teardown", None)
-            if callable(run_teardown):
+            run_until_done = getattr(agent_service, "run_until_done", None)
+            if callable(run_until_done):
                 # The agent is out of routing, or Claude is disabled, so this
                 # owner retries a failed settlement or stop at each idle sweep,
                 # holding the lock this backend's config changes hold.
                 coordinator = getattr(self.controller, "backend_restart_coordinator", None)
                 backend_lock = getattr(coordinator, "backend_lock", None)
-                await run_teardown(
+                await run_until_done(
                     self._disable_teardown_key(backend, agent),
                     teardown,
                     retry_lock=backend_lock(backend) if callable(backend_lock) else None,
@@ -2357,14 +2357,25 @@ class AgentAuthService:
 
         A controller that started with OpenCode disabled kept those durable polls
         but missed their restore; enabling OpenCode in it restores them now.
+        Every transport-ready event already ran and no later reconciliation
+        restores polls for an agent that exists, so a failed restore is kept
+        and retried at each idle sweep until it succeeds.
         """
         restore = getattr(self.controller, "restore_polls_on_ready_transports", None)
         if not callable(restore):
             return
-        try:
+        agent_service = getattr(self.controller, "agent_service", None)
+        run_until_done = getattr(agent_service, "run_until_done", None)
+        if not callable(run_until_done):
             await restore()
-        except Exception:
-            logger.warning("Restoring OpenCode polls after enabling it failed", exc_info=True)
+            return
+        coordinator = getattr(self.controller, "backend_restart_coordinator", None)
+        backend_lock = getattr(coordinator, "backend_lock", None)
+        await run_until_done(
+            "Restoring OpenCode polls after enabling it",
+            restore,
+            retry_lock=backend_lock("opencode") if callable(backend_lock) else None,
+        )
 
     def _register_missing_backend_agent(self, backend: str, runtime_config: Any) -> bool:
         agent_service = getattr(self.controller, "agent_service", None)

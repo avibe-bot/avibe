@@ -2490,12 +2490,12 @@ def test_a_failed_teardown_is_retried_until_it_finishes() -> None:
                 raise RuntimeError("process survived its stop")
 
         service = AgentService(controller=SimpleNamespace())
-        assert await service.run_teardown("disabled:codex", stop) is False
-        await service.retry_teardowns()
+        assert await service.run_until_done("disabled:codex", stop) is False
+        await service.retry_pending()
         assert len(attempts) == 2
-        await service.retry_teardowns()
+        await service.retry_pending()
         assert len(attempts) == 3
-        await service.retry_teardowns()
+        await service.retry_pending()
         assert len(attempts) == 3
 
     asyncio.run(run())

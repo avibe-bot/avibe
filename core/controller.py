@@ -998,24 +998,29 @@ class Controller:
                     logger.debug("IM runtime could not signal the event loop to stop", exc_info=True)
 
     async def _restore_active_polls(self, platforms: set[str]) -> None:
+        try:
+            await self._restore_active_polls_or_raise(platforms)
+        except Exception as e:
+            logger.error(f"Failed to restore active polls: {e}", exc_info=True)
+
+    async def _restore_active_polls_or_raise(self, platforms: set[str]) -> None:
         coordinator = getattr(self, "backend_restart_coordinator", None)
         if coordinator is not None and "opencode" in coordinator._blocked_backends():
             coordinator.restore_migration_blocks()
             return
         opencode_agent = self.agent_service.agents.get("opencode")
         if opencode_agent and hasattr(opencode_agent, "restore_active_polls"):
-            try:
-                restored = await opencode_agent.restore_active_polls(platforms)  # type: ignore[attr-defined]
-                if restored > 0:
-                    logger.info(f"Restored {restored} active OpenCode poll(s)")
-            except Exception as e:
-                logger.error(f"Failed to restore active polls: {e}", exc_info=True)
+            restored = await opencode_agent.restore_active_polls(platforms)  # type: ignore[attr-defined]
+            if restored > 0:
+                logger.info(f"Restored {restored} active OpenCode poll(s)")
 
     async def restore_polls_on_ready_transports(self) -> None:
         """Restore durable OpenCode polls on every transport that can deliver now.
 
         IM-ready events restore polls at startup. OpenCode enabled in a running
-        controller missed them, so this runs once it registers.
+        controller missed them, so this runs once it registers. Raises when the
+        restore fails, so its caller can retry it; a restore skips every poll
+        already running, so a retry is safe.
         """
         platforms = {"avibe"}
         for platform in list(getattr(self, "im_clients", {}) or {}):
@@ -1023,7 +1028,7 @@ class Controller:
                 platforms.add(platform)
         if self.primary_platform in platforms:
             platforms.add("")
-        await self._restore_active_polls(platforms)
+        await self._restore_active_polls_or_raise(platforms)
 
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
@@ -1137,7 +1142,7 @@ class Controller:
                     if any(outcome is StopOutcome.FAILED for outcome in outcomes):
                         raise RuntimeError("an OpenCode server a previous controller left did not stop")
 
-                await agent_service.run_teardown("disabled-startup:opencode", stop_leftover_servers)
+                await agent_service.run_until_done("disabled-startup:opencode", stop_leftover_servers)
         except Exception as e:
             logger.error("Failed to stop OpenCode servers a previous controller left: %s", e, exc_info=True)
 
@@ -2225,7 +2230,7 @@ class Controller:
 
                 try:
                     # A disabled backend's processes whose stop failed.
-                    await self.agent_service.retry_teardowns()
+                    await self.agent_service.retry_pending()
                 except Exception as e:
                     logger.error("Teardown retry sweep failed: %s", e, exc_info=True)
 
@@ -2381,7 +2386,7 @@ class Controller:
             # A disabled backend whose stop failed has no other owner: its
             # agent is out of routing and the idle sweep that retries it is
             # already cancelled, so shutdown makes the last attempt.
-            _stop_loop_coroutine(self.agent_service.retry_teardowns(), "Pending backend teardowns")
+            _stop_loop_coroutine(self.agent_service.retry_pending(), "Pending backend teardowns")
         except Exception as e:
             logger.debug(f"Pending backend teardowns skipped: {e}")
 

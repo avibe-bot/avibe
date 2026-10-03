@@ -54,7 +54,7 @@ class AgentService:
         self.agents: Dict[str, BaseAgent] = {}
         # Teardowns that must finish even after they failed once, such as a
         # disabled backend's processes; the idle sweep retries them.
-        self._pending_teardowns: Dict[str, tuple[Callable[[], Awaitable[None]], Optional[asyncio.Lock]]] = {}
+        self._pending_operations: Dict[str, tuple[Callable[[], Awaitable[None]], Optional[asyncio.Lock]]] = {}
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
         self.activities = activities or SessionActivityRegistry()
@@ -281,40 +281,43 @@ class AgentService:
         self.agents[agent.name] = agent
         logger.info(f"Registered agent backend: {agent.name}")
 
-    async def run_teardown(
+    async def run_until_done(
         self,
         key: str,
-        teardown: Callable[[], Awaitable[None]],
+        operation: Callable[[], Awaitable[None]],
         *,
         retry_lock: Optional[asyncio.Lock] = None,
     ) -> bool:
-        """Run a teardown that must eventually finish; True once it has.
+        """Run an operation that must eventually finish; True once it has.
 
-        A failure is logged and kept, and ``retry_teardowns`` runs it again on
-        every idle sweep until it succeeds. Nothing else owns the processes it
-        stops: their agent is already gone. A cancelled requester never leaves
-        a teardown half done. A retry holds ``retry_lock``, the lock the first
-        run's caller held, so it never interleaves with a later change.
+        A backend lifecycle step with no other owner left to retry it uses
+        this: a disabled agent's teardown, whose agent is already gone, or the
+        poll restore of a backend enabled after its transports became ready.
+        A failure is logged and kept, and ``retry_pending`` runs it again on
+        every idle sweep until it succeeds, so it must be safe to repeat. A
+        cancelled requester never leaves it half done. A retry holds
+        ``retry_lock``, the lock the first run's caller held, so it never
+        interleaves with a later change.
         """
         from core.backend_restart import finish_native_operation
 
-        self._pending_teardowns.pop(key, None)
+        self._pending_operations.pop(key, None)
         try:
-            await finish_native_operation(teardown())
+            await finish_native_operation(operation())
         except Exception:
-            logger.warning("Teardown %s failed; the idle sweep retries it", key, exc_info=True)
-            self._pending_teardowns[key] = (teardown, retry_lock)
+            logger.warning("%s failed; the idle sweep retries it", key, exc_info=True)
+            self._pending_operations[key] = (operation, retry_lock)
             return False
         return True
 
-    async def retry_teardowns(self) -> None:
-        for key, (teardown, retry_lock) in list(self._pending_teardowns.items()):
+    async def retry_pending(self) -> None:
+        for key, (operation, retry_lock) in list(self._pending_operations.items()):
             if retry_lock is None:
-                await self.run_teardown(key, teardown)
+                await self.run_until_done(key, operation)
                 continue
             async with retry_lock:
-                if key in self._pending_teardowns:
-                    await self.run_teardown(key, teardown, retry_lock=retry_lock)
+                if key in self._pending_operations:
+                    await self.run_until_done(key, operation, retry_lock=retry_lock)
 
     def _on_activity_output_settled(self, activity: Any) -> None:
         agent = self.agents.get(str(getattr(activity, "backend", "") or ""))
