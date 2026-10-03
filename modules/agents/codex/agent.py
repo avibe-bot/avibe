@@ -169,8 +169,8 @@ class _CodexRuntime:
     ended: bool = False
     # Set while a teardown holds the activation fence; done when it finishes.
     teardown: asyncio.Future[None] | None = None
-    # No unit holds this running process: it outlived its own failed start,
-    # or its stop failed in a closed unit. The sweep retries its stop.
+    # No unit holds this running process: it outlived its own failed start.
+    # The sweep retries its stop.
     orphaned: bool = False
 
 
@@ -280,11 +280,9 @@ class CodexAgent(BaseAgent):
         self._generation_serials = itertools.count(1)
         # cwd -> processes not yet ended, attached to their unit or not
         self._runtimes: Dict[str, set[_CodexRuntime]] = {}
-        # Shutdown ends every process without the runtime-update notice.
+        # Shutdown, which also serves disabling the backend, ends every
+        # process without the runtime-update notice and admits nothing more.
         self._shutting_down = False
-        # Set once the backend is disabled: nothing is admitted any more, and
-        # each process stops once its work drains.
-        self._retired = False
         # Part of every launch spec: renewing moves each cwd to a new process
         # at its next turn.
         self._runtime_epoch = 0
@@ -638,7 +636,7 @@ class CodexAgent(BaseAgent):
         launch = None
         config = None
         try:
-            if self._retired or self._shutting_down:
+            if self._shutting_down:
                 # Past the agent lookup already: refuse before anything is
                 # recorded or a Hub launch is resolved for this turn.
                 raise RuntimeUnitStopping("runtime unit is stopping")
@@ -1637,34 +1635,14 @@ class CodexAgent(BaseAgent):
             self._turn_registry.clear_session(base_session_id)
         logger.info("Prepared Codex runtime for resumed session %s", base_session_id)
 
-    async def retire_runtime(self) -> None:
-        """Retire every app-server because the backend was disabled.
-
-        The core has already removed this agent from its registry, so routing
-        sends it nothing new; a turn already past that lookup fails visibly
-        instead of starting a process. Running turns keep streaming, and Stop,
-        steer, liveness, and Activities still reach them. Each generation
-        stops once its work drains, when a turn completes or at the
-        controller's sweep. Nothing is interrupted, and calling this again
-        changes nothing.
-        """
-        self._retired = True
-        for unit in list(self._units.values()):
-            await unit.stop_all(force=False)
-
-    def runtime_retired(self) -> bool:
-        """Whether retirement finished: no process of this agent remains.
-
-        That covers every process, attached to a unit or not, including a
-        child that outlived its own failed start.
-        """
-        return self._retired and not any(self._runtimes.values())
-
     async def shutdown_runtime(self) -> None:
-        """Stop all app-server transports during vibe-remote shutdown.
+        """Stop every app-server now: service shutdown, probe teardown, or disable.
 
-        It ends running work, so it serves service shutdown and probe teardown
-        only; a disabled backend retires through ``retire_runtime``.
+        Disabling the backend is an explicit, user-visible stop: the core has
+        already interrupted its work with the backend-refresh notice and
+        removed this agent from routing, so this ends every process without a
+        notice of its own. A turn that captured the agent before that lookup
+        fails visibly and starts no process.
         """
         await self.adopt_model_hub_catalog()
         self._session_last_activity.clear()
@@ -1996,7 +1974,7 @@ class CodexAgent(BaseAgent):
     def _unit(self, cwd: str) -> RuntimeGenerationSet[CodexLaunchSpec, _CodexRuntime]:
         unit = self._units.get(cwd)
         if unit is None:
-            if self._retired or self._shutting_down:
+            if self._shutting_down:
                 # Every existing unit already refuses admission; a new
                 # directory must not start a process nobody would stop.
                 raise RuntimeUnitStopping("runtime unit is stopping")
@@ -2541,11 +2519,7 @@ class CodexAgent(BaseAgent):
         try:
             restored = await unit.adopt(generation.spec, runtime, current=False)
         except RuntimeUnitStopping:
-            # A retired or shut-down agent's unit takes nothing back. Its
-            # Sessions stay bound, and the sweep, or shutdown through
-            # ``_runtimes``, retries the stop.
-            runtime.orphaned = True
-            return
+            return  # Shutdown ends it through ``_runtimes``.
         for base_session_id, bound in list(self._session_generations.items()):
             if bound is generation:
                 self._session_generations[base_session_id] = restored
@@ -2587,8 +2561,7 @@ class CodexAgent(BaseAgent):
 
         The sweep also retires processes that exited or stopped answering, so
         an idle directory's dead process and its Hub scope do not linger, and
-        retries the stop of every process no unit holds. It is the only
-        sweeper of a retired agent, so it drives that agent's stops too.
+        retries the stop of every process no unit holds.
         """
         for unit in list(self._units.values()):
             await self._retire_unusable_generations(unit)

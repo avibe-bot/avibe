@@ -60,6 +60,8 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_backend_restart.py::test_runtime_gen_006_disabling_a_backend_stops_its_work_at_once
+    related_tests:
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_006_disabling_codex_ends_every_app_server_and_admits_nothing
   - id: RUNTIME-GEN-007
     name: Re-enabling a backend registers a fresh agent at once; disabling already stopped the old one
     status: covered
