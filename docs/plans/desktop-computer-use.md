@@ -104,8 +104,10 @@ running. The tray keeps the shell alive after the window closes.
   Spawn it with `CREATE_NO_WINDOW` (it is a console program), as `runtime-host`
   already does for the Runtime.
 - **Toggle.** A native checkable "Computer Use" item in the tray and the app
-  menu, following the Start at Login pattern. It adds no webview command. The
-  shell persists the state with its other native preferences.
+  menu, following the Start at Login pattern. It adds no webview command. Its
+  only durable record is `D.enabled`. The shell keeps no second copy in its
+  native preferences: it reads `D` at launch and writes `D` on every flip, so
+  the next launch and the live Runtime can never disagree.
 - **Permission requests (macOS).** The shell requests Accessibility with
   `AXIsProcessTrustedWithOptions` and a prompt. It requests Screen Recording
   with `CGRequestScreenCaptureAccess`, falling back to opening the Settings
@@ -129,8 +131,9 @@ running. The tray keeps the shell alive after the window closes.
   | any | toggle off | `off` | stop the daemon if running |
   | `off` | toggle on, both grants held | `starting` | spawn |
   | `off` | toggle on, a grant missing | `needs_permission` | prompt and run the capture probe (the only prompting path) |
-  | shell launch, `enabled` | both grants held | `starting` | spawn |
-  | shell launch, `enabled` | a grant missing | `needs_permission` | none; silent |
+  | shell launch | `D` missing or not `enabled` | `off` | if `D` exists, write `off` with this shell's `shell_pid` and `instance_id` |
+  | shell launch | `enabled`, both grants held | `starting` | spawn |
+  | shell launch | `enabled`, a grant missing | `needs_permission` | none; silent |
   | `needs_permission` | grant check passes | `starting` | spawn |
   | `starting` | socket accepts and health passes | `ready` | none |
   | `starting` | health reports a missing grant | `needs_permission` | stop the daemon; no prompt |
@@ -176,8 +179,8 @@ running. The tray keeps the shell alive after the window closes.
   writes it atomically on every change. It is also the only cross-process
   record: the Runtime, the computer MCP server, and the separately running
   Workbench API process all read the same file.
-  - Every write carries `schema_version`, `enabled` (a mirror of the toggle,
-    the configuration input), `state`, `reason` (a stable code, or null),
+  - Every write carries `schema_version`, `enabled` (the toggle's only
+    durable record and the configuration input), `state`, `reason` (a stable code, or null),
     `shell_pid`, `instance_id` (random per shell process), and `generation`.
     `state` is one of these:
     - `off`: the toggle is off.
@@ -237,6 +240,7 @@ running. The tray keeps the shell alive after the window closes.
     | --- | --- | --- |
     | missing | `off` | `never_enabled` |
     | unreadable, malformed, or unknown `schema_version` | `unavailable` | `invalid_state_file` |
+    | `enabled` is false | `off` | `toggle_off` |
     | `shell_pid` not alive, or `state` is `stopped` | `unavailable` | `shell_not_running` |
     | `state` other than `ready` | that state | its recorded `reason` |
     | `ready`, socket refuses a connection | `unavailable` | `daemon_unreachable` |
