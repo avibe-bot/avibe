@@ -551,6 +551,64 @@ async def test_runtime_gen_016_a_retried_disable_never_revokes_a_reenabled_agent
 
 
 @pytest.mark.asyncio
+async def test_runtime_gen_006_a_reenabled_agent_starts_beside_a_teardown_that_holds_its_activation(tmp_path, monkeypatch):
+    """RUNTIME-GEN-006: a re-enabled agent's first generation never aliases a disabled agent's.
+
+    Both number their first generation in a directory as serial 1. While the
+    disabled agent's retried teardown holds that generation's activation
+    reserved for retirement, the re-enabled agent's turn in the same
+    directory still attaches its own and runs.
+    """
+    failures = AsyncMock()
+    monkeypatch.setattr(codex_agent_module, "emit_backend_failure", failures)
+    activation = RuntimeActivationRegistry()
+    disabled, cwd = _agent(tmp_path)
+    reenabled, _ = _agent(tmp_path)
+    for agent in (disabled, reenabled):
+        agent.controller.runtime_activation = activation
+    await disabled.handle_message(_request(cwd, "s1"))
+    old = _server_for(disabled, "s1")
+    stopping, release = asyncio.Event(), asyncio.Event()
+    stop = old.stop
+
+    async def slow_stop():
+        stopping.set()
+        await release.wait()
+        await stop()
+
+    old.stop = slow_stop
+    teardown = asyncio.create_task(disabled.shutdown_runtime(settle_reason="backend_disabled"))
+    await asyncio.wait_for(stopping.wait(), 1)
+
+    await asyncio.wait_for(reenabled.handle_message(_request(cwd, "s2")), 1)
+
+    failures.assert_not_awaited()
+    assert reenabled._turn_registry.get_active_turn("s2")
+    release.set()
+    await asyncio.wait_for(teardown, 1)
+    assert old.stopped and _server_for(reenabled, "s2").alive
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_016_a_process_whose_post_start_setup_fails_is_stopped_by_the_sweep(tmp_path, monkeypatch):
+    """RUNTIME-GEN-016: whatever fails after the spawn, the started app-server stays the sweep's to stop."""
+    agent, cwd = _agent(tmp_path)
+    failures = AsyncMock()
+    monkeypatch.setattr(codex_agent_module, "emit_backend_failure", failures)
+    monkeypatch.setattr(
+        agent, "_attach_runtime_activation", Mock(side_effect=RuntimeError("activation unavailable"))
+    )
+
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s1")), 1)
+
+    failures.assert_awaited_once()
+    started = FakeAppServer.started[-1]
+    assert started.alive
+    await agent.reap_runtime_generations()
+    assert started.stopped and not any(agent._runtimes.values())
+
+
+@pytest.mark.asyncio
 async def test_runtime_gen_010_a_busy_directory_never_holds_a_turn_on_a_new_spec(tmp_path):
     """RUNTIME-GEN-010: S1's long turn keeps its process; S2 starts at once on a new one."""
     agent, cwd = _agent(tmp_path)

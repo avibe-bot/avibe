@@ -176,8 +176,8 @@ class _CodexRuntime:
     ended: bool = False
     # Set while a teardown holds the activation fence; done when it finishes.
     teardown: asyncio.Future[None] | None = None
-    # No unit holds this running process: it outlived its own failed start.
-    # The sweep retries its stop.
+    # No unit holds this running process: it outlived its own failed start, or
+    # its setup failed after the spawn. The sweep retries its stop.
     orphaned: bool = False
 
 
@@ -1870,9 +1870,14 @@ class CodexAgent(BaseAgent):
             durable_session_workdir=cwd if current else None,
         )
 
-    @staticmethod
-    def _generation_resource_key(runtime: _CodexRuntime) -> str:
-        return f"{runtime.cwd}#{runtime.serial}"
+    def _generation_resource_key(self, runtime: _CodexRuntime) -> str:
+        """One generation's activation and ownership key.
+
+        A disabled agent's retried teardown can hold its generations while a
+        re-enabled agent numbers its own from 1 in the same directory, so the
+        key names the agent instance as well.
+        """
+        return f"{runtime.cwd}#{self._instance_serial}.{runtime.serial}"
 
     async def _ownership_snapshots(
         self,
@@ -2323,20 +2328,22 @@ class CodexAgent(BaseAgent):
         self._runtimes.setdefault(runtime.cwd, set()).add(runtime)
         try:
             await transport.start()
+            governor_from_controller(self.controller).apply_to_pid(
+                getattr(transport, "pid", None),
+                label="codex app-server",
+            )
+            runtime.activation = self._attach_runtime_activation(runtime)
         except BaseException:
+            # No generation will hold this process, whatever failed: a start
+            # whose own cleanup failed, or setup after a successful spawn.
             if self._process_exited(transport):
                 runtime.ended = True
                 self._runtimes.get(runtime.cwd, set()).discard(runtime)
                 self._retire_hub_scope_after(runtime)
             else:
-                # Its own cleanup failed; the sweep stops it.
+                # The sweep, or shutdown, stops it.
                 runtime.orphaned = True
             raise
-        governor_from_controller(self.controller).apply_to_pid(
-            getattr(transport, "pid", None),
-            label="codex app-server",
-        )
-        runtime.activation = self._attach_runtime_activation(runtime)
         logger.info(
             "Started Codex app-server generation %s for cwd=%s",
             runtime.serial,

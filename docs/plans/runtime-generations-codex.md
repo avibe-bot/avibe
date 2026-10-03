@@ -152,7 +152,7 @@ author and two independent reviewers.
 | Hub scope | The gateway credential is revoked exactly when this agent's last Hub process in the directory is gone, a starting or failed-start one included; another agent instance's processes never share it. | `_runtimes`, `_retire_hub_scope_after` |
 | Per generation | A decision about a generation reads only its own Sessions, turns, bindings, and process. | admission, drained check, eviction, End |
 | Session serialization | Turn admission, End, `/new`, and resume preparation run under the Session's lifecycle lock. | `session_lifecycle` |
-| Spec identity | Equal digests are interchangeable processes; the credential identity covers the file store only. | `_launch_spec_digest`, `codex_credential_identity` |
+| Spec identity | Equal digests are interchangeable processes; the credential identity covers the file store only, and names an account by its ChatGPT account id or, in an older bag without one, by its id_token subject or email, never by a token. | `_launch_spec_digest`, `codex_credential_identity` |
 | Eventual teardown | Every started process is eventually stopped: drained retiring ones, the cap's victim, failed starts, and survivors of a failed or cancelled stop. | core reconciler, sweep, `_readopt` |
 
 Two documented exceptions: shutdown ends processes without the
@@ -308,7 +308,12 @@ All Hub generations of a directory share its request-scoped gateway
 credential. Per-turn routes ride on `responsesapiClientMetadata`. The scope is
 retired only when the directory's last Hub process ends.
 
-The scope belongs to one agent instance (`<cwd>#<instance>`). A disable whose
+The scope belongs to one agent instance (`<cwd>#<instance>`), and so does each
+generation's activation and ownership key (`<cwd>#<instance>.<serial>`): a
+re-enabled agent numbers its generations from 1 again while a disabled agent's
+retried teardown may still reserve its own. Any failure after a spawn, in the
+start itself or in the setup that follows it, leaves the process marked for
+the sweep. A disable whose
 teardown failed keeps the old agent's processes until the idle sweep's retry
 stops them, while a re-enabled agent already runs its own in the same
 directory. The old agent revoking its scope with its last Hub process therefore
