@@ -401,6 +401,11 @@ def build_claude_hub_env(
         # The Hub owns retry and failover. A stream error must not make the CLI
         # replay the whole turn as a second, non-streaming request.
         result["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"] = "1"
+        # The CLI drops ``thinking.display="updates"`` only after an HTTP 400
+        # whose message names it. A slow Hub resolution commits a 200 stream
+        # first, so a Source that rejects the value would fail the turn instead
+        # of the CLI retrying without it. Thinking and effort are unaffected.
+        result["CLAUDE_CODE_THINKING_DISPLAY_UPDATES"] = "0"
         for key, value in _CLAUDE_HUB_TIMEOUT_DEFAULTS.items():
             result.setdefault(key, value)
     else:

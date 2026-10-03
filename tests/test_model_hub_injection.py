@@ -137,6 +137,7 @@ def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
     assert env["ANTHROPIC_AUTH_TOKEN"] == launch.gateway_token
     assert env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
     assert env["CLAUDE_CODE_MAX_RETRIES"] == "0"
+    assert env["CLAUDE_CODE_THINKING_DISPLAY_UPDATES"] == "0"
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "999999"
     assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "999999"
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
@@ -170,6 +171,21 @@ def test_claude_hub_settings_own_connection_after_native_and_sdk_env_merges():
     assert settings["apiKeyHelper"] == ""
     settings = json.loads(claude_settings_for_launch('{"env":{"CLAUDE_CODE_MAX_RETRIES":"9"}}', launch))
     assert settings["env"]["CLAUDE_CODE_MAX_RETRIES"] == "0"
+
+
+def test_claude_hub_launch_pins_thinking_display_updates_off_above_native_choice():
+    # The CLI drops display="updates" only on an HTTP 400 naming it; a Hub
+    # stream committed as 200 before the Source rejects it would fail the turn.
+    launch = hub_launch()
+    native = '{"env":{"CLAUDE_CODE_THINKING_DISPLAY_UPDATES":"1"}}'
+    settings = json.loads(claude_settings_for_launch(native, launch))
+    env = build_claude_hub_env({"CLAUDE_CODE_THINKING_DISPLAY_UPDATES": "1"}, launch)
+
+    assert settings["env"]["CLAUDE_CODE_THINKING_DISPLAY_UPDATES"] == "0"
+    assert env["CLAUDE_CODE_THINKING_DISPLAY_UPDATES"] == "0"
+    for channel in ("direct", "native_cli"):
+        other = hub_launch(channel=channel, gateway_base_url=None, gateway_token=None)
+        assert "CLAUDE_CODE_THINKING_DISPLAY_UPDATES" not in build_claude_hub_env({}, other)
 
 
 @pytest.mark.parametrize("channel", [None, "direct", "native_cli"])
