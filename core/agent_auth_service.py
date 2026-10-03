@@ -2320,13 +2320,17 @@ class AgentAuthService:
         return True
 
     async def _recover_after_live_registration(self, backend: str) -> None:
-        """A backend registered after startup missed the startup recovery; run it now."""
-        agent = getattr(getattr(self.controller, "agent_service", None), "agents", {}).get(backend)
-        recover = getattr(agent, "recover_runtime_state", None)
-        if not callable(recover):
+        """A backend registered after startup: its recovery owner hands over to the registered adapter.
+
+        For ``avibe`` the controller's single ``AvibeRecovery`` retires any pending retry
+        (an unregistered adapter's) and runs the next pass on the registered adapter, so
+        two adapters never settle the same Session at once.
+        """
+        recovery = getattr(self.controller, "avibe_recovery", None) if backend == "avibe" else None
+        if recovery is None:
             return
         try:
-            await recover()
+            await recovery.start()
         except Exception:
             logger.exception("Failed to recover %s runtime state after live registration", backend)
 

@@ -21,7 +21,6 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
 from __future__ import annotations
 
 import asyncio
-import itertools
 import logging
 import os
 import secrets
@@ -99,9 +98,6 @@ BACKEND = "avibe"
 _EXPLAINED_STOPS = ("refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
 _JOB_PRUNE_INTERVAL_S = 3600.0
-# Startup recovery retries a Session it could not settle: 5 s, 30 s, 2 min, then every 10 min.
-_RECOVERY_RETRY_DELAYS_S = (5.0, 30.0, 120.0)
-_RECOVERY_RETRY_PERIOD_S = 600.0
 
 
 def _relative_to(cwd: str) -> Callable[[str], str]:
@@ -199,8 +195,6 @@ class AvibeAgent(BaseAgent):
         # J5 while the service runs: when the jobs directory was last pruned, and the pass in flight.
         self._pruned_at: Optional[float] = None
         self._prune_task: Optional[asyncio.Task] = None
-        # Startup recovery's retry while some Session has not settled (``recover_runtime_state``).
-        self._recovery_task: Optional[asyncio.Task] = None
 
     # --- BaseAgent -----------------------------------------------------------
 
@@ -342,84 +336,37 @@ class AvibeAgent(BaseAgent):
         }
 
     async def recover_runtime_state(self) -> list[str]:
-        """At startup or live registration: settle open tool calls, then prune settled jobs (T2, J5).
+        """One settlement pass outside a Turn: T2, T3 admission, then J5; return the unsettled Sessions.
 
-        Returns the Sessions it could not settle, never success over a failure. While
-        any remain, one retry task keeps trying until every candidate has settled
-        (``_retry_recovery``). Never calls the model; T3 stays with each Session's resume.
+        Candidates come from the rows: Sessions whose context can hold an open call, and
+        Sessions with accepted inputs no run consumed. Each runs the same resume a Turn
+        runs (T2 and T3, no model call). A Session a run holds is skipped: its own resume
+        settles it. J5 pruning follows a pass that settled everything. Never reports
+        success over a failure; ``AvibeRecovery`` owns the retries.
         """
-        try:
-            failed = await self._recover_round()
-        except Exception:
-            # The candidate scan itself failed: nothing is known to have settled.
-            self._ensure_recovery_retry()
-            raise
-        if failed:
-            self._ensure_recovery_retry()
-        return failed
-
-    @property
-    def recovering(self) -> bool:
-        """Whether recovery is still retrying a Session it could not settle."""
-        return self._recovery_task is not None and not self._recovery_task.done()
-
-    async def _recover_round(self) -> list[str]:
-        """One recovery pass; J5 pruning follows a pass that settled every candidate."""
-        failed = await self._recover_open_tool_calls()
-        if not failed:
-            await self._prune_settled_jobs()
-        return failed
-
-    def _ensure_recovery_retry(self) -> None:
-        if self._recovery_task is None or self._recovery_task.done():
-            self._recovery_task = asyncio.create_task(self._retry_recovery(), name="avibe-agent-recovery-retry")
-
-    async def _retry_recovery(self) -> None:
-        """Retry startup recovery with backoff until every candidate Session has settled.
-
-        No kill fail-safe: a transient DB or Watch failure must not kill a user's command,
-        whose own wrapper deadline still bounds it. ``stop_recovery`` ends the retries.
-        """
-        for attempt in itertools.count():
-            delay = _RECOVERY_RETRY_DELAYS_S[attempt] if attempt < len(_RECOVERY_RETRY_DELAYS_S) else (
-                _RECOVERY_RETRY_PERIOD_S
-            )
-            await asyncio.sleep(delay)
-            try:
-                failed = await self._recover_round()
-            except Exception:
-                logger.exception("Avibe Agent recovery pass failed; retrying")
-                continue
-            if not failed:
-                logger.info("Avibe Agent recovery settled every Session")
-                return
-            logger.error("Avibe Agent recovery could not settle Sessions %s; retrying", ", ".join(failed))
-
-    def stop_recovery(self) -> None:
-        """Stop retrying recovery (service stop, or the backend being disabled)."""
-        if self._recovery_task is not None and not self._recovery_task.done():
-            self._recovery_task.cancel()
-        self._recovery_task = None
-
-    async def _recover_open_tool_calls(self) -> list[str]:
-        """Settle every candidate Session's open tool calls (recovery.md T2); return those that failed.
-
-        Eager, not at the Session's next message: a running foreground job is handed to
-        its Watch now (J6), so no command outlives its Turn without an owner. A Session a
-        run holds is skipped: its own resume settles open calls first. Settlement is
-        idempotent, so a Session that failed is simply tried again.
-        """
-        failed: list[str] = []
-        for session_id in await asyncio.to_thread(self._sessions_with_open_tail):
+        candidates = await asyncio.to_thread(self._recovery_candidates)
+        unsettled: list[str] = []
+        for session_id in candidates:
             async with self._held(session_id, wait=False) as runtime:
                 if runtime is None:
                     continue
                 try:
-                    await self._settle_open_calls(runtime)
+                    await self._resume(runtime)
                 except Exception:
-                    logger.exception("Avibe Agent tool-call recovery failed for Session %s", session_id)
-                    failed.append(session_id)
-        return failed
+                    logger.exception("Avibe Agent could not settle Session %s outside a Turn", session_id)
+                    unsettled.append(session_id)
+        if not unsettled:
+            await self._prune_settled_jobs()
+        return unsettled
+
+    def _recovery_candidates(self) -> list[str]:
+        return sorted({*self._sessions_with_open_tail(), *self._sessions_with_unconsumed_inputs()})
+
+    def _schedule_recovery(self) -> None:
+        """Hand what this Turn could not settle to the process's recovery owner."""
+        recovery = getattr(self.controller, "avibe_recovery", None)
+        if recovery is not None:
+            recovery.ensure()
 
     def _prune_jobs_soon(self) -> None:
         """J5 while the service runs: runs create jobs, so a run's end prunes, at most hourly, off the Turn."""
@@ -467,7 +414,6 @@ class AvibeAgent(BaseAgent):
 
     async def shutdown_runtime(self) -> None:
         """Disabling the backend ends its runs; the rolling refresh drains Turns before this."""
-        self.stop_recovery()
         for runtime in list(self._runtimes.values()):
             if runtime.run is not None:
                 runtime.run.stop_requested = True
@@ -702,7 +648,10 @@ class AvibeAgent(BaseAgent):
             for item in await run.agent.take_pending_inputs():
                 await self.store.consume_input(run.session_id, item.message_id, item.message)
         except Exception:
+            # The rows stay accepted and unconsumed: the recovery owner admits them (T3)
+            # without waiting for the Session's next message.
             logger.exception("Avibe Agent could not admit returned inputs for Session %s", run.session_id)
+            self._schedule_recovery()
 
     # --- resume (recovery.md T2, T3) -------------------------------------------
 
@@ -1208,6 +1157,28 @@ class AvibeAgent(BaseAgent):
                 if settled < len(calls):
                     candidates.append(session_id)
         return sorted(candidates)
+
+    def _sessions_with_unconsumed_inputs(self) -> list[str]:
+        """Sessions with inputs accepted into an ``avibe`` Turn that no run consumed (T3)."""
+        with self._engine.connect() as conn:
+            return sorted(
+                conn.execute(
+                    select(messages.c.session_id)
+                    .select_from(
+                        messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
+                            session_turns, session_turns.c.id == message_deliveries.c.turn_id
+                        )
+                    )
+                    .where(
+                        messages.c.session_id.is_not(None),
+                        messages.c.context_seq.is_(None),
+                        messages.c.type.in_(INPUT_TYPES),
+                        message_deliveries.c.state == "accepted",
+                        session_turns.c.backend == BACKEND,
+                    )
+                    .distinct()
+                ).scalars()
+            )
 
     def _session_workdir(self, session_id: str) -> str:
         with self._engine.connect() as conn:

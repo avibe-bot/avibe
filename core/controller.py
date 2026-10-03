@@ -313,6 +313,10 @@ class Controller:
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
+        from modules.agents.avibe.recovery import AvibeRecovery
+
+        # The single owner of the Avibe Agent's settlement outside a Turn.
+        self.avibe_recovery = AvibeRecovery(self)
         self.trace_retention_task: Optional[asyncio.Task] = None
         self._trace_retention_executor: Optional[Any] = None
         self._trace_retention_cancel_event: Optional[threading.Event] = None
@@ -1017,25 +1021,13 @@ class Controller:
                 logger.error(f"Failed to restore active polls: {e}", exc_info=True)
 
     async def _recover_avibe_agent_runtime_state(self) -> None:
-        """Settle the Avibe Agent's open tool calls and prune settled jobs left by the previous process.
+        """Settle what the previous process left of the Avibe Agent's work (T2, T3 admission, J5).
 
         Not gated on ``agents.avibe.enabled``: a foreground job the previous process left
         running must be handed to its Watch even when the backend admits no new Turns.
-        Recovery needs only the transcript store, the job host and the Watch hand-over, so
-        an unregistered adapter runs it and is then dropped.
+        ``avibe_recovery`` is the single owner, retrying until every Session has settled.
         """
-        avibe_agent = getattr(getattr(self, "agent_service", None), "agents", {}).get("avibe")
-        if avibe_agent is None:
-            from modules.agents.avibe import AvibeAgent
-
-            avibe_agent = AvibeAgent(self)
-        try:
-            await avibe_agent.recover_runtime_state()
-        finally:
-            if avibe_agent.recovering:
-                # Its retry task keeps trying until every Session settles; hold the adapter
-                # (registered or not) so that task lives, and stop it at service stop.
-                self._avibe_recovery_agent = avibe_agent
+        await self.avibe_recovery.start()
 
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
@@ -2363,14 +2355,10 @@ class Controller:
         if show_git_checkpoint_service is not None:
             show_git_checkpoint_service.stop()
 
-        recovery_agent = getattr(self, "_avibe_recovery_agent", None)
-        if recovery_agent is not None:
-            # Startup recovery's retries end with the service; the next start recovers again.
-            async def _stop_avibe_recovery() -> None:
-                recovery_agent.stop_recovery()
-
-            _stop_loop_coroutine(_stop_avibe_recovery(), "Avibe Agent recovery retry")
-            self._avibe_recovery_agent = None
+        # The Avibe Agent's recovery retries end with the service; the next start recovers again.
+        avibe_recovery = getattr(self, "avibe_recovery", None)
+        if avibe_recovery is not None:
+            _stop_loop_coroutine(avibe_recovery.stop(), "Avibe Agent recovery")
 
         try:
             codex_agent = self.agent_service.agents.get("codex")

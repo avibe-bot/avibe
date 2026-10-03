@@ -1523,8 +1523,9 @@ async def test_the_config_refresh_registers_and_retires_the_backend(engine, monk
     agents: dict[str, Any] = {}
     recovered: list[AvibeAgent] = []
 
-    async def recover(agent) -> None:
+    async def recover(agent) -> list[str]:
         recovered.append(agent)
+        return []
 
     # A backend enabled after startup missed the startup recovery (T2, J5); it runs on registration.
     monkeypatch.setattr(AvibeAgent, "recover_runtime_state", recover)
@@ -1540,9 +1541,12 @@ async def test_the_config_refresh_registers_and_retires_the_backend(engine, monk
         release_runtime_turn_tokens=lambda _tokens: None,
     )
     config = V2Config.default()
+    from modules.agents.avibe.recovery import AvibeRecovery
+
     controller = SimpleNamespace(
         agent_service=service, im_client=_IMClient(), settings_manager=_SettingsManager(), config=None
     )
+    controller.avibe_recovery = AvibeRecovery(controller)
     owner = AgentAuthService(controller)
     for enabled in (True, False, True):
         config.agents.avibe.enabled = enabled
@@ -1589,10 +1593,8 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
     harness.agent._sessions_with_open_tail = unavailable
     with pytest.raises(RuntimeError):
         await harness.agent.recover_runtime_state()
-    assert harness.agent.recovering
-    harness.agent.stop_recovery()
     harness.agent._sessions_with_open_tail = scan
-    await harness.agent.recover_runtime_state()
+    assert await harness.agent.recover_runtime_state() == []
     rows = await harness.context_rows()
     assert rows[-1].kind == "tool_result" and "now Watch watch_job_1" in rows[-1].message.content[0].text
     # Another process start settles nothing twice.
@@ -2104,6 +2106,20 @@ async def test_resume_settles_a_reused_call_id_from_the_job_its_own_call_started
         await suite.jobs.kill(current)
 
 
+def _disabled_controller() -> SimpleNamespace:
+    """A controller with ``agents.avibe`` disabled: no registered adapter, and its single recovery owner."""
+    from modules.agents.avibe.recovery import AvibeRecovery
+
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(agents={}),
+        config=SimpleNamespace(avibe=None, platform="avibe", language="en"),
+        im_client=None,
+        settings_manager=SimpleNamespace(),
+    )
+    controller.avibe_recovery = AvibeRecovery(controller)
+    return controller
+
+
 async def test_startup_hands_a_foreground_job_to_its_watch_with_the_backend_disabled(
     engine, session, tmp_path, published
 ) -> None:
@@ -2121,17 +2137,12 @@ async def test_startup_hands_a_foreground_job_to_its_watch_with_the_backend_disa
     suite = harness.suite
     job_id = await _real_job(suite, "sleep 30", call_id="call_bash", cwd=tmp_path)
     # The process restarts with agents.avibe disabled: no adapter is registered.
-    controller = SimpleNamespace(
-        agent_service=SimpleNamespace(agents={}),
-        config=SimpleNamespace(avibe=None, platform="avibe", language="en"),
-        im_client=None,
-        settings_manager=SimpleNamespace(),
-    )
+    controller = _disabled_controller()
     try:
         await Controller._recover_avibe_agent_runtime_state(controller)
 
         watch_id = ManagedWatchStore().find_job_watch(job_id)
-        assert watch_id is not None
+        assert watch_id is not None and not controller.avibe_recovery.retrying
         result = (await harness.context_rows())[-1]
         assert result.kind == "tool_result" and f"now Watch {watch_id}" in result.message.content[0].text
     finally:
@@ -2164,7 +2175,7 @@ async def _two_sessions_with_open_calls(engine, tmp_path, suite) -> tuple[_Harne
 def _hand_over_failing_once(monkeypatch) -> list[str]:
     """Watch hand-over raises on its first call, as a transient DB or Watch failure would."""
     import core.watches as watches_module
-    import modules.agents.avibe.agent as agent_module
+    import modules.agents.avibe.recovery as recovery_module
 
     calls: list[str] = []
     real = watches_module.hand_over_job
@@ -2176,8 +2187,8 @@ def _hand_over_failing_once(monkeypatch) -> list[str]:
         return await real(meta, **kwargs)
 
     monkeypatch.setattr(watches_module, "hand_over_job", flaky)
-    monkeypatch.setattr(agent_module, "_RECOVERY_RETRY_DELAYS_S", (0.05, 0.05), raising=False)
-    monkeypatch.setattr(agent_module, "_RECOVERY_RETRY_PERIOD_S", 0.05, raising=False)
+    monkeypatch.setattr(recovery_module, "RETRY_DELAYS_S", (0.05, 0.05))
+    monkeypatch.setattr(recovery_module, "RETRY_PERIOD_S", 0.05)
     return calls
 
 
@@ -2190,46 +2201,108 @@ async def _results(engine, session_id: str) -> list[str]:
         ).scalars())
 
 
-async def test_startup_recovery_retries_a_session_it_could_not_settle(engine, session, tmp_path, published, monkeypatch) -> None:
-    from core.watches import ManagedWatchStore
-
-    _hand_over_failing_once(monkeypatch)
-    suite = local_tool_suite(str(tmp_path / "jobs"))
-    harness, running, _exited = await _two_sessions_with_open_calls(engine, tmp_path, suite)
-    agent = harness.new_agent()
-    try:
-        # The first pass settles ses_b and fails SESSION; it reports that, not success.
-        assert await agent.recover_runtime_state() == [SESSION]
-        assert len(await _results(engine, "ses_b")) == 1
-        # Without any Turn, a retry hands SESSION's running job to its Watch.
-        await _until(lambda: ManagedWatchStore().find_job_watch(running) is not None, "the retry never handed over")
-        await _until(lambda: not agent.recovering, "the retry never finished")
-        assert len(await _results(engine, SESSION)) == 1 and len(await _results(engine, "ses_b")) == 1
-    finally:
-        agent.stop_recovery()
-        await suite.jobs.kill(running)
-
-
-async def test_startup_recovery_retries_with_the_backend_disabled(engine, session, tmp_path, published, monkeypatch) -> None:
-    from core.controller import Controller
+@pytest.mark.parametrize("registered", [True, False])
+async def test_recovery_retries_a_session_it_could_not_settle(
+    engine, session, tmp_path, published, monkeypatch, registered
+) -> None:
     from core.watches import ManagedWatchStore
 
     _hand_over_failing_once(monkeypatch)
     harness, running, _exited = await _two_sessions_with_open_calls(engine, tmp_path, local_tool_suite())
-    controller = SimpleNamespace(
-        agent_service=SimpleNamespace(agents={}),
-        config=SimpleNamespace(avibe=None, platform="avibe", language="en"),
-        im_client=None,
-        settings_manager=SimpleNamespace(),
-    )
+    controller = _disabled_controller()
+    if registered:
+        controller.agent_service.agents["avibe"] = harness.new_agent()
+    recovery = controller.avibe_recovery
     try:
-        await Controller._recover_avibe_agent_runtime_state(controller)
-        # The unregistered adapter is kept while its retry runs, and the retry settles the Session.
-        assert controller._avibe_recovery_agent.recovering
+        # The first pass settles ses_b and reports SESSION, never success over a failure.
+        assert await recovery.start() == [SESSION]
+        assert recovery.retrying and len(await _results(engine, "ses_b")) == 1
+        # Without any Turn, the single owner's retry hands SESSION's running job to its Watch.
         await _until(lambda: ManagedWatchStore().find_job_watch(running) is not None, "the retry never handed over")
+        await _until(lambda: not recovery.retrying, "the retry never finished")
+        assert len(await _results(engine, SESSION)) == 1 and len(await _results(engine, "ses_b")) == 1
     finally:
-        controller._avibe_recovery_agent.stop_recovery()
+        await recovery.stop()
         await harness.suite.jobs.kill(running)
+
+
+async def test_enabling_the_backend_hands_recovery_to_the_registered_adapter(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    import modules.agents.avibe.recovery as recovery_module
+    from core.agent_auth_service import AgentAuthService
+    from core.controller import Controller
+    from core.watches import ManagedWatchStore
+
+    calls = _hand_over_failing_once(monkeypatch)
+    # The detached retry would wait long; live registration must not leave it beside the new owner.
+    monkeypatch.setattr(recovery_module, "RETRY_DELAYS_S", (60.0,))
+    harness, running, _exited = await _two_sessions_with_open_calls(engine, tmp_path, local_tool_suite())
+    controller = _disabled_controller()
+    try:
+        # Startup with agents.avibe disabled: SESSION's hand-over fails and a retry is pending.
+        await Controller._recover_avibe_agent_runtime_state(controller)
+        # agents.avibe is enabled: the config refresh registers an adapter and recovers on it.
+        controller.agent_service.agents["avibe"] = harness.new_agent()
+        await AgentAuthService._recover_after_live_registration(SimpleNamespace(controller=controller), "avibe")
+
+        # One owner: the registered adapter settled everything, and no detached retry remains.
+        pending = [task for task in asyncio.all_tasks() if task.get_name().startswith("avibe-agent-recovery")]
+        assert [task for task in pending if not task.done()] == []
+        assert ManagedWatchStore().find_job_watch(running) is not None
+        assert len(await _results(engine, SESSION)) == 1 and calls.count(running) == 2
+    finally:
+        await controller.avibe_recovery.stop()
+        for task in asyncio.all_tasks():
+            if task.get_name().startswith("avibe-agent-recovery"):
+                task.cancel()
+        await harness.suite.jobs.kill(running)
+
+
+async def test_recovery_admits_a_returned_input_whose_admission_failed(engine, session, tmp_path, published) -> None:
+    from modules.agents.avibe.recovery import AvibeRecovery
+
+    started = asyncio.Event()
+
+    async def wait_for_cancel(arguments, ctx):
+        started.set()
+        await ctx.cancel.wait()
+        return ToolResult((text("Command aborted"),), is_error=True)
+
+    harness = _Harness(engine, tmp_path, "avibe", _tool_turn(), tools=[FakeTool("echo", execute=wait_for_cancel)])
+    harness.controller.avibe_recovery = AvibeRecovery(harness.controller)
+    harness.controller.agent_service.agents = {"avibe": harness.agent}
+    request = harness.request("run it")
+    turn_id = _turn(request.context)
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    await started.wait()
+    native = harness.controller.started[-1]
+    delivery_id, attempt_id = harness.open_steer("and the docs", turn_id, native)
+    receipt = await harness.agent.steer_active_turn(
+        SteerRequest(SESSION, turn_id, native, "and the docs", attempt_id=attempt_id),
+        ActiveSteerTarget("runtime", turn_id, request.context, request, harness.agent),
+    )
+    assert receipt.outcome is SteerOutcome.ACCEPTED
+    harness.accept_steer(delivery_id, attempt_id, turn_id)
+    store, consume, failures = harness.agent.store, harness.agent.store.consume_input, []
+
+    async def locked_once(session_id, message_id, message):
+        if message_id == delivery_id and not failures:
+            failures.append(message_id)
+            raise RuntimeError("database is locked")
+        return await consume(session_id, message_id, message)
+
+    store.consume_input = locked_once
+    # Stop returns the accepted steer; admitting it fails once.
+    await harness.agent.handle_stop(AgentRequest(**{**request.__dict__, "message": "stop"}))
+    await running
+    assert failures == [delivery_id] and harness.controller.avibe_recovery.retrying
+    harness.controller.avibe_recovery._task.cancel()
+
+    # The owner's next pass admits it, without any Turn, exactly once.
+    assert await harness.controller.avibe_recovery.start() == []
+    admitted = [entry for entry in await harness.context_rows() if entry.row_id == delivery_id]
+    assert len(admitted) == 1
 
 
 async def test_the_default_job_host_lives_in_the_watch_jobs_dir(engine, session, tmp_path) -> None:
