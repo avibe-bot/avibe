@@ -304,11 +304,6 @@ All Hub generations of a directory share its request-scoped gateway
 credential. Per-turn routes ride on `responsesapiClientMetadata`. The scope is
 retired only when the directory's last Hub process ends.
 
-The scope belongs to one agent instance (`<cwd>#<instance>`). Re-enabling
-Codex registers a new agent while the retired one drains, possibly in the same
-directory; the retired agent revoking its scope at its last Hub process never
-revokes the credential the new agent's processes use.
-
 ## Triggers
 
 | Hook | Behavior |

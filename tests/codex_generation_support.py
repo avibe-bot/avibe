@@ -13,7 +13,6 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-import modules.agents.codex.agent as codex_agent_module
 from modules.agents.codex.agent import CodexAgent, _CodexRuntime
 
 
@@ -34,7 +33,6 @@ def init_generation_state(agent: Any) -> Any:
     agent._runtimes = {}
     agent._shutting_down = False
     agent._retired = False
-    agent._instance_serial = next(codex_agent_module._AGENT_INSTANCE_SERIALS)
     agent._runtime_epoch = 0
     agent._reap_tasks = set()
     agent._model_hub_catalogs = OrderedDict()
