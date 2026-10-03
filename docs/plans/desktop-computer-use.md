@@ -775,57 +775,84 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 
 ## Validation
 
-- Rust: one case per lifecycle-table row; a capabilities transport error keeps
-  the last answer, and only a 404 or a lower schema means unsupported; with
-  grant checks, spawn, socket, and health faked. Each case asserts the resulting
-  `D` and that no prompt is raised outside the toggle-on row. Stale-preflight
-  cases: a grant that the shell's preflight misses reaches `ready` after one
-  activation; a truly missing grant spawns once per activation. Also:
-  `generation` bumps on each spawn, nothing is spawned through LaunchServices,
-  and the toggle persists. A daemon that ignores EOF is killed after 3 s. A
-  killed shell takes its daemon down and releases its lock, and the next launch
-  reclaims the endpoint. A Runtime without a covering `computer_use_schema`
-  never gets a daemon. A failed `D` write still stops the daemon.
-- Python, configuration: the spec and the prompt section exist exactly when
-  `enabled` is true and the snapshot verifies; a missing or mismatched snapshot
-  yields neither, plus `snapshot_invalid`. Each backend translation is checked;
-  Codex also carries the approval override. Reconciliation brings every live
-  consumer (Codex, OpenCode, cached Claude clients) to the final (`enabled`,
-  snapshot hash, snapshot valid) triple. Claude clients are recreated only
-  between turns. The reconciliation sees no change when availability moves or
-  when the triple returns to its old value between polls. Deleting and then
-  restoring the snapshot file reconciles both ways.
-- Python, server: one case per row of the effective-status table, asserting both
-  status and reason, plus a home-independence case: a Runtime with `AVIBE_HOME`
-  set reads the same `D`. A call while not ready returns the named state and
-  never spawns a child. A call after an (`instance_id`, `generation`) change or
-  a child exit respawns exactly once. Folding keeps image blocks. Every
-  advertised schema requires `session`. Two sessions get separate Cua sessions
-  on one upstream connection. A session that called `end_session` works again on
-  its next call. Simultaneous first calls from two processes yield exactly one
-  holder, a 120 s call keeps its lease, a session that lost the lease in between
-  has its old element tokens rejected and gets `observe_first` for input until a
-  state observation, a daemon respawn revives each session before its next call,
-  a session's calls run one at a time and `end_session` waits for earlier ones,
-  a stale shell preflight does not stop a `ready` daemon, a 500 from
-  capabilities keeps the last answer only for the same `controller_id`, a health
-  check that hangs or fails on any step returns `unhealthy` at start and in
-  `ready`, the `ready` heartbeat never captures, a failed respawn retries with
-  backoff and reaches `error` only on the third start failure in 5 minutes, an
-  old Controller's unknown-operation error reads as schema `0`, a
-  stop-and-re-enable voids every lease, a desktop-targeted or unrecognised input
-  call is rejected on macOS, observing window A does not clear `observe_first`
-  for window B, a new server process requires an observation before a session's
-  first input, and the other gets `desktop_busy` until `end_session` or 60 s
-  idle. Tests stay hermetic: the `D` path and the upstream command are
-  redirected to test-owned fakes.
-- Shell: the daemon environment names the bundled managed policy. A release
-  check confirms that the pinned driver's `tools/list`, under that policy,
-  equals the bundled tool snapshot. For a Runtime without a covering
-  `computer_use_schema`, turning the toggle on is refused while turning it off
-  still works, `/ready` is unchanged for released shells, and a changed
-  `tool_snapshot` hash reconciles live consumers.
-- Manual on a signed build: Slack → agent → background GUI task completes while
-  the user keeps working; the tray toggle stops an in-flight session's access.
-  On an idle desktop, sample the frontmost app and the pointer during AX and
-  pixel actions, and confirm that the agent cursor overlay stays visible.
+Each case lives in the suite of the component that owns the behavior.
+
+- **Rust, shell lifecycle (`desktop/`)**, with grant checks, spawn, socket,
+  health, `/ready`, and capabilities faked. These cases cover:
+  - One case per lifecycle-table row. Each asserts the resulting `D` and
+    that no prompt is raised outside the toggle-on row.
+  - Stale preflight: a grant the shell's preflight misses reaches `ready`
+    after one activation. A truly missing grant spawns once per activation.
+    A stale shell preflight does not stop a `ready` daemon.
+  - Health check: the full mode runs at start and includes the capture
+    probe. The `ready` heartbeat never captures. A step that hangs or fails
+    returns `unhealthy` in both modes.
+  - Start failures, on a first start or a respawn, retry with backoff.
+    They reach `error` only on the third failure within 5 minutes.
+  - Capabilities: a transport error or a 500 keeps the last answer, but
+    only for the same `controller_id`. Only a 404 or a lower schema means
+    unsupported. A new `controller_id` with no definitive answer stops a
+    running daemon. A Runtime without a covering `computer_use_schema`
+    never gets a daemon. Turning the toggle on is refused there, while
+    turning it off still works.
+  - Process: a daemon that ignores EOF is killed after 3 s. A killed shell
+    takes its daemon down and releases its lock, and the next launch
+    reclaims the endpoint. `generation` bumps on each spawn, and nothing is
+    spawned through LaunchServices.
+  - State file: a failed `D` write still stops the daemon, and the toggle
+    persists only in `D`.
+- **Release check (shell build)**, covering three points:
+  - The daemon environment names the bundled managed policy.
+  - The pinned driver's `tools/list`, under that policy, equals the bundled
+    tool snapshot.
+  - The driver guide's no-foreground section is re-read for the new driver
+    version.
+- **Python, UI process (`vibe/`)**, covering these cases:
+  - `/ready` is byte-for-byte unchanged for released shells.
+  - `/api/desktop/capabilities` answers from the Controller over IPC.
+  - An old Controller's unknown-operation error reads as schema `0`.
+- **Python, Runtime configuration (`core/computer_use.py`)**, covering these
+  cases:
+  - One case per row of the effective-status table, asserting both status
+    and reason.
+  - A Runtime with `AVIBE_HOME` set reads the same `D`.
+  - The spec and the prompt section exist exactly when `enabled` is true
+    and the snapshot verifies. A missing or mismatched snapshot yields
+    neither, plus `snapshot_invalid`.
+  - Each backend translation is checked; Codex also carries the approval
+    override.
+  - Reconciliation brings every live consumer (Codex, OpenCode, cached
+    Claude clients) to the final (`enabled`, snapshot hash, snapshot valid)
+    triple. Claude clients are recreated only between turns.
+  - Availability changes, and a triple that returns to its old value
+    between polls, cause no reconciliation. Deleting and then restoring the
+    snapshot file reconciles both ways.
+- **Python, computer MCP server**, with the upstream command faked. These
+  cases cover:
+  - Upstream: a call while not ready returns the named state and never
+    spawns a child. An (`instance_id`, `generation`) change or a child exit
+    respawns exactly once. Folding keeps image blocks.
+  - Sessions: every advertised schema requires `session`. Two sessions get
+    separate Cua sessions on one upstream connection. A session is revived
+    before its next call after `end_session`, after a daemon respawn, and
+    after a child replacement. A session's calls run one at a time, and
+    `end_session` waits for the calls queued before it.
+  - Lease: simultaneous first calls from two processes yield exactly one
+    holder, and the other gets `desktop_busy` until `end_session` or 60 s
+    idle. A 120 s call keeps its lease. A stop and re-enable voids every
+    lease.
+  - Stale input: after an epoch change, old element tokens are rejected,
+    and input to a window gets `observe_first` until that same window is
+    observed. Observing window A does not clear window B. A new server
+    process requires an observation before a session's first input.
+  - macOS input: a desktop-targeted, foreground, or unrecognised input
+    call is rejected, and so are the guide's focus-intent shortcuts.
+- **Manual, on a signed build.**
+  - Slack → agent → a background GUI task completes while the user keeps
+    working, and the tray toggle stops an in-flight session's access.
+  - On an idle desktop, sample the frontmost app and the pointer during AX
+    and pixel actions, and confirm that the agent cursor overlay stays
+    visible.
+
+All automated cases are hermetic: the `D` path and the upstream command are
+redirected to test-owned fakes.
