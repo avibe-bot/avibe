@@ -67,6 +67,7 @@ scenarios:
       - tests/test_opencode_generations.py::test_runtime_gen_006_a_retired_opencode_runtime_keeps_its_turn_and_stops_once_drained
       - tests/test_opencode_generations.py::test_a_retired_runtime_reaps_until_it_reports_retired
       - tests/test_running_agents_service.py::test_runtime_gen_006_a_disabled_backends_running_work_stays_in_running_agents
+      - tests/test_opencode_generations.py::test_a_turn_that_races_a_disable_reports_the_localized_retired_error
   - id: RUNTIME-GEN-007
     name: Re-enabling a backend while its retired agent drains starts new work at once and leaves the retired work running
     status: covered
@@ -84,6 +85,8 @@ scenarios:
     layer: contract
     backend: shared
     test: tests/test_backend_restart.py::test_runtime_gen_008_idle_maintenance_runs_behind_closed_admission_then_renews
+    related_tests:
+      - tests/test_opencode_generations.py::test_a_leased_generation_counts_as_active_runtime_work
   - id: RUNTIME-GEN-010
     name: A Codex turn on a new launch spec starts at once on a new app-server while a busy one in the same directory finishes on its own
     status: covered
@@ -215,9 +218,9 @@ scenarios:
     backend: opencode
     test: tests/test_opencode_generations.py::test_runtime_gen_024_a_mode_switch_during_a_hub_run_moves_new_turns_to_direct
   - id: RUNTIME-GEN-025
-    name: A controller that starts with OpenCode disabled stops the OpenCode servers a crashed controller recorded, and leaves them for adoption when OpenCode is enabled
+    name: A controller that starts with OpenCode disabled retires a drain-only agent for the servers a crashed controller recorded; an idle one stops at once, one still serving a lease or a live run stops once drained, and with OpenCode enabled the registered agent adopts them
     status: covered
     kind: recovery
     layer: unit
     backend: opencode
-    test: tests/test_opencode_generations.py::test_a_controller_starting_with_opencode_disabled_stops_a_crashed_controllers_servers
+    test: tests/test_opencode_generations.py::test_a_disabled_restart_drains_a_crashed_controllers_servers_without_interrupting_them

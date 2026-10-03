@@ -438,7 +438,7 @@
     "codexPromptRefreshUnavailable": "Codex 无法确认能否安全刷新此现有会话的 Avibe 指令。请检查或升级 Codex 后重试本回合。",
     "codexForkBoundaryUnavailable": "Codex 无法确定此次分叉的安全历史边界。请等待源会话当前回合结束后重试；如果问题持续，请检查或升级 Codex。",
     "codexThreadReleaseUnavailable": "Codex 无法把这个会话从它上次运行的 app-server 进程上移走，因为该进程仍占用着它。请等那里仍在运行的工作结束后重试这条输入。",
-    "codexRuntimeRetired": "Codex 已关闭或 Avibe 正在停止，这条消息没有开始执行。请在 Codex 启用后重新发送。",
+    "agentRuntimeRetired": "{agent} 已关闭或 Avibe 正在停止，这条消息没有开始执行。请在 {agent} 启用后重新发送。",
     "codexResponseTooLarge": "Codex 返回的响应超过 {limitMiB} MiB，此连接无法继续。请检查或升级 Codex 后重试。",
     "opencodeRuntimeConfigInvalid": "OpenCode 无法启动，因为 OPENCODE_CONFIG_CONTENT 无效。请修正运行时配置后重试。",
     "opencodeDirectoryBootstrapTimeout": "OpenCode 仍在完成首次准备，请稍后重新发送消息。",

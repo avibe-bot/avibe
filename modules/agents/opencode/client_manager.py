@@ -299,6 +299,7 @@ class OpenCodeRuntime:
         self.durable_poll_generations: Optional[Callable[[], Mapping[str, Optional[str]]]] = None
         self.on_generation_ready: Optional[Callable[[OpenCodeGeneration], None]] = None
         self.on_generation_stopping: Optional[Callable[[OpenCodeGeneration, bool], Awaitable[None]]] = None
+        self.marked_run_is_live: Optional[Callable[[OpenCodeGeneration], Awaitable[bool]]] = None
 
     def renew(self) -> None:
         """New turns start a new generation; running work stays where it is.
@@ -327,6 +328,10 @@ class OpenCodeRuntime:
     def current(self) -> Optional[OpenCodeGeneration]:
         current = self._generations.current
         return current.runtime if current is not None else None
+
+    def has_bound_work(self) -> bool:
+        """Whether a turn, restored poll, request sequence, or lease holds a generation."""
+        return any(generation.bindings for generation in self._generations.generations)
 
     def generations(self) -> tuple[OpenCodeGeneration, ...]:
         """Every live generation, oldest first."""
@@ -604,10 +609,12 @@ class OpenCodeRuntime:
         generation = wrapper.runtime
         if not force and generation.process_alive() and not generation.is_drained():
             if self._closed:
-                # A disabled backend serves no native run its bindings do not
-                # hold, and nothing sweeps its runtime, so a run marker, such
-                # as one whose clear failed, must not keep the process.
+                # A retired runtime serves no new run, so a marker keeps its
+                # process only while that run still runs there: the marker of
+                # a run that ended, or that no durable poll backs, does not.
                 if generation.has_requests_in_flight():
+                    return False
+                if self.marked_run_is_live is not None and await self.marked_run_is_live(generation):
                     return False
             else:
                 # A run marker that no durable poll backs, left by an adoption

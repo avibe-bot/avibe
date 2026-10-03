@@ -2130,12 +2130,9 @@ def stop_recorded_server_sync(path: Path, info: Mapping[str, Any]) -> StopOutcom
 
 
 def stop_recorded_servers_sync(runtime_ids: frozenset[str] = frozenset()) -> list[StopOutcome]:
-    """Stop every recorded server no runtime of this process owns.
+    """Stop every recorded server no runtime of this process owns, for ``vibe stop``.
 
-    ``vibe stop`` runs it, as does a controller that starts with OpenCode
-    disabled, since no agent there would adopt what a crashed controller left
-    running. A record whose process already ended is forgotten with its
-    overlay. A server of another desktop Runtime than ``runtime_ids`` is left
+    A record whose process already ended is forgotten with its overlay. A server of another desktop Runtime than ``runtime_ids`` is left
     running. OpenCode starts each tool command in its own session, so each
     stop takes the whole process tree.
     """

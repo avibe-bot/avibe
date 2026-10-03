@@ -348,6 +348,7 @@ def test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership() -> N
         generations=lambda: (retiring, current),
         current=lambda: current,
         outside_turn_acquisitions=0,
+        has_bound_work=lambda: False,
     )
     # base-a still runs on the retiring generation; base-b is between turns.
     opencode._session_generations = {"base-a": retiring}

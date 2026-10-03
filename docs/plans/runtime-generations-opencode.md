@@ -37,12 +37,18 @@ are the Phase 1 design. Their line references are to
 - Disabling the backend calls `retire_runtime()`. It adopts any generations a
   previous controller left, then closes admission. The service's 60 s sweep
   keeps calling `reap_runtime_generations()` on the retired agent until
-  `runtime_retired()` is true, then drops it. Run markers do not keep a retired
-  runtime's generations: each one stops once its bindings and requests drain.
-- A controller that starts with OpenCode disabled stops the servers a crashed
-  controller recorded. It uses `stop_recorded_servers_sync()`, the same
-  function as `vibe stop`, which honors ownership here, process identity, and
-  the desktop foreign-Runtime refusal.
+  `runtime_retired()` is true, then drops it. A retired runtime's generation
+  stops once its bindings and requests drain and no run its markers record
+  still runs on that process. The durable poll names the run's directory, and
+  the process's own session status says whether it is live.
+- A controller that starts with OpenCode disabled builds a drain-only agent
+  (`OpenCodeAgent.draining()`) and hands it to `AgentService.retire_agent`,
+  which never registers it. The agent adopts what a crashed controller
+  recorded: an idle server stops at once, and one still serving a lease or a
+  live run stops once drained. `stop_recorded_servers_sync()` remains only for
+  `vibe stop`.
+- Bindings, and so leases, count as active runtime work, so maintenance such as
+  a CLI replacement waits for a leased sequence between its requests.
 - Work outside a turn (`current_server()` and UI leases) is admitted the way a
   turn is. It waits while a native migration drains the backend, and counts as
   active until it is bound.
@@ -612,7 +618,7 @@ and the corrected cells came from an independent agent that checked every
 | B3 | A bound generation is stopped only by a forced stop, which first settles the bound work. |
 | M1 | A native run is marked on its generation, and that marker persisted, before the run's first native write. |
 | M2 | A turn clears its marker together with its durable poll: both go, or both stay. This is master's contract. |
-| M3 | A marker that no live run or durable poll backs never keeps a process: adoption reconciliation, the re-reconcile in `_stop`, and a closed runtime that ignores markers. |
+| M3 | A marker that no live run or durable poll backs never keeps a process: adoption reconciliation, the re-reconcile in `_stop`, and a retired runtime that keeps a marker only while its run is live on that process. |
 | S1 | New turns run on the generation whose spec equals the current spec. A renewal is persisted before it takes effect. |
 | N1 | A native migration never overlaps the start of an OpenCode process: work outside a turn waits while the backend drains, and admitted work counts as active until it is bound. |
 | P1 | A durable poll names the generation that runs its native turn, including after a restore binds it elsewhere. |
@@ -641,7 +647,7 @@ and the corrected cells came from an independent agent that checked every
 | Retire: forced refresh | `_cancel_active_requests()` then `retire_all()` | B3 holds; leases keep their generation until released. |
 | Disable | `AgentService.retire_backend` unregisters the agent and calls `retire_runtime()` → `close()`: admission closed, unbound generations stop, bound ones stop as they drain, markers ignored; the service's sweep reaps the retired agent until `runtime_retired()` | B3, M3, L3 hold. **Gap G1:** nothing swept a closed runtime, so a stop that declined for an in-flight request, or failed, was never retried, and a stale record was never flushed (O4). **Gap G2:** a runtime that never adopted closed without adopting, so a crashed predecessor's generations ran until shutdown (O2, O4). |
 | Cap force-stop | core `_next_victim` forces the oldest retiring generation; `_on_generation_stopping(force)` settles bound turns; `stop_generation` | B3 holds; a lease holder sees its process end, by design. **Known K3:** the cap counts per runtime, so while a disabled backend's runtime drains next to a re-enabled one, up to 3 + 3 processes may run. |
-| Controller restart | explicit: shutdown stops every recorded generation; next start adopts nothing and restores polls on a new current. After a crash with OpenCode disabled, startup calls `stop_recorded_servers_sync()` | R2, B1 hold. **Gap S-1:** after a crash, a restart with OpenCode disabled never adopted its leftovers, which ran until the next stop or enable (O2). |
+| Controller restart | explicit: shutdown stops every recorded generation; next start adopts nothing and restores polls on a new current. After a crash with OpenCode disabled, startup retires a drain-only agent that adopts the leftovers | R2, B1 hold. **Gap S-1:** after a crash, a restart with OpenCode disabled never adopted its leftovers, which ran until the next stop or enable (O2). Its first fix stopped every leftover, including ones still serving a lease or a live run. |
 | Crash between steps | spawn→record (K1); record→ready (adopted or stopped); lease grant→hand-out (the successor honors it until TTL); marker→durable poll (marker reconciled away); kill→record removal (unproven, removed later); legacy write→legacy removal (G3) | R1–R3 hold except K1 and G3. |
 | Process death | `acquire` replaces a dead current (`forget` → `stop_generation` cleans up); a dead retiring generation is cleaned on its last release | R2, B1 hold. |
 | CLI stop | `forget_dead_records()`, then each proven record: desktop-claim check, `stop_recorded_server_sync` | R2, R4 hold; a survivor keeps its record; exit stays non-fatal (#2242). |
@@ -660,7 +666,7 @@ and the corrected cells came from an independent agent that checked every
 | G7 | adoption probes a proven process up to three times, two seconds apart, before stopping it | `test_adoption_gives_a_busy_server_more_than_one_health_probe` |
 | G8 | the restore loop releases the binding if anything raises before the poll task takes it; the task rebinds when a forced stop took the generation it was handed | `test_restore_releases_a_poll_binding_its_task_never_took`, `test_a_restored_poll_whose_generation_was_force_stopped_rebinds_before_registering` |
 | G9 | an adopted lease is re-held for at most `MAX_LEASE_SECONDS` | `test_adoption_never_holds_a_recorded_lease_longer_than_any_lease_is_granted` |
-| S-1 | controller startup with OpenCode not registered runs `stop_recorded_servers_sync()` | `test_a_controller_starting_with_opencode_disabled_stops_a_crashed_controllers_servers` (RUNTIME-GEN-025) |
+| S-1 | controller startup with OpenCode not registered retires a drain-only agent (`AgentService.retire_agent`), which adopts the leftovers and stops each once its leases and live runs drain | `test_a_disabled_restart_drains_a_crashed_controllers_servers_without_interrupting_them` (RUNTIME-GEN-025) |
 
 ### Known by design
 

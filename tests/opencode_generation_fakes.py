@@ -55,6 +55,9 @@ class FakeOpenCodeRuntime:
     def current(self) -> Any:
         return self.server
 
+    def has_bound_work(self) -> bool:
+        return any(not binding.released for binding in self.bindings)
+
     def generations(self) -> tuple[Any, ...]:
         return (self.server,) if self.server is not None else ()
 

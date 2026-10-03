@@ -67,7 +67,7 @@ from core.system_prompt_injection import (
     get_enabled_agents_for_prompt,
 )
 from modules.agents.base import AgentRequest, BaseAgent, message_with_files
-from modules.agents.runtime_generations import RuntimeBinding
+from modules.agents.runtime_generations import RuntimeBinding, RuntimeUnitStopping
 from modules.agents.model_hub import (
     ModelHubLaunch,
     OpenCodeOverlay,
@@ -777,6 +777,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self._runtime.durable_poll_generations = self._durable_poll_generations
         self._runtime.on_generation_ready = self._attach_generation_activation
         self._runtime.on_generation_stopping = self._on_generation_stopping
+        self._runtime.marked_run_is_live = self._marked_run_is_live
         self._session_manager = OpenCodeSessionManager(self.settings_manager, self.name)
 
         self._poll_loop = OpenCodePollLoop(self)
@@ -799,6 +800,44 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         # no turn's cleanup waits on another generation's start or stop.
         self._lifecycle_tasks: set[asyncio.Task] = set()
         self._resource_failures: Dict[tuple[Any, ...], AgentResourceFailure | None] = {}
+
+    @classmethod
+    def draining(cls, controller) -> "OpenCodeAgent":
+        """An agent that only drains what a previous controller left running.
+
+        A controller that starts with OpenCode disabled retires it at once. It
+        adopts the recorded servers, keeps each one while a lease or a live run
+        still uses it, and never starts a process, so the CLI path is unused.
+        """
+        from config.v2_compat import OpenCodeCompatConfig
+
+        return cls(controller, OpenCodeCompatConfig(enabled=False, binary="opencode", request_timeout_seconds=60))
+
+    async def _marked_run_is_live(self, generation: OpenCodeGeneration) -> bool:
+        """Whether a run a marker records still runs on that process.
+
+        The durable poll names the directory the status query needs. A run
+        that cannot be checked counts as live, and a later sweep asks again.
+        """
+        if not generation.active_run_sessions:
+            return False
+        try:
+            polls = self.sessions.get_all_active_polls()
+            for session_id in tuple(generation.active_run_sessions):
+                poll = polls.get(session_id)
+                if poll is None:
+                    continue
+                status = await generation.get_session_status(session_id, poll.working_path)
+                if isinstance(status, dict) and status.get("type") in {"busy", "retry"}:
+                    return True
+        except Exception:
+            logger.warning(
+                "Could not tell whether OpenCode generation %s still runs a marked run",
+                generation.generation_id,
+                exc_info=True,
+            )
+            return True
+        return False
 
     def _durable_poll_generations(self) -> Dict[str, Optional[str]]:
         return {
@@ -1152,17 +1191,21 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         *,
         resource_failure: AgentResourceFailure | None = None,
     ) -> str:
-        localized_key = None
+        language = str(
+            getattr(getattr(self.controller, "config", None), "language", "en")
+            or "en"
+        )
         if isinstance(error, OpenCodeRuntimeConfigInvalidError):
-            localized_key = "error.opencodeRuntimeConfigInvalid"
+            message = i18n_t("error.opencodeRuntimeConfigInvalid", language)
         elif isinstance(error, OpenCodeDirectoryBootstrapTimeoutError):
-            localized_key = "error.opencodeDirectoryBootstrapTimeout"
-        if localized_key is not None:
-            language = str(
-                getattr(getattr(self.controller, "config", None), "language", "en")
-                or "en"
+            message = i18n_t("error.opencodeDirectoryBootstrapTimeout", language)
+        elif isinstance(error, RuntimeUnitStopping):
+            # The backend was disabled after this turn looked its agent up.
+            message = i18n_t(
+                "error.agentRuntimeRetired",
+                language,
+                agent=i18n_t("backend.opencode", language),
             )
-            message = i18n_t(localized_key, language)
         else:
             message = f"Failed to start OpenCode server: {error}"
         return f"❌ {message}{self._resource_failure_suffix(resource_failure)}"
@@ -1179,7 +1222,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         await self._runtime.retire_all_strict()
 
     def runtime_has_active_turns(self) -> bool:
-        if self._runtime.outside_turn_acquisitions:
+        # A lease is a binding: an OAuth flow or another leased sequence between
+        # its HTTP requests keeps its process in use.
+        if self._runtime.outside_turn_acquisitions or self._runtime.has_bound_work():
             return True
         if any(not task.done() for task in self._active_requests.values()):
             return True

@@ -399,7 +399,7 @@ async def test_runtime_gen_006_a_retired_codex_agent_finishes_its_work_and_admit
     await asyncio.wait_for(agent.handle_message(_request(cwd, "s4")), 1)
     assert [type(call.kwargs["cause"]) for call in failures.await_args_list] == [RuntimeUnitStopping] * 2
     assert {call.kwargs["display_text"] for call in failures.await_args_list} == {
-        f"❌ {i18n_t('error.codexRuntimeRetired', 'en')}"
+        f"❌ {i18n_t('error.agentRuntimeRetired', 'en', agent='Codex')}"
     }
     assert len(FakeAppServer.started) == started
 

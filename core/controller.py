@@ -1112,14 +1112,14 @@ class Controller:
 
         try:
             if "opencode" not in getattr(agent_service, "agents", {}):
-                # OpenCode is disabled, so no agent here will ever adopt the
-                # servers a crashed controller recorded.
-                from modules.agents.opencode.server import stop_recorded_servers_sync
-                from vibe.desktop_runtime import desktop_caller_provenance
+                # OpenCode is disabled, so no registered agent will adopt what a
+                # crashed controller left running. An agent that only drains
+                # adopts it: work still running finishes, the rest stops now.
+                from modules.agents.opencode import OpenCodeAgent
 
-                await asyncio.to_thread(stop_recorded_servers_sync, desktop_caller_provenance())
+                await agent_service.retire_agent("opencode", OpenCodeAgent.draining(self))
         except Exception as e:
-            logger.error("Failed to stop OpenCode servers a previous controller left: %s", e, exc_info=True)
+            logger.error("Failed to retire the OpenCode servers a previous controller left: %s", e, exc_info=True)
 
         try:
             self._start_model_hub_snapshot_reconcile_loop()

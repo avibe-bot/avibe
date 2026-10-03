@@ -700,7 +700,9 @@ class CodexAgent(BaseAgent):
                 display_text = f"❌ {i18n_t('error.codexThreadReleaseUnavailable', language)}"
             elif isinstance(e, RuntimeUnitStopping):
                 # Not a source failure: no Hub cooldown.
-                display_text = f"❌ {i18n_t('error.codexRuntimeRetired', language)}"
+                display_text = (
+                    f"❌ {i18n_t('error.agentRuntimeRetired', language, agent=i18n_t('backend.codex', language))}"
+                )
             elif isinstance(e, CodexModelHubCatalogUnavailableError):
                 await self._record_model_hub_native_failure(request.context, str(e))
                 display_text = f"❌ {i18n_t('modelHub.errors.codex_catalog_unavailable', language)}"
@@ -1743,7 +1745,7 @@ class CodexAgent(BaseAgent):
                 getattr(getattr(self.controller, "config", None), "language", "en")
                 or "en"
             )
-            message = i18n_t("error.codexRuntimeRetired", language)
+            message = i18n_t("error.agentRuntimeRetired", language, agent=i18n_t("backend.codex", language))
         elif isinstance(error, CodexForkBoundaryUnavailableError):
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")

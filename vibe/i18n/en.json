@@ -438,7 +438,7 @@
     "codexPromptRefreshUnavailable": "Codex could not confirm that it can safely refresh Avibe's instructions for this existing session. Check or update Codex, then retry this turn.",
     "codexForkBoundaryUnavailable": "Codex could not determine a safe history boundary for this fork. Wait for the source turn to finish, then retry. If the problem persists, check or update Codex.",
     "codexThreadReleaseUnavailable": "Codex could not move this conversation off the app-server it last ran on, because that process is still holding it. Retry this input once the work still running there finishes.",
-    "codexRuntimeRetired": "Codex was turned off, or Avibe is stopping, so this message was not started. Send it again once Codex is enabled.",
+    "agentRuntimeRetired": "{agent} was turned off, or Avibe is stopping, so this message was not started. Send it again once {agent} is enabled.",
     "codexResponseTooLarge": "Codex returned a response larger than {limitMiB} MiB, so this connection cannot continue. Check or update Codex before retrying.",
     "opencodeRuntimeConfigInvalid": "OpenCode could not start because OPENCODE_CONFIG_CONTENT is invalid. Fix the runtime configuration and retry.",
     "opencodeDirectoryBootstrapTimeout": "OpenCode is still finishing its first-time setup. Send your message again shortly.",
