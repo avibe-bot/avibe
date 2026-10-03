@@ -440,6 +440,36 @@ async def reap_duplicate_claude_resume_processes(
     return await _reap_pid_set(target_pids, terminate_timeout=terminate_timeout, logger=logger)
 
 
+async def stop_claude_client_process(
+    client: object | None,
+    *,
+    logger: logging.Logger,
+    timeout: float = 5.0,
+) -> bool:
+    """Whether a client's CLI process is gone, stopping it and its tools first if not.
+
+    A failed ``disconnect()`` can leave the CLI and its tool processes running.
+    While the client's returncode is unknown, its pid is still this process's
+    unreaped child, so signalling it can never reach a reused pid.
+    """
+    pid = get_claude_client_pid(client)
+    if pid is None or get_claude_client_returncode(client) is not None:
+        return True
+    try:
+        rows = _parse_ps_rows(await asyncio.to_thread(_run_ps))
+    except Exception:
+        # No process table, as on Windows: the CLI alone.
+        rows = []
+    await _reap_pid_set(_runtime_related_pids(rows, pid), terminate_timeout=timeout, logger=logger)
+    wait = getattr(getattr(getattr(client, "_transport", None), "_process", None), "wait", None)
+    if callable(wait):
+        try:
+            await asyncio.wait_for(wait(), timeout=timeout)
+        except Exception:
+            logger.debug("Claude CLI pid=%s did not report its exit", pid, exc_info=True)
+    return get_claude_client_returncode(client) is not None
+
+
 async def _reap_pid_set(
     target_pids: set[int],
     *,

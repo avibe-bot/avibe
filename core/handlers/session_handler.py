@@ -31,6 +31,7 @@ from modules.agents.claude_process_reaper import (
     register_claude_owned_process,
     reap_duplicate_claude_resume_processes,
     reap_orphaned_claude_processes,
+    stop_claude_client_process,
 )
 from config.v2_config import (
     DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
@@ -586,8 +587,11 @@ class SessionHandler(BaseHandler):
         """Close exactly the captured clients, busy or idle, settling their work.
 
         A client created after the capture, such as one of a re-enabled
-        backend, is never touched. Raises while a captured client survives, so
-        a caller can retry.
+        backend, is never touched. A captured client counts as closed only once
+        its CLI process has exited: a failed disconnect leaves it running after
+        it left ``claude_sessions``, so its process is stopped directly, on a
+        retry too. Raises while a captured client survives, so a caller can
+        retry.
         """
         for composite_key, client in captured:
             if self.claude_sessions.get(composite_key) is not client:
@@ -597,7 +601,12 @@ class SessionHandler(BaseHandler):
                     continue
                 self._interrupt_claude_session_work(composite_key, reason=reason)
                 await self._cleanup_session_locked(composite_key, expected_client=client, reason=reason)
-        survivors = [key for key, client in captured if self.claude_sessions.get(key) is client]
+        survivors = [
+            key
+            for key, client in captured
+            if self.claude_sessions.get(key) is client
+            or not await stop_claude_client_process(client, logger=logger)
+        ]
         if survivors:
             raise RuntimeError(f"{len(survivors)} Claude client(s) survived their close")
 

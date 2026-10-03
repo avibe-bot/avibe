@@ -2610,6 +2610,50 @@ def test_runtime_gen_006_disabling_claude_closes_its_busy_clients_and_only_those
     assert disconnects == ["disconnect"]
 
 
+def test_runtime_gen_006_a_disabled_claude_client_whose_disconnect_fails_still_exits(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """RUNTIME-GEN-006 (Claude): a captured client counts as closed only once its CLI has exited.
+
+    Its disconnect fails after it left ``claude_sessions``, so the close stops
+    its process directly instead of reporting the backend stopped.
+    """
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            raise RuntimeError("transport wedged")
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    controller.agent_service = SimpleNamespace(force_end_runtime_activities=lambda *_args, **_kwargs: None)
+    handler = SessionHandler(controller)
+    client = _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+    captured = handler.capture_claude_clients()
+
+    async def scenario():
+        # A test-owned child stands in for the Claude CLI.
+        process = await asyncio.create_subprocess_exec("sleep", "30")
+        client._transport = SimpleNamespace(_process=process)
+        try:
+            await handler.close_captured_claude_clients(captured, reason="backend_disabled")
+            return process.returncode
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
+    assert asyncio.run(scenario()) is not None
+    assert f"slack_C123:{tmp_path}" not in handler.claude_sessions
+
+
 def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 
