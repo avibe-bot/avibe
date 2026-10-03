@@ -11650,19 +11650,17 @@ def save_claude_auth(payload: dict, *, _native_lease=None) -> dict:
 async def _opencode_lease(purpose: str):
     """Lease a controller-owned OpenCode generation for UI-process HTTP calls.
 
-    The UI process never launches OpenCode. Returns ``None`` when OpenCode is
-    disabled or the controller has no generation that can serve.
+    The UI process never launches OpenCode. Returns ``None`` only when
+    OpenCode is disabled. When it is enabled, a lease that cannot be had, for
+    example because the controller is unreachable or no generation can start,
+    raises: a caller must never take an unavailable runtime for a disabled one.
     """
     from config.v2_compat import to_app_config
     from modules.agents.opencode.client_manager import lease_opencode_server
 
     if not to_app_config(V2Config.load()).opencode:
         return None
-    try:
-        return await lease_opencode_server(purpose, ttl_seconds=60.0)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("No OpenCode generation for %s: %s", purpose, exc)
-        return None
+    return await lease_opencode_server(purpose, ttl_seconds=60.0)
 
 
 _LOCAL_PROVIDER_IDS = {"ollama", "lmstudio", "lm-studio"}
@@ -12556,7 +12554,12 @@ async def save_opencode_provider_model_async(provider_id: str, payload: dict) ->
     except Exception as exc:
         logger.debug("OpenCode user-model lookup failed for %s: %s", pid, exc)
 
-    lease = await _opencode_lease("provider model save")
+    try:
+        lease = await _opencode_lease("provider model save")
+    except Exception as exc:
+        # Without the live catalog the save could shadow a built-in model.
+        logger.warning("No OpenCode generation to validate %s/%s: %s", pid, model_id, exc)
+        return {"ok": False, "message": "provider model catalog is unavailable"}
     try:
         if lease is not None:
             try:
@@ -12898,7 +12901,11 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
 
 
 async def _delete_opencode_provider_auth_async(provider_id: str) -> dict:
-    lease = await _opencode_lease("provider auth removal")
+    try:
+        lease = await _opencode_lease("provider auth removal")
+    except Exception as exc:
+        logger.warning("No OpenCode generation to remove %s auth: %s", provider_id, exc)
+        return {"ok": False, "message": f"OpenCode is unavailable: {exc}"}
     if lease is None:
         return {"ok": False, "message": "OpenCode is disabled in V2Config"}
     try:

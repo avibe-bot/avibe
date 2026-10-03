@@ -944,3 +944,27 @@ def test_base_url_persist_failure_surfaces_to_caller(monkeypatch, tmp_path) -> N
     # Credential persistence is config-file based; the daemon auth API
     # is not called for Settings-entered API keys.
     assert server.set_calls == []
+
+
+def test_save_provider_model_fails_closed_when_an_enabled_opencode_cannot_be_leased(monkeypatch, tmp_path) -> None:
+    """OpenCode is enabled, but the controller cannot lease a generation right
+    now. Without the live catalog the save could shadow a built-in model, so it
+    fails instead of persisting as it would for a disabled OpenCode."""
+
+    import config.v2_compat as v2_compat
+    from modules.agents.opencode import client_manager
+    from vibe.opencode_config import read_opencode_provider_user_models
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: object()))
+    monkeypatch.setattr(v2_compat, "to_app_config", lambda _config: type("App", (), {"opencode": object()})())
+
+    async def unreachable(purpose, *, ttl_seconds, controller=None):
+        raise client_manager.OpenCodeRuntimeUnavailableError("controller_unavailable", "control IPC timed out")
+
+    monkeypatch.setattr(client_manager, "lease_opencode_server", unreachable)
+
+    result = _save_model("deepseek", {"model_id": "deepseek-chat"})
+
+    assert result == {"ok": False, "message": "provider model catalog is unavailable"}
+    assert read_opencode_provider_user_models("deepseek", home=tmp_path) == {}
