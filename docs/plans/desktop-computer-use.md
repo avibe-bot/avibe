@@ -160,15 +160,16 @@ running. The tray keeps the shell alive after the window closes.
   | shell launch | `enabled`, Runtime lacks a covering `computer_use_schema` | `needs_runtime` | none; no spawn |
   | shell launch | `enabled`, both grants held | `starting` | spawn |
   | shell launch | `enabled`, a grant missing | `needs_permission` | none; silent |
-  | `needs_runtime` | `/desktop/capabilities` now covers the schema | as from shell launch | none |
+  | `needs_runtime` | capabilities now cover the schema, both grants held | `starting` | spawn |
+  | `needs_runtime` | capabilities now cover the schema, a grant missing | `needs_permission` | none; silent |
   | any, `enabled` | a successful `/ready` is followed by an unsupported capabilities answer | `needs_runtime` | stop the daemon if running |
   | `needs_permission` | grant check passes | `starting` | spawn |
+  | `needs_permission` | app activation, grant check still fails, no fallback attempt yet in this activation | `starting` | spawn once (stale-preflight fallback) |
   | `starting` | socket accepts and health passes | `ready` | none |
   | `starting` | health reports a missing grant | `needs_permission` | stop the daemon; no prompt |
   | `starting` | spawn, socket, or health fails otherwise | `error` | stop the daemon; record the reason |
   | `ready` | grant check fails | `needs_permission` | stop the daemon |
   | `ready` | daemon exits unexpectedly, or its socket refuses on 2 consecutive checks | `starting` | stop the daemon if alive; respawn with backoff; after 3 failures in 5 minutes, go to `error` |
-  | `error` | toggle off, then on | as from `off` | none |
   | any, `enabled` | quit | `stopped` | stop the daemon |
 
   - **Grant check.** Silent, and it runs only while `enabled`. It fires on
@@ -177,12 +178,18 @@ running. The tray keeps the shell alive after the window closes.
     own answer. While `ready`, the same 5 s tick also probes the daemon's
     socket. A wedged daemon that is alive but not accepting is treated like
     one that exited.
-  - **Stale preflight.** macOS caches TCC answers per process. If the
-    in-process preflight stays stale after a grant on macOS 26 (verify in
-    Phase 1), the `needs_permission` check falls back to a `starting`
-    attempt. The new daemon process reads its grants fresh, and its health
-    check either reaches `ready` or returns to `needs_permission` with no
-    prompt.
+  - **Stale preflight.** macOS caches TCC answers per process, so the
+    shell's own preflight can stay false after the user grants access in
+    System Settings. The fallback row covers that case.
+    - A user who grants access returns to Avibe, which is an app activation.
+      At most one attempt runs per activation.
+    - A fresh daemon reads the grants anew. Its health check then reaches
+      `ready`, or returns to `needs_permission` with no prompt.
+    - A grant that is truly missing therefore costs one short-lived daemon
+      per activation, never a loop.
+  - **No indirection.** Every row names its target state and action. `error`
+    leaves only through toggle off (the first row), and a later toggle on
+    starts from `off`.
   - **Health.** Call `check_permissions` and
     `health_report(include=["bundle_identity"])`, and require
     `source.attribution == "host"`. The menu shows the localized reason for
@@ -602,13 +609,14 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 ## Validation
 
 - Rust: one case per lifecycle-table row, with grant checks, spawn, socket, and
-  health faked. Each case asserts the resulting `D` and that no prompt is
-  raised outside the toggle-on row. Also: `generation` bumps on each spawn,
-  nothing is spawned through LaunchServices, and the toggle persists. A
-  killed shell takes its daemon down and releases its lock, and the next
-  launch reclaims the endpoint. A Runtime without a covering
-  `computer_use_schema` never gets a daemon. A failed `D` write still stops
-  the daemon.
+  health faked. Each case asserts the resulting `D` and that no prompt is raised
+  outside the toggle-on row. Stale-preflight cases: a grant that the shell's
+  preflight misses reaches `ready` after one activation; a truly missing grant
+  spawns once per activation. Also: `generation` bumps on each spawn, nothing is
+  spawned through LaunchServices, and the toggle persists. A killed shell takes
+  its daemon down and releases its lock, and the next launch reclaims the
+  endpoint. A Runtime without a covering `computer_use_schema` never gets a
+  daemon. A failed `D` write still stops the daemon.
 - Python, configuration: the spec and the prompt section exist exactly when
   `enabled` is true and the snapshot verifies; a missing or mismatched
   snapshot yields neither, plus `snapshot_invalid`. Each backend translation is checked; Codex also carries
