@@ -77,6 +77,9 @@ MAX_CUMULATIVE_OUTPUT_CHARS = 32 * 1024 * 1024
 # block/tool objects and their indexing sets/maps in addition to payload bytes.
 BLOCK_SLOT_OVERHEAD_BYTES = 2048
 TOOL_ALIAS_OVERHEAD_BYTES = 512
+# Only late response closes are detached; retain them until bounded cleanup
+# completes. The driver registers their ownership in its single finally.
+_response_cleanup_tasks: set[asyncio.Task[None]] = set()
 
 
 class OutputBudgetExceeded(ValueError):
@@ -389,7 +392,11 @@ class StreamAssembler:
             ThinkingBlock(text="", signature=signature, redacted=redacted),
         )
 
-    def redacted_thinking(self, key: Hashable, signature: str) -> int:
+    def redacted_thinking(self, key: Hashable, signature: str) -> int | None:
+        # C-1 removes unverifiable opaque blocks. Do so before allocating an
+        # index, otherwise final sanitization shifts already-published deltas.
+        if not self.verified_origin:
+            return None
         index = self.ensure_thinking_slot(key, signature=signature, redacted=True)
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
@@ -557,7 +564,6 @@ class StreamAssembler:
             # Canonical identity is immutable after ToolCallStart. A late wire
             # ID is an alias, never a new allocated canonical ID.
             if "content_index" not in state:
-                self._account_pending_tool_identity(state, "id", call_id)
                 self._set_tool_id(key, state, call_id)
         if native_id:
             self._account_pending_tool_identity(state, "native_id", native_id)
@@ -1059,9 +1065,14 @@ class StreamAssembler:
         state: dict[str, Any],
         value: str | None,
     ) -> None:
+        owners = self._tool_id_owners.get(value or "")
+        if owners and (len(owners) != 1 or key not in owners):
+            value = self._new_tool_id()
         previous = state.get("id") or ""
         if previous == (value or ""):
             return
+        if value:
+            self._account_pending_tool_identity(state, "id", value)
         if previous:
             owners = self._tool_id_owners.get(previous)
             if owners is not None:
@@ -1404,6 +1415,7 @@ async def drive_sse_stream(
     """
 
     response: httpx.Response | None = None
+    opening: asyncio.Task[httpx.Response] | None = None
     candidate: Done | ProviderError | None = None
     assembler.begin_driver()
     try:
@@ -1412,8 +1424,11 @@ async def drive_sse_stream(
                 candidate = assembler.aborted(cancel.reason)
             else:
                 request = client.build_request(method, url, json=json_body, headers=headers)
+                # Retain the opening task even if cancellation wins the await:
+                # its successful result still belongs to this driver's finally.
+                opening = asyncio.create_task(client.send(request, stream=True))
                 response = await _await_network(
-                    client.send(request, stream=True),
+                    opening,
                     cancel,
                     timeout_s=CONNECT_TIMEOUT_S,
                 )
@@ -1487,10 +1502,17 @@ async def drive_sse_stream(
                 yield terminal
     finally:
         assembler.end_driver()
-        if response is not None:
+        async def close_opened_response() -> None:
+            if opening is None:
+                return
+            try:
+                opened_response = opening.result()
+            except BaseException:
+                # A failed/cancelled open did not transfer a response to us.
+                return
             try:
                 await _await_network(
-                    response.aclose(),
+                    opened_response.aclose(),
                     CancelToken(),
                     timeout_s=CLEANUP_TIMEOUT_S,
                 )
@@ -1500,6 +1522,19 @@ async def drive_sse_stream(
                 # asyncio.CancelledError remains a BaseException so consumer
                 # and task cancellation continues through this cleanup path.
                 pass
+        if opening is not None:
+            if opening.done():
+                await close_opened_response()
+            else:
+                # Non-cooperative opening tasks may outlive the bounded cancel
+                # join. Attach disposal here without delaying the terminal.
+                def close_late_response(_: asyncio.Future[httpx.Response]) -> None:
+                    cleanup = asyncio.create_task(close_opened_response())
+                    _response_cleanup_tasks.add(cleanup)
+                    cleanup.add_done_callback(_response_cleanup_tasks.discard)
+                    cleanup.add_done_callback(_consume_task_result)
+
+                opening.add_done_callback(close_late_response)
 
 
 async def _await_network(

@@ -404,6 +404,38 @@ def test_closed_tool_identity_does_not_retain_unused_history() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("identity_at", ["added", "done"])
+async def test_responses_parallel_calls_have_unique_explicit_canonical_ids(identity_at: str) -> None:
+    frames = []
+    for index in range(2):
+        item = {"type": "function_call", "id": f"fc_{index}", "name": "read"}
+        if identity_at == "added":
+            item["call_id"] = "call_1"
+        frames.append({"type": "response.output_item.added", "output_index": index, "item": item})
+    for index in range(2):
+        frames.extend([
+            {"type": "response.function_call_arguments.delta", "output_index": index,
+             "item_id": f"fc_{index}", "delta": json.dumps({"path": str(index)})},
+            {"type": "response.output_item.done", "output_index": index, "item": {
+                "type": "function_call", "id": f"fc_{index}", "call_id": "call_1", "name": "read",
+            }},
+        ])
+    frames.append({"type": "response.completed", "response": {"status": "completed"}})
+    body = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+    starts = [event for event in events if isinstance(event, ToolCallStart)]
+    assert len(starts) == 2
+    assert len({event.id for event in starts}) == 2
+    assert isinstance(events[-1], Done)
+    calls = events[-1].message.tool_calls
+    assert [call.id for call in calls] == [event.id for event in starts]
+    assert calls[0].id == "call_1"
+    assert [call.arguments for call in calls] == [{"path": "0"}, {"path": "1"}]
+    assert [call.native_id for call in calls] == ["fc_0", "fc_1"]
+
+
+@pytest.mark.asyncio
 async def test_anthropic_streams_thinking_tool_arguments_and_usage() -> None:
     body = (
         'data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\r\n\r\n'
@@ -2476,18 +2508,25 @@ async def test_malformed_tool_arguments_are_terminal_invalid_requests() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gateway_without_served_hop_report_removes_all_opaque_payloads() -> None:
+@pytest.mark.parametrize("served_hop", [None, "invalid", '{"provider":"anthropic","api":"anthropic","model":"model-x"}'])
+async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(served_hop: str | None) -> None:
     body = (
         'data: {"type":"message_start","message":{"usage":{}}}\n\n'
-        'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","signature":"sig"}}\n\n'
-        'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"x"}}\n\n'
-        'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t","name":"read"}}\n\n'
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"opaque"}}\n\n'
+        'data: {"type":"content_block_stop","index":0}\n\n'
+        'data: {"type":"content_block_start","index":1,"content_block":{"type":"thinking","signature":"sig"}}\n\n'
+        'data: {"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"x"}}\n\n'
+        'data: {"type":"content_block_start","index":2,"content_block":{"type":"text","text":"visible"}}\n\n'
+        'data: {"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"t","name":"read"}}\n\n'
         'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}\n\n'
         'data: {"type":"message_stop"}\n\n'
     )
 
     def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+        headers = {"content-type": "text/event-stream"}
+        if served_hop is not None:
+            headers["x-avibe-served-hop"] = served_hop
+        return httpx.Response(200, headers=headers, text=body)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         events = await _events(
@@ -2497,7 +2536,20 @@ async def test_gateway_without_served_hop_report_removes_all_opaque_payloads() -
 
     final = events[-1]
     assert isinstance(final, Done)
-    assert all(not isinstance(block, ThinkingBlock) or block.signature is None for block in final.message.content)
+    verified = served_hop is not None and served_hop != "invalid"
+    assert len(final.message.content) == (4 if verified else 3)
+    assert any(isinstance(block, ThinkingBlock) and block.redacted for block in final.message.content) == verified
+    for event in events:
+        if isinstance(event, ThinkingDelta):
+            assert isinstance(final.message.content[event.index], ThinkingBlock)
+            assert final.message.content[event.index].text == "x"
+        elif isinstance(event, TextDelta):
+            assert final.message.content[event.index] == TextBlock("visible")
+        elif isinstance(event, ToolCallStart):
+            assert isinstance(final.message.content[event.index], ToolCallBlock)
+            assert final.message.content[event.index].id == event.id
+    if not verified:
+        assert all(not isinstance(block, ThinkingBlock) or block.signature is None for block in final.message.content)
     assert all(not isinstance(block, ToolCallBlock) or block.signature is None for block in final.message.content)
 
 
@@ -3054,6 +3106,46 @@ class _TrackCloseStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         self.closed.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["anthropic", "openai_chat", "openai_responses"])
+@pytest.mark.parametrize("completion", ["same_cycle", "during_join", "detached"])
+async def test_cancelled_header_arrival_disposes_the_unclaimed_response(
+    monkeypatch: pytest.MonkeyPatch, protocol: str, completion: str,
+) -> None:
+    monkeypatch.setattr(common_module, "CLEANUP_TIMEOUT_S", 0.01)
+    cancel = CancelToken()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    stream = _TrackCloseStream(b"")
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        started.set()
+        if completion == "same_cycle":
+            cancel.cancel("header race")
+        else:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if completion == "detached":
+                    await release.wait()
+        return httpx.Response(200, stream=stream)
+
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            task = asyncio.create_task(_events(adapter_class(protocol)(client), _request(protocol), cancel))
+            await started.wait()
+            cancel.cancel("header race")
+            events = await asyncio.wait_for(task, 1)
+            assert len(events) == 1
+            assert isinstance(events[0], ProviderError)
+            assert events[0].kind == "aborted"
+            release.set()
+            await asyncio.wait_for(stream.closed.wait(), 1)
+    finally:
+        release.set()
+        await stream.aclose()
 
 
 class _StalledCloseStream(httpx.AsyncByteStream):

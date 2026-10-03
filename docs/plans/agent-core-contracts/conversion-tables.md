@@ -17,14 +17,14 @@ rules on top of those mappings.
 | Images | `ImageBlock.media_token` is resolved by `MediaLoader` immediately before the request. Unknown `supports_images` is false, so the cross-provider transform replaces each image with `[image: <name or mime>]`. |
 | Tool ids | A safe stored id is preserved when accepted by the target. Otherwise the per-request map uses `call_` plus the first 24 hex characters of SHA-256. The same map rewrites tool results. |
 | Missing tool results | The transform inserts `[tool call interrupted; no result recorded]` with `is_error=true`. |
-| Origin | Direct requests use the endpoint origin. Gateway requests parse only `x-avibe-served-hop`, whose JSON object must contain exactly `provider`, `api`, and `model`. A missing or invalid report makes the response unverified: thinking and tool-call signatures are nulled, and redacted thinking is dropped. |
+| Origin | Direct requests use the endpoint origin. Gateway requests parse only `x-avibe-served-hop`, whose JSON object must contain exactly `provider`, `api`, and `model`. A missing or invalid report makes the response unverified: thinking and tool-call signatures are nulled, and redacted thinking is dropped before allocating a canonical slot, so later event indexes still identify their final message blocks. |
 | Cancellation | `CancelToken` ends the HTTP stream and yields one non-retryable `ProviderError(kind="aborted")`. Opening, stream reads, error-body reads, media loads, and served-hop resolution all use the shared cancellation-aware await owner. |
 | Network timeouts | The shared lifecycle driver bounds connect/open at 10 seconds, time-to-first-byte at 30 seconds, and idle time between chunks at 30 seconds. Each timeout is a classified `ProviderError(kind="network")`, retryable only when no model output was emitted; a provider that never sends response headers cannot hang a turn. A bounded 10-second cancellation join detaches a non-cooperative transport task instead of extending the timeout indefinitely. |
 | HTTP response status | Only 2xx responses enter an SSE translator. Redirects (3xx) are terminal `invalid_request` errors and are never followed implicitly; 4xx/5xx bodies use the shared status-aware classifier. |
 | SSE memory and scan bounds | `SSEParser` caps an unfinished line at 8 MiB of decoded characters and an unfinished event's combined `data:` fields at 32 MiB of decoded characters. It scans each buffer with a cursor and compacts once per feed, so many short fields remain linear rather than repeatedly copying the suffix. Exceeding either bound is one terminal `invalid_request` provider error, with any assembled partial preserved. |
 | Cumulative assembled-output bound | `StreamAssembler._account_output` is the only byte-accounting function. It covers text, thinking, signatures, opaque/reasoning details, tool arguments, serialized initial tool inputs, tool-call identities and aliases. Each content slot, tool state, or Anthropic block-kind entry adds a conservative 2048-byte structure allowance; each alias adds 512 bytes, plus its string payload. The cumulative accounting budget is 32 MiB across the stream, not an exact process-RSS promise (transport/parser buffers and transient materialization have separate costs). An over-budget mutation raises one terminal `invalid_request` error, preserving the assembled partial. |
 | Error-body read failure | If a known HTTP error body raises or times out while being read, the shared driver classifies from the already-known status and headers, preserving `Retry-After`; the failure remains one terminal provider error with any partial. |
-| Response cleanup | The shared driver closes every response after committing its one terminal event and bounds `response.aclose()` at 10 seconds. A stalled close is cleanup-only and cannot replace or duplicate the terminal outcome. |
+| Response cleanup | The shared driver's single `finally` owns the opening task as well as its response. It closes successful results even when cancellation wins the same wait cycle or the bounded join; if opening is detached, that `finally` registers a late-result close callback. Cleanup follows terminal delivery and bounds `response.aclose()` at 10 seconds. A stalled close is cleanup-only and cannot replace or duplicate the terminal outcome. |
 | Retry boundary | `ProviderError.retryable` is false once any model content delta or tool-call start/delta was emitted. A Responses `ToolCallStart` therefore makes a later provider failure non-retryable. |
 | Partial and abort | The shared `partial_message` policy is used by all three adapters. Usage captured before the first visible delta is retained, and errors/abort carry an assembled `AssistantMessage` whenever visible content or usage exists; empty placeholder slots alone do not count as streamed output, while non-empty terminal snapshots do. Consumer/task cancellation is preserved even if response cleanup fails. |
 | Retry admission | `RetryPolicy.delay` in `core/agent_core/agent/models.py` applies only the bounded retry count/time budget and obeys `ProviderError.retryable`; it does not reject a usage-only partial or infer a second streamed-output boundary. A retry-admitted usage-only partial is committed as its own non-final model-response row, preserving per-attempt usage without adding prompt attempts together in one response. `test_retry_obeys_provider_flag_and_allows_usage_only_partial` and `test_retry_preserves_usage_only_partial_in_successful_response` are the loop proofs. |
@@ -41,7 +41,7 @@ construct partials, mark terminal state, or parse final tool arguments.
 | Concern | Single owner | Adapter call sites |
 | --- | --- | --- |
 | Content accumulation and visible-output flag | `StreamAssembler.text_delta`, `thinking_delta`, `tool_start`, `tool_arguments` | `anthropic.py` content-block branches; `openai_chat.py` delta branches; `openai_responses.py` output/reasoning/tool branches |
-| Stable tool id and native id map | `StreamAssembler.tool_start`, `tool_state` | The three adapters' tool-call translation branches only |
+| Stable tool id and native id map | `StreamAssembler.tool_start` → `_set_tool_id`, `tool_state` | The three adapters' tool-call translation branches only; explicit canonical IDs consult the same ownership map as native/fallback IDs. A collision receives a fresh monotonic fallback ID before `ToolCallStart`; native item aliases and arguments stay separate. |
 | Final JSON argument validation | `StreamAssembler.finalize` → `parsed_arguments` | The three adapters call `finalize` once after their protocol terminator; malformed arguments are a C-2 terminal `invalid_request` deviation from Pi's permissive partial parser |
 | Usage and early usage retention | `set_usage` | Anthropic `message_start`/`message_delta`; Chat usage chunks; Responses terminal response |
 | Partial on every error and abort | `StreamAssembler.partial`, `error`, `exception`, `aborted`, `incomplete` | `drive_sse_stream` owns HTTP, transport-read, error-body, cancellation, and translator exceptions; protocol translators only request assembler errors |
@@ -202,6 +202,19 @@ delivery precedes response cleanup.
 | Shared driver branch | Canonical outcome | Recorded proof |
 | --- | --- | --- |
 | transport read raises after a visible delta, while response close is observable | one non-retryable `ProviderError(kind="network", partial=...)`, delivered before `response.aclose`; no second terminal | `test_delayed_transport_read_emits_terminal_before_close` across all three adapters |
+
+### Round 13 exact-head Codex dispositions
+
+All three findings on `929aaf39e` are C-1/C-2 boundary defects, not new protocol
+policy. The new adapter regressions failed first (13 failing cases and one
+verified-origin control), then all 14 passed after the shared-owner fixes.
+No further local reviewer was launched; Codex remains the reviewer of record.
+
+| Finding | Decision rule / fix | Boundary evidence |
+| --- | --- | --- |
+| P2 response lost when cancellation wins header arrival | C-2 lifecycle / hang harm: retain the opening task in the driver and dispose its result from the single `finally`, including successful completion during join and after detach | `test_cancelled_header_arrival_disposes_the_unclaimed_response`: all three adapters × same-cycle, during-join, detached completion |
+| P2 duplicate explicit canonical tool-call IDs | C-2 per-message identity: `_set_tool_id` checks ownership, allocates a collision-free fallback, and charges the actual chosen ID before emission | `test_responses_parallel_calls_have_unique_explicit_canonical_ids`: duplicate IDs arriving at either added or done; distinct native item IDs, arguments, starts and final blocks |
+| P2 unverified redacted thinking shifts published indexes | C-1 opaque-origin stripping + C-2 stable content indexes: skip unverified redacted thinking before slot allocation, preserving verified opaque blocks | `test_gateway_origin_sanitization_preserves_streamed_block_indexes`: missing, invalid and verified served-hop reports with redacted thinking followed by thinking, text and a tool |
 
 ## Pi branch audit
 
