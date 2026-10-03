@@ -7,7 +7,6 @@ from math import isfinite
 from typing import Optional, Protocol
 
 from core.agent_core.ai.provider import (
-    RETRYABLE_ERROR_KINDS,
     ModelCapabilities,
     ModelEndpoint,
     ProviderAdapter,
@@ -68,12 +67,13 @@ class RetryPolicy:
     def delay(self, error: ProviderError, *, retries: int, streamed: bool, elapsed_s: float = 0) -> Optional[float]:
         if (
             retries >= self.max_retries
-            or streamed
-            or error.partial is not None
             or not error.retryable
-            or error.kind not in RETRYABLE_ERROR_KINDS
         ):
             return None
+        # ``ProviderError.retryable`` is the provider boundary decision. The
+        # loop only applies the bounded count/time budget; it must not infer a
+        # second retry boundary from a partial message or its own event count.
+        del streamed
         backoff = min(self.max_delay_s, self.initial_delay_s * 2**retries)
         delay = max(backoff, error.retry_after_s or 0.0)
         return delay if elapsed_s + delay < self.max_elapsed_s else None
