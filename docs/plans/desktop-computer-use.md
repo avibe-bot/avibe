@@ -221,12 +221,16 @@ running. The tray keeps the shell alive after the window closes.
   - **Health (macOS).** Call `health_report` and read its `checks` array.
     Require `tcc_accessibility` and `tcc_screen_recording` to pass, and require
     the `bundle_identity` check to pass with `identity_source:
-    parent_application`. That is the host-attribution evidence Phase 0 Q1
-    recorded. `source.attribution` belongs to `check_permissions`, which the
-    policy excludes, so it is never read. Windows emits different checks
-    (`ax_capability`, `screen_capture_capability`), so its predicate is set by
-    the Windows Q6 run, not by reusing these. The menu shows the localized
-    reason for `needs_permission` and `error`.
+    parent_application`, and require `ax_capability` to pass. `health_report` is
+    read-only and skips `screen_capture_capability` (Phase 0 output), so capture
+    is proven functionally: the check also calls `get_desktop_state` with
+    `max_image_dimension: 64` and requires an image. That is the
+    host-attribution evidence Phase 0 Q1 recorded. `source.attribution` belongs
+    to `check_permissions`, which the policy excludes, so it is never read.
+    Windows emits different checks (`ax_capability`,
+    `screen_capture_capability`), so its predicate is set by the Windows Q6 run,
+    not by reusing these. The menu shows the localized reason for
+    `needs_permission` and `error`.
   - **Orderly quit.** Write `stopped`, then stop the daemon. `D` keeps
     `enabled`, and the effective-status table reads `stopped` as
     `shell_not_running`, the same as a released shell lock after a crash.
@@ -419,8 +423,12 @@ running. The tray keeps the shell alive after the window closes.
       under a newer epoch. Before forwarding that call, the server runs
       `end_session` and then `start_session` for its name. Cua then
       invalidates every element token the session held, so a stale token
-      fails with Cua's own error and the agent has to observe again. The
-      server keeps no observe-first rule of its own.
+      fails with Cua's own error. Coordinates from an old screenshot are not
+      covered by that, so the server also refuses every input tool from that
+      session with `observe_first` until the session makes a fresh state
+      observation. Only `get_window_state`, `get_desktop_state`, and `zoom`
+      count, because those return the current screen. Calls such as
+      `get_cursor_position` do not clear it.
   - This isolation is cooperative. Every caller is the same user's agent;
     it is not a security boundary.
   - Tool restriction stays in the driver's managed policy, not in this server.
@@ -739,14 +747,15 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   on one upstream connection. A session that called `end_session` works again on
   its next call. Simultaneous first calls from two processes yield exactly one
   holder, a 120 s call keeps its lease, a session that lost the lease in between
-  has its old element tokens rejected, a daemon respawn revives each session
-  before its next call, a session's calls run one at a time and `end_session`
-  waits for earlier ones, a stale shell preflight does not stop a `ready`
-  daemon, a 500 from capabilities keeps the last answer only for the same
-  `controller_id`, a hung `health_report` leads to a respawn, a
-  stop-and-re-enable voids every lease, and the other gets `desktop_busy` until
-  `end_session` or 60 s idle. Tests stay hermetic: the `D` path and the upstream
-  command are redirected to test-owned fakes.
+  has its old element tokens rejected and gets `observe_first` for input until a
+  state observation, a daemon respawn revives each session before its next call,
+  a session's calls run one at a time and `end_session` waits for earlier ones,
+  a stale shell preflight does not stop a `ready` daemon, a 500 from
+  capabilities keeps the last answer only for the same `controller_id`, a hung
+  `health_report` leads to a respawn, a stop-and-re-enable voids every lease,
+  and the other gets `desktop_busy` until `end_session` or 60 s idle. Tests stay
+  hermetic: the `D` path and the upstream command are redirected to test-owned
+  fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
   check confirms that the pinned driver's `tools/list`, under that policy,
   equals the bundled tool snapshot. For a Runtime without a covering
