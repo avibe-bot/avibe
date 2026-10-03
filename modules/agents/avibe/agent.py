@@ -76,13 +76,13 @@ from modules.agents.avibe.models import HubModelRouter, ProviderFactory, registr
 from modules.agents.avibe.prompt import current_environment, system_prompt
 from modules.agents.avibe.store import AdapterTranscriptStore
 from modules.agents.avibe.tools import ToolSuite, local_tool_suite
-from modules.agents.base import AgentRequest, BaseAgent
+from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
 from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
 from storage import messages_service
 from storage.agent_transcript import (
-    FINAL_TYPES,
     INPUT_TYPES,
+    RESPONSE_TYPES,
     SQLiteTranscriptStore,
     final_outcome,
     render_text,
@@ -140,6 +140,8 @@ class _Run:
     cwd: str = ""
     settled: bool = False
     reason: Optional[str] = None
+    # Model Hub's copy for a route it refused during the run (``_preflight``).
+    refusal: Optional[str] = None
     errors: list[tuple[str, str]] = field(default_factory=list)
     final_row: Optional[str] = None
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
@@ -160,7 +162,6 @@ class _SessionRuntime:
 
     session_id: str
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    recovered: bool = False
     run: Optional[_Run] = None
     cwd: str = ""
     holders: int = 0
@@ -246,7 +247,7 @@ class AvibeAgent(BaseAgent):
             return await self._settle_stopped(turn)
         cwd = request.working_path or runtime.cwd
         try:
-            turn.router = await self._preflight(request, session_id)
+            turn.router = await self._preflight(turn)
         except Exception as error:
             turn.settled = True
             await self._fail_preflight(request, error)
@@ -264,6 +265,10 @@ class AvibeAgent(BaseAgent):
         self.bind_agent_session_id(request, session_id)
         mark_backend_dispatch_attempted(context)
         self.mark_runtime_turn_started(context)
+        indicator = getattr(self.controller, "processing_indicator", None)
+        if indicator is not None:
+            # The ack message goes once the native write is accepted, as for the other backends.
+            await indicator.delete_ack_message(request)
         accept_catalog(self.controller, context, skill_catalog, backend=BACKEND)
         agent_input: Optional[AgentInput] = AgentInput(input_id, message)
         while agent_input is not None:
@@ -284,9 +289,7 @@ class AvibeAgent(BaseAgent):
         await self._settle(turn)
 
     async def handle_stop(self, request: AgentRequest) -> bool:
-        session_id = self._session_id(request.context)
-        runtime = self._runtimes.get(session_id or "")
-        run = runtime.run if runtime is not None else None
+        run = self._stop_target(request)
         if run is None:
             request.stop_failure_reason = "not_active"
             return False
@@ -294,6 +297,22 @@ class AvibeAgent(BaseAgent):
         if run.agent is not None:
             run.agent.abort("stopped by user")
         return True
+
+    def _stop_target(self, request: AgentRequest) -> Optional[_Run]:
+        """The Turn a Stop addresses: by its Session, or by the runtime key the shared layer gates on.
+
+        An IM ``/stop`` names no Session; like the other backends, it finds the Turn by
+        the runtime identity ``AgentService`` stamped on the request.
+        """
+        runtime = self._runtimes.get(self._session_id(request.context) or "")
+        if runtime is not None and runtime.run is not None:
+            return runtime.run
+        payload = getattr(request.context, "platform_specific", None) or {}
+        key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip() or self.runtime_turn_key(request)
+        return next(
+            (rt.run for rt in self._runtimes.values() if rt.run is not None and self.runtime_turn_key(rt.run.request) == key),
+            None,
+        )
 
     async def clear_sessions(self, session_key: str) -> int:
         cleared = 0
@@ -468,9 +487,15 @@ class AvibeAgent(BaseAgent):
 
     # --- one run ---------------------------------------------------------------
 
-    async def _preflight(self, request: AgentRequest, session_id: str) -> HubModelRouter:
-        """Resolve the route before the input is written; the run's first model call reuses it."""
-        from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
+    async def _preflight(self, turn: _Run) -> HubModelRouter:
+        """Resolve the route before the input is written; the run's first model call reuses it.
+
+        A later attempt resolves again (C-6 item 3); a Model Hub refusal there is kept on
+        the Turn, so its failure shows the Hub's copy, as a refusal at preflight does.
+        """
+        from modules.agents.model_hub import bind_launch, launch_refusal_copy, resolve_model_hub_launch
+
+        request, session_id = turn.request, turn.session_id
 
         model = request.subagent_model or request.vibe_agent_model
         if not model:
@@ -478,9 +503,13 @@ class AvibeAgent(BaseAgent):
         context = request.context
 
         async def resolve() -> ModelSelection:
-            launch = await resolve_model_hub_launch(
-                self.controller, BACKEND, model, process_scope=f"{BACKEND}:{session_id}", context=context
-            )
+            try:
+                launch = await resolve_model_hub_launch(
+                    self.controller, BACKEND, model, process_scope=f"{BACKEND}:{session_id}", context=context
+                )
+            except Exception as error:
+                turn.refusal = launch_refusal_copy(self.controller, error)
+                raise
             bind_launch(context, launch)
             return selection_from_hop(launch.to_hop_resolution(), gateway_base_url=launch.gateway_base_url)
 
@@ -531,6 +560,7 @@ class AvibeAgent(BaseAgent):
         arrives after the final row committed loses the race, as it does for the Codex
         backend.
         """
+        run.settled = True
         request, context = run.request, run.request.context
         reason = run.reason or "error"
         kind, diagnostic = run.errors[0] if run.errors else (None, reason)
@@ -545,6 +575,8 @@ class AvibeAgent(BaseAgent):
                 # A silent final whose run failed after the commit: like a final without text
                 # of its own (``_display_source``), its row carries the explanation.
                 body = error_text(kind or "empty_response", self._language(), reason=reason)
+            if failed:
+                await self.record_model_hub_native_failure(context, diagnostic or (kind or "failed final"))
             if body.strip():
                 # The same result path as the other backends; the row is already the message.
                 await self.emit_result_message(
@@ -574,7 +606,7 @@ class AvibeAgent(BaseAgent):
                 context, "result", "", level="silent", output=terminal_output_for(request)
             )
             return
-        await self._fail(request, kind, diagnostic, reason=reason)
+        await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal)
 
     async def _continuing_input(self, run: _Run) -> Optional[AgentInput]:
         """The input that continues a Turn whose run ended by design with inputs it accepted.
@@ -613,10 +645,11 @@ class AvibeAgent(BaseAgent):
 
     async def _resume(self, runtime: _SessionRuntime) -> None:
         session_id = runtime.session_id
-        if not runtime.recovered:
-            await self._settle_open_calls(runtime)
-            runtime.cwd = runtime.cwd or await asyncio.to_thread(self._session_workdir, session_id)
-            runtime.recovered = True
+        # T2 before every run: idempotent, and a Turn that waited behind an aborted one
+        # finds the call that abort left open on the same, still-held runtime.
+        await self._settle_open_calls(runtime)
+        if not runtime.cwd:
+            runtime.cwd = await asyncio.to_thread(self._session_workdir, session_id)
         for message_id, text_value, files, delivery in await asyncio.to_thread(self._unconsumed_inputs, session_id):
             message = await self._render_input(session_id, text_value, files, await self._input_metadata(delivery))
             await self.store.consume_input(session_id, message_id, message)
@@ -913,7 +946,9 @@ class AvibeAgent(BaseAgent):
         *,
         reason: Optional[str] = None,
         cause: Optional[BaseException] = None,
+        refusal: Optional[str] = None,
     ) -> None:
+        """A failed Turn's notice; a Model Hub ``refusal`` copy takes precedence, as at preflight."""
         # A failure after Model Hub served the route replaces that served attempt, as for the other backends.
         await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
         await emit_backend_failure(
@@ -921,7 +956,7 @@ class AvibeAgent(BaseAgent):
             request.context,
             BACKEND,
             diagnostic or (kind or "error"),
-            display_text=f"❌ {error_text(kind, self._language(), reason=reason)}",
+            display_text=f"❌ {refusal or error_text(kind, self._language(), reason=reason)}",
             request=request,
             cause=cause,
         )
@@ -931,8 +966,8 @@ class AvibeAgent(BaseAgent):
 
         logger.warning("Avibe Agent could not resolve its model route: %s", error)
         refusal = launch_refusal_copy(self.controller, error)
-        if refusal is not None:
-            await self.record_model_hub_native_failure(request.context, str(error))
+        # Recorded on every start failure, as the other backends do: a no-op unless a launch is bound.
+        await self.record_model_hub_native_failure(request.context, str(error))
         display = f"❌ {refusal}" if refusal is not None else f"❌ {error_text('generic', self._language())}"
         await emit_backend_failure(
             self.controller,
@@ -1018,37 +1053,53 @@ class AvibeAgent(BaseAgent):
         return seq is not None
 
     def _sessions_with_open_tail(self) -> list[str]:
-        """Sessions with Avibe context whose context does not end with a final reply.
+        """Sessions whose context can hold an open tool call: startup T2's candidates.
 
-        Only these can hold an open call. Every run settles earlier open calls before it
-        starts and commits its own results before its next model call, so a context
-        ending in a final row has none. Candidates are the Sessions that have Avibe
-        context rows (only this backend writes ``context_seq``), whatever Agent the
-        Session is routed to now: a Session switched away mid-run still owns its jobs.
+        Every run settles earlier open calls before its next model call, so only a
+        Session's last response can have one: it has tool calls and fewer results after
+        it. Candidates come from Avibe context rows (only this backend writes
+        ``context_seq``), whatever Agent the Session is routed to now: a Session switched
+        away mid-run still owns its jobs.
         """
         from sqlalchemy import func
 
         with self._engine.connect() as conn:
-            last: dict[str, int] = {}
-            for table in (messages, agent_events):
-                for session_id, seq in conn.execute(
-                    select(table.c.session_id, func.max(table.c.context_seq))
-                    .where(table.c.session_id.is_not(None), table.c.context_seq.is_not(None))
-                    .group_by(table.c.session_id)
-                ):
-                    last[session_id] = max(seq, last.get(session_id, 0))
-            finals = dict(
-                conn.execute(
-                    select(messages.c.session_id, func.max(messages.c.context_seq))
-                    .where(
-                        messages.c.session_id.is_not(None),
-                        messages.c.context_seq.is_not(None),
-                        messages.c.type.in_(FINAL_TYPES),
-                    )
-                    .group_by(messages.c.session_id)
-                ).all()
+            last_response = (
+                select(messages.c.session_id, func.max(messages.c.context_seq).label("seq"))
+                .where(
+                    messages.c.session_id.is_not(None),
+                    messages.c.context_seq.is_not(None),
+                    messages.c.type.in_(RESPONSE_TYPES),
+                )
+                .group_by(messages.c.session_id)
+                .subquery()
             )
-        return sorted(session_id for session_id, seq in last.items() if finals.get(session_id) != seq)
+            responses = conn.execute(
+                select(messages.c.session_id, messages.c.context_seq, messages.c.content_json).join(
+                    last_response,
+                    and_(
+                        messages.c.session_id == last_response.c.session_id,
+                        messages.c.context_seq == last_response.c.seq,
+                    ),
+                )
+            ).all()
+            candidates = []
+            for session_id, seq, raw in responses:
+                message = (_json_object(raw).get("model") or {}).get("message") or {}
+                calls = [block for block in message.get("content") or () if isinstance(block, dict)
+                         and block.get("type") == "tool_call"]
+                if not calls:
+                    continue
+                settled = conn.execute(
+                    select(func.count()).select_from(agent_events).where(
+                        agent_events.c.session_id == session_id,
+                        agent_events.c.event_type == "tool_result",
+                        agent_events.c.context_seq > seq,
+                    )
+                ).scalar()
+                if settled < len(calls):
+                    candidates.append(session_id)
+        return sorted(candidates)
 
     def _session_workdir(self, session_id: str) -> str:
         with self._engine.connect() as conn:

@@ -479,6 +479,8 @@ async def test_a_turn_commits_its_context_once_and_shows_the_reply_once(
     if platform == "avibe":
         announced = [payload["id"] for name, payload in published if name == "message.new"]
         assert announced.count(result["id"]) == 1
+        # The model payload is context, never part of a message a client receives.
+        assert not any("model" in (payload.get("content") or {}) for name, payload in published if name == "message.new")
     else:
         assert harness.controller.im_client.sent.count("两个文件。") == 1
         assert harness.controller.im_client.sent[0] == "Listing."
@@ -734,7 +736,10 @@ async def test_stop_aborts_the_running_tool_and_settles_the_turn_as_stopped(
     async def finish(_request, *, terminal_emoji=None) -> None:
         receipts.append(terminal_emoji)
 
-    harness.controller.processing_indicator = SimpleNamespace(finish=finish)
+    async def delete_ack_message(_request, **_kwargs) -> None:
+        receipts.append("ack deleted")
+
+    harness.controller.processing_indicator = SimpleNamespace(finish=finish, delete_ack_message=delete_ack_message)
     request = harness.request("run it")
     stop = AgentRequest(**{**request.__dict__, "message": "stop"})
     assert await harness.agent.handle_stop(stop) is False
@@ -747,8 +752,8 @@ async def test_stop_aborts_the_running_tool_and_settles_the_turn_as_stopped(
 
     assert observed == [True]
     assert len(harness.provider.requests) == 1
-    # IM's stop receipt, as the other backends leave it.
-    assert receipts[:1] == ["⏹️"]
+    # The ack message goes at native start, and Stop leaves IM's ⏹️ receipt, as for the other backends.
+    assert receipts[:2] == ["ack deleted", "⏹️"]
     assert harness.controller.terminals == [
         {"turn": _turn(request.context), "is_error": False, "settled_by": "stopped"}
     ]
@@ -1034,6 +1039,13 @@ async def test_a_failed_run_shows_localized_copy_and_a_refusal_shows_its_explana
     harness = _Harness(
         engine, tmp_path, "telegram", [[Done(assistant(""))], [Done(refusal)]], language=language
     )
+    reported: list[str] = []
+
+    async def record_native_failure(context, diagnostic) -> bool:
+        reported.append(diagnostic)
+        return False
+
+    harness.controller.model_hub_runtime.record_native_failure = record_native_failure
 
     await harness.agent.handle_message(harness.request("say nothing"))
     await harness.agent.handle_message(harness.request("say something unsafe"))
@@ -1045,6 +1057,8 @@ async def test_a_failed_run_shows_localized_copy_and_a_refusal_shows_its_explana
     assert sent == [empty_copy, refusal_copy]
     assert sorted(row["content_text"] for row in harness.rows("error")) == sorted([empty_copy, refusal_copy])
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [True, True]
+    # A final that failed by itself is a failed Turn for Model Hub too.
+    assert len(reported) == 2
 
 
 async def test_a_run_failure_is_reported_to_model_hub_like_the_other_backends(engine, session, tmp_path, published) -> None:
@@ -1120,6 +1134,93 @@ async def test_a_session_is_titled_from_its_first_prompt(engine, session, tmp_pa
     # As the native backends title a session without metadata: derived from the first prompt.
     await _until(lambda: bool(title()), "the Session was never titled")
     assert title().startswith("Refactor")
+
+
+async def test_a_route_model_hub_refuses_mid_run_shows_the_hubs_copy(engine, session, tmp_path, published) -> None:
+    from core.handlers.model_hub.service import ModelHubError
+    from modules.agents.model_hub import launch_refusal_copy
+
+    from core.handlers.model_hub.service import produce_turn_outcome
+
+    refused = ModelHubError("engine_down", status=503, turn_outcome=produce_turn_outcome("turn.engine_down"))
+    harness = _Harness(engine, tmp_path, "telegram", _tool_turn())
+    resolve, calls = harness.controller._resolve, []
+
+    async def route(*args, **kwargs):
+        calls.append(1)
+        if len(calls) > 1:
+            raise refused
+        return await resolve(*args, **kwargs)
+
+    # Every model call resolves again; the second one (after the tool batch) is refused.
+    harness.controller.model_hub_runtime = SimpleNamespace(resolve=route)
+
+    await harness.agent.handle_message(harness.request("look"))
+
+    copy = launch_refusal_copy(harness.controller, refused)
+    assert copy and harness.controller.im_client.sent[-1] == f"❌ {copy}"
+
+
+async def test_an_im_stop_finds_the_turn_by_its_runtime_key(engine, session, tmp_path, published) -> None:
+    started = asyncio.Event()
+
+    async def wait_for_cancel(arguments, ctx):
+        started.set()
+        await ctx.cancel.wait()
+        return ToolResult((text("Command aborted"),), is_error=True)
+
+    harness = _Harness(engine, tmp_path, "telegram", _tool_turn(), tools=[FakeTool("echo", execute=wait_for_cancel)])
+    request = harness.request("run it")
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    await started.wait()
+    # IM /stop: the raw channel context names no Session, only the runtime identity.
+    raw = MessageContext(user_id="u1", channel_id="C1", platform="telegram", platform_specific={})
+    stop = AgentRequest(
+        context=raw, message="stop", user_message="", working_path=str(tmp_path),
+        base_session_id=request.base_session_id, composite_session_id=request.composite_session_id,
+        session_key=request.session_key,
+    )
+
+    assert await harness.agent.handle_stop(stop) is True
+    await running
+    assert harness.controller.terminals[-1]["settled_by"] == "stopped"
+
+
+async def test_a_turn_queued_behind_a_stopped_one_settles_the_call_it_left_open(
+    engine, session, tmp_path, published
+) -> None:
+    started, closing, close = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def wait_for_cancel(arguments, ctx):
+        started.set()
+        await ctx.cancel.wait()
+        raise asyncio.CancelledError()
+
+    class _SlowClose(ScriptedProvider):
+        async def aclose(self) -> None:
+            closing.set()
+            await close.wait()
+
+    provider = _SlowClose([[Done(assistant("", calls=(ToolCallBlock(id="call_1", name="echo", arguments={}),)))],
+                           [Done(assistant("next answer"))]])
+    harness = _Harness(engine, tmp_path, "telegram", [], tools=[FakeTool("echo", execute=wait_for_cancel)],
+                       providers=lambda protocol: provider)
+    first = harness.request("run it")
+    stopped = asyncio.create_task(harness.agent.handle_message(first))
+    await started.wait()
+    await harness.agent.handle_stop(AgentRequest(**{**first.__dict__, "message": "stop"}))
+    await closing.wait()
+    # The next Turn arrives while the stopped one is still closing its provider.
+    second = asyncio.create_task(harness.agent.handle_message(harness.request("and now?")))
+    await asyncio.sleep(0.05)
+    close.set()
+    await stopped
+    await second
+
+    rows = await harness.context_rows()
+    results = [entry for entry in rows if entry.kind == "tool_result"]
+    assert [entry.message.tool_call_id for entry in results] == ["call_1"]
+    assert results[0].context_seq < next(entry.context_seq for entry in rows if entry.row_id.startswith("dlv_turn_2"))
 
 
 async def test_a_refused_model_route_fails_before_the_input_is_written(engine, session, tmp_path, published) -> None:
@@ -1241,7 +1342,7 @@ async def test_an_idle_session_holds_no_adapter_state(engine, session, tmp_path,
     await harness.agent.handle_message(harness.request("second"))
 
     assert harness.agent._runtimes == {}
-    assert harness.agent.store._env_state == {}
+    assert harness.agent.store._env_state == {} and harness.agent.store._store._locks == {}
     assert not getattr(harness.agent.store, "_responses", {})
 
 

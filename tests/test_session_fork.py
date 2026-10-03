@@ -212,10 +212,13 @@ def test_reserve_forked_avibe_session_records_its_context_anchor(tmp_path: Path)
             scope_id = conn.execute(
                 select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
             ).scalar_one()
-            for seq, (author, text) in enumerate((("user", "first question"), ("agent", "first answer")), start=1):
+            turns = (("user", "user", "first question"), ("agent", "result", "first answer"),
+                     ("user", "user", "fyi"), ("agent", "assistant", ""))
+            # The last Turn ended silently: its final is a hidden row no message anchor names.
+            for seq, (author, mtype, text) in enumerate(turns, start=1):
                 row = messages_service.append(
                     conn, scope_id=scope_id, session_id=source_id, platform="avibe", author=author,
-                    source=author, message_type="user" if author == "user" else "result", text=text,
+                    source=author, message_type=mtype, text=text,
                 )
                 conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
     finally:
@@ -231,7 +234,8 @@ def test_reserve_forked_avibe_session_records_its_context_anchor(tmp_path: Path)
         engine.dispose()
     metadata = json.loads(row["metadata_json"])
     assert result.fork.source_backend == "avibe"
-    assert metadata["fork_source_context_seq"] == 2
+    # With no running Turn the child inherits the whole settled context, as a native fork does.
+    assert metadata["fork_source_context_seq"] == 4
 
 
 def test_reserve_forked_codex_running_fork_marks_trim(tmp_path: Path) -> None:

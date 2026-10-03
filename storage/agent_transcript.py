@@ -151,6 +151,12 @@ class SQLiteTranscriptStore:
         self._render = render
         self._locks: dict[str, asyncio.Lock] = {}
 
+    def forget(self, session_id: str) -> None:
+        """Drop an idle Session's write lock; the next write creates it again."""
+        lock = self._locks.get(session_id)
+        if lock is not None and not lock.locked():
+            del self._locks[session_id]
+
     # --- TranscriptStore ----------------------------------------------------
 
     async def load(self, session_id: str) -> Sequence[ContextEntry]:
@@ -388,6 +394,16 @@ def _turn_origin(conn: Connection, session_id: str) -> _TurnOrigin:
 
 
 # --- fork ancestry -------------------------------------------------------------
+
+
+def context_bound(conn: Connection, session_id: str) -> int:
+    """The last ``context_seq`` of a Session's context, including the prefix it inherited.
+
+    A fork of a Session with no running Turn inherits all of it: a Turn that ended
+    silently or was stopped shows no row a message anchor could name.
+    """
+    link = _fork_link(conn, session_id)
+    return max(value for value in (_own_bound(conn, session_id), link[1] if link else 0) if value is not None)
 
 
 def resolve_fork_anchor_seq(conn: Connection, source_session_id: str, anchor_message_id: Optional[str]) -> int:

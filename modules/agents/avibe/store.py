@@ -61,6 +61,7 @@ class AdapterTranscriptStore:
     def forget(self, session_id: str) -> None:
         """Drop per-Session state; the next consumption reads the environment from the rows again."""
         self._env_state.pop(session_id, None)
+        self._store.forget(session_id)
 
     # --- TranscriptStore -----------------------------------------------------
 

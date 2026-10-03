@@ -379,11 +379,24 @@ def reserve_forked_session(
                 }
             )
             if source_backend == "avibe":
-                # The Avibe Agent's context is the source's rows up to this anchor,
-                # resolved once now so later rows never enter the prefix (C-5 section 4).
-                from storage.agent_transcript import resolve_fork_anchor_seq
+                # The Avibe Agent's context is the source's rows up to the anchor, resolved
+                # once now so later rows never enter the prefix (C-5 section 4). With no
+                # running Turn the anchor is the whole context, as a native fork keeps the
+                # whole settled session: a silent or stopped Turn shows no row to name.
+                from storage.agent_transcript import context_bound, resolve_fork_anchor_seq
+                from storage.models import session_turns
 
-                metadata["fork_source_context_seq"] = resolve_fork_anchor_seq(conn, str(row["id"]), source_message_id)
+                running = conn.execute(
+                    select(session_turns.c.id).where(
+                        session_turns.c.session_id == str(row["id"]),
+                        session_turns.c.state.in_(("starting", "active")),
+                    ).limit(1)
+                ).first()
+                metadata["fork_source_context_seq"] = (
+                    resolve_fork_anchor_seq(conn, str(row["id"]), source_message_id)
+                    if running is not None
+                    else context_bound(conn, str(row["id"]))
+                )
             if opencode_fork_message_id:
                 metadata["fork_opencode_message_id"] = opencode_fork_message_id
             if opencode_fork_empty_history:

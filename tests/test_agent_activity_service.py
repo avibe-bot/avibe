@@ -151,6 +151,8 @@ def test_done_failed_interrupted_and_trailing_groups(isolated_state):
         # Turn 1 — done: user, assistant, tool_call, result.
         _msg(conn, scope, sid, mid="m_u1", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q1", source="user")
         _msg(conn, scope, sid, mid="m_a1", mtype="assistant", author="agent", created_at="2026-06-01T10:00:01.000000+00:00", text="thinking")
+        # A response that only called tools persists no text (the Avibe Agent's transcript row): not a step.
+        _msg(conn, scope, sid, mid="m_a1b", mtype="assistant", author="agent", created_at="2026-06-01T10:00:01.500000+00:00", text="")
         _evt(conn, scope, sid, eid="e_t1", created_at="2026-06-01T10:00:02Z", text="🔧 `Bash` `{\"command\":\"ls\"}`")
         _msg(conn, scope, sid, mid="m_r1", mtype="result", author="agent", created_at="2026-06-01T10:00:03.000000+00:00", text="answer 1")
         # Turn 2 — no activity: user + result only → no group.
