@@ -320,7 +320,9 @@ Implemented in the first PR; the Codex and OpenCode adapters build on it.
     force-stopped.
   - A declined stop is retried on the next release or sweep. A failed or
     cancelled stop is retried only by the next sweep; the generation is
-    `closed`, so it never serves a turn again.
+    `closed`, so it never serves a turn again. A sweep or stop-all that
+    arrives while a stop runs entitles every generation, including that one,
+    to one more attempt.
   - `stop_all` closes admission first. A graceful `stop_all` lets bound
     generations finish their work. `settled()` waits for the reconciler.
 - **Forced stops.** `AgentService.force_end_runtime_activities(backend,

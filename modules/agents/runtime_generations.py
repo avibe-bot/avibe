@@ -104,6 +104,13 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         self._stopping = False
         self._force_all = False
         self._reconciler: asyncio.Task[None] | None = None
+        # The serials a reconciler pass has already tried, per kind of stop, so
+        # a stop that keeps failing waits for a retry instead of looping.
+        self._tried_forced: set[int] = set()
+        self._tried_graceful: set[int] = set()
+        # Bumped by every retry request; a stop that was running when one
+        # arrived leaves its generation eligible for another attempt.
+        self._retry_requests = 0
 
     @property
     def current(self) -> RuntimeGeneration[_S, _R] | None:
@@ -169,9 +176,7 @@ class RuntimeGenerationSet(Generic[_S, _R]):
 
     async def reap(self) -> None:
         """Retry every retiring generation, then wait for the stops this starts."""
-        for generation in self._retiring:
-            generation.deferred = False
-            generation.failed = False
+        self._request_retry()
         self._kick()
         await self.settled()
 
@@ -185,11 +190,10 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         self._force_all = self._force_all or force
         for generation in self.generations:
             generation.closed = True
-            generation.deferred = False
-            generation.failed = False
             if generation is self._current:
                 self._current = None
                 self._add_retiring(generation)
+        self._request_retry()
         self._kick()
         # A start already in flight attaches its runtime for teardown once it
         # returns; wait for it so every process started before admission closed
@@ -202,6 +206,15 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         """Wait until the reconciler has no stop left to run."""
         while self._reconciler is not None and not self._reconciler.done():
             await asyncio.shield(self._reconciler)
+
+    def _request_retry(self) -> None:
+        """Entitle every generation to one more stop attempt, including one whose stop is running."""
+        self._retry_requests += 1
+        self._tried_forced.clear()
+        self._tried_graceful.clear()
+        for generation in self._retiring:
+            generation.deferred = False
+            generation.failed = False
 
     def _admitting(self) -> None:
         if self._stopping:
@@ -256,7 +269,10 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         generation = binding.generation
         generation.bindings -= 1
         if generation.retiring and generation.bindings == 0:
+            # Drained now, so its graceful stop deserves another attempt even
+            # if this pass already tried one while it was still bound.
             generation.deferred = False
+            self._tried_graceful.discard(generation.serial)
             self._kick()
 
     def _add_retiring(self, generation: RuntimeGeneration[_S, _R]) -> None:
@@ -277,15 +293,11 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         if self._reconciler is None or self._reconciler.done():
             self._reconciler = asyncio.get_running_loop().create_task(self._reconcile())
 
-    def _next_victim(
-        self,
-        forced: set[int],
-        graceful: set[int],
-    ) -> tuple[RuntimeGeneration[_S, _R], bool] | None:
-        # Each pass tries a generation at most once per kind of stop, so a stop
-        # that keeps failing is retried by the next pass rather than in a tight
-        # loop, while a declined graceful stop can still be forced in this pass.
-        unforced = [generation for generation in self._retiring if generation.serial not in forced]
+    def _next_victim(self) -> tuple[RuntimeGeneration[_S, _R], bool] | None:
+        # Each pass tries a generation at most once per kind of stop until a
+        # retry is requested, so a stop that keeps failing never loops, while a
+        # declined graceful stop can still be forced in this pass.
+        unforced = [generation for generation in self._retiring if generation.serial not in self._tried_forced]
         if self._force_all and unforced:
             return unforced[0], True
         if not self._stopping and len(self._retiring) + (self._current is not None) > self._cap and unforced:
@@ -298,7 +310,7 @@ class RuntimeGenerationSet(Generic[_S, _R]):
             (
                 generation
                 for generation in unforced
-                if generation.serial not in graceful
+                if generation.serial not in self._tried_graceful
                 and generation.bindings == 0
                 and not generation.deferred
                 and not generation.failed
@@ -308,16 +320,17 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         return (drained, False) if drained is not None else None
 
     async def _reconcile(self) -> None:
-        forced: set[int] = set()
-        graceful: set[int] = set()
-        while (choice := self._next_victim(forced, graceful)) is not None:
+        self._tried_forced.clear()
+        self._tried_graceful.clear()
+        while (choice := self._next_victim()) is not None:
             generation, force = choice
-            (forced if force else graceful).add(generation.serial)
+            (self._tried_forced if force else self._tried_graceful).add(generation.serial)
+            requests = self._retry_requests
             self._detach(generation)
             try:
                 stopped = await self._stop(generation, force)
             except asyncio.CancelledError:
-                self._reattach(generation, failed=True)
+                self._reattach(generation, failed=True, retry=False)
                 raise
             except Exception:
                 logger.warning(
@@ -325,20 +338,27 @@ class RuntimeGenerationSet(Generic[_S, _R]):
                     generation.serial,
                     exc_info=True,
                 )
-                self._reattach(generation, failed=True)
+                self._reattach(generation, failed=True, retry=self._retry_requests != requests)
                 continue
             if stopped is False:
                 # The adapter still sees work. A forced stop that declines is a
                 # failure; a graceful one is retried by the next sweep or release.
-                self._reattach(generation, failed=force)
+                self._reattach(generation, failed=force, retry=self._retry_requests != requests)
 
-    def _reattach(self, generation: RuntimeGeneration[_S, _R], *, failed: bool) -> None:
+    def _reattach(self, generation: RuntimeGeneration[_S, _R], *, failed: bool, retry: bool) -> None:
+        """Track a generation whose stop did not finish.
+
+        ``retry`` means a retry was requested while the stop ran, so the
+        generation stays eligible for one more attempt in this pass.
+        """
         generation.stopped = False
         if failed:
             # A process whose teardown went wrong never serves a turn again.
             generation.closed = True
-            generation.failed = True
-        else:
-            generation.deferred = True
+        if not retry:
+            if failed:
+                generation.failed = True
+            else:
+                generation.deferred = True
         if generation not in self._retiring:
             self._add_retiring(generation)

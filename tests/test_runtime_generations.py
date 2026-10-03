@@ -389,6 +389,66 @@ def test_a_forced_stop_all_forces_a_generation_whose_graceful_stop_was_in_flight
     asyncio.run(run())
 
 
+def test_a_forced_stop_all_retries_a_forced_stop_that_was_in_flight_and_failed():
+    """A forced stop-all stops every process, even one whose earlier forced stop failed mid-pass."""
+    runtimes = _Runtimes()
+    generations = runtimes.generation_set(cap=2)
+
+    async def run():
+        oldest = await generations.acquire(_Spec("1"))
+        await generations.acquire(_Spec("2"))
+        runtimes.stop_gate = asyncio.Event()
+        runtimes.fail_stops = 1
+        # The cap force-stops the oldest; that stop is still running.
+        await generations.acquire(_Spec("3"))
+        await asyncio.sleep(0)
+
+        stopping = asyncio.create_task(generations.stop_all(force=True))
+        await asyncio.sleep(0)
+        runtimes.stop_gate.set()
+        await asyncio.wait_for(stopping, timeout=1)
+
+        assert runtimes.live == []
+        assert (oldest.generation.runtime, True) in runtimes.stopped
+
+    asyncio.run(run())
+
+
+def test_a_reap_during_a_pass_retries_a_stop_that_pass_already_declined():
+    """A sweep that arrives mid-pass still retries a generation that pass declined earlier."""
+    runtimes = _Runtimes()
+    generations = runtimes.generation_set()
+
+    async def run():
+        first = await generations.acquire(_Spec("a"))
+        second = await generations.acquire(_Spec("b"))
+        await generations.acquire(_Spec("c"))
+        runtimes.decline_stops = 1
+        gate = asyncio.Event()
+
+        async def hold_the_pass(generation):
+            if generation is second.generation:
+                await gate.wait()
+
+        runtimes.before_stop = hold_the_pass
+        await first.release()
+        await second.release()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        # The pass declined the first stop and is now stopping the second.
+        assert first.generation.deferred and first.generation.runtime in runtimes.live
+
+        sweep = asyncio.create_task(generations.reap())
+        await asyncio.sleep(0)
+        gate.set()
+        await asyncio.wait_for(sweep, timeout=1)
+
+        assert first.generation.runtime not in runtimes.live
+        assert second.generation.runtime not in runtimes.live
+
+    asyncio.run(run())
+
+
 def test_a_failed_start_leaves_the_current_generation_serving():
     runtimes = _Runtimes()
     generations = runtimes.generation_set()

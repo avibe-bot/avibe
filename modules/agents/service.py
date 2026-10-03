@@ -52,8 +52,9 @@ class AgentService:
     ):
         self.controller = controller
         self.agents: Dict[str, BaseAgent] = {}
-        # Agents of disabled backends whose running work has not finished yet.
-        self._retired_agents: list[BaseAgent] = []
+        # Agents of disabled backends whose running work has not finished yet,
+        # with the backend each one was registered under.
+        self._retired_agents: list[tuple[str, BaseAgent]] = []
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
         self.activities = activities or SessionActivityRegistry()
@@ -241,7 +242,7 @@ class AgentService:
         agent = self.agents.pop(backend, None)
         if agent is None:
             return False
-        self._retired_agents.append(agent)
+        self._retired_agents.append((backend, agent))
         retire = getattr(agent, "retire_runtime", None)
         if callable(retire):
             await retire()
@@ -252,8 +253,8 @@ class AgentService:
         """Registered agents and retired ones whose work still runs."""
         return [
             agent
-            for agent in (*self.agents.values(), *self._retired_agents)
-            if backend is None or agent.name == backend
+            for name, agent in (*self.agents.items(), *self._retired_agents)
+            if backend is None or name == backend
         ]
 
     def forget_retired_agents(self) -> None:
@@ -263,7 +264,7 @@ class AgentService:
             probe = getattr(agent, "runtime_retired", None)
             return not callable(probe) or bool(probe())
 
-        self._retired_agents = [agent for agent in self._retired_agents if not retired(agent)]
+        self._retired_agents = [(name, agent) for name, agent in self._retired_agents if not retired(agent)]
 
     def _on_activity_output_settled(self, activity: Any) -> None:
         backend = str(getattr(activity, "backend", "") or "")
