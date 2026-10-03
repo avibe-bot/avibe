@@ -58,6 +58,11 @@ CONNECT_TIMEOUT_S = 10.0
 TIME_TO_FIRST_BYTE_TIMEOUT_S = 30.0
 IDLE_CHUNK_TIMEOUT_S = 30.0
 CLEANUP_TIMEOUT_S = 10.0
+MAX_CUMULATIVE_OUTPUT_CHARS = 32 * 1024 * 1024
+
+
+class OutputBudgetExceeded(ValueError):
+    """A provider exceeded the shared cumulative assembled-output budget."""
 
 
 def usage_counter_error(
@@ -123,6 +128,7 @@ class StreamAssembler:
         self._fallback_tool_sequence = 0
         self._latest_fallback_tool_key: Hashable | None = None
         self._driver_mode = False
+        self._output_chars = 0
 
     @property
     def streamed(self) -> bool:
@@ -146,6 +152,16 @@ class StreamAssembler:
         if usage is not None:
             self.usage = usage
 
+    def _reserve_output(self, chars: int) -> None:
+        if chars <= 0:
+            return
+        if self._output_chars + chars > MAX_CUMULATIVE_OUTPUT_CHARS:
+            raise OutputBudgetExceeded(
+                "provider cumulative output budget exceeded "
+                f"({MAX_CUMULATIVE_OUTPUT_CHARS} characters)"
+            )
+        self._output_chars += chars
+
     def text_delta(self, key: Hashable, value: str) -> TextDelta | None:
         if not value:
             return None
@@ -155,6 +171,7 @@ class StreamAssembler:
         block = self.content[index]
         if not isinstance(block, TextBlock):
             return None
+        self._reserve_output(len(value))
         self.content[index] = TextBlock(text=(block.text or "") + value)
         self._visible_blocks.add(index)
         self._emitted_output = True
@@ -173,6 +190,7 @@ class StreamAssembler:
         if not isinstance(block, TextBlock):
             return None
         previous = block.text
+        self._reserve_output(max(0, len(value) - len(previous)))
         self.content[index] = TextBlock(text=value)
         self._visible_blocks.add(index)
         self._emitted_output = True
@@ -188,6 +206,8 @@ class StreamAssembler:
     ) -> ThinkingDelta | None:
         if not value:
             return None
+        if ("thinking", key) not in self._slots and signature:
+            self._reserve_output(len(signature))
         index = self._ensure_slot(
             "thinking",
             key,
@@ -198,6 +218,7 @@ class StreamAssembler:
             return None
         if not isinstance(block, ThinkingBlock):
             return None
+        self._reserve_output(len(value))
         self.content[index] = ThinkingBlock(
             text=block.text + value,
             signature=block.signature or signature,
@@ -216,6 +237,7 @@ class StreamAssembler:
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
             previous = block.text
+            self._reserve_output(max(0, len(value) - len(previous)))
             self.content[index] = ThinkingBlock(
                 text=value,
                 signature=block.signature,
@@ -255,6 +277,8 @@ class StreamAssembler:
         signature: str | None = None,
         redacted: bool = False,
     ) -> int:
+        if ("thinking", key) not in self._slots and signature:
+            self._reserve_output(len(signature))
         return self._ensure_slot(
             "thinking",
             key,
@@ -274,6 +298,7 @@ class StreamAssembler:
             index = self._ensure_slot("thinking", key, ThinkingBlock(text=""))
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
+            self._reserve_output(max(0, len(signature) - len(block.signature or "")))
             self.content[index] = ThinkingBlock(
                 text=block.text,
                 signature=signature,
@@ -288,6 +313,7 @@ class StreamAssembler:
             index = self._ensure_slot("thinking", key, ThinkingBlock(text=""))
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
+            self._reserve_output(len(value))
             self.content[index] = ThinkingBlock(
                 text=block.text,
                 signature=f"{block.signature or ''}{value}",
@@ -458,7 +484,10 @@ class StreamAssembler:
             return None
         if value:
             state = self._tools.setdefault(key, self._new_tool_state())
-            state["arguments"] = value if replace else f"{state['arguments']}{value}"
+            previous = str(state.get("arguments", ""))
+            assembled = value if replace else f"{previous}{value}"
+            self._reserve_output(max(0, len(assembled) - len(previous)))
+            state["arguments"] = assembled
         state = self._tools.get(key)
         if not value or state is None or "content_index" not in state:
             return None
@@ -477,8 +506,10 @@ class StreamAssembler:
         if not value:
             return None
         if not value.startswith(previous):
+            self._reserve_output(len(value))
             state["arguments"] = value
             return None
+        self._reserve_output(len(value) - len(previous))
         state["arguments"] = value
         suffix = value[len(previous) :]
         if not suffix:
@@ -515,6 +546,8 @@ class StreamAssembler:
     def set_tool_arguments_object(self, key: Hashable, value: Mapping[str, Any]) -> None:
         """Store an initial object without corrupting later JSON deltas."""
 
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        self._reserve_output(len(encoded))
         self.tool_state(key)["arguments_obj"] = dict(value)
 
     def tool_state(self, key: Hashable) -> dict[str, Any]:
@@ -1068,6 +1101,8 @@ async def drive_sse_stream(
                                 )
         except (GeneratorExit, asyncio.CancelledError):
             raise
+        except OutputBudgetExceeded as exc:
+            candidate = assembler.error(str(exc), kind="invalid_request")
         except SSEParseError as exc:
             candidate = assembler.error(str(exc), kind="invalid_request")
         except Exception as exc:

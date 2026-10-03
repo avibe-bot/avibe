@@ -864,7 +864,9 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                     kind="unknown",
                                 )
                             )
-                        elif status == "incomplete" and incomplete_reason not in {
+                        elif (
+                            event_type == "response.incomplete" or status == "incomplete"
+                        ) and incomplete_reason not in {
                             "max_output_tokens",
                             "length",
                             "content_filter",

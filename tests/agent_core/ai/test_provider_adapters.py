@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
+import core.agent_core.ai._common as common_module
 import core.agent_core.ai.sse as sse_module
 from core.agent_core.ai.anthropic import AnthropicAdapter
 from core.agent_core.ai._common import read_response_body
@@ -897,6 +898,90 @@ async def test_responses_incomplete_reasons_have_explicit_outcomes(reason: str, 
     else:
         assert isinstance(terminal, ProviderError)
         assert terminal.kind == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_responses_incomplete_without_status_is_not_success() -> None:
+    body = (
+        'data: {"type":"response.incomplete","response":'
+        '{"incomplete_details":{"reason":"unknown_reason"}}}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    terminal = events[-1]
+    assert isinstance(terminal, ProviderError)
+    assert terminal.kind == "unknown"
+    assert terminal.partial is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "body"),
+    [
+        (
+            AnthropicAdapter,
+            "anthropic",
+            (
+                'event: message_start\n'
+                'data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}\n\n'
+                'event: content_block_start\n'
+                'data: {"type":"content_block_start","index":0,'
+                '"content_block":{"type":"thinking","thinking":""}}\n\n'
+                'event: content_block_delta\n'
+                'data: {"type":"content_block_delta","index":0,'
+                '"delta":{"type":"thinking_delta","thinking":"ab"}}\n\n'
+                'event: content_block_delta\n'
+                'data: {"type":"content_block_delta","index":0,'
+                '"delta":{"type":"thinking_delta","thinking":"cd"}}\n\n'
+            ),
+        ),
+        (
+            OpenAIChatAdapter,
+            "openai_chat",
+            (
+                'data: {"choices":[{"delta":{"content":"ab"}}]}\n\n'
+                'data: {"choices":[{"delta":{"content":"cd"}}]}\n\n'
+            ),
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            (
+                'data: {"type":"response.output_item.added","output_index":0,'
+                '"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read"}}\n\n'
+                'data: {"type":"response.function_call_arguments.delta",'
+                '"output_index":0,"delta":"ab"}\n\n'
+                'data: {"type":"response.function_call_arguments.delta",'
+                '"output_index":0,"delta":"cd"}\n\n'
+            ),
+        ),
+    ],
+)
+async def test_cumulative_output_budget_covers_text_thinking_and_tool_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter_type: Any,
+    protocol: str,
+    body: str,
+) -> None:
+    monkeypatch.setattr(common_module, "MAX_CUMULATIVE_OUTPUT_CHARS", 3)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert error.retryable is False
+    assert "output budget" in error.message.lower()
+    assert error.partial is not None
 
 
 @pytest.mark.asyncio
