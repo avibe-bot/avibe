@@ -53,13 +53,18 @@ _NON_OVERFLOW_RE = (
     re.compile(r"too many requests", re.IGNORECASE),
 )
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+_BASIC_RE = re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/]+={0,2}")
+_AUTHORIZATION_SCHEME_RE = re.compile(
+    r"(?i)(?P<key>\"?authorization\"?)(?P<separator>\s*[:=]\s*)"
+    r"(?P<scheme>Basic|Bearer)\s+[A-Za-z0-9._~+/=-]+"
+)
 _QUOTED_NAMED_SECRET_RE = re.compile(
     r"(?i)(?P<key>\"?(?:authorization|api[_-]?key|x-api-key|x-goog-api-key|token|secret|password)\"?)"
     r"(?P<separator>\s*[:=]\s*)(?P<quote>[\"'])[^\"']*(?P=quote)"
 )
 _BARE_NAMED_SECRET_RE = re.compile(
     r"(?i)(?P<key>\"?(?:authorization|api[_-]?key|x-api-key|x-goog-api-key|token|secret|password)\"?)"
-    r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;}\"']+)"
+    r"(?P<separator>\s*[:=]\s*)(?P<value>(?!(?:Basic|Bearer)\b)[^\s,;}\"']+)"
 )
 _QUERY_SECRET_RE = re.compile(r"(?i)([?&](?:key|token|api[_-]?key|password)=)[^&\s]+")
 _SENSITIVE_KEYS = {
@@ -271,7 +276,15 @@ def _error_message(body: str, exc: BaseException | None) -> str:
 
 
 def _redact(value: str) -> str:
+    value = _AUTHORIZATION_SCHEME_RE.sub(
+        lambda match: (
+            f"{match.group('key')}{match.group('separator')}"
+            f"{match.group('scheme')} [redacted]"
+        ),
+        value,
+    )
     value = _BEARER_RE.sub("Bearer [redacted]", value)
+    value = _BASIC_RE.sub("Basic [redacted]", value)
     value = _QUOTED_NAMED_SECRET_RE.sub(
         lambda match: (
             f"{match.group('key')}{match.group('separator')}"

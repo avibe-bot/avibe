@@ -11,7 +11,7 @@ import pytest
 
 import core.agent_core.ai._common as common_module
 import core.agent_core.ai.sse as sse_module
-from core.agent_core.ai.anthropic import AnthropicAdapter
+from core.agent_core.ai.anthropic import AnthropicAdapter, build_messages_payload
 from core.agent_core.ai._common import read_response_body
 from core.agent_core.ai.openai_chat import OpenAIChatAdapter, build_chat_payload
 from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter, build_responses_payload
@@ -985,6 +985,26 @@ async def test_cumulative_output_budget_covers_text_thinking_and_tool_arguments(
 
 
 @pytest.mark.asyncio
+async def test_many_small_chat_deltas_preserve_the_complete_text() -> None:
+    count = 20_000
+    body = (
+        'data: {"choices":[{"delta":{"content":"x"}}]}\n\n' * count
+        + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+        + "data: [DONE]\n\n"
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    final = events[-1]
+    assert isinstance(final, Done)
+    assert final.message.content == (TextBlock(text="x" * count),)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["failed", "cancelled"])
 async def test_responses_failed_or_cancelled_status_is_terminal_provider_error(status: str) -> None:
     body = f'data: {{"type":"response.completed","response":{{"status":"{status}"}}}}\n\n'
@@ -1820,6 +1840,16 @@ def test_openai_payloads_forward_explicit_none_reasoning_effort(
     else:
         assert payload[field] == {"effort": "none", "summary": "auto"}
         assert "include" not in payload
+
+
+def test_anthropic_adaptive_xhigh_maps_to_max_effort() -> None:
+    payload = build_messages_payload(
+        _request("anthropic", model_id="claude-opus-5", reasoning_effort="xhigh"),
+        (),
+    )
+
+    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["output_config"] == {"effort": "max"}
 
 
 def test_chat_tool_result_images_become_explicit_placeholders() -> None:

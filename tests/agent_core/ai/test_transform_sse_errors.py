@@ -336,6 +336,13 @@ def test_error_message_redacts_quoted_json_nested_in_message() -> None:
     assert "[redacted]" in error.message
 
 
+def test_error_message_redacts_basic_authorization_credentials() -> None:
+    error = classify_error(body="provider echoed Authorization: Basic dXNlcjpwYXNz")
+
+    assert "dXNlcjpwYXNz" not in error.message
+    assert "Basic [redacted]" in error.message
+
+
 @pytest.mark.parametrize("source", _PROTOCOL_ORIGINS)
 @pytest.mark.parametrize("target", _PROTOCOL_ORIGINS)
 def test_history_from_each_protocol_can_be_replayed_without_foreign_opaque_state(

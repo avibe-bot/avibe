@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import inspect
 import json
 import re
@@ -63,6 +64,12 @@ MAX_CUMULATIVE_OUTPUT_CHARS = 32 * 1024 * 1024
 
 class OutputBudgetExceeded(ValueError):
     """A provider exceeded the shared cumulative assembled-output budget."""
+
+
+def _string_buffer(value: str = "") -> io.StringIO:
+    buffer = io.StringIO()
+    buffer.write(value)
+    return buffer
 
 
 def usage_counter_error(
@@ -129,6 +136,12 @@ class StreamAssembler:
         self._latest_fallback_tool_key: Hashable | None = None
         self._driver_mode = False
         self._output_chars = 0
+        self._text_buffers: dict[int, io.StringIO] = {}
+        self._thinking_buffers: dict[int, io.StringIO] = {}
+        self._thinking_signature_buffers: dict[int, io.StringIO] = {}
+        self._thinking_details: dict[Hashable, list[dict[str, Any]]] = {}
+        self._thinking_detail_buffers: dict[tuple[Hashable, int, str], io.StringIO] = {}
+        self._tool_argument_buffers: dict[Hashable, io.StringIO] = {}
 
     @property
     def streamed(self) -> bool:
@@ -162,6 +175,75 @@ class StreamAssembler:
             )
         self._output_chars += chars
 
+    def _text_value(self, index: int) -> str:
+        buffer = self._text_buffers.get(index)
+        if buffer is not None:
+            return buffer.getvalue()
+        block = self.content[index]
+        return block.text or "" if isinstance(block, TextBlock) else ""
+
+    def _thinking_value(self, index: int) -> str:
+        buffer = self._thinking_buffers.get(index)
+        if buffer is not None:
+            return buffer.getvalue()
+        block = self.content[index]
+        return block.text if isinstance(block, ThinkingBlock) else ""
+
+    def _thinking_signature_value(self, index: int) -> str:
+        for key, candidate_index in self._slots.items():
+            if candidate_index == index and key[0] == "thinking":
+                self._materialize_thinking_details(key[1])
+                break
+        buffer = self._thinking_signature_buffers.get(index)
+        if buffer is not None:
+            return buffer.getvalue()
+        block = self.content[index]
+        return block.signature or "" if isinstance(block, ThinkingBlock) else ""
+
+    def _tool_arguments_value(self, key: Hashable) -> str:
+        buffer = self._tool_argument_buffers.get(key)
+        return buffer.getvalue() if buffer is not None else ""
+
+    def _materialize_thinking_details(self, key: Hashable) -> None:
+        details = self._thinking_details.get(key)
+        if details is None:
+            return
+        index = self._slots.get(("thinking", key))
+        if index is None:
+            return
+        values = [dict(item) for item in details]
+        for (owner, item_index, field), buffer in self._thinking_detail_buffers.items():
+            if owner == key and item_index < len(values):
+                values[item_index][field] = buffer.getvalue()
+        signature = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+        block = self.content[index]
+        if isinstance(block, ThinkingBlock):
+            self._thinking_signature_buffers[index] = _string_buffer(signature)
+            self.content[index] = ThinkingBlock(
+                text=self._thinking_value(index),
+                signature=signature,
+                redacted=block.redacted,
+            )
+        self._thinking_details.pop(key, None)
+        for detail_key in tuple(self._thinking_detail_buffers):
+            if detail_key[0] == key:
+                del self._thinking_detail_buffers[detail_key]
+
+    def _materialize_content(self) -> None:
+        """Publish buffered fragments into canonical blocks at a stream boundary."""
+
+        for key in tuple(self._thinking_details):
+            self._materialize_thinking_details(key)
+        for index, block in enumerate(self.content):
+            if isinstance(block, TextBlock):
+                self.content[index] = TextBlock(text=self._text_value(index))
+            elif isinstance(block, ThinkingBlock):
+                self.content[index] = ThinkingBlock(
+                    text=self._thinking_value(index),
+                    signature=self._thinking_signature_value(index) or None,
+                    redacted=block.redacted,
+                )
+
     def text_delta(self, key: Hashable, value: str) -> TextDelta | None:
         if not value:
             return None
@@ -172,7 +254,8 @@ class StreamAssembler:
         if not isinstance(block, TextBlock):
             return None
         self._reserve_output(len(value))
-        self.content[index] = TextBlock(text=(block.text or "") + value)
+        buffer = self._text_buffers.setdefault(index, _string_buffer(block.text or ""))
+        buffer.write(value)
         self._visible_blocks.add(index)
         self._emitted_output = True
         return TextDelta(index=index, delta=value)
@@ -189,9 +272,9 @@ class StreamAssembler:
         block = self.content[index]
         if not isinstance(block, TextBlock):
             return None
-        previous = block.text
+        previous = self._text_value(index)
         self._reserve_output(max(0, len(value) - len(previous)))
-        self.content[index] = TextBlock(text=value)
+        self._text_buffers[index] = _string_buffer(value)
         self._visible_blocks.add(index)
         self._emitted_output = True
         suffix = value[len(previous) :] if value.startswith(previous) else ""
@@ -219,11 +302,8 @@ class StreamAssembler:
         if not isinstance(block, ThinkingBlock):
             return None
         self._reserve_output(len(value))
-        self.content[index] = ThinkingBlock(
-            text=block.text + value,
-            signature=block.signature or signature,
-            redacted=block.redacted,
-        )
+        buffer = self._thinking_buffers.setdefault(index, _string_buffer(block.text))
+        buffer.write(value)
         self._visible_blocks.add(index)
         self._emitted_output = True
         return ThinkingDelta(index=index, delta=value)
@@ -236,13 +316,9 @@ class StreamAssembler:
             return None
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
-            previous = block.text
+            previous = self._thinking_value(index)
             self._reserve_output(max(0, len(value) - len(previous)))
-            self.content[index] = ThinkingBlock(
-                text=value,
-                signature=block.signature,
-                redacted=block.redacted,
-            )
+            self._thinking_buffers[index] = _string_buffer(value)
             if value:
                 self._visible_blocks.add(index)
                 self._emitted_output = True
@@ -259,13 +335,27 @@ class StreamAssembler:
         for index in range(len(self.content) - 1, -1, -1):
             block = self.content[index]
             if isinstance(block, ThinkingBlock):
+                key = next(
+                    (
+                        slot_key[1]
+                        for slot_key, slot_index in self._slots.items()
+                        if slot_index == index and slot_key[0] == "thinking"
+                    ),
+                    None,
+                )
+                if key is not None:
+                    self._materialize_thinking_details(key)
+                    block = self.content[index]
+                    if not isinstance(block, ThinkingBlock):
+                        continue
                 if block.signature is not None:
                     return
                 self.content[index] = ThinkingBlock(
-                    text=block.text,
+                    text=self._thinking_value(index),
                     signature=signature,
                     redacted=block.redacted,
                 )
+                self._thinking_signature_buffers[index] = _string_buffer(signature)
                 return
         key = fallback_key if fallback_key is not None else ("thinking-signature", len(self.content))
         self.ensure_thinking_slot(key, signature=signature)
@@ -289,6 +379,8 @@ class StreamAssembler:
         index = self.ensure_thinking_slot(key, signature=signature, redacted=True)
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
+            self._thinking_buffers.pop(index, None)
+            self._thinking_signature_buffers[index] = _string_buffer(signature)
             self.content[index] = ThinkingBlock(text="", signature=signature, redacted=True)
         return index
 
@@ -296,11 +388,15 @@ class StreamAssembler:
         index = self._slots.get(("thinking", key))
         if index is None:
             index = self._ensure_slot("thinking", key, ThinkingBlock(text=""))
+        self._materialize_thinking_details(key)
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
-            self._reserve_output(max(0, len(signature) - len(block.signature or "")))
+            self._reserve_output(
+                max(0, len(signature) - len(self._thinking_signature_value(index)))
+            )
+            self._thinking_signature_buffers[index] = _string_buffer(signature)
             self.content[index] = ThinkingBlock(
-                text=block.text,
+                text=self._thinking_value(index),
                 signature=signature,
                 redacted=block.redacted,
             )
@@ -311,12 +407,18 @@ class StreamAssembler:
         index = self._slots.get(("thinking", key))
         if index is None:
             index = self._ensure_slot("thinking", key, ThinkingBlock(text=""))
+        self._materialize_thinking_details(key)
         block = self.content[index]
         if isinstance(block, ThinkingBlock):
             self._reserve_output(len(value))
+            buffer = self._thinking_signature_buffers.setdefault(
+                index,
+                _string_buffer(self._thinking_signature_value(index)),
+            )
+            buffer.write(value)
             self.content[index] = ThinkingBlock(
-                text=block.text,
-                signature=f"{block.signature or ''}{value}",
+                text=self._thinking_value(index),
+                signature=block.signature,
                 redacted=block.redacted,
             )
 
@@ -325,15 +427,21 @@ class StreamAssembler:
         if not valid:
             return
         index = self._ensure_slot("thinking", key, ThinkingBlock(text=""))
-        block = self.content[index]
-        accumulated: list[dict[str, Any]] = []
-        if isinstance(block, ThinkingBlock) and block.signature:
-            try:
-                previous = json.loads(block.signature)
-            except (TypeError, ValueError):
-                previous = []
-            if isinstance(previous, list):
-                accumulated.extend(item for item in previous if isinstance(item, Mapping))
+        accumulated = self._thinking_details.get(key)
+        if accumulated is None:
+            block = self.content[index]
+            accumulated = []
+            existing_signature = self._thinking_signature_value(index)
+            if isinstance(block, ThinkingBlock) and existing_signature:
+                try:
+                    previous = json.loads(existing_signature)
+                except (TypeError, ValueError):
+                    previous = []
+                if isinstance(previous, list):
+                    accumulated.extend(item for item in previous if isinstance(item, Mapping))
+            self._thinking_details[key] = accumulated
+        if accumulated is None:
+            return
         for detail in valid:
             item = dict(detail)
             previous = accumulated[-1] if accumulated else None
@@ -345,14 +453,23 @@ class StreamAssembler:
                 and isinstance(item.get("text" if item["type"] == "reasoning.text" else "summary"), str)
             ):
                 field = "text" if item["type"] == "reasoning.text" else "summary"
-                previous[field] += item[field]
+                detail_index = len(accumulated) - 1
+                buffer = self._thinking_detail_buffers.setdefault(
+                    (key, detail_index, field),
+                    _string_buffer(str(previous[field])),
+                )
+                self._reserve_output(len(item[field]))
+                buffer.write(item[field])
+                previous[field] = ""
                 for name in ("id", "format", "index", "signature"):
                     if previous.get(name) in (None, "") and name in item:
                         previous[name] = item[name]
                 continue
+            for field in ("text", "summary"):
+                value = item.get(field)
+                if isinstance(value, str):
+                    self._reserve_output(len(value))
             accumulated.append(item)
-        signature = json.dumps(accumulated, ensure_ascii=False, separators=(",", ":"))
-        self.set_thinking_signature(key, signature)
 
     def has_tools(self) -> bool:
         return any(isinstance(block, ToolCallBlock) for block in self.content)
@@ -484,10 +601,17 @@ class StreamAssembler:
             return None
         if value:
             state = self._tools.setdefault(key, self._new_tool_state())
-            previous = str(state.get("arguments", ""))
-            assembled = value if replace else f"{previous}{value}"
-            self._reserve_output(max(0, len(assembled) - len(previous)))
-            state["arguments"] = assembled
+            previous = self._tool_arguments_value(key)
+            if replace:
+                self._reserve_output(max(0, len(value) - len(previous)))
+                self._tool_argument_buffers[key] = _string_buffer(value)
+            else:
+                self._reserve_output(len(value))
+                buffer = self._tool_argument_buffers.setdefault(
+                    key,
+                    _string_buffer(previous),
+                )
+                buffer.write(value)
         state = self._tools.get(key)
         if not value or state is None or "content_index" not in state:
             return None
@@ -502,15 +626,15 @@ class StreamAssembler:
             return None
         if state["content_index"] in self._closed_indices:
             return None
-        previous = str(state.get("arguments", ""))
+        previous = self._tool_arguments_value(key)
         if not value:
             return None
         if not value.startswith(previous):
             self._reserve_output(len(value))
-            state["arguments"] = value
+            self._tool_argument_buffers[key] = _string_buffer(value)
             return None
         self._reserve_output(len(value) - len(previous))
-        state["arguments"] = value
+        self._tool_argument_buffers[key] = _string_buffer(value)
         suffix = value[len(previous) :]
         if not suffix:
             return None
@@ -519,16 +643,19 @@ class StreamAssembler:
 
     def pending_tool_arguments(self, key: Hashable) -> ToolCallDelta | None:
         state = self._tools.get(key)
-        if state is None or "content_index" not in state or not state.get("arguments"):
+        if state is None or "content_index" not in state:
             return None
         if state["content_index"] in self._closed_indices:
+            return None
+        arguments = self._tool_arguments_value(key)
+        if not arguments:
             return None
         if state.get("arguments_emitted"):
             return None
         state["arguments_emitted"] = True
         return ToolCallDelta(
             index=state["content_index"],
-            arguments_delta=state["arguments"],
+            arguments_delta=arguments,
         )
 
     def tool_arguments_object(self, key: Hashable, value: Mapping[str, Any]) -> ToolCallDelta | None:
@@ -624,6 +751,7 @@ class StreamAssembler:
         return None
 
     def finalize(self, stop_reason: str, *, error_message: str | None = None) -> AssistantMessage | ProviderError:
+        self._materialize_content()
         for state in self._tools.values():
             if not state.get("name"):
                 return self.error("tool call name is missing", kind="invalid_request")
@@ -635,12 +763,17 @@ class StreamAssembler:
             for state in self._tools.values()
             if "content_index" in state
         }
+        key_by_index = {
+            state.get("content_index"): key
+            for key, state in self._tools.items()
+            if "content_index" in state
+        }
         for index, block in enumerate(self.content):
             if not isinstance(block, ToolCallBlock):
                 final.append(block)
                 continue
             state = state_by_index.get(index, {})
-            raw_arguments = str(state.get("arguments", ""))
+            raw_arguments = self._tool_arguments_value(key_by_index[index])
             if not raw_arguments and isinstance(state.get("arguments_obj"), Mapping):
                 arguments: dict[str, Any] | ProviderError = dict(state["arguments_obj"])
             else:
@@ -678,6 +811,7 @@ class StreamAssembler:
     def partial(self, *, stop_reason: str = "error") -> AssistantMessage | None:
         if self.usage is None and not self._emitted_output:
             return None
+        self._materialize_content()
         content = list(self.content)
         if not self._emitted_output:
             content = []

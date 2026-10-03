@@ -863,7 +863,7 @@ def _normalize_stop_reason(value: Any) -> str:
 
 
 def _anthropic_effort(effort: str) -> str:
-    return {"minimal": "low"}.get(effort, effort)
+    return {"minimal": "low", "xhigh": "max"}.get(effort, effort)
 
 
 def _uses_adaptive_thinking(model_id: str) -> bool:
