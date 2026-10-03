@@ -1188,6 +1188,7 @@ class AgentService:
         activity_runtime_keys: set[str],
         reason: str = SETTLED_BY_BACKEND_REFRESH,
         activation_identities: Optional[Iterable[Optional[RuntimeActivationIdentity]]] = None,
+        agent: Optional[BaseAgent] = None,
     ) -> None:
         """Interrupt the work of a runtime the service stops itself.
 
@@ -1196,16 +1197,27 @@ class AgentService:
         (a runtime update, or the backend disabled), and every other session
         keeps running. ``activation_identities`` limits the Activities to those
         started under them, as ``force_end_runtime_activities`` describes.
+
+        ``agent`` is the agent instance whose runtime stops. A Session whose
+        running turn another instance holds is left alone: after a backend is
+        enabled again, a disabled agent's retried stop names Sessions whose
+        next turn may already run on the new agent.
         """
         # Only the turns running now: a session's next turn, admitted while the
         # release below awaits, runs elsewhere and is not this runtime's work.
-        tokens = {
-            gate.token
+        gates = [
+            gate
             for gate in self._turn_gates.values()
             if gate.token
             and gate.backend == backend
             and getattr(gate.request, "base_session_id", None) in base_session_ids
-        }
+        ]
+        if agent is not None:
+            base_session_ids = set(base_session_ids) - {
+                gate.request.base_session_id for gate in gates if gate.agent is not None and gate.agent is not agent
+            }
+            gates = [gate for gate in gates if gate.agent is None or gate.agent is agent]
+        tokens = {gate.token for gate in gates}
         manager = getattr(self.controller, "session_turns", None)
         release = getattr(manager, "release_for_backend_refresh", None)
         if callable(release) and base_session_ids:

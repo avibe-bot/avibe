@@ -876,6 +876,7 @@ def test_end_codex_settles_clears_and_stops_the_last_users_app_server():
             activity_runtime_keys={"b1:/w"},
             activation_identities={None},
             reason="backend_refresh",
+            agent=agent,
         )
         transport.stop.assert_awaited_once()
         assert "b1" in cleared and mgr.get_cwd("b1") is None

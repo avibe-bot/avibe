@@ -1216,7 +1216,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         async def stop():
             events.append("stop")
 
-        async def end_work(backend, *, base_session_ids, activity_runtime_keys, activation_identities, reason):
+        async def end_work(backend, *, base_session_ids, activity_runtime_keys, activation_identities, reason, agent):
             events.append(("settle", backend, set(base_session_ids), set(activity_runtime_keys), reason))
 
         transport = SimpleNamespace(stop=stop, _process=None)
@@ -1255,6 +1255,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             activity_runtime_keys={"session-1:/tmp/work"},
             activation_identities={None},
             reason="backend_refresh",
+            agent=agent,
         )
         transport.stop.assert_awaited_once_with()
 

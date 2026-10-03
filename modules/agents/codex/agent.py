@@ -2451,6 +2451,7 @@ class CodexAgent(BaseAgent):
                 activity_runtime_keys={f"{base_session_id}:{runtime.cwd}" for base_session_id in sessions},
                 activation_identities=identities or {None},
                 reason=reason,
+                agent=self,
             )
 
     async def _stop_runtime(

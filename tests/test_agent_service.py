@@ -812,6 +812,57 @@ def test_a_runtime_force_end_spares_the_next_turn_admitted_while_it_settles() ->
     asyncio.run(_run())
 
 
+def test_runtime_gen_006_a_disabled_agents_retried_stop_spares_the_re_enabled_agents_turn() -> None:
+    """RUNTIME-GEN-006: a disabled agent's stop names a Session whose next turn runs on a new agent.
+
+    The backend was enabled again before the retry, and the new agent now runs
+    the Session's next turn: that turn is not the stopping agent's work.
+    """
+
+    async def _run():
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        disabled, enabled = _RuntimeAgent(), _RuntimeAgent()
+        running = asyncio.Event()
+
+        async def handle_message(_request):
+            running.set()
+            await asyncio.Event().wait()
+
+        enabled.handle_message = handle_message
+        service.register(enabled)
+        request = _request("next")
+        request.base_session_id = "s1"
+        task = asyncio.create_task(service.handle_message("claude", request))
+        await asyncio.wait_for(running.wait(), 1)
+        released = []
+
+        async def release_for_backend_refresh(**kwargs):
+            released.append(kwargs)
+
+        controller.session_turns = SimpleNamespace(
+            on_running=lambda _context: None,
+            release_for_backend_refresh=release_for_backend_refresh,
+        )
+
+        await service.force_end_runtime_work(
+            "claude",
+            base_session_ids={"s1"},
+            activity_runtime_keys=set(),
+            reason="backend_disabled",
+            agent=disabled,
+        )
+        await asyncio.sleep(0)
+
+        assert released == []
+        assert not task.done()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(_run())
+
+
 class _RecordingIndicator:
     """Records the queued/promote/finish reaction calls the gate drives."""
 

@@ -1352,7 +1352,7 @@ def test_a_cap_forced_stop_settles_the_activities_of_the_sessions_it_interrupts(
 
     interrupted: list[dict] = []
 
-    async def force_end_runtime_work(backend, *, base_session_ids, activity_runtime_keys, reason, activation_identities):
+    async def force_end_runtime_work(backend, *, base_session_ids, activity_runtime_keys, reason, activation_identities, agent):
         interrupted.append(
             {"backend": backend, "sessions": set(base_session_ids), "keys": set(activity_runtime_keys), "reason": reason}
         )

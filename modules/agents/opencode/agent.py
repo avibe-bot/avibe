@@ -1077,6 +1077,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 activity_runtime_keys=self._activity_runtime_keys(unsettled),
                 activation_identities=identities or {None},
                 reason=self._forced_stop_reason,
+                agent=self,
             )
             generation.interrupted_sessions |= unsettled
         await self._cancel_active_requests(base_session_ids=sessions)
