@@ -1617,6 +1617,35 @@ async def test_startup_recovers_a_session_routed_to_another_agent_since(engine, 
     assert (await harness.context_rows())[-1].kind == "tool_result"
 
 
+async def test_recovered_tool_results_keep_the_agent_that_made_the_call(engine, session, tmp_path, published) -> None:
+    harness = _Harness(engine, tmp_path, "avibe", [])
+    request = harness.request("run the slow suite")
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run the slow suite"),))
+    )
+    harness.agent.store.bind_agent(SESSION, "builder")
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "pytest -q"})
+    owner = await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    harness.agent.store.bind_agent(SESSION, None)
+    with engine.begin() as conn:
+        # The Session is switched to another Agent; then the process restarts with the call open.
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == SESSION).values(agent_name="reviewer"))
+
+    harness.new_agent()
+    await harness.agent.recover_runtime_state()
+
+    # Startup T2 writes outside any Turn: the result takes the Agent of the response that made the call.
+    with engine.connect() as conn:
+        assert conn.execute(select(messages.c.author_name).where(messages.c.id == owner.row_id)).scalar() == "builder"
+        [recovered] = conn.execute(
+            select(agent_events.c.agent_name).where(
+                agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_result"
+            )
+        ).scalars().all()
+    assert recovered == "builder"
+
+
 async def test_a_provider_that_fails_to_close_does_not_fail_a_delivered_turn(
     engine, session, tmp_path, published
 ) -> None:

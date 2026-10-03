@@ -93,7 +93,7 @@ sent with that request gets the error result `Tool <name> is not available.`
 | `text_delta`, `thinking_delta` | dropped in v1: no backend shows live partial text, so progress comes from the committed narration and tool lines, as for the other backends (live partial text is a follow-up that needs a new UI surface for every backend, `avibe-agent-core.md` §10) |
 | `message_committed` | the committed `messages` row is delivered: `assistant` as activity, `result` as the reply |
 | `tool_started` | `agent_events` `tool_call` trace row; IM progress line |
-| `tool_progress` | status bubble update |
+| `tool_progress` | dropped in v1: no backend shows live tool output, so a running tool shows its `tool_started` line, as for the other backends (live tool output joins the live partial text and progress follow-up, `avibe-agent-core.md` §10) |
 | `tool_finished` | the committed `tool_result` row; a handed-over job names its Watch |
 | `steer_applied` | the steer delivery is accepted into the running Turn |
 | `compaction_started`, `compaction_finished`, `compaction_failed` | optional status line; failures always reported |

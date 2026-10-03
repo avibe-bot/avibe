@@ -728,17 +728,26 @@ class AvibeAgent(BaseAgent):
 
         # Each job lookup lists the jobs directory: one pass, off the event loop.
         inherited, job_ids = await asyncio.to_thread(evidence)
-        for result in inherited:
-            await self.store.append_tool_result(
-                session_id, result.message, details=dict(result.payload.get("details") or {})
+        # A tool result is the Agent's that made the call: its owning response's author, not
+        # the Turn writing it now (or none, at startup) or the Session's current selection.
+        # Only the last response can hold open calls, so they share one owner.
+        owner_agent = await asyncio.to_thread(self._author_of, open_calls[0][0].row_id)
+        with self.store.writing_as(session_id, owner_agent):
+            for result in inherited:
+                await self.store.append_tool_result(
+                    session_id, result.message, details=dict(result.payload.get("details") or {})
+                )
+            await settle_open_calls(
+                session_id=session_id,
+                store=self.store,
+                jobs=suite.jobs,
+                job_ids=job_ids,
+                render_result=suite.render_recovered,
             )
-        await settle_open_calls(
-            session_id=session_id,
-            store=self.store,
-            jobs=suite.jobs,
-            job_ids=job_ids,
-            render_result=suite.render_recovered,
-        )
+
+    def _author_of(self, row_id: str) -> Optional[str]:
+        with self._engine.connect() as conn:
+            return conn.execute(select(messages.c.author_name).where(messages.c.id == row_id)).scalar()
 
     def _committed_at(self, row_ids: Sequence[str]) -> dict[str, datetime]:
         with self._engine.connect() as conn:

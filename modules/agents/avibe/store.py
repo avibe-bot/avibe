@@ -16,8 +16,9 @@ owns it; nothing here keeps responses after that.
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import time
-from typing import Any, Callable, Literal, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
@@ -67,6 +68,16 @@ class AdapterTranscriptStore:
             self._agents[session_id] = agent_name
         else:
             self._agents.pop(session_id, None)
+
+    @contextmanager
+    def writing_as(self, session_id: str, agent_name: Optional[str]) -> Iterator[None]:
+        """Attribute the Session's writes inside the block to ``agent_name``; restore after."""
+        previous = self._agents.get(session_id)
+        self.bind_agent(session_id, agent_name or previous)
+        try:
+            yield
+        finally:
+            self.bind_agent(session_id, previous)
 
     def forget(self, session_id: str) -> None:
         """Drop per-Session state; the next consumption reads the environment from the rows again."""
