@@ -160,6 +160,11 @@ running. The tray keeps the shell alive after the window closes.
 - **Lifecycle.** The shell runs one state machine whose states are the `D`
   states. Every transition writes `D` first, except that `ready` is written
   only after the health check passes.
+  - **Failure budget.** One rule, shared by every failure row. Each failed
+    start and each failure from `ready` counts once. When the count reaches
+    3 within 5 minutes, the state becomes `error` with the reason. Otherwise
+    it becomes `starting` and respawns after backoff. A daemon that passes
+    startup and then crashes therefore cannot restart forever.
   - **Failed writes.** A failed `D` write never blocks a stop. Toggle-off,
     quit, and revocation always stop the daemon. If their write failed, the
     menu says the setting was not saved, and the shell retries the write every
@@ -191,9 +196,9 @@ running. The tray keeps the shell alive after the window closes.
   | `needs_permission` | app activation, grant check still fails, no fallback attempt yet in this activation | `starting` | spawn once (stale-preflight fallback) |
   | `starting` | socket accepts and the health check returns `pass` | `ready` | none |
   | `starting` | the health check returns `missing_grant` | `needs_permission` | stop the daemon; no prompt |
-  | `starting` | spawn or socket fails, or the health check returns `unhealthy` | `starting` | stop the daemon; count a start failure; respawn after backoff, or go to `error` with the reason once 3 start failures fall within 5 minutes |
+  | `starting` | spawn or socket fails, or the health check returns `unhealthy` | per the failure budget | stop the daemon; apply the failure budget |
   | `ready` | the health check returns `missing_grant` | `needs_permission` | stop the daemon |
-  | `ready` | daemon exits unexpectedly, or its socket refuses or the health check returns `unhealthy` on 2 consecutive ticks | `starting` | stop the daemon if alive; count a start failure; respawn after backoff |
+  | `ready` | daemon exits unexpectedly, or its socket refuses or the health check returns `unhealthy` on 2 consecutive ticks | per the failure budget | stop the daemon if alive; apply the failure budget |
   | any `enabled` state except `error` | quit | `stopped` | stop the daemon |
   | `error` | quit | `error` | none; `error` is kept across relaunch |
 
@@ -788,7 +793,9 @@ Each case lives in the suite of the component that owns the behavior.
     probe. The `ready` heartbeat never captures. A step that hangs or fails
     returns `unhealthy` in both modes.
   - Start failures, on a first start or a respawn, retry with backoff.
-    They reach `error` only on the third failure within 5 minutes.
+    They reach `error` only on the third failure within 5 minutes. A daemon
+    that passes startup health and then crashes from `ready` each time also
+    reaches `error` on its third failure.
   - Capabilities: a transport error or a 500 keeps the last answer, but
     only for the same `controller_id`. Only a 404 or a lower schema means
     unsupported. A new `controller_id` with no definitive answer stops a
