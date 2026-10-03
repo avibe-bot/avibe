@@ -22,6 +22,7 @@ from core.agent_core.ai._common import (
     json_object,
     prepare_messages,
     StreamAssembler,
+    usage_counter_error,
 )
 from core.agent_core.ai.provider import (
     Done,
@@ -134,6 +135,20 @@ class OpenAIChatAdapter(ProviderAdapter):
                         if terminal is not None:
                             yield terminal
                         return
+                    usage_error = usage_counter_error(
+                        chunk.get("usage"),
+                        label="OpenAI Chat usage",
+                        fields=("prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens", "cached_tokens"),
+                        nested_fields={
+                            "prompt_tokens_details": ("cached_tokens", "cache_write_tokens"),
+                            "completion_tokens_details": ("reasoning_tokens",),
+                        },
+                    )
+                    if usage_error is not None:
+                        terminal = assembler.terminal(assembler.error(usage_error, kind="invalid_request"))
+                        if terminal is not None:
+                            yield terminal
+                        return
                     if isinstance(chunk.get("usage"), Mapping):
                         assembler.set_usage(_openai_usage(chunk["usage"]))
                     top_level_error = chunk.get("error")
@@ -185,15 +200,30 @@ class OpenAIChatAdapter(ProviderAdapter):
                         if terminal is not None:
                             yield terminal
                         return
-                    if not isinstance(chunk.get("usage"), Mapping) and isinstance(choice.get("usage"), Mapping):
-                        assembler.set_usage(_openai_usage(choice["usage"]))
-                    if choice.get("usage") is not None and not isinstance(choice.get("usage"), Mapping):
+                    choice_usage = choice.get("usage")
+                    if choice_usage is not None and not isinstance(choice_usage, Mapping):
                         terminal = assembler.terminal(
                             assembler.error("OpenAI Chat choice usage must be an object", kind="invalid_request")
                         )
                         if terminal is not None:
                             yield terminal
                         return
+                    usage_error = usage_counter_error(
+                        choice_usage,
+                        label="OpenAI Chat choice usage",
+                        fields=("prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens", "cached_tokens"),
+                        nested_fields={
+                            "prompt_tokens_details": ("cached_tokens", "cache_write_tokens"),
+                            "completion_tokens_details": ("reasoning_tokens",),
+                        },
+                    )
+                    if usage_error is not None:
+                        terminal = assembler.terminal(assembler.error(usage_error, kind="invalid_request"))
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    if not isinstance(chunk.get("usage"), Mapping) and isinstance(choice_usage, Mapping):
+                        assembler.set_usage(_openai_usage(choice_usage))
                     if choice.get("finish_reason") is not None:
                         if not isinstance(choice.get("finish_reason"), str):
                             terminal = assembler.terminal(
@@ -333,9 +363,13 @@ class OpenAIChatAdapter(ProviderAdapter):
                             if isinstance(index_value, int) and not isinstance(index_value, bool):
                                 key = ("chat-tool", index_value)
                             else:
+                                function = raw.get("function")
+                                has_new_identity = bool(raw_id) or (
+                                    isinstance(function, Mapping) and function.get("name") is not None
+                                )
                                 key = assembler.fallback_tool_key(
                                     native_id=raw_id or None,
-                                    allocate=True,
+                                    allocate=has_new_identity,
                                 )
                                 if key is None:
                                     terminal = assembler.terminal(

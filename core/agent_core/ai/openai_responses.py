@@ -26,6 +26,7 @@ from core.agent_core.ai._common import (
     json_object,
     prepare_messages,
     StreamAssembler,
+    usage_counter_error,
 )
 from core.agent_core.ai.provider import (
     Done,
@@ -786,6 +787,20 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
+                        usage_error = usage_counter_error(
+                            response_body.get("usage"),
+                            label=f"{event_type} response usage",
+                            fields=("input_tokens", "output_tokens"),
+                            nested_fields={
+                                "input_tokens_details": ("cached_tokens", "cache_write_tokens"),
+                                "output_tokens_details": ("reasoning_tokens",),
+                            },
+                        )
+                        if usage_error is not None:
+                            terminal = assembler.terminal(assembler.error(usage_error, kind="invalid_request"))
+                            if terminal is not None:
+                                yield terminal
+                            return
                         usage = _responses_usage(response_body.get("usage"))
                         assembler.set_usage(usage)
                         response_value = response_body.get("error")
@@ -950,6 +965,20 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                         kind="invalid_request",
                                     )
                                 )
+                                if terminal is not None:
+                                    yield terminal
+                                return
+                            usage_error = usage_counter_error(
+                                usage_value,
+                                label="response.failed usage",
+                                fields=("input_tokens", "output_tokens"),
+                                nested_fields={
+                                    "input_tokens_details": ("cached_tokens", "cache_write_tokens"),
+                                    "output_tokens_details": ("reasoning_tokens",),
+                                },
+                            )
+                            if usage_error is not None:
+                                terminal = assembler.terminal(assembler.error(usage_error, kind="invalid_request"))
                                 if terminal is not None:
                                     yield terminal
                                 return

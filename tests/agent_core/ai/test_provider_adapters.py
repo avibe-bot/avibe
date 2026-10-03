@@ -1501,6 +1501,26 @@ async def test_chat_completions_reassembles_parallel_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_reuses_indexless_tool_slot_for_argument_only_delta() -> None:
+    body = (
+        'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","function":{"name":"read"}}]}}]}\n\n'
+        'data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\\"path\\":\\"x\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    final = events[-1]
+    assert isinstance(final, Done)
+    assert final.message.tool_calls[0].id == "call_a"
+    assert final.message.tool_calls[0].arguments == {"path": "x"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("first", "second"),
     [
@@ -3139,6 +3159,84 @@ async def test_adapter_error_redaction_preserves_json_classification() -> None:
     assert parsed["details"][0]["url"] == "https://model.test/v1"
     assert "password" not in error.message
     assert "project=secret" not in error.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"error":{"message":"x-goog-api-key: google-secret"}}',
+        '{"error":{"x-goog-api-key":"google-secret"}}',
+        "provider failed: x-goog-api-key=google-secret",
+    ],
+)
+async def test_google_api_key_is_redacted_from_error_bodies(body: str) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(GoogleAdapter(client), _request("google"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert "google-secret" not in error.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "body"),
+    [
+        (
+            AnthropicAdapter,
+            "anthropic",
+            (
+                'data: {"type":"message_start","message":{"usage":{"input_tokens":-1}}}\n\n'
+                'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+                'data: {"type":"message_stop"}\n\n'
+            ),
+        ),
+        (
+            OpenAIChatAdapter,
+            "openai_chat",
+            (
+                'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],'
+                '"usage":{"prompt_tokens":-1}}\n\n'
+                "data: [DONE]\n\n"
+            ),
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            (
+                'data: {"type":"response.completed","response":{"status":"completed",'
+                '"output":[],"usage":{"input_tokens":"2"}}}\n\n'
+            ),
+        ),
+        (
+            GoogleAdapter,
+            "google",
+            (
+                'data: {"candidates":[{"finishReason":"STOP"}],'
+                '"usageMetadata":{"promptTokenCount":"2"}}\n\n'
+            ),
+        ),
+    ],
+)
+async def test_adapters_reject_malformed_present_usage_counters(
+    adapter_type: Any,
+    protocol: str,
+    body: str,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert "usage" in error.message.lower()
 
 
 @pytest.mark.asyncio

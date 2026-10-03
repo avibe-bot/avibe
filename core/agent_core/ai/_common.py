@@ -51,6 +51,36 @@ _URL_RE = re.compile(
 WireTranslator = Callable[[AsyncIterator[SSEEvent]], AsyncIterator[Any]]
 
 
+def usage_counter_error(
+    value: Any,
+    *,
+    label: str,
+    fields: tuple[str, ...],
+    nested_fields: Mapping[str, tuple[str, ...]] | None = None,
+) -> str | None:
+    """Return an error for present usage counters with the wrong JSON shape."""
+
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        return f"{label} must be an object"
+    for field in fields:
+        raw = value.get(field)
+        if raw is not None and (not isinstance(raw, int) or isinstance(raw, bool) or raw < 0):
+            return f"{label} {field} must be a non-negative integer"
+    for parent, child_fields in (nested_fields or {}).items():
+        nested = value.get(parent)
+        if nested is None:
+            continue
+        if not isinstance(nested, Mapping):
+            return f"{label} {parent} must be an object"
+        for field in child_fields:
+            raw = nested.get(field)
+            if raw is not None and (not isinstance(raw, int) or isinstance(raw, bool) or raw < 0):
+                return f"{label} {parent}.{field} must be a non-negative integer"
+    return None
+
+
 class StreamAssembler:
     """Own canonical stream state shared by every native protocol adapter.
 

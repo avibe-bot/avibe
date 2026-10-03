@@ -22,6 +22,7 @@ from core.agent_core.ai._common import (
     json_object,
     prepare_messages,
     StreamAssembler,
+    usage_counter_error,
 )
 from core.agent_core.ai.provider import (
     Done,
@@ -573,23 +574,17 @@ def _gemini_usage(value: Any) -> Any:
 
 
 def _gemini_usage_shape_error(value: Any) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, Mapping):
-        return "Gemini usageMetadata must be an object"
-    for field in (
-        "promptTokenCount",
-        "candidatesTokenCount",
-        "totalTokenCount",
-        "cachedContentTokenCount",
-        "thoughtsTokenCount",
-    ):
-        raw = value.get(field)
-        if raw is not None and (
-            not isinstance(raw, int) or isinstance(raw, bool) or raw < 0
-        ):
-            return f"Gemini usageMetadata {field} must be a non-negative integer"
-    return None
+    return usage_counter_error(
+        value,
+        label="Gemini usageMetadata",
+        fields=(
+            "promptTokenCount",
+            "candidatesTokenCount",
+            "totalTokenCount",
+            "cachedContentTokenCount",
+            "thoughtsTokenCount",
+        ),
+    )
 
 
 def _thinking_config(model: str, effort: str | None) -> dict[str, Any] | None:

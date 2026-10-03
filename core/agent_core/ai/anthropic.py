@@ -24,6 +24,7 @@ from core.agent_core.ai._common import (
     json_object,
     prepare_messages,
     StreamAssembler,
+    usage_counter_error,
 )
 from core.agent_core.ai.provider import (
     Done,
@@ -194,6 +195,25 @@ class AnthropicAdapter(ProviderAdapter):
                             terminal = assembler.terminal(
                                 assembler.error("message_start usage must be an object", kind="invalid_request")
                             )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        usage_error = usage_counter_error(
+                            message.get("usage"),
+                            label="message_start usage",
+                            fields=(
+                                "input_tokens",
+                                "output_tokens",
+                                "cache_read_input_tokens",
+                                "cache_creation_input_tokens",
+                            ),
+                            nested_fields={
+                                "cache_creation": ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"),
+                                "output_tokens_details": ("thinking_tokens",),
+                            },
+                        )
+                        if usage_error is not None:
+                            terminal = assembler.terminal(assembler.error(usage_error, kind="invalid_request"))
                             if terminal is not None:
                                 yield terminal
                             return
@@ -491,6 +511,25 @@ class AnthropicAdapter(ProviderAdapter):
                                     kind="invalid_request",
                                 )
                             )
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        usage_error = usage_counter_error(
+                            usage,
+                            label="message_delta usage",
+                            fields=(
+                                "input_tokens",
+                                "output_tokens",
+                                "cache_read_input_tokens",
+                                "cache_creation_input_tokens",
+                            ),
+                            nested_fields={
+                                "cache_creation": ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"),
+                                "output_tokens_details": ("thinking_tokens",),
+                            },
+                        )
+                        if usage_error is not None:
+                            terminal = assembler.terminal(assembler.error(usage_error, kind="invalid_request"))
                             if terminal is not None:
                                 yield terminal
                             return

@@ -54,11 +54,11 @@ _NON_OVERFLOW_RE = (
 )
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 _QUOTED_NAMED_SECRET_RE = re.compile(
-    r"(?i)(?P<key>\"?(?:authorization|api[_-]?key|x-api-key|token|secret)\"?)"
+    r"(?i)(?P<key>\"?(?:authorization|api[_-]?key|x-api-key|x-goog-api-key|token|secret)\"?)"
     r"(?P<separator>\s*[:=]\s*)(?P<quote>[\"'])[^\"']*(?P=quote)"
 )
 _BARE_NAMED_SECRET_RE = re.compile(
-    r"(?i)(?P<key>\"?(?:authorization|api[_-]?key|x-api-key|token|secret)\"?)"
+    r"(?i)(?P<key>\"?(?:authorization|api[_-]?key|x-api-key|x-goog-api-key|token|secret)\"?)"
     r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;}\"']+)"
 )
 _QUERY_SECRET_RE = re.compile(r"(?i)([?&](?:key|token|api[_-]?key)=)[^&\s]+")
@@ -68,6 +68,8 @@ _SENSITIVE_KEYS = {
     "apikey",
     "x-api-key",
     "x_api_key",
+    "x-goog-api-key",
+    "x_goog_api_key",
     "token",
     "secret",
     "password",
