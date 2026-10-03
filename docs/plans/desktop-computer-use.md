@@ -184,7 +184,8 @@ running. The tray keeps the shell alive after the window closes.
   | shell launch | `enabled`, a grant missing | `needs_permission` | none; silent |
   | `needs_runtime` | capabilities now cover the schema, both grants held | `starting` | spawn |
   | `needs_runtime` | capabilities now cover the schema, a grant missing | `needs_permission` | none; silent |
-  | any `enabled` state except `error` | a successful `/ready` is followed by an unsupported capabilities answer | `needs_runtime` | stop the daemon if running |
+    | any `enabled` state except `error` | a successful `/ready` is followed by an unsupported capabilities answer | `needs_runtime` | stop the daemon if running |
+  | any `enabled` state except `error` | adoption found a new `controller_id` with no definitive supported answer yet | `needs_runtime` | stop the daemon if running |
   | `needs_permission` | grant check passes | `starting` | spawn |
   | `needs_permission` | app activation, grant check still fails, no fallback attempt yet in this activation | `starting` | spawn once (stale-preflight fallback) |
   | `starting` | socket accepts and the health check returns `pass` | `ready` | none |
@@ -333,11 +334,15 @@ running. The tray keeps the shell alive after the window closes.
     applies to every caller, the shell included, so the shell's health check
     uses `health_report` instead.
   - `bring_to_front` and `move_cursor` are excluded. The first persistently
-    takes the foreground, and the second can move the user's real pointer.
-    Both break the promise that background work leaves focus and pointer
-    alone. The computer MCP server also rejects `delivery_mode:
-    "foreground"` on macOS. The Windows Q6 run decides the Windows policy,
-    where some surfaces work only in the foreground.
+    takes the foreground, and the second can move the user's real pointer. Both
+    break the promise that background work leaves focus and pointer alone. On
+    macOS the computer MCP server also admits an input call only when it
+    addresses one window: a `pid` with a `window_id`, or an element token. It
+    rejects any other targeting, including a desktop target (`target.kind:
+    "desktop"` or `scope: "desktop"`), `delivery_mode: "foreground"`, and
+    anything it does not recognise. This is an allow rule, so a targeting option
+    added in a later driver is refused until it is reviewed. The Windows Q6 run
+    decides the Windows policy, where some surfaces work only in the foreground.
 
   It omits config, update,
   extension, recording/replay, cursor-theme, legacy `page`, the typed browser
@@ -441,7 +446,10 @@ running. The tray keeps the shell alive after the window closes.
       fails with Cua's own error. Coordinates from an old screenshot are not
       covered by that, so the server also refuses every input tool from that
       session with `observe_first` until the session makes a fresh state
-      observation. Only `get_window_state`, `get_desktop_state`, and `zoom`
+      observation. A server process that has no record of a session, for
+      example after the backend restarted it, applies the same rule to that
+      session's first input call. Nothing has to persist across server
+      processes. Only `get_window_state`, `get_desktop_state`, and `zoom`
       count, because those return the current screen. Calls such as
       `get_cursor_position` do not clear it.
   - This isolation is cooperative. Every caller is the same user's agent;
@@ -772,9 +780,11 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   capabilities keeps the last answer only for the same `controller_id`, a health
   check that hangs or fails on any step returns `unhealthy` at start and in
   `ready`, an old Controller's unknown-operation error reads as schema `0`, a
-  stop-and-re-enable voids every lease, and the other gets `desktop_busy` until
-  `end_session` or 60 s idle. Tests stay hermetic: the `D` path and the upstream
-  command are redirected to test-owned fakes.
+  stop-and-re-enable voids every lease, a desktop-targeted or unrecognised input
+  call is rejected on macOS, a new server process requires an observation before
+  a session's first input, and the other gets `desktop_busy` until `end_session`
+  or 60 s idle. Tests stay hermetic: the `D` path and the upstream command are
+  redirected to test-owned fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
   check confirms that the pinned driver's `tools/list`, under that policy,
   equals the bundled tool snapshot. For a Runtime without a covering
