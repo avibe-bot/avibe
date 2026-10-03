@@ -112,9 +112,12 @@ running. The tray keeps the shell alive after the window closes.
   a desktop update that Runtime can be older than the shell.
   - The Runtime's versioned `GET /ready` response gains
     `computer_use_schema`: the newest `D` `schema_version` it can read.
-  - The shell enables the toggle only when that value covers the schema it
-    writes. Otherwise the item is disabled and its menu text says the Avibe
-    service must restart to support computer use.
+  - Turning the toggle on requires that value to cover the schema the shell
+    writes. Otherwise the shell refuses to turn it on, and the menu text says
+    the Avibe service must restart to support computer use.
+  - Turning it off always works. A toggle that was already on stays on as
+    `needs_runtime`, with no daemon, until the shell's existing `/ready`
+    probe sees support.
   - The shell never restarts an adopted Runtime itself. A pre-feature
     Runtime lacks the field and therefore reads as unsupported.
 - **Permission requests (macOS).** The shell requests Accessibility with
@@ -148,9 +151,11 @@ running. The tray keeps the shell alive after the window closes.
   | any | toggle off | `off` | stop the daemon if running |
   | `off` | toggle on, both grants held | `starting` | spawn |
   | `off` | toggle on, a grant missing | `needs_permission` | prompt and run the capture probe (the only prompting path) |
-  | shell launch | `D` missing or not `enabled` | `off` | if `D` exists, write `off` with this shell's `shell_pid` and `instance_id` |
+  | shell launch | `D` missing or not `enabled` | `off` | if `D` exists, write `off` with this shell's `instance_id` |
+  | shell launch | `enabled`, Runtime lacks a covering `computer_use_schema` | `needs_runtime` | none; no spawn |
   | shell launch | `enabled`, both grants held | `starting` | spawn |
   | shell launch | `enabled`, a grant missing | `needs_permission` | none; silent |
+  | `needs_runtime` | the adopted Runtime's `/ready` now covers the schema | as from shell launch | none |
   | `needs_permission` | grant check passes | `starting` | spawn |
   | `starting` | socket accepts and health passes | `ready` | none |
   | `starting` | health reports a missing grant | `needs_permission` | stop the daemon; no prompt |
@@ -178,7 +183,7 @@ running. The tray keeps the shell alive after the window closes.
     `needs_permission` and `error`.
   - **Orderly quit.** Write `stopped`, then stop the daemon. `D` keeps
     `enabled`, and the effective-status table reads `stopped` as
-    `shell_not_running`, the same as a dead `shell_pid` after a crash.
+    `shell_not_running`, the same as a released shell lock after a crash.
 - **Daemon.** Spawn directly with `Command`, never through
   `open`/LaunchServices. Mirror upstream `EmbeddedCuaDriverHost` (in
   `cua-driver-sdk/src/embedded.rs`) at the pinned tag.
@@ -225,14 +230,22 @@ running. The tray keeps the shell alive after the window closes.
     - `error`: start or health failed for a reason other than a missing
       grant.
     - `stopped`: the toggle is on and the shell is quitting or has quit.
+    - `needs_runtime`: the toggle is on, but the adopted Runtime cannot read
+      this schema. No daemon runs.
   - `ready` also carries `socket_path`, `proxy_executable` (absolute path to
     the bundled binary) and `host_bundle_id`.
   - `generation` increases with each daemon spawn within one `instance_id`.
     The pair identifies a daemon across shell restarts.
   - The shell writes a non-ready state before stopping the daemon (`off` for
     toggle-off, `stopped` for quit). It never deletes the file, so `enabled`
-    survives quits and restarts. A dead `shell_pid` reads as unavailable. A
-    missing file means the user never enabled the feature.
+    survives quits and restarts. A missing file means the user never enabled
+    the feature.
+  - **Shell liveness** is a lock, not a PID. Each shell holds an exclusive
+    lock on `computer-use.lock`, next to `D`, for its whole lifetime: `flock`
+    on macOS, `LockFileEx` on Windows. The OS releases it when the shell
+    dies, even on power loss. A reader that can take the lock knows no shell
+    is running, so a reused PID cannot fake liveness. `shell_pid` stays in
+    `D` for diagnostics only.
   - The location belongs to the desktop shell, of which each OS user has
     one. It does not belong to the Avibe home. So every Runtime finds `D`
     without seeing the shell's launch environment, whatever home it
@@ -263,10 +276,14 @@ running. The tray keeps the shell alive after the window closes.
 ### Runtime (`core/`, `modules/agents/`)
 
 - **One owner.** A new `core/computer_use.py` owns both reads of `D`.
-  - **Configuration.** While `enabled` is true it returns the single managed
-    stdio MCP spec: name `computer`, launching Avibe's computer MCP server with
-    Avibe's Python. While `enabled` is false or the file is missing, it returns
-    nothing. Backends only translate this spec.
+  - **Configuration.** It returns the single managed stdio MCP spec (name
+    `computer`, launching Avibe's computer MCP server with Avibe's Python)
+    only when `enabled` is true and `D.tool_snapshot` exists with a matching
+    SHA-256. Otherwise it returns nothing. A failed snapshot check logs one
+    warning per distinct hash, and the status reads `unavailable` /
+    `snapshot_invalid`. An optional feature with a broken bundle is never
+    injected, and the rest of the agent keeps working. Backends only
+    translate this spec.
   - **Effective status.** One total derivation, where the first matching row
     wins. The server and the Workbench both use this one reader.
 
@@ -275,7 +292,8 @@ running. The tray keeps the shell alive after the window closes.
     | missing | `off` | `never_enabled` |
     | unreadable, malformed, or unknown `schema_version` | `unavailable` | `invalid_state_file` |
     | `enabled` is false | `off` | `toggle_off` |
-    | `shell_pid` not alive, or `state` is `stopped` | `unavailable` | `shell_not_running` |
+    | `tool_snapshot` missing or hash mismatch | `unavailable` | `snapshot_invalid` |
+    | shell lock not held, or `state` is `stopped` | `unavailable` | `shell_not_running` |
     | `state` other than `ready` | that state | its recorded `reason` |
     | `ready`, socket refuses a connection | `unavailable` | `daemon_unreachable` |
     | `ready`, socket accepts | `ready` | null |
@@ -581,8 +599,9 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   health faked. Each case asserts the resulting `D` and that no prompt is
   raised outside the toggle-on row. Also: `generation` bumps on each spawn,
   nothing is spawned through LaunchServices, and the toggle persists. A
-  killed shell takes its daemon down, and the next launch reclaims the
-  endpoint. A failed `D` write still stops the daemon.
+  killed shell takes its daemon down and releases its lock, and the next
+  launch reclaims the endpoint. A Runtime without a covering
+  `computer_use_schema` never gets a daemon. A failed `D` write still stops the daemon.
 - Python, configuration: the spec and the prompt section exist exactly when
   `enabled` is true. Each backend translation is checked; Codex also carries
   the approval override. Reconciliation brings every live consumer (Codex,
