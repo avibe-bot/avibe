@@ -124,7 +124,15 @@ running. The tray keeps the shell alive after the window closes.
     verify the shell-side probe on macOS 26 in Phase 1.
 - **Lifecycle.** The shell runs one state machine whose states are the `D`
   states. Every transition writes `D` first, except that `ready` is written
-  only after the health check passes. The first matching row wins:
+  only after the health check passes.
+  - **Failed writes.** A failed `D` write never blocks a stop. Toggle-off,
+    quit, and revocation always stop the daemon. If their write failed, the
+    menu says the setting was not saved, and the shell retries the write every
+    5 s while it runs. A failed write never starts anything: a transition into
+    `starting` that cannot write `D` goes to `error` with reason
+    `state_unwritable`.
+
+  The first matching row wins:
 
   | From | Event | To | Action |
   | --- | --- | --- | --- |
@@ -160,18 +168,31 @@ running. The tray keeps the shell alive after the window closes.
   - **Orderly quit.** Write `stopped`, then stop the daemon. `D` keeps
     `enabled`, and the effective-status table reads `stopped` as
     `shell_not_running`, the same as a dead `shell_pid` after a crash.
-- **Daemon.** Spawn directly with `posix_spawn`/`Command`, never through
-  `open`/LaunchServices. Environment: `CUA_DRIVER_EMBEDDED=1`,
-  `CUA_DRIVER_HOST_BUNDLE_ID=<bundle id>`,
-  `CUA_DRIVER_PERMISSION_MODE=standard`,
-  `CUA_DRIVER_MANAGED_POLICY_FILE=<bundled tool policy>`,
-  `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, `CUA_DRIVER_RS_UPDATE_CHECK=0`,
-  `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=300`. Use a private socket in the shell's
-  app data directory (see `D`); on Windows, a private pipe name. The driver's
-  parent-liveness pipe ends it if the shell dies. An orderly quit stops it
-  explicitly. A terminated daemon leaves its socket file behind, and a new
-  daemon refuses to start on an existing endpoint, so the shell removes the
-  stale socket (after confirming its own daemon has exited) before each spawn.
+- **Daemon.** Spawn directly with `Command`, never through
+  `open`/LaunchServices. Mirror upstream `EmbeddedCuaDriverHost` (in
+  `cua-driver-sdk/src/embedded.rs`) at the pinned tag.
+  - Arguments: `serve --embedded --parent-liveness-stdio
+    --no-permissions-gate --socket <S> --host-bundle-id <bundle id>
+    --permission-mode standard`.
+  - Environment: start from an empty environment, then set
+    `CUA_DRIVER_EMBEDDED=1`, `CUA_DRIVER_EMBEDDED_HOST_PID=<shell pid>`,
+    `CUA_DRIVER_MANAGED_POLICY_FILE=<bundled tool policy>`,
+    `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, `CUA_DRIVER_RS_UPDATE_CHECK=0`, and
+    `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=300`.
+  - Avibe does not depend on that crate. It is unpublished and pulls in the
+    whole platform stack, while the protocol needs only these few lines.
+  - **Liveness.** The shell keeps the child's stdin pipe open for the
+    daemon's lifetime and never writes to it. When the shell dies, the OS
+    closes the pipe and the daemon exits, so a crash leaves no daemon
+    holding Avibe's grants. An orderly stop closes the pipe and then waits
+    for exit. The spike host did not pass `--parent-liveness-stdio`; Phase 1
+    tests this with a killed shell.
+  - **Endpoint.** The socket lives in the shell's app data directory (see
+    `D`). On Windows it is a private pipe name. A dead daemon leaves its socket
+    file behind, and a new daemon refuses an existing endpoint. So before each
+    spawn the shell probes the socket. If it still accepts, the shell waits up
+    to 2 s for an orphan to see its closed pipe. It then removes the file, or
+    goes to `error` with reason `endpoint_busy` if the socket still accepts.
 - **State file `D`.** `computer-use.json` in the shell's per-user app data
   directory is the only shell-to-Runtime contract. On macOS that directory is
   `~/Library/Application Support/bot.avibe.desktop/`, where `bootstrap.log`
@@ -179,10 +200,10 @@ running. The tray keeps the shell alive after the window closes.
   writes it atomically on every change. It is also the only cross-process
   record: the Runtime, the computer MCP server, and the separately running
   Workbench API process all read the same file.
-  - Every write carries `schema_version`, `enabled` (the toggle's only
-    durable record and the configuration input), `state`, `reason` (a stable code, or null),
-    `shell_pid`, `instance_id` (random per shell process), and `generation`.
-    `state` is one of these:
+  - Every write carries `schema_version`, `enabled` (the toggle's only durable
+    record and the configuration input), `state`, `reason` (a stable code, or
+    null), `shell_pid`, `instance_id` (random per shell process), and
+    `generation`. `state` is one of these:
     - `off`: the toggle is off.
     - `needs_permission`: the toggle is on and a grant is missing.
     - `starting`: the toggle is on, both grants are held, and the daemon is
@@ -196,9 +217,9 @@ running. The tray keeps the shell alive after the window closes.
   - `generation` increases with each daemon spawn within one `instance_id`.
     The pair identifies a daemon across shell restarts.
   - The shell writes a non-ready state before stopping the daemon (`off` for
-    toggle-off, `stopped` for quit). It never deletes the file, so `enabled` survives quits and restarts. A dead
-    `shell_pid` reads as unavailable. A missing file means the user never
-    enabled the feature.
+    toggle-off, `stopped` for quit). It never deletes the file, so `enabled`
+    survives quits and restarts. A dead `shell_pid` reads as unavailable. A
+    missing file means the user never enabled the feature.
   - The location belongs to the desktop shell, of which each OS user has
     one. It does not belong to the Avibe home. So every Runtime finds `D`
     without seeing the shell's launch environment, whatever home it
@@ -541,7 +562,9 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 - Rust: one case per lifecycle-table row, with grant checks, spawn, socket, and
   health faked. Each case asserts the resulting `D` and that no prompt is
   raised outside the toggle-on row. Also: `generation` bumps on each spawn,
-  nothing is spawned through LaunchServices, and the toggle persists.
+  nothing is spawned through LaunchServices, and the toggle persists. A
+  killed shell takes its daemon down, and the next launch reclaims the
+  endpoint. A failed `D` write still stops the daemon.
 - Python, configuration: the spec and the prompt section exist exactly when
   `enabled` is true. Each backend translation is checked; Codex also carries
   the approval override. Reconciliation brings every live consumer (Codex,
