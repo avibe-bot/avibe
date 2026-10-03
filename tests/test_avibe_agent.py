@@ -526,6 +526,51 @@ async def test_a_steer_enters_after_the_tool_batch_even_when_its_row_arrives_lat
     assert late.outcome is SteerOutcome.NOT_ACTIVE
 
 
+async def test_a_run_ended_by_design_still_answers_the_steer_its_turn_accepted(
+    engine, session, tmp_path, published
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def finish(arguments, ctx):
+        started.set()
+        await release.wait()
+        return ToolResult((text("handed off"),), terminate=True)
+
+    call = ToolCallBlock(id="call_1", name="finish", arguments={})
+    harness = _Harness(
+        engine, tmp_path, "telegram",
+        [[Done(assistant("", calls=(call,)))], [Done(assistant("Docs checked too."))]],
+        tools=[FakeTool("finish", execute=finish)],
+    )
+    request = harness.request("wrap up")
+    turn_id = _turn(request.context)
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    await started.wait()
+    native = harness.controller.started[0]
+    delivery_id, attempt_id = harness.open_steer("also check the docs", turn_id, native)
+    receipt = await harness.agent.steer_active_turn(
+        SteerRequest(SESSION, turn_id, native, "also check the docs", attempt_id=attempt_id),
+        ActiveSteerTarget("runtime", turn_id, request.context, request, harness.agent),
+    )
+    assert receipt.outcome is SteerOutcome.ACCEPTED
+    release.set()
+    harness.accept_steer(delivery_id, attempt_id, turn_id)
+    await running
+
+    # The terminating tool ended the run before its queue drained; the Turn answers the steer.
+    rows = await harness.context_rows()
+    assert [(entry.kind, entry.row_id) for entry in rows[2:]] == [
+        ("tool_result", rows[2].row_id),
+        ("input", delivery_id),
+        ("response", rows[4].row_id),
+    ]
+    assert harness.provider.requests[1].messages == project(rows[:4]).messages
+    assert harness.controller.im_client.sent.count("Docs checked too.") == 1
+    assert harness.controller.terminals == [
+        {"turn": turn_id, "is_error": False, "settled_by": "terminal_result"}
+    ]
+
+
 async def test_stop_aborts_the_running_tool_and_settles_the_turn_as_stopped(
     engine, session, tmp_path, published
 ) -> None:
@@ -897,12 +942,25 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
     await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
     jobs.states["job_1"] = JobStatus("running")
 
-    for _ in range(2):
-        harness.new_agent()
-        await harness.agent.recover_runtime_state()
+    # A pass that failed before it settled anything runs again in full.
+    harness.new_agent()
+    scan = harness.agent._sessions_with_open_tail
 
+    def unavailable():
+        raise RuntimeError("database is locked")
+
+    harness.agent._sessions_with_open_tail = unavailable
+    with pytest.raises(RuntimeError):
+        await harness.agent.recover_runtime_state()
+    harness.agent._sessions_with_open_tail = scan
+    await harness.agent.recover_runtime_state()
     rows = await harness.context_rows()
     assert rows[-1].kind == "tool_result" and "now Watch watch_job_1" in rows[-1].message.content[0].text
+    # Another process start settles nothing twice.
+    harness.new_agent()
+    await harness.agent.recover_runtime_state()
+
+    assert await harness.context_rows() == rows
     assert rendered == [("call_bash", "job_1", "watch_job_1")] and jobs.watches == {"job_1": "watch_job_1"}
     assert harness.provider.requests == []
 

@@ -157,7 +157,6 @@ class AvibeAgent(BaseAgent):
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.
         self._runtimes: dict[str, _SessionRuntime] = {}
-        self._open_calls_recovered = False
 
     # --- BaseAgent -----------------------------------------------------------
 
@@ -194,8 +193,11 @@ class AvibeAgent(BaseAgent):
                 message = await self._render_input(
                     session_id, request.message, request.files, request.input_metadata
                 )
-                async for event in run.agent.run(AgentInput(input_id, message), turn_id=turn_id):
-                    await self._on_event(run, event)
+                agent_input: Optional[AgentInput] = AgentInput(input_id, message)
+                while agent_input is not None:
+                    async for event in run.agent.run(agent_input, turn_id=turn_id):
+                        await self._on_event(run, event)
+                    agent_input = await self._continuing_input(run)
                 await self._settle(run)
             finally:
                 runtime.run = None
@@ -238,18 +240,16 @@ class AvibeAgent(BaseAgent):
 
         Never calls the model. T3 stays with each Session's resume.
         """
-        await self._recover_open_tool_calls_once()
+        await self._recover_open_tool_calls()
 
-    async def _recover_open_tool_calls_once(self) -> None:
+    async def _recover_open_tool_calls(self) -> None:
         """At startup, settle every Session's open tool calls before any run (recovery.md T2).
 
         Eager, not at the Session's next message: a running foreground job is handed to
-        its Watch now (J6), so no command outlives its Turn without an owner. Runs once
-        per process and never calls the model; T3 stays with each Session's resume.
+        its Watch now (J6), so no command outlives its Turn without an owner. Settlement
+        is idempotent, so a pass that failed can simply run again. Never calls the
+        model; T3 stays with each Session's resume.
         """
-        if self._open_calls_recovered:
-            return
-        self._open_calls_recovered = True
         for session_id in await asyncio.to_thread(self._sessions_with_open_tail):
             async with self._held(session_id, wait=False) as runtime:
                 if runtime is None:
@@ -461,11 +461,30 @@ class AvibeAgent(BaseAgent):
             return
         await self._fail(request, kind, diagnostic, reason=reason)
 
-    async def _admit_returned_inputs(self, run: _Run) -> None:
-        """Inputs the run accepted but did not consume enter the context (recovery.md T3).
+    async def _continuing_input(self, run: _Run) -> Optional[AgentInput]:
+        """The input that continues a Turn whose run ended by design with inputs it accepted.
 
-        They already are accepted messages of the settled Turn, which has no way back
-        to the P3 queue; the next Turn answers them with the full context.
+        An accepted steer belongs to the Turn that accepted it. A run that a terminating
+        tool or a hook ``end`` closed before draining its queue therefore runs again for
+        them: the earlier ones enter the context, the last starts the next run. A
+        stopped or failed run continues nothing (``_admit_returned_inputs``).
+        """
+        if run.stop_requested or run.reason not in _COMPLETED:
+            return None
+        pending = await run.agent.take_pending_inputs()
+        if not pending:
+            return None
+        for item in pending[:-1]:
+            await self.store.consume_input(run.session_id, item.message_id, item.message)
+        run.reason = None
+        return pending[-1]
+
+    async def _admit_returned_inputs(self, run: _Run) -> None:
+        """Inputs a stopped or failed run accepted but did not consume enter the context (T3).
+
+        They belong to the Turn that accepted them and share its outcome, as a message
+        merged into another backend's stopped or failed turn does; the next Turn
+        answers them with the full context.
         """
         try:
             for item in await run.agent.take_pending_inputs():
