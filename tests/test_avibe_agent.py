@@ -584,6 +584,28 @@ async def test_committed_rows_keep_the_agent_that_ran_the_turn(engine, session, 
     assert backends == {"avibe"}
 
 
+async def test_the_environment_names_watches_without_their_commands(engine, session, tmp_path, published) -> None:
+    from core.watches import ManagedWatch
+
+    secret = "curl -H 'Authorization: Bearer sk-live-secret' https://api.example"
+    watches = [
+        ManagedWatch(id="wch_named", name="nightly sync", session_key="k", session_id=SESSION, shell_command=secret),
+        ManagedWatch(
+            id="wch_job", name=None, session_key="k", session_id=SESSION, shell_command=secret,
+            metadata={"watch_target": {"kind": "job", "job_id": "job_1", "command": secret}},
+        ),
+    ]
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("ok"))]])
+    harness.controller.watch_service = SimpleNamespace(store=SimpleNamespace(list_watches=lambda: watches))
+
+    await harness.agent.handle_message(harness.request("status?"))
+
+    # The block is model context: a Watch is named by its id, name, and kind, never its command.
+    block = (await harness.context_rows())[0].message.content[0].text
+    assert "sk-live-secret" not in block and "curl" not in block
+    assert 'wch_named "nightly sync" command' in block and "wch_job job" in block
+
+
 async def test_a_steer_enters_after_the_tool_batch_even_when_its_row_arrives_late(
     engine, session, tmp_path, published
 ) -> None:
@@ -671,18 +693,15 @@ async def test_reconcile_reports_a_steer_attempt_only_from_evidence(engine, sess
     try:
         # No evidence the run has the steer, and its live call is in flight: neither accepted nor a negative.
         assert await outcome() is SteerOutcome.UNKNOWN
-        release.set()
-        await running
-        # The run is gone, but the live call still owns the attempt's receipt.
-        assert await outcome() is SteerOutcome.UNKNOWN
         fail.set()
         assert (await steering).outcome is SteerOutcome.REFUSED
+        # The live call returned (its receipt may have been lost) while the run goes on in a long tool:
+        # nothing here can settle the attempt any more, so it is not held until the run ends.
+        assert await outcome() is SteerOutcome.NOT_ACTIVE
     finally:
         fail.set()
         release.set()
         await running
-    # The live call returned (its receipt may have been lost) and its run is gone: nothing here can
-    # settle the attempt, so it is not left in reconciliation until a restart.
     assert await outcome() is SteerOutcome.NOT_ACTIVE
 
 
@@ -2081,6 +2100,41 @@ async def test_resume_settles_a_reused_call_id_from_the_job_its_own_call_started
         assert ManagedWatchStore().find_job_watch(old) is None
     finally:
         await suite.jobs.kill(current)
+
+
+async def test_startup_hands_a_foreground_job_to_its_watch_with_the_backend_disabled(
+    engine, session, tmp_path, published
+) -> None:
+    from core.controller import Controller
+    from core.watches import ManagedWatchStore
+
+    harness = _Harness(engine, tmp_path, "avibe", [], suite=local_tool_suite())
+    request = harness.request("run it")
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run it"),))
+    )
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "sleep 30"})
+    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    suite = harness.suite
+    job_id = await _real_job(suite, "sleep 30", call_id="call_bash", cwd=tmp_path)
+    # The process restarts with agents.avibe disabled: no adapter is registered.
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(agents={}),
+        config=SimpleNamespace(avibe=None, platform="avibe", language="en"),
+        im_client=None,
+        settings_manager=SimpleNamespace(),
+    )
+    try:
+        await Controller._recover_avibe_agent_runtime_state(controller)
+
+        watch_id = ManagedWatchStore().find_job_watch(job_id)
+        assert watch_id is not None
+        result = (await harness.context_rows())[-1]
+        assert result.kind == "tool_result" and f"now Watch {watch_id}" in result.message.content[0].text
+    finally:
+        if suite.jobs.status(job_id).state == "running":
+            await suite.jobs.kill(job_id)
 
 
 async def test_the_default_job_host_lives_in_the_watch_jobs_dir(engine, session, tmp_path) -> None:

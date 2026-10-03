@@ -465,12 +465,11 @@ class AvibeAgent(BaseAgent):
     async def reconcile_steer_attempt(self, request: SteerReconcileRequest, target: Any) -> SteerResult:
         """Evidence about a prior steer attempt, as the Codex and OpenCode reconcilers give it.
 
-        ACCEPTED when its row was consumed or the live run accepted it. UNKNOWN while
-        a call could still settle it: its live steer call is in flight here, or the Turn
-        it targets is still running (that call may not have started yet). Otherwise
-        NOT_ACTIVE: the attempt's Turn ran on another adapter instance (a retired adapter
-        or a previous process; the native turn id names it), or this instance's live
-        call has returned and its run is gone, so nothing here can settle it.
+        ACCEPTED when its row was consumed or the live run accepted it; UNKNOWN only
+        while this instance has the attempt's live call in flight (that call owns the
+        receipt); otherwise NOT_ACTIVE. A live call that starts after a NOT_ACTIVE finds
+        its attempt settled and refuses (``_steer``), and the Turn owner fences any late
+        receipt for an attempt it no longer has, so a second negative changes nothing.
         """
         message_id = await asyncio.to_thread(self._attempt_leader_id, request.attempt_id)
         if message_id is not None and await asyncio.to_thread(self._consumed, message_id):
@@ -483,13 +482,9 @@ class AvibeAgent(BaseAgent):
         ):
             # The accepted steer is still queued in the live run that owns it.
             return steer_result(SteerOutcome.ACCEPTED, turn_id=run.turn_id)
-        if not request.expected_native_turn_id.startswith(f"{BACKEND}:{self._instance}:"):
-            return steer_result(SteerOutcome.NOT_ACTIVE, reason="another_adapter_instance")
-        if request.attempt_id in self._steering or (
-            run is not None and run.native_turn_id == request.expected_native_turn_id
-        ):
+        if request.attempt_id in self._steering:
             return steer_result(SteerOutcome.UNKNOWN, reason="in_progress")
-        return steer_result(SteerOutcome.NOT_ACTIVE, reason="settled_here")
+        return steer_result(SteerOutcome.NOT_ACTIVE, reason="no_live_call")
 
     # --- one run ---------------------------------------------------------------
 
@@ -937,8 +932,11 @@ class AvibeAgent(BaseAgent):
         for watch in watches:
             if getattr(watch, "session_id", None) != session_id or not getattr(watch, "enabled", False):
                 continue
-            label = getattr(watch, "shell_command", None) or getattr(watch, "name", None) or watch.id
-            lines.append(f'{watch.id} "{label}" running')
+            # Model context: a Watch's id, name and kind only. Its command can carry a
+            # credential, and the block is persisted and sent to the provider.
+            kind = "job" if getattr(watch, "job_target", None) else "command"
+            name = " ".join(str(getattr(watch, "name", None) or "").split())
+            lines.append(f'{watch.id} "{name}" {kind} running' if name else f"{watch.id} {kind} running")
         return lines
 
     # --- output helpers ------------------------------------------------------

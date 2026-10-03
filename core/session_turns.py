@@ -2712,7 +2712,7 @@ class SessionTurnManager:
             )
         else:
             receipt = await self._attempt_steer(backend, request)
-        return await self._finish_steer(delivery_id, receipt, context=context)
+        return await self._finish_steer(delivery_id, receipt, context=context, expected_attempt_id=attempt_id)
 
     async def _reconcile_steer_attempt(
         self,
@@ -3252,6 +3252,7 @@ class SessionTurnManager:
         receipt: Any,
         *,
         context: Optional["MessageContext"],
+        expected_attempt_id: Optional[str] = None,
     ) -> DeliveryResult:
         outcome = getattr(receipt, "outcome", SteerOutcome.UNKNOWN)
         outcome_value = str(getattr(outcome, "value", outcome))
@@ -3279,6 +3280,16 @@ class SessionTurnManager:
                 target_turn_id = str(delivery.get("current_target_turn_id") or "")
                 session_id = str(delivery["session_id"])
                 attempt_id = str(delivery.get("current_attempt_id") or "")
+                if expected_attempt_id is not None and attempt_id != expected_attempt_id:
+                    # A receipt for an attempt this Delivery no longer has (settled, or
+                    # superseded by a newer attempt) changes nothing.
+                    return DeliveryResult(
+                        delivery_id,
+                        None,
+                        str(delivery.get("state") or "reconciling_steer"),
+                        target_turn_id or None,
+                        "receipt_cas_lost",
+                    )
                 attempt_rows = (
                     delivery_store.attempt_deliveries(conn, attempt_id)
                     if attempt_id
@@ -3330,6 +3341,20 @@ class SessionTurnManager:
                             target_turn_id or None, "receipt_cas_lost",
                         )
                 elif not materialized:
+                    # A negative receipt is fenced like the ACCEPTED and UNKNOWN branches:
+                    # it settles only a current attempt whose Deliveries are still steering
+                    # or reconciling. A late or duplicate one for an attempt already settled
+                    # would otherwise move a Delivery a newer Turn has since claimed.
+                    if not attempt_id or not attempt_rows or any(
+                        row["state"] not in {"steering", "reconciling_steer"} for row in attempt_rows
+                    ):
+                        return DeliveryResult(
+                            delivery_id,
+                            None,
+                            str(delivery.get("state") or "reconciling_steer"),
+                            target_turn_id or None,
+                            "receipt_cas_lost",
+                        )
                     session_status = conn.execute(
                         select(agent_sessions.c.status).where(
                             agent_sessions.c.id == str(delivery["session_id"])
@@ -6234,6 +6259,7 @@ class SessionTurnManager:
                 str(delivery["id"]),
                 receipt,
                 context=None,
+                expected_attempt_id=attempt_id,
             )
             return result.state != "reconciling_steer"
         return False
@@ -6821,6 +6847,7 @@ class SessionTurnManager:
                 str(attempt["id"]),
                 receipt,
                 context=None,
+                expected_attempt_id=attempt_id,
             )
             if result.state != "reconciling_steer":
                 recovered.append(str(attempt["session_id"]))

@@ -1017,11 +1017,19 @@ class Controller:
                 logger.error(f"Failed to restore active polls: {e}", exc_info=True)
 
     async def _recover_avibe_agent_runtime_state(self) -> None:
-        """Settle the Avibe Agent's open tool calls and prune settled jobs left by the previous process."""
+        """Settle the Avibe Agent's open tool calls and prune settled jobs left by the previous process.
+
+        Not gated on ``agents.avibe.enabled``: a foreground job the previous process left
+        running must be handed to its Watch even when the backend admits no new Turns.
+        Recovery needs only the transcript store, the job host and the Watch hand-over, so
+        an unregistered adapter runs it and is then dropped.
+        """
         avibe_agent = getattr(getattr(self, "agent_service", None), "agents", {}).get("avibe")
-        recover = getattr(avibe_agent, "recover_runtime_state", None)
-        if callable(recover):
-            await recover()
+        if avibe_agent is None:
+            from modules.agents.avibe import AvibeAgent
+
+            avibe_agent = AvibeAgent(self)
+        await avibe_agent.recover_runtime_state()
 
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""

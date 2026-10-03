@@ -4241,6 +4241,50 @@ def test_accepted_turn_of_a_process_bound_backend_without_runtime_settles_and_re
     assert [text for _started_turn, text in starts] == ["continue after restart"]
 
 
+def test_a_late_negative_steer_receipt_never_moves_a_delivery_its_attempt_no_longer_owns(managers) -> None:
+    # A refusal re-queued the steer and the queue claimed it into a new Turn; a second, late
+    # negative receipt for the same attempt must not pull it back out of that Turn.
+    manager, _restarted, engine, _engine_b, starts = managers
+    turn_id, _context_value = asyncio.run(_activate(manager))
+    with engine.begin() as conn:
+        delivery = delivery_store.insert_delivery(
+            conn,
+            delivery_id="dlv_late_negative",
+            session_id="ses_fsm",
+            priority="p1",
+            state="reserved",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None, session_id="ses_fsm", platform="avibe", author="user",
+                source="user", message_type="user", text="also this",
+            ),
+            dispatch_text="also this",
+            now="2026-10-04T00:00:00.000000Z",
+        )
+        assert delivery_store.open_steer_attempt(
+            conn, delivery["id"], expected_version=int(delivery["version"]), turn_id=turn_id,
+            attempt_id="att_late_negative", expected_native_turn_id=f"native-{turn_id}",
+        )
+        conn.execute(
+            update(session_turns).where(session_turns.c.id == turn_id).values(
+                state="terminal", terminal_outcome="completed", terminal_at="2026-10-04T00:00:01.000000Z"
+            )
+        )
+    asyncio.run(manager._finish_steer(
+        "dlv_late_negative", steer_result(SteerOutcome.REFUSED, reason="run_closed"), context=None
+    ))
+    with engine.connect() as conn:
+        claimed = delivery_store.get_delivery(conn, "dlv_late_negative")
+    assert claimed["state"] == "claimed" and claimed["turn_id"]
+
+    asyncio.run(manager._finish_steer(
+        "dlv_late_negative", steer_result(SteerOutcome.NOT_ACTIVE, reason="not_active"), context=None
+    ))
+
+    with engine.connect() as conn:
+        after = delivery_store.get_delivery(conn, "dlv_late_negative")
+    assert (after["state"], after["turn_id"]) == ("claimed", claimed["turn_id"])
+
+
 def _capture_lost_turn_report(manager: SessionTurnManager) -> tuple[list, list]:
     """Record what a lost turn reports outward, without a real IM client."""
 
