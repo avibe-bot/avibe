@@ -1883,6 +1883,55 @@ def test_adoption_leaves_every_record_of_another_desktop_runtime_alone(isolated_
         assert path.read_bytes() == before[path.name]
 
 
+@pytest.mark.parametrize(
+    ("malformed", "ours"),
+    [
+        ({"desktop_runtime_id": ["rt-a"]}, False),
+        ({"desktop_runtime_id": {"id": "rt-a"}}, False),
+        ({"generation_id": ["ocg_bad"]}, True),
+        ({"process_created_at": 10**400}, True),
+    ],
+)
+def test_a_malformed_record_never_disables_opencode(isolated_launch, monkeypatch, malformed, ours):
+    """A readable record whose field has the wrong type degrades to a record
+    without that field. Adoption, a lease, a restore's ownership check, and
+    shutdown still work, and the record's process is still judged and handled:
+    a malformed Runtime id is judged by the live process, which belongs here to
+    another Runtime, and a record of this Runtime is adopted and stopped."""
+
+    records = isolated_launch.records
+    own_pid, bad_pid = fake_pid(90), fake_pid(91)
+    monkeypatch.setattr(opencode_server, "desktop_caller_provenance", lambda: frozenset({"rt-a"}))
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: records / "absent.json")
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid in (own_pid, bad_pid))
+    monkeypatch.setattr(opencode_server, "_get_pid_command", lambda pid: None)
+    monkeypatch.setattr(
+        opencode_server.runtime,
+        "_desktop_runtime_mismatch",
+        lambda pid, runtime_ids: "runtime_id_mismatch" if pid == bad_pid else None,
+    )
+    stopped: list[int] = []
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: stopped.append(pid) or True)
+    record = _record(records, "ocg_bad", bad_pid, 50091, desktop_runtime_id="rt-a")
+    record.write_text(json.dumps({**json.loads(record.read_text()), **malformed}), encoding="utf-8")
+    isolated_launch.processes.append(_Process(own_pid))
+    runtime = OpenCodeRuntime(SimpleNamespace(binary="/bin/opencode", request_timeout_seconds=60))
+
+    async def lease():
+        _lease_id, generation = await runtime.lease(OpenCodeLaunchSpec(digest="v1", binary="/bin/opencode"), 60)
+        # An adopted generation of this Runtime retires and, idle, stops.
+        await runtime._generations.settled()
+        return generation
+
+    leased = asyncio.run(lease())
+    foreign = [info["generation_id"] for info in opencode_server.other_runtimes_live_records()]
+    opencode_server.stop_owned_generations_sync()
+
+    assert leased.pid == own_pid
+    assert foreign == ([] if ours else ["ocg_bad"])
+    assert sorted(stopped) == sorted([own_pid, bad_pid] if ours else [own_pid])
+
+
 def test_a_failed_start_whose_process_survives_is_reaped_until_it_is_gone(isolated_launch, monkeypatch):
     """A start times out and its process survives the stop. The runtime that
     spawned it keeps it owned and stops it at a later reap, record and Hub

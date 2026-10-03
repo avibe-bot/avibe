@@ -214,6 +214,8 @@ scenarios:
       - tests/test_opencode_generations.py::test_adoption_keeps_every_proven_serving_process_and_drops_the_rest
       - tests/test_opencode_restore_polls.py::test_a_cancelled_restore_releases_the_binding_its_poll_task_never_took
       - tests/test_opencode_restore_polls.py::test_two_overlapping_restores_of_one_durable_poll_start_exactly_one_loop
+      - tests/test_opencode_restore_polls.py::test_a_restore_whose_generation_rewrite_fails_runs_nothing_and_the_sweep_restores_it
+      - tests/test_opencode_restore_polls.py::test_a_poll_task_whose_rebind_cannot_be_recorded_leaves_its_turn_live_for_the_sweep
   - id: RUNTIME-GEN-023
     name: The UI process never launches OpenCode; it leases the controller's generation over control IPC
     status: covered
@@ -242,3 +244,4 @@ scenarios:
       - tests/test_opencode_generations.py::test_service_shutdown_stops_a_started_process_whose_record_was_never_written
       - tests/test_opencode_generations.py::test_adoption_leaves_every_record_of_another_desktop_runtime_alone
       - tests/test_opencode_restore_polls.py::test_restore_leaves_every_poll_whose_run_another_desktop_runtimes_live_server_executes
+      - tests/test_opencode_generations.py::test_a_malformed_record_never_disables_opencode

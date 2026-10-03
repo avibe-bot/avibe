@@ -161,6 +161,10 @@ def _poll_generation_id(poll_info: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+class _RestoredPollUnrecorded(RuntimeError):
+    """A restored poll binds elsewhere than it names, and that was not recorded."""
+
+
 def _poll_runs_in(poll_info: Any, records: list[dict[str, Any]]) -> bool:
     """Whether one of ``records`` names the process executing a poll's run.
 
@@ -825,6 +829,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         # One restore at a time: an enable-triggered restore can overlap an
         # IM-ready or reconnect one, and a poll is claimed only at its handoff.
         self._restore_lock = asyncio.Lock()
+        # Durable polls a restore left for a later one; the sweep restores again.
+        self._polls_awaiting_restore: set[str] = set()
 
     def _durable_poll_generations(self) -> Dict[str, Optional[str]]:
         return {
@@ -1361,6 +1367,23 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
     async def reap_runtime_generations(self) -> None:
         await self._runtime.reap()
+        await self._restore_left_polls()
+
+    async def _restore_left_polls(self) -> None:
+        """Restore again every durable poll a restore left for a later one.
+
+        Startup restores each transport's polls once, so a poll a transient
+        failure left would otherwise wait for the next restart.
+        """
+        if not self._polls_awaiting_restore:
+            return
+        self._polls_awaiting_restore &= set(self.sessions.get_all_active_polls())
+        restore = getattr(self.controller, "restore_polls_on_ready_transports", None)
+        if self._polls_awaiting_restore and callable(restore):
+            try:
+                await restore()
+            except Exception:
+                logger.warning("Restoring the OpenCode polls an earlier restore left failed", exc_info=True)
 
     async def shutdown_runtime(self, settle_reason: str | None = None) -> None:
         """The backend is disabled, or the service stops: stop every process now.
@@ -2732,6 +2755,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     session_id,
                 )
                 continue
+            self._polls_awaiting_restore.discard(session_id)
             processing_snapshot = (
                 poll_info.processing_indicator
                 if isinstance(poll_info.processing_indicator, dict)
@@ -2760,6 +2784,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 except RuntimeUnitStopping:
                     # OpenCode was disabled while restoring: the poll stays durable
                     # for the next controller that has OpenCode enabled.
+                    continue
+                except _RestoredPollUnrecorded:
+                    # Still naming its old process, the poll waits for a later restore.
+                    self._polls_awaiting_restore.add(session_id)
                     continue
                 except Exception as err:
                     logger.warning(f"Failed to verify OpenCode session {session_id} for restoration: {err}")
@@ -2859,6 +2887,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                                 logical_turn_id,
                             )
                             await self._release_binding(binding)
+                            self._polls_awaiting_restore.add(session_id)
                             continue
                     logger.info(f"OpenCode session {session_id} has completed, removing from active polls")
                     try:
@@ -2870,6 +2899,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                             poll_info.opencode_session_id,
                         )
                         await self._release_binding(binding)
+                        self._polls_awaiting_restore.add(session_id)
                         continue
                     await self._release_binding(binding)
                     await self._poll_loop.remove_restored_ack(poll_info)
@@ -3190,6 +3220,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     self._restored_poll_servers.get(current_task) or server,
                 )
             )
+        except _RestoredPollUnrecorded:
+            if restoration_registered:
+                raise
+            # Unregistered and still naming its old process, the poll stays
+            # durable with its Turn live, and a later restore retries it.
+            self._polls_awaiting_restore.add(poll_info.opencode_session_id)
         except Exception as err:
             if restoration_registered:
                 raise
@@ -3314,13 +3350,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     poll_info.opencode_session_id,
                     processing_indicator={**indicator, _GENERATION_SNAPSHOT_KEY: bound_id},
                 )
-            except Exception:
+            except Exception as exc:
+                # Never run a poll whose record still names another process: a
+                # crash would bind its next restore to the wrong server.
+                await self._release_binding(binding)
                 logger.warning(
-                    "Could not record OpenCode generation %s for restored poll %s",
+                    "Could not record OpenCode generation %s for restored poll %s; a later restore retries it",
                     bound_id,
                     poll_info.opencode_session_id,
                     exc_info=True,
                 )
+                raise _RestoredPollUnrecorded(poll_info.opencode_session_id) from exc
         return binding
 
     def _prepare_message_with_files(self, request: AgentRequest) -> str:

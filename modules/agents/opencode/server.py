@@ -9,6 +9,7 @@ from datetime import datetime
 from enum import Enum
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -1935,6 +1936,42 @@ def _read_json_object(path: Path) -> Optional[Dict[str, Any]]:
     return data
 
 
+# A record is read back from disk, where any field can be malformed. Readers
+# take each field only through these, so a corrupt record degrades to one that
+# lacks the field and never breaks the readers of every other record.
+
+
+def _record_pid(info: Mapping[str, Any]) -> Optional[int]:
+    pid = info.get("pid")
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) and 0 < pid < 2**32 else None
+
+
+def _record_port(info: Mapping[str, Any]) -> Optional[int]:
+    port = info.get("port")
+    return port if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536 else None
+
+
+def _record_number(value: object) -> Optional[float]:
+    """A finite number a record holds, or None for anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _record_runtime_id(info: Mapping[str, Any]) -> Any:
+    """The desktop Runtime a record names: an id, None, or unrecorded.
+
+    A record from before the field existed, or one whose value is no id at
+    all, counts as unrecorded and is judged by its live process.
+    """
+    value = info.get("desktop_runtime_id", _UNRECORDED_RUNTIME_ID)
+    return value if value is None or isinstance(value, str) else _UNRECORDED_RUNTIME_ID
+
+
 def _record_proves_process(info: Mapping[str, Any], *, require_port: bool = True) -> bool:
     """Whether a record still names the exact ``opencode serve`` it started.
 
@@ -1942,17 +1979,17 @@ def _record_proves_process(info: Mapping[str, Any], *, require_port: bool = True
     ``vibe stop`` always accepted; adopting one does.
     """
 
-    pid = info.get("pid")
-    port = info.get("port")
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or not _pid_exists(pid):
+    pid = _record_pid(info)
+    port = _record_port(info)
+    if pid is None or not _pid_exists(pid):
         return False
-    has_port = isinstance(port, int) and not isinstance(port, bool)
+    has_port = port is not None
     if require_port and not has_port:
         return False
-    created_at = info.get("process_created_at")
-    if isinstance(created_at, (int, float)) and not isinstance(created_at, bool):
+    created_at = _record_number(info.get("process_created_at"))
+    if created_at is not None:
         # A command line alone can belong to a reused pid.
-        if runtime.process_create_time(pid) != float(created_at):
+        if runtime.process_create_time(pid) != created_at:
             return False
     command = _get_pid_command(pid)
     if command:
@@ -1976,42 +2013,39 @@ def _generation_from_record(
     request_timeout_seconds: int,
 ) -> OpenCodeGeneration:
     binary = info.get("binary") if isinstance(info.get("binary"), dict) else {}
-    recorded_created_at = info.get("process_created_at")
-    created_at = (
-        float(recorded_created_at)
-        if isinstance(recorded_created_at, (int, float)) and not isinstance(recorded_created_at, bool)
-        else runtime.process_create_time(int(info["pid"]))
-    )
-    started_at = info.get("started_at")
+    pid = int(info["pid"])
+    created_at = _record_number(info.get("process_created_at"))
+    if created_at is None:
+        created_at = runtime.process_create_time(pid)
+    started_at = _record_number(info.get("started_at"))
     leases = info.get("leases") if isinstance(info.get("leases"), dict) else {}
     caller_context_path = info.get("caller_context_path")
     overlay_hash = info.get("model_hub_overlay_hash")
+    host = info.get("host")
+    binary_path = binary.get("path")
     return OpenCodeGeneration(
         generation_id=generation_id,
-        pid=int(info["pid"]),
+        pid=pid,
         port=int(info["port"]),
-        host=str(info.get("host") or DEFAULT_OPENCODE_HOST),
+        host=host if isinstance(host, str) and host else DEFAULT_OPENCODE_HOST,
         spec_digest=spec_digest,
         process_created_at=created_at,
-        binary=str(binary.get("path") or ""),
+        binary=binary_path if isinstance(binary_path, str) else "",
         binary_version=binary.get("version") if isinstance(binary.get("version"), str) else None,
         caller_context_path=caller_context_path if isinstance(caller_context_path, str) else None,
         model_hub_overlay_hash=overlay_hash if isinstance(overlay_hash, str) else None,
         model_hub_provider_ids=_string_tuple(info.get("model_hub_overlay_provider_ids")),
         active_run_sessions=_string_tuple(info.get("active_run_sessions")),
         leases={
-            str(key): float(value)
+            str(key): expires_at
             for key, value in leases.items()
-            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            if (expires_at := _record_number(value)) is not None
         },
         # The process's age: a record without a start time, such as the
         # legacy one, started when its process did, never at its adoption.
-        started_at=(
-            float(started_at)
-            if isinstance(started_at, (int, float)) and not isinstance(started_at, bool)
-            else created_at
-        ),
-        desktop_runtime_id=info.get("desktop_runtime_id") if "desktop_runtime_id" in info else _UNRECORDED_RUNTIME_ID,
+        started_at=started_at if started_at is not None else created_at,
+        # Rewritten without a malformed id, so every later read judges it alike.
+        desktop_runtime_id=_record_runtime_id(info),
         request_timeout_seconds=request_timeout_seconds,
     )
 
@@ -2029,17 +2063,18 @@ def _record_is_ours(info: Mapping[str, Any], runtime_ids: frozenset[str]) -> boo
     It is the one ownership gate for every path that reads or acts on records.
     A caller with no desktop provenance acts on any record, as ``vibe stop``
     always has. A record names the desktop Runtime whose controller wrote it;
-    a record from before Runtime ids were recorded is judged by its live
-    process, exactly as ``refuse_foreign_desktop_process`` judges one, and a
-    record whose process is gone belongs to nobody.
+    a record from before Runtime ids were recorded, or whose id is malformed,
+    is judged by its live process, exactly as ``refuse_foreign_desktop_process``
+    judges one, and a record whose process is gone belongs to nobody.
     """
 
     if not runtime_ids:
         return True
-    if "desktop_runtime_id" in info:
-        return runtime_ids == {info["desktop_runtime_id"]}
-    pid = info.get("pid")
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+    recorded = _record_runtime_id(info)
+    if recorded is not _UNRECORDED_RUNTIME_ID:
+        return runtime_ids == {recorded}
+    pid = _record_pid(info)
+    if pid is None:
         return True
     try:
         runtime.refuse_foreign_desktop_process(pid, "opencode", runtime_ids)
@@ -2091,6 +2126,9 @@ def _every_recorded_process() -> list[tuple[Path, Dict[str, Any]]]:
                 continue
             info = _read_json_object(path)
             if info is not None:
+                # A generation's record is named for it, so its file name is
+                # the id every reader uses, whatever the content claims.
+                info["generation_id"] = path.stem
                 found.append((path, info))
     legacy = _read_json_object(legacy_pid_file())
     if legacy is not None:
@@ -2172,10 +2210,11 @@ def _owned_here(info: Mapping[str, Any], *, by_id: bool = True) -> bool:
     if not _OWNED_HERE:
         # A CLI process, or a controller whose OpenCode never ran, owns nothing.
         return False
-    if by_id and info.get("generation_id") in _OWNED_HERE:
+    generation_id = info.get("generation_id")
+    if by_id and isinstance(generation_id, str) and generation_id in _OWNED_HERE:
         return True
-    pid = info.get("pid")
-    if not isinstance(pid, int) or isinstance(pid, bool):
+    pid = _record_pid(info)
+    if pid is None:
         return False
     return (pid, runtime.process_create_time(pid)) in _OWNED_HERE.values()
 
