@@ -219,6 +219,14 @@ as it does for the Workbench.
   Avibe", which calls `pet_open("avibe://settings")`; `main`'s own guard then
   shows setup) and stays on `/pet`. So a default-on pet on a
   fresh install never becomes a pet-sized setup wizard.
+- The pet leaves setup-pending by re-reading the authoritative setup check
+  (the same `getConfig` result `AuthGuard` uses), not by waiting for a
+  notification: finishing the wizard in `main` gives the pet no route change
+  and no cross-window event. While setup-pending, the pet re-reads on every
+  `pet:summon`, on window focus, and on becoming visible. Every way the user
+  returns to the pet (hotkey, tray, clicking it) is one of these, so the
+  first interaction after setup finds the completed setup and mounts the
+  normal pet, with no restart.
 - It reuses the provider's single `EventSource('/api/events')`. That is one
   connection per window. The server has no per-session filter, so the route
   filters on `session_id` on the client.
@@ -565,6 +573,14 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     no valid binding opens the switcher and never starts capture;
   - before setup is complete, `/pet` renders its setup-pending state and is
     not redirected to `/setup`;
+  - with setup completed in another window, the next summon, focus, or
+    visibility change re-reads setup and leaves setup-pending;
+- **Setup scenario:** the shell-and-state PR adds a scenario to
+  `tests/scenarios/auth_setup/catalog.yaml` with a closed-loop case in
+  `test_auth_setup_scenarios.py`: on a fresh install the pet is
+  setup-pending, setup is completed through the wizard, and the next summon
+  shows the normal pet without a restart. The scenario ID goes in that PR's
+  description;
   - the route renders the pet and panel from each `PetLayout` orientation;
   - with several unread results, all are rendered and mark-read passes the
     last rendered row; a result that arrives after rendering stays unread;
