@@ -586,9 +586,11 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 - Python, configuration: the spec and the prompt section exist exactly when
   `enabled` is true. Each backend translation is checked; Codex also carries
   the approval override. Reconciliation brings every live consumer (Codex,
-  OpenCode, cached Claude clients) to the final `enabled` value. Claude
+  OpenCode, cached Claude clients) to the final (`enabled`, snapshot hash)
+  pair. Claude
   clients are recreated only between turns. The reconciliation sees no change
-  when availability moves or when the toggle flips back between polls.
+  when availability moves or when the pair returns to its old value between
+  polls.
 - Python, server: one case per row of the effective-status table, asserting
   both status and reason, plus a home-independence case: a Runtime with
   `AVIBE_HOME` set reads the same `D`. A call while
