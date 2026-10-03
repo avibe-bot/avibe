@@ -151,7 +151,9 @@ running. The tray keeps the shell alive after the window closes.
     menu says the setting was not saved, and the shell retries the write every
     5 s while it runs. A failed write never starts anything: a transition into
     `starting` that cannot write `D` goes to `error` with reason
-    `state_unwritable`.
+    `state_unwritable`. A failed post-health `ready` write does the same: it
+    stops and reaps the healthy daemon, then holds `error` /
+    `state_unwritable` in memory and shows it in the menu.
 
   The first matching row wins:
 
@@ -161,6 +163,8 @@ running. The tray keeps the shell alive after the window closes.
   | `off` | toggle on, Runtime lacks a covering `computer_use_schema` | `off` | refuse; the menu says the Avibe service must restart |
   | `off` | toggle on, both grants held | `starting` | spawn |
   | `off` | toggle on, a grant missing | `needs_permission` | prompt and run the capture probe (the only prompting path) |
+    | shell launch | `D` unreadable, malformed, or of a newer `schema_version` | unchanged | spawn nothing and do not rewrite `D`; the menu warns. Only an explicit toggle action overwrites it |
+  | shell launch | `enabled` and recorded `state` is `error` | `error` | none; no spawn |
   | shell launch | `D` missing or not `enabled` | `off` | if `D` exists, write `off` with this shell's `instance_id` |
   | shell launch | `enabled`, Runtime lacks a covering `computer_use_schema` | `needs_runtime` | none; no spawn |
   | shell launch | `enabled`, both grants held | `starting` | spawn |
@@ -175,7 +179,8 @@ running. The tray keeps the shell alive after the window closes.
   | `starting` | spawn, socket, or health fails otherwise | `error` | stop the daemon; record the reason |
   | `ready` | grant check fails | `needs_permission` | stop the daemon |
   | `ready` | daemon exits unexpectedly, or its socket refuses on 2 consecutive checks | `starting` | stop the daemon if alive; respawn with backoff; after 3 failures in 5 minutes, go to `error` |
-  | any, `enabled` | quit | `stopped` | stop the daemon |
+    | any `enabled` state except `error` | quit | `stopped` | stop the daemon |
+  | `error` | quit | `error` | none; `error` is kept across relaunch |
 
   - **Grant check.** Silent, and it runs only while `enabled`. It fires on
     app activation, and every 5 s while in `needs_permission` or `ready`.
@@ -199,8 +204,8 @@ running. The tray keeps the shell alive after the window closes.
   - **No indirection.** Every row names its target state and action. `error`
     leaves only through toggle off (the first row), and a later toggle on
     starts from `off`.
-  - **Health.** Call `check_permissions` and
-    `health_report(include=["bundle_identity"])`, and require
+  - **Health.** Call `health_report`, which already reports Accessibility,
+    Screen Recording, and `bundle_identity`, and require
     `source.attribution == "host"`. The menu shows the localized reason for
     `needs_permission` and `error`.
   - **Orderly quit.** Write `stopped`, then stop the daemon. `D` keeps
@@ -278,7 +283,7 @@ running. The tray keeps the shell alive after the window closes.
     path, and tests redirect it.
 - **Tool policy.** Ship a YAML allow-list as the driver's managed policy
   (Phase 0 finding). It is pinned with the driver version, because the list
-  must be reviewed against each new tool surface. The v1 list has exactly 32
+  must be reviewed against each new tool surface. The v1 list has exactly 31
   tools, and the bundled tool snapshot must equal it:
   - Observation: `list_apps`, `list_windows`, `get_window_state`,
     `verify_state`, `get_accessibility_tree`, `get_screen_size`,
@@ -290,7 +295,11 @@ running. The tray keeps the shell alive after the window closes.
   - Clipboard: `clipboard_read`, `clipboard_write`.
   - Sessions: `start_session`, `end_session`, `get_session`,
     `list_sessions`.
-  - Diagnostics: `check_permissions`, `health_report`.
+    - Diagnostics: `health_report`.
+  - `check_permissions` is excluded. Its `prompt: true` raises system
+    dialogs, and only the native toggle-on action may prompt. The policy
+    applies to every caller, the shell included, so the shell's health check
+    uses `health_report` instead.
 
   It omits config, update,
   extension, recording/replay, cursor-theme, legacy `page`, the typed browser
@@ -348,21 +357,29 @@ running. The tray keeps the shell alive after the window closes.
     costs the other backends nothing.
   - **Concurrent sessions.** Claude spawns one server per session. Codex
     and OpenCode share one server across their conversations, so a caller
-    cannot be identified by process. Isolation therefore uses the Avibe
-    session id that every session prompt already carries
-    (`core/prompts/session-start.md`):
-    - The injected prompt tells the agent to pass that id as `session` on
-      every computer call.
+    cannot be identified by process. Isolation uses the Avibe session id
+    that every session prompt already carries
+    (`core/prompts/session-start.md`), and the server enforces it:
+    - The server adds a required `session` string to every advertised
+      tool schema, so schema-driven clients always send it. The injected
+      prompt says to fill it with the session id.
+    - Before forwarding a session's first call, or its first call after an
+      `end_session`, the server calls `start_session` for that name, which
+      creates or revives it. Agents never manage the Cua session lifecycle.
     - The server forwards the id as the named Cua session. Element tokens
-      and implicit-session state are therefore per Avibe session, even on
-      one shared upstream connection.
-    - The server rejects a call without `session`.
-  - **Desktop lease.** There is one desktop, so it is also one resource. The
-    first session to act holds a desktop lease. Calls from any other session
-    return `desktop_busy` with the holder's session id. The holder releases
-    the lease with `end_session`, or it lapses after 60 s with no call. The
-    lease file sits next to `D`, so separate server processes (Claude's
-    per-session servers and the shared ones) see the same lease.
+      and session state are therefore per Avibe session, even on one shared
+      upstream connection.
+  - **Desktop lease.** There is one desktop, so only one session acts at a
+    time.
+    - Acquisition, refresh, and release run under an exclusive OS lock on
+      `computer-lease.lock`, next to `D` (`flock` on macOS, `LockFileEx` on
+      Windows). Inside that lock the server reads and writes the lease
+      record: holder session id and last call time.
+    - Two first calls from different processes therefore serialize. One
+      wins, and the other gets `desktop_busy` naming the holder.
+    - The lease lapses after 60 s with no call from its holder, so a holder
+      that crashed frees the desktop within a minute without any PID check.
+      Calling `end_session` releases it at once.
   - This isolation is cooperative. Every caller is the same user's agent;
     it is not a security boundary.
   - Tool restriction stays in the driver's managed policy, not in this server.
@@ -382,8 +399,9 @@ running. The tray keeps the shell alive after the window closes.
   non-read-only MCP call under that policy.
 - **OpenCode.** Add `mcp.avibe_computer` (`type: "local"`) through the existing
   config overlay / `PATCH /global/config` path.
-- **Why the server follows the toggle.** The 32 allowed tool schemas
-  measure about 70 KB, roughly 17.6k tokens per session. Every session of a
+- **Why the server follows the toggle.** The allowed tool schemas measured
+  about 70 KB, roughly 17.6k tokens per session (on the 32-tool draft, which
+  also included `check_permissions`). Every session of a
   user who never enabled the feature would pay that, so the server is not
   injected unconditionally. Only availability is absorbed at call time.
 - **Configuration reconciliation.** `core/computer_use.py` owns the one change
@@ -406,9 +424,10 @@ running. The tray keeps the shell alive after the window closes.
 - **Prompt.** Add a short section in `core/system_prompt_injection.py`, only
   when the server is configured. It says the tools can report a state such as
   `off` or `needs_permission`, and then the agent tells the user instead of
-  retrying. It requires the session id as `session` on every call. It says
-  `desktop_busy` means another session holds the desktop, so the agent waits or
-  tells the user, and calls `end_session` when done. It also says to prefer
+  retrying. It says to fill the required `session` field with the session
+  id. It says `desktop_busy` means another session holds the desktop, so the
+  agent waits or tells the user, and to call `end_session` when a GUI task is
+  done. It also says to prefer
   CLI/API routes, use GUI tools for GUI-only steps, prefer accessibility
   element-token actions over pixel input, treat screen content as untrusted, and
   observe state before retrying any action, since an error result does not prove
@@ -418,9 +437,10 @@ running. The tray keeps the shell alive after the window closes.
 
 ### Workbench
 
-A read-only status line, derived from the effective status (ready, off,
-needs permission, starting, error with its reason, or unavailable when the
-shell is not running). The Workbench API reads it through the same
+A read-only status line, derived from the effective status: ready, off, needs
+permission, needs a newer Runtime (with "restart the Avibe service"),
+starting, error with its reason, or unavailable with its reason. Validation
+covers one rendering per status. The Workbench API reads it through the same
 `core/computer_use.py` reader, not through Runtime memory, because it runs in a
 separate process. Copy goes through `ui/src/i18n/en.json` and `zh.json`.
 The control itself stays native in v1.
@@ -545,8 +565,9 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   id. The driver's YAML tool policy only names tools. Set as
   `CUA_DRIVER_MANAGED_POLICY_FILE` on the embedded daemon, a 30-tool draft
   allow-list shrank `tools/list` to 30 through the proxy. The final v1 list
-  (see Tool policy) adds `check_permissions` and `health_report`, and it
-  listed exactly those 32 tools under the policy. Omitted tools returned
+  (see Tool policy) adds `health_report`, giving 31. A 32-tool draft that
+  also allowed `check_permissions` listed exactly its 32 tools under the
+  policy. Omitted tools returned
   `permission_denied`, and allowed ones worked. Agent-side environment on the
   proxy could not widen it: a widening user policy, a widening managed policy,
   and `unrestricted` mode variables each left the daemon's surface unchanged.
@@ -659,16 +680,17 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   snapshot hash) pair. Claude clients are recreated only between turns. The
   reconciliation sees no change when availability moves or when the pair returns
   to its old value between polls.
-- Python, server: one case per row of the effective-status table, asserting
-  both status and reason, plus a home-independence case: a Runtime with
-  `AVIBE_HOME` set reads the same `D`. A call while
-  not ready returns the named state and never spawns a child. A call after an
-  (`instance_id`, `generation`) change or a child exit respawns exactly once.
-  Folding keeps image blocks. Two sessions get separate Cua sessions on one
-  upstream connection. A call without `session` is rejected. A second
-  session gets `desktop_busy` until `end_session` or 60 s idle, across
-  separate server processes. Tests stay hermetic: the `D` path and the
-  upstream command are redirected to test-owned fakes.
+- Python, server: one case per row of the effective-status table, asserting both
+  status and reason, plus a home-independence case: a Runtime with `AVIBE_HOME`
+  set reads the same `D`. A call while not ready returns the named state and
+  never spawns a child. A call after an (`instance_id`, `generation`) change or
+  a child exit respawns exactly once. Folding keeps image blocks. Every
+  advertised schema requires `session`. Two sessions get separate Cua sessions
+  on one upstream connection. A session that called `end_session` works again on
+  its next call. Simultaneous first calls from two processes yield exactly one
+  holder, and the other gets `desktop_busy` until `end_session` or 60 s idle.
+  Tests stay hermetic: the `D` path and the upstream command are redirected to
+  test-owned fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
   check confirms that the pinned driver's `tools/list`, under that policy,
   equals the bundled tool snapshot. For a Runtime without a covering
