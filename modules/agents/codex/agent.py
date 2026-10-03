@@ -38,6 +38,7 @@ from core.native_dispatch_phase import (
     mark_prewrite_recovery_required,
 )
 from core.processing_indicator import STOPPED_REACTION_EMOJI
+from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
 from core.prompt_registry import prompt_text
 from core.services.agent_steering import (
     ActiveSteerTarget,
@@ -287,6 +288,9 @@ class CodexAgent(BaseAgent):
         # Shutdown, which also serves disabling the backend, ends every
         # process without the runtime-update notice and admits nothing more.
         self._shutting_down = False
+        # Set by a disable's shutdown: every forced stop then settles the work
+        # bound to its generation with this reason. None shows no notice.
+        self._shutdown_settle_reason: str | None = None
         # Part of every launch spec: renewing moves each cwd to a new process
         # at its next turn.
         self._runtime_epoch = 0
@@ -1408,7 +1412,7 @@ class CodexAgent(BaseAgent):
             # migration_guard interrupted the backend's work before custody
             # moves, and the drained check above refuses any owner it missed.
             await self._stop_generations_now(
-                unit, generations, require_process_exit=True, settle=False
+                unit, generations, require_process_exit=True, settle_reason=None
             )
         await self._end_unattached_runtimes(require_process_exit=True)
         for base_session_id in self._session_mgr.all_base_sessions():
@@ -1452,7 +1456,9 @@ class CodexAgent(BaseAgent):
                 and not self._serves_another_session(unit, base_session_id)
             ):
                 # End is an explicit request to kill.
-                await self._stop_generations_now(unit, unit.generations, require_process_exit=True, settle=True)
+                await self._stop_generations_now(
+                    unit, unit.generations, require_process_exit=True, settle_reason=SETTLED_BY_BACKEND_REFRESH
+                )
                 process_killed = True
             else:
                 # A process the reconciler already detached is not End's to
@@ -1501,7 +1507,7 @@ class CodexAgent(BaseAgent):
             try:
                 # The exclusive cutover runs after the coordinator interrupted
                 # this backend's turns and Activities.
-                await self._stop_generations_now(unit, generations, settle=False)
+                await self._stop_generations_now(unit, generations, settle_reason=None)
             except Exception as exc:
                 logger.warning("Failed to stop Codex transport during auth refresh: %s", exc)
             stopped += sum(1 for generation in generations if generation.runtime.ended)
@@ -1644,22 +1650,27 @@ class CodexAgent(BaseAgent):
             self._turn_registry.clear_session(base_session_id)
         logger.info("Prepared Codex runtime for resumed session %s", base_session_id)
 
-    async def shutdown_runtime(self) -> None:
+    async def shutdown_runtime(self, settle_reason: str | None = None) -> None:
         """Stop every app-server now: service shutdown, probe teardown, or disable.
 
         Disabling the backend is an explicit, user-visible stop: the core has
-        already interrupted its work with the backend-refresh notice and
-        removed this agent from routing, so this ends every process without a
-        notice of its own. A turn that captured the agent before that lookup
-        fails visibly and starts no process.
+        removed this agent from routing and passes ``settle_reason``. Every
+        forced stop then settles the turns and Activities bound to its
+        generation with that reason before it kills the process, so this
+        agent's work is settled even if the core's own interrupt failed, and
+        no other agent's work is touched. Service shutdown and probe teardown
+        pass none and show no notice. A turn that captured the agent before
+        the routing change fails visibly and starts no process.
 
         Raises while any app-server survives: nothing else owns it once the
         agent leaves routing, so the caller keeps the teardown and retries
-        it, and calling this again retries every stop.
+        it. A retry stops every survivor again and settles whatever is still
+        bound to it.
         """
         await self.adopt_model_hub_catalog()
         self._session_last_activity.clear()
         self._shutting_down = True
+        self._shutdown_settle_reason = settle_reason
         stopped = sum(len(runtimes) for runtimes in self._runtimes.values())
         for unit in list(self._units.values()):
             # A forced stop that fails leaves its generation attached; the
@@ -1667,13 +1678,16 @@ class CodexAgent(BaseAgent):
             await unit.stop_all(force=True)
         failure: Exception | None = None
         try:
-            await self._end_unattached_runtimes()
+            await self._end_unattached_runtimes(settle_reason=settle_reason)
         except Exception as exc:
             failure = exc
 
         # Shutdown ends the whole runtime: every process was just asked to end,
-        # so all Session state goes with it, including any bindings.
+        # so all Session state goes with it, including any bindings. A Session
+        # still bound to a survivor keeps its state, so a retry can settle it.
         for base_session_id in list(self._session_mgr.all_base_sessions()):
+            if self._generation_for_session(base_session_id) is not None:
+                continue
             session_key = self._session_mgr.get_session_key(base_session_id)
             if session_key:
                 self.sessions.clear_agent_session_mapping(session_key, self.name, base_session_id)
@@ -2360,15 +2374,21 @@ class CodexAgent(BaseAgent):
         if not kill and not await self._generation_drained(generation):
             return False
         # Every adapter-initiated kill settles its bound work through
-        # ``_end_bound_work``. The one exception is shutdown: the whole runtime
-        # is going away, and restart recovery reports interrupted work, so it
-        # shows no runtime-update notice here.
+        # ``_end_bound_work`` with the runtime-update notice. A shutdown
+        # settles with its own reason: a disable's, or none at service
+        # shutdown, whose restart recovery reports interrupted work.
+        if not kill:
+            settle_reason = None
+        elif self._shutting_down:
+            settle_reason = self._shutdown_settle_reason
+        else:
+            settle_reason = SETTLED_BY_BACKEND_REFRESH
         stopped = await self._stop_runtime(
             runtime,
             # The decision is repeated inside the fence, where no owner can
             # commit to this generation any longer.
             still_drained=None if kill else lambda: self._generation_drained(generation),
-            settle=kill and not self._shutting_down,
+            settle_reason=settle_reason,
         )
         if not stopped:
             return False
@@ -2381,12 +2401,15 @@ class CodexAgent(BaseAgent):
         )
         return True
 
-    async def _end_bound_work(self, runtime: _CodexRuntime) -> None:
-        """Settle a force-stopped generation's work with the runtime-update notice.
+    async def _end_bound_work(self, runtime: _CodexRuntime, reason: str) -> None:
+        """Settle a force-stopped generation's work with ``reason``'s notice.
 
         Registered turns and every bound Session's Activities settle here. A
         turn still starting holds the unit's binding inside ``handle_message``
-        and fails or retries on its own once its process is gone.
+        and fails or retries on its own once its process is gone. Only this
+        agent's work settles: after a re-enable, another agent can run the same
+        Session in the same directory under the same keys. Settling again
+        finds nothing left, so a retried teardown may call this freely.
         """
         sessions = set(runtime.threads)
         if not sessions:
@@ -2410,27 +2433,59 @@ class CodexAgent(BaseAgent):
         )
         end_work = getattr(service, "force_end_runtime_work", None)
         if callable(end_work):
-            # A durable Activity can outlive its foreground turn and keep this
-            # process owned, so every bound Session's Activities settle too.
-            await end_work(
-                self.name,
-                base_session_ids=busy,
-                activity_runtime_keys={f"{base_session_id}:{runtime.cwd}" for base_session_id in sessions},
-            )
+            await end_work(self.name, base_session_ids=busy, activity_runtime_keys=set(), reason=reason)
+        # A durable Activity can outlive its foreground turn and keep this
+        # process owned, so every bound Session's Activities settle too: those
+        # this agent's processes started, never another agent's under the same
+        # runtime key.
+        self._end_own_activities(service, sessions, runtime, reason)
+
+    def _end_own_activities(
+        self,
+        service: Any,
+        sessions: set[str],
+        runtime: _CodexRuntime,
+        reason: str,
+    ) -> None:
+        end_runtime = getattr(getattr(service, "activities", None), "end_runtime", None)
+        if not callable(end_runtime):
+            return
+        identities = {
+            other.activation
+            for runtimes in self._runtimes.values()
+            for other in runtimes
+            if other.activation is not None
+        }
+        if runtime.activation is not None:
+            identities.add(runtime.activation)
+        on_terminal = getattr(service, "on_activity_terminal", None)
+        for base_session_id in sessions:
+            for identity in identities or {None}:
+                completed = end_runtime(
+                    self.name,
+                    f"{base_session_id}:{runtime.cwd}",
+                    status="killed",
+                    retain_terminal_snapshots=True,
+                    activation_identity=identity,
+                    metadata={"interrupt_reason": reason},
+                )
+                for activity in completed:
+                    if callable(on_terminal):
+                        on_terminal(activity)
 
     async def _stop_runtime(
         self,
         runtime: _CodexRuntime,
         *,
         still_drained: Callable[[], Awaitable[bool]] | None = None,
-        settle: bool = False,
+        settle_reason: str | None = None,
         require_process_exit: bool = False,
     ) -> bool:
         """Tear one process down inside its activation fence.
 
         The retirement is reserved before anything awaits, so no durable owner
         commits to the generation while its final drained check runs, its bound
-        work settles (``settle``), or its process stops. A failed check or
+        work settles (with ``settle_reason``), or its process stops. A failed check or
         teardown aborts the reservation. Returns False when ``still_drained``
         declined.
         """
@@ -2450,8 +2505,8 @@ class CodexAgent(BaseAgent):
                 if reservation is not None:
                     registry.finish_retirement(reservation, retire=False)
                 return False
-            if settle:
-                await self._end_bound_work(runtime)
+            if settle_reason is not None:
+                await self._end_bound_work(runtime, settle_reason)
             await transport.stop()
             if require_process_exit and process is not None and process.returncode is None:
                 await asyncio.wait_for(process.wait(), timeout=5)
@@ -2501,15 +2556,16 @@ class CodexAgent(BaseAgent):
         generations: Sequence[_CodexGeneration],
         *,
         require_process_exit: bool = False,
-        settle: bool,
+        settle_reason: str | None,
     ) -> None:
         """Stop generations outside the core's own decisions.
 
         Every generation is detached before the first stop awaits, so a turn
         arriving meanwhile starts its own generation instead of binding to one
-        about to be killed. With ``settle``, each generation's bound work is
-        settled through ``_end_bound_work`` inside its activation fence;
-        callers pass False only when that work was already settled upstream.
+        about to be killed. With ``settle_reason``, each generation's bound
+        work is settled through ``_end_bound_work`` inside its activation
+        fence; callers pass None only when that work was already settled
+        upstream.
         A process whose stop fails, or that a cancellation left unstopped, is
         adopted back as retiring with its Sessions still bound, so a later
         call or sweep can retry.
@@ -2523,7 +2579,7 @@ class CodexAgent(BaseAgent):
                 generation = pending[0]
                 try:
                     await self._stop_runtime(
-                        generation.runtime, settle=settle, require_process_exit=require_process_exit
+                        generation.runtime, settle_reason=settle_reason, require_process_exit=require_process_exit
                     )
                 except Exception as exc:
                     failure = failure or exc
@@ -2554,17 +2610,24 @@ class CodexAgent(BaseAgent):
             if bound is generation:
                 self._session_generations[base_session_id] = restored
 
-    async def _end_unattached_runtimes(self, *, require_process_exit: bool = False) -> None:
+    async def _end_unattached_runtimes(
+        self,
+        *,
+        require_process_exit: bool = False,
+        settle_reason: str | None = None,
+    ) -> None:
         """End every process this Agent still owns that no unit holds any longer.
 
-        Its callers (migration, the exclusive refresh, shutdown) have already
-        settled the backend's work or, at shutdown, deliberately show no notice.
+        Migration and the exclusive refresh have already settled the backend's
+        work. A shutdown passes its own reason: a disable's, or none.
         """
         failure: BaseException | None = None
         for runtimes in list(self._runtimes.values()):
             for runtime in list(runtimes):
                 try:
-                    await self._stop_runtime(runtime, require_process_exit=require_process_exit)
+                    await self._stop_runtime(
+                        runtime, require_process_exit=require_process_exit, settle_reason=settle_reason
+                    )
                 except Exception as exc:
                     failure = failure or exc
                     continue

@@ -870,7 +870,9 @@ def test_end_codex_settles_clears_and_stops_the_last_users_app_server():
         res = await running_agents.end_running_agent(_make_controller(codex=agent), backend="codex", base_session_id="b1")
 
         assert res["ok"] is True and res["process_killed"] is True
-        end_work.assert_awaited_once_with("codex", base_session_ids={"b1"}, activity_runtime_keys={"b1:/w"})
+        end_work.assert_awaited_once_with(
+            "codex", base_session_ids={"b1"}, activity_runtime_keys=set(), reason="backend_refresh"
+        )
         transport.stop.assert_awaited_once()
         assert "b1" in cleared and mgr.get_cwd("b1") is None
         assert codex_transports(agent) == {}

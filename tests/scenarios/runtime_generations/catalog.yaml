@@ -70,6 +70,7 @@ scenarios:
       - tests/test_claude_agent_sessions.py::test_runtime_gen_006_a_turn_reaching_a_disabled_claude_starts_nothing
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_disabling_codex_ends_every_app_server_and_admits_nothing
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_disable_whose_stop_fails_is_retried_until_the_app_server_is_gone
+      - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_retried_disable_settles_only_the_disabled_agents_work
       - tests/test_opencode_generations.py::test_runtime_gen_006_disabling_opencode_stops_every_generation_now_and_refuses_a_late_turn
       - tests/test_opencode_generations.py::test_a_disable_shutdown_that_leaves_a_process_raises_and_its_retry_finishes
   - id: RUNTIME-GEN-007

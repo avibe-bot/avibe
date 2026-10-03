@@ -16,6 +16,7 @@ import pytest
 import modules.agents.codex.agent as codex_agent_module
 from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, set_dispatch_phase
 from core.runtime_activation import RuntimeActivationRegistry
+from core.session_activities import SessionActivityRegistry
 from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.codex.session import CodexSessionManager
@@ -435,6 +436,72 @@ async def test_runtime_gen_006_a_disable_whose_stop_fails_is_retried_until_the_a
 
     assert server.stopped and not any(agent._runtimes.values())
     assert attempts == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_006_a_retried_disable_settles_only_the_disabled_agents_work(tmp_path):
+    """RUNTIME-GEN-006: a disable settles its own agent's work even after Codex is enabled again.
+
+    The core's interrupt failed and the first teardown failed before settling.
+    Re-enabled meanwhile, a new agent runs the same Session in the same
+    directory, so its Activity has the same runtime key. The retried teardown
+    settles the old agent's Activity with the disable reason and leaves the
+    new agent's work alone.
+    """
+    activation = RuntimeActivationRegistry()
+    activities = SessionActivityRegistry(activation_registry=activation)
+    service = AgentService(controller=SimpleNamespace(), activities=activities, activation_registry=activation)
+    end_work = service.force_end_runtime_work
+    service.force_end_runtime_work = AsyncMock(side_effect=RuntimeError("settlement store unavailable"))
+
+    def enabled_agent():
+        agent, cwd = _agent(tmp_path)
+        agent.controller.runtime_activation = activation
+        agent.controller.agent_service = service
+        return agent, cwd
+
+    def start_activity(agent, activity_id):
+        activities.start(
+            backend="codex",
+            runtime_key=f"s1:{cwd}",
+            session_id="ses-1",
+            activity_id=activity_id,
+            kind="task",
+            activation_identity=agent._generation_for_session("s1").runtime.activation,
+        )
+
+    disabled, cwd = enabled_agent()
+    await disabled.handle_message(_request(cwd, "s1"))
+    old = _server_for(disabled, "s1")
+    start_activity(disabled, "old-task")
+    with pytest.raises(RuntimeError, match="survived shutdown"):
+        await disabled.shutdown_runtime(settle_reason="backend_disabled")
+    assert old.alive
+
+    reenabled, _ = enabled_agent()
+    await reenabled.handle_message(_request(cwd, "s1"))
+    new = _server_for(reenabled, "s1")
+    start_activity(reenabled, "new-task")
+    turns_settled = []
+
+    async def recorded_end_work(backend, *, base_session_ids, reason, **kwargs):
+        turns_settled.append((set(base_session_ids), reason))
+        await end_work(backend, base_session_ids=base_session_ids, reason=reason, **kwargs)
+
+    service.force_end_runtime_work = recorded_end_work
+    settled = []
+    service.on_activity_terminal = settled.append
+
+    await disabled.shutdown_runtime(settle_reason="backend_disabled")
+
+    assert [(item.id, item.status, item.metadata.get("interrupt_reason")) for item in settled] == [
+        ("old-task", "killed", "backend_disabled")
+    ]
+    assert [item["id"] for item in activities.session_state("ses-1")["background_activities"]] == ["new-task"]
+    # The disabled agent still knew its own running turn, so it settled it too.
+    assert turns_settled == [({"s1"}, "backend_disabled")]
+    assert old.stopped and new.alive
+    assert reenabled._turn_registry.get_active_turn("s1")
 
 
 @pytest.mark.asyncio
