@@ -486,6 +486,19 @@ class Agent:
                 close = getattr(stream, "aclose", None)
                 if close is not None:
                     await self._cleanup(close, stream=True)
+            if terminal.partial is not None and terminal.partial.usage is not None and not terminal.partial.content:
+                row = await self._response(terminal.partial, final=False)
+                if not self._consumer_closed:
+                    await emit(
+                        MessageCommitted,
+                        message_id=row.row_id,
+                        context_seq=row.context_seq,
+                        final=False,
+                    )
+                # This attempt has already been durably announced. Keep the
+                # retry decision, but do not carry the same partial through a
+                # later expiry path where _loop would commit it again.
+                terminal = replace(terminal, partial=None)
             retry_error = terminal
             retries += 1
             await self._scope.call(lambda: asyncio.sleep(delay))
@@ -520,6 +533,7 @@ class Agent:
 
     async def _loop(self, system: str, emit: Callable[..., Awaitable[None]], selected: ModelSelection) -> RunEndReason:
         first_selection: Optional[ModelSelection] = selected
+        length_tool_retries = 0
         while True:
             async with self._model(system, emit, first_selection) as (terminal, tools):
                 first_selection = None
@@ -542,6 +556,8 @@ class Agent:
                 message = terminal.message
                 self._validate_response(message)
                 failed = message.stop_reason in {"error", "aborted"}
+                if not (message.tool_calls and message.stop_reason == "length"):
+                    length_tool_retries = 0
                 if failed:
                     self._outcome.primary("aborted" if message.stop_reason == "aborted" else "error")
                     await emit(
@@ -570,6 +586,48 @@ class Agent:
                     end = True
                     break
                 skip = skip or isinstance(decision, SkipTools)
+            if message.tool_calls and message.stop_reason != "tool_use":
+                reason = message.stop_reason
+                skip_reason = (
+                    "Tool call was truncated by the output limit; re-issue it with complete arguments."
+                    if reason == "length"
+                    else f"Tool call not executed because the model stopped with {reason}."
+                )
+                for call in message.tool_calls:
+                    self._scope.check()
+                    await self._tool(
+                        call,
+                        tools,
+                        True,
+                        emit,
+                        skip_reason=skip_reason,
+                    )
+                if reason == "length":
+                    if end:
+                        return "ended_by_hook"
+                    length_tool_retries += 1
+                    # Reuse the bounded loop retry budget so an impossible
+                    # tool call cannot spin forever after repeated truncation.
+                    if length_tool_retries > self.retry.max_retries:
+                        self._open = False
+                        self._outcome.primary("error")
+                        await emit(
+                            AgentError,
+                            kind="length",
+                            message="The model repeatedly exceeded its output limit while emitting a tool call.",
+                        )
+                        return "error"
+                    await self._drain_steers(emit)
+                    continue
+                self._open = False
+                if not failed:
+                    self._outcome.primary("error")
+                    await emit(
+                        AgentError,
+                        kind=reason,
+                        message=message.error_message or f"Model stopped with {reason}.",
+                    )
+                return "aborted" if message.stop_reason == "aborted" else "error"
             if failed:
                 return "aborted" if message.stop_reason == "aborted" else "error"
             if not message.tool_calls:
@@ -592,18 +650,21 @@ class Agent:
                 return "ended_by_hook"
             if terminate:
                 return "completed"
-            applied = []
-            try:
-                async with self._lock:
-                    while self._steers:
-                        item = self._steers[0]
-                        await self._consume(item)
-                        self._steers.popleft()
-                        applied.append(item)
-            finally:
-                if not self._consumer_closed:
-                    for item in applied:
-                        await emit(SteerApplied, message_id=item.message_id)
+            await self._drain_steers(emit)
+
+    async def _drain_steers(self, emit: Callable[..., Awaitable[None]]) -> None:
+        applied = []
+        try:
+            async with self._lock:
+                while self._steers:
+                    item = self._steers[0]
+                    await self._consume(item)
+                    self._steers.popleft()
+                    applied.append(item)
+        finally:
+            if not self._consumer_closed:
+                for item in applied:
+                    await emit(SteerApplied, message_id=item.message_id)
 
     async def _tool(
         self,
@@ -611,12 +672,14 @@ class Agent:
         tools: Mapping[str, Tool],
         skip: bool,
         emit: Callable[..., Awaitable[None]],
+        *,
+        skip_reason: str | None = None,
     ) -> tuple[ToolResult, bool]:
         call = deepcopy(original)
         end = False
         result = None
         if skip:
-            result = ToolResult((text("[skipped by policy]"),), is_error=True)
+            result = ToolResult((text(skip_reason or "[skipped by policy]"),), is_error=True)
         else:
             for hook in self.hooks:
                 decision = await self._hook(lambda: hook.before_tool(call, self._ctx))
