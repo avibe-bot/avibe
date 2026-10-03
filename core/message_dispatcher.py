@@ -2854,6 +2854,9 @@ class ConsolidatedMessageDispatcher:
                 "delivery_suppressed": True,
             }
         native_output_id = output_semantics.native_message_id(target_context) if output is not None else None
+        # A backend that commits its own transcript row passes it here: every persist
+        # site below then writes that row's display columns instead of a second row.
+        existing_row_id = output_semantics.persisted_row_id
 
         # For a result, persist the SAME cleaned text the user receives:
         # process_reply() strips file:// markdown links + the trailing
@@ -3033,6 +3036,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -3043,6 +3047,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
                 else:
                     persisted_output = persist_agent_message(
@@ -3052,6 +3057,7 @@ class ConsolidatedMessageDispatcher:
                         metadata=output_metadata,
                         native_message_id=native_output_id,
                         citations=citations,
+                        existing_row_id=existing_row_id,
                     )
                 local_message_id = (persisted_output or {}).get("id") or (
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
@@ -3479,6 +3485,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -3489,6 +3496,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
 
                 if settlement_waits_for_persistence:
@@ -3621,7 +3629,9 @@ class ConsolidatedMessageDispatcher:
         # Persist the intermediate log row BEFORE the mute filter so muted
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
-        persist_agent_message(target_context, canonical_type, persist_text, citations=citations)
+        persist_agent_message(
+            target_context, canonical_type, persist_text, citations=citations, existing_row_id=existing_row_id
+        )
         # Web only: the same text additionally lands as a transcript-visible
         # ``interim`` row. Every backend emits ``assistant`` only once later output
         # has proved the text is not the Turn's final answer, so this never

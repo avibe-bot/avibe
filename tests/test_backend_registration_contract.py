@@ -53,7 +53,7 @@ PYTHON_DECLARATIONS = {
     ("core/handlers/model_hub/service.py", "Tuple", frozenset({"claude", "codex"})): (3, "native_subset", "Backends with bundled model lists."),
     ("core/services/session_fork.py", "Set", frozenset({"codex", "opencode"})): (1, "native_subset", "Native forks that can trim a running turn."),
     ("core/services/skills.py", "Dict", NATIVE): (1, "native", "askill native CLI ids."),
-    ("core/session_turns.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "Runtimes whose running turns cannot restore."),
+    ("core/session_turns.py", "Set", frozenset({"claude", "codex", "avibe"})): (1, "agent_subset", "Runtimes whose accepted turns cannot survive a service restart (process-bound, including Avibe's in-process loop)."),
     ("core/vibe_agents.py", "Dict", NATIVE): (1, "native", "Native recommendations; Avibe uses its configured Hub catalog."),
     ("modules/im/telegram.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "Native subagent routing controls."),
     ("scripts/incus_tenant.py", "Dict", AGENTS): (1, "agent", "Bootstrap config with backend-specific fields."),
@@ -146,6 +146,8 @@ def test_backend_universes_are_catalog_owned_and_literals_are_classified():
             assert members == AGENTS
         elif relation == "native":
             assert members == NATIVE
+        elif relation == "agent_subset":
+            assert members < AGENTS
         else:
             assert relation == "native_subset" and members < NATIVE
 

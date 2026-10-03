@@ -154,11 +154,13 @@ class Agent:
             return True
 
     async def take_pending_inputs(self) -> tuple[AgentInput, ...]:
-        """Return accepted but unconsumed inputs to the adapter's P3 queue.
+        """Return accepted but unconsumed inputs to the adapter.
 
         Call after the run closes admission (normally after RunEnded). The
         adapter still has the original durable rows; this transfers admission
-        ownership back in steer/follow-up priority order, exactly once.
+        ownership back in steer/follow-up priority order, exactly once. The
+        inputs still belong to the Turn that accepted them, never to a new P3
+        Turn (``recovery.md`` T3).
         """
         async with self._lock:
             if self._open:

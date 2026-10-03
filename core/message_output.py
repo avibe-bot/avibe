@@ -63,6 +63,10 @@ class MessageOutput:
     requires_delivery_for_run_settlement: bool = False
     settled_by: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    # ``messages.id`` of a row the backend already committed as its transcript (the
+    # Avibe Agent). Persistence then writes that row's display columns instead of
+    # inserting a second row; nothing else about delivery changes.
+    persisted_row_id: str | None = None
 
     @property
     def settles_run(self) -> bool:

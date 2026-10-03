@@ -35,13 +35,15 @@ commit input → loop:
     else, holding the queue lock:
         if a steer or follow-up is pending: commit the response as `assistant`, commit the pending inputs,
             release the lock → continue loop
-        else: commit the response as `result` (final) and close the queues for this run, release the lock → end
+        else: commit the response as final (`result`, or `error` when it failed) and close the queues, release the lock → end
 ```
 
-Finality is decided before the response row is inserted, so a `result` row is always the run's last response. A final
-response with `stop_reason` `refusal` or `safety` and no text is still committed as `result`; its rendered display text
-is the localized explanation, written in the same transaction, so re-delivery after a crash shows it too. The run also
-ends with an `error` event of that kind. Refusal text from the provider is kept as the reply. A
+Finality is decided before the response row is inserted, so a final (`result` or `error`) row is always the run's last
+response. A final response with `stop_reason` `refusal` or `safety` and no text is still committed as the final
+response, typed `error` ([`transcript.md`](transcript.md) §1); its commit-time display text is the localized
+explanation. (That it is written in the same transaction so that re-delivery after a crash shows it is moot: Avibe
+delivers committed rows through the shared emit path and nothing re-delivers them, [`recovery.md`](recovery.md)
+§Delivery.) The run also ends with an `error` event of that kind. Refusal text from the provider is kept as the reply. A
 steer that arrives after the queues closed is refused by the running Turn, and Avibe's delivery falls back to the P3
 queue, which starts the next run.
 

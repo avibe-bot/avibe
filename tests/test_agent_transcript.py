@@ -20,6 +20,7 @@ from core.agent_core.messages import (
     AssistantMessage,
     ImageBlock,
     Origin,
+    TextBlock,
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
@@ -233,7 +234,6 @@ async def test_every_kind_round_trips_in_one_order_attributed_to_the_turn(engine
     for entry, row_type, display in ((written[1], "assistant", "Listing."), (written[7], "result", "两个文件。")):
         row = rows[entry.row_id]
         assert (row["type"], row["content_text"], row["author"]) == (row_type, display, "agent")
-        assert json.loads(row["metadata_json"])["delivery"] == {"state": "pending", "parts": []}
     # Every inserted row answers the Turn's initial input, not the steer's surface.
     inserted = [rows[written[1].row_id], rows[written[7].row_id], *events]
     assert {(row["platform"], row["scope_id"]) for row in inserted} == {("slack", home)}
@@ -362,51 +362,6 @@ async def test_fork_chain_reads_the_ancestry_up_to_each_anchor(engine) -> None:
     assert early.context_seq == 2
 
 
-async def test_outbox_replays_pending_responses_until_every_part_is_confirmed(engine) -> None:
-    with engine.begin() as conn:
-        home = _scope(conn, "C-home")
-        _session(conn, "ses_main", home)
-        consumed = _row(conn, "ses_main", home, "go")
-    store = SQLiteTranscriptStore(engine)
-    await store.consume_input("ses_main", consumed, _user("go"))
-    narration = await store.append_response("ses_main", _assistant("step", call_id="call_1"), final=False)
-    await store.append_tool_result("ses_main", _tool_result("call_1", "ok"), details={})
-    # A response with nothing to display has no part on any surface.
-    silent = AssistantMessage(content=(ToolCallBlock(id="call_2", name="bash"),), origin=ORIGIN, stop_reason="tool_use")
-    await store.append_response("ses_main", silent, final=False)
-    await store.append_tool_result("ses_main", _tool_result("call_2", "ok"), details={})
-    reply = await store.append_response("ses_main", _assistant("answer"), final=True)
-
-    pending = await store.pending_deliveries("ses_main")
-    assert [(item.row_id, item.context_seq, item.final, item.text, item.parts) for item in pending] == [
-        (narration.row_id, 2, False, "step", ()),
-        (reply.row_id, 6, True, "answer", ()),
-    ]
-    assert pending[1].message == reply.message
-
-    assert await store.record_delivery_part("ses_main", narration.row_id, index=0, count=1) is True
-    # A reply split in two stays pending until both parts are confirmed, and a
-    # retried part keeps its first receipt.
-    assert await store.record_delivery_part("ses_main", reply.row_id, index=1, count=2, native_message_id="b") is False
-    assert await store.record_delivery_part("ses_main", reply.row_id, index=1, count=2, native_message_id="x") is False
-    [still_pending] = await store.pending_deliveries("ses_main")
-    assert still_pending.row_id == reply.row_id
-    assert [part and part["native_message_id"] for part in still_pending.parts] == [None, "b"]
-    with pytest.raises(TranscriptError):
-        await store.record_delivery_part("ses_main", reply.row_id, index=0, count=3)
-    assert await store.record_delivery_part("ses_main", reply.row_id, index=0, count=2, native_message_id="a") is True
-
-    assert await store.pending_deliveries("ses_main") == []
-    with engine.connect() as conn:
-        delivery = json.loads(
-            conn.execute(select(messages.c.metadata_json).where(messages.c.id == reply.row_id)).scalar_one()
-        )["delivery"]
-    assert delivery["state"] == "delivered"
-    assert [part["native_message_id"] for part in delivery["parts"]] == ["a", "b"]
-    with pytest.raises(TranscriptError):
-        await store.record_delivery_part("ses_main", consumed, index=0, count=1)
-
-
 async def test_a_cancelled_write_raises_only_after_its_commit_settled(engine) -> None:
     with engine.begin() as conn:
         home = _scope(conn, "C-home")
@@ -450,3 +405,35 @@ async def test_payloads_that_would_not_read_back_unchanged_are_refused(engine, v
     with pytest.raises(ValueError):
         await store.append_tool_result("ses_main", _tool_result("call_1", "ok"), details={"value": value})
     assert list(await store.load("ses_main")) == [entry]
+
+
+async def test_the_display_copy_commits_with_its_row_and_never_reaches_the_context(engine) -> None:
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "go")
+
+    def render(message, *, final):
+        body = "\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
+        return f"{body} (shown)" if final else body.upper()
+
+    store = SQLiteTranscriptStore(engine, render=render)
+    await store.consume_input("ses_main", consumed, _user("go"))
+    narration = await store.append_response("ses_main", _assistant("step", call_id="call_1"), final=False)
+    await store.append_tool_result("ses_main", _tool_result("call_1", "ok"), details={})
+    reply = await store.append_response("ses_main", _assistant("答案"), final=True)
+
+    with engine.connect() as conn:
+        shown = dict(
+            conn.execute(
+                select(messages.c.id, messages.c.content_text).where(
+                    messages.c.id.in_([narration.row_id, reply.row_id])
+                )
+            ).all()
+        )
+    assert shown == {narration.row_id: "STEP", reply.row_id: "答案 (shown)"}
+    # The model copy is the response verbatim; the display copy is not context.
+    assert [entry.message for entry in await store.load("ses_main") if entry.kind == "response"] == [
+        narration.message,
+        reply.message,
+    ]

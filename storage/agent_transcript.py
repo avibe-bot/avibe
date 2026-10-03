@@ -7,9 +7,8 @@ context exactly when its ``context_seq`` is non-null:
 * inputs are existing ``messages`` rows (``user``, ``harness``,
   ``agent_initiated``, ``annotation``); consuming one sets its ``context_seq``
   and ``content_json.model`` once;
-* responses are new ``assistant`` / ``result`` rows with ``content_json.model``,
-  a rendered ``content_text``, and the output outbox state
-  ``metadata_json.delivery``;
+* responses are new ``assistant`` / ``result`` / ``error`` rows with
+  ``content_json.model`` and a rendered ``content_text``;
 * tool results, checkpoints, context edits, and hook state are new
   ``agent_events`` rows with ``visibility='context'``.
 
@@ -24,7 +23,8 @@ Delivery, and that Turn's initial Delivery names the input row. That is the
 channel the Turn answers, where ``persist_agent_message`` attributes the same
 output, and a steer from another surface does not re-home the reply. An input
 without a Delivery link stands for itself. ``agent_events.turn_id`` is that
-Turn.
+Turn. A fork that settles the calls it inherited open before its first input
+attributes those rows to its own scope, with no Turn.
 
 Fork. A child inherits its source's context rows up to ``anchor_seq``, read
 from the top-level Session metadata ``fork_source_session_id`` and
@@ -35,11 +35,13 @@ never move into or out of the prefix. A fork without that key (a released fork,
 or one from another backend) inherits nothing. The child's own rows continue
 from ``anchor_seq + 1``.
 
-Outbox. A response row commits with ``delivery = {"state": "pending",
-"parts": []}``. The adapter records a receipt for each part a surface splits it
-into; the row becomes ``delivered`` only when every part has one
-(``recovery.md`` D1). A response whose display text is blank (only thinking or
-tool calls) has no part on any surface and commits ``delivered``.
+Display. A response row commits with the display text its renderer gives it.
+Its display columns (``content_text``, the display keys of ``content_json``,
+type ``result`` or ``error``) are written again when the dispatcher delivers
+it, exactly as for the other backends' rows (``persist_agent_message`` with
+``existing_row_id``). The transcript payload, ``content_json.model``, never
+changes after commit. A final whose ``final_outcome`` failed commits as
+``error``.
 
 Cancellation. A worker thread cannot be interrupted, so a cancelled write keeps
 the Session's lock until its transaction settles and only then raises: when a
@@ -69,11 +71,19 @@ from core.agent_core.messages import (
 )
 from storage import agent_events_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
-from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
+from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
-RESPONSE_TYPES = ("assistant", "result")
+# A final response is ``result``, or ``error`` when ``final_outcome`` says it failed:
+# the row carries its outcome, as the other backends' terminal rows do. A final with
+# nothing to show (a silent reply) is the hidden response type ``assistant``: context,
+# but no transcript row, inbox reply, or unread result, as the other backends persist
+# nothing visible for it.
+FINAL_TYPES = ("result", "error")
+RESPONSE_TYPES = ("assistant", *FINAL_TYPES)
 CONTEXT_VISIBILITY = "context"
+# Only the Avibe Agent writes context rows; the Session's routed backend may change mid-Turn.
+CONTEXT_WRITER = "avibe"
 PAYLOAD_VERSION = 1
 
 PayloadKind = Literal["compaction", "context_edit", "agent_state"]
@@ -85,31 +95,40 @@ _EVENT_TYPE_BY_KIND: dict[str, str] = {
 }
 _KIND_BY_EVENT_TYPE = {event_type: kind for kind, event_type in _EVENT_TYPE_BY_KIND.items()}
 
-DisplayRenderer = Callable[[AssistantMessage], str]
+# ``render(message, final=...)``: a response row's commit-time display text.
+DisplayRenderer = Callable[..., str]
 _T = TypeVar("_T")
+FinalOutcome = Literal["completed", "failed"]
 
 
-def render_text(message: AssistantMessage) -> str:
+def final_outcome(message: AssistantMessage) -> FinalOutcome:
+    """The Turn outcome a committed final response determines by itself.
+
+    The one rule, shared by the row's type at commit and live settlement: a final
+    reply without text of its own (an unexplained refusal or safety stop, or an
+    empty answer) failed; any other final completed. It is the loop's own
+    empty-reply test (loop-control.md section 2). Failures only a live run can
+    observe after the commit are applied by the live caller.
+    """
+    has_text = any(isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content)
+    return "completed" if has_text else "failed"
+
+
+def _response_type(message: AssistantMessage, *, final: bool, display_text: str) -> str:
+    if not final:
+        return "assistant"
+    if final_outcome(message) == "failed":
+        return "error"
+    return "result" if display_text.strip() else "assistant"
+
+
+def render_text(message: AssistantMessage, *, final: bool = False) -> str:
     """Default display copy of a response: its text blocks, verbatim, in order."""
     return "\n\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
 
 
 class TranscriptError(RuntimeError):
     """A write the context rules refuse, or rows that cannot form a context."""
-
-
-@dataclass(frozen=True)
-class PendingDelivery:
-    """A committed response whose surface delivery has not been recorded."""
-
-    session_id: str
-    context_seq: int
-    row_id: str
-    final: bool
-    text: str
-    message: AssistantMessage
-    parts: tuple[Optional[Mapping[str, Any]], ...] = ()
-    """Receipts by part index from an earlier attempt; ``None`` marks a part still to send."""
 
 
 @dataclass(frozen=True)
@@ -122,16 +141,23 @@ class _TurnOrigin:
 
 
 class SQLiteTranscriptStore:
-    """``TranscriptStore`` over Avibe's tables, plus the output outbox helpers.
+    """``TranscriptStore`` over Avibe's tables.
 
-    ``render`` produces a response row's ``content_text``; the adapter supplies
-    its display rendering, the default keeps the text blocks.
+    ``render(message, final=...)`` produces a response row's commit-time
+    ``content_text``; the adapter supplies its display rendering, the default keeps
+    the text blocks.
     """
 
     def __init__(self, engine: Engine, *, render: DisplayRenderer = render_text) -> None:
         self._engine = engine
         self._render = render
         self._locks: dict[str, asyncio.Lock] = {}
+
+    def forget(self, session_id: str) -> None:
+        """Drop an idle Session's write lock; the next write creates it again."""
+        lock = self._locks.get(session_id)
+        if lock is not None and not lock.locked():
+            del self._locks[session_id]
 
     # --- TranscriptStore ----------------------------------------------------
 
@@ -171,14 +197,16 @@ class SQLiteTranscriptStore:
 
         return await self._write(session_id, work)
 
-    async def append_response(self, session_id: str, message: AssistantMessage, *, final: bool) -> ContextEntry:
+    async def append_response(
+        self, session_id: str, message: AssistantMessage, *, final: bool, agent_name: Optional[str] = None
+    ) -> ContextEntry:
         if not isinstance(message, AssistantMessage):
             raise TypeError("append_response takes an AssistantMessage")
         model = _canonical({"version": PAYLOAD_VERSION, "message": message_to_dict(message)}, "response")
-        display_text = self._render(message)
+        display_text = self._render(message, final=final)
 
         def work(conn: Connection) -> ContextEntry:
-            origin = _turn_origin(conn, session_id)
+            origin = _turn_origin(conn, session_id, agent_name)
             seq = _next_context_seq(conn, session_id)
             row = messages_service.append(
                 conn,
@@ -188,10 +216,9 @@ class SQLiteTranscriptStore:
                 author="agent",
                 source="agent",
                 author_name=origin.agent_name,
-                message_type="result" if final else "assistant",
+                message_type=_response_type(message, final=final, display_text=display_text),
                 text=display_text,
                 content={"model": model},
-                metadata={"delivery": {"state": "pending" if display_text.strip() else "delivered", "parts": []}},
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
             return ContextEntry(session_id, seq, "response", row["id"], message=message, payload=model)
@@ -199,7 +226,12 @@ class SQLiteTranscriptStore:
         return await self._write(session_id, work)
 
     async def append_tool_result(
-        self, session_id: str, message: ToolResultMessage, *, details: Mapping[str, Any]
+        self,
+        session_id: str,
+        message: ToolResultMessage,
+        *,
+        details: Mapping[str, Any],
+        agent_name: Optional[str] = None,
     ) -> ContextEntry:
         if not isinstance(message, ToolResultMessage):
             raise TypeError("append_tool_result takes a ToolResultMessage")
@@ -208,40 +240,21 @@ class SQLiteTranscriptStore:
             payload["details"] = dict(details)
         payload = _canonical(payload, "tool result")
         return await self._write(
-            session_id, lambda conn: self._append_event(conn, session_id, "tool_result", payload, message)
+            session_id,
+            lambda conn: self._append_event(conn, session_id, "tool_result", payload, message, agent_name),
         )
 
-    async def append_payload(self, session_id: str, kind: PayloadKind, payload: Mapping[str, Any]) -> ContextEntry:
+    async def append_payload(
+        self, session_id: str, kind: PayloadKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None
+    ) -> ContextEntry:
         if kind not in ("compaction", "context_edit", "agent_state"):
             raise ValueError(f"not a payload entry kind: {kind!r}")
         data = _canonical(dict(payload), f"{kind} payload")
         if not _is_current_version(data):
             raise ValueError(f"a {kind} payload needs version {PAYLOAD_VERSION}")
-        return await self._write(session_id, lambda conn: self._append_event(conn, session_id, kind, data, None))
-
-    # --- output outbox --------------------------------------------------------
-
-    async def pending_deliveries(self, session_id: str) -> list[PendingDelivery]:
-        """The Session's committed responses not yet delivered, in ``context_seq`` order."""
-        return await asyncio.to_thread(self._pending_deliveries, session_id)
-
-    async def record_delivery_part(
-        self,
-        session_id: str,
-        row_id: str,
-        *,
-        index: int,
-        count: int,
-        native_message_id: Optional[str] = None,
-    ) -> bool:
-        """Record the receipt of part ``index`` of ``count``; True once every part has one.
-
-        A part that already has a receipt keeps its first one, so a retried send is
-        recorded once.
-        """
-        if not 0 <= index < count:
-            raise ValueError(f"part {index} is outside a delivery of {count} part(s)")
-        return await asyncio.to_thread(self._record_delivery_part, session_id, row_id, index, count, native_message_id)
+        return await self._write(
+            session_id, lambda conn: self._append_event(conn, session_id, kind, data, None, agent_name)
+        )
 
     # --- implementation -------------------------------------------------------
 
@@ -267,8 +280,9 @@ class SQLiteTranscriptStore:
         kind: EntryKind,
         payload: dict[str, Any],
         message: Optional[ToolResultMessage],
+        agent_name: Optional[str] = None,
     ) -> ContextEntry:
-        origin = _turn_origin(conn, session_id)
+        origin = _turn_origin(conn, session_id, agent_name)
         seq = _next_context_seq(conn, session_id)
         row = agent_events_service.append(
             conn,
@@ -301,82 +315,6 @@ class SQLiteTranscriptStore:
                     f"rows {previous.row_id} and {current.row_id} share context_seq {current.context_seq}"
                 )
         return entries
-
-    def _pending_deliveries(self, session_id: str) -> list[PendingDelivery]:
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                select(
-                    messages.c.id,
-                    messages.c.type,
-                    messages.c.context_seq,
-                    messages.c.content_text,
-                    messages.c.content_json,
-                    messages.c.metadata_json,
-                )
-                .where(
-                    messages.c.session_id == session_id,
-                    messages.c.context_seq.is_not(None),
-                    messages.c.type.in_(RESPONSE_TYPES),
-                    func.json_extract(messages.c.metadata_json, "$.delivery.state") == "pending",
-                )
-                .order_by(messages.c.context_seq)
-            ).mappings().all()
-        deliveries = []
-        for row in rows:
-            entry = _message_entry(session_id, row)
-            assert isinstance(entry.message, AssistantMessage)
-            deliveries.append(
-                PendingDelivery(
-                    session_id=session_id,
-                    context_seq=entry.context_seq,
-                    row_id=entry.row_id,
-                    final=row["type"] == "result",
-                    text=row["content_text"] or "",
-                    message=entry.message,
-                    parts=tuple(_delivery(row["metadata_json"], entry.row_id)["parts"]),
-                )
-            )
-        return deliveries
-
-    def _record_delivery_part(
-        self, session_id: str, row_id: str, index: int, count: int, native_message_id: Optional[str]
-    ) -> bool:
-        with self._engine.begin() as conn:
-            reserve_write_lock(conn)
-            raw = conn.execute(
-                select(messages.c.metadata_json).where(
-                    messages.c.id == row_id,
-                    messages.c.session_id == session_id,
-                    messages.c.context_seq.is_not(None),
-                    messages.c.type.in_(RESPONSE_TYPES),
-                )
-            ).scalar_one_or_none()
-            if raw is None:
-                raise TranscriptError(f"{row_id} is not a response of Session {session_id}")
-            metadata = _json_object(raw, row_id)
-            delivery = _delivery(raw, row_id)
-            if delivery["state"] == "delivered":
-                return True
-            parts = delivery["parts"] or [None] * count
-            if len(parts) != count:
-                raise TranscriptError(f"{row_id} was split into {len(parts)} part(s), not {count}")
-            if parts[index] is None:
-                now = _utc_now()
-                receipt: dict[str, Any] = {"delivered_at": now}
-                if native_message_id:
-                    receipt["native_message_id"] = native_message_id
-                parts[index] = receipt
-                state = "delivered" if all(part is not None for part in parts) else "pending"
-                conn.execute(
-                    messages.update()
-                    .where(messages.c.id == row_id)
-                    .values(
-                        metadata_json=json.dumps({**metadata, "delivery": {"state": state, "parts": parts}}),
-                        updated_at=now,
-                    )
-                )
-            return all(part is not None for part in parts)
-
 
 async def _settle(task: asyncio.Future[Any]) -> None:
     """Wait for ``task`` to finish, whatever cancellations arrive meanwhile."""
@@ -414,9 +352,15 @@ def _next_context_seq(conn: Connection, session_id: str) -> int:
     return top + 1
 
 
-def _turn_origin(conn: Connection, session_id: str) -> _TurnOrigin:
+def _turn_origin(conn: Connection, session_id: str, agent_name: Optional[str] = None) -> _TurnOrigin:
+    """Where an inserted row belongs, and the Agent that wrote it.
+
+    ``agent_name`` is the running Turn's Agent (its request snapshot): the Session's
+    selected Agent may change mid-Turn, so the Session row is only the fallback for a
+    write outside a Turn (startup recovery).
+    """
     session = conn.execute(
-        select(agent_sessions.c.agent_name, agent_sessions.c.agent_backend).where(agent_sessions.c.id == session_id)
+        select(agent_sessions.c.agent_name).where(agent_sessions.c.id == session_id)
     ).first()
     if session is None:
         raise TranscriptError(f"Session {session_id} does not exist")
@@ -431,7 +375,20 @@ def _turn_origin(conn: Connection, session_id: str) -> _TurnOrigin:
         .limit(1)
     ).first()
     if latest is None:
-        raise TranscriptError(f"Session {session_id} has consumed no input; a context row answers a Turn")
+        # A fork settles the calls it inherited open (T2) before it consumes its first
+        # input: those rows belong to the Session's own scope, outside any Turn.
+        home = (
+            conn.execute(
+                select(scopes.c.id, scopes.c.platform)
+                .select_from(agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id))
+                .where(agent_sessions.c.id == session_id)
+            ).first()
+            if _fork_link(conn, session_id) is not None
+            else None
+        )
+        if home is None:
+            raise TranscriptError(f"Session {session_id} has consumed no input; a context row answers a Turn")
+        return _TurnOrigin(home.platform, home.id, None, agent_name or session.agent_name, CONTEXT_WRITER)
     platform, scope_id = latest.platform, latest.scope_id
     turn_id = conn.execute(
         select(message_deliveries.c.turn_id)
@@ -454,10 +411,20 @@ def _turn_origin(conn: Connection, session_id: str) -> _TurnOrigin:
         ).first()
         if initial is not None:
             platform, scope_id = initial.platform, initial.scope_id
-    return _TurnOrigin(platform, scope_id, turn_id, session.agent_name, session.agent_backend)
+    return _TurnOrigin(platform, scope_id, turn_id, agent_name or session.agent_name, CONTEXT_WRITER)
 
 
 # --- fork ancestry -------------------------------------------------------------
+
+
+def context_bound(conn: Connection, session_id: str) -> int:
+    """The last ``context_seq`` of a Session's context, including the prefix it inherited.
+
+    A fork of a Session with no running Turn inherits all of it: a Turn that ended
+    silently or was stopped shows no row a message anchor could name.
+    """
+    link = _fork_link(conn, session_id)
+    return max(value for value in (_own_bound(conn, session_id), link[1] if link else 0) if value is not None)
 
 
 def resolve_fork_anchor_seq(conn: Connection, source_session_id: str, anchor_message_id: Optional[str]) -> int:
@@ -494,6 +461,46 @@ def resolve_fork_anchor_seq(conn: Connection, source_session_id: str, anchor_mes
         )
     ).scalar()
     return max(value for value in (inherited, own_messages, own_events) if value is not None)
+
+
+def source_tool_result(
+    conn: Connection, owner_session_id: str, response_seq: int, tool_call_id: str
+) -> Optional[ContextEntry]:
+    """The result its owner committed for a call instance a fork inherited open.
+
+    A fork anchored between a response and its tool results inherits those calls
+    open. A call's identity is its instance: the response that carries it
+    (``owner_session_id`` at ``response_seq``) plus its id, because providers may
+    reuse ids. Its result is the first ``tool_result`` for that id after the
+    response in the owner's own rows, in context order: every call is settled
+    before the next model call, so a later reuse of the id comes after it. The
+    child settles with that result instead of re-deriving it from job state that
+    J5 may since have pruned.
+    """
+    row = (
+        conn.execute(
+            select(
+                agent_events.c.id,
+                agent_events.c.session_id,
+                agent_events.c.context_seq,
+                agent_events.c.content_json,
+                agent_events.c.event_type,
+                agent_events.c.visibility,
+            )
+            .where(
+                agent_events.c.session_id == owner_session_id,
+                agent_events.c.event_type == _EVENT_TYPE_BY_KIND["tool_result"],
+                agent_events.c.visibility == CONTEXT_VISIBILITY,
+                agent_events.c.context_seq > response_seq,
+                func.json_extract(agent_events.c.content_json, "$.message.tool_call_id") == tool_call_id,
+            )
+            .order_by(agent_events.c.context_seq)
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
+    return _event_entry(row["session_id"], row) if row is not None else None
 
 
 def _fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:
@@ -594,19 +601,6 @@ def _versioned(value: Any, row_id: str) -> dict[str, Any]:
 def _is_current_version(payload: Mapping[str, Any]) -> bool:
     version = payload.get("version")
     return isinstance(version, int) and not isinstance(version, bool) and version == PAYLOAD_VERSION
-
-
-def _delivery(raw_metadata: Any, row_id: str) -> dict[str, Any]:
-    delivery = _json_object(raw_metadata, row_id).get("delivery")
-    parts = delivery.get("parts") if isinstance(delivery, dict) else None
-    if (
-        not isinstance(delivery, dict)
-        or delivery.get("state") not in ("pending", "delivered")
-        or not isinstance(parts, list)
-        or any(part is not None and not isinstance(part, dict) for part in parts)
-    ):
-        raise TranscriptError(f"response {row_id} has no readable delivery state")
-    return {"state": delivery["state"], "parts": list(parts)}
 
 
 def _json_object(raw: Any, row_id: str) -> dict[str, Any]:

@@ -751,6 +751,14 @@ class Controller:
                 self.agent_service.register(OpenCodeAgent(self, self.config.opencode))
             except Exception as e:
                 logger.error(f"Failed to initialize OpenCode agent: {e}")
+        avibe_config = getattr(self.config, "avibe", None)
+        if avibe_config is not None and getattr(avibe_config, "enabled", True):
+            try:
+                from modules.agents.avibe import AvibeAgent
+
+                self.agent_service.register(AvibeAgent(self))
+            except Exception as e:
+                logger.error(f"Failed to initialize Avibe Agent: {e}")
 
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
@@ -1008,6 +1016,13 @@ class Controller:
             except Exception as e:
                 logger.error(f"Failed to restore active polls: {e}", exc_info=True)
 
+    async def _recover_avibe_agent_runtime_state(self) -> None:
+        """Settle the Avibe Agent's open tool calls and prune settled jobs left by the previous process."""
+        avibe_agent = getattr(getattr(self, "agent_service", None), "agents", {}).get("avibe")
+        recover = getattr(avibe_agent, "recover_runtime_state", None)
+        if callable(recover):
+            await recover()
+
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)
@@ -1085,6 +1100,10 @@ class Controller:
         # A no-op in any process that does not hold the service lock, so the
         # embedded and test paths that run a controller are unaffected.
         self._publish_readiness_unless_im_runtime_failed()
+        try:
+            await self._recover_avibe_agent_runtime_state()
+        except Exception:
+            logger.exception("Failed to recover the Avibe Agent's runtime state")
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:

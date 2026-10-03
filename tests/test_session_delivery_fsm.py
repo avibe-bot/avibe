@@ -4200,9 +4200,16 @@ def test_start_write_ambiguity_replays_once_after_restart(managers) -> None:
     assert turns[1]["state"] == "starting"
 
 
-def test_accepted_codex_turn_without_runtime_settles_and_releases_queue(managers) -> None:
+@pytest.mark.parametrize("backend", ["codex", "avibe"])
+def test_accepted_turn_of_a_process_bound_backend_without_runtime_settles_and_releases_queue(
+    managers, backend: str
+) -> None:
+    # The Avibe Agent's loop runs inside the controller process, so after a
+    # restart its accepted Turn can only be settled as interrupted (recovery.md T4).
     first, restarted, engine, _engine_b, starts = managers
     turn_id, _context_value = asyncio.run(_activate(first, text="accepted before restart"))
+    with engine.begin() as conn:
+        conn.execute(update(session_turns).where(session_turns.c.id == turn_id).values(backend=backend))
     queued = asyncio.run(
         first.deliver(
             DeliveryRequest(

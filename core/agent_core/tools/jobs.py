@@ -213,16 +213,30 @@ class LocalJobHost:
     def _write_meta(self, job_id: str, meta: Mapping[str, Any]) -> None:
         _write_atomic(self._path(job_id, "meta.json"), _meta_text(meta))
 
-    def find_job(self, session_id: str, tool_call_id: str) -> Optional[str]:
-        """The job started for a tool call, for settling it at resume."""
+    def find_job(
+        self, session_id: str, tool_call_id: str, *, created_since: Optional[datetime] = None
+    ) -> Optional[str]:
+        """The job started for a tool call, for settling it at resume.
+
+        A provider may reuse a tool-call id in a later response, so several jobs can
+        match: the newest is returned. ``created_since``, the commit time of the
+        response that made the call, excludes jobs an earlier call with the same id
+        started.
+        """
+        floor = _iso(created_since.astimezone(timezone.utc)) if created_since is not None else ""
+        newest: Optional[tuple[str, str]] = None
         for name in self._job_ids():
             try:
                 meta = self.meta(name)
             except (KeyError, ValueError, OSError):
                 continue
-            if meta.get("session_id") == session_id and meta.get("tool_call_id") == tool_call_id:
-                return name
-        return None
+            if meta.get("session_id") != session_id or meta.get("tool_call_id") != tool_call_id:
+                continue
+            # ``_iso`` strings of one width order chronologically.
+            created = str(meta.get("created_at") or "")
+            if created >= floor and (newest is None or created > newest[0]):
+                newest = (created, name)
+        return newest[1] if newest is not None else None
 
     def _job_ids(self) -> list[str]:
         try:

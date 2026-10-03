@@ -25,18 +25,18 @@ at-least-once, and that is stated where it applies.
 | --- | --- | --- |
 | T1 | `project()` reads only committed rows; the same rows always produce the same request. | projection before and after job state changes |
 | T2 | At resume, before the first projection, every tool call without a committed `tool_result` gets exactly one, chosen from its job state (exited: the output; running: handover; never ran: the interrupted result). A call without job state (`write`, `edit`) gets `[tool call interrupted; it may or may not have completed; re-read the file before continuing]`. Retries settle nothing twice. | crash between settlement steps, then resume twice |
-| T3 | Inputs accepted by `steer` or `follow_up` are never dropped: they enter the context or are returned to the adapter for the P3 queue, including after a crash (the adapter re-queues accepted but unconsumed inputs at resume). | a terminating tool while a steer is queued; a crash before consumption |
+| T3 | Inputs accepted by `steer` or `follow_up` are never dropped: they enter the context, including after a crash. They belong to the Turn that accepted them and are never re-queued as a new P3 Turn. A run that ended by design runs again for them within its Turn; after a stop, an error, or a crash they are admitted into the context (at the end of the run, or at the Session's resume) and share the Turn's outcome. | a terminating tool while a steer is queued; a crash before consumption |
 | T4 | An unsettled Turn found at startup is settled as interrupted after T2; the agent never continues it on its own (a hook `end`, an abort, or a crash all leave the same safe state). The user's next message starts a new Turn with the full context. | crash after an `end` hook and after a mid-turn commit |
 
 ## Delivery (adapter wave)
 
-| ID | Invariant | Proof |
-| --- | --- | --- |
-| D1 | A committed response is delivered completely: every part a surface splits it into is either confirmed or retried. A partial delivery is never recorded as delivered. | failure on a later part, and a crash between parts |
-| D2 | Workbench delivery is exactly once (the row is the message). IM delivery is at least once per part: `BaseIMClient.send_message` has no idempotency key, so a crash after the platform accepted a part but before its receipt was committed resends that part. | crash after accept, before receipt |
-
-Today `core/message_dispatcher.py` swallows failures of later split chunks and returns the first chunk's id. The
-adapter wave must not reuse that path as is for agent rows; D1 is the requirement it meets.
+D1 and D2 are withdrawn (owner decision, 2026-10-03, PR #2345). The Avibe Agent delivers each committed response
+through the same emit path as the other backends: splitting, file upload, failure handling, and narration settings
+are the dispatcher's. The one difference is persistence: the response row already exists, so the dispatcher writes
+its display columns instead of inserting a second row (`transcript.md` §2). A crash or send failure between commit
+and send loses that delivery, as it does for the other backends; the transcript, and so the context, is unaffected.
+A Turn interrupted after its final commit is settled by T4 like any other, so the user sees the interruption
+notice, and the committed reply stays in the Workbench transcript with its commit-time display.
 
 ## Shared fields
 
@@ -45,4 +45,3 @@ The only cross-lane shapes recovery adds:
 - `meta.json` (`job.schema.json`): `deadline_at` (absolute, nullable), and `process` with the identity fields of
   `PersistedProcessIdentity` (`core/process_isolation.py`), recorded before the command can run (J2).
 - Watch `job` target: keyed by `job_id`, created by adopt-or-create (J6).
-- Response rows: `metadata_json.delivery` with one entry per part (`transcript.md` §2).
