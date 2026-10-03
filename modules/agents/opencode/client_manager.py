@@ -293,6 +293,9 @@ class OpenCodeRuntime:
         self.outside_turn_acquisitions = 0
         self._leases: dict[str, tuple[RuntimeBinding[Any, OpenCodeGeneration], Optional[asyncio.TimerHandle]]] = {}
         self._lease_tasks: set[asyncio.Task[None]] = set()
+        # Processes a failed start could not stop. Every process this runtime
+        # spawned is stopped by a later reap or shutdown until it is gone.
+        self._start_survivors: dict[str, OpenCodeGeneration] = {}
         # Pid of the last start whose process exited on its own: resource evidence.
         self.last_start_failure_pid: Optional[int] = None
         self.start_failures = 0
@@ -511,9 +514,27 @@ class OpenCodeRuntime:
         return True
 
     async def reap(self) -> None:
+        await self._stop_start_survivors()
         for generation in self.generations():
             generation.flush_record()
         await self._generations.reap()
+
+    def _keep_start_survivor(self, generation: OpenCodeGeneration) -> None:
+        logger.warning(
+            "OpenCode generation %s pid=%s survived its failed start; reaping retries its stop",
+            generation.generation_id,
+            generation.pid,
+        )
+        self._start_survivors[generation.generation_id] = generation
+
+    async def _stop_start_survivors(self) -> None:
+        for generation_id, generation in list(self._start_survivors.items()):
+            try:
+                await stop_generation(generation)
+            except Exception:
+                logger.warning("OpenCode generation %s survived its stop again", generation_id, exc_info=True)
+                continue
+            self._start_survivors.pop(generation_id, None)
 
     async def retire_confirmed(
         self,
@@ -553,8 +574,9 @@ class OpenCodeRuntime:
         retries it. A retry repeats both steps and is safe at any point.
         """
         await self._generations.stop_all(force=True)
+        await self._stop_start_survivors()
         leftovers = await asyncio.to_thread(stop_recorded_servers_sync, desktop_caller_provenance())
-        survivors = [generation.generation_id for generation in self.generations()]
+        survivors = [generation.generation_id for generation in (*self.generations(), *self._start_survivors.values())]
         failed = sum(outcome is StopOutcome.FAILED for outcome in leftovers)
         if survivors or failed:
             raise RuntimeError(
@@ -588,6 +610,7 @@ class OpenCodeRuntime:
                 spec,
                 request_timeout_seconds=self.config.request_timeout_seconds,
                 resource_governor=self.resource_governor,
+                on_survivor=self._keep_start_survivor,
             )
         except OpenCodeGenerationStartError as exc:
             self.start_failures += 1

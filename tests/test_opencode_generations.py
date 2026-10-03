@@ -1674,3 +1674,50 @@ def test_adoption_leaves_every_record_of_another_desktop_runtime_alone(isolated_
     assert stopped == []
     for path in (foreign, released, dead, overlay):
         assert path.read_bytes() == before[path.name]
+
+
+def test_a_failed_start_whose_process_survives_is_reaped_until_it_is_gone(isolated_launch, monkeypatch):
+    """A start times out and its process survives the stop. The runtime that
+    spawned it keeps it owned and stops it at a later reap, record and Hub
+    overlay included, instead of leaving it running beside later generations."""
+
+    pid = fake_pid(66)
+    isolated_launch.processes.append(_Process(pid))
+    monkeypatch.setattr(opencode_server.OpenCodeGeneration, "is_healthy", AsyncMock(return_value=False))
+    monkeypatch.setattr(opencode_server, "SERVER_START_TIMEOUT", 0.3)
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda candidate: candidate == pid)
+    killable = {"now": False}
+    stopped: list[int] = []
+
+    def terminate(candidate, timeout=5.0):
+        if killable["now"]:
+            stopped.append(candidate)
+        return killable["now"]
+
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", terminate)
+    monkeypatch.setattr(opencode_server, "_terminate_started_process", AsyncMock(return_value=False))
+    overlay = _overlay()
+    spec = OpenCodeLaunchSpec(
+        digest="hub",
+        binary="/bin/opencode",
+        overlay_hash=overlay.content_hash,
+        overlay_file_content=overlay.content,
+        overlay_inline_content=opencode_server._managed_runtime_config_content(overlay.content),
+    )
+    runtime = _runtime()
+
+    async def scenario():
+        with pytest.raises(opencode_server.OpenCodeGenerationStartError):
+            await runtime.acquire(spec)
+        await runtime.reap()
+        still_running = sorted(path.name for path in isolated_launch.records.iterdir())
+        killable["now"] = True
+        await runtime.reap()
+        return still_running
+
+    still_running = asyncio.run(scenario())
+
+    assert len(still_running) == 2
+    assert stopped == [pid]
+    assert list(isolated_launch.records.iterdir()) == []

@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from asyncio.subprocess import Process
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 import aiohttp
 import psutil
@@ -1773,8 +1773,14 @@ async def start_generation(
     *,
     request_timeout_seconds: int = 60,
     resource_governor: Any | None = None,
+    on_survivor: Optional[Callable[[OpenCodeGeneration], None]] = None,
 ) -> OpenCodeGeneration:
-    """Start one generation on a port of its own and wait until it serves."""
+    """Start one generation on a port of its own and wait until it serves.
+
+    A start that fails after spawning stops its process. When the process
+    survives that stop, ``on_survivor`` receives it, still owned here, so its
+    runtime keeps retrying the stop; its record and overlay stay meanwhile.
+    """
 
     generation_id = f"ocg_{secrets.token_hex(8)}"
     ensure_plugin_installed()
@@ -1789,9 +1795,9 @@ async def start_generation(
     env = _launch_environment(spec, overlay_path)
     exited_pid: int | None = None
     exit_code: int | None = None
-    # A process that survives its stop keeps its record and overlay, so
-    # adoption or ``vibe stop`` can still find and stop it.
-    survivor = False
+    # A process that survives its stop keeps its record and overlay; its
+    # runtime retries the stop, and ``vibe stop`` can still find it.
+    survivor: Optional[OpenCodeGeneration] = None
     try:
         for _attempt in range(_PORT_ATTEMPTS):
             port = _choose_port(DEFAULT_OPENCODE_HOST)
@@ -1836,7 +1842,7 @@ async def start_generation(
                 if await _terminate_started_process(process, "start interrupted"):
                     _remove_quietly(generation.record_path)
                 else:
-                    survivor = True
+                    survivor = generation
                 raise
             if outcome == "ready":
                 logger.info("OpenCode generation %s serves at %s", generation_id, generation.base_url)
@@ -1852,7 +1858,7 @@ async def start_generation(
             if await _terminate_started_process(process, "startup timeout"):
                 _remove_quietly(generation.record_path)
             else:
-                survivor = True
+                survivor = generation
             raise OpenCodeGenerationStartError(
                 f"OpenCode server failed to start within {SERVER_START_TIMEOUT}s."
             )
@@ -1861,9 +1867,13 @@ async def start_generation(
             exited_pid=exited_pid,
         )
     except BaseException:
-        # A process that survived is no runtime's; a later adoption may stop it.
-        _OWNED_HERE.pop(generation_id, None)
-        if overlay_path is not None and not survivor:
+        if survivor is not None and on_survivor is not None:
+            # Still owned here: the runtime that started it retries its stop.
+            on_survivor(survivor)
+        else:
+            # A survivor nobody tracks is no runtime's; a later adoption may stop it.
+            _OWNED_HERE.pop(generation_id, None)
+        if overlay_path is not None and survivor is None:
             _remove_quietly(overlay_path)
         raise
 
