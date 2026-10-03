@@ -2484,12 +2484,11 @@ def test_session_handler_uses_scheduled_turn_source_for_dm_anchor(monkeypatch, t
     assert getattr(client, "_vibe_runtime_session_key") == f"{base_session_id}:{tmp_path}"
 
 
-def test_runtime_gen_006_a_client_from_before_a_renewal_is_reclaimed_once_idle(monkeypatch, tmp_path: Path) -> None:
-    """RUNTIME-GEN-006 (Claude): a disabled or renewed Claude stops its clients once idle.
+def test_runtime_gen_005_a_client_from_before_a_renewal_is_reclaimed_once_idle(monkeypatch, tmp_path: Path) -> None:
+    """RUNTIME-GEN-005: a client from before a renewal stops at the first idle sweep.
 
-    Disabling Claude renews it in place. Each client from before the renewal
-    is disconnected at the first sweep that finds it idle, even with idle
-    eviction off. A busy one keeps running until then.
+    It can never serve another turn, so it is disconnected as soon as a sweep
+    finds it idle, even with idle eviction off. A busy one keeps running.
     """
     disconnects: list[str] = []
 

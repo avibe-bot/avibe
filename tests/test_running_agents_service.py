@@ -76,20 +76,14 @@ class _FakeTask:
         return self._done
 
 
-def _make_controller(*, claude=None, codex=None, opencode=None, retired=()):
+def _make_controller(*, claude=None, codex=None, opencode=None):
     agents = {}
     if codex is not None:
         agents["codex"] = codex
     if opencode is not None:
         agents["opencode"] = opencode
     controller = types.SimpleNamespace()
-    controller.agent_service = types.SimpleNamespace(
-        agents=agents,
-        # Retired agents are (backend, agent) pairs, listed after registered ones.
-        runtime_agents=lambda backend=None: [
-            agent for name, agent in (*agents.items(), *retired) if backend in (None, name)
-        ],
-    )
+    controller.agent_service = types.SimpleNamespace(agents=agents)
     controller.claude_sessions = (claude or {}).get("sessions", {})
     controller.claude_active_sessions = (claude or {}).get("active", set())
     controller.session_last_activity = (claude or {}).get("last_activity", {})
@@ -296,34 +290,6 @@ def test_codex_shared_pid_one_row_per_session():
     assert by_base["base-1"]["state"] == "active"
     assert by_base["base-2"]["state"] == "idle"
     assert snap["counts"]["by_backend"]["codex"] == 3
-
-
-def test_runtime_gen_006_a_disabled_backends_running_work_stays_in_running_agents():
-    """RUNTIME-GEN-006: Running Agents lists and ends a disabled backend's running work.
-
-    Disabling Codex unregisters its agent from routing, but the agent still owns
-    the turn it is running: the row stays listed and End reaches it.
-    """
-    mgr = _FakeSessionMgr({"base-old": "/work/x"})
-    end = _AsyncFlag({"interrupted": True, "process_killed": True})
-    retired = types.SimpleNamespace(
-        _session_mgr=mgr,
-        _turn_registry=_FakeTurnRegistry({"base-old": "turn-1"}),
-        transport_for_session=_transport_by_cwd(mgr, {"/work/x": _FakeTransport(7001)}),
-        end_session=end,
-    )
-    controller = _make_controller(retired=[("codex", retired)])
-
-    snap = running_agents.snapshot_running_agents(controller)
-    by_base = {row["base_session_id"]: row for row in snap["agents"]}
-    assert by_base["base-old"]["state"] == "active" and by_base["base-old"]["pid"] == 7001
-    assert running_agents._resolve_live_state(
-        controller, backend="codex", session_id=None, composite_key=None, base_session_id="base-old"
-    ) == "active"
-
-    ended = asyncio.run(running_agents._end_codex(controller, "base-old"))
-    assert ended["ok"] and ended["interrupted"] and ended["process_killed"]
-    assert end.called
 
 
 def test_codex_skips_evicted_idle_base_without_transport():

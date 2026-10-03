@@ -62,10 +62,7 @@ def test_a_saved_idle_timeout_applies_without_a_backend_restart(monkeypatch) -> 
         reap_orphaned_claude_sessions=AsyncMock(),
     )
     reap = AsyncMock()
-    codex = SimpleNamespace(name="codex", reap_runtime_generations=reap)
-    controller.agent_service = SimpleNamespace(
-        agents={"codex": codex}, runtime_agents=lambda: [codex], forget_retired_agents=lambda: None
-    )
+    controller.agent_service = SimpleNamespace(agents={"codex": SimpleNamespace(name="codex", reap_runtime_generations=reap)})
     sweeps = []
 
     async def sleep(_seconds):

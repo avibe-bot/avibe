@@ -10,7 +10,6 @@ capability:
     - tests/test_controller_idle_cleanup.py
     - tests/test_codex_runtime_generations.py
     - tests/test_opencode_generations.py
-    - tests/test_running_agents_service.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -53,30 +52,21 @@ scenarios:
     test: tests/test_controller_idle_cleanup.py::test_a_saved_idle_timeout_applies_without_a_backend_restart
     related_tests:
       - tests/test_claude_cli_path.py::test_a_config_save_that_only_changes_live_fields_renews_no_client
+      - tests/test_claude_cli_path.py::test_runtime_gen_005_a_client_from_before_a_renewal_is_reclaimed_once_idle
   - id: RUNTIME-GEN-006
-    name: Disabling a backend holds no message and interrupts nothing; running work finishes and the processes stop once drained
+    name: Disabling a backend is the user's own interruption; new messages see it disabled at once, running work settles with the interruption notice, and every process stops now
     status: covered
     kind: lifecycle
     layer: contract
     backend: shared
-    test: tests/test_backend_restart.py::test_runtime_gen_006_disabling_a_backend_holds_no_message_and_interrupts_nothing
-    related_tests:
-      - tests/test_claude_cli_path.py::test_runtime_gen_006_a_client_from_before_a_renewal_is_reclaimed_once_idle
-      - tests/test_codex_runtime_generations.py::test_runtime_gen_006_a_retired_codex_agent_finishes_its_work_and_admits_nothing
-      - tests/test_codex_runtime_generations.py::test_runtime_gen_006_the_sweep_ends_a_retired_agents_process_whose_stop_failed
-      - tests/test_opencode_generations.py::test_runtime_gen_006_a_retired_opencode_runtime_keeps_its_turn_and_stops_once_drained
-      - tests/test_opencode_generations.py::test_a_retired_runtime_reaps_until_it_reports_retired
-      - tests/test_running_agents_service.py::test_runtime_gen_006_a_disabled_backends_running_work_stays_in_running_agents
-      - tests/test_opencode_generations.py::test_a_turn_that_races_a_disable_reports_the_localized_retired_error
+    test: tests/test_backend_restart.py::test_runtime_gen_006_disabling_a_backend_stops_its_work_at_once
   - id: RUNTIME-GEN-007
-    name: Re-enabling a backend while its disabled agent drains reopens that same agent; new work starts at once and the retired work keeps running
+    name: Re-enabling a backend registers a fresh agent at once; disabling already stopped the old one
     status: covered
     kind: lifecycle
     layer: contract
     backend: shared
-    test: tests/test_backend_restart.py::test_runtime_gen_007_re_enabling_reopens_the_agent_that_still_drains
-    related_tests:
-      - tests/test_opencode_generations.py::test_runtime_gen_007_a_reenabled_opencode_runtime_starts_beside_a_draining_retired_one
+    test: tests/test_backend_restart.py::test_runtime_gen_007_re_enabling_starts_a_fresh_agent_at_once
   - id: RUNTIME-GEN-008
     name: An unattended CLI update closes admission only for its install, then renews in place instead of tearing the runtime down
     status: covered

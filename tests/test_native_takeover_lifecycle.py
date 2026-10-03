@@ -31,9 +31,6 @@ def controller_fixture(*, backends=("claude", "codex", "opencode"), busy=False):
     turns = set()
     service = SimpleNamespace(
         agents={name: SimpleNamespace(retire_for_native_migration=AsyncMock()) for name in backends},
-        runtime_agents=lambda backend=None: [
-            agent for name, agent in service.agents.items() if backend in (None, name)
-        ],
         begin_backend_drain=Mock(side_effect=admissions.add),
         end_backend_drain=Mock(side_effect=admissions.discard),
         prepare_backend_restart=AsyncMock(),

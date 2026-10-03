@@ -419,8 +419,7 @@ class Controller:
                 handler.im_client = self.im_client
                 handler.settings_manager = self.settings_manager
                 handler.sessions = self.sessions
-        # A disabled backend's retired agent still delivers its running work.
-        for agent in self.agent_service.runtime_agents():
+        for agent in getattr(getattr(self, "agent_service", None), "agents", {}).values():
             agent.config = new_config
             agent.im_client = self.im_client
             agent.settings_manager = self.settings_manager
@@ -736,8 +735,6 @@ class Controller:
         from storage.session_activities import SQLiteSessionActivityStore
 
         activity_store = SQLiteSessionActivityStore(get_cached_sqlite_engine())
-        # Set once a startup adopted what a crashed controller left for disabled OpenCode.
-        self._opencode_drain_checked = False
         self.agent_service = AgentService(
             self,
             activities=SessionActivityRegistry(
@@ -1005,35 +1002,14 @@ class Controller:
         if coordinator is not None and "opencode" in coordinator._blocked_backends():
             coordinator.restore_migration_blocks()
             return
-        await self._retire_unowned_opencode_runtime()
-        # A drain-only or retired agent restores the polls of the work it runs,
-        # so that work still delivers its result.
-        for opencode_agent in self.agent_service.runtime_agents("opencode"):
-            if not hasattr(opencode_agent, "restore_active_polls"):
-                continue
+        opencode_agent = self.agent_service.agents.get("opencode")
+        if opencode_agent and hasattr(opencode_agent, "restore_active_polls"):
             try:
                 restored = await opencode_agent.restore_active_polls(platforms)  # type: ignore[attr-defined]
                 if restored > 0:
                     logger.info(f"Restored {restored} active OpenCode poll(s)")
             except Exception as e:
                 logger.error(f"Failed to restore active polls: {e}", exc_info=True)
-
-    async def _retire_unowned_opencode_runtime(self) -> None:
-        """Adopt what a crashed controller left running when OpenCode is disabled.
-
-        No registered agent would ever adopt those servers. An agent that only
-        drains adopts them before any poll is restored: work still running
-        finishes and delivers, and the rest stops. It is created at most once.
-        """
-        if getattr(self, "_opencode_drain_checked", False) or "opencode" in self.agent_service.agents:
-            return
-        self._opencode_drain_checked = True
-        try:
-            from modules.agents.opencode import OpenCodeAgent
-
-            await self.agent_service.retire_agent("opencode", OpenCodeAgent.draining(self))
-        except Exception as e:
-            logger.error("Failed to retire the OpenCode servers a previous controller left: %s", e, exc_info=True)
 
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
@@ -1135,11 +1111,15 @@ class Controller:
             logger.error("Failed to start runtime command watcher: %s", e, exc_info=True)
 
         try:
-            # A startup whose poll restore was held back by migration recovery
-            # still adopts what a crashed controller left; a no-op otherwise.
-            await self._retire_unowned_opencode_runtime()
+            if "opencode" not in getattr(agent_service, "agents", {}):
+                # OpenCode is disabled, so no agent will adopt the servers a
+                # crashed controller recorded; disabling stops its work.
+                from modules.agents.opencode.server import stop_recorded_servers_sync
+                from vibe.desktop_runtime import desktop_caller_provenance
+
+                await asyncio.to_thread(stop_recorded_servers_sync, desktop_caller_provenance())
         except Exception as e:
-            logger.error("Failed to retire the OpenCode servers a previous controller left: %s", e, exc_info=True)
+            logger.error("Failed to stop OpenCode servers a previous controller left: %s", e, exc_info=True)
 
         try:
             self._start_model_hub_snapshot_reconcile_loop()
@@ -2224,19 +2204,14 @@ class Controller:
                 claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
 
                 # Retiring runtime generations stop once drained, whatever the
-                # idle timeouts say. This sweep is the only one that reaches the
-                # agents of disabled backends while their work finishes.
-                for agent in self.agent_service.runtime_agents():
+                # idle timeouts say.
+                for agent in list(getattr(self.agent_service, "agents", {}).values()):
                     reap = getattr(agent, "reap_runtime_generations", None)
                     if callable(reap):
                         try:
                             await reap()
                         except Exception as e:
                             logger.error("Runtime generation sweep failed for %s: %s", agent.name, e, exc_info=True)
-                try:
-                    self.agent_service.forget_retired_agents()
-                except Exception as e:
-                    logger.error("Retired agent sweep failed: %s", e, exc_info=True)
 
                 try:
                     # A client from before the latest renewal is reclaimed once
@@ -2371,10 +2346,9 @@ class Controller:
             show_git_checkpoint_service.stop()
 
         try:
-            # A disabled backend's retired agent may still run app-servers.
-            for codex_agent in self.agent_service.runtime_agents("codex"):
-                if hasattr(codex_agent, "shutdown_runtime"):
-                    _stop_loop_coroutine(codex_agent.shutdown_runtime(), "Codex runtime")
+            codex_agent = self.agent_service.agents.get("codex")
+            if codex_agent and hasattr(codex_agent, "shutdown_runtime"):
+                _stop_loop_coroutine(codex_agent.shutdown_runtime(), "Codex runtime")
         except Exception as e:
             logger.debug(f"Codex runtime cleanup skipped: {e}")
 

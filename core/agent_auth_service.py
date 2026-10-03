@@ -2178,9 +2178,8 @@ class AgentAuthService:
                 getattr(self.controller, name, None)
                 for name in ("command_handler", "settings_handler", "message_handler", "session_handler")
             )
-            # Retired agents still run processes that read the credential.
-            runtime_agents = getattr(getattr(self.controller, "agent_service", None), "runtime_agents", None)
-            owners.extend(runtime_agents() if callable(runtime_agents) else ())
+            agents = getattr(getattr(self.controller, "agent_service", None), "agents", {})
+            owners.extend(agents.values())
             for backend, values in snapshot.items():
                 targets = []
                 for owner in owners:
@@ -2249,28 +2248,49 @@ class AgentAuthService:
         except Exception as err:  # noqa: BLE001
             logger.warning("Failed to sync built-in Agents after backend runtime refresh: %s", err)
 
-    async def _retire_disabled_backend_agent(self, backend: str) -> bool:
-        """Unregister a disabled backend at once; its running work finishes in place."""
-        agent_service = getattr(self.controller, "agent_service", None)
-        retire = getattr(agent_service, "retire_backend", None)
-        retired = bool(await retire(backend)) if callable(retire) else False
-        setattr(self.controller.config, backend, None)
-        self._sync_builtin_default_agents()
-        return retired
+    async def _stop_disabled_backend(self, backend: str, *, unregister: bool) -> bool:
+        """Disabling a backend is an explicit user action: stop its work now.
 
-    async def _register_missing_backend_agent(self, backend: str, runtime_config: Any) -> bool:
+        A Codex or OpenCode agent first leaves the registry, so no new message
+        reaches it. Its running turns and Activities then settle with the
+        runtime-interruption notice, and every process of the backend stops.
+        Claude stays registered while disabled, and its clients are closed.
+        """
+        from core.backend_restart import finish_native_operation
+
+        agent_service = getattr(self.controller, "agent_service", None)
+        agents = getattr(agent_service, "agents", {})
+        agent = agents.pop(backend, None) if unregister else agents.get(backend)
+
+        async def stop() -> None:
+            coordinator = getattr(self.controller, "backend_restart_coordinator", None)
+            interrupt = getattr(coordinator, "interrupt_backend", None)
+            if callable(interrupt):
+                await interrupt(backend)
+            if agent is None:
+                return
+            if unregister:
+                shutdown = getattr(agent, "shutdown_runtime", None)
+                if callable(shutdown):
+                    await shutdown()
+                return
+            close_clients = getattr(agent, "refresh_auth_state", None)
+            if callable(close_clients):
+                await close_clients()
+
+        # A cancelled requester never leaves the backend half stopped.
+        await finish_native_operation(stop())
+        if unregister:
+            setattr(self.controller.config, backend, None)
+        self._sync_builtin_default_agents()
+        if agent is not None:
+            logger.info("Stopped disabled %s backend", backend)
+        return agent is not None
+
+    def _register_missing_backend_agent(self, backend: str, runtime_config: Any) -> bool:
         agent_service = getattr(self.controller, "agent_service", None)
         if agent_service is None or backend in getattr(agent_service, "agents", {}):
             return False
-
-        # A disabled backend's agent may still own its runtime while its work
-        # drains; re-enabling reopens it rather than starting a second owner.
-        reopen = getattr(agent_service, "reopen_backend", None)
-        if callable(reopen) and await reopen(backend, runtime_config):
-            setattr(self.controller.config, backend, runtime_config)
-            self._sync_builtin_default_agents()
-            logger.info("Reopened %s backend after runtime config refresh", backend)
-            return True
 
         if backend == "codex":
             from modules.agents.codex import CodexAgent
@@ -2291,25 +2311,33 @@ class AgentAuthService:
         return True
 
     async def renew_backend_runtime(self, backend: str, config_save: bool = False) -> None:
-        """Apply persisted runtime config without waiting for or interrupting work.
+        """Apply persisted runtime config.
 
-        An enabled backend renews in place, so each runtime unit moves at its
-        next turn. A newly enabled backend registers at once. A disabled Codex
-        or OpenCode agent retires: it leaves the registry, and its running
-        work finishes on the processes it started on. Claude stays registered
-        while disabled; its renewal retires every client once it is idle.
+        An enabled backend renews in place without waiting for or interrupting
+        work, so each runtime unit moves at its next turn, and a newly enabled
+        backend registers at once. Disabling is the one exception: the user
+        turned the backend off, so its work stops now.
         """
         runtime_config = self._load_backend_runtime_config(backend)
         if runtime_config is None:
-            await self._retire_disabled_backend_agent(backend)
+            await self._stop_disabled_backend(backend, unregister=True)
             return
-        if await self._register_missing_backend_agent(backend, runtime_config):
+        if getattr(runtime_config, "enabled", True) is not False and self._register_missing_backend_agent(
+            backend, runtime_config
+        ):
             return
         agent_service = getattr(self.controller, "agent_service", None)
         agent = getattr(agent_service, "agents", {}).get(backend) if agent_service else None
+        # Claude stays registered while disabled; disabling it stops its work.
+        newly_disabled = getattr(runtime_config, "enabled", True) is False and (
+            getattr(getattr(self.controller.config, backend, None), "enabled", True) is not False
+        )
         renew = getattr(agent, "renew_runtime", None)
         if callable(renew):
             await renew(runtime_config, config_save=config_save)
+        if newly_disabled:
+            await self._stop_disabled_backend(backend, unregister=False)
+            return
         self._sync_builtin_default_agents()
 
     async def _refresh_backend_runtime(self, backend: str) -> None:
@@ -2332,9 +2360,9 @@ class AgentAuthService:
             if callable(refresh_runtime_config):
                 runtime_config = self._load_backend_runtime_config(backend)
                 if runtime_config is None:
-                    await self._retire_disabled_backend_agent(backend)
+                    await self._stop_disabled_backend(backend, unregister=True)
                     return
-                if runtime_config is not None and await self._register_missing_backend_agent(
+                if runtime_config is not None and self._register_missing_backend_agent(
                     backend,
                     runtime_config,
                 ):

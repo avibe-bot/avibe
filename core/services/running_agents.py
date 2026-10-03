@@ -366,10 +366,11 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
 
 
 def _get_agent(controller: "Controller", name: str):
-    """The agent owning a backend's runtime, including a disabled backend's
-    agent while its running work finishes."""
-    runtime_agents = getattr(getattr(controller, "agent_service", None), "runtime_agents", None)
-    return next(iter(runtime_agents(name)), None) if callable(runtime_agents) else None
+    service = getattr(controller, "agent_service", None)
+    if service is None:
+        return None
+    agents = getattr(service, "agents", {}) or {}
+    return agents.get(name)
 
 
 def _enrich_from_db(rows: list[dict[str, Any]]) -> None:

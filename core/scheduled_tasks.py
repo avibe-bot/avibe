@@ -4514,9 +4514,8 @@ class ScheduledTaskService:
         return getattr(getattr(self.controller, "agent_service", None), "activities", None)
 
     def _activity_output_grace_seconds(self, backend: str) -> float:
-        # A disabled backend's retired agent still owns its Activities' output.
-        runtime_agents = getattr(getattr(self.controller, "agent_service", None), "runtime_agents", None)
-        agent = next(iter(runtime_agents(str(backend))), None) if callable(runtime_agents) else None
+        agents = getattr(getattr(self.controller, "agent_service", None), "agents", {})
+        agent = agents.get(str(backend)) if isinstance(agents, dict) else None
         try:
             return max(
                 0.0,

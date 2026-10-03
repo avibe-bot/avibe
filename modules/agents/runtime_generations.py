@@ -144,12 +144,8 @@ class RuntimeGenerationSet(Generic[_S, _R]):
             return self._bind(generation)
 
     async def bind(self, generation: RuntimeGeneration[_S, _R]) -> RuntimeBinding[_S, _R]:
-        """Bind recovered work, such as a restored poll, to its known generation.
-
-        Recovered work is not new work, so a stopping unit still binds it: a
-        disabled backend's runtime finishes and delivers what was already
-        running, and the generation stops once that work is released.
-        """
+        """Bind recovered work, such as a restored poll, to its known generation."""
+        self._admitting()
         if generation.stopped:
             raise RuntimeError("cannot bind work to a stopped runtime generation")
         return self._bind(generation)
@@ -205,16 +201,6 @@ class RuntimeGenerationSet(Generic[_S, _R]):
         async with self._start_lock:
             pass
         await self.settled()
-
-    async def reopen(self) -> None:
-        """Admit new work again after a graceful stop-all, for example on re-enable.
-
-        Generations retired by the stop-all stay closed and keep draining; the
-        next turn starts a fresh generation.
-        """
-        if self._force_all:
-            raise RuntimeError("a unit stopped by force cannot reopen")
-        self._stopping = False
 
     async def settled(self) -> None:
         """Wait until the reconciler has no stop left to run."""

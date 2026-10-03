@@ -571,18 +571,19 @@ class BackendRestartCoordinator:
                         await asyncio.sleep(self._poll_interval)
                 self._assert_no_native_login(targets)
                 for backend in targets:
-                    # A disabled backend's retired agent may still run processes
-                    # that read the credential. A backend with no agent at all
-                    # is left to the mandatory process inventory below.
-                    for agent in self.controller.agent_service.runtime_agents(backend):
-                        retire = getattr(agent, "retire_for_native_migration", None)
-                        if not callable(retire):
-                            raise NativeMigrationBlockedError("native_retirement_unavailable", (backend,))
-                        try:
-                            await finish_native_operation(retire())
-                        except Exception:
-                            unretired.add(backend)
-                            raise NativeMigrationBlockedError("native_retirement_failed", (backend,)) from None
+                    agent = self.controller.agent_service.agents.get(backend)
+                    if agent is None:
+                        # A disabled backend has no controller-owned runtime.
+                        # The mandatory process inventory still checks its CLI.
+                        continue
+                    retire = getattr(agent, "retire_for_native_migration", None)
+                    if not callable(retire):
+                        raise NativeMigrationBlockedError("native_retirement_unavailable", (backend,))
+                    try:
+                        await finish_native_operation(retire())
+                    except Exception:
+                        unretired.add(backend)
+                        raise NativeMigrationBlockedError("native_retirement_failed", (backend,)) from None
                     # The runtime is retired and relaunches on demand, so a failed
                     # earlier restart no longer describes it.
                     if self._outcomes.get(backend, {}).get("state") == "failed":
@@ -778,8 +779,9 @@ class BackendRestartCoordinator:
             return {"state": "unavailable"}
         return {"state": "applied"}
 
-    async def _interrupt(self, backend: str) -> None:
-        """Settle every turn running on ``backend`` ahead of a forced refresh."""
+    async def interrupt_backend(self, backend: str) -> None:
+        """Settle every turn and Activity running on ``backend`` with the
+        runtime-interruption notice, ahead of a forced stop or refresh."""
         session_ids = self.controller.session_turns.active_runtime_session_ids_for_backend(backend)
         await self.controller.session_turns.release_for_backend_refresh(
             backend=backend,
@@ -860,7 +862,7 @@ class BackendRestartCoordinator:
         try:
             if await self._has_active_turns(backend):
                 forced = True
-                await self._interrupt(backend)
+                await self.interrupt_backend(backend)
             await self._refresh(backend, forced)
             refreshed = True
         finally:

@@ -143,16 +143,19 @@ class _StubController:
 
 
 class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyncioTestCase):
-    async def test_claude_renews_in_place_whether_enabled_or_disabled(self):
-        """RUNTIME-GEN-004: Claude stays registered while disabled and renews in place.
+    async def test_claude_renews_in_place_and_disabling_it_stops_its_work(self):
+        """RUNTIME-GEN-004 and -006: Claude stays registered and renews in place.
 
-        Its renewal retires every client once idle, so disabling it waits for
-        and interrupts nothing.
+        Disabling it is the user's own interruption: its running work settles
+        with the interruption notice and every client closes at once. Saving
+        again while it is already disabled interrupts nothing more.
         """
-        for enabled in (True, False):
+        for was_enabled, enabled in ((True, True), (True, False), (False, False)):
             controller = _StubController()
-            renew = AsyncMock()
-            controller.agent_service = SimpleNamespace(agents={"claude": SimpleNamespace(renew_runtime=renew)})
+            controller.config.claude = SimpleNamespace(enabled=was_enabled)
+            agent = SimpleNamespace(renew_runtime=AsyncMock(), refresh_auth_state=AsyncMock())
+            controller.agent_service = SimpleNamespace(agents={"claude": agent})
+            controller.backend_restart_coordinator = SimpleNamespace(interrupt_backend=AsyncMock())
             service = AgentAuthService(controller)
             runtime_config = SimpleNamespace(enabled=enabled)
             service._load_backend_runtime_config = lambda _backend, config=runtime_config: config
@@ -160,8 +163,11 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
             await service.renew_backend_runtime("claude")
 
-            renew.assert_awaited_once_with(runtime_config, config_save=False)
-            assert "claude" in controller.agent_service.agents
+            agent.renew_runtime.assert_awaited_once_with(runtime_config, config_save=False)
+            assert controller.agent_service.agents["claude"] is agent
+            stopped = was_enabled and not enabled
+            assert controller.backend_restart_coordinator.interrupt_backend.await_count == int(stopped)
+            assert agent.refresh_auth_state.await_count == int(stopped)
 
     async def test_handle_setup_command_submits_code(self):
         controller = _StubController()
@@ -1720,7 +1726,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertIs(registered.codex_config, runtime_config)
         self.assertIs(controller.config.codex, runtime_config)
 
-    async def test_refresh_backend_runtime_retires_disabled_codex_in_place(self):
+    async def test_refresh_backend_runtime_stops_disabled_codex_at_once(self):
         from modules.agent_router import AgentRouter
         from modules.agents.service import AgentService
 
@@ -1730,7 +1736,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.config.codex = SimpleNamespace(binary="/old/codex")
         controller.config.default_backend = "codex"
         controller.agent_service.register(SimpleNamespace(name="claude"))
-        agent = SimpleNamespace(name="codex", retire_runtime=AsyncMock(), shutdown_runtime=AsyncMock())
+        agent = SimpleNamespace(name="codex", shutdown_runtime=AsyncMock())
         controller.agent_service.register(agent)
         service = AgentAuthService(controller)
         service._load_backend_runtime_config = Mock(return_value=None)
@@ -1744,10 +1750,8 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertEqual(controller.agent_router.global_default, "codex")
         self.assertEqual(controller.agent_router.platform_routes["slack"].default, "codex")
         self.assertEqual(controller.config.default_backend, "codex")
-        # The agent retires without a forced stop; its running work finishes in place.
-        agent.retire_runtime.assert_awaited_once_with()
-        agent.shutdown_runtime.assert_not_awaited()
-        self.assertEqual(controller.agent_service.runtime_agents("codex"), [agent])
+        # Disabling stops the agent's processes at once.
+        agent.shutdown_runtime.assert_awaited_once_with()
         service._sync_builtin_default_agents.assert_called_once_with()
 
     async def test_refresh_backend_runtime_does_not_restore_legacy_default_after_late_registration(self):

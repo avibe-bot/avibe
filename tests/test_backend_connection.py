@@ -280,21 +280,13 @@ def test_disabled_applied_configuration_stays_saved_without_readiness(monkeypatc
         controller = SimpleNamespace(config=to_app_config(config), agent_service=service,
             session_turns=SimpleNamespace(begin_backend_drain=Mock(), end_backend_drain=AsyncMock()))
         # Claude's loaded compat object remains registered even when disabled.
-        claude = SimpleNamespace(config=controller.config, controller=controller)
+        claude = SimpleNamespace(config=controller.config, controller=controller, refresh_auth_state=AsyncMock())
         claude.renew_runtime = lambda value, config_save=False: ClaudeAgent.renew_runtime(
             claude, value, config_save=config_save
         )
         service.agents["claude"] = claude
         if backend != "claude":
-            service.agents[backend] = SimpleNamespace(retire_runtime=AsyncMock())
-
-        async def retire_backend(name):
-            agent = service.agents.pop(name, None)
-            if agent is not None:
-                await agent.retire_runtime()
-            return agent is not None
-
-        service.retire_backend = retire_backend
+            service.agents[backend] = SimpleNamespace(shutdown_runtime=AsyncMock())
         owner = AgentAuthService(controller)
         failure = []
 
