@@ -24,7 +24,7 @@ at-least-once, and that is stated where it applies.
 | ID | Invariant | Proof |
 | --- | --- | --- |
 | T1 | `project()` reads only committed rows; the same rows always produce the same request. | projection before and after job state changes |
-| T2 | At resume, before the first projection, every tool call without a committed `tool_result` gets exactly one, chosen from its job state (exited: the output; running: handover; never ran: the interrupted result). A call without job state (`write`, `edit`) gets `[tool call interrupted; it may or may not have completed; re-read the file before continuing]`. Retries settle nothing twice. | crash between settlement steps, then resume twice |
+| T2 | At resume, before the first projection, every tool call without a committed `tool_result` gets exactly one, chosen from its job state (exited: the output; running: handover; never ran: the interrupted result). A call without job state (`write`, `edit`) gets `[tool call interrupted; it may or may not have completed; re-read the file before continuing]`. Retries settle nothing twice, and neither do concurrent writers: the store's `append_tool_result` returns the result already committed for the call instance instead of writing a second. | crash between settlement steps, then resume twice |
 | T3 | Inputs accepted by `steer` or `follow_up` are never dropped: they enter the context, including after a crash. They belong to the Turn that accepted them and are never re-queued as a new P3 Turn. A run that ended by design runs again for them within its Turn; after a stop, an error, or a crash they are admitted into the context (at the end of the run, or at the Session's resume) and share the Turn's outcome. | a terminating tool while a steer is queued; a crash before consumption |
 | T4 | An unsettled Turn found at startup is settled as interrupted after T2; the agent never continues it on its own (a hook `end`, an abort, or a crash all leave the same safe state). The user's next message starts a new Turn with the full context. | crash after an `end` hook and after a mid-turn commit |
 
@@ -44,4 +44,7 @@ The only cross-lane shapes recovery adds:
 
 - `meta.json` (`job.schema.json`): `deadline_at` (absolute, nullable), and `process` with the identity fields of
   `PersistedProcessIdentity` (`core/process_isolation.py`), recorded before the command can run (J2).
-- Watch `job` target: keyed by `job_id`, created by adopt-or-create (J6).
+- Watch `job` target: keyed by `job_id`, created by adopt-or-create (J6). The hand-over takes the Watch's Agent and
+  authority from the job's owning Turn, never from the caller of the hand-over, and records that authority
+  explicitly: the Turn's remote snapshot, a local marker, or an unverifiable snapshot (a remote Turn whose
+  authorization cannot be found). A job Watch without a verifiable authority still owns its job but never follows up.

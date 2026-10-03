@@ -56,7 +56,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 
 from core.agent_core.harness.store import ContextEntry, EntryKind
@@ -239,10 +239,17 @@ class SQLiteTranscriptStore:
         if details:
             payload["details"] = dict(details)
         payload = _canonical(payload, "tool result")
-        return await self._write(
-            session_id,
-            lambda conn: self._append_event(conn, session_id, "tool_result", payload, message, agent_name),
-        )
+
+        def work(conn: Connection) -> ContextEntry:
+            # A call instance is settled once, whoever writes (a run, T2 at resume, a
+            # recovery pass): checked under the writer lock, so a racing second writer
+            # gets the first result back instead of a duplicate.
+            settled = _settled_result(conn, session_id, message.tool_call_id)
+            if settled is not None:
+                return settled
+            return self._append_event(conn, session_id, "tool_result", payload, message, agent_name)
+
+        return await self._write(session_id, work)
 
     async def append_payload(
         self, session_id: str, kind: PayloadKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None
@@ -461,6 +468,64 @@ def resolve_fork_anchor_seq(conn: Connection, source_session_id: str, anchor_mes
         )
     ).scalar()
     return max(value for value in (inherited, own_messages, own_events) if value is not None)
+
+
+def _settled_result(conn: Connection, session_id: str, tool_call_id: str) -> Optional[ContextEntry]:
+    """The result already committed for the latest call instance with this id in the Session's context.
+
+    The call instance is the last response in the context (own rows and the inherited
+    prefix) that carries a tool call with this id; its result is the first
+    ``tool_result`` for the id after that response, in context order.
+    """
+    chain = _ancestry(conn, session_id)
+    owner_seq: Optional[int] = None
+    for member, bound in chain:
+        query = (
+            "SELECT MAX(m.context_seq) FROM messages AS m, "
+            "json_each(json_extract(m.content_json, '$.model.message.content')) AS block "
+            "WHERE m.session_id = :member AND m.context_seq IS NOT NULL "
+            "AND json_extract(block.value, '$.type') = 'tool_call' "
+            "AND json_extract(block.value, '$.id') = :call_id"
+            + (" AND m.context_seq <= :bound" if bound is not None else "")
+        )
+        seq = conn.execute(
+            text(query), {"member": member, "call_id": tool_call_id, "bound": bound}
+        ).scalar()
+        if seq is not None and (owner_seq is None or seq > owner_seq):
+            owner_seq = seq
+    if owner_seq is None:
+        return None
+    first = None
+    for member, bound in chain:
+        conditions = [
+            agent_events.c.session_id == member,
+            agent_events.c.event_type == _EVENT_TYPE_BY_KIND["tool_result"],
+            agent_events.c.visibility == CONTEXT_VISIBILITY,
+            agent_events.c.context_seq > owner_seq,
+            func.json_extract(agent_events.c.content_json, "$.message.tool_call_id") == tool_call_id,
+        ]
+        if bound is not None:
+            conditions.append(agent_events.c.context_seq <= bound)
+        row = (
+            conn.execute(
+                select(
+                    agent_events.c.id,
+                    agent_events.c.session_id,
+                    agent_events.c.context_seq,
+                    agent_events.c.content_json,
+                    agent_events.c.event_type,
+                    agent_events.c.visibility,
+                )
+                .where(*conditions)
+                .order_by(agent_events.c.context_seq)
+                .limit(1)
+            )
+            .mappings()
+            .first()
+        )
+        if row is not None and (first is None or row["context_seq"] < first["context_seq"]):
+            first = row
+    return _event_entry(first["session_id"], first) if first is not None else None
 
 
 def source_tool_result(

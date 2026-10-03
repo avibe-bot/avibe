@@ -33,6 +33,9 @@ class AvibeRecovery:
         self._controller = controller
         self._task: Optional[asyncio.Task] = None
         self._transient: Any = None
+        # Serializes every pass, immediate or retried, and the scheduling around it, so
+        # two passes never run at once (a start racing a registration, or a retry).
+        self._lock = asyncio.Lock()
 
     @property
     def retrying(self) -> bool:
@@ -42,15 +45,16 @@ class AvibeRecovery:
     async def start(self) -> list[str]:
         """Retire any pending retry, run one pass now, and keep retrying while Sessions stay unsettled.
 
-        The entry point for startup and for live registration of the backend: the
-        previous owner's task is cancelled and awaited first (a write it has begun
-        still commits), so there are never two passes at once. Returns the Sessions
-        this pass left unsettled.
+        The entry point for startup and for live registration of the backend. Under
+        the lock a pending retry is only ever sleeping or waiting for the lock, never
+        mid-pass, so it is retired without interrupting a write and there are never
+        two passes at once. Returns the Sessions this pass left unsettled.
         """
-        await self.stop()
-        unsettled = await self._pass()
-        if unsettled:
-            self._task = asyncio.create_task(self._retry(), name="avibe-agent-recovery")
+        async with self._lock:
+            await self.stop()
+            unsettled = await self._pass()
+            if unsettled and not self.retrying:
+                self._task = asyncio.create_task(self._retry(), name="avibe-agent-recovery")
         return unsettled
 
     def ensure(self) -> None:
@@ -71,7 +75,8 @@ class AvibeRecovery:
         # whose own wrapper deadline still bounds it.
         for attempt in itertools.count():
             await asyncio.sleep(RETRY_DELAYS_S[attempt] if attempt < len(RETRY_DELAYS_S) else RETRY_PERIOD_S)
-            unsettled = await self._pass()
+            async with self._lock:
+                unsettled = await self._pass()
             if not unsettled:
                 logger.info("Avibe Agent recovery settled every Session")
                 return

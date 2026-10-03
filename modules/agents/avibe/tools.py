@@ -15,6 +15,7 @@ keeps the command in the foreground.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 
@@ -36,15 +37,39 @@ class ToolSuite:
     prune: Optional[Callable[[CallSettled], list[str]]] = None
 
 
-def local_tool_suite(jobs_dir: Optional[str] = None) -> ToolSuite:
-    """Pi's ``read``, ``write``, ``edit``, and ``bash`` over the ``pipe`` job host."""
+#: The hand-over route for a job (``hand_over_job``'s keywords), from its owning Turn.
+HandOverRoute = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+
+
+def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOverRoute] = None) -> ToolSuite:
+    """Pi's ``read``, ``write``, ``edit``, and ``bash`` over the ``pipe`` job host.
+
+    Every path that creates a job Watch (``watch=true``, the foreground-window hand-over,
+    and T2 recovery) goes through the host's ``on_hand_over``, which takes the Watch's
+    Agent and authorization from ``route``: the job's owning Turn.
+    """
     from core.agent_core.tools.bash import final_result, handover_result
     from core.agent_core.tools.coding import create_coding_tools
     from core.agent_core.tools.jobs import LocalJobHost
     from core.agent_core.tools.output import JobOutput
-    from core.watches import ManagedWatchStore, agent_jobs_dir, hand_over_job
+    from core.watches import ManagedWatchStore, agent_jobs_dir
 
-    host = LocalJobHost(str(jobs_dir or agent_jobs_dir()), on_hand_over=hand_over_job)
+    async def hand_over(meta: Mapping[str, Any]) -> str:
+        import core.watches as watches
+        from core.vibe_agents import VibeAgentAccessError
+        from storage.resource_access_service import ResourceAccessError
+
+        owner = dict(await asyncio.to_thread(route, meta)) if route is not None else {}
+        try:
+            return await watches.hand_over_job(meta, **owner)
+        except (ResourceAccessError, VibeAgentAccessError, ValueError):
+            # The Turn's principal may not create this Watch (no Harness edit right, or
+            # no access to the Agent): the Watch still owns the job, and its follow-up
+            # stays denied.
+            fallback = {key: value for key, value in owner.items() if key != "user_context"}
+            return await watches.hand_over_job(meta, **fallback, unverifiable_remote=True)
+
+    host = LocalJobHost(str(jobs_dir or agent_jobs_dir()), on_hand_over=hand_over)
 
     def create_tools(jobs: JobHost, image_sink: Optional[ImageSink]) -> Sequence[Tool]:
         return create_coding_tools(jobs, image_sink=image_sink)

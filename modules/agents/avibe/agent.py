@@ -29,6 +29,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
 from sqlalchemy import and_, select
@@ -735,6 +736,110 @@ class AvibeAgent(BaseAgent):
         with self._engine.connect() as conn:
             return conn.execute(select(messages.c.author_name).where(messages.c.id == row_id)).scalar()
 
+    def _job_route(self, meta: Mapping[str, Any]) -> dict[str, Any]:
+        """A job Watch's Agent and authorization, from the job's owning Turn (fail closed).
+
+        The same rule for every hand-over, in a Turn or at startup: the owning response
+        is the latest one carrying the job's call, committed at or before the job's
+        creation; its Turn is the one whose input the response answers, and that Turn's
+        initial input row carries the principal and its persisted resource snapshot.
+        A remote Turn without a usable snapshot, or a job whose Turn cannot be found, is
+        handed over as unverifiable: owned, but never followed up.
+        """
+        from core.caller_context import caller_context_from_platform_payload
+        from storage.resource_access_service import (
+            RESOURCE_USER_CONTEXT_METADATA_KEY,
+            ResourceAccessError,
+            resource_user_context_from_metadata,
+        )
+
+        session_id, call_id = str(meta.get("session_id") or ""), str(meta.get("tool_call_id") or "")
+        created = instant(meta.get("created_at"))
+        with self._engine.connect() as conn:
+            owner = self._owning_response(conn, session_id, call_id, created)
+            origin = self._turn_initial_input(conn, session_id, owner["context_seq"]) if owner else None
+        if owner is None or origin is None:
+            return {"unverifiable_remote": True}
+        route: dict[str, Any] = {"agent_name": owner["author_name"]} if owner["author_name"] else {}
+        metadata = _json_object(origin["metadata_json"])
+        caller = caller_context_from_platform_payload(
+            {"agent_session_id": session_id, "platform": origin["platform"], "message_metadata": metadata},
+            message=SimpleNamespace(
+                platform=origin["platform"], user_id=origin["author_id"] or "", channel_id=None,
+                message_id=None, thread_id=None,
+            ),
+        )
+        if caller is None or not caller.is_remote:
+            return route
+        try:
+            context = (
+                resource_user_context_from_metadata({RESOURCE_USER_CONTEXT_METADATA_KEY: caller.resource_user_context})
+                if caller.resource_user_context
+                else None
+            )
+        except ResourceAccessError:
+            context = None
+        if context is None:
+            return {**route, "unverifiable_remote": True}
+        return {**route, "user_context": context}
+
+    @staticmethod
+    def _owning_response(conn: Any, session_id: str, call_id: str, created: Optional[datetime]) -> Optional[dict]:
+        from sqlalchemy import text as sql_text
+
+        rows = conn.execute(
+            sql_text(
+                "SELECT m.context_seq, m.author_name, m.created_at FROM messages AS m, "
+                "json_each(json_extract(m.content_json, '$.model.message.content')) AS block "
+                "WHERE m.session_id = :session_id AND m.context_seq IS NOT NULL "
+                "AND json_extract(block.value, '$.type') = 'tool_call' AND json_extract(block.value, '$.id') = :call_id "
+                "ORDER BY m.context_seq DESC"
+            ),
+            {"session_id": session_id, "call_id": call_id},
+        ).mappings()
+        for row in rows:
+            committed = instant(row["created_at"])
+            if created is None or committed is None or committed <= created:
+                return dict(row)
+        return None
+
+    @staticmethod
+    def _turn_initial_input(conn: Any, session_id: str, before_seq: int) -> Optional[dict]:
+        """The initial input row of the Turn whose input precedes ``before_seq``."""
+        latest = conn.execute(
+            select(messages.c.id)
+            .where(
+                messages.c.session_id == session_id,
+                messages.c.context_seq.is_not(None),
+                messages.c.context_seq < before_seq,
+                messages.c.type.in_(INPUT_TYPES),
+            )
+            .order_by(messages.c.context_seq.desc())
+            .limit(1)
+        ).scalar()
+        if latest is None:
+            return None
+        # The Turn that wrote it, in any state: the hand-over may come after that Turn settled
+        # (T2 at a later resume, or a retried recovery pass after T4).
+        turn_id = conn.execute(
+            select(message_deliveries.c.turn_id)
+            .where(message_deliveries.c.message_id == latest, message_deliveries.c.turn_id.is_not(None))
+            .limit(1)
+        ).scalar()
+        initial_id = latest
+        if turn_id is not None:
+            initial_id = conn.execute(
+                select(message_deliveries.c.message_id)
+                .select_from(
+                    session_turns.join(message_deliveries, message_deliveries.c.id == session_turns.c.initial_delivery_id)
+                )
+                .where(session_turns.c.id == turn_id)
+            ).scalar() or latest
+        row = conn.execute(
+            select(messages.c.platform, messages.c.author_id, messages.c.metadata_json).where(messages.c.id == initial_id)
+        ).mappings().first()
+        return dict(row) if row is not None else None
+
     def _committed_at(self, row_ids: Sequence[str]) -> dict[str, datetime]:
         with self._engine.connect() as conn:
             rows = conn.execute(select(messages.c.id, messages.c.created_at).where(messages.c.id.in_(set(row_ids))))
@@ -1047,8 +1152,9 @@ class AvibeAgent(BaseAgent):
 
     def _tools(self) -> ToolSuite:
         if self._tool_suite is None:
-            # Jobs live in Watch's agent_jobs_dir(), where vibe stop and the job-Watch sweep look.
-            self._tool_suite = local_tool_suite()
+            # Jobs live in Watch's agent_jobs_dir(), where vibe stop and the job-Watch sweep look;
+            # a job's Watch takes its Agent and authorization from the job's owning Turn.
+            self._tool_suite = local_tool_suite(route=self._job_route)
         return self._tool_suite
 
     @asynccontextmanager

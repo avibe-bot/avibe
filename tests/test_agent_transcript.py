@@ -437,3 +437,25 @@ async def test_the_display_copy_commits_with_its_row_and_never_reaches_the_conte
         narration.message,
         reply.message,
     ]
+
+
+async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "go")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_main", consumed, _user("go"))
+    await store.append_response("ses_main", _assistant("step", call_id="call_1"), final=False)
+
+    # Two writers settle the same open call (a run and a recovery pass): one result row.
+    first = await store.append_tool_result("ses_main", _tool_result("call_1", "ok"), details={})
+    second = await store.append_tool_result("ses_main", _tool_result("call_1", "again"), details={})
+
+    assert second.row_id == first.row_id and second.message == first.message
+    results = [entry for entry in await store.load("ses_main") if entry.kind == "tool_result"]
+    assert [entry.row_id for entry in results] == [first.row_id]
+    # A later response that reuses the id is a new call instance, settled on its own.
+    await store.append_response("ses_main", _assistant("again", call_id="call_1"), final=False)
+    later = await store.append_tool_result("ses_main", _tool_result("call_1", "second call"), details={})
+    assert later.row_id != first.row_id

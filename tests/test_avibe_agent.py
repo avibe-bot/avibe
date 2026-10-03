@@ -2226,6 +2226,40 @@ async def test_recovery_retries_a_session_it_could_not_settle(
         await harness.suite.jobs.kill(running)
 
 
+async def test_two_recovery_passes_racing_on_one_open_call_settle_it_once(engine, session, tmp_path, published) -> None:
+    jobs = FakeJobHost()
+    both_rendering, renders = asyncio.Event(), []
+
+    async def render(call, job_id, status, watch_id):
+        # Both passes have loaded the open call before either commits its result.
+        renders.append(job_id)
+        if len(renders) == 2:
+            both_rendering.set()
+        await both_rendering.wait()
+        return ToolResult((text("done"),))
+
+    suite = ToolSuite(
+        jobs=jobs, create_tools=lambda jobs_, sink: [FakeTool("bash")], render_recovered=render,
+        find_job=lambda session_id, call_id, **_: "job_1",
+    )
+    harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
+    request = harness.request("run it")
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run it"),))
+    )
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "make"})
+    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    jobs.states["job_1"] = JobStatus("exited", exit_code=0)
+    # Two adapters (two owners' worth of locks) recover the same Session at once.
+    first, second = harness.new_agent(), harness.new_agent()
+
+    await asyncio.gather(first.recover_runtime_state(), second.recover_runtime_state())
+
+    results = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
+    assert len(renders) == 2 and len(results) == 1
+
+
 async def test_enabling_the_backend_hands_recovery_to_the_registered_adapter(
     engine, session, tmp_path, published, monkeypatch
 ) -> None:
@@ -2303,6 +2337,137 @@ async def test_recovery_admits_a_returned_input_whose_admission_failed(engine, s
     assert await harness.controller.avibe_recovery.start() == []
     admitted = [entry for entry in await harness.context_rows() if entry.row_id == delivery_id]
     assert len(admitted) == 1
+
+
+_REMOTE_SNAPSHOT = {
+    "sub": "remote-user-1",
+    "email": "editor@example.com",
+    "vibe_instance_role": "owner",
+    "vibe_instance_access_source": "organization_group",
+    "vibe_organization_id": "org_1",
+    "vibe_organization_role": "member",
+}
+
+
+async def _remote_turn_with_open_call(
+    harness: _Harness, tmp_path: Path, *, snapshot: Optional[dict], author_id: str = "remote:remote-user-1"
+) -> str:
+    """A Workbench Turn (by a remote principal unless ``author_id`` says otherwise) whose response opened a bash call; returns its job id."""
+    from core.vibe_agents import VibeAgentStore
+
+    VibeAgentStore().ensure_builtin_default_agent(backend="avibe")
+    turn_id, delivery_id = f"turn_remote_{id(harness)}", f"dlv_remote_{id(harness)}"
+    metadata = {"resource_user_context": dict(snapshot)} if snapshot is not None else {}
+    with harness.engine.begin() as conn:
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id=SESSION,
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=_SCOPES["avibe"], session_id=SESSION, platform="avibe", author="user", source="user",
+                message_type="user", text="run the release", metadata=metadata, author_id=author_id,
+            ),
+            dispatch_text="run the release",
+            now=NOW,
+        )
+        message_deliveries.claim_start_batch(
+            conn, turn_id=turn_id, session_id=SESSION, backend="avibe", deliveries=[delivery],
+            dispatch_text="run the release",
+        )
+    context = _context("avibe", SESSION, turn_id=turn_id, delivery_id=delivery_id)
+    harness.controller._native_start(context)
+    await harness.agent.store.consume_input(SESSION, delivery_id, UserMessage((text("run the release"),)))
+    harness.agent.store.bind_agent(SESSION, "avibe")
+    call = ToolCallBlock(id="call_release", name="bash", arguments={"command": "sleep 30"})
+    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    harness.agent.store.bind_agent(SESSION, None)
+    return await harness.agent._tools().jobs.start(
+        "sleep 30", cwd=str(tmp_path), env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        timeout_s=None, session_id=SESSION, tool_call_id="call_release",
+    )
+
+
+def _job_watch(job_id: str):
+    from core.watches import ManagedWatchStore
+
+    store = ManagedWatchStore()
+    watch_id = store.find_job_watch(job_id)
+    store.load()
+    return store.get_watch(watch_id) if watch_id else None
+
+
+async def test_a_remote_turns_job_watch_carries_its_authorization(engine, session, tmp_path, published, monkeypatch) -> None:
+    import storage.resource_access_service as access
+
+    harness = _Harness(engine, tmp_path, "avibe", [])
+    harness.agent._tool_suite = None  # the adapter's own job host and hand-over
+    job_id = await _remote_turn_with_open_call(harness, tmp_path, snapshot=_REMOTE_SNAPSHOT)
+    try:
+        # The same hand-over bash's watch=true and its foreground window use.
+        await harness.agent._tools().jobs.hand_over(job_id)
+
+        watch = _job_watch(job_id)
+        assert watch.agent_name == "avibe"
+        assert watch.metadata["resource_user_context"]["sub"] == "remote-user-1"
+        from core.watches import watch_allows_runtime
+
+        assert watch_allows_runtime(watch)
+
+        # Revoked access fails the recheck the Watch runs before following up.
+        def revoked(metadata, **_kwargs):
+            raise access.ResourceAccessError(access.HARNESS_ACCESS_FORBIDDEN_CODE)
+
+        monkeypatch.setattr(access, "resource_user_context_from_metadata", revoked)
+        assert not watch_allows_runtime(watch)
+
+        # An update re-authors the Watch to its updater, explicitly: a local rename makes it local.
+        from core.watches import ManagedWatchStore
+        from tests.test_watch_job_target import _update_fields
+
+        ManagedWatchStore().update_watch(watch.id, **{**_update_fields(watch), "name": "release"})
+        renamed = _job_watch(job_id)
+        assert "resource_user_context" not in renamed.metadata
+        assert watch_allows_runtime(renamed)
+    finally:
+        await harness.agent._tools().jobs.kill(job_id)
+
+
+@pytest.mark.parametrize(
+    ("author_id", "snapshot", "authority", "allowed"),
+    [
+        ("remote:remote-user-1", _REMOTE_SNAPSHOT, {"resource_user_context": {"sub": "remote-user-1"}}, True),
+        # A remote Turn with no snapshot: owned, but never followed up.
+        ("remote:remote-user-1", None, {"resource_user_context": {"unverifiable": True}}, False),
+        ("owner", None, {"job_watch_authorization": "local"}, True),
+    ],
+    ids=["remote", "remote-without-snapshot", "local"],
+)
+async def test_startup_recovery_hands_a_job_over_with_its_turns_authorization(
+    engine, session, tmp_path, published, author_id, snapshot, authority, allowed
+) -> None:
+    harness = _Harness(engine, tmp_path, "avibe", [])
+    harness.agent._tool_suite = None
+    job_id = await _remote_turn_with_open_call(harness, tmp_path, snapshot=snapshot, author_id=author_id)
+    suite = harness.agent._tool_suite
+    try:
+        # The process restarted: no live request, only the Turn's durable rows.
+        agent = harness.new_agent()
+        agent._tool_suite = None
+        assert await agent.recover_runtime_state() == []
+
+        watch = _job_watch(job_id)
+        assert watch is not None and watch.agent_name == "avibe"
+        for key, expected in authority.items():
+            recorded = watch.metadata.get(key)
+            assert {k: recorded[k] for k in expected} == expected if isinstance(expected, dict) else recorded == expected
+        assert ("resource_user_context" in watch.metadata) is author_id.startswith("remote:")
+        from core.watches import watch_allows_runtime
+
+        assert watch_allows_runtime(watch) is allowed
+    finally:
+        await suite.jobs.kill(job_id)
 
 
 async def test_the_default_job_host_lives_in_the_watch_jobs_dir(engine, session, tmp_path) -> None:
