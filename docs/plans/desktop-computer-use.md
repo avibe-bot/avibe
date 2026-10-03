@@ -161,6 +161,7 @@ running. The tray keeps the shell alive after the window closes.
   | shell launch | `enabled`, both grants held | `starting` | spawn |
   | shell launch | `enabled`, a grant missing | `needs_permission` | none; silent |
   | `needs_runtime` | `/desktop/capabilities` now covers the schema | as from shell launch | none |
+  | any, `enabled` | a successful `/ready` is followed by an unsupported capabilities answer | `needs_runtime` | stop the daemon if running |
   | `needs_permission` | grant check passes | `starting` | spawn |
   | `starting` | socket accepts and health passes | `ready` | none |
   | `starting` | health reports a missing grant | `needs_permission` | stop the daemon; no prompt |
@@ -609,7 +610,8 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   `computer_use_schema` never gets a daemon. A failed `D` write still stops
   the daemon.
 - Python, configuration: the spec and the prompt section exist exactly when
-  `enabled` is true. Each backend translation is checked; Codex also carries
+  `enabled` is true and the snapshot verifies; a missing or mismatched
+  snapshot yields neither, plus `snapshot_invalid`. Each backend translation is checked; Codex also carries
   the approval override. Reconciliation brings every live consumer (Codex,
   OpenCode, cached Claude clients) to the final (`enabled`, snapshot hash)
   pair. Claude
