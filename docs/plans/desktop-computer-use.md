@@ -106,39 +106,73 @@ running. The tray keeps the shell alive after the window closes.
 - **Toggle.** A native checkable "Computer Use" item in the tray and the app
   menu, following the Start at Login pattern. It adds no webview command. The
   shell persists the state with its other native preferences.
-- **Enable flow (macOS).** Request Accessibility
-  (`AXIsProcessTrustedWithOptions` with prompt) and Screen Recording
-  (`CGRequestScreenCaptureAccess`; fall back to opening the Settings pane).
-  Start the daemon only after both report granted. Prompt only from the user's
-  toggle action; app launch checks silently, because every prompting call while
-  a grant is missing queues another system dialog. On macOS 26 an app appears in
-  the Screen Recording pane only after a real capture attempt, so the request
-  step also makes one capture attempt from the shell process itself. A one-pixel
-  ScreenCaptureKit capture whose result is discarded is enough. TCC attributes
-  it to Avibe.app, and it needs no daemon. That matters because the daemon
-  starts only after both grants exist, so a daemon-side probe could never run on
-  a first enable. Verify this shell-side probe on macOS 26 in Phase 1. In the
-  spike the row appeared after the host's daemon attempted a capture. If a grant
-  changes later, restart the daemon, because macOS caches TCC answers per
-  process.
+- **Permission requests (macOS).** The shell requests Accessibility with
+  `AXIsProcessTrustedWithOptions` and a prompt. It requests Screen Recording
+  with `CGRequestScreenCaptureAccess`, falling back to opening the Settings
+  pane.
+  - It prompts only on the user's toggle-on action. Every other check is
+    silent, because each prompting call while a grant is missing queues
+    another system dialog.
+  - On macOS 26 an app appears in the Screen Recording pane only after a real
+    capture attempt. So the request also makes one attempt from the shell
+    process itself: a one-pixel ScreenCaptureKit capture whose result is
+    discarded. TCC attributes it to Avibe.app, and it needs no daemon, which
+    matters because the daemon starts only after both grants exist. In the
+    spike the row appeared after the host's daemon attempted a capture, so
+    verify the shell-side probe on macOS 26 in Phase 1.
+- **Lifecycle.** The shell runs one state machine whose states are the `D`
+  states. Every transition writes `D` first, except that `ready` is written
+  only after the health check passes. The first matching row wins:
+
+  | From | Event | To | Action |
+  | --- | --- | --- | --- |
+  | any | toggle off | `off` | stop the daemon if running |
+  | `off` | toggle on, both grants held | `starting` | spawn |
+  | `off` | toggle on, a grant missing | `needs_permission` | prompt and run the capture probe (the only prompting path) |
+  | shell launch, `enabled` | both grants held | `starting` | spawn |
+  | shell launch, `enabled` | a grant missing | `needs_permission` | none; silent |
+  | `needs_permission` | grant check passes | `starting` | spawn |
+  | `starting` | socket accepts and health passes | `ready` | none |
+  | `starting` | spawn, socket, or health fails | `error` | stop the daemon; record the reason |
+  | `ready` | grant check fails | `needs_permission` | stop the daemon |
+  | `ready` | daemon exits unexpectedly | `starting` | respawn with backoff; after 3 failures in 5 minutes, go to `error` |
+  | `error` | toggle off, then on | as from `off` | none |
+
+  - **Grant check.** Silent, and it runs only while `enabled`. It fires on
+    app activation, and every 5 s while in `needs_permission` or `ready`.
+    `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess` give the shell's
+    own answer.
+  - **Stale preflight.** macOS caches TCC answers per process. If the
+    in-process preflight stays stale after a grant on macOS 26 (verify in
+    Phase 1), the `needs_permission` check falls back to a `starting`
+    attempt. The new daemon process reads its grants fresh, and its health
+    check either reaches `ready` or returns to `needs_permission` with no
+    prompt.
+  - **Health.** Call `check_permissions` and
+    `health_report(include=["bundle_identity"])`, and require
+    `source.attribution == "host"`. The menu shows the localized reason for
+    `needs_permission` and `error`.
+  - **Orderly quit.** Stop the daemon. `D` keeps `enabled`, and the
+    effective-status table reads it as `shell_not_running`.
 - **Daemon.** Spawn directly with `posix_spawn`/`Command`, never through
   `open`/LaunchServices. Environment: `CUA_DRIVER_EMBEDDED=1`,
   `CUA_DRIVER_HOST_BUNDLE_ID=<bundle id>`,
   `CUA_DRIVER_PERMISSION_MODE=standard`,
   `CUA_DRIVER_MANAGED_POLICY_FILE=<bundled tool policy>`,
   `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, `CUA_DRIVER_RS_UPDATE_CHECK=0`,
-  `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=300`. Use a private socket in the
-  shell's app data directory (see `D`); on Windows, a private pipe name. The driver's parent-liveness pipe ends it if the shell
-  dies. An orderly quit stops it explicitly. A terminated daemon leaves its
-  socket file behind, and a new daemon refuses to start on an existing endpoint,
-  so the shell removes the stale socket (after confirming its own daemon has
-  exited) before each spawn.
+  `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=300`. Use a private socket in the shell's
+  app data directory (see `D`); on Windows, a private pipe name. The driver's
+  parent-liveness pipe ends it if the shell dies. An orderly quit stops it
+  explicitly. A terminated daemon leaves its socket file behind, and a new
+  daemon refuses to start on an existing endpoint, so the shell removes the
+  stale socket (after confirming its own daemon has exited) before each spawn.
 - **State file `D`.** `computer-use.json` in the shell's per-user app data
   directory is the only shell-to-Runtime contract. On macOS that directory is
   `~/Library/Application Support/bot.avibe.desktop/`, where `bootstrap.log`
-  already lives. On Windows it is `%APPDATA%\bot.avibe.desktop\`. The shell writes it atomically on every change. It
-  is also the only cross-process record: the Runtime, the computer MCP server,
-  and the separately running Workbench API process all read the same file.
+  already lives. On Windows it is `%APPDATA%\bot.avibe.desktop\`. The shell
+  writes it atomically on every change. It is also the only cross-process
+  record: the Runtime, the computer MCP server, and the separately running
+  Workbench API process all read the same file.
   - Every write carries `schema_version`, `enabled` (a mirror of the toggle,
     the configuration input), `state`, `reason` (a stable code, or null),
     `shell_pid`, `instance_id` (random per shell process), and `generation`.
@@ -183,10 +217,6 @@ running. The tray keeps the shell alive after the window closes.
   extension, recording/replay, cursor-theme, legacy `page`, the typed browser
   tools, and visual parsing. Typed browser tools are deferred, not rejected:
   they need their own runtime and origin scope.
-- **Health.** After start, call `check_permissions` and
-  `health_report(include=["bundle_identity"])` and require
-  `source.attribution == "host"`. On failure, write `D` as `error` with its
-  reason, stop the daemon, and show the localized reason in the menu.
 
 ### Runtime (`core/`, `modules/agents/`)
 
@@ -499,10 +529,10 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 
 ## Validation
 
-- Rust: every toggle, permission, start, health, and stop path writes the
-  matching `D` state, with a non-ready state before the daemon stops and
-  `ready` only after its socket accepts; generation bumps on each spawn; no
-  spawn through LaunchServices; toggle persistence.
+- Rust: one case per lifecycle-table row, with grant checks, spawn, socket, and
+  health faked. Each case asserts the resulting `D` and that no prompt is
+  raised outside the toggle-on row. Also: `generation` bumps on each spawn,
+  nothing is spawned through LaunchServices, and the toggle persists.
 - Python, configuration: the spec and the prompt section exist exactly when
   `enabled` is true. Each backend translation is checked; Codex also carries
   the approval override. Reconciliation brings every live consumer (Codex,
