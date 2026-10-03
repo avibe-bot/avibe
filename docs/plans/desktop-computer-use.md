@@ -62,11 +62,10 @@ machine. User docs must recommend `require_bind` for shared channels.
 ## Architecture
 
 ```text
-Avibe.app (Tauri shell; owns TCC grants, toggle, lifecycle)
+Avibe.app (Tauri shell; owns TCC grants, toggle, lifecycle; writes state file D)
   └─ cua-driver serve --embedded --socket <S>   ← executes tools, checks TCC
-       writes descriptor D after the socket accepts connections
 
-Avibe Runtime (adopted or shell-started; reads D, never spawns the daemon)
+Avibe Runtime (adopted or shell-started; watches D, never spawns the daemon)
   └─ agent backend process
        └─ cua-driver mcp --embedded --socket <S>   ← stdio MCP proxy only
 ```
@@ -84,45 +83,59 @@ running. The tray keeps the shell alive after the window closes.
 
 - **Packaging.** Ship `cua-driver` as a Tauri sidecar (`externalBin`), signed as
   a nested executable before the app is signed and notarized. Pin the version
-  and SHA-256 in a sources manifest beside `runtime-sources.json`. Fetch only the
-  plain driver binary, never the `cua-perception` extension, which is AGPL.
+  and SHA-256 in a sources manifest beside `runtime-sources.json`. Fetch only
+  the plain driver binary, never the `cua-perception` extension, which is AGPL.
   Add the upstream MIT notice. Desktop packages are per architecture
-  (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`),
-  so ship one thin slice per package: `lipo -thin` of the universal binary
-  keeps Cua's valid per-slice signature. Windows ships `cua-driver.exe`; whether
-  the default-off `cua-driver-uia.exe` worker is needed is a Windows-run
-  question. Spawn it with `CREATE_NO_WINDOW` (it is a console program), as
-  `runtime-host` already does for the Runtime.
+  (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`), so
+  ship one thin slice per package: `lipo -thin` of the universal binary keeps
+  Cua's valid per-slice signature. Windows ships `cua-driver.exe`; whether the
+  default-off `cua-driver-uia.exe` worker is needed is a Windows-run question.
+  Spawn it with `CREATE_NO_WINDOW` (it is a console program), as `runtime-host`
+  already does for the Runtime.
 - **Toggle.** A native checkable "Computer Use" item in the tray and the app
   menu, following the Start at Login pattern. It adds no webview command. The
   shell persists the state with its other native preferences.
 - **Enable flow (macOS).** Request Accessibility
   (`AXIsProcessTrustedWithOptions` with prompt) and Screen Recording
-  (`CGRequestScreenCaptureAccess`; fall back to opening the Settings pane). Start
-  the daemon only after both report granted. Prompt only from the user's toggle
-  action; app launch checks silently, because every prompting call while a grant
-  is missing queues another system dialog. On macOS 26 an app appears in the
-  Screen Recording pane only after a real capture attempt, so the request step
-  also runs one capture probe (the driver's `check_permissions` with
-  `prompt: true` does this as the host). If a grant changes later, restart
-  the daemon, because macOS caches TCC answers per process.
+  (`CGRequestScreenCaptureAccess`; fall back to opening the Settings pane).
+  Start the daemon only after both report granted. Prompt only from the user's
+  toggle action; app launch checks silently, because every prompting call while
+  a grant is missing queues another system dialog. On macOS 26 an app appears in
+  the Screen Recording pane only after a real capture attempt, so the request
+  step also runs one capture probe (the driver's `check_permissions` with
+  `prompt: true` does this as the host). If a grant changes later, restart the
+  daemon, because macOS caches TCC answers per process.
 - **Daemon.** Spawn directly with `posix_spawn`/`Command`, never through
   `open`/LaunchServices. Environment: `CUA_DRIVER_EMBEDDED=1`,
-  `CUA_DRIVER_HOST_BUNDLE_ID=<bundle id>`, `CUA_DRIVER_PERMISSION_MODE=standard`,
+  `CUA_DRIVER_HOST_BUNDLE_ID=<bundle id>`,
+  `CUA_DRIVER_PERMISSION_MODE=standard`,
   `CUA_DRIVER_MANAGED_POLICY_FILE=<bundled tool policy>`,
   `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, `CUA_DRIVER_RS_UPDATE_CHECK=0`,
-  `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=300`.
-  Use a private socket under the Avibe run directory. The driver's
-  parent-liveness pipe ends it if the shell dies. An orderly quit stops it
-  explicitly. A terminated daemon leaves its socket file behind, and a new
-  daemon refuses to start on an existing endpoint, so the shell removes the
-  stale socket (after confirming its own daemon has exited) before each spawn.
-- **Descriptor `D`.** Write `~/.avibe/run/desktop-computer-use.json` atomically
-  after the socket accepts connections: `schema_version`, `socket_path`,
-  `proxy_executable` (absolute path to the bundled binary), `driver_version`,
-  `generation`, `host_bundle_id`. Remove it before stopping the daemon. A fixed
-  path under the Avibe home works for adopted Runtimes, which never see the
-  shell's launch environment.
+  `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=300`. Use a private socket under the
+  Avibe run directory. The driver's parent-liveness pipe ends it if the shell
+  dies. An orderly quit stops it explicitly. A terminated daemon leaves its
+  socket file behind, and a new daemon refuses to start on an existing endpoint,
+  so the shell removes the stale socket (after confirming its own daemon has
+  exited) before each spawn.
+- **State file `D`.** `~/.avibe/run/desktop-computer-use.json` is the only
+  shell-to-Runtime contract. The shell writes it atomically on every state
+  change. It is also the only cross-process record: the Runtime and the
+  separately running Workbench API process read the same file.
+  - Every state carries `schema_version`, `state`, `reason` (a stable code,
+    or null), `shell_pid`, and `generation`. `state` is one of these:
+    - `off`: the toggle is off.
+    - `needs_permission`: the toggle is on and a grant is missing.
+    - `starting`: the toggle is on, both grants are held, and the daemon is
+      not yet accepting connections.
+    - `ready`: the socket accepts connections.
+    - `error`: start or health failed.
+  - `ready` also carries `socket_path`, `proxy_executable` (absolute path to
+    the bundled binary), `driver_version`, and `host_bundle_id`.
+  - `generation` increases with each daemon spawn.
+  - The shell writes a non-ready state before stopping the daemon. It removes
+    the file on orderly quit.
+  - A fixed path under the Avibe home works for adopted Runtimes, which never
+    see the shell's launch environment.
 - **Tool policy.** Ship a YAML allow-list as the driver's managed policy
   (Phase 0 finding). It is pinned with the driver version, because the list
   must be reviewed against each new tool surface. It allows observation,
@@ -133,18 +146,22 @@ running. The tray keeps the shell alive after the window closes.
   they need their own runtime and origin scope.
 - **Health.** After start, call `check_permissions` and
   `health_report(include=["bundle_identity"])` and require
-  `source.attribution == "host"`. On failure, stop the daemon and show the
-  localized reason in the menu.
+  `source.attribution == "host"`. On failure, write `D` as `error` with its
+  reason, stop the daemon, and show the localized reason in the menu.
 
 ### Runtime (`core/`, `modules/agents/`)
 
-- **One owner.** A new `core/computer_use.py` reads `D`, validates it (schema
-  version, absolute proxy path, socket connectable), and returns at most one
-  managed stdio MCP spec: name `computer`, command `proxy_executable`,
-  args `mcp --embedded --socket <S>`, env `CUA_DRIVER_EMBEDDED=1`,
-  `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, `CUA_DRIVER_RS_UPDATE_CHECK=0`. The
-  proxy runs its own update check and prints a banner without the last one.
-  Backends only translate this spec. They do not decide availability.
+- **One owner.** A new `core/computer_use.py` reads `D` and derives one
+  effective status. It is `ready` only when the state is `ready`, `shell_pid` is
+  alive, the proxy path is absolute, and the socket accepts a connection. A
+  missing file or a dead `shell_pid` derives `unavailable`. Otherwise the
+  recorded state is used, so a crashed shell's stale file never reads as
+  `ready`. Only `ready` yields the single managed stdio MCP spec: name
+  `computer`, command `proxy_executable`, args `mcp --embedded --socket <S>`,
+  env `CUA_DRIVER_EMBEDDED=1`, `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`,
+  `CUA_DRIVER_RS_UPDATE_CHECK=0`. The proxy runs its own update check and prints
+  a banner without the last one. Backends only translate this spec. They do not
+  decide availability.
 - **Claude Code.** Pass `mcp_servers={"computer": ...}` in the session options
   built in `core/handlers/session_handler.py`. SDK 0.2.93 supports
   `McpStdioServerConfig`. Keep `strict_mcp_config` unset so user MCP config is
@@ -165,14 +182,21 @@ running. The tray keeps the shell alive after the window closes.
   filter.
 - **OpenCode.** Add `mcp.computer` (`type: "local"`) through the existing config
   overlay / `PATCH /global/config` path.
-- **Availability changes.** Inject the server only while `D` is valid. The
-  proxy exits when no daemon is listening and when its daemon goes away, and
-  it does not reconnect (Phase 0, Q3), so always-inject would hand agents a
-  dead MCP server. When `D` appears, disappears, or changes `generation`,
-  long-lived Codex/OpenCode servers take the existing rolling refresh; Claude
-  sessions pick it up on their next start. Teaching the Codex filter to
-  reconnect is the fallback if refresh proves too disruptive; it is not planned
-  for v1.
+- **Availability changes.** Inject the server only while the effective status is
+  `ready`. The proxy exits when no daemon is listening and when its daemon goes
+  away, and it does not reconnect (Phase 0, Q3), so always-inject would hand
+  agents a dead MCP server. `core/computer_use.py` also owns change detection,
+  so neither the shell nor a backend has to. A controller background task polls
+  the effective status every 2 s, the same polling model as
+  `RuntimeCommandWatcher`. It compares the pair (is-ready, `generation`). When
+  the pair changes, the task calls the same
+  `AgentAuthService._refresh_backend_runtime` handler that the restart markers
+  call. It does so for each running backend whose launch config embeds the
+  server, which today means Codex and OpenCode. So enabling adds the server, and
+  disabling, a daemon restart, or a shell crash removes or replaces it without
+  waiting for an unrelated refresh. Claude sessions read the status on their
+  next start. Teaching the Codex filter to reconnect is the fallback if refresh
+  proves too disruptive; it is not planned for v1.
 - **Prompt.** Add a short section in `core/system_prompt_injection.py`, only
   when the server is present: prefer CLI/API routes, use GUI tools for GUI-only
   steps, prefer accessibility element-token actions over pixel input, treat
@@ -184,8 +208,11 @@ running. The tray keeps the shell alive after the window closes.
 
 ### Workbench
 
-A read-only status line (enabled / missing permission / unavailable), derived
-from `D` by the Runtime. Copy goes through `ui/src/i18n/en.json` and `zh.json`.
+A read-only status line, derived from the effective status (ready, off,
+needs permission, starting, error with its reason, or unavailable when the
+shell is not running). The Workbench API reads it through the same
+`core/computer_use.py` reader, not through Runtime memory, because it runs in a
+separate process. Copy goes through `ui/src/i18n/en.json` and `zh.json`.
 The control itself stays native in v1.
 
 ## Signing prerequisite
@@ -266,7 +293,7 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   proxy exits before the MCP handshake. When the daemon stops, the connected
   proxy exits too, and it does not come back after the daemon restarts. A
   fresh proxy works against the restarted daemon. This settles Availability
-  changes: inject only while `D` is valid.
+  changes: inject only while the effective status is `ready`.
 - **Q4 Codex (codex-cli 0.145.0): images are dropped, and writes are
   cancelled. Both have workarounds.** Every cua image tool
   (`get_window_state`, `get_desktop_state`, `zoom`) returns `structuredContent`
@@ -390,7 +417,7 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 - [x] Phase 0 spike on macOS; answers recorded above
 - [ ] Phase 0 Q6 on a Windows machine: embedded spawn, proxy reach, UIA worker
 - [ ] Shell: sidecar packaging, pinned manifest, signing order, notices
-- [ ] Shell: toggle, permission flow, daemon lifecycle, descriptor, health
+- [ ] Shell: toggle, permission flow, daemon lifecycle, state file `D`, health
 - [ ] Core: `core/computer_use.py` + Claude/Codex/OpenCode translation + prompt
 - [ ] Workbench status line + i18n
 - [ ] User docs: enabling, permissions, `require_bind` guidance, stop
@@ -398,14 +425,18 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 
 ## Validation
 
-- Rust: descriptor write/remove ordering, generation bump on restart, no spawn
-  through LaunchServices, toggle persistence.
-- Python: per-backend injection from a fixture descriptor; absent, stale, or
-  invalid descriptors inject nothing; the prompt section appears only with the
-  server. The Codex translation adds the stdio filter and the approval
-  override, and the filter folds `structuredContent` into text while keeping
-  image blocks. Tests stay hermetic: the descriptor path is redirected to
-  test-owned state.
+- Rust: every toggle, permission, start, health, and stop path writes the
+  matching `D` state, with a non-ready state before the daemon stops and
+  `ready` only after its socket accepts; generation bumps on each spawn; no
+  spawn through LaunchServices; toggle persistence.
+- Python: the effective status for every `D` state, plus missing, malformed,
+  dead-`shell_pid`, and unconnectable-socket files (only a live `ready` file
+  injects); the watcher refreshes each embedding backend exactly once per
+  (is-ready, `generation`) change and never on an unchanged poll; the prompt
+  section appears only with the server. The Codex translation adds the stdio
+  filter and the approval override, and the filter folds `structuredContent`
+  into text while keeping image blocks. Tests stay hermetic: the `D` path is
+  redirected to test-owned state.
 - Shell: the daemon environment names the bundled managed policy, and a release
   check compares that policy against the pinned driver's `tools/list`.
 - Manual on a signed build: Slack → agent → background GUI task completes while
