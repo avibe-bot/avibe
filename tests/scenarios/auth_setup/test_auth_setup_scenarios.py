@@ -1568,13 +1568,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 agent,
                 str(home),
                 FakeCodexTransport(),
-                digest=agent._launch_spec_digest(
-                    str(home),
-                    binary="codex-probe",
-                    args=(),
-                    extra_args=(),
-                    env=dict(agent._codex_runtime_environment()),
-                ),
+                digest=(await agent._launch_spec(str(home))).digest,
             )
             current.test_result = await probe_backend_auth_async(
                 "codex",
