@@ -74,12 +74,14 @@ def read_process_create_time(pid: int) -> float:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         raise psutil.NoSuchProcess(pid)
     process = psutil.Process(pid)
+    # psutil's read proves the pid is there and readable, with psutil's errors.
+    created = float(process.create_time())
     ticks = _linux_start_ticks(pid)
     if ticks is not None:
         anchor = _linux_boot_anchor()
         if anchor is not None:
             return anchor + ticks / _clock_ticks_per_second()
-    return float(process.create_time())
+    return created
 
 
 def _linux_start_ticks(pid: int) -> int | None:
