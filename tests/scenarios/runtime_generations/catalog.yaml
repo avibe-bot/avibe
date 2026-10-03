@@ -202,6 +202,7 @@ scenarios:
     test: tests/test_opencode_generations.py::test_runtime_gen_022_a_restored_poll_resumes_on_the_generation_that_runs_it
     related_tests:
       - tests/test_opencode_generations.py::test_adoption_keeps_every_proven_serving_process_and_drops_the_rest
+      - tests/test_opencode_restore_polls.py::test_a_cancelled_restore_releases_the_binding_its_poll_task_never_took
   - id: RUNTIME-GEN-023
     name: The UI process never launches OpenCode; it leases the controller's generation over control IPC
     status: covered

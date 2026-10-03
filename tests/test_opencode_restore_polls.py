@@ -1419,3 +1419,34 @@ def test_a_restored_poll_whose_generation_was_force_stopped_rebinds_before_regis
 
     assert stopped.released
     assert len(agent._runtime.bindings) == 1 and agent._runtime.bindings[0].released
+
+
+@pytest.mark.parametrize("stage", ["listing messages", "reading status"])
+def test_a_cancelled_restore_releases_the_binding_its_poll_task_never_took(stage) -> None:
+    """An IM-ready restoration is cancelled while it still verifies a poll.
+    The generation binding it took must be released, or every retry keeps
+    that generation from ever draining."""
+
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    waiting = asyncio.Event()
+
+    async def hang(*_args, **_kwargs):
+        waiting.set()
+        await asyncio.Event().wait()
+
+    if stage == "listing messages":
+        agent._test_server.list_messages = hang
+    else:
+        agent._test_server.get_session_status = hang
+
+    async def run() -> None:
+        restore = asyncio.get_running_loop().create_task(agent.restore_active_polls())
+        await waiting.wait()
+        restore.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await restore
+
+    asyncio.run(run())
+
+    assert agent._runtime.bindings and all(binding.released for binding in agent._runtime.bindings)

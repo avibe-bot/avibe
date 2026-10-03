@@ -2688,132 +2688,132 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             binding: RuntimeBinding | None = None
             server: OpenCodeGeneration | None = None
             try:
-                binding = await self._bind_restored_poll(poll_info)
-                server = binding.generation.runtime
-                messages = await server.list_messages(
-                    session_id=poll_info.opencode_session_id,
-                    directory=poll_info.working_path,
-                )
-            except RuntimeUnitStopping:
-                # OpenCode was disabled while restoring: the poll stays durable
-                # for the next controller that has OpenCode enabled.
-                continue
-            except Exception as err:
-                logger.warning(f"Failed to verify OpenCode session {session_id} for restoration: {err}")
-                messages = []
-                verification_unknown = True
-
-            baseline_message_ids = set(poll_info.baseline_message_ids)
-            start_attempt_part_id = (
-                native_part_id_for_attempt(start_attempt_id)
-                if start_attempt_id
-                else ""
-            )
-            start_attempt_found = any(
-                start_attempt_part_id
-                and message.get("info", {}).get("role") == "user"
-                and any(
-                    isinstance(part, dict)
-                    and str(part.get("id") or "") == start_attempt_part_id
-                    for part in (message.get("parts") or [])
-                )
-                for message in messages
-            )
-            has_in_progress = False
-            last_assistant_finish = None
-            last_completed_assistant_index = -1
-            for index, message in enumerate(messages):
-                info = message.get("info", {})
-                if info.get("role") != "assistant":
-                    continue
-                time_info = info.get("time") or {}
-                if not time_info.get("completed"):
-                    has_in_progress = True
-                    continue
-                if info.get("id") in baseline_message_ids:
-                    continue
-                last_completed_assistant_index = index
-                last_assistant_finish = info.get("finish")
-
-            has_post_assistant_user = any(
-                last_completed_assistant_index >= 0
-                and index > last_completed_assistant_index
-                and message.get("info", {}).get("role") == "user"
-                and message.get("info", {}).get("id") not in baseline_message_ids
-                for index, message in enumerate(messages)
-            )
-            reconcile_after_message_ids = (
-                {
-                    str(message.get("info", {}).get("id"))
-                    for message in messages[: last_completed_assistant_index + 1]
-                    if message.get("info", {}).get("id")
-                }
-                if has_post_assistant_user
-                else None
-            )
-            status_unknown = verification_unknown
-            native_status = None
-            if not verification_unknown:
                 try:
-                    native_status = await server.get_session_status(
-                        poll_info.opencode_session_id,
-                        poll_info.working_path,
+                    binding = await self._bind_restored_poll(poll_info)
+                    server = binding.generation.runtime
+                    messages = await server.list_messages(
+                        session_id=poll_info.opencode_session_id,
+                        directory=poll_info.working_path,
                     )
+                except RuntimeUnitStopping:
+                    # OpenCode was disabled while restoring: the poll stays durable
+                    # for the next controller that has OpenCode enabled.
+                    continue
                 except Exception as err:
-                    logger.debug("Failed to read OpenCode status while restoring %s: %s", session_id, err)
-                    status_unknown = True
+                    logger.warning(f"Failed to verify OpenCode session {session_id} for restoration: {err}")
+                    messages = []
+                    verification_unknown = True
 
-            native_status_is_active = (
-                native_status is not None
-                and native_status.get("type") in {"busy", "retry"}
-            )
-            if native_status_is_active and reconcile_after_message_ids is None:
-                reconcile_after_message_ids = {
-                    str(message.get("info", {}).get("id"))
-                    for message in messages[: last_completed_assistant_index + 1]
-                    if message.get("info", {}).get("id")
-                }
-            session_still_active = (
-                status_unknown
-                or native_status_is_active
-                or has_in_progress
-                or last_assistant_finish == "tool-calls"
-                or has_post_assistant_user
-                or start_attempt_found
-            )
-            if not session_still_active:
-                if start_attempt_id and logical_turn_id:
+                baseline_message_ids = set(poll_info.baseline_message_ids)
+                start_attempt_part_id = (
+                    native_part_id_for_attempt(start_attempt_id)
+                    if start_attempt_id
+                    else ""
+                )
+                start_attempt_found = any(
+                    start_attempt_part_id
+                    and message.get("info", {}).get("role") == "user"
+                    and any(
+                        isinstance(part, dict)
+                        and str(part.get("id") or "") == start_attempt_part_id
+                        for part in (message.get("parts") or [])
+                    )
+                    for message in messages
+                )
+                has_in_progress = False
+                last_assistant_finish = None
+                last_completed_assistant_index = -1
+                for index, message in enumerate(messages):
+                    info = message.get("info", {})
+                    if info.get("role") != "assistant":
+                        continue
+                    time_info = info.get("time") or {}
+                    if not time_info.get("completed"):
+                        has_in_progress = True
+                        continue
+                    if info.get("id") in baseline_message_ids:
+                        continue
+                    last_completed_assistant_index = index
+                    last_assistant_finish = info.get("finish")
+
+                has_post_assistant_user = any(
+                    last_completed_assistant_index >= 0
+                    and index > last_completed_assistant_index
+                    and message.get("info", {}).get("role") == "user"
+                    and message.get("info", {}).get("id") not in baseline_message_ids
+                    for index, message in enumerate(messages)
+                )
+                reconcile_after_message_ids = (
+                    {
+                        str(message.get("info", {}).get("id"))
+                        for message in messages[: last_completed_assistant_index + 1]
+                        if message.get("info", {}).get("id")
+                    }
+                    if has_post_assistant_user
+                    else None
+                )
+                status_unknown = verification_unknown
+                native_status = None
+                if not verification_unknown:
                     try:
-                        self.controller.session_turns.reconcile_start_attempt_not_written(
-                            logical_turn_id,
-                            start_attempt_id,
-                            backend="opencode",
+                        native_status = await server.get_session_status(
+                            poll_info.opencode_session_id,
+                            poll_info.working_path,
                         )
+                    except Exception as err:
+                        logger.debug("Failed to read OpenCode status while restoring %s: %s", session_id, err)
+                        status_unknown = True
+
+                native_status_is_active = (
+                    native_status is not None
+                    and native_status.get("type") in {"busy", "retry"}
+                )
+                if native_status_is_active and reconcile_after_message_ids is None:
+                    reconcile_after_message_ids = {
+                        str(message.get("info", {}).get("id"))
+                        for message in messages[: last_completed_assistant_index + 1]
+                        if message.get("info", {}).get("id")
+                    }
+                session_still_active = (
+                    status_unknown
+                    or native_status_is_active
+                    or has_in_progress
+                    or last_assistant_finish == "tool-calls"
+                    or has_post_assistant_user
+                    or start_attempt_found
+                )
+                if not session_still_active:
+                    if start_attempt_id and logical_turn_id:
+                        try:
+                            self.controller.session_turns.reconcile_start_attempt_not_written(
+                                logical_turn_id,
+                                start_attempt_id,
+                                backend="opencode",
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to persist definitive missing OpenCode start "
+                                "attempt for Turn=%s",
+                                logical_turn_id,
+                            )
+                            await self._release_binding(binding)
+                            continue
+                    logger.info(f"OpenCode session {session_id} has completed, removing from active polls")
+                    try:
+                        await server.mark_run_inactive(poll_info.opencode_session_id)
                     except Exception:
                         logger.exception(
-                            "Failed to persist definitive missing OpenCode start "
-                            "attempt for Turn=%s",
-                            logical_turn_id,
+                            "Failed to clear OpenCode run marker for session=%s; "
+                            "preserving its active poll and continuing restoration",
+                            poll_info.opencode_session_id,
                         )
                         await self._release_binding(binding)
                         continue
-                logger.info(f"OpenCode session {session_id} has completed, removing from active polls")
-                try:
-                    await server.mark_run_inactive(poll_info.opencode_session_id)
-                except Exception:
-                    logger.exception(
-                        "Failed to clear OpenCode run marker for session=%s; "
-                        "preserving its active poll and continuing restoration",
-                        poll_info.opencode_session_id,
-                    )
                     await self._release_binding(binding)
+                    await self._poll_loop.remove_restored_ack(poll_info)
+                    stale_poll_ids.append(session_id)
                     continue
-                await self._release_binding(binding)
-                await self._poll_loop.remove_restored_ack(poll_info)
-                stale_poll_ids.append(session_id)
-                continue
 
-            try:
                 logger.info(
                     f"Restoring poll loop for OpenCode session {session_id} "
                     f"(thread={poll_info.base_session_id}, cwd={poll_info.working_path})"
