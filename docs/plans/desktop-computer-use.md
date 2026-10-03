@@ -147,14 +147,16 @@ running. The tray keeps the shell alive after the window closes.
   | `starting` | health reports a missing grant | `needs_permission` | stop the daemon; no prompt |
   | `starting` | spawn, socket, or health fails otherwise | `error` | stop the daemon; record the reason |
   | `ready` | grant check fails | `needs_permission` | stop the daemon |
-  | `ready` | daemon exits unexpectedly | `starting` | respawn with backoff; after 3 failures in 5 minutes, go to `error` |
+  | `ready` | daemon exits unexpectedly, or its socket refuses on 2 consecutive checks | `starting` | stop the daemon if alive; respawn with backoff; after 3 failures in 5 minutes, go to `error` |
   | `error` | toggle off, then on | as from `off` | none |
   | any, `enabled` | quit | `stopped` | stop the daemon |
 
   - **Grant check.** Silent, and it runs only while `enabled`. It fires on
     app activation, and every 5 s while in `needs_permission` or `ready`.
     `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess` give the shell's
-    own answer.
+    own answer. While `ready`, the same 5 s tick also probes the daemon's
+    socket. A wedged daemon that is alive but not accepting is treated like
+    one that exited.
   - **Stale preflight.** macOS caches TCC answers per process. If the
     in-process preflight stays stale after a grant on macOS 26 (verify in
     Phase 1), the `needs_permission` check falls back to a `starting`
