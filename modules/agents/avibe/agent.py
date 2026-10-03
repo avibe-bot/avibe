@@ -479,11 +479,13 @@ class AvibeAgent(BaseAgent):
     async def _settle(self, run: _Run) -> None:
         """Settle the Turn from the run's outcome (loop-control.md section 6).
 
-        A committed final row is the Turn's outcome and result text; the result path
-        writes that row's display, as for the other backends. The row's own outcome is ``final_outcome`` (the rule its type was
-        committed by); the live run adds only the failures it alone can observe after
-        the commit. A Stop that arrives after the final row committed loses the race,
-        as it does for the Codex backend.
+        A committed final row is the Turn's outcome and result text, and it always
+        settles through the result path, which writes that row's display and type as
+        for the other backends; there is no separate failure notice for it. The row's
+        own outcome is ``final_outcome`` (the rule its type was committed by); the live
+        run adds only the failures it alone can observe after the commit. A Stop that
+        arrives after the final row committed loses the race, as it does for the Codex
+        backend.
         """
         request, context = run.request, run.request.context
         reason = run.reason or "error"
@@ -495,6 +497,10 @@ class AvibeAgent(BaseAgent):
             run_failed_after_commit = reason not in _COMPLETED
             failed = final_outcome(final) == "failed" or run_failed_after_commit
             body = self._display_source(final, final=True)
+            if failed and not body.strip():
+                # A silent final whose run failed after the commit: like a final without text
+                # of its own (``_display_source``), its row carries the explanation.
+                body = error_text(kind or "empty_response", self._language(), reason=reason)
             if body.strip():
                 # The same result path as the other backends; the row is already the message.
                 await self.emit_result_message(
@@ -505,8 +511,6 @@ class AvibeAgent(BaseAgent):
                     request=request,
                     output=replace(terminal_output_for(request), persisted_row_id=run.final_row),
                 )
-            elif failed:
-                await self._fail(request, kind or "empty_response", diagnostic, reason=reason)
             else:
                 # A reply the model chose to keep silent.
                 await self.controller.emit_agent_message(
@@ -565,9 +569,19 @@ class AvibeAgent(BaseAgent):
             await self._settle_open_calls(runtime)
             runtime.cwd = runtime.cwd or await asyncio.to_thread(self._session_workdir, session_id)
             runtime.recovered = True
-        for message_id, text_value, files, metadata in await asyncio.to_thread(self._unconsumed_inputs, session_id):
-            message = await self._render_input(session_id, text_value, files, metadata)
+        for message_id, text_value, files, delivery in await asyncio.to_thread(self._unconsumed_inputs, session_id):
+            message = await self._render_input(session_id, text_value, files, await self._input_metadata(delivery))
             await self.store.consume_input(session_id, message_id, message)
+
+    async def _input_metadata(self, delivery: dict[str, Any]) -> Optional[AgentInputMetadata]:
+        """A recovered input's sender facts, from the owner the live steer path uses (T3).
+
+        ``SessionTurnManager`` rebuilds the Delivery's context, including a scheduled
+        or agent-authored input's provenance, and asks the message handler, so the
+        input renders after a restart exactly as it would have live.
+        """
+        owner = getattr(getattr(self.controller, "session_turns", None), "_steer_input_metadata", None)
+        return await owner([delivery]) if callable(owner) else None
 
     async def _settle_open_calls(self, runtime: _SessionRuntime) -> None:
         """T2: one committed result for every open tool call, chosen from its job's state."""
@@ -616,7 +630,7 @@ class AvibeAgent(BaseAgent):
             rows = conn.execute(select(messages.c.id, messages.c.created_at).where(messages.c.id.in_(set(row_ids))))
             return {row_id: instant for row_id, created in rows if (instant := _instant(created)) is not None}
 
-    def _unconsumed_inputs(self, session_id: str) -> list[tuple[str, str, list[FileAttachment], AgentInputMetadata]]:
+    def _unconsumed_inputs(self, session_id: str) -> list[tuple[str, str, list[FileAttachment], dict[str, Any]]]:
         """Inputs accepted into an ``avibe`` Turn but never consumed, in acceptance order.
 
         Only Turns this backend ran count, so history from an earlier backend of the
@@ -630,8 +644,7 @@ class AvibeAgent(BaseAgent):
                     messages.c.id,
                     messages.c.content_text,
                     messages.c.content_json,
-                    messages.c.author_id,
-                    messages.c.author_name,
+                    message_deliveries.c.id.label("delivery_id"),
                 )
                 .select_from(
                     messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
@@ -659,9 +672,9 @@ class AvibeAgent(BaseAgent):
                 specs = resolve_attachment_specs(
                     conn, session_id=session_id, attachments=list(content.get("attachments") or [])
                 )
-                metadata = AgentInputMetadata(user_id=row["author_id"], user_name=row["author_name"])
+                delivery = delivery_store.get_delivery(conn, row["delivery_id"])
                 inputs.append(
-                    (row["id"], row["content_text"] or "", list(file_attachments_from_specs(specs) or ()), metadata)
+                    (row["id"], row["content_text"] or "", list(file_attachments_from_specs(specs) or ()), delivery)
                 )
         return inputs
 

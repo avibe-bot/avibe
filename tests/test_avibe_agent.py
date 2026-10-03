@@ -727,6 +727,63 @@ async def test_resume_settles_open_calls_and_admits_unconsumed_inputs_before_the
     assert only.messages == project(rows[:6]).messages
 
 
+async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, session, tmp_path, published) -> None:
+    from types import MethodType
+
+    from core.handlers.message_handler import MessageHandler
+    from core.session_turns import SessionTurnManager
+
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))]])
+    # The live steer path's owner of sender facts: the Turn owner and the message handler.
+    owner = SessionTurnManager(
+        harness.controller, build_context=lambda sid: _context("avibe", sid, turn_id="", delivery_id="")
+    )
+    owner._engine = engine
+    harness.controller.session_turns._steer_input_metadata = owner._steer_input_metadata
+    handler = SimpleNamespace(_source_session_id=MessageHandler._source_session_id)
+    harness.controller.message_handler = SimpleNamespace(
+        prepare_input_metadata=MethodType(MessageHandler.prepare_input_metadata, handler)
+    )
+    first = harness.request("watch the deploy")
+    turn_id = _turn(first.context)
+    harness.controller._native_start(first.context)
+    await harness.agent.store.consume_input(
+        SESSION, first.context.platform_specific["delivery_id"], UserMessage((text("watch the deploy"),))
+    )
+    with engine.begin() as conn:
+        # Another Session's agent steers this Turn; the process exits before the loop consumes it.
+        steer = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="dlv_agent_steer",
+            session_id=SESSION,
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=_SCOPES["avibe"], session_id=SESSION, platform="avibe", author="harness",
+                source="harness", message_type="harness", text="the deploy finished",
+                metadata={"scheduled_provenance": {
+                    "task_execution_id": "run_1",
+                    "platform_specific": {"task_trigger_kind": "agent_run", "source_session_id": "ses_source"},
+                }},
+            ),
+            dispatch_text="the deploy finished",
+            now=NOW,
+        )
+        assert message_deliveries.open_steer_attempt(
+            conn, steer["id"], expected_version=int(steer["version"]), turn_id=turn_id,
+            attempt_id="att_agent_steer", expected_native_turn_id=f"avibe:{turn_id}",
+        )
+        assert message_deliveries.materialize_steer_acceptance(
+            conn, leader_delivery_id=steer["id"], expected_attempt_id="att_agent_steer", turn_id=turn_id, evidence={}
+        )
+
+    harness.new_agent()
+    await harness.agent.handle_message(harness.request("anything new?"))
+
+    [recovered] = [entry for entry in await harness.context_rows() if entry.row_id == "dlv_agent_steer"]
+    assert "From: #ses_source" in recovered.message.content[-1].text
+
+
 async def test_a_fork_from_an_earlier_message_continues_only_the_inherited_prefix(
     engine, session, tmp_path, published
 ) -> None:
@@ -973,6 +1030,38 @@ async def test_a_silent_final_shows_nothing_and_completes(engine, session, tmp_p
     assert (await harness.context_rows())[-1].message.content[0] == text("<silent>nothing to add</silent>")
     assert harness.controller.im_client.sent == []
     assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_row(
+    engine, session, tmp_path, published
+) -> None:
+    class _LeakyJobs(FakeJobHost):
+        async def kill(self, job_id, *, reason="killed") -> None:
+            raise RuntimeError("the job's process group cannot be signalled")
+
+    def tools(tracking, sink):
+        async def start_and_leave(arguments, ctx):
+            await tracking.start("sleep 600", cwd=ctx.cwd, env={}, timeout_s=None, session_id=ctx.session_id,
+                                 tool_call_id=ctx.tool_call_id)
+            return ToolResult((text("started"),))
+
+        return [FakeTool("echo", execute=start_and_leave)]
+
+    call = ToolCallBlock(id="call_1", name="echo", arguments={})
+    suite = ToolSuite(jobs=_LeakyJobs(), create_tools=tools, render_recovered=_unused_renderer, find_job=lambda *a: None)
+    harness = _Harness(
+        engine, tmp_path, "avibe",
+        [[Done(assistant("", calls=(call,)))], [Done(assistant("<silent>nothing to add</silent>"))]], suite=suite,
+    )
+
+    await harness.agent.handle_message(harness.request("start it"))
+
+    # The failure settles through the committed final itself, never a second notice beside it.
+    final = (await harness.context_rows())[-1]
+    assert harness.rows("result") == []
+    [row] = harness.rows("error")
+    assert row["id"] == final.row_id and row["content_text"].strip()
+    assert harness.controller.terminals[-1]["is_error"] is True
 
 
 async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session, tmp_path, published) -> None:
