@@ -1699,8 +1699,10 @@ class OpenCodeGeneration(OpenCodeServerClient):
 
     def process_alive(self) -> bool:
         process = self._process
-        if process is not None and process.returncode is not None:
-            return False
+        if process is not None:
+            # This controller's own child: its handle is the authority, and
+            # its pid cannot be reused before the handle reaps it.
+            return process.returncode is None
         created_at = runtime.process_create_time(self.pid)
         if self.process_created_at is None:
             return created_at is not None or _pid_exists(self.pid)

@@ -1,7 +1,8 @@
 {
   "backendConnection": {
     "applyOnStart": "Configuration will apply on next start.",
-    "applyUnacknowledged": "Backend refresh was not acknowledged by the controller."
+    "applyUnacknowledged": "Backend refresh was not acknowledged by the controller.",
+    "restartAccepted": "{agent} restarted. Running work finishes where it started; new turns use the new runtime."
   },
   "errors": {
     "agentModelRequired": "Select a model for the {backend} Agent or Session in Avibe before running it.",

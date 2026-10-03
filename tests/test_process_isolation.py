@@ -76,6 +76,35 @@ def test_isolated_subprocess_kwargs_start_new_session_on_posix() -> None:
         assert isolated_subprocess_kwargs() == {"start_new_session": True}
 
 
+def test_a_process_start_time_survives_a_clock_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Linux derives a process's start time from the current wall clock, so a
+    clock step moves it. Avibe reads the same value before and after one, in
+    this process and in another process, and a new boot gets a new anchor."""
+
+    import core.process_isolation as process_isolation
+    from vibe import runtime
+
+    clock = {"boot_time": 1_000.0}
+    # Since boot, the process started 123.45 s in; psutil adds today's boot time.
+    process = SimpleNamespace(create_time=lambda: 123.45 + clock["boot_time"])
+    monkeypatch.setattr("core.process_isolation.psutil.Process", lambda _pid: process)
+    monkeypatch.setattr("core.process_isolation.psutil.boot_time", lambda: clock["boot_time"])
+    boot = {"id": "boot-a"}
+    monkeypatch.setattr(process_isolation, "_linux_boot_id", lambda: boot["id"], raising=False)
+    monkeypatch.setattr(process_isolation, "_boot_anchor", None, raising=False)
+
+    first = runtime.process_create_time(4242)
+    clock["boot_time"] = 998.0  # NTP stepped the clock back by two seconds.
+    after_step = runtime.process_create_time(4242)
+    # Another process of this Avibe home, such as a restarted controller.
+    monkeypatch.setattr(process_isolation, "_boot_anchor", None, raising=False)
+    elsewhere = runtime.process_create_time(4242)
+
+    assert first == after_step == elsewhere == pytest.approx(1_123.45)
+    boot["id"] = "boot-b"
+    assert runtime.process_create_time(4242) == pytest.approx(1_121.45)
+
+
 def test_process_identity_reads_inherited_worker_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     process = SimpleNamespace(
         create_time=lambda: 123.0,

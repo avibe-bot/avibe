@@ -81,13 +81,6 @@ WEB_OAUTH_BACKENDS: Final[frozenset[str]] = frozenset(
     if descriptor.capabilities.supports_web_oauth
 )
 
-_RUNTIME_REFRESH_SUCCESS_MESSAGES: Final[dict[str, str]] = {
-    "opencode": "OpenCode restart accepted; active turns will drain before the server refreshes.",
-    "claude": "Claude restart accepted; active turns will drain before sessions reconnect.",
-    "codex": "Codex restart accepted; active turns will drain before transports refresh.",
-}
-
-
 def agent_backend_descriptors() -> list[AgentBackendDescriptor]:
     """Return backend descriptors in stable UI/routing order."""
     return list(AGENT_BACKEND_REGISTRY.values())
@@ -155,11 +148,3 @@ def supports_install(name: str) -> bool:
     if name not in AGENT_BACKEND_REGISTRY:
         return False
     return AGENT_BACKEND_REGISTRY[name].capabilities.supports_install
-
-
-def runtime_refresh_success_message(name: str) -> str:
-    """Return the success message for a refreshed backend runtime."""
-    return _RUNTIME_REFRESH_SUCCESS_MESSAGES.get(
-        name,
-        f"{name} restart accepted; active turns will drain before runtime refresh.",
-    )

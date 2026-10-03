@@ -9,7 +9,6 @@ from modules.agents.catalog import (
     display_name_for_backend,
     is_agent_backend,
     latest_probe_for_backend,
-    runtime_refresh_success_message,
     supports_install,
     supports_runtime_refresh,
     supports_web_oauth,
@@ -28,7 +27,6 @@ def test_agent_catalog_is_backend_management_source_of_truth() -> None:
         assert supports_install(backend)
         assert default_cli_for_backend(backend)
         assert latest_probe_for_backend(backend) is not None
-        assert backend.lower() in runtime_refresh_success_message(backend).lower()
 
     assert display_name_for_backend("opencode") == "OpenCode"
     assert display_name_for_backend("claude") == "Claude Code"

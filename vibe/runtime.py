@@ -36,6 +36,7 @@ from config.v2_config import (
     V2Config,
 )
 from core.process_isolation import fingerprint_process_marker, isolated_subprocess_kwargs, processes_carrying_marker
+from core.process_isolation import process_create_time as _stable_process_create_time
 from vibe.log_sink import RUNTIME_LOG_MAX_BYTES, RUNTIME_LOG_RETAIN_BYTES
 
 
@@ -781,16 +782,15 @@ def pid_alive(pid):
 
 
 def process_create_time(pid: int) -> float | None:
-    """Wall-clock start time of a process, or ``None`` if it can't be read.
+    """Start time of a process, or ``None`` if it can't be read.
 
     Used to tell a recorded pid apart from an unrelated process that later reused
     the same pid (notably across a reboot): a reused pid has a different start
-    time, so ``(pid, create_time)`` identifies the original process.
+    time, so ``(pid, create_time)`` identifies the original process. The value
+    is the same on every read, whatever the clock does since; see
+    ``core.process_isolation.process_create_time``.
     """
-    try:
-        return float(psutil.Process(pid).create_time())
-    except (psutil.Error, ValueError, TypeError):
-        return None
+    return _stable_process_create_time(pid)
 
 
 def _safe_resolve_path(value: str | Path) -> Path | None:

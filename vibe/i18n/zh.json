@@ -1,7 +1,8 @@
 {
   "backendConnection": {
     "applyOnStart": "配置将在下次启动时应用。",
-    "applyUnacknowledged": "控制器未确认后端刷新请求。"
+    "applyUnacknowledged": "控制器未确认后端刷新请求。",
+    "restartAccepted": "{agent} 已重启。正在进行的工作会在原来的运行环境中完成，新的对话轮次会使用新的运行环境。"
   },
   "errors": {
     "agentModelRequired": "请先在 Avibe 中为 {backend} Agent 或会话选择模型。",

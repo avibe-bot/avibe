@@ -458,6 +458,28 @@ def test_an_old_generation_stays_until_the_activity_it_started_ends(fake_process
     assert fake_processes.stopped == [old]
 
 
+def test_a_generation_this_controller_started_is_alive_while_its_handle_says_so(monkeypatch):
+    """Its own child's handle decides, never a start-time comparison: a clock
+    step moves the start time Linux reports, and the generation was then taken
+    for exited, replaced on the next turn, and left running with no record."""
+
+    process = SimpleNamespace(returncode=None)
+    generation = OpenCodeGeneration(
+        generation_id="ocg_own",
+        pid=fake_pid(7),
+        port=50107,
+        spec_digest="v1",
+        process_created_at=1_000.0,
+        process=process,
+    )
+    # The start time read now differs from the one recorded at spawn.
+    monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda _pid: 998.0)
+
+    assert generation.process_alive()
+    process.returncode = 0
+    assert not generation.process_alive()
+
+
 def test_a_current_generation_whose_process_died_is_replaced(fake_processes):
     async def scenario():
         runtime = _runtime()
