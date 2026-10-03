@@ -484,6 +484,57 @@ async def test_a_turn_commits_its_context_once_and_shows_the_reply_once(
         assert harness.controller.im_client.sent[0] == "Listing."
 
 
+async def test_a_stop_before_dispatch_settles_the_turn_as_stopped(engine, session, tmp_path, published) -> None:
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("an answer nobody wants"))]])
+    resolving, release = asyncio.Event(), asyncio.Event()
+    resolve = harness.controller._resolve
+
+    async def slow_route(*args, **kwargs):
+        resolving.set()
+        await release.wait()
+        return await resolve(*args, **kwargs)
+
+    # Stop arrives while Model Hub is still resolving the route, before anything is dispatched.
+    harness.controller.model_hub_runtime = SimpleNamespace(resolve=slow_route)
+    request = harness.request("long question")
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    await resolving.wait()
+
+    assert await harness.agent.handle_stop(AgentRequest(**{**request.__dict__, "message": "stop"})) is True
+    release.set()
+    await running
+
+    assert harness.controller.started == [] and harness.provider.requests == []
+    assert harness.controller.terminals == [
+        {"turn": _turn(request.context), "is_error": False, "settled_by": "stopped"}
+    ]
+
+
+async def test_a_setup_failure_after_the_route_resolved_fails_the_hub_attempt(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    import core.system_prompt_injection as injection
+
+    reported: list[str] = []
+
+    async def record_native_failure(context, diagnostic) -> bool:
+        reported.append(diagnostic)
+        return False
+
+    def broken(**_kwargs):
+        raise RuntimeError("the skills directory could not be read")
+
+    monkeypatch.setattr(injection, "build_system_prompt_injection", broken)
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("unreachable"))]])
+    harness.controller.model_hub_runtime.record_native_failure = record_native_failure
+
+    await harness.agent.handle_message(harness.request("hello"))
+
+    # Through the same Hub-aware failure path as any other run failure, before any dispatch.
+    assert len(reported) == 1 and harness.controller.started == []
+    assert harness.controller.terminals[-1]["is_error"] is True
+
+
 async def test_a_steer_enters_after_the_tool_batch_even_when_its_row_arrives_late(
     engine, session, tmp_path, published
 ) -> None:
@@ -596,6 +647,24 @@ async def test_reconcile_settles_an_attempt_a_previous_process_opened(engine, se
             .where(delivery_rows.c.current_attempt_id == attempt_id)
             .values(current_attempt_opened_at="2026-01-01T00:00:00.000000Z")
         )
+
+    receipt = await harness.agent.reconcile_steer_attempt(SteerReconcileRequest(SESSION, turn_id, native, attempt_id), None)
+
+    assert receipt.outcome is SteerOutcome.NOT_ACTIVE
+
+
+async def test_reconcile_settles_an_attempt_a_retired_adapter_opened(engine, session, tmp_path, published) -> None:
+    from core.services.agent_steering import SteerReconcileRequest
+
+    harness = _Harness(engine, tmp_path, "avibe", [])
+    request = harness.request("long task")
+    turn_id = _turn(request.context)
+    harness.controller._native_start(request.context)
+    native = f"avibe:{turn_id}"
+    _delivery_id, attempt_id = harness.open_steer("and this", turn_id, native)
+    # The backend is disabled and enabled again in this process: a new adapter owns no live call for it.
+    await asyncio.sleep(1.1)
+    harness.new_agent()
 
     receipt = await harness.agent.reconcile_steer_attempt(SteerReconcileRequest(SESSION, turn_id, native, attempt_id), None)
 
@@ -1109,10 +1178,13 @@ async def test_a_silent_final_shows_nothing_and_completes(engine, session, tmp_p
 
     await harness.agent.handle_message(harness.request("fyi"))
 
-    # The row keeps the reply in the context, and no surface shows its markup.
-    [row] = harness.rows("result")
-    assert row["content_text"] == ""
-    assert (await harness.context_rows())[-1].message.content[0] == text("<silent>nothing to add</silent>")
+    # The reply stays in the context as a hidden response: no transcript row, inbox reply, or
+    # unread result, as the other backends persist nothing visible for a silent reply.
+    final = (await harness.context_rows())[-1]
+    assert final.message.content[0] == text("<silent>nothing to add</silent>")
+    assert harness.rows("result") == [] and harness.rows("error") == []
+    [hidden] = [row for row in harness.rows("assistant") if row["id"] == final.row_id]
+    assert hidden["content_text"] == ""
     assert harness.controller.im_client.sent == []
     assert harness.controller.terminals[-1]["is_error"] is False
 
@@ -1343,6 +1415,40 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
     assert await harness.context_rows() == rows
     assert rendered == [("call_bash", "job_1", "watch_job_1")] and jobs.watches == {"job_1": "watch_job_1"}
     assert harness.provider.requests == []
+
+
+async def test_startup_recovers_a_session_routed_to_another_agent_since(engine, session, tmp_path, published) -> None:
+    jobs = FakeJobHost()
+
+    async def render(call, job_id, status, watch_id):
+        return ToolResult((text(f"Command is still running and is now Watch {watch_id}."),))
+
+    suite = ToolSuite(
+        jobs=jobs,
+        create_tools=lambda jobs_, sink: [FakeTool("bash")],
+        render_recovered=render,
+        find_job=lambda session_id, call_id, **_: "job_1" if (session_id, call_id) == (SESSION, "call_bash") else None,
+    )
+    harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
+    request = harness.request("run the slow suite")
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run the slow suite"),))
+    )
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "pytest -q"})
+    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    jobs.states["job_1"] = JobStatus("running")
+    with engine.begin() as conn:
+        # The user switched this Session to another Agent while the command ran; then the process died.
+        conn.execute(
+            update(agent_sessions).where(agent_sessions.c.id == SESSION).values(agent_name="codex", agent_backend="codex")
+        )
+
+    harness.new_agent()
+    await harness.agent.recover_runtime_state()
+
+    assert jobs.watches == {"job_1": "watch_job_1"}
+    assert (await harness.context_rows())[-1].kind == "tool_result"
 
 
 async def test_a_provider_that_fails_to_close_does_not_fail_a_delivered_turn(

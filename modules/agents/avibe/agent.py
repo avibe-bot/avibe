@@ -97,9 +97,6 @@ BACKEND = "avibe"
 # Final responses whose empty text is explained by the stop itself (loop-control.md section 2).
 _EXPLAINED_STOPS = ("refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
-# When this process loaded the backend, before any of its runs: a steer attempt
-# opened earlier belongs to a previous process, so no live call can settle it.
-_PROCESS_STARTED_AT = datetime.now(timezone.utc)
 _JOB_PRUNE_INTERVAL_S = 3600.0
 
 
@@ -133,12 +130,15 @@ def _microsecond_text(instant: datetime) -> str:
 
 @dataclass
 class _Run:
-    agent: Agent
-    router: HubModelRouter
+    """One Turn's state, published before its first await (``handle_message``)."""
+
     request: AgentRequest
     session_id: str
     turn_id: str
-    cwd: str
+    agent: Optional[Agent] = None
+    router: Optional[HubModelRouter] = None
+    cwd: str = ""
+    settled: bool = False
     reason: Optional[str] = None
     errors: list[tuple[str, str]] = field(default_factory=list)
     final_row: Optional[str] = None
@@ -196,6 +196,12 @@ class AvibeAgent(BaseAgent):
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.
         self._runtimes: dict[str, _SessionRuntime] = {}
+        # When this adapter was registered, before any of its runs: a steer attempt opened
+        # earlier belongs to a previous process or a retired adapter, so no live call of
+        # this one can settle it.
+        # Attempt timestamps have whole seconds, so this one does too: an attempt in the
+        # registration second stays UNKNOWN rather than risk a false NOT_ACTIVE.
+        self._started_at = datetime.now(timezone.utc).replace(microsecond=0)
         # J5 while the service runs: when the jobs directory was last pruned, and the pass in flight.
         self._pruned_at: Optional[float] = None
         self._prune_task: Optional[asyncio.Task] = None
@@ -203,6 +209,13 @@ class AvibeAgent(BaseAgent):
     # --- BaseAgent -----------------------------------------------------------
 
     async def handle_message(self, request: AgentRequest) -> None:
+        """One Turn, with a single entry and a single exit.
+
+        The Turn's state (its Stop intent, router, and failure route) is published
+        before anything is awaited, so a Stop in any phase is honored: before the
+        dispatch marks it settles the Turn as stopped with nothing dispatched. Every
+        exception goes to the Hub-aware ``_fail``, and every exit closes the router.
+        """
         context = request.context
         payload = context.platform_specific or {}
         session_id = self.ensure_agent_session_id(request)
@@ -211,56 +224,64 @@ class AvibeAgent(BaseAgent):
         if not session_id or not turn_id or not input_id:
             await self._fail(request, "generic", "Avibe Agent turn has no Session, Turn, or input identity.")
             return
-        async with self._held(session_id) as runtime:
+        turn = _Run(request, session_id, turn_id)
+        async with self._held(session_id, run=turn) as runtime:
             try:
-                await self._resume(runtime)
+                await self._run_turn(runtime, turn, input_id)
             except Exception as error:
-                logger.exception("Avibe Agent resume failed for Session %s", session_id)
-                await self._fail(request, "generic", f"resume failed: {error}", cause=error)
-                return
-            cwd = request.working_path or runtime.cwd
-            try:
-                router = await self._preflight(request, session_id)
-            except Exception as error:
-                await self._fail_preflight(request, error)
-                return
-            sections, skill_catalog = await self._avibe_sections(request, cwd)
-            run = self._new_run(request, session_id, turn_id, cwd, router, sections)
-            runtime.cwd = cwd
-            runtime.run = run
-            try:
-                try:
-                    # Prepared before anything is dispatched (``core.native_dispatch_phase``).
-                    message = await self._render_input(
-                        session_id, request.message, request.files, request.input_metadata
-                    )
-                except Exception as error:
-                    logger.exception("Avibe Agent could not prepare the input for Session %s", session_id)
-                    await self._fail(request, "generic", f"input preparation failed: {error}", cause=error)
-                    return
-                # Native acceptance materializes the input row the loop consumes.
-                self.bind_agent_session_id(request, session_id)
-                mark_backend_dispatch_attempted(context)
-                self.mark_runtime_turn_started(context)
-                accept_catalog(self.controller, context, skill_catalog, backend=BACKEND)
-                agent_input: Optional[AgentInput] = AgentInput(input_id, message)
-                while agent_input is not None:
-                    if run.stop_requested:
-                        # A Stop acknowledged before the loop could abort, such as while an
-                        # input was still being prepared: no run starts. An input left
-                        # unconsumed is admitted at the Session's next resume (T3).
-                        run.reason = "aborted"
-                        break
-                    async for event in run.agent.run(agent_input, turn_id=turn_id):
-                        await self._on_event(run, event)
-                    agent_input = await self._continuing_input(run)
-                await self._settle(run)
-                self._maybe_backfill_session_title(request, session_id)
+                logger.exception("Avibe Agent turn failed for Session %s", session_id)
+                if not turn.settled:
+                    await self._fail(request, "generic", f"turn failed: {error}", cause=error)
             finally:
-                runtime.run = None
-                await self._admit_returned_inputs(run)
-                await run.router.aclose()
+                await self._admit_returned_inputs(turn)
+                if turn.router is not None:
+                    await turn.router.aclose()
                 self._prune_jobs_soon()
+
+    async def _run_turn(self, runtime: _SessionRuntime, turn: _Run, input_id: str) -> None:
+        request, session_id = turn.request, turn.session_id
+        context = request.context
+        await self._resume(runtime)
+        if turn.stop_requested:
+            return await self._settle_stopped(turn)
+        cwd = request.working_path or runtime.cwd
+        try:
+            turn.router = await self._preflight(request, session_id)
+        except Exception as error:
+            turn.settled = True
+            await self._fail_preflight(request, error)
+            return
+        if turn.stop_requested:
+            return await self._settle_stopped(turn)
+        sections, skill_catalog = await self._avibe_sections(request, cwd)
+        self._start_agent(turn, cwd, sections)
+        runtime.cwd = cwd
+        # Prepared before anything is dispatched (``core.native_dispatch_phase``).
+        message = await self._render_input(session_id, request.message, request.files, request.input_metadata)
+        if turn.stop_requested:
+            return await self._settle_stopped(turn)
+        # Native acceptance materializes the input row the loop consumes.
+        self.bind_agent_session_id(request, session_id)
+        mark_backend_dispatch_attempted(context)
+        self.mark_runtime_turn_started(context)
+        accept_catalog(self.controller, context, skill_catalog, backend=BACKEND)
+        agent_input: Optional[AgentInput] = AgentInput(input_id, message)
+        while agent_input is not None:
+            if turn.stop_requested:
+                # A Stop acknowledged before this run could abort: no run starts. An input
+                # left unconsumed is admitted at the Session's next resume (T3).
+                turn.reason = "aborted"
+                break
+            async for event in turn.agent.run(agent_input, turn_id=turn.turn_id):
+                await self._on_event(turn, event)
+            agent_input = await self._continuing_input(turn)
+        await self._settle(turn)
+        self._maybe_backfill_session_title(request, session_id)
+
+    async def _settle_stopped(self, turn: _Run) -> None:
+        """A Stop before the loop started: the Turn settles as stopped, nothing dispatched."""
+        turn.reason = "aborted"
+        await self._settle(turn)
 
     async def handle_stop(self, request: AgentRequest) -> bool:
         session_id = self._session_id(request.context)
@@ -270,7 +291,8 @@ class AvibeAgent(BaseAgent):
             request.stop_failure_reason = "not_active"
             return False
         run.stop_requested = True
-        run.agent.abort("stopped by user")
+        if run.agent is not None:
+            run.agent.abort("stopped by user")
         return True
 
     async def clear_sessions(self, session_key: str) -> int:
@@ -279,7 +301,8 @@ class AvibeAgent(BaseAgent):
             run = runtime.run
             if run is not None and run.request.session_key == session_key:
                 run.stop_requested = True
-                run.agent.abort("session cleared")
+                if run.agent is not None:
+                    run.agent.abort("session cleared")
                 cleared += 1
         return cleared
 
@@ -372,7 +395,9 @@ class AvibeAgent(BaseAgent):
         """Disabling the backend ends its runs; the rolling refresh drains Turns before this."""
         for runtime in list(self._runtimes.values()):
             if runtime.run is not None:
-                runtime.run.agent.abort("backend disabled")
+                runtime.run.stop_requested = True
+                if runtime.run.agent is not None:
+                    runtime.run.agent.abort("backend disabled")
 
     async def prepare_resume_binding(self, *, base_session_id: str, session_key: str, working_path: str) -> None:
         """Nothing to prepare: the transcript is the Session's own rows, read at the next run."""
@@ -402,7 +427,7 @@ class AvibeAgent(BaseAgent):
         except Exception:
             logger.exception("Avibe Agent could not prepare a steer for Session %s", request.target_session_id)
             return steer_result(SteerOutcome.REFUSED, reason="preparation_failed")
-        if await run.agent.steer(AgentInput(message_id, message)):
+        if run.agent is not None and await run.agent.steer(AgentInput(message_id, message)):
             run.accepted_steers.add(request.attempt_id)
             return steer_result(SteerOutcome.ACCEPTED, turn_id=run.turn_id)
         return steer_result(SteerOutcome.REFUSED, reason="run_closed")
@@ -421,8 +446,9 @@ class AvibeAgent(BaseAgent):
 
         ACCEPTED when its row was consumed or the live run accepted it; otherwise
         UNKNOWN, because the live attempt in this process owns its definitive
-        negative receipt. Only an attempt a previous process opened is NOT_ACTIVE:
-        no call can still settle it.
+        negative receipt. Only an attempt opened before this adapter was registered
+        (by a previous process or a retired adapter) is NOT_ACTIVE: no call of this
+        adapter can still settle it.
         """
         leader = await asyncio.to_thread(self._attempt_leader, request.attempt_id)
         message_id, opened_at = leader if leader is not None else (None, None)
@@ -436,8 +462,8 @@ class AvibeAgent(BaseAgent):
         ):
             # The accepted steer is still queued in the live run that owns it.
             return steer_result(SteerOutcome.ACCEPTED, turn_id=run.turn_id)
-        if opened_at is not None and opened_at < _PROCESS_STARTED_AT:
-            return steer_result(SteerOutcome.NOT_ACTIVE, reason="previous_process")
+        if opened_at is not None and opened_at < self._started_at:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="previous_adapter")
         return steer_result(SteerOutcome.UNKNOWN, reason="no_attempt_evidence")
 
     # --- one run ---------------------------------------------------------------
@@ -460,19 +486,13 @@ class AvibeAgent(BaseAgent):
 
         return HubModelRouter(resolve, self._providers, first=await resolve())
 
-    def _new_run(
-        self,
-        request: AgentRequest,
-        session_id: str,
-        turn_id: str,
-        cwd: str,
-        router: HubModelRouter,
-        sections: str,
-    ) -> _Run:
+    def _start_agent(self, turn: _Run, cwd: str, sections: str) -> None:
+        """The Turn's loop, over its router, tools, and system prompt."""
+        request, session_id = turn.request, turn.session_id
         suite = self._tools()
         agent = Agent(
             session_id=session_id,
-            models=router,
+            models=turn.router,
             tools=(),
             hooks=(),
             store=self.store,
@@ -484,7 +504,7 @@ class AvibeAgent(BaseAgent):
         tools = tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id)))
         agent.set_tools(tools)
         agent.system = system_prompt([tool.spec.name for tool in tools], sections)
-        return _Run(agent, router, request, session_id, turn_id, cwd)
+        turn.agent, turn.cwd = agent, cwd
 
     async def _on_event(self, run: _Run, event: AgentEvent) -> None:
         if isinstance(event, MessageCommitted):
@@ -581,6 +601,8 @@ class AvibeAgent(BaseAgent):
         merged into another backend's stopped or failed turn does; the next Turn
         answers them with the full context.
         """
+        if run.agent is None:
+            return
         try:
             for item in await run.agent.take_pending_inputs():
                 await self.store.consume_input(run.session_id, item.message_id, item.message)
@@ -806,7 +828,7 @@ class AvibeAgent(BaseAgent):
 
     def _environment(self, session_id: str) -> dict[str, str]:
         runtime = self._runtimes.get(session_id)
-        cwd = runtime.run.cwd if runtime is not None and runtime.run is not None else (runtime.cwd if runtime else "")
+        cwd = ((runtime.run.cwd if runtime.run is not None else "") or runtime.cwd) if runtime is not None else ""
         return current_environment(
             cwd, self._watch_lines(session_id), include_time=getattr(self.config, "include_time_info", True)
         )
@@ -931,12 +953,15 @@ class AvibeAgent(BaseAgent):
         return self._tool_suite
 
     @asynccontextmanager
-    async def _held(self, session_id: str, *, wait: bool = True) -> AsyncIterator[Optional[_SessionRuntime]]:
+    async def _held(
+        self, session_id: str, *, wait: bool = True, run: Optional[_Run] = None
+    ) -> AsyncIterator[Optional[_SessionRuntime]]:
         """Hold the Session's writer lock; the last holder retires its in-memory state.
 
         With ``wait=False`` a Session someone already holds yields ``None`` instead of
         waiting: startup recovery never blocks behind a run, which does the same work
-        at its own resume.
+        at its own resume. A Turn's ``run`` is published before the lock is awaited,
+        so a Stop is honored even while the Turn waits for it.
         """
         runtime = self._runtimes.get(session_id)
         if runtime is None:
@@ -945,10 +970,14 @@ class AvibeAgent(BaseAgent):
             yield None
             return
         runtime.holders += 1
+        if run is not None:
+            runtime.run = run
         try:
             async with runtime.lock:
                 yield runtime
         finally:
+            if run is not None and runtime.run is run:
+                runtime.run = None
             runtime.holders -= 1
             if runtime.holders == 0 and runtime.run is None and self._runtimes.get(session_id) is runtime:
                 del self._runtimes[session_id]
@@ -989,20 +1018,22 @@ class AvibeAgent(BaseAgent):
         return seq is not None
 
     def _sessions_with_open_tail(self) -> list[str]:
-        """Avibe Sessions whose context does not end with a final reply: only these can hold an open call.
+        """Sessions with Avibe context whose context does not end with a final reply.
 
-        Every run settles earlier open calls before it starts and commits its own results
-        before its next model call, so a context ending in a ``result`` row has none.
+        Only these can hold an open call. Every run settles earlier open calls before it
+        starts and commits its own results before its next model call, so a context
+        ending in a final row has none. Candidates are the Sessions that have Avibe
+        context rows (only this backend writes ``context_seq``), whatever Agent the
+        Session is routed to now: a Session switched away mid-run still owns its jobs.
         """
         from sqlalchemy import func
 
-        own = select(agent_sessions.c.id).where(agent_sessions.c.agent_backend == BACKEND).subquery()
         with self._engine.connect() as conn:
             last: dict[str, int] = {}
             for table in (messages, agent_events):
                 for session_id, seq in conn.execute(
                     select(table.c.session_id, func.max(table.c.context_seq))
-                    .where(table.c.session_id.in_(select(own.c.id)), table.c.context_seq.is_not(None))
+                    .where(table.c.session_id.is_not(None), table.c.context_seq.is_not(None))
                     .group_by(table.c.session_id)
                 ):
                     last[session_id] = max(seq, last.get(session_id, 0))
@@ -1010,7 +1041,7 @@ class AvibeAgent(BaseAgent):
                 conn.execute(
                     select(messages.c.session_id, func.max(messages.c.context_seq))
                     .where(
-                        messages.c.session_id.in_(select(own.c.id)),
+                        messages.c.session_id.is_not(None),
                         messages.c.context_seq.is_not(None),
                         messages.c.type.in_(FINAL_TYPES),
                     )

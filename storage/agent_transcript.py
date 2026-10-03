@@ -75,7 +75,10 @@ from storage.models import agent_events, agent_sessions, message_deliveries, mes
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 # A final response is ``result``, or ``error`` when ``final_outcome`` says it failed:
-# the row carries its outcome, as the other backends' terminal rows do.
+# the row carries its outcome, as the other backends' terminal rows do. A final with
+# nothing to show (a silent reply) is the hidden response type ``assistant``: context,
+# but no transcript row, inbox reply, or unread result, as the other backends persist
+# nothing visible for it.
 FINAL_TYPES = ("result", "error")
 RESPONSE_TYPES = ("assistant", *FINAL_TYPES)
 CONTEXT_VISIBILITY = "context"
@@ -107,6 +110,14 @@ def final_outcome(message: AssistantMessage) -> FinalOutcome:
     """
     has_text = any(isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content)
     return "completed" if has_text else "failed"
+
+
+def _response_type(message: AssistantMessage, *, final: bool, display_text: str) -> str:
+    if not final:
+        return "assistant"
+    if final_outcome(message) == "failed":
+        return "error"
+    return "result" if display_text.strip() else "assistant"
 
 
 def render_text(message: AssistantMessage, *, final: bool = False) -> str:
@@ -195,7 +206,7 @@ class SQLiteTranscriptStore:
                 author="agent",
                 source="agent",
                 author_name=origin.agent_name,
-                message_type=("error" if final_outcome(message) == "failed" else "result") if final else "assistant",
+                message_type=_response_type(message, final=final, display_text=display_text),
                 text=display_text,
                 content={"model": model},
             )

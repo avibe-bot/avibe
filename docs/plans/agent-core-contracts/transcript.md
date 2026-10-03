@@ -19,7 +19,10 @@ unique per Session across both tables (partial unique index on each table, plus 
 | hook state | `agent_events` | `agent_state` | `context` | `content_json` = `AgentState` |
 
 A final response is `error` when it failed by itself (no text of its own: an empty answer, or a refusal or safety
-stop without an explanation), as the other backends' failed terminal rows are; context loading accepts both.
+stop without an explanation), as the other backends' failed terminal rows are. A successful final with nothing to show
+(a silent reply) is the hidden response type `assistant`: context, but no transcript row, inbox reply, or unread
+result, as the other backends persist nothing visible for it; a terminal write at delivery (a run that failed after
+the commit) types it `error`. Context loading accepts all three.
 
 Display-only rows keep `context_seq` null: `interim`, `notify`, an `error` that reports a run failure, `vault`,
 `output`, queued or removed inputs, and the `tool_call` trace row written at tool start (its `metadata_json` carries
