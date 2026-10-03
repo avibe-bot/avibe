@@ -10,6 +10,7 @@ capability:
     - tests/test_controller_idle_cleanup.py
     - tests/test_codex_runtime_generations.py
     - tests/test_opencode_generations.py
+    - tests/test_running_agents_service.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -65,6 +66,7 @@ scenarios:
       - tests/test_codex_runtime_generations.py::test_runtime_gen_006_the_sweep_ends_a_retired_agents_process_whose_stop_failed
       - tests/test_opencode_generations.py::test_runtime_gen_006_a_retired_opencode_runtime_keeps_its_turn_and_stops_once_drained
       - tests/test_opencode_generations.py::test_a_retired_runtime_reaps_until_it_reports_retired
+      - tests/test_running_agents_service.py::test_runtime_gen_006_a_disabled_backends_running_work_stays_in_running_agents
   - id: RUNTIME-GEN-007
     name: Re-enabling a backend while its retired agent drains starts new work at once and leaves the retired work running
     status: covered
