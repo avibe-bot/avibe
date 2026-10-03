@@ -75,7 +75,12 @@ _RESPONSE_CHUNK_BYTES: Final = 64 * 1024
 # recovery waits, Source failover, or an upstream that sends nothing before its
 # first model output, so a Claude stream commits its headers once resolution is
 # slow and then sends SSE comments, which carry no event, until it resolves.
-_EARLY_STREAM_COMMIT_SECONDS: Final = 2.0
+# A commit also takes the HTTP status away: the CLI drops an unsupported beta or
+# thinking.display and retries only on an HTTP 400 naming it, so a rejection in
+# a committed stream fails the turn. Commit only shortly before the CLI's 300s
+# default first-byte window for a non-Anthropic base URL, which Hub launches
+# raise further; every faster resolution keeps its real status.
+_EARLY_STREAM_COMMIT_SECONDS: Final = 240.0
 # Below the CLI's 10s heartbeat so every tick observes bytes.
 _STREAM_KEEPALIVE_SECONDS: Final = 5.0
 _STREAM_KEEPALIVE_FRAME: Final = b": keepalive\n\n"
