@@ -112,22 +112,23 @@ running. The tray keeps the shell alive after the window closes.
   a desktop update that Runtime can be older than the shell.
   - `GET /ready` stays byte-for-byte unchanged, because released shells parse it
     with an exact key set (`runtime-host/src/health.rs`). A new `GET
-    /desktop/capabilities` returns `computer_use_schema`, the newest `D`
-    `schema_version` the Runtime can read. The UI process obtains it from the
-    Controller over the existing internal IPC socket and does not derive it from
-    its own package version. The Controller is what reads `D`, and `/ready` may
-    pair a newer UI with an older Controller. Only a definitive answer means
-    unsupported: a 404, or a schema below the one the shell writes. The answer
-    also carries the Controller's `controller_id`, which is random per
-    Controller process. The cached answer is keyed by that id, and it is cleared
-    whenever the `/ready` monitor re-runs adoption. Only a cached answer from
-    the same Controller is ever reused. A transport error, such as an IPC
-    timeout or a reset, keeps that same-Controller answer. A transient failure
-    therefore never stops a healthy daemon. Losing the Runtime itself is already
-    handled by the `/ready` monitor. Any other non-definitive answer, such as a
-    500 or a malformed body, also keeps the last known answer. Before the first
-    definitive answer, the shell spawns nothing and retries on the next `/ready`
-    tick.
+    /api/desktop/capabilities` (under `/api/`, where an unknown route is a real
+    404; elsewhere the UI's SPA fallback answers 200 with `index.html`) returns
+    `computer_use_schema`, the newest `D` `schema_version` the Runtime can read.
+    The UI process obtains it from the Controller over the existing internal IPC
+    socket and does not derive it from its own package version. The Controller
+    is what reads `D`, and `/ready` may pair a newer UI with an older
+    Controller. Only a definitive answer means unsupported: a 404, or a schema
+    below the one the shell writes. The answer also carries the Controller's
+    `controller_id`, which is random per Controller process. The cached answer
+    is keyed by that id, and it is cleared whenever the `/ready` monitor re-runs
+    adoption. Only a cached answer from the same Controller is ever reused. A
+    transport error, such as an IPC timeout or a reset, keeps that
+    same-Controller answer. A transient failure therefore never stops a healthy
+    daemon. Losing the Runtime itself is already handled by the `/ready`
+    monitor. Any other non-definitive answer, such as a 500 or a malformed body,
+    also keeps the last known answer. Before the first definitive answer, the
+    shell spawns nothing and retries on the next `/ready` tick.
   - Turning the toggle on requires that value to cover the schema the shell
     writes. Otherwise the shell refuses to turn it on, and the menu text says
     the Avibe service must restart to support computer use.
@@ -185,7 +186,7 @@ running. The tray keeps the shell alive after the window closes.
   | `needs_permission` | app activation, grant check still fails, no fallback attempt yet in this activation | `starting` | spawn once (stale-preflight fallback) |
   | `starting` | socket accepts and health passes | `ready` | none |
   | `starting` | health reports a missing grant | `needs_permission` | stop the daemon; no prompt |
-  | `starting` | spawn, socket, or health fails otherwise | `error` | stop the daemon; record the reason |
+    | `starting` | spawn, socket, or health fails otherwise, or `health_report` exceeds its 5 s deadline | `error` | stop the daemon; record the reason |
     | `ready` | daemon `health_report` reports a missing grant | `needs_permission` | stop the daemon |
     | `ready` | daemon exits unexpectedly, or its socket refuses or its `health_report` times out on 2 consecutive checks | `starting` | stop the daemon if alive; respawn with backoff; after 3 failures in 5 minutes, go to `error` |
     | any `enabled` state except `error` | quit | `stopped` | stop the daemon |
@@ -381,11 +382,12 @@ running. The tray keeps the shell alive after the window closes.
     - The server adds a required `session` string to every advertised
       tool schema, so schema-driven clients always send it. The injected
       prompt says to fill it with the session id.
-    - The server calls `start_session` for a session's name before forwarding
-      in three cases: its first call, its first call after an
-      `end_session`, and its first call after the daemon key (`instance_id`,
-      `generation`) changes. That call creates or revives the session. Agents
-      never manage the Cua session lifecycle.
+    - The server calls `start_session` for a session's name before forwarding in
+      four cases: its first call, its first call after an `end_session`, its
+      first call after the daemon key (`instance_id`, `generation`) changes, and
+      its first call after the server replaced its upstream proxy child. Closing
+      that transport ends its sessions in Cua. That call creates or revives the
+      session. Agents never manage the Cua session lifecycle.
     - Calls from one session run one at a time, and the server queues the
       rest. So a session never has two calls in flight. An `end_session`
       releases the lease only after the calls queued before it have
@@ -701,6 +703,9 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   reconciliation, Claude/Codex/OpenCode translation, prompt
 - [ ] Workbench status line + i18n
 - [ ] User docs: enabling, permissions, `require_bind` guidance, stop
+- [ ] Signed build, idle desktop: the agent cursor overlay stays visible, and
+  representative AX and pixel actions neither take focus nor move the user's
+  pointer (redoes the confounded Phase 0 check)
 - [ ] Windows parity
 
 ## Validation
@@ -750,3 +755,5 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   `tool_snapshot` hash reconciles live consumers.
 - Manual on a signed build: Slack → agent → background GUI task completes while
   the user keeps working; the tray toggle stops an in-flight session's access.
+  On an idle desktop, sample the frontmost app and the pointer during AX and
+  pixel actions, and confirm that the agent cursor overlay stays visible.
