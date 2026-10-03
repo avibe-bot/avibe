@@ -242,12 +242,21 @@ class AgentService:
         agent = self.agents.pop(backend, None)
         if agent is None:
             return False
+        await self.retire_agent(backend, agent)
+        return True
+
+    async def retire_agent(self, backend: str, agent: BaseAgent) -> None:
+        """Keep an unregistered agent until its running work finishes.
+
+        Besides a disabled backend's agent, this serves an agent built only to
+        adopt and drain a previous controller's processes for a backend that is
+        disabled now; it never admits new work.
+        """
         self._retired_agents.append((backend, agent))
         retire = getattr(agent, "retire_runtime", None)
         if callable(retire):
             await retire()
         logger.info("Retired agent backend %s; its running work finishes in place", backend)
-        return True
 
     def runtime_agents(self, backend: str | None = None) -> list[BaseAgent]:
         """Registered agents and retired ones whose work still runs."""
