@@ -127,14 +127,16 @@ running. The tray keeps the shell alive after the window closes.
   `CUA_DRIVER_PERMISSION_MODE=standard`,
   `CUA_DRIVER_MANAGED_POLICY_FILE=<bundled tool policy>`,
   `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, `CUA_DRIVER_RS_UPDATE_CHECK=0`,
-  `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=300`. Use a private socket under the
-  Avibe run directory. The driver's parent-liveness pipe ends it if the shell
+  `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=300`. Use a private socket in the
+  shell's app data directory (see `D`); on Windows, a private pipe name. The driver's parent-liveness pipe ends it if the shell
   dies. An orderly quit stops it explicitly. A terminated daemon leaves its
   socket file behind, and a new daemon refuses to start on an existing endpoint,
   so the shell removes the stale socket (after confirming its own daemon has
   exited) before each spawn.
-- **State file `D`.** `~/.avibe/run/desktop-computer-use.json` is the only
-  shell-to-Runtime contract. The shell writes it atomically on every change. It
+- **State file `D`.** `computer-use.json` in the shell's per-user app data
+  directory is the only shell-to-Runtime contract. On macOS that directory is
+  `~/Library/Application Support/bot.avibe.desktop/`, where `bootstrap.log`
+  already lives. On Windows it is `%APPDATA%\bot.avibe.desktop\`. The shell writes it atomically on every change. It
   is also the only cross-process record: the Runtime, the computer MCP server,
   and the separately running Workbench API process all read the same file.
   - Every write carries `schema_version`, `enabled` (a mirror of the toggle,
@@ -155,13 +157,29 @@ running. The tray keeps the shell alive after the window closes.
     deletes the file, so `enabled` survives quits and restarts. A dead
     `shell_pid` reads as unavailable. A missing file means the user never
     enabled the feature.
-  - A fixed path under the Avibe home works for adopted Runtimes, which never
-    see the shell's launch environment.
+  - The location belongs to the desktop shell, of which each OS user has
+    one. It does not belong to the Avibe home. So every Runtime finds `D`
+    without seeing the shell's launch environment, whatever home it
+    resolves: `AVIBE_HOME`, the default `~/.avibe`, or a legacy-only
+    `~/.vibe_remote`. `core/computer_use.py` resolves the same per-platform
+    path, and tests redirect it.
 - **Tool policy.** Ship a YAML allow-list as the driver's managed policy
   (Phase 0 finding). It is pinned with the driver version, because the list
-  must be reviewed against each new tool surface. It allows observation,
-  app launch/front/frame, menu, pointer, keyboard, value, clipboard, session,
-  `check_permissions`, and `health_report` tools. It omits config, update,
+  must be reviewed against each new tool surface. The v1 list has exactly 32
+  tools, and the bundled tool snapshot must equal it:
+  - Observation: `list_apps`, `list_windows`, `get_window_state`,
+    `verify_state`, `get_accessibility_tree`, `get_screen_size`,
+    `get_desktop_state`, `get_cursor_position`, `zoom`.
+  - Apps and windows: `launch_app`, `kill_app`, `bring_to_front`,
+    `set_window_frame`, `invoke_menu`.
+  - Input: `click`, `double_click`, `right_click`, `drag`, `scroll`,
+    `type_text`, `press_key`, `hotkey`, `set_value`, `move_cursor`.
+  - Clipboard: `clipboard_read`, `clipboard_write`.
+  - Sessions: `start_session`, `end_session`, `get_session`,
+    `list_sessions`.
+  - Diagnostics: `check_permissions`, `health_report`.
+
+  It omits config, update,
   extension, recording/replay, cursor-theme, legacy `page`, the typed browser
   tools, and visual parsing. Typed browser tools are deferred, not rejected:
   they need their own runtime and origin scope.
@@ -177,10 +195,20 @@ running. The tray keeps the shell alive after the window closes.
     stdio MCP spec: name `computer`, launching Avibe's computer MCP server with
     Avibe's Python. While `enabled` is false or the file is missing, it returns
     nothing. Backends only translate this spec.
-  - **Effective status.** The status is `ready` only when the state is
-    `ready`, `shell_pid` is alive, and the socket accepts a connection. A dead
-    `shell_pid` reads as `unavailable`. Otherwise the recorded state is used.
-    The server and the Workbench both use this one reader.
+  - **Effective status.** One total derivation, where the first matching row
+    wins. The server and the Workbench both use this one reader.
+
+    | `D` | Status | Reason |
+    | --- | --- | --- |
+    | missing | `off` | `never_enabled` |
+    | unreadable, malformed, or unknown `schema_version` | `unavailable` | `invalid_state_file` |
+    | `shell_pid` not alive | `unavailable` | `shell_not_running` |
+    | `state` other than `ready` | that state | its recorded `reason` |
+    | `ready`, socket refuses a connection | `unavailable` | `daemon_unreachable` |
+    | `ready`, socket accepts | `ready` | null |
+
+    Configuration reads only `enabled`. A missing or invalid file counts as
+    not enabled. Atomic writes keep a half-written file from appearing.
 - **Computer MCP server.** A small Avibe-owned stdio server is the one stable
   endpoint for every backend.
   - It starts without a daemon. It serves the pinned tool list from a
@@ -373,8 +401,10 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   A capability manifest does not fit general computer use: it is deny by
   default for resources too, so every app would have to be listed by bundle
   id. The driver's YAML tool policy only names tools. Set as
-  `CUA_DRIVER_MANAGED_POLICY_FILE` on the embedded daemon, a 30-tool allow-list
-  shrank `tools/list` to 30 through the proxy. Omitted tools returned
+  `CUA_DRIVER_MANAGED_POLICY_FILE` on the embedded daemon, a 30-tool draft
+  allow-list shrank `tools/list` to 30 through the proxy. The final v1 list
+  (see Tool policy) adds `check_permissions` and `health_report`, and it
+  listed exactly those 32 tools under the policy. Omitted tools returned
   `permission_denied`, and allowed ones worked. Agent-side environment on the
   proxy could not widen it: a widening user policy, a widening managed policy,
   and `unrestricted` mode variables each left the daemon's surface unchanged.
@@ -479,8 +509,9 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   OpenCode, cached Claude clients) to the final `enabled` value. Claude
   clients are recreated only between turns. The reconciliation sees no change
   when availability moves or when the toggle flips back between polls.
-- Python, server: the effective status for every `D` state, plus missing,
-  malformed, dead-`shell_pid`, and unconnectable-socket files. A call while
+- Python, server: one case per row of the effective-status table, asserting
+  both status and reason, plus a home-independence case: a Runtime with
+  `AVIBE_HOME` set reads the same `D`. A call while
   not ready returns the named state and never spawns a child. A call after an
   (`instance_id`, `generation`) change or a child exit respawns exactly once.
   Folding keeps image blocks. Tests stay hermetic: the `D` path and the
