@@ -708,6 +708,38 @@ async def test_runtime_gen_015_direct_and_native_cli_launches_share_one_process(
 
 
 @pytest.mark.asyncio
+async def test_runtime_gen_015_a_renewal_during_hub_catalog_preparation_leaves_one_coherent_spec(tmp_path):
+    """RUNTIME-GEN-015: a Hub turn's spec derives from one load of its launch inputs.
+
+    A renewal that lands while the turn's catalog is prepared changes neither
+    its binary nor its epoch midway: the turn runs on the app-server its inputs
+    describe, and the directory's next turn moves to the renewed one.
+    """
+    router = _Router()
+    router.launches["model-a"] = _launch("model-a", "hub", token="hub-token")
+    agent, cwd = _agent(tmp_path, router=router)
+    catalog = SimpleNamespace(retain=lambda: SimpleNamespace(path=tmp_path / "catalog.json", close=Mock()))
+    agent.prepare_model_hub_runtime = AsyncMock(return_value=catalog)
+    await agent.handle_message(_request(cwd, "s1"))
+    first = _server_for(agent, "s1")
+    await first.complete(agent._session_mgr.get_thread_id("s1"))
+
+    async def renewed_while_preparing(*_args, **_kwargs):
+        await agent.renew_runtime(SimpleNamespace(binary="codex-renewed", extra_args=[]))
+        return catalog
+
+    agent.prepare_model_hub_runtime = AsyncMock(side_effect=renewed_while_preparing)
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s2")), 1)
+
+    assert _server_for(agent, "s2") is first
+    assert [server.binary for server in FakeAppServer.started] == ["codex-generation-fake"]
+
+    agent.prepare_model_hub_runtime = AsyncMock(return_value=catalog)
+    await asyncio.wait_for(agent.handle_message(_request(cwd, "s3")), 1)
+    assert [server.binary for server in FakeAppServer.started] == ["codex-generation-fake", "codex-renewed"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_gen_015_a_dead_retiring_generation_is_never_reused(tmp_path):
     """RUNTIME-GEN-015: an equal spec reuses a process only while that process can serve."""
     router = _Router()

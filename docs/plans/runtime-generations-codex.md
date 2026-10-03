@@ -127,6 +127,13 @@ same load the launch resolution used. It is cached by `(binary identity,
 models digest)`, with the two most recent entries kept. Each Hub generation
 holds its own pin while it runs.
 
+The spec's mutable inputs (the Codex config's binary and extra arguments, the
+runtime environment, the renewal epoch, and the binary, credential, and cwd
+identities) are read in one step before the catalog is awaited
+(`_launch_inputs`). Catalog preparation and the digest use only that snapshot,
+so a save or renewal that lands while the catalog is exported changes nothing
+about the turn's spec; the directory's next turn moves (RUNTIME-GEN-015).
+
 ## Lifecycle invariants
 
 Every transition below was audited against each invariant, by the adapter

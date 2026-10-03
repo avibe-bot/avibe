@@ -137,6 +137,21 @@ class CodexLaunchSpec:
             self.catalog.close()
 
 
+@dataclass(frozen=True, eq=False)
+class _LaunchInputs:
+    """What a launch spec reads from mutable state, captured at one instant.
+
+    A save or renewal that lands while a Hub catalog is prepared then changes
+    nothing about the spec being built; the directory's next turn moves.
+    """
+
+    binary: str
+    extra_args: tuple[str, ...]
+    env: Mapping[str, str] = field(repr=False)
+    # Renewal epoch, binary and credential identity, and the cwd's inode.
+    identity: Mapping[str, Any] = field(repr=False)
+
+
 @dataclass(eq=False)
 class _CodexRuntime:
     """One app-server process serving a working directory."""
@@ -415,13 +430,8 @@ class CodexAgent(BaseAgent):
         unit = self._units.get(cwd)
         if unit is None or not os.path.isdir(cwd):
             return None
-        digest = self._launch_spec_digest(
-            cwd,
-            binary=self.codex_config.binary,
-            args=(),
-            extra_args=tuple(self.codex_config.extra_args),
-            env=dict(self._codex_runtime_environment()),
-        )
+        inputs = self._launch_inputs(cwd)
+        digest = self._launch_spec_digest(inputs, args=(), env=inputs.env)
         for generation in reversed(unit.generations):
             if (
                 not generation.closed
@@ -1535,15 +1545,25 @@ class CodexAgent(BaseAgent):
         for catalog in catalogs:
             catalog.close()
 
-    async def prepare_model_hub_runtime(self, config: Any = None) -> CodexHubCatalog:
+    async def prepare_model_hub_runtime(
+        self,
+        config: Any = None,
+        *,
+        inputs: _LaunchInputs | None = None,
+    ) -> CodexHubCatalog:
         """Bind Hub metadata to this Agent's exact configured Codex binary.
 
         ``config`` is the turn's Model Hub snapshot; the catalog lists exactly
-        the models that snapshot resolved against.
+        the models that snapshot resolved against. ``inputs`` is the turn's
+        launch snapshot, so the catalog comes from the binary its process runs.
         """
         from vibe import backend_model_catalog
 
-        binary = self.codex_config.binary
+        if inputs is None:
+            binary = self.codex_config.binary
+            binary_identity = self._binary_identity(binary, self._codex_runtime_environment())
+        else:
+            binary, binary_identity = inputs.binary, inputs.identity["binary"]
         configured_models = None
         if config is None:
             model_hub_service = getattr(self.controller, "model_hub_service", None)
@@ -1552,7 +1572,7 @@ class CodexAgent(BaseAgent):
         if config is not None:
             configured_models = [model.to_payload() for model in config.agents["codex"].models]
         key = (
-            json.dumps(self._binary_identity(binary, self._codex_runtime_environment()), sort_keys=True),
+            json.dumps(binary_identity, sort_keys=True),
             hashlib.sha256(json.dumps(configured_models, sort_keys=True).encode()).hexdigest(),
         )
         async with self._model_hub_catalog_lock:
@@ -2083,33 +2103,45 @@ class CodexAgent(BaseAgent):
         has_pending_turn_start = getattr(self._turn_registry, "has_pending_turn_start", None)
         return bool(callable(has_pending_turn_start) and has_pending_turn_start(base_session_id))
 
-    def _launch_spec_digest(
-        self,
-        cwd: str,
-        *,
-        binary: str,
-        args: Sequence[str],
-        extra_args: Sequence[str],
-        env: Mapping[str, str],
-        catalog_path: str | None = None,
-    ) -> str:
+    def _launch_inputs(self, cwd: str) -> _LaunchInputs:
+        """Read every mutable launch input for ``cwd`` in one step, with no await."""
+        codex_config = self.codex_config
+        binary = codex_config.binary
+        env = dict(self._codex_runtime_environment())
         codex_home = env.get("CODEX_HOME") or os.path.join(
             env.get("HOME") or os.path.expanduser("~"),
             ".codex",
         )
+        return _LaunchInputs(
+            binary=binary,
+            extra_args=tuple(codex_config.extra_args),
+            env=env,
+            identity={
+                "epoch": self._runtime_epoch,
+                "binary": self._binary_identity(binary, env),
+                "credential": codex_credential_identity(Path(codex_home).expanduser()),
+                # A directory deleted and re-created under the same path leaves
+                # a running app-server in a dead inode (#561).
+                "cwd": [cwd, self._cwd_inode(cwd)],
+            },
+        )
+
+    @staticmethod
+    def _launch_spec_digest(
+        inputs: _LaunchInputs,
+        *,
+        args: Sequence[str],
+        env: Mapping[str, str],
+        catalog_path: str | None = None,
+    ) -> str:
         identity = {
-            "epoch": self._runtime_epoch,
-            "binary": self._binary_identity(binary, env),
-            "argv": [*args, *extra_args],
+            **inputs.identity,
+            "argv": [*args, *inputs.extra_args],
             "catalog": catalog_path,
             # Digest only: the environment carries the Hub gateway token.
             "env": hashlib.sha256(
                 json.dumps(sorted(env.items()), separators=(",", ":")).encode()
             ).hexdigest(),
-            "credential": codex_credential_identity(Path(codex_home).expanduser()),
-            # A directory deleted and re-created under the same path leaves a
-            # running app-server in a dead inode (#561).
-            "cwd": [cwd, self._cwd_inode(cwd)],
         }
         return hashlib.sha256(
             json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
@@ -2137,18 +2169,21 @@ class CodexAgent(BaseAgent):
         *,
         config: Any = None,
     ) -> CodexLaunchSpec:
-        """Capture once every process-level input an app-server for ``cwd`` needs."""
+        """Capture once every process-level input an app-server for ``cwd`` needs.
+
+        The turn loads its launch inputs once, before the Hub catalog is
+        awaited; the catalog, the process, and the digest all derive from that
+        load.
+        """
         os.makedirs(cwd, exist_ok=True)
-        codex_config = self.codex_config
-        binary = codex_config.binary
-        extra_args = tuple(codex_config.extra_args)
-        env = dict(self._codex_runtime_environment())
+        inputs = self._launch_inputs(cwd)
+        env = dict(inputs.env)
         args: list[str] = []
         catalog: CodexHubCatalog | None = None
         if launch is not None and launch.channel == "hub":
             from modules.agents.model_hub import build_codex_hub_launch
 
-            catalog = (await self.prepare_model_hub_runtime(config)).retain()
+            catalog = (await self.prepare_model_hub_runtime(config, inputs=inputs)).retain()
             try:
                 args, hub_env = build_codex_hub_launch(
                     [],
@@ -2163,19 +2198,17 @@ class CodexAgent(BaseAgent):
             if hub_env is not None:
                 env = hub_env
         digest = self._launch_spec_digest(
-            cwd,
-            binary=binary,
+            inputs,
             args=args,
-            extra_args=extra_args,
             env=env,
             catalog_path=str(catalog.path) if catalog is not None else None,
         )
         return CodexLaunchSpec(
             digest=digest,
             cwd=cwd,
-            binary=binary,
+            binary=inputs.binary,
             args=tuple(args),
-            extra_args=extra_args,
+            extra_args=inputs.extra_args,
             env=env,
             hub=catalog is not None,
             catalog=catalog,

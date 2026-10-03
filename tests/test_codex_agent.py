@@ -399,13 +399,7 @@ class CodexAgentConnectionProbeTests(unittest.IsolatedAsyncioTestCase):
         agent.codex_config = SimpleNamespace(binary="codex-probe-fixture", extra_args=[])
         with tempfile.TemporaryDirectory() as cwd:
             self.assertFalse(agent.can_reuse_direct_connection_probe(cwd))
-            direct_digest = agent._launch_spec_digest(
-                cwd,
-                binary="codex-probe-fixture",
-                args=(),
-                extra_args=(),
-                env=dict(agent._codex_runtime_environment()),
-            )
+            direct_digest = asyncio.run(agent._launch_spec(cwd)).digest
 
             install_codex_transport(
                 agent, cwd, SimpleNamespace(is_initialized=True), digest="hub-spec", hub=True
