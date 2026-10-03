@@ -4024,6 +4024,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
                             {
                                 "default_provider": "openai",
                                 "default_reasoning_effort": "high",
+                                "error_retry_limit": 0,
                             },
                     )(),
                 },
@@ -4042,7 +4043,8 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
     agent.im_client = agent.controller.im_client
     agent.settings_manager = agent.controller.settings_manager
     agent.sessions = agent.controller.sessions
-    agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+    # One ``agents.opencode`` object, as in production.
+    agent.opencode_config = agent.controller.config.opencode
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
     agent._steering_states = {}

@@ -280,7 +280,7 @@ class OpenCodePollLoop:
         if callable(record_failure):
             await record_failure(context, diagnostic)
 
-    def _active_turn_timeout_seconds(self) -> float:
+    def _active_turn_timeout_seconds(self, settings: Any = None) -> float:
         """The configured wall-clock bound, or ``0.0`` when it is disabled.
 
         Non-positive, missing, or non-finite values all read as disabled. The
@@ -291,7 +291,7 @@ class OpenCodePollLoop:
         """
 
         raw_timeout = getattr(
-            self._agent.opencode_config,
+            settings if settings is not None else self._agent.opencode_config,
             "active_turn_timeout_seconds",
             DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS,
         )
@@ -585,6 +585,7 @@ class OpenCodePollLoop:
         model_dict: Optional[Dict[str, str]],
         reasoning_effort: Optional[str],
         baseline_message_ids: set[str],
+        settings: Any = None,
     ) -> tuple[Optional[str], bool]:
         """Poll messages for a prompt.
 
@@ -598,14 +599,15 @@ class OpenCodePollLoop:
         seen_tool_calls: set[str] = set()
         emitted_assistant_messages: set[str] = set()
         final_text: Optional[str] = None
-        timeout_seconds = self._active_turn_timeout_seconds()
+        # The settings the turn was admitted with, never the live config.
+        timeout_seconds = self._active_turn_timeout_seconds(settings)
         deadline = (
             time.monotonic() + timeout_seconds if timeout_seconds > 0 else math.inf
         )
 
         error_retry_count = 0
         error_retry_limit = getattr(
-            self._agent.opencode_config,
+            settings if settings is not None else self._agent.opencode_config,
             "error_retry_limit",
             DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
         )

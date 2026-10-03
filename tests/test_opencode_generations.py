@@ -585,7 +585,7 @@ def test_runtime_gen_022_a_restored_poll_resumes_on_the_generation_that_runs_it(
         generations=lambda: (named, legacy, current),
         bind=bind,
         acquire=acquire,
-        launch_inputs=lambda: None,
+        launch_inputs=lambda: SimpleNamespace(settings=None),
         launch_spec=AsyncMock(return_value=SimpleNamespace(digest="current")),
     )
 
@@ -1721,3 +1721,135 @@ def test_a_failed_start_whose_process_survives_is_reaped_until_it_is_gone(isolat
     assert len(still_running) == 2
     assert stopped == [pid]
     assert list(isolated_launch.records.iterdir()) == []
+
+
+def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
+    """An ``agents.opencode`` save lands after a turn's admission snapshot and
+    before the turn resolves its model. The turn runs on the generation its
+    snapshot names, so it also takes its default provider, reasoning effort,
+    and poll settings from that snapshot; the next turn moves to the new ones."""
+
+    from modules.agents.base import AgentRequest
+    from modules.im import MessageContext
+    from tests.opencode_generation_fakes import serve_opencode_agent
+
+    admitted = SimpleNamespace(
+        default_provider="openai",
+        default_reasoning_effort="high",
+        error_retry_limit=0,
+        active_turn_timeout_seconds=0,
+    )
+    saved = SimpleNamespace(
+        default_provider="anthropic",
+        default_reasoning_effort="low",
+        error_retry_limit=5,
+        active_turn_timeout_seconds=600,
+    )
+    prompts: list[dict] = []
+    polled: list[object] = []
+    bootstrapping, proceed = asyncio.Event(), asyncio.Event()
+    agent = object.__new__(OpenCodeAgent)
+
+    class _Server:
+        async def ensure_directory_ready(self, directory):
+            bootstrapping.set()
+            await proceed.wait()
+
+        async def list_messages(self, session_id, directory):
+            return []
+
+        async def get_available_models(self, directory):
+            return {"providers": []}
+
+        async def prompt_async(self, **kwargs):
+            prompts.append(kwargs)
+
+        async def mark_run_active(self, session_id):
+            return None
+
+        async def mark_run_inactive(self, session_id):
+            return None
+
+        def get_default_agent_from_config(self):
+            return None
+
+        def get_agent_model_from_config(self, _agent):
+            return None
+
+        def get_agent_reasoning_effort_from_config(self, _agent):
+            return None
+
+    class _SessionManager:
+        async def ensure_working_dir(self, path):
+            return None
+
+        async def get_or_create_session_id(self, request, server):
+            return "oc-session"
+
+        def set_request_session(self, *args):
+            return None
+
+        def set_agent_session_id(self, *_args):
+            return None
+
+        def mark_initialized(self, session_id):
+            return False
+
+    class _Sessions:
+        def add_active_poll(self, **kwargs):
+            return None
+
+        def remove_active_poll(self, session_id):
+            return None
+
+        def update_active_poll_state(self, session_id, **kwargs):
+            return None
+
+    class _PollLoop:
+        async def run_prompt_poll(self, *args, settings=None, **kwargs):
+            polled.append(settings)
+            return "done", False
+
+    async def _async_noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("modules.agents.opencode.agent.build_system_prompt_injection", lambda **kwargs: "")
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", lambda *args, **kwargs: None)
+    agent.controller = SimpleNamespace(
+        config=SimpleNamespace(platform="slack", reply_enhancements=False, remote_access=None, language="en", opencode=admitted),
+        processing_indicator=SimpleNamespace(snapshot_request=lambda request: {}),
+        get_opencode_overrides=lambda context: (None, "gpt-5.4", None),
+    )
+    agent.config = agent.controller.config
+    agent.sessions = _Sessions()
+    agent.opencode_config = admitted
+    agent._session_manager = _SessionManager()
+    agent._poll_loop = _PollLoop()
+    agent._steering_states = {}
+    agent._active_requests = {}
+    serve_opencode_agent(agent, _Server())
+    agent._delete_ack = _async_noop
+    agent._remove_ack_reaction = _async_noop
+    request = AgentRequest(
+        context=MessageContext(user_id="u", channel_id="c", platform="slack", platform_specific={}),
+        message="hello",
+        user_message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::c",
+    )
+
+    async def scenario():
+        turn = asyncio.get_running_loop().create_task(agent._process_message(request))
+        await bootstrapping.wait()
+        # A save of agents.opencode adopts its config the way a renewal does.
+        agent._adopt_runtime_config(saved)
+        proceed.set()
+        await turn
+
+    asyncio.run(scenario())
+
+    assert prompts and prompts[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
+    assert prompts[0]["reasoning_effort"] == "high"
+    assert polled == [admitted]

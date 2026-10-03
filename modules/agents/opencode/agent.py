@@ -812,14 +812,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     async def _prepare_launch(
         self,
         context: Any = None,
-    ) -> tuple[Any, OpenCodeOverlay | None, OpenCodeLaunchSpec]:
+    ) -> tuple[Any, OpenCodeOverlay | None, OpenCodeLaunchSpec, Any]:
         """Snapshot every launch input in one step, then derive the launch from it.
 
         The Model Hub snapshot and the runtime's own inputs (CLI path, renewal
         epoch, binary, config, and credential identities) are read together,
-        before the first await. The overlay and the spec derive from that
-        snapshot only, so a save or renewal that lands while the overlay is
-        prepared changes nothing about this launch; the next one moves.
+        before the first await, with the ``agents.opencode`` settings they came
+        from. The overlay and the spec derive from that snapshot only, and the
+        turn takes its per-turn settings from the returned settings, so a save
+        or renewal that lands meanwhile changes nothing about this turn; the
+        next one moves.
         """
 
         model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
@@ -832,7 +834,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             bind_turn_mode(context, turn_mode("opencode", **snapshot_kwargs))
         prepare_overlay = getattr(model_hub_runtime, "prepare_opencode_overlay", None)
         overlay = await prepare_overlay(**snapshot_kwargs) if callable(prepare_overlay) else None
-        return config, overlay, await self._runtime.launch_spec(overlay, inputs)
+        return config, overlay, await self._runtime.launch_spec(overlay, inputs), inputs.settings
 
     async def _ensure_adopted(self) -> None:
         """Adopt a previous controller's generations against the current spec."""
@@ -840,7 +842,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         if self._runtime.adopted:
             return
         try:
-            _config, _overlay, current_spec = await self._prepare_launch()
+            _config, _overlay, current_spec, _settings = await self._prepare_launch()
         except Exception:
             # Without a spec nothing can keep serving; every adopted generation
             # retires and stops once its restored work drains.
@@ -877,7 +879,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         """Pin the current generation for one controller-side request sequence."""
 
         async with self._outside_turn_admission():
-            _config, _overlay, spec = await self._prepare_launch()
+            _config, _overlay, spec, _settings = await self._prepare_launch()
             binding = await self._runtime.acquire(spec)
         try:
             yield binding.generation.runtime
@@ -888,7 +890,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         """Pin the current generation for a caller outside the controller."""
 
         async with self._outside_turn_admission():
-            _config, _overlay, spec = await self._prepare_launch()
+            _config, _overlay, spec, _settings = await self._prepare_launch()
             lease_id, generation = await self._runtime.lease(spec, ttl_seconds)
         logger.info(
             "Leased OpenCode generation %s for %s (%s)",
@@ -1486,7 +1488,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
             # One Model Hub load serves this turn end to end: its overlay is a
             # launch spec input, and its model resolves from the same overlay.
-            model_hub_config, model_hub_overlay, launch_spec = await self._prepare_launch(request.context)
+            model_hub_config, model_hub_overlay, launch_spec, opencode_settings = await self._prepare_launch(
+                request.context
+            )
             turn.binding = await self._runtime.acquire(launch_spec)
             server = turn.binding.generation.runtime
             self._session_generations[request.base_session_id] = server
@@ -1615,7 +1619,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             model_str = require_agent_model(
                 override_model, "opencode", getattr(self.controller.config, "language", "en")
             )
-            opencode_cfg = getattr(self.controller.config, "opencode", None)
             requested_model_str = opencode_requested_model_for_overlay(
                 model_str,
                 model_hub_overlay,
@@ -1638,7 +1641,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             default_provider = (
                 None
                 if model_hub_overlay is not None
-                else getattr(opencode_cfg, "default_provider", None)
+                else getattr(opencode_settings, "default_provider", None)
             )
             model_dict = resolve_opencode_model_dict(model_str, default_provider)
             if model_dict is None:
@@ -1654,7 +1657,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if not reasoning_effort:
                 reasoning_effort = server.get_agent_reasoning_effort_from_config(agent_to_use)
             if not reasoning_effort:
-                reasoning_effort = getattr(opencode_cfg, "default_reasoning_effort", None)
+                reasoning_effort = getattr(opencode_settings, "default_reasoning_effort", None)
             if model_dict:
                 try:
                     model_catalog = (
@@ -1954,6 +1957,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model_dict=model_dict,
                 reasoning_effort=reasoning_effort,
                 baseline_message_ids=baseline_message_ids,
+                settings=opencode_settings,
             )
 
             if not should_emit:
@@ -3252,7 +3256,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         else:
             # No live process owns this run any more. Its messages are in the
             # shared database, so the current generation reads and settles it.
-            _config, _overlay, spec = await self._prepare_launch()
+            _config, _overlay, spec, _settings = await self._prepare_launch()
             binding = await self._runtime.acquire(spec)
         bound_id = binding.generation.runtime.generation_id
         if bound_id != generation_id:

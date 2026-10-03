@@ -22,8 +22,9 @@ class FakeBinding:
 
 
 class FakeOpenCodeRuntime:
-    def __init__(self, server: Any) -> None:
+    def __init__(self, server: Any, agent: Any = None) -> None:
         self.server = server
+        self._agent = agent
         self.bindings: list[FakeBinding] = []
         self.specs: list[Any] = []
         self.last_start_failure_pid = None
@@ -32,7 +33,12 @@ class FakeOpenCodeRuntime:
         self.outside_turn_acquisitions = 0
 
     def launch_inputs(self) -> Any:
-        return None
+        # The real runtime's config is the agent's ``agents.opencode`` object.
+        agent = self._agent
+        settings = getattr(agent, "opencode_config", None) or getattr(
+            getattr(getattr(agent, "controller", None), "config", None), "opencode", None
+        )
+        return SimpleNamespace(settings=settings)
 
     async def launch_spec(self, overlay: Any, inputs: Any) -> Any:
         spec = SimpleNamespace(digest="spec", overlay=overlay)
@@ -77,7 +83,7 @@ def serve_opencode_agent(agent: Any, server: Any) -> FakeOpenCodeRuntime:
         server.generation_id = "ocg_test"
     if server is not None and not hasattr(server, "active_run_sessions"):
         server.active_run_sessions = set()
-    runtime = FakeOpenCodeRuntime(server)
+    runtime = FakeOpenCodeRuntime(server, agent)
     agent._runtime = runtime
     agent._session_generations = {}
     agent._lifecycle_tasks = set()

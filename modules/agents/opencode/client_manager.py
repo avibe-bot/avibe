@@ -170,11 +170,15 @@ class OpenCodeLaunchInputs:
     caller_context_path: str
     user_config: dict[str, Optional[str]]
     credentials: Optional[str]
+    # The ``agents.opencode`` settings the CLI path was read from. The turn
+    # takes every per-turn setting from here, never from the live config.
+    settings: Any = None
 
 
-def read_launch_inputs(binary: str, renew_epoch: int) -> OpenCodeLaunchInputs:
+def read_launch_inputs(binary: str, renew_epoch: int, settings: Any = None) -> OpenCodeLaunchInputs:
     executable, binary_identity = _binary_identity(binary)
     return OpenCodeLaunchInputs(
+        settings=settings,
         executable=executable,
         binary_identity=binary_identity,
         renew_epoch=renew_epoch,
@@ -318,7 +322,8 @@ class OpenCodeRuntime:
 
     def launch_inputs(self) -> OpenCodeLaunchInputs:
         """Read this runtime's launch inputs now; the CLI path and epoch move together."""
-        return read_launch_inputs(self.config.binary, self._renew_epoch)
+        settings = self.config
+        return read_launch_inputs(settings.binary, self._renew_epoch, settings)
 
     async def launch_spec(self, overlay: Any | None, inputs: OpenCodeLaunchInputs) -> OpenCodeLaunchSpec:
         # Off the loop only for the first version probe of a new build.
