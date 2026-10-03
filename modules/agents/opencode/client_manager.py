@@ -48,7 +48,8 @@ from .server import (
 
 logger = logging.getLogger(__name__)
 
-_LAUNCH_SPEC_SCHEMA = 1
+# 2: the binary is identified by its stat signature alone.
+_LAUNCH_SPEC_SCHEMA = 2
 # OpenCode rewrites these fields of an OAuth entry whenever it refreshes the
 # token, and every live process reads them from auth.json per request.
 _VOLATILE_OAUTH_FIELDS = frozenset({"access", "refresh", "expires"})
@@ -85,8 +86,8 @@ def _probe_binary_version(binary: str) -> Optional[str]:
 def _binary_identity(configured: str) -> tuple[str, dict[str, Any]]:
     """The executable a launch runs, and what identifies its exact build.
 
-    The version is probed once per file identity, so an in-place upgrade is
-    seen without a probe on every turn.
+    Every install writes the file anew, so its stat signature changes on any
+    upgrade or reinstall, including one made outside Avibe.
     """
 
     resolved = configured if os.path.isabs(configured) else shutil.which(configured)
@@ -97,10 +98,7 @@ def _binary_identity(configured: str) -> tuple[str, dict[str, Any]]:
         stat = os.stat(real)
     except OSError:
         return resolved, {"path": real, "missing": True}
-    key = (real, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-    if key not in _binary_versions:
-        _binary_versions[key] = _probe_binary_version(resolved)
-    return resolved, {"path": real, "stat": list(key[1:]), "version": _binary_versions[key]}
+    return resolved, {"path": real, "stat": [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]}
 
 
 def _global_config_files() -> list[Path]:
@@ -154,10 +152,50 @@ def _credential_digest(path: Path) -> Optional[str]:
     return _digest(normalized)
 
 
-def compute_launch_spec(binary: str, overlay: Any | None, renew_epoch: int) -> OpenCodeLaunchSpec:
-    """The launch spec a turn needs, from its Model Hub overlay and the files OpenCode loads."""
+@dataclass(frozen=True, eq=False)
+class OpenCodeLaunchInputs:
+    """Every mutable input of a launch spec except the Model Hub overlay.
 
+    ``read_launch_inputs`` reads them in one step with no await, in the same
+    step as the turn's Model Hub snapshot, so a save or renewal that lands
+    while the overlay is prepared changes nothing about that launch.
+    """
+
+    executable: str
+    binary_identity: dict[str, Any]
+    renew_epoch: int
+    caller_context_path: str
+    user_config: dict[str, Optional[str]]
+    credentials: Optional[str]
+
+
+def read_launch_inputs(binary: str, renew_epoch: int) -> OpenCodeLaunchInputs:
     executable, binary_identity = _binary_identity(binary)
+    return OpenCodeLaunchInputs(
+        executable=executable,
+        binary_identity=binary_identity,
+        renew_epoch=renew_epoch,
+        caller_context_path=server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"],
+        user_config={str(path): _user_config_digest(path) for path in _global_config_files()},
+        credentials=_credential_digest(get_opencode_auth_path()),
+    )
+
+
+def _binary_version(inputs: OpenCodeLaunchInputs) -> Optional[str]:
+    """The build's version for its record, probed once per file identity."""
+
+    stat = inputs.binary_identity.get("stat")
+    if stat is None:
+        return None
+    key = (inputs.binary_identity["path"], *stat)
+    if key not in _binary_versions:
+        _binary_versions[key] = _probe_binary_version(inputs.executable)
+    return _binary_versions[key]
+
+
+def compute_launch_spec(inputs: OpenCodeLaunchInputs, overlay: Any | None) -> OpenCodeLaunchSpec:
+    """The launch spec of one launch: a pure function of its inputs and overlay."""
+
     overlay_hash: Optional[str] = None
     provider_ids: tuple[str, ...] = ()
     file_content: Optional[bytes] = None
@@ -182,21 +220,22 @@ def compute_launch_spec(binary: str, overlay: Any | None, renew_epoch: int) -> O
     digest = _digest(
         {
             "schema": _LAUNCH_SPEC_SCHEMA,
-            "binary": binary_identity,
+            "binary": inputs.binary_identity,
             "model_hub_overlay": overlay_hash,
             "model_hub_overlay_provider_ids": list(provider_ids),
+            # Constants of this Avibe build.
             "policy": _MANAGED_RUNTIME_POLICY_REVISION,
             "plugin": hashlib.sha256(PLUGIN_SOURCE.encode()).hexdigest(),
-            "caller_context_path": server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"],
-            "user_config": {str(path): _user_config_digest(path) for path in _global_config_files()},
-            "credentials": _credential_digest(get_opencode_auth_path()),
-            "renew_epoch": renew_epoch,
+            "caller_context_path": inputs.caller_context_path,
+            "user_config": inputs.user_config,
+            "credentials": inputs.credentials,
+            "renew_epoch": inputs.renew_epoch,
         }
     )
     return OpenCodeLaunchSpec(
         digest=digest,
-        binary=executable,
-        binary_version=binary_identity.get("version"),
+        binary=inputs.executable,
+        binary_version=_binary_version(inputs),
         overlay_hash=overlay_hash,
         overlay_provider_ids=provider_ids,
         overlay_file_content=file_content,
@@ -273,8 +312,13 @@ class OpenCodeRuntime:
         write_atomic(path, str(epoch))
         self._renew_epoch = epoch
 
-    async def launch_spec(self, overlay: Any | None) -> OpenCodeLaunchSpec:
-        return await asyncio.to_thread(compute_launch_spec, self.config.binary, overlay, self._renew_epoch)
+    def launch_inputs(self) -> OpenCodeLaunchInputs:
+        """Read this runtime's launch inputs now; the CLI path and epoch move together."""
+        return read_launch_inputs(self.config.binary, self._renew_epoch)
+
+    async def launch_spec(self, overlay: Any | None, inputs: OpenCodeLaunchInputs) -> OpenCodeLaunchSpec:
+        # Off the loop only for the first version probe of a new build.
+        return await asyncio.to_thread(compute_launch_spec, inputs, overlay)
 
     @property
     def adopted(self) -> bool:

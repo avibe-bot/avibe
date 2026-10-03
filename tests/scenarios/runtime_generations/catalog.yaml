@@ -179,6 +179,7 @@ scenarios:
     related_tests:
       - tests/test_opencode_generations.py::test_an_in_place_binary_upgrade_changes_the_launch_spec
       - tests/test_opencode_generations.py::test_credential_digest_ignores_token_refresh_but_sees_new_credentials
+      - tests/test_opencode_generations.py::test_a_renewal_during_overlay_preparation_leaves_the_launch_one_coherent_spec
   - id: RUNTIME-GEN-021
     name: An OpenCode turn is aborted and steered on the generation that runs it while a newer generation is current
     status: covered

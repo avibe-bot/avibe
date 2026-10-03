@@ -404,7 +404,7 @@ canonical JSON over these inputs:
 
 | Input | Source | Notes |
 | --- | --- | --- |
-| Binary identity | `resolve_cli_path` on the snapshot's `agents.opencode.cli_path` | Covers the realpath, `(st_dev, st_ino, st_size, st_mtime_ns)`, and the version. The version comes from `<binary> --version`, cached per stat key, so a turn runs the probe only after the binary changes. This fixes the ignored in-place upgrade. |
+| Binary identity | `resolve_cli_path` on the snapshot's `agents.opencode.cli_path` | Covers the realpath and `(st_dev, st_ino, st_size, st_mtime_ns)`. Every install writes the file anew, so the stat signature changes on any upgrade or reinstall, including an in-place one. The version (`<binary> --version`, cached per stat signature) goes into the generation's record only, so the digest stays a pure function of the snapshot. |
 | Hub overlay | `overlay.content_hash` and `provider_ids`; `None` in Direct mode | The same overlay object the turn resolves its model with. A Hub/Direct switch therefore changes the spec. |
 | Managed policy | `_MANAGED_RUNTIME_POLICY_REVISION` (`server.py:72`) | A bump now starts a new generation instead of refusing turns. |
 | Caller-context plugin | sha256 of `PLUGIN_SOURCE` | |
@@ -426,6 +426,20 @@ Proposal: pass the core snapshot's Model Hub configuration into
 mode as `direct` when the overlay is `None`, `hub` otherwise. The overlay
 digest and the model resolution then come from one load. `model_hub.py` is
 shared, so this needs core agreement.
+
+**One snapshot per launch.** `_prepare_launch()` reads every mutable launch
+input in one synchronous step, before its first await. That covers the Model Hub
+snapshot, the CLI path, the renewal epoch, the binary identity, and the user
+config and credential digests (`OpenCodeRuntime.launch_inputs()`). The policy
+revision and plugin source are constants of the Avibe build. The overlay is
+derived from that Hub snapshot, and the spec is a pure function of the
+snapshot and the overlay (`compute_launch_spec(inputs, overlay)`). Turns,
+restored polls, `current_server()`, leases, and adoption all use this one
+path. A save or renewal that lands while the overlay is prepared therefore
+changes nothing about that launch: it stays on the generation its snapshot
+names, starts no spare generation, and the next launch moves. After the
+snapshot, only the generation's HTTP request timeout is read live; it is a
+client setting, not a process input.
 
 **Check-to-spawn window.** Files are digested before the spawn. If a save
 lands in between, the generation loads files newer than its label says. The

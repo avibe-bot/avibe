@@ -23,7 +23,7 @@ import pytest
 from modules.agents.opencode import client_manager
 from modules.agents.opencode import server as opencode_server
 from modules.agents.opencode.agent import OpenCodeAgent, _OpenCodeSteerState
-from modules.agents.opencode.client_manager import OpenCodeRuntime, compute_launch_spec
+from modules.agents.opencode.client_manager import OpenCodeRuntime, compute_launch_spec, read_launch_inputs
 from modules.agents.opencode.server import OpenCodeGeneration, OpenCodeLaunchSpec
 from tests.fake_pid_helpers import fake_pid
 
@@ -56,7 +56,11 @@ def opencode_home(tmp_path, monkeypatch):
 
 
 def _spec(home, *, overlay=None, renew_epoch: int = 0) -> OpenCodeLaunchSpec:
-    return compute_launch_spec(str(home.binary), overlay, renew_epoch)
+    return compute_launch_spec(read_launch_inputs(str(home.binary), renew_epoch), overlay)
+
+
+def _current_spec(runtime: OpenCodeRuntime, overlay=None) -> OpenCodeLaunchSpec:
+    return asyncio.run(runtime.launch_spec(overlay, runtime.launch_inputs()))
 
 
 def _overlay(content: str = '{"provider":{"avibe-openai":{}}}'):
@@ -581,6 +585,7 @@ def test_runtime_gen_022_a_restored_poll_resumes_on_the_generation_that_runs_it(
         generations=lambda: (named, legacy, current),
         bind=bind,
         acquire=acquire,
+        launch_inputs=lambda: None,
         launch_spec=AsyncMock(return_value=SimpleNamespace(digest="current")),
     )
 
@@ -852,13 +857,13 @@ def test_strict_retirement_retries_a_stop_that_declined_while_a_request_ran(fake
 
 def test_a_renewal_outlives_a_controller_restart(opencode_home):
     before = OpenCodeRuntime(SimpleNamespace(binary=str(opencode_home.binary), request_timeout_seconds=60))
-    original = asyncio.run(before.launch_spec(None))
+    original = _current_spec(before)
     before.renew()
     # A restarted controller must not promote a generation the renewal retired.
     after = OpenCodeRuntime(SimpleNamespace(binary=str(opencode_home.binary), request_timeout_seconds=60))
 
-    assert asyncio.run(after.launch_spec(None)).digest == asyncio.run(before.launch_spec(None)).digest
-    assert asyncio.run(after.launch_spec(None)).digest != original.digest
+    assert _current_spec(after).digest == _current_spec(before).digest
+    assert _current_spec(after).digest != original.digest
 
 
 def test_shutdown_keeps_the_record_of_a_server_that_survived(isolated_launch, monkeypatch):
@@ -880,7 +885,7 @@ def test_shutdown_keeps_the_record_of_a_server_that_survived(isolated_launch, mo
 
 def test_a_renewal_that_cannot_be_persisted_fails_without_taking_effect(opencode_home, monkeypatch):
     runtime = OpenCodeRuntime(SimpleNamespace(binary=str(opencode_home.binary), request_timeout_seconds=60))
-    before = asyncio.run(runtime.launch_spec(None)).digest
+    before = _current_spec(runtime).digest
 
     def unwritable(*_args, **_kwargs):
         raise OSError("disk full")
@@ -890,7 +895,7 @@ def test_a_renewal_that_cannot_be_persisted_fails_without_taking_effect(opencode
     # A crash after an unpersisted renewal would promote the retired generation.
     with pytest.raises(OSError):
         runtime.renew()
-    assert asyncio.run(runtime.launch_spec(None)).digest == before
+    assert _current_spec(runtime).digest == before
 
 
 def test_a_lease_released_before_adoption_never_pins_its_generation(fake_processes, monkeypatch):
@@ -990,11 +995,11 @@ def test_runtime_gen_024_a_mode_switch_during_a_hub_run_moves_new_turns_to_direc
 
     async def scenario():
         runtime = OpenCodeRuntime(SimpleNamespace(binary=str(opencode_home.binary), request_timeout_seconds=60))
-        hub_turn = await runtime.acquire(await runtime.launch_spec(_overlay()))
+        hub_turn = await runtime.acquire(await runtime.launch_spec(_overlay(), runtime.launch_inputs()))
         hub = hub_turn.generation.runtime
         await hub.mark_run_active("ses_hub")
         # The mode switch commits Direct; the next turn's snapshot has no overlay.
-        direct_turn = await runtime.acquire(await runtime.launch_spec(None))
+        direct_turn = await runtime.acquire(await runtime.launch_spec(None, runtime.launch_inputs()))
         direct = direct_turn.generation.runtime
         both = (hub in runtime.generations(), runtime.current() is direct)
         await hub_turn.release()
@@ -1499,3 +1504,58 @@ def test_runtime_gen_007_a_reenabled_opencode_runtime_starts_beside_a_draining_r
     assert retired.runtime_retired()
     assert reenabled._runtime.generations() == (serving,)
     assert retired_scopes == []
+
+
+def test_a_renewal_during_overlay_preparation_leaves_the_launch_one_coherent_spec(fake_processes, opencode_home):
+    """A save that moves the CLI path, with its renewal, and a Model Hub
+    catalog save both land while a launch awaits its overlay. That launch
+    stays on the spec it snapshotted and starts no spare generation; the next
+    launch moves to the new one."""
+
+    upgraded = opencode_home.binary.with_name("opencode-next")
+    upgraded.write_bytes(opencode_home.binary.read_bytes() + b"# next\n")
+    upgraded.chmod(opencode_home.binary.stat().st_mode)
+    hub = {"overlay": _overlay('{"provider":{"avibe-openai":{"models":{"a":{}}}}}')}
+    preparing, release = asyncio.Event(), asyncio.Event()
+    hold = {"next": False}
+
+    async def prepare_opencode_overlay(*, config):
+        # The snapshot is the overlay this launch derives.
+        if hold["next"]:
+            hold["next"] = False
+            preparing.set()
+            await release.wait()
+        return config
+
+    agent = object.__new__(OpenCodeAgent)
+    agent.controller = SimpleNamespace(
+        model_hub_runtime=SimpleNamespace(
+            snapshot=lambda: hub["overlay"],
+            prepare_opencode_overlay=prepare_opencode_overlay,
+        ),
+        config=SimpleNamespace(opencode=None),
+    )
+    agent._lifecycle_tasks = set()
+    agent._runtime = OpenCodeRuntime(SimpleNamespace(binary=str(opencode_home.binary), request_timeout_seconds=60))
+
+    async def launch():
+        async with agent.current_server() as server:
+            return server
+
+    async def scenario():
+        before = await launch()
+        hold["next"] = True
+        racing = asyncio.get_running_loop().create_task(launch())
+        await preparing.wait()
+        hub["overlay"] = _overlay('{"provider":{"avibe-openai":{"models":{"b":{}}}}}')
+        await agent.renew_runtime(SimpleNamespace(binary=str(upgraded), request_timeout_seconds=60))
+        release.set()
+        return before, await racing, await launch()
+
+    before, during, after = asyncio.run(scenario())
+
+    assert during is before
+    assert after is not before and after.spec_digest == _spec(
+        SimpleNamespace(binary=upgraded), overlay=_overlay('{"provider":{"avibe-openai":{"models":{"b":{}}}}}'), renew_epoch=1
+    ).digest
+    assert fake_processes.started == [before, after]

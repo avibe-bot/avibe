@@ -31,7 +31,10 @@ class FakeOpenCodeRuntime:
         self.adopted = True
         self.outside_turn_acquisitions = 0
 
-    async def launch_spec(self, overlay: Any) -> Any:
+    def launch_inputs(self) -> Any:
+        return None
+
+    async def launch_spec(self, overlay: Any, inputs: Any) -> Any:
         spec = SimpleNamespace(digest="spec", overlay=overlay)
         self.specs.append(spec)
         return spec
