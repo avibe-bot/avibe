@@ -23,6 +23,7 @@ from modules.agents.codex.transport import CodexRPCError
 from modules.agents.codex.turn_state import CodexTurnRegistry
 from modules.agents.model_hub import ModelHubLaunch
 from modules.agents.runtime_generations import RuntimeUnitStopping
+from modules.agents.service import AgentService
 from tests.codex_generation_support import init_generation_state
 from vibe.i18n import t as i18n_t
 
@@ -404,6 +405,36 @@ async def test_runtime_gen_006_disabling_codex_ends_every_app_server_and_admits_
     }
     assert len(FakeAppServer.started) == started
     assert len(resolutions) == 1  # The late turn resolved no launch.
+
+
+@pytest.mark.asyncio
+async def test_runtime_gen_006_a_disable_whose_stop_fails_is_retried_until_the_app_server_is_gone(tmp_path):
+    """RUNTIME-GEN-006: a disable that leaves an app-server running fails, so the idle sweep retries it.
+
+    The agent is already out of routing, so the teardown is the only owner of
+    that process; a shutdown that returned normally would lose it.
+    """
+    agent, cwd = _agent(tmp_path)
+    await agent.handle_message(_request(cwd, "s1"))
+    server = _server_for(agent, "s1")
+    stop = server.stop
+    server.stop = AsyncMock(side_effect=RuntimeError("the child did not stop"))
+    service = AgentService(controller=SimpleNamespace())
+    attempts = []
+
+    async def disable():
+        attempts.append(len(attempts) + 1)
+        await agent.shutdown_runtime()
+
+    assert not await service.run_teardown("codex", disable)
+    assert server.alive
+
+    server.stop = stop
+    await service.retry_teardowns()
+    await service.retry_teardowns()  # A finished teardown is not run again.
+
+    assert server.stopped and not any(agent._runtimes.values())
+    assert attempts == [1, 2]
 
 
 @pytest.mark.asyncio

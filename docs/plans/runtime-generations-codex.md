@@ -315,7 +315,7 @@ retired only when the directory's last Hub process ends.
 | `renew_runtime(config, config_save=False)` | Adopts the config. A plain `agents.*` save (`config_save=True`) needs nothing more, because the binary and extra arguments are already spec inputs. Every other caller bumps the renewal epoch. Nothing stops or waits. |
 | `adopt_model_hub_catalog()` | Drops the prepared catalogs; the next Hub turn prepares from its own snapshot. |
 | Hub/Direct mode switch | The core commits the mode and calls `adopt_model_hub_catalog()`. The mode decides the turn's launch, so it is a spec change: the next turn starts on a process for the new mode, while a running Hub turn finishes on its own process and keeps the gateway credential until it ends (RUNTIME-GEN-016). |
-| `shutdown_runtime()` | Service shutdown, probe teardown, and disabling the backend. On a disable the core has already interrupted the backend's work with the backend-refresh notice and removed the agent from routing; this ends every process at once without a notice of its own, then the core forgets the agent. A turn that captured the agent before that lookup fails visibly with `error.agentRuntimeRetired` and starts no process, in a directory with a unit or without one (RUNTIME-GEN-006). Re-enabling constructs a new agent. |
+| `shutdown_runtime()` | Service shutdown, probe teardown, and disabling the backend. On a disable the core has already interrupted the backend's work with the backend-refresh notice and removed the agent from routing; this ends every process at once without a notice of its own, then the core forgets the agent. A turn that captured the agent before that lookup fails visibly with `error.agentRuntimeRetired` and starts no process, in a directory with a unit or without one (RUNTIME-GEN-006). Re-enabling constructs a new agent. It raises while any app-server survives its stops; the caller keeps the teardown and calls it again, which retries every stop. |
 | `refresh_runtime_config` / `refresh_auth_state` | Kept only for the exclusive `migration_guard` cutover: stop every generation. |
 | `retire_for_native_migration` | Refuses while any generation is bound or not drained; otherwise ends every process and requires it to exit. |
 | `prepare_resume_binding` | Releases only the resumed Session's thread; the process keeps serving others. |
@@ -367,9 +367,10 @@ generations. RUNTIME-GEN-019 is the opt-in real-binary contract
   confirmation and then the failure.
 - **Survivors of a failed stop.** The exclusive refresh logs a stop failure
   and goes on; the survivor is uninitialized, so it is retired and reaped, and
-  migration's exit check backstops it. Shutdown drops the bindings of a process
-  that survived both stop attempts, which matters only when a disabled backend
-  is shut down while the controller keeps running.
+  migration's exit check backstops it. Shutdown drops the Session bindings of
+  a process that survived both stop attempts, then raises, so a disable's
+  teardown is kept and retried on every idle sweep until the process is gone
+  (RUNTIME-GEN-006).
 - **Untracked writers.** A thread still held by a process Avibe does not track,
   such as a wedged child of an earlier controller, fails its resume as
   unavailable rather than as held.

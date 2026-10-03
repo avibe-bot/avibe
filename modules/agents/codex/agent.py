@@ -1652,17 +1652,24 @@ class CodexAgent(BaseAgent):
         removed this agent from routing, so this ends every process without a
         notice of its own. A turn that captured the agent before that lookup
         fails visibly and starts no process.
+
+        Raises while any app-server survives: nothing else owns it once the
+        agent leaves routing, so the caller keeps the teardown and retries
+        it, and calling this again retries every stop.
         """
         await self.adopt_model_hub_catalog()
         self._session_last_activity.clear()
         self._shutting_down = True
         stopped = sum(len(runtimes) for runtimes in self._runtimes.values())
         for unit in list(self._units.values()):
+            # A forced stop that fails leaves its generation attached; the
+            # pass below retries every process still running, attached or not.
             await unit.stop_all(force=True)
+        failure: Exception | None = None
         try:
             await self._end_unattached_runtimes()
         except Exception as exc:
-            logger.warning("Failed to stop Codex transport during shutdown: %s", exc)
+            failure = exc
 
         # Shutdown ends the whole runtime: every process was just asked to end,
         # so all Session state goes with it, including any bindings.
@@ -1676,6 +1683,9 @@ class CodexAgent(BaseAgent):
             self._clear_thread_developer_instructions(base_session_id)
 
         self._session_locks.clear()
+        survivors = sum(len(runtimes) for runtimes in self._runtimes.values())
+        if failure is not None or survivors:
+            raise RuntimeError(f"{survivors} Codex app-server(s) survived shutdown") from failure
         logger.info("Stopped Codex runtime across %d transport(s)", stopped)
 
     def _bind_runtime_agent_session_id(self, request: AgentRequest) -> None:
