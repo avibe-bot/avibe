@@ -2151,8 +2151,25 @@ def stop_recorded_servers_sync(runtime_ids: frozenset[str] = frozenset()) -> lis
     return outcomes
 
 
-def terminate_recorded_generations_sync() -> None:
-    """Stop every recorded OpenCode server during an explicit Avibe shutdown."""
+def stop_owned_generations_sync() -> None:
+    """Stop every generation a runtime of this controller started or adopted.
+
+    An explicit Avibe shutdown runs it. A record no runtime here owns, such as
+    one of another desktop Runtime sharing this state directory, is left alone.
+    """
 
     for path, info in _recorded_processes():
-        stop_recorded_server_sync(path, info)
+        if _owned_here(info):
+            stop_recorded_server_sync(path, info)
+
+
+def forget_recorded_lease(lease_id: str) -> bool:
+    """Clear a lease from the record holding it; whether any record did."""
+
+    for path, info in _recorded_processes():
+        leases = info.get("leases")
+        if isinstance(leases, dict) and lease_id in leases:
+            info = {**info, "leases": {key: value for key, value in leases.items() if key != lease_id}}
+            write_atomic(path, json.dumps(info))
+            return True
+    return False

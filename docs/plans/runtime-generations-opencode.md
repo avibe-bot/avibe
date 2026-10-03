@@ -38,15 +38,28 @@ are the Phase 1 design. Their line references are to
   previous controller left, then closes admission. The service's 60 s sweep
   keeps calling `reap_runtime_generations()` on the retired agent until
   `runtime_retired()` is true, then drops it. A retired runtime's generation
-  stops once its bindings and requests drain and no run its markers record
-  still runs on that process. The durable poll names the run's directory, and
-  the process's own session status says whether it is live.
+  stops once its bindings and requests drain and its run markers are gone.
+  Run markers, reconciled against durable polls, are the one owner of "a run
+  here still needs this process". For `UNRESTORED_RUN_GRACE_SECONDS` (10 min)
+  after the runtime closes, a marker keeps its process for the restore that
+  binds its poll. After that, it keeps the process only while the process's own
+  session status reports the run live.
 - A controller that starts with OpenCode disabled builds a drain-only agent
-  (`OpenCodeAgent.draining()`) and hands it to `AgentService.retire_agent`,
-  which never registers it. The agent adopts what a crashed controller
-  recorded: an idle server stops at once, and one still serving a lease or a
-  live run stops once drained. `stop_recorded_servers_sync()` remains only for
+  (`OpenCodeAgent.draining()`) before any poll is restored, and hands it to
+  `AgentService.retire_agent`, which never registers it. The agent adopts what
+  a crashed controller recorded: an idle server stops at once. The controller
+  restores every runtime agent's polls, so each durable poll binds its adopted
+  generation, delivers its result, and settles; that generation stops once the
+  poll releases it. A poll whose process is gone stays durable for the next
+  enabled controller. `stop_recorded_servers_sync()` remains only for
   `vibe stop`.
+- A UI lease released before any runtime here adopted it is cleared from its
+  record, so the adoption that follows never re-holds it. A release otherwise
+  reaches the runtime holding the lease, or each runtime agent, registered or
+  retired, which adopts first.
+- Explicit shutdown stops only the generations a runtime of this controller
+  started or adopted (`stop_owned_generations_sync()`). Another desktop
+  Runtime's generations, sharing this state directory, keep running.
 - Bindings, and so leases, count as active runtime work, so maintenance such as
   a CLI replacement waits for a leased sequence between its requests.
 - Work outside a turn (`current_server()` and UI leases) is admitted the way a
@@ -618,7 +631,7 @@ and the corrected cells came from an independent agent that checked every
 | B3 | A bound generation is stopped only by a forced stop, which first settles the bound work. |
 | M1 | A native run is marked on its generation, and that marker persisted, before the run's first native write. |
 | M2 | A turn clears its marker together with its durable poll: both go, or both stay. This is master's contract. |
-| M3 | A marker that no live run or durable poll backs never keeps a process: adoption reconciliation, the re-reconcile in `_stop`, and a retired runtime that keeps a marker only while its run is live on that process. |
+| M3 | A marker that no live run or durable poll backs never keeps a process: adoption reconciliation, the re-reconcile in `_stop`, and a retired runtime that keeps a backed marker only for its restore grace, then only while its run is live on that process. |
 | S1 | New turns run on the generation whose spec equals the current spec. A renewal is persisted before it takes effect. |
 | N1 | A native migration never overlaps the start of an OpenCode process: work outside a turn waits while the backend drains, and admitted work counts as active until it is bound. |
 | P1 | A durable poll names the generation that runs its native turn, including after a restore binds it elsewhere. |
@@ -638,7 +651,7 @@ and the corrected cells came from an independent agent that checked every
 | Lease acquire, in controller | `lease_generation` → `OpenCodeRuntime.lease`: core `acquire`, then `set_lease` (persisted first), then `_hold_lease` (timer and holder) | L1, L5 hold. W: the lease fails and its binding is released. C: no binding survives. |
 | Lease acquire, IPC | `POST /internal/opencode/generation-leases` → same path | Same as above. A UI caller that gives up after the grant leaves the lease to its TTL (L2). |
 | Lease renew | none by design; each holder sizes its TTL | L4 holds for realistic runs: OAuth uses the remaining flow budget + 60 s; the probe uses bootstrap + timeout + 60 s; model options makes at most about 5 × 10 s of requests under 60 s; catalog, model save, and auth removal each make one request bounded by its request timeout. A probe whose every request hits its own timeout can outlast its lease, and then fails anyway. A UI caller that gives up before the grant leaves a lease nobody releases, bounded by its TTL. |
-| Lease release | in controller: the captured agent's `release_generation_lease`; IPC: `release_opencode_lease` (holder map, else the registered agent adopts, else 404); expiry timer → `release_lease` | L1–L3 hold. W: the drop is write-behind and flushed by the next sweep. After a force-stop, the record write is a no-op (R5). |
+| Lease release | in controller: the captured agent's `release_generation_lease`; IPC: `release_opencode_lease` (holder map, else each runtime agent adopts first, else the recorded lease is cleared, else 404); expiry timer → `release_lease` | L1–L3 hold. W: the drop is write-behind and flushed by the next sweep. After a force-stop, the record write is a no-op (R5). |
 | Turn bind and unbind | `_run_turn`: acquire → `_session_generations` → `mark_run_active` (persisted first) → durable poll → prompt; `_process_message` `finally` releases | B1, B2, M1, M2 hold. C: release is synchronous bookkeeping in a `finally`. W: a failed marker write fails the turn before its first native write; a failed clear keeps marker and poll (M2). |
 | Restored poll | `_bind_restored_poll` (adopts first; binds by generation id, else legacy marker, else current) → task → `finally` releases | B2 holds. A closed runtime refuses the bind, so the poll stays durable. **Gap G8:** `restore_active_polls` holds the binding across several awaits before the poll task takes it over. An exception in that stretch leaks the binding (B1), and a forced stop in it leaves the poll registering on a dead process (B3). **Gap G5:** a poll bound to a generation other than the one it names keeps the old name, so after another crash adoption drops the new generation's marker and the rebind goes to the wrong process (P1, M3). |
 | Native migration | `BackendRestartCoordinator` guard: `begin_backend_drain` holds turns; it waits on `backend_runtime_active` → `runtime_has_active_turns`; `retire_for_native_migration` → `retire_all_strict`; `verify_idle` | **Gap G4:** `current_server()` and `lease_generation()` bypass turn admission, and an acquisition still starting a process is invisible to `runtime_has_active_turns`, so the guard can yield while a process starts (N1). |
@@ -651,7 +664,7 @@ and the corrected cells came from an independent agent that checked every
 | Crash between steps | spawn→record (K1); record→ready (adopted or stopped); lease grant→hand-out (the successor honors it until TTL); marker→durable poll (marker reconciled away); kill→record removal (unproven, removed later); legacy write→legacy removal (G3) | R1–R3 hold except K1 and G3. |
 | Process death | `acquire` replaces a dead current (`forget` → `stop_generation` cleans up); a dead retiring generation is cleaned on its last release | R2, B1 hold. |
 | CLI stop | `forget_dead_records()`, then each proven record: desktop-claim check, `stop_recorded_server_sync` | R2, R4 hold; a survivor keeps its record; exit stays non-fatal (#2242). |
-| Shutdown | `terminate_recorded_generations_sync()`: stop each proven record, forget unproven ones, keep unreadable ones | R2, R4 hold. **Known K5:** the loop keeps running briefly after this call, and a lease expiry or sweep there can rewrite a record of a process just killed (R5). The next adoption or `vibe stop` removes it as dead. |
+| Shutdown | `stop_owned_generations_sync()`: stop each generation a runtime of this controller owns; another desktop Runtime's records are left alone | R2, R4 hold. **Known K5:** the loop keeps running briefly after this call, and a lease expiry or sweep there can rewrite a record of a process just killed (R5). The next adoption or `vibe stop` removes it as dead. |
 
 ### Fixes
 
@@ -685,6 +698,10 @@ and the corrected cells came from an independent agent that checked every
   `vibe stop`, shutdown, or the next adoption.
 - **K5.** After shutdown stops the recorded generations, a late write can
   recreate the record of a killed process; it is removed as dead later.
+- **K6, restore grace.** A durable poll whose platform transport is not ready
+  within 10 minutes of a retired runtime closing no longer keeps its process,
+  unless its run is still live. Its result is then delivered by the next
+  enabled controller, from the shared database.
 - **Core reconciler latency.** A generation that drains while the reconciler
   pass that declined it is still running waits for the next release or sweep
   (60 s, or the closed runtime's own sweep). This is core behavior.

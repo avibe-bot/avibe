@@ -2426,11 +2426,12 @@ class Controller:
         self._im_thread = None
 
         # An explicit Avibe stop/restart must not leave any OpenCode generation
-        # behind. Active turns have already reached shutdown cleanup.
+        # of this controller behind; another desktop Runtime's are not ours.
+        # Active turns have already reached shutdown cleanup.
         try:
-            from modules.agents.opencode.server import terminate_recorded_generations_sync
+            from modules.agents.opencode.server import stop_owned_generations_sync
 
-            terminate_recorded_generations_sync()
+            stop_owned_generations_sync()
         except Exception as e:
             logger.warning("OpenCode server cleanup failed: %s", e)
 

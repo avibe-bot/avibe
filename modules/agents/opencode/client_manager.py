@@ -40,6 +40,7 @@ from .server import (
     OpenCodeServerClient,
     StopOutcome,
     adopt_recorded_generations,
+    forget_recorded_lease,
     apply_resource_governance,
     own_generation,
     start_generation,
@@ -60,6 +61,10 @@ MAX_LEASE_SECONDS = 1800.0
 # The runtime holding each live lease. A release reaches it there even after
 # its backend was disabled and its agent unregistered while the lease drains.
 _LEASE_HOLDERS: dict[str, "OpenCodeRuntime"] = {}
+# How long a retired runtime keeps a process for a durable poll no restore has
+# bound yet: a transport that is not ready by then gets the poll delivered by
+# the next enabled controller instead.
+UNRESTORED_RUN_GRACE_SECONDS = 600.0
 
 
 def _digest(value: object) -> str:
@@ -287,6 +292,7 @@ class OpenCodeRuntime:
         self._adopt_lock: Optional[asyncio.Lock] = None
         # Set once the backend is disabled: no generation will serve again.
         self._closed = False
+        self._restore_deadline = 0.0
         # Work outside a turn admitted but not yet bound; a native migration
         # counts it as active, so it never overlaps a process start.
         self.outside_turn_acquisitions = 0
@@ -549,6 +555,7 @@ class OpenCodeRuntime:
         that declined or failed, until ``retired()``.
         """
         self._closed = True
+        self._restore_deadline = time.monotonic() + UNRESTORED_RUN_GRACE_SECONDS
         try:
             await self.ensure_adopted(None)
         except Exception:
@@ -609,12 +616,18 @@ class OpenCodeRuntime:
         generation = wrapper.runtime
         if not force and generation.process_alive() and not generation.is_drained():
             if self._closed:
-                # A retired runtime serves no new run, so a marker keeps its
-                # process only while that run still runs there: the marker of
-                # a run that ended, or that no durable poll backs, does not.
+                # A retired runtime serves no new run. A run marker a durable
+                # poll backs keeps the process for the restore that binds the
+                # poll and settles its run there; after the grace, only while
+                # that run is still live.
                 if generation.has_requests_in_flight():
                     return False
-                if self.marked_run_is_live is not None and await self.marked_run_is_live(generation):
+                if generation.active_run_sessions:
+                    self._reconcile_run_markers(generation, self._durable_polls())
+                if generation.active_run_sessions and (
+                    time.monotonic() < self._restore_deadline
+                    or (self.marked_run_is_live is not None and await self.marked_run_is_live(generation))
+                ):
                     return False
             else:
                 # A run marker that no durable poll backs, left by an adoption
@@ -719,18 +732,24 @@ async def release_opencode_lease(lease_id: str, *, controller: Any) -> Optional[
     """Release a lease in the runtime holding it, wherever its agent went.
 
     A lease no runtime holds yet, recorded before a controller restart, goes
-    to the registered agent, which adopts it first. ``None`` means OpenCode is
-    disabled and holds no such lease.
+    to each runtime agent, registered or retired, which adopts it first. With
+    no agent yet, as before a disabled controller's drain-only agent exists,
+    it is cleared from its record, so the adoption that follows never re-holds
+    it. ``None`` means OpenCode has no agent and no record holds the lease.
     """
 
     holder = _LEASE_HOLDERS.get(lease_id)
     if holder is not None:
         return await holder.release_lease(lease_id)
-    agent = getattr(getattr(controller, "agent_service", None), "agents", {}).get("opencode")
-    release = getattr(agent, "release_generation_lease", None)
-    if not callable(release):
-        return None
-    return bool(await release(lease_id))
+    runtime_agents = getattr(getattr(controller, "agent_service", None), "runtime_agents", None)
+    agents = list(runtime_agents("opencode")) if callable(runtime_agents) else []
+    for agent in agents:
+        release = getattr(agent, "release_generation_lease", None)
+        if callable(release) and await release(lease_id):
+            return True
+    if forget_recorded_lease(lease_id):
+        return True
+    return False if agents else None
 
 
 @asynccontextmanager

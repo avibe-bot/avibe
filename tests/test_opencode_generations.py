@@ -648,7 +648,11 @@ def test_runtime_gen_023_the_ui_process_leases_the_controllers_generation_over_c
         return True
 
     agent = SimpleNamespace(lease_generation=lease_generation, release_generation_lease=release_generation_lease)
-    app = create_app(SimpleNamespace(agent_service=SimpleNamespace(agents={"opencode": agent})))
+    app = create_app(
+        SimpleNamespace(
+            agent_service=SimpleNamespace(agents={"opencode": agent}, runtime_agents=lambda _backend: [agent])
+        )
+    )
 
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
@@ -869,12 +873,15 @@ def test_a_renewal_outlives_a_controller_restart(opencode_home):
 def test_shutdown_keeps_the_record_of_a_server_that_survived(isolated_launch, monkeypatch):
     record = _record(isolated_launch.records, "ocg_stuck", fake_pid(22), 50022)
     gone = _record(isolated_launch.records, "ocg_gone", fake_pid(23), 50023)
+    # Both were this controller's, the one a runtime here started or adopted.
+    for generation_id, pid in (("ocg_stuck", fake_pid(22)), ("ocg_gone", fake_pid(23))):
+        opencode_server._OWNED_HERE[generation_id] = (pid, 100.0 + pid)
     monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
     monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid == fake_pid(22))
     monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=50022")
     monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: False)
 
-    opencode_server.terminate_recorded_generations_sync()
+    opencode_server.stop_owned_generations_sync()
 
     assert record.exists()
     assert not gone.exists()
@@ -1158,7 +1165,8 @@ def test_adoption_tracks_a_serving_process_whose_record_cannot_be_rewritten(
 # ------------------------------------------------- review round 5 regressions
 
 
-def test_a_disabled_backend_stops_a_generation_whose_run_marker_clear_failed(fake_processes):
+def test_a_disabled_backend_stops_a_generation_whose_run_marker_clear_failed(fake_processes, monkeypatch):
+    monkeypatch.setattr(client_manager, "UNRESTORED_RUN_GRACE_SECONDS", 0.0)
     runtime = _runtime()
 
     async def scenario():
@@ -1175,7 +1183,7 @@ def test_a_disabled_backend_stops_a_generation_whose_run_marker_clear_failed(fak
 
     running = asyncio.run(scenario())
 
-    # Nothing sweeps a disabled backend's runtime; the release is its last chance.
+    # Past the restore grace, a marker whose run is not live keeps nothing.
     assert fake_processes.stopped == [running]
 
 
@@ -1428,89 +1436,111 @@ def test_adoption_never_holds_a_recorded_lease_longer_than_any_lease_is_granted(
 
 
 def _restarted_controller(monkeypatch, *, opencode_enabled: bool, durable_polls: dict):
-    """A controller that runs only its post-readiness startup, with a real service."""
+    """A controller whose transports come up after a crash, with a real service."""
 
     from core import controller as controller_module
+    from core.processing_indicator import ProcessingIndicatorService
+    from core.session_turns import SessionTurnManager
     from modules.agents.service import AgentService
-    from tests.test_service_readiness import _install_runtime_ready_dependencies
 
     monkeypatch.setattr("modules.agents.opencode.agent.governor_from_controller", lambda _controller: None)
     controller = controller_module.Controller.__new__(controller_module.Controller)
-    _install_runtime_ready_dependencies(controller, [])
     controller.config = SimpleNamespace(language="en", platform="slack", opencode=None)
+    controller.primary_platform = "slack"
     controller.im_client = None
-    controller.sessions = SimpleNamespace(get_all_active_polls=lambda: dict(durable_polls))
+    controller.sessions = SimpleNamespace(
+        get_all_active_polls=lambda: dict(durable_polls),
+        remove_active_poll=lambda session_id: durable_polls.pop(session_id, None),
+        update_active_poll_state=lambda *_args, **_kwargs: None,
+    )
     controller.settings_manager = SimpleNamespace(sessions=controller.sessions)
+    controller.processing_indicator = ProcessingIndicatorService(controller)
+    controller.session_turns = SessionTurnManager(controller)
+    controller.set_agent_status = lambda *_args: None
     controller.agent_service = AgentService(controller)
     if opencode_enabled:
         controller.agent_service.agents["opencode"] = object()
-    controller._publish_readiness_unless_im_runtime_failed = lambda: None
-    controller._start_model_hub_snapshot_reconcile_loop = lambda: None
-    controller.periodic_cleanup = AsyncMock()
-    controller.trace_retention_task = None
-    controller._agent_events_retention_loop = AsyncMock()
     return controller_module.Controller, controller
 
 
 @pytest.mark.parametrize("opencode_enabled", [False, True], ids=["disabled", "enabled"])
-def test_a_disabled_restart_drains_a_crashed_controllers_servers_without_interrupting_them(
+def test_a_disabled_restart_drains_a_crashed_controllers_servers_and_delivers_their_runs(
     isolated_launch, monkeypatch, opencode_enabled
 ):
-    """A controller crashed while OpenCode was disabled and its servers still
-    drained: one served a UI lease, one ran a native turn its durable poll
-    records, one served nothing. Restarted with OpenCode disabled, a drain-only
-    agent adopts them: the idle one stops at once, and each other stops only
-    once its lease is released or its run ends. With OpenCode enabled, the
-    registered agent adopts them all instead."""
+    """A controller crashed while its OpenCode servers still worked: one served
+    a UI lease, one ran a turn that finished while the controller was down, one
+    served nothing. Restarted with OpenCode disabled, a drain-only agent adopts
+    them before any poll is restored. The idle one stops at once. The finished
+    turn's poll is restored on its own process, its result delivered and its
+    durable poll settled, and that process then stops; the leased one stops
+    once its lease is released. With OpenCode enabled, the registered agent
+    adopts them all instead."""
 
     from modules.agents.opencode.client_manager import release_opencode_lease
+    from modules.agents.opencode.poll_loop import OpenCodePollLoop
+    from tests.test_opencode_restore_polls import ATTEMPT_ID, NATIVE_PART_ID, _make_poll
 
     records = isolated_launch.records
-    pids = {"ocg_idle": fake_pid(52), "ocg_leased": fake_pid(53), "ocg_running": fake_pid(54)}
+    pids = {"ocg_idle": fake_pid(52), "ocg_leased": fake_pid(53), "ocg_finished": fake_pid(54)}
     ports = {pid: 50000 + index for index, pid in enumerate(pids.values())}
     _record(records, "ocg_idle", pids["ocg_idle"], ports[pids["ocg_idle"]])
     _record(records, "ocg_leased", pids["ocg_leased"], ports[pids["ocg_leased"]], leases={"ocl_ui": time.time() + 600})
-    _record(records, "ocg_running", pids["ocg_running"], ports[pids["ocg_running"]], active_run_sessions=["ses_live"])
+    _record(records, "ocg_finished", pids["ocg_finished"], ports[pids["ocg_finished"]], active_run_sessions=["oc-done"])
     monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: records / "absent.json")
     monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid in ports)
     monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: f"/bin/opencode serve --port={ports[pid]}")
     stopped: list[int] = []
     monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: stopped.append(pid) or True)
-    run = {"busy": True}
+
+    async def list_messages(generation, session_id, directory):
+        # The turn finished while no controller ran: its result waits here.
+        return [
+            {"info": {"id": "user-1", "role": "user", "time": {}}, "parts": [{"id": NATIVE_PART_ID, "type": "text"}]},
+            {"info": {"id": "assistant-1", "role": "assistant", "time": {"completed": 1}, "finish": "stop"}},
+        ]
 
     async def get_session_status(generation, session_id, directory):
-        assert (generation.generation_id, session_id, directory) == ("ocg_running", "ses_live", "/work")
-        return {"type": "busy" if run["busy"] else "idle"}
+        return {"type": "idle"}
 
+    monkeypatch.setattr(opencode_server.OpenCodeGeneration, "list_messages", list_messages)
     monkeypatch.setattr(opencode_server.OpenCodeGeneration, "get_session_status", get_session_status)
-    durable = {"ses_live": SimpleNamespace(working_path="/work", processing_indicator={"opencode_generation_id": "ocg_running"})}
+    delivered: list[tuple[str, str]] = []
+
+    async def run_restored_poll_loop(_loop, poll_info, server):
+        delivered.append((poll_info.opencode_session_id, server.generation_id))
+        return True
+
+    monkeypatch.setattr(OpenCodePollLoop, "run_restored_poll_loop", run_restored_poll_loop)
+    monkeypatch.setattr(OpenCodePollLoop, "remove_restored_ack", AsyncMock())
+    poll = _make_poll(platform="slack", base_session_id="base-done", opencode_session_id="oc-done")
+    poll.processing_indicator = {"opencode_generation_id": "ocg_finished", "delivery_start_attempt_id": ATTEMPT_ID}
+    durable = {"oc-done": poll}
     controller_class, controller = _restarted_controller(monkeypatch, opencode_enabled=opencode_enabled, durable_polls=durable)
 
     async def scenario():
-        await controller_class._on_runtime_ready(controller)
-        at_startup = sorted(stopped)
-        retired = controller.agent_service.runtime_agents("opencode")
-        if opencode_enabled or len(retired) != 1:
-            return at_startup, None, None, retired
-        (draining,) = retired
+        # The first transport comes up: restoration starts.
+        await controller_class._restore_active_polls(controller, {"slack", ""})
+        agents = controller.agent_service.runtime_agents("opencode")
+        if opencode_enabled or len(agents) != 1:
+            return sorted(stopped), None, None
+        (draining,) = agents
+        await asyncio.gather(*draining._active_requests.values())
+        await draining._runtime._generations.settled()
+        after_restore = sorted(stopped)
         await release_opencode_lease("ocl_ui", controller=controller)
         await draining._runtime._generations.settled()
-        after_release = sorted(stopped)
-        run["busy"] = False
-        # The service's 60 s sweep is a retired agent's only retry.
-        await draining.reap_runtime_generations()
         controller.agent_service.forget_retired_agents()
-        return at_startup, after_release, sorted(stopped), controller.agent_service.runtime_agents("opencode")
+        return after_restore, sorted(stopped), controller.agent_service.runtime_agents("opencode")
 
-    at_startup, after_release, after_run, remaining = asyncio.run(scenario())
+    after_restore, after_release, remaining = asyncio.run(scenario())
 
     if opencode_enabled:
-        assert at_startup == [] and all(path.exists() for path in records.glob("ocg_*.json"))
+        assert after_restore == [] and delivered == [] and all(path.exists() for path in records.glob("ocg_*.json"))
         return
-    assert at_startup == [pids["ocg_idle"]]
-    assert after_release is not None, "no drain-only agent retired the adopted servers"
-    assert after_release == sorted([pids["ocg_idle"], pids["ocg_leased"]])
-    assert after_run == sorted(pids.values())
+    assert delivered == [("oc-done", "ocg_finished")]
+    assert "oc-done" not in durable
+    assert after_restore == sorted([pids["ocg_idle"], pids["ocg_finished"]])
+    assert after_release == sorted(pids.values())
     assert remaining == [] and not list(records.glob("ocg_*.json"))
 
 
@@ -1670,3 +1700,48 @@ def test_a_turn_that_races_a_disable_reports_the_localized_retired_error(fake_pr
     asyncio.run(scenario())
 
     assert failures == [f"❌ {i18n_t('error.agentRuntimeRetired', 'zh', agent='OpenCode')}"]
+
+
+def test_a_lease_released_before_any_runtime_adopted_it_is_never_re_held(isolated_launch, monkeypatch):
+    """OpenCode was disabled across a restart, and the UI finished its flow
+    before the drain-only agent existed. Its release clears the recorded lease,
+    so the adoption that follows stops the idle process at once."""
+
+    from modules.agents.opencode.client_manager import release_opencode_lease
+    from modules.agents.service import AgentService
+
+    _record(isolated_launch.records, "ocg_leased", fake_pid(55), 50055, leases={"ocl_ui": time.time() + 600})
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid == fake_pid(55))
+    monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=50055")
+    stopped: list[int] = []
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: stopped.append(pid) or True)
+    controller = SimpleNamespace(agent_service=AgentService(SimpleNamespace()))
+
+    async def scenario():
+        released = await release_opencode_lease("ocl_ui", controller=controller)
+        await _runtime().close()
+        return released
+
+    assert asyncio.run(scenario()) is True
+    assert stopped == [fake_pid(55)]
+
+
+def test_shutdown_stops_only_the_generations_this_controller_owns(isolated_launch, monkeypatch):
+    """Another desktop Runtime shares this state directory: stopping this
+    controller leaves that Runtime's OpenCode generation running."""
+
+    own = _record(isolated_launch.records, "ocg_own", fake_pid(56), 50056)
+    foreign = _record(isolated_launch.records, "ocg_foreign", fake_pid(57), 50057)
+    opencode_server._OWNED_HERE["ocg_own"] = (fake_pid(56), 100.0 + fake_pid(56))
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
+    ports = {fake_pid(56): 50056, fake_pid(57): 50057}
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid in ports)
+    monkeypatch.setattr(opencode_server.runtime, "get_process_command", lambda pid: f"/bin/opencode serve --port={ports[pid]}")
+    stopped: list[int] = []
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5.0: stopped.append(pid) or True)
+
+    opencode_server.stop_owned_generations_sync()
+
+    assert stopped == [fake_pid(56)]
+    assert not own.exists() and foreign.exists()

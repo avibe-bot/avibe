@@ -816,8 +816,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     async def _marked_run_is_live(self, generation: OpenCodeGeneration) -> bool:
         """Whether a run a marker records still runs on that process.
 
-        The durable poll names the directory the status query needs. A run
-        that cannot be checked counts as live, and a later sweep asks again.
+        A retired runtime asks only once the restore grace ended without a
+        restore binding the run's poll, so a live native run is not cut short.
+        The durable poll names the directory the status query needs. A process
+        that cannot answer does not count as running anything.
         """
         if not generation.active_run_sessions:
             return False
@@ -836,7 +838,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 generation.generation_id,
                 exc_info=True,
             )
-            return True
         return False
 
     def _durable_poll_generations(self) -> Dict[str, Optional[str]]:
@@ -2727,6 +2728,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     session_id=poll_info.opencode_session_id,
                     directory=poll_info.working_path,
                 )
+            except RuntimeUnitStopping:
+                # A retired runtime starts no process, and none it adopted
+                # runs this turn; the next enabled controller restores it.
+                continue
             except Exception as err:
                 logger.warning(f"Failed to verify OpenCode session {session_id} for restoration: {err}")
                 messages = []
