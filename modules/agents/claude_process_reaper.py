@@ -98,11 +98,25 @@ def get_claude_client_stderr_tail(client: object | None) -> str:
 
 
 def _process_start_time(pid: int) -> float | None:
-    # The same value on every read, whatever the clock does; ``ps lstart`` is
-    # derived from the current wall clock and moves with every clock step.
-    from core.process_isolation import process_create_time
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+        )
+    except Exception:
+        return None
+    text = (result.stdout or "").strip()
+    if not text:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
 
-    return process_create_time(pid)
+        return parsedate_to_datetime(text).timestamp()
+    except Exception:
+        return None
 
 
 def _process_start_times(pids: set[int]) -> dict[int, float]:

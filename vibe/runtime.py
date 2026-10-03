@@ -36,7 +36,6 @@ from config.v2_config import (
     V2Config,
 )
 from core.process_isolation import fingerprint_process_marker, isolated_subprocess_kwargs, processes_carrying_marker
-from core.process_isolation import process_create_time as _stable_process_create_time
 from vibe.log_sink import RUNTIME_LOG_MAX_BYTES, RUNTIME_LOG_RETAIN_BYTES
 
 
@@ -782,27 +781,15 @@ def pid_alive(pid):
 
 
 def process_create_time(pid: int) -> float | None:
-    """Start time of a process, or ``None`` if it can't be read.
+    """Wall-clock start time of a process, or ``None`` if it can't be read.
 
     Used to tell a recorded pid apart from an unrelated process that later reused
     the same pid (notably across a reboot): a reused pid has a different start
-    time, so ``(pid, create_time)`` identifies the original process. The value
-    is the same on every read, whatever the clock does since; see
-    ``core.process_isolation.process_create_time``. It is not a wall-clock
-    timestamp: measure an age with ``process_wall_clock_start``.
-    """
-    return _stable_process_create_time(pid)
-
-
-def process_wall_clock_start(pid: int) -> float | None:
-    """When a process started, on today's wall clock, or ``None`` if it can't be read.
-
-    For an age measured against ``time.time()``. It moves with the clock, so it
-    never identifies a process; ``process_create_time`` does that.
+    time, so ``(pid, create_time)`` identifies the original process.
     """
     try:
         return float(psutil.Process(pid).create_time())
-    except (psutil.Error, OSError, ValueError, TypeError, OverflowError):
+    except (psutil.Error, ValueError, TypeError):
         return None
 
 
@@ -1067,8 +1054,8 @@ def _pid_reservation_is_fresh(pid_path: Path, pid: int, *, max_age: float = SERV
         pidfile_mtime = pid_path.stat().st_mtime
     except OSError:
         return False
-    started_at = process_wall_clock_start(pid)
-    latest_signal = max(pidfile_mtime, started_at or 0)
+    create_time = process_create_time(pid)
+    latest_signal = max(pidfile_mtime, create_time or 0)
     return time.time() - latest_signal <= max_age
 
 

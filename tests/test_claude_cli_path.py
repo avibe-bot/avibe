@@ -40,18 +40,11 @@ from core.native_dispatch_phase import (
 from core.handlers.model_hub.service import ModelHubError
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
-from tests.fake_pid_helpers import fake_pid
 from tests.scenario_harness.model_hub import (
     UNLISTED_MODEL,
     unlisted_model_copy,
     unlisted_model_runtime,
 )
-
-
-# Claude CLI pids the tests hand the product: no process can hold them.
-CLI_PID = fake_pid(9753)
-OTHER_CLI_PID = fake_pid(4321)
-REPLACEMENT_CLI_PID = fake_pid(9876)
 
 
 @dataclass
@@ -976,7 +969,7 @@ def test_session_handler_moves_claude_process_into_agent_cgroup(monkeypatch, tmp
 
     class _StubClaudeSDKClient:
         def __init__(self, options):
-            self._transport = type("Transport", (), {"_process": type("Process", (), {"pid": CLI_PID})()})()
+            self._transport = type("Transport", (), {"_process": type("Process", (), {"pid": 9753})()})()
 
         async def connect(self) -> None:
             return None
@@ -999,7 +992,7 @@ def test_session_handler_moves_claude_process_into_agent_cgroup(monkeypatch, tmp
 
     _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
 
-    assert calls == [(CLI_PID, "claude")]
+    assert calls == [(9753, "claude")]
 
 
 def test_session_handler_keeps_sdk_default_for_default_claude_binary(monkeypatch, tmp_path: Path) -> None:
@@ -1523,7 +1516,7 @@ def test_session_handler_marks_claude_sdk_session_process_owner(monkeypatch, tmp
     class _StubClaudeSDKClient:
         def __init__(self, options):
             captured["options"] = options
-            self._transport = type("T", (), {"_process": type("P", (), {"pid": OTHER_CLI_PID})()})()
+            self._transport = type("T", (), {"_process": type("P", (), {"pid": 4321})()})()
 
         async def connect(self) -> None:
             captured["connected"] = True
@@ -3178,7 +3171,7 @@ def test_reap_orphaned_sessions_disables_in_tree_sweep_when_create_in_flight(mon
         return 0
 
     monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
-    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: OTHER_CLI_PID)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -3197,7 +3190,7 @@ def test_reap_orphaned_sessions_enables_in_tree_sweep_when_owner_set_complete(mo
         return 0
 
     monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
-    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: OTHER_CLI_PID)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -3221,7 +3214,7 @@ def test_reap_orphaned_sessions_excludes_active_watch_process_roots(monkeypatch,
             return {500}
 
     monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
-    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: OTHER_CLI_PID)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
 
     controller = _Controller(tmp_path)
     controller.watch_service = _WatchService()
@@ -3246,7 +3239,7 @@ def test_reap_orphaned_sessions_excludes_active_claude_auth_clients(monkeypatch,
             return {600}
 
     monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
-    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: OTHER_CLI_PID)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
 
     controller = _Controller(tmp_path)
     controller.agent_auth_service = _AuthService()
@@ -3278,7 +3271,7 @@ def test_reap_orphaned_sessions_disables_in_tree_when_auth_client_pid_unknown(
             return True
 
     monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
-    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: OTHER_CLI_PID)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
 
     controller = _Controller(tmp_path)
     controller.agent_auth_service = _AuthService()
@@ -3743,7 +3736,7 @@ def test_evict_idle_sessions_reaps_native_resume_processes(monkeypatch, tmp_path
             self._transport = type(
                 "Transport",
                 (),
-                {"_process": type("Process", (), {"pid": OTHER_CLI_PID})()},
+                {"_process": type("Process", (), {"pid": 4321})()},
             )()
             captured["client"] = self
 
@@ -3808,7 +3801,7 @@ def test_cleanup_defers_duplicate_reap_while_a_client_create_is_in_flight(
             self._transport = type(
                 "Transport",
                 (),
-                {"_process": type("Process", (), {"pid": OTHER_CLI_PID})()},
+                {"_process": type("Process", (), {"pid": 4321})()},
             )()
 
         async def connect(self) -> None:
@@ -3856,7 +3849,7 @@ def test_evict_idle_sessions_protects_pids_of_other_live_sessions(monkeypatch, t
             self._transport = type(
                 "Transport",
                 (),
-                {"_process": type("Process", (), {"pid": OTHER_CLI_PID})()},
+                {"_process": type("Process", (), {"pid": 4321})()},
             )()
 
         async def connect(self) -> None:
@@ -3892,13 +3885,13 @@ def test_evict_idle_sessions_protects_pids_of_other_live_sessions(monkeypatch, t
     # A second live client resuming the same native session id, as created by
     # the turn that follows a force eviction.
     replacement = _StubClaudeSDKClient(None)
-    replacement._transport._process.pid = REPLACEMENT_CLI_PID
+    replacement._transport._process.pid = 9876
     setattr(replacement, "_vibe_native_session_id", "native-session-1")
     controller.claude_sessions["slack_C999:other"] = replacement
 
     asyncio.run(handler.cleanup_session(composite_key))
 
-    assert captured["exclude_pids"] == {REPLACEMENT_CLI_PID}
+    assert captured["exclude_pids"] == {9876}
 
 
 def test_cleanup_defers_duplicate_reap_when_a_live_client_pid_is_unresolved(
@@ -3920,7 +3913,7 @@ def test_cleanup_defers_duplicate_reap_when_a_live_client_pid_is_unresolved(
             self._transport = type(
                 "Transport",
                 (),
-                {"_process": type("Process", (), {"pid": OTHER_CLI_PID})()},
+                {"_process": type("Process", (), {"pid": 4321})()},
             )()
 
         async def connect(self) -> None:
@@ -3975,7 +3968,7 @@ def test_cleanup_skips_a_generation_a_replacement_already_took_over(
             self._transport = type(
                 "Transport",
                 (),
-                {"_process": type("Process", (), {"pid": OTHER_CLI_PID})()},
+                {"_process": type("Process", (), {"pid": 4321})()},
             )()
 
         async def connect(self) -> None:

@@ -11,14 +11,11 @@ import os
 import secrets
 import signal
 import subprocess
-import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 import psutil
-
-logger = logging.getLogger(__name__)
 
 KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 PROCESS_IDENTITY_ENV = "AVIBE_PROCESS_IDENTITY"
@@ -38,150 +35,6 @@ ProcessReapOutcome = Literal["reaped", "gone", "unconfirmed"]
 #: deciding whether it may start a second copy of that work must treat the last two
 #: differently -- only "gone" is permission.
 ProcessTreePresence = Literal["present", "gone", "unknown"]
-
-
-# One wall-clock anchor per boot, shared by every process of this Avibe home.
-_BOOT_ANCHOR_PREFIX = "boot-anchor-"
-# (runtime directory, boot id) -> anchor, so another home never shares one.
-_boot_anchors: dict[tuple[str, str], float] = {}
-_boot_anchor_lock = threading.Lock()
-
-
-def process_create_time(pid: int) -> float | None:
-    """A process's start time in epoch seconds, identical on every read; None if unreadable.
-
-    It identifies a recorded pid, together with the pid itself, across reads,
-    processes, and restarts of this service. psutil's value cannot do that on
-    Linux: it adds the process's start, counted in clock ticks since boot, to a
-    boot time derived from the current wall clock, so every clock step or NTP
-    adjustment moves every process's start time and an exact match fails. On
-    Linux this adds those ticks to one boot-time anchor that every process of
-    this Avibe home reads for the current boot. Other platforms record an
-    absolute start time, which never moves.
-    """
-    try:
-        return read_process_create_time(pid)
-    except (psutil.Error, OSError, ValueError, TypeError, OverflowError):
-        return None
-
-
-def read_process_create_time(pid: int) -> float:
-    """``process_create_time``, raising when the start time cannot be read.
-
-    A caller that must tell a missing process from an unreadable one, such as
-    a liveness probe, keeps the distinction: ``psutil.NoSuchProcess`` for a
-    missing process, any other psutil error or ``OSError`` for one that is
-    there but cannot be read. Where /proc exists, a failure to read the stable
-    value is such an error too, never a fallback to psutil's clock-dependent
-    one: a value recorded once from either source must match every later read.
-    """
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        raise psutil.NoSuchProcess(pid)
-    process = psutil.Process(pid)
-    # psutil opens and reads the pid first, with its own errors.
-    created = float(process.create_time())
-    if not _proc_start_ticks_available():
-        # This platform records an absolute start time, which never moves.
-        return created
-    ticks = _linux_start_ticks(pid)
-    anchor = _linux_boot_anchor()
-    if anchor is None:
-        raise OSError("the boot-time anchor of this Avibe home is unavailable")
-    return anchor + ticks / _clock_ticks_per_second()
-
-
-def _proc_start_ticks_available() -> bool:
-    """Whether this platform's /proc records each process's start in ticks since boot."""
-    return os.path.exists("/proc/self/stat")
-
-
-def _linux_start_ticks(pid: int) -> int:
-    """A process's start in clock ticks since boot, from /proc.
-
-    Raises ``psutil.NoSuchProcess`` once the process is gone, and ``OSError``
-    when it is there but its record cannot be read.
-    """
-    try:
-        with open(f"/proc/{pid}/stat", "rb") as handle:
-            stat = handle.read().decode("utf-8", "replace")
-    except (FileNotFoundError, ProcessLookupError) as exc:
-        raise psutil.NoSuchProcess(pid) from exc
-    try:
-        # The command name may contain spaces or parentheses; fields follow its last ')'.
-        return int(stat.rsplit(")", 1)[1].split()[19])
-    except (IndexError, ValueError) as exc:
-        raise OSError(f"unreadable /proc/{pid}/stat") from exc
-
-
-def _clock_ticks_per_second() -> int:
-    return os.sysconf("SC_CLK_TCK")
-
-
-def _linux_boot_id() -> str | None:
-    try:
-        with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as handle:
-            boot_id = handle.read().strip()
-    except OSError:
-        return None
-    return boot_id if boot_id and all(char.isalnum() or char == "-" for char in boot_id) else None
-
-
-def _linux_boot_anchor() -> float | None:
-    """This home's boot time for the current boot, recorded atomically by its first reader; None if unavailable."""
-    boot_id = _linux_boot_id()
-    if boot_id is None:
-        return None
-    from config import paths
-
-    try:
-        runtime_dir = paths.get_runtime_dir()
-    except OSError:
-        return None
-    key = (str(runtime_dir), boot_id)
-    with _boot_anchor_lock:
-        anchor = _boot_anchors.get(key)
-        if anchor is None:
-            anchor = _read_or_create_boot_anchor(runtime_dir, boot_id)
-            if anchor is not None:
-                _boot_anchors[key] = anchor
-        return anchor
-
-
-def _read_or_create_boot_anchor(runtime_dir, boot_id: str) -> float | None:
-    try:
-        path = runtime_dir / f"{_BOOT_ANCHOR_PREFIX}{boot_id}"
-        existing = _read_boot_anchor(path)
-        if existing is not None:
-            return existing
-        runtime_dir.mkdir(parents=True, exist_ok=True)
-        candidate = float(psutil.boot_time())
-        staging = runtime_dir / f".{_BOOT_ANCHOR_PREFIX}{boot_id}.{os.getpid()}.{secrets.token_hex(4)}"
-        staging.write_text(repr(candidate), encoding="utf-8")
-        try:
-            # A link never overwrites and is never seen half written: the
-            # first writer's anchor is the one every reader uses.
-            os.link(staging, path)
-        except FileExistsError:
-            pass
-        finally:
-            staging.unlink(missing_ok=True)
-        anchor = _read_boot_anchor(path)
-        if anchor is not None:
-            for stale in runtime_dir.glob(f"{_BOOT_ANCHOR_PREFIX}*"):
-                if stale != path:
-                    stale.unlink(missing_ok=True)
-        return anchor
-    except (OSError, ValueError, psutil.Error):
-        logger.debug("Boot-time anchor unavailable", exc_info=True)
-        return None
-
-
-def _read_boot_anchor(path) -> float | None:
-    try:
-        value = float(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return None
-    return value if math.isfinite(value) and value > 0 else None
 
 
 @dataclass(frozen=True)
@@ -225,7 +78,7 @@ def capture_spawned_process_identity(
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
     try:
-        create_time = read_process_create_time(pid)
+        create_time = float(psutil.Process(pid).create_time())
     except (psutil.Error, OSError, TypeError, ValueError, OverflowError) as exc:
         # Callers may retain a safe diagnostic without changing the fail-closed
         # identity result or gaining authority to signal an unverified pid.
@@ -331,7 +184,7 @@ def process_identity_recycled(expected: PersistedProcessIdentity, live: ProcessI
 
 def _open_process_identity(pid: int) -> tuple[psutil.Process, ProcessIdentity]:
     process = psutil.Process(pid)
-    create_time = read_process_create_time(pid)
+    create_time = float(process.create_time())
     worker_fingerprint = None
     marker_readable = True
     try:

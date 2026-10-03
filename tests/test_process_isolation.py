@@ -76,82 +76,6 @@ def test_isolated_subprocess_kwargs_start_new_session_on_posix() -> None:
         assert isolated_subprocess_kwargs() == {"start_new_session": True}
 
 
-def test_a_process_start_time_survives_a_clock_step(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Linux derives psutil's start time from the current wall clock, so a clock
-    step moves it. Avibe reads the same value before and after one, in this
-    process and in another process of the same home; another home and a new
-    boot each get their own anchor."""
-
-    import core.process_isolation as process_isolation
-    from config import paths
-    from vibe import runtime
-
-    clock = {"boot_time": 1_000.0}
-    # The kernel's record: the process started 12345 ticks (123.45 s) after boot.
-    monkeypatch.setattr(process_isolation, "_proc_start_ticks_available", lambda: True)
-    monkeypatch.setattr(process_isolation, "_linux_start_ticks", lambda _pid: 12_345)
-    monkeypatch.setattr(process_isolation, "_clock_ticks_per_second", lambda: 100)
-    monkeypatch.setattr("core.process_isolation.psutil.boot_time", lambda: clock["boot_time"])
-
-    class _Process:
-        """psutil's Linux shape: ticks plus today's boot time, cached per object."""
-
-        def __init__(self, _pid):
-            self._created = None
-
-        def create_time(self):
-            if self._created is None:
-                self._created = 123.45 + clock["boot_time"]
-            return self._created
-
-    monkeypatch.setattr("core.process_isolation.psutil.Process", _Process)
-    boot = {"id": "boot-a"}
-    monkeypatch.setattr(process_isolation, "_linux_boot_id", lambda: boot["id"])
-    monkeypatch.setattr(process_isolation, "_boot_anchors", {})
-
-    first = runtime.process_create_time(4242)
-    clock["boot_time"] = 998.0  # NTP stepped the clock back by two seconds.
-    after_step = runtime.process_create_time(4242)
-    # Another process of this Avibe home, such as a restarted controller.
-    monkeypatch.setattr(process_isolation, "_boot_anchors", {})
-    elsewhere = runtime.process_create_time(4242)
-
-    assert first == after_step == elsewhere == pytest.approx(1_123.45)
-    home = paths.get_vibe_remote_dir()
-    monkeypatch.setenv(paths.AVIBE_HOME_ENV, str(home.parent / f"{home.name}-other"))
-    assert runtime.process_create_time(4242) == pytest.approx(1_121.45)
-    monkeypatch.setenv(paths.AVIBE_HOME_ENV, str(home))
-    boot["id"] = "boot-b"
-    assert runtime.process_create_time(4242) == pytest.approx(1_121.45)
-
-
-def test_an_unreadable_stable_start_time_never_falls_back_to_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Where /proc records start ticks, a failed read of them is an unreadable
-    identity, never psutil's clock-dependent value: a value recorded from that
-    fallback would stop matching once the clock moves."""
-
-    import core.process_isolation as process_isolation
-    from vibe import runtime
-
-    real_open = open
-
-    def _open(path, *args, **kwargs):
-        if str(path) == "/proc/4242/stat":
-            raise OSError(24, "Too many open files")
-        return real_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(process_isolation, "_proc_start_ticks_available", lambda: True)
-    monkeypatch.setattr(process_isolation, "open", _open, raising=False)
-    monkeypatch.setattr(process_isolation, "_linux_boot_id", lambda: "boot-a")
-    monkeypatch.setattr(
-        "core.process_isolation.psutil.Process",
-        lambda _pid: SimpleNamespace(create_time=lambda: 1_123.45, environ=lambda: {}),
-    )
-
-    assert runtime.process_create_time(4242) is None
-    assert probe_process_liveness(4242) == "unknown"
-
-
 def test_process_identity_reads_inherited_worker_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     process = SimpleNamespace(
         create_time=lambda: 123.0,
@@ -205,17 +129,6 @@ def test_probe_tells_an_empty_pid_apart_from_one_it_cannot_read(
     monkeypatch.setattr(
         "core.process_isolation.psutil.Process", _raise(psutil.AccessDenied(12345))
     )
-    assert probe_process_liveness(12345) == "unknown"
-
-    # The pid opens, but its start time cannot be read on the way to its identity.
-    def _unreadable_start(_pid: int):
-        def create_time():
-            raise psutil.AccessDenied(12345)
-
-        return SimpleNamespace(create_time=create_time, environ=lambda: {})
-
-    monkeypatch.setattr("core.process_isolation._linux_start_ticks", lambda _pid: None)
-    monkeypatch.setattr("core.process_isolation.psutil.Process", _unreadable_start)
     assert probe_process_liveness(12345) == "unknown"
 
 
