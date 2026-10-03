@@ -117,13 +117,17 @@ running. The tray keeps the shell alive after the window closes.
     Controller over the existing internal IPC socket and does not derive it from
     its own package version. The Controller is what reads `D`, and `/ready` may
     pair a newer UI with an older Controller. Only a definitive answer means
-    unsupported: a 404, or a schema below the one the shell writes. A transport
-    error, such as an IPC timeout or a reset, keeps the last known answer. A
-    transient failure therefore never stops a healthy daemon. Losing the Runtime
-    itself is already handled by the `/ready` monitor. Any other
-    non-definitive answer, such as a 500 or a malformed body, also keeps the
-    last known answer. Before the first definitive answer, the shell spawns
-    nothing and retries on the next `/ready` tick.
+    unsupported: a 404, or a schema below the one the shell writes. The answer
+    also carries the Controller's `controller_id`, which is random per
+    Controller process. The cached answer is keyed by that id, and it is cleared
+    whenever the `/ready` monitor re-runs adoption. Only a cached answer from
+    the same Controller is ever reused. A transport error, such as an IPC
+    timeout or a reset, keeps that same-Controller answer. A transient failure
+    therefore never stops a healthy daemon. Losing the Runtime itself is already
+    handled by the `/ready` monitor. Any other non-definitive answer, such as a
+    500 or a malformed body, also keeps the last known answer. Before the first
+    definitive answer, the shell spawns nothing and retries on the next `/ready`
+    tick.
   - Turning the toggle on requires that value to cover the schema the shell
     writes. Otherwise the shell refuses to turn it on, and the menu text says
     the Avibe service must restart to support computer use.
@@ -183,7 +187,7 @@ running. The tray keeps the shell alive after the window closes.
   | `starting` | health reports a missing grant | `needs_permission` | stop the daemon; no prompt |
   | `starting` | spawn, socket, or health fails otherwise | `error` | stop the daemon; record the reason |
     | `ready` | daemon `health_report` reports a missing grant | `needs_permission` | stop the daemon |
-  | `ready` | daemon exits unexpectedly, or its socket refuses on 2 consecutive checks | `starting` | stop the daemon if alive; respawn with backoff; after 3 failures in 5 minutes, go to `error` |
+    | `ready` | daemon exits unexpectedly, or its socket refuses or its `health_report` times out on 2 consecutive checks | `starting` | stop the daemon if alive; respawn with backoff; after 3 failures in 5 minutes, go to `error` |
     | any `enabled` state except `error` | quit | `stopped` | stop the daemon |
   | `error` | quit | `error` | none; `error` is kept across relaunch |
 
@@ -192,7 +196,9 @@ running. The tray keeps the shell alive after the window closes.
     own `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess`. In `ready`,
     it uses the daemon's `health_report` instead. That process reads its
     grants fresh, so a stale shell preflight can never stop a daemon that the
-    fallback just brought up. The same 5 s tick also probes the daemon's
+    fallback just brought up. Each ready-state `health_report` gets a 5 s
+    deadline. Two consecutive timeouts count as an unhealthy daemon, the same
+    as two socket refusals. The same 5 s tick also probes the daemon's
     socket. A wedged daemon that is alive but not accepting is treated like
     one that exited.
   - **Stale preflight.** macOS caches TCC answers per process, so the
@@ -731,10 +737,11 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   has its old element tokens rejected, a daemon respawn revives each session
   before its next call, a session's calls run one at a time and `end_session`
   waits for earlier ones, a stale shell preflight does not stop a `ready`
-  daemon, a 500 from capabilities keeps the last answer, a stop-and-re-enable
-  voids every lease, and the other gets `desktop_busy` until `end_session` or 60
-  s idle. Tests stay hermetic: the `D` path and the upstream command are
-  redirected to test-owned fakes.
+  daemon, a 500 from capabilities keeps the last answer only for the same
+  `controller_id`, a hung `health_report` leads to a respawn, a
+  stop-and-re-enable voids every lease, and the other gets `desktop_busy` until
+  `end_session` or 60 s idle. Tests stay hermetic: the `D` path and the upstream
+  command are redirected to test-owned fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
   check confirms that the pinned driver's `tools/list`, under that policy,
   equals the bundled tool snapshot. For a Runtime without a covering
