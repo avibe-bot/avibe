@@ -1,10 +1,15 @@
 """Model routing for the Avibe Agent over Model Hub hop resolution (C-2, C-6).
 
 Model Hub answers "how should the ``avibe`` backend call model M now" with a
-``HopResolution`` (``ModelHubRuntimeRouter.resolve_hop``). The router turns it
-into the loop's ``ModelEndpoint`` and ``ModelCapabilities`` and keeps unknown
-capabilities ``None``; the loop applies the conservative defaults. Transport is
-the provider adapter registered for the hop's protocol.
+``HopResolution`` (``ModelHubRuntimeRouter.resolve_hop``). ``selection_from_hop``
+turns it into the loop's ``ModelEndpoint`` and ``ModelCapabilities`` and keeps
+unknown capabilities ``None``; the loop applies the conservative defaults.
+Transport is the provider adapter registered for the endpoint's protocol.
+
+A ``google`` hop is called over Chat Completions at the same gateway: Model Hub
+serves every source on its OpenAI-compatible ``/v1`` surface and converts, so
+the agent needs no Gemini transport. The served origin still comes from
+``x-avibe-served-hop``.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from core.handlers.model_hub.provenance import SERVED_HOP_HEADER, SERVED_HOP_HEA
 
 logger = logging.getLogger(__name__)
 
-HopResolver = Callable[[], Awaitable[Mapping[str, Any]]]
+SelectionResolver = Callable[[], Awaitable[ModelSelection]]
 ProviderFactory = Callable[[ProtocolName], ProviderAdapter]
 
 
@@ -36,8 +41,13 @@ def _optional(value: Any, kind: type, what: str) -> Any:
     return value
 
 
-def selection_from_hop(hop: Mapping[str, Any]) -> ModelSelection:
-    """Build the loop's selection from one ``HopResolution`` (hop-resolution.schema.json)."""
+def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str] = None) -> ModelSelection:
+    """Build the loop's selection from one ``HopResolution`` (hop-resolution.schema.json).
+
+    ``gateway_base_url`` is the Model Hub gateway prefix the hop's ``base_url`` was
+    built from; a ``google`` hop needs it, because its ``base_url`` is the
+    ``/v1beta`` Gemini surface and the agent speaks Chat to ``/v1``.
+    """
     if hop.get("backend") != "avibe":
         raise HopResolutionError(f"hop resolved for backend {hop.get('backend')!r}, not avibe")
     protocol = hop.get("protocol")
@@ -66,9 +76,14 @@ def selection_from_hop(hop: Mapping[str, Any]) -> ModelSelection:
         supports_reasoning=_optional(raw.get("supports_reasoning"), bool, "supports_reasoning"),
         reasoning_efforts=tuple(efforts),
     )
+    base_url = hop["base_url"]
+    if protocol == "google":
+        if not gateway_base_url:
+            raise HopResolutionError("a google hop needs the gateway prefix to call Chat Completions")
+        protocol, base_url = "openai_chat", f"{gateway_base_url.rstrip('/')}/v1"
     endpoint = ModelEndpoint(
         protocol=protocol,
-        base_url=hop["base_url"],
+        base_url=base_url,
         model_id=hop["runtime_model"],
         token=hop["token"],
         request_headers=dict(headers),
@@ -113,12 +128,12 @@ class HubModelRouter:
 
     def __init__(
         self,
-        resolve_hop: HopResolver,
+        resolve: SelectionResolver,
         providers: ProviderFactory,
         *,
         first: Optional[ModelSelection] = None,
     ) -> None:
-        self._resolve_hop = resolve_hop
+        self._resolve = resolve
         self._providers = providers
         self._first = first
         self._adapters: dict[str, ProviderAdapter] = {}
@@ -127,7 +142,7 @@ class HubModelRouter:
         if self._first is not None:
             selection, self._first = self._first, None
             return selection
-        return selection_from_hop(await self._resolve_hop())
+        return await self._resolve()
 
     def provider_for(self, protocol: ProtocolName) -> ProviderAdapter:
         adapter = self._adapters.get(protocol)

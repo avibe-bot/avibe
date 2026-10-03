@@ -6,15 +6,16 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
   written, so a refused route fails like any backend that never started;
 * marks native acceptance, which materializes the input's ``messages`` row, and
   then runs the loop, whose rows *are* the transcript (C-5);
-* renders each committed response's delivery plan inside its commit (target,
-  finality, parts), delivers every row by replaying that plan - live and after
-  a crash alike - and writes the outcome footer when the run settles;
+* delivers every committed response through the same emit path as the other
+  backends; the dispatcher writes the committed row's display columns instead
+  of persisting a second row (``MessageOutput.persisted_row_id``);
 * steers the running loop with P1 deliveries and lets a refused steer fall back
   to the P3 queue; Stop aborts the run;
 * before any run of a Session in this process, under the Session writer lock,
-  settles open tool calls (T2), admits accepted inputs that were never consumed
-  (T3), and re-delivers pending outbox rows (D1). The Turn a restart interrupted
-  is settled by the Turn owner (T4; ``avibe`` is a process-bound runtime).
+  settles open tool calls (T2) and admits accepted inputs that were never
+  consumed (T3); at startup it settles every Session's open calls eagerly. The
+  Turn a restart interrupted is settled by the Turn owner (T4; ``avibe`` is a
+  process-bound runtime).
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional, Sequence
 
@@ -41,6 +42,7 @@ from core.agent_core.agent.events import (
 )
 from core.agent_core.agent.hooks import AgentInput
 from core.agent_core.agent.loop import Agent
+from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.messages import (
@@ -60,7 +62,6 @@ from core.services.agent_steering import (
     result as steer_result,
 )
 from core.backend_failure import emit_backend_failure
-from core.message_dispatcher import CommittedOutput
 from core.message_output import MessageOutput, stop_output_for, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.reply_enhancer import process_reply, strip_silent_blocks
@@ -77,15 +78,12 @@ from storage import messages_service
 from storage.agent_transcript import (
     FINAL_TYPES,
     INPUT_TYPES,
-    PendingDelivery,
-    final_outcome,
-    RenderedDisplay,
     SQLiteTranscriptStore,
+    final_outcome,
     render_text,
 )
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
-from storage.workbench_sessions_service import touch_session_agent_activity
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +106,8 @@ class _Run:
     errors: list[tuple[str, str]] = field(default_factory=list)
     final_row: Optional[str] = None
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
+    # This run's committed responses by row id, for delivering them; released with the run.
+    responses: dict[str, AssistantMessage] = field(default_factory=dict)
     stop_requested: bool = False
 
     @property
@@ -147,7 +147,7 @@ class AvibeAgent(BaseAgent):
         self._state_dir = state
         self.media = MediaSnapshots(self._engine, state / "media")
         self.store = AdapterTranscriptStore(
-            SQLiteTranscriptStore(self._engine, render=self._render_display),
+            SQLiteTranscriptStore(self._engine, render=self._display_source),
             self._engine,
             environment=self._environment,
             on_response=self._on_response,
@@ -158,8 +158,6 @@ class AvibeAgent(BaseAgent):
         # the last holder retires it, together with the store's per-Session state.
         self._runtimes: dict[str, _SessionRuntime] = {}
         self._open_calls_recovered = False
-        # Sessions whose activity rank a commit just bumped; announced once the commit returns.
-        self._ranked: dict[str, Optional[str]] = {}
 
     # --- BaseAgent -----------------------------------------------------------
 
@@ -235,32 +233,19 @@ class AvibeAgent(BaseAgent):
             if rt.run is not None and rt.run.request.session_key == session_key
         }
 
-    async def restore_pending_deliveries(self, platforms: set[str]) -> int:
-        """At startup, once ``platforms`` can deliver: resume every Session a crash left with pending rows.
+    async def recover_runtime_state(self) -> None:
+        """At startup or live registration: settle open tool calls and prune settled jobs (T2, J5).
 
-        Resume settles open tool calls, admits unconsumed inputs, and re-delivers
-        pending outbox rows (recovery.md T2, T3, D1); it never runs the model.
+        Never calls the model. T3 stays with each Session's resume.
         """
         await self._recover_open_tool_calls_once()
-        session_ids = await asyncio.to_thread(self._sessions_with_pending_rows, platforms)
-        for session_id in session_ids:
-            async with self._held(session_id, wait=False) as runtime:
-                if runtime is None:
-                    # A run holds the Session; its own resume re-delivers before it starts.
-                    continue
-                try:
-                    await self._resume(runtime, platforms=platforms)
-                except Exception:
-                    logger.exception("Avibe Agent startup resume failed for Session %s", session_id)
-        return len(session_ids)
 
     async def _recover_open_tool_calls_once(self) -> None:
         """At startup, settle every Session's open tool calls before any run (recovery.md T2).
 
         Eager, not at the Session's next message: a running foreground job is handed to
         its Watch now (J6), so no command outlives its Turn without an owner. Runs once
-        per process and never calls the model; T3 and outbox re-delivery stay with each
-        Session's resume.
+        per process and never calls the model; T3 stays with each Session's resume.
         """
         if self._open_calls_recovered:
             return
@@ -378,14 +363,14 @@ class AvibeAgent(BaseAgent):
             raise ValueError("The Avibe Agent has no model selected.")
         context = request.context
 
-        async def resolve_hop() -> dict[str, Any]:
+        async def resolve() -> ModelSelection:
             launch = await resolve_model_hub_launch(
                 self.controller, BACKEND, model, process_scope=f"{BACKEND}:{session_id}", context=context
             )
             bind_launch(context, launch)
-            return launch.to_hop_resolution()
+            return selection_from_hop(launch.to_hop_resolution(), gateway_base_url=launch.gateway_base_url)
 
-        return HubModelRouter(resolve_hop, self._providers, first=selection_from_hop(await resolve_hop()))
+        return HubModelRouter(resolve, self._providers, first=await resolve())
 
     def _new_run(
         self,
@@ -418,10 +403,7 @@ class AvibeAgent(BaseAgent):
                 # Delivered at the end of the run, which decides how the Turn settles.
                 run.final_row = event.message_id
             else:
-                row = await self.store.delivery(run.session_id, event.message_id, include_delivered=True)
-                # Outbox rows that are still pending, and IM narration, which is shown live and never queued.
-                if row is not None and (row.state == "pending" or (row.plan or {}).get("live_log")):
-                    await self._deliver(run.request.context, row, output=None)
+                await self._emit_narration(run, event.message_id)
         elif isinstance(event, ToolStarted):
             await self._emit_tool_started(run, event)
         elif isinstance(event, AgentError):
@@ -432,34 +414,32 @@ class AvibeAgent(BaseAgent):
     async def _settle(self, run: _Run) -> None:
         """Settle the Turn from the run's outcome (loop-control.md section 6).
 
-        A committed final row is the Turn's outcome and result text, whatever its
-        delivery state; the outbox only delivers it. The row's own outcome is
-        ``final_outcome`` (shared with startup recovery); the live run adds only the
-        failures it alone can observe after the commit. A Stop that arrives after the
-        final row committed loses the race, as it does for the Codex backend.
+        A committed final row is the Turn's outcome and result text; the result path
+        writes that row's display, as for the other backends. The row's own outcome is ``final_outcome`` (the rule its type was
+        committed by); the live run adds only the failures it alone can observe after
+        the commit. A Stop that arrives after the final row committed loses the race,
+        as it does for the Codex backend.
         """
         request, context = run.request, run.request.context
         reason = run.reason or "error"
         kind, diagnostic = run.errors[0] if run.errors else (None, reason)
-        final = (
-            await self.store.delivery(run.session_id, run.final_row, include_delivered=True)
-            if run.final_row
-            else None
-        )
+        final = run.responses.get(run.final_row) if run.final_row else None
         if final is not None:
             if run.stop_requested and reason == "aborted":
                 reason = "completed"
             run_failed_after_commit = reason not in _COMPLETED
-            failed = final_outcome(final.message) == "failed" or run_failed_after_commit
-            if strip_silent_blocks(self._display_source(final.message, final=True)).strip():
-                footer = self._result_footer(run, is_error=failed)
-                if footer and final.state == "pending":
-                    # Written before the first part goes out; a started delivery keeps its footer.
-                    await self.store.settle_delivery(
-                        run.session_id, run.final_row, footer=footer, display={"result_footer": footer}
-                    )
-                    final = await self.store.delivery(run.session_id, run.final_row, include_delivered=True) or final
-                await self._deliver(context, final, output=terminal_output_for(request), is_error=failed)
+            failed = final_outcome(final) == "failed" or run_failed_after_commit
+            body = self._display_source(final, final=True)
+            if body.strip():
+                # The same result path as the other backends; the row is already the message.
+                await self.emit_result_message(
+                    context,
+                    body,
+                    subtype="error" if failed else "success",
+                    started_at=run.started_at,
+                    request=request,
+                    output=replace(terminal_output_for(request), persisted_row_id=run.final_row),
+                )
             elif failed:
                 await self._fail(request, kind or "empty_response", diagnostic, reason=reason)
             else:
@@ -493,82 +473,9 @@ class AvibeAgent(BaseAgent):
         except Exception:
             logger.exception("Avibe Agent could not admit returned inputs for Session %s", run.session_id)
 
-    # --- delivery from committed rows ------------------------------------------
+    # --- resume (recovery.md T2, T3) -------------------------------------------
 
-    async def _deliver(
-        self,
-        context: Any,
-        pending: PendingDelivery,
-        *,
-        output: Optional[MessageOutput],
-        is_error: bool = False,
-    ) -> None:
-        """Deliver one committed row by replaying the plan committed with it."""
-        if pending.plan is None:
-            logger.error("Avibe Agent row %s has no delivery plan", pending.row_id)
-            return
-        session_id, row_id = pending.session_id, pending.row_id
-
-        async def acknowledge(
-            index: int, count: int, native_message_id: Optional[str], *, skipped: Optional[str] = None
-        ) -> bool:
-            return await self.store.record_delivery_part(
-                session_id, row_id, index=index, count=count, native_message_id=native_message_id, skipped=skipped
-            )
-
-        committed = CommittedOutput(
-            row_id=row_id,
-            plan=pending.plan,
-            acknowledge=acknowledge,
-            delivered_parts=tuple(part is not None for part in pending.parts),
-            footer=pending.footer,
-        )
-        output = output or MessageOutput(completes_turn=False, completes_run=False)
-        dispatcher = self.controller.message_dispatcher
-        try:
-            await dispatcher.emit_agent_message(
-                context=context,
-                message_type="result" if pending.final else "assistant",
-                text=self._display_source(pending.message, final=pending.final),
-                is_error=is_error,
-                output=output,
-                committed=committed,
-            )
-        except Exception:
-            # The row stays pending and is re-delivered before the Session's next run.
-            logger.exception("Avibe Agent delivery of %s failed", row_id)
-            if output.completes_turn and not output.detached:
-                # The Turn still settles from the row's outcome; the row stays pending for re-delivery.
-                await self.controller.emit_agent_message(
-                    context, "result", "", level="silent", is_error=is_error, output=output
-                )
-        finally:
-            manager = getattr(self.controller, "session_turns", None)
-            complete = getattr(manager, "on_terminal_delivery_complete", None)
-            if callable(complete):
-                complete(context)
-
-    async def _redeliver_pending(self, session_id: str, *, platforms: Optional[set[str]] = None) -> None:
-        """Deliver every committed row whose delivery a crash or failure left pending (D1/D2).
-
-        Each row replays its own plan, with its own target and finality; a detached
-        output never settles a Turn, old or current. A transport-ready sweep passes
-        ``platforms`` and delivers only rows planned for them; a run delivers them all.
-        """
-        for item in await self.store.pending_deliveries(session_id):
-            if item.plan is None:
-                logger.warning("Avibe Agent cannot re-deliver %s: it has no delivery plan", item.row_id)
-                continue
-            if platforms is not None and (item.plan.get("target") or {}).get("platform") not in platforms:
-                continue
-            target = CommittedOutput(item.row_id, item.plan, _no_acknowledgement).target()
-            await self._deliver(
-                target, item, output=MessageOutput(completes_turn=False, completes_run=False, detached=True)
-            )
-
-    # --- resume (recovery.md T2, T3, D1) ---------------------------------------
-
-    async def _resume(self, runtime: _SessionRuntime, *, platforms: Optional[set[str]] = None) -> None:
+    async def _resume(self, runtime: _SessionRuntime) -> None:
         session_id = runtime.session_id
         if not runtime.recovered:
             await self._settle_open_calls(runtime)
@@ -577,7 +484,6 @@ class AvibeAgent(BaseAgent):
         for message_id, text_value, files, metadata in await asyncio.to_thread(self._unconsumed_inputs, session_id):
             message = await self._render_input(session_id, text_value, files, metadata)
             await self.store.consume_input(session_id, message_id, message)
-        await self._redeliver_pending(session_id, platforms=platforms)
 
     async def _settle_open_calls(self, runtime: _SessionRuntime) -> None:
         """T2: one committed result for every open tool call, chosen from its job's state."""
@@ -688,78 +594,18 @@ class AvibeAgent(BaseAgent):
         return UserMessage(content=tuple(content))
 
     def _display_source(self, message: AssistantMessage, *, final: bool) -> str:
-        """The text a surface renders a response from: its text blocks, verbatim.
+        """The text a surface renders a response from: its text blocks without silent blocks.
 
-        A final without text of its own (``final_outcome`` failed) is explained by
-        localized copy written with the row, so a re-delivery after a crash shows
-        it too (loop-control.md section 2): the refusal or safety explanation, else
-        the empty-reply one.
+        Also the row's commit-time display (the store's renderer). A final without
+        text of its own (``final_outcome`` failed) is explained by localized copy:
+        the refusal or safety explanation, else the empty-reply one, so the row
+        never shows nothing for a failed Turn (loop-control.md section 2).
         """
         value = render_text(message)
         if final and not value.strip():
             kind = message.stop_reason if message.stop_reason in _EXPLAINED_STOPS else "empty_response"
             return error_text(kind, self._language())
-        return value
-
-    def _render_display(
-        self,
-        message: AssistantMessage,
-        *,
-        final: bool,
-        conn: Any,
-        platform: str,
-        scope_id: Optional[str],
-        session_id: str,
-    ) -> RenderedDisplay:
-        """The row's display copy and delivery plan, decided once inside its commit transaction.
-
-        The display copy is what ``persist_agent_message`` would have written; the
-        plan (``plan_committed_delivery``) is everything each surface will send. The
-        session's activity rank is set here, once, because it asserts that the agent
-        persisted output (``touch_session_agent_activity``).
-        """
-        if touch_session_agent_activity(conn, session_id) and platform == "avibe":
-            self._ranked[session_id] = scope_id
-        source = self._display_source(message, final=final)
-        plan = self.controller.message_dispatcher.plan_committed_delivery(
-            self._plan_context(session_id, platform), source, final=final
-        )
-        if not final:
-            return RenderedDisplay(strip_silent_blocks(source), {"kind": "assistant"}, plan)
-        capabilities = get_platform_descriptor(platform).capabilities
-        enhanced = process_reply(
-            source,
-            include_quick_replies=getattr(self.config, "reply_enhancements", True),
-            allow_unseparated_quick_replies=capabilities.supports_quick_replies,
-            keep_file_links=platform == "avibe",
-        )
-        display = enhanced.text if enhanced.text.strip() else strip_silent_blocks(source)
-        content: dict[str, Any] = {"kind": "error" if final_outcome(message) == "failed" else "result"}
-        if platform == "avibe":
-            from core.workbench_media import rewrite_agent_media
-
-            display = rewrite_agent_media(conn, scope_id=scope_id, session_id=session_id, text=display)
-            if enhanced.buttons:
-                content["quick_replies"] = [button.text for button in enhanced.buttons]
-        return RenderedDisplay(display, content, plan)
-
-    def _plan_context(self, session_id: str, platform: str) -> Any:
-        """The context a response is delivered from: its run's Turn, else the Session's own channel."""
-        from modules.im import MessageContext
-
-        run = self._run_for(session_id, None)
-        if run is not None:
-            return run.request.context
-        builder = getattr(getattr(self.controller, "session_turns", None), "_build_context", None)
-        context = builder(session_id) if callable(builder) and platform != "avibe" else None
-        if context is not None and context.platform == platform:
-            return context
-        return MessageContext(
-            user_id="workbench",
-            channel_id=session_id,
-            platform=platform,
-            platform_specific={"agent_session_id": session_id, "workbench_session_id": session_id, "platform": platform},
-        )
+        return strip_silent_blocks(value)
 
     def _avibe_sections(self, request: AgentRequest, cwd: str) -> str:
         from core.managed_skills import managed_skill_claude_cli_path, managed_skill_project_base
@@ -805,6 +651,22 @@ class AvibeAgent(BaseAgent):
 
     # --- output helpers ------------------------------------------------------
 
+    async def _emit_narration(self, run: _Run, row_id: str) -> None:
+        """A non-final response through the same process path as the other backends' narration."""
+        message = run.responses.get(row_id)
+        body = self._display_source(message, final=False) if message is not None else ""
+        if not body.strip():
+            return
+        try:
+            await self.controller.emit_agent_message(
+                run.request.context,
+                "assistant",
+                body,
+                output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=row_id),
+            )
+        except Exception:
+            logger.exception("Avibe Agent could not show narration %s", row_id)
+
     async def _emit_tool_started(self, run: _Run, event: ToolStarted) -> None:
         call = run.tool_calls.get(event.tool_call_id)
         arguments = dict(call.arguments) if call is not None else {}
@@ -820,20 +682,11 @@ class AvibeAgent(BaseAgent):
             logger.exception("Avibe Agent could not show tool %s", event.name)
 
     def _on_response(self, session_id: str, row_id: str, message: AssistantMessage) -> None:
-        """A response committed: announce a rank it bumped, and keep what the run's tool events need."""
-        if session_id in self._ranked:
-            scope_id = self._ranked.pop(session_id)
-            try:
-                from core.inbox_events import bus
-
-                bus.publish(
-                    "session.activity", {"session_id": session_id, "scope_id": scope_id, "event": "agent_activity"}
-                )
-            except Exception:
-                logger.debug("Avibe Agent session.activity publish failed", exc_info=True)
+        """A response committed for the Session's run: keep what its delivery and tool events need."""
         run = self._run_for(session_id, None)
         if run is None:
             return
+        run.responses[row_id] = message
         run.tool_calls.update({call.id: call for call in message.tool_calls})
         self._note_tokens(run, message)
 
@@ -847,26 +700,6 @@ class AvibeAgent(BaseAgent):
             note(run.request.context, total=total)
         except Exception:
             logger.debug("Avibe Agent token note failed", exc_info=True)
-
-    def _result_footer(self, run: Optional[_Run], *, is_error: bool) -> Optional[str]:
-        if run is None or not getattr(self.config, "show_duration", True):
-            return None
-        context = run.request.context
-        token_field = ""
-        field_for = getattr(self.controller, "session_token_field", None)
-        if callable(field_for):
-            try:
-                token_field = field_for(context) or ""
-            except Exception:
-                token_field = ""
-        duration_ms = max(0, int((time.monotonic() - run.started_at) * 1000))
-        try:
-            footer = self._get_formatter(context).format_result_footer(
-                "error" if is_error else "success", duration_ms, token_field=token_field
-            )
-        except Exception:
-            return None
-        return footer or None
 
     async def _fail(
         self,
@@ -918,7 +751,8 @@ class AvibeAgent(BaseAgent):
         """Hold the Session's writer lock; the last holder retires its in-memory state.
 
         With ``wait=False`` a Session someone already holds yields ``None`` instead of
-        waiting: sweeps never block behind a run, which does the same work itself.
+        waiting: startup recovery never blocks behind a run, which does the same work
+        at its own resume.
         """
         runtime = self._runtimes.get(session_id)
         if runtime is None:
@@ -994,40 +828,12 @@ class AvibeAgent(BaseAgent):
             )
         return sorted(session_id for session_id, seq in last.items() if finals.get(session_id) != seq)
 
-    def _sessions_with_pending_rows(self, platforms: set[str]) -> list[str]:
-        from sqlalchemy import func
-
-        with self._engine.connect() as conn:
-            return list(
-                conn.execute(
-                    select(messages.c.session_id)
-                    .select_from(messages.join(agent_sessions, agent_sessions.c.id == messages.c.session_id))
-                    .where(
-                        agent_sessions.c.agent_backend == BACKEND,
-                        messages.c.context_seq.is_not(None),
-                        # The plan's target is the only recovery selector: a row waits for
-                        # the transport it will be sent through, not its source channel.
-                        func.json_extract(messages.c.metadata_json, "$.delivery.plan.target.platform").in_(
-                            sorted(platforms - {""})
-                        ),
-                        func.json_extract(messages.c.metadata_json, "$.delivery.state") == "pending",
-                    )
-                    .group_by(messages.c.session_id)
-                ).scalars()
-            )
-
     def _session_workdir(self, session_id: str) -> str:
         with self._engine.connect() as conn:
             workdir = conn.execute(
                 select(agent_sessions.c.workdir).where(agent_sessions.c.id == session_id)
             ).scalar_one_or_none()
         return str(workdir or "")
-
-
-async def _no_acknowledgement(
-    _index: int, _count: int, _native_message_id: Optional[str], *, skipped: Optional[str] = None
-) -> bool:
-    return False
 
 
 def _json_object(raw: Any) -> dict[str, Any]:

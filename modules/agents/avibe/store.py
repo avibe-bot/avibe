@@ -25,7 +25,7 @@ from sqlalchemy.engine import Engine
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import AssistantMessage, ToolResultMessage, UserMessage
 from modules.agents.avibe.prompt import environment_delta, environment_state, with_environment
-from storage.agent_transcript import PendingDelivery, SQLiteTranscriptStore
+from storage.agent_transcript import SQLiteTranscriptStore
 from storage.models import messages
 
 EnvironmentSource = Callable[[str], Mapping[str, str]]
@@ -92,35 +92,6 @@ class AdapterTranscriptStore:
         self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state"], payload: Mapping[str, Any]
     ) -> ContextEntry:
         return await self._store.append_payload(session_id, kind, payload)
-
-    # --- outbox --------------------------------------------------------------
-
-    async def pending_deliveries(self, session_id: str) -> list[PendingDelivery]:
-        return await self._store.pending_deliveries(session_id)
-
-    async def delivery(
-        self, session_id: str, row_id: str, *, include_delivered: bool = False
-    ) -> Optional[PendingDelivery]:
-        return await self._store.delivery(session_id, row_id, include_delivered=include_delivered)
-
-    async def settle_delivery(
-        self, session_id: str, row_id: str, *, footer: Optional[str], display: Mapping[str, Any]
-    ) -> None:
-        await self._store.settle_delivery(session_id, row_id, footer=footer, display=display)
-
-    async def record_delivery_part(
-        self,
-        session_id: str,
-        row_id: str,
-        *,
-        index: int,
-        count: int,
-        native_message_id: Optional[str] = None,
-        skipped: Optional[str] = None,
-    ) -> bool:
-        return await self._store.record_delivery_part(
-            session_id, row_id, index=index, count=count, native_message_id=native_message_id, skipped=skipped
-        )
 
     # --- implementation ------------------------------------------------------
 

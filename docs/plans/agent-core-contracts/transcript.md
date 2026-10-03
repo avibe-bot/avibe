@@ -12,15 +12,18 @@ unique per Session across both tables (partial unique index on each table, plus 
 | --- | --- | --- | --- | --- |
 | user or steer input | `messages` | `user` | — | `content_json.model` = `ModelInput` |
 | harness input | `messages` | `harness`, `agent_initiated`, `annotation` | — | `content_json.model` = `ModelInput` |
-| model response | `messages` | `assistant` (not final), `result` (final) | — | `content_json.model` = `ModelResponse` |
+| model response | `messages` | `assistant` (not final), `result` or `error` (final) | — | `content_json.model` = `ModelResponse` |
 | tool result | `agent_events` | `tool_result` | `context` | `content_json` = `ToolResult` |
 | checkpoint | `agent_events` | `context_compaction` | `context` | `content_json` = `Compaction` |
 | cleared result | `agent_events` | `context_edit` | `context` | `content_json` = `ContextEdit` |
 | hook state | `agent_events` | `agent_state` | `context` | `content_json` = `AgentState` |
 
-Display-only rows keep `context_seq` null: `interim`, `notify`, `error`, `vault`, `output`, queued or removed inputs,
-and the `tool_call` trace row written at tool start (its `metadata_json` carries `tool_call_id` and `job_id` so the
-activity panel can pair it with the result).
+A final response is `error` when it failed by itself (no text of its own: an empty answer, or a refusal or safety
+stop without an explanation), as the other backends' failed terminal rows are; context loading accepts both.
+
+Display-only rows keep `context_seq` null: `interim`, `notify`, an `error` that reports a run failure, `vault`,
+`output`, queued or removed inputs, and the `tool_call` trace row written at tool start (its `metadata_json` carries
+`tool_call_id` and `job_id` so the activity panel can pair it with the result).
 
 ## 2. Writing
 
@@ -30,18 +33,18 @@ activity panel can pair it with the result).
 - Inputs already exist as rows when they are submitted. The loop sets `context_seq` and `content_json.model` on that
   row when it consumes the input. Each entry is its own transaction; an input accepted by `steer` but not yet
   consumed when a crash happens is re-queued by the adapter at resume (`recovery.md` T3).
-- A response row is inserted at `message_end` with both `content_json.model` and its rendered `content_text`.
+- A response row is inserted at `message_end` with both `content_json.model` and its commit-time display
+  `content_text`.
 - A tool result row is inserted at `tool_finished`. The `tool_call` trace row is inserted at tool start without a
   `context_seq`.
-- Each commit is one SQLite transaction. The adapter delivers a row to surfaces only after it commits; the
-  dispatcher does not persist it again.
-- **Output outbox.** Every row a run produces for a surface (`assistant`, `result`, and the `notify` / `error` rows
-  that report its failures) is in the outbox. Such a row is committed with `metadata_json.delivery = {"state":
-  "pending", "parts": []}` in the same transaction; each part a surface sends is recorded with its receipt, and the
-  row is `delivered` only when every part is (`recovery.md` D1). After the surface accepts it, the adapter sets `{"state": "delivered"}` with
-  the platform receipt (`native_message_id` where the platform returns one). At startup, and before a Session
-  resumes, the adapter re-delivers its `pending` rows in `context_seq` order. Nothing is lost or regenerated;
-  duplicates are possible on IM in one window ([`recovery.md`](recovery.md) §Delivery).
+- Each commit is one SQLite transaction. The adapter delivers a row to surfaces only after it commits, through the
+  same emit path as the other backends, naming the row (`MessageOutput.persisted_row_id`). Every dispatcher persist
+  site then writes that row's display columns instead of inserting a second row: `content_text`, the display keys
+  of `content_json` (`text`, `kind`, `quick_replies`, `result_footer`, `citations`), the delivery target's
+  `platform` and `scope_id`, `metadata_json` (including the `delivery_suppressed` marker and its promotion), the
+  output's `native_message_id` unless another row holds it, and a final's `result` / `error` type. Nothing is
+  replayed: a delivery a crash or send failure interrupts is lost, as for the other backends
+  ([`recovery.md`](recovery.md) §Delivery).
 
 ## 3. Projection
 
@@ -78,6 +81,6 @@ The child Session's metadata already records its parent as top-level keys `fork_
 
 - Trace retention never selects `visibility = 'context'`; a contract test pins this.
 - The context content of a row never changes after commit: `context_seq` and `content_json.model` are written once
-  (on an input row, when it is consumed). Delivery state in `metadata_json.delivery` is the one field that changes
-  afterwards, and only through the outbox helpers. Context rows are never deleted while a Session or a fork descendant
-  references them.
+  (on an input row, when it is consumed). A response row's display columns (§2) may be written again when it is
+  delivered; they are never context. Context rows are never deleted while a Session or a fork descendant references
+  them.

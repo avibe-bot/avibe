@@ -7,9 +7,8 @@ context exactly when its ``context_seq`` is non-null:
 * inputs are existing ``messages`` rows (``user``, ``harness``,
   ``agent_initiated``, ``annotation``); consuming one sets its ``context_seq``
   and ``content_json.model`` once;
-* responses are new ``assistant`` / ``result`` rows with ``content_json.model``,
-  a rendered ``content_text``, and the output outbox state
-  ``metadata_json.delivery``;
+* responses are new ``assistant`` / ``result`` / ``error`` rows with
+  ``content_json.model`` and a rendered ``content_text``;
 * tool results, checkpoints, context edits, and hook state are new
   ``agent_events`` rows with ``visibility='context'``.
 
@@ -35,22 +34,13 @@ never move into or out of the prefix. A fork without that key (a released fork,
 or one from another backend) inherits nothing. The child's own rows continue
 from ``anchor_seq + 1``.
 
-Display. The adapter's renderer writes a response row's display copy inside
-the commit transaction: ``content_text`` and, optionally, display keys of
-``content_json`` next to the reserved ``model`` key (``RenderedDisplay``). It
-receives the transaction's connection and the row's attribution, so a
-surface-specific rewrite (the Workbench media proxy) lands with the row. The
-display copy is never part of the context.
-
-Outbox. A response row commits with ``delivery = {"state": "pending",
-"parts": []}``. A renderer may also return the row's delivery plan: every part
-each surface will send, decided once at commit. It is stored as
-``delivery.plan``, part receipts are counted against it, and re-delivery
-replays it instead of recomputing it. Facts that depend on the run's outcome
-(the result footer) are written by ``settle_delivery`` before delivery. The adapter records a receipt for each part a surface splits it
-into; the row becomes ``delivered`` only when every part has one
-(``recovery.md`` D1). A response whose display text is blank (only thinking or
-tool calls) has no part on any surface and commits ``delivered``.
+Display. A response row commits with the display text its renderer gives it.
+Its display columns (``content_text``, the display keys of ``content_json``,
+type ``result`` or ``error``) are written again when the dispatcher delivers
+it, exactly as for the other backends' rows (``persist_agent_message`` with
+``existing_row_id``). The transcript payload, ``content_json.model``, never
+changes after commit. A final whose ``final_outcome`` failed commits as
+``error``.
 
 Cancellation. A worker thread cannot be interrupted, so a cancelled write keeps
 the Session's lock until its transaction settles and only then raises: when a
@@ -61,10 +51,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Literal, Mapping, Optional, Protocol, Sequence, TypeVar, Union
+from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.engine import Connection, Engine
@@ -100,87 +89,32 @@ _EVENT_TYPE_BY_KIND: dict[str, str] = {
 }
 _KIND_BY_EVENT_TYPE = {event_type: kind for kind, event_type in _EVENT_TYPE_BY_KIND.items()}
 
+# ``render(message, final=...)``: a response row's commit-time display text.
+DisplayRenderer = Callable[..., str]
 _T = TypeVar("_T")
-MODEL_KEY = "model"
-logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class RenderedDisplay:
-    """A response row's display copy, and optionally its delivery plan.
-
-    ``text`` is ``content_text``; ``content`` holds display keys of ``content_json``;
-    ``delivery`` is the plan (``{"parts": [...], ...}``), committed with the row.
-    """
-
-    text: str
-    content: Mapping[str, Any] = field(default_factory=dict)
-    delivery: Optional[Mapping[str, Any]] = None
-
-
-class DisplayRenderer(Protocol):
-    """Renders a response row inside its commit transaction.
-
-    ``platform`` and ``scope_id`` are the row's attribution (the Turn's channel).
-    Returning a ``str`` sets only ``content_text``.
-    """
-
-    def __call__(
-        self,
-        message: AssistantMessage,
-        *,
-        final: bool,
-        conn: Connection,
-        platform: str,
-        scope_id: Optional[str],
-        session_id: str,
-    ) -> Union[str, RenderedDisplay]: ...
-
-
 FinalOutcome = Literal["completed", "failed"]
 
 
 def final_outcome(message: AssistantMessage) -> FinalOutcome:
     """The Turn outcome a committed final response determines by itself.
 
-    The one rule, shared by live settlement and startup recovery: a final reply
-    without text of its own (an unexplained refusal or safety stop, or an empty
-    answer) failed; any other final completed. It is the loop's own empty-reply
-    test (loop-control.md section 2). Failures only a live run can observe after
-    the commit (a foreground job that could not be stopped) are applied by the
-    live caller and are unknowable after a crash.
+    The one rule, shared by the row's type at commit and live settlement: a final
+    reply without text of its own (an unexplained refusal or safety stop, or an
+    empty answer) failed; any other final completed. It is the loop's own
+    empty-reply test (loop-control.md section 2). Failures only a live run can
+    observe after the commit are applied by the live caller.
     """
     has_text = any(isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content)
     return "completed" if has_text else "failed"
 
 
-def render_text(message: AssistantMessage, **_attribution: Any) -> str:
+def render_text(message: AssistantMessage, *, final: bool = False) -> str:
     """Default display copy of a response: its text blocks, verbatim, in order."""
     return "\n\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
 
 
 class TranscriptError(RuntimeError):
     """A write the context rules refuse, or rows that cannot form a context."""
-
-
-@dataclass(frozen=True)
-class PendingDelivery:
-    """A committed response whose surface delivery has not been recorded."""
-
-    session_id: str
-    context_seq: int
-    row_id: str
-    final: bool
-    text: str
-    message: AssistantMessage
-    parts: tuple[Optional[Mapping[str, Any]], ...] = ()
-    """Receipts by part index from an earlier attempt; ``None`` marks a part still to send."""
-    plan: Optional[Mapping[str, Any]] = None
-    """The delivery plan committed with the row, when its renderer produced one."""
-    state: str = "pending"
-    """``pending`` or ``delivered``; only reads with ``include_delivered`` see the latter."""
-    footer: Optional[str] = None
-    """The result footer written at settlement, when the run settled before delivery."""
 
 
 @dataclass(frozen=True)
@@ -193,10 +127,10 @@ class _TurnOrigin:
 
 
 class SQLiteTranscriptStore:
-    """``TranscriptStore`` over Avibe's tables, plus the output outbox helpers.
+    """``TranscriptStore`` over Avibe's tables.
 
-    ``render`` produces a response row's display copy inside its commit
-    transaction; the adapter supplies its display rendering, the default keeps
+    ``render(message, final=...)`` produces a response row's commit-time
+    ``content_text``; the adapter supplies its display rendering, the default keeps
     the text blocks.
     """
 
@@ -247,19 +181,10 @@ class SQLiteTranscriptStore:
         if not isinstance(message, AssistantMessage):
             raise TypeError("append_response takes an AssistantMessage")
         model = _canonical({"version": PAYLOAD_VERSION, "message": message_to_dict(message)}, "response")
+        display_text = self._render(message, final=final)
 
         def work(conn: Connection) -> ContextEntry:
             origin = _turn_origin(conn, session_id)
-            display = _display(
-                self._render(
-                    message,
-                    final=final,
-                    conn=conn,
-                    platform=origin.platform,
-                    scope_id=origin.scope_id,
-                    session_id=session_id,
-                )
-            )
             seq = _next_context_seq(conn, session_id)
             row = messages_service.append(
                 conn,
@@ -270,9 +195,8 @@ class SQLiteTranscriptStore:
                 source="agent",
                 author_name=origin.agent_name,
                 message_type=("error" if final_outcome(message) == "failed" else "result") if final else "assistant",
-                text=display.text,
-                content={**display.content, MODEL_KEY: model},
-                metadata={"delivery": _initial_delivery(display)},
+                text=display_text,
+                content={"model": model},
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
             return ContextEntry(session_id, seq, "response", row["id"], message=message, payload=model)
@@ -299,56 +223,6 @@ class SQLiteTranscriptStore:
         if not _is_current_version(data):
             raise ValueError(f"a {kind} payload needs version {PAYLOAD_VERSION}")
         return await self._write(session_id, lambda conn: self._append_event(conn, session_id, kind, data, None))
-
-    # --- output outbox --------------------------------------------------------
-
-    async def pending_deliveries(self, session_id: str) -> list[PendingDelivery]:
-        """The Session's committed responses not yet delivered, in ``context_seq`` order."""
-        return await asyncio.to_thread(self._pending_deliveries, session_id)
-
-    async def delivery(
-        self, session_id: str, row_id: str, *, include_delivered: bool = False
-    ) -> Optional[PendingDelivery]:
-        """The row's delivery: ``None`` once it is delivered, unless ``include_delivered``."""
-        found = await asyncio.to_thread(self._pending_deliveries, session_id, row_id, include_delivered)
-        return found[0] if found else None
-
-    async def settle_delivery(
-        self, session_id: str, row_id: str, *, footer: Optional[str], display: Mapping[str, Any]
-    ) -> None:
-        """Record what the run's outcome adds to a pending row before it is delivered.
-
-        ``footer`` is the result footer every surface shows; ``display`` holds the
-        display keys of ``content_json`` it implies (``model`` is reserved). The
-        context content of the row is unchanged.
-        """
-        if MODEL_KEY in display:
-            raise TranscriptError(f"display content must not set the reserved {MODEL_KEY!r} key")
-        data = _canonical(dict(display), "display content")
-        await asyncio.to_thread(self._settle_delivery, session_id, row_id, footer, data)
-
-    async def record_delivery_part(
-        self,
-        session_id: str,
-        row_id: str,
-        *,
-        index: int,
-        count: int,
-        native_message_id: Optional[str] = None,
-        skipped: Optional[str] = None,
-    ) -> bool:
-        """Record the receipt of part ``index`` of ``count``; True once every part has one.
-
-        A receipt is evidence of the part's effect: the platform's message id, or
-        ``skipped`` naming why the part was deliberately not sent (a channel setting,
-        a file that no longer exists). A part that already has a receipt keeps its
-        first one, so a retried send is recorded once.
-        """
-        if not 0 <= index < count:
-            raise ValueError(f"part {index} is outside a delivery of {count} part(s)")
-        return await asyncio.to_thread(
-            self._record_delivery_part, session_id, row_id, index, count, native_message_id, skipped
-        )
 
     # --- implementation -------------------------------------------------------
 
@@ -409,134 +283,6 @@ class SQLiteTranscriptStore:
                 )
         return entries
 
-    def _pending_deliveries(
-        self, session_id: str, row_id: Optional[str] = None, include_delivered: bool = False
-    ) -> list[PendingDelivery]:
-        only = [messages.c.id == row_id] if row_id is not None else []
-        if not include_delivered:
-            only.append(func.json_extract(messages.c.metadata_json, "$.delivery.state") == "pending")
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                select(
-                    messages.c.id,
-                    messages.c.type,
-                    messages.c.context_seq,
-                    messages.c.content_text,
-                    messages.c.content_json,
-                    messages.c.metadata_json,
-                )
-                .where(
-                    messages.c.session_id == session_id,
-                    messages.c.context_seq.is_not(None),
-                    messages.c.type.in_(RESPONSE_TYPES),
-                    *only,
-                )
-                .order_by(messages.c.context_seq)
-            ).mappings().all()
-        deliveries = []
-        for row in rows:
-            entry = _message_entry(session_id, row)
-            assert isinstance(entry.message, AssistantMessage)
-            delivery = _delivery(row["metadata_json"], entry.row_id)
-            deliveries.append(
-                PendingDelivery(
-                    session_id=session_id,
-                    context_seq=entry.context_seq,
-                    row_id=entry.row_id,
-                    final=row["type"] in FINAL_TYPES,
-                    text=row["content_text"] or "",
-                    message=entry.message,
-                    parts=tuple(delivery["parts"]),
-                    plan=delivery.get("plan"),
-                    footer=delivery.get("footer"),
-                    state=delivery["state"],
-                )
-            )
-        return deliveries
-
-    def _settle_delivery(self, session_id: str, row_id: str, footer: Optional[str], display: dict[str, Any]) -> None:
-        with self._engine.begin() as conn:
-            reserve_write_lock(conn)
-            row = conn.execute(
-                select(messages.c.metadata_json, messages.c.content_json).where(
-                    messages.c.id == row_id,
-                    messages.c.session_id == session_id,
-                    messages.c.context_seq.is_not(None),
-                    messages.c.type.in_(RESPONSE_TYPES),
-                )
-            ).first()
-            if row is None:
-                raise TranscriptError(f"{row_id} is not a response of Session {session_id}")
-            metadata = _json_object(row.metadata_json, row_id)
-            delivery = _delivery(row.metadata_json, row_id)
-            if delivery["state"] != "pending" or any(part is not None for part in delivery["parts"]):
-                # Settlement precedes the first part; a started delivery keeps what it began with.
-                return
-            if footer:
-                delivery["footer"] = footer
-            content = {**_json_object(row.content_json, row_id), **display}
-            conn.execute(
-                messages.update()
-                .where(messages.c.id == row_id)
-                .values(
-                    metadata_json=json.dumps({**metadata, "delivery": delivery}),
-                    content_json=json.dumps(content),
-                    updated_at=_utc_now(),
-                )
-            )
-
-    def _record_delivery_part(
-        self,
-        session_id: str,
-        row_id: str,
-        index: int,
-        count: int,
-        native_message_id: Optional[str],
-        skipped: Optional[str],
-    ) -> bool:
-        with self._engine.begin() as conn:
-            reserve_write_lock(conn)
-            raw = conn.execute(
-                select(messages.c.metadata_json).where(
-                    messages.c.id == row_id,
-                    messages.c.session_id == session_id,
-                    messages.c.context_seq.is_not(None),
-                    messages.c.type.in_(RESPONSE_TYPES),
-                )
-            ).scalar_one_or_none()
-            if raw is None:
-                raise TranscriptError(f"{row_id} is not a response of Session {session_id}")
-            metadata = _json_object(raw, row_id)
-            delivery = _delivery(raw, row_id)
-            if delivery["state"] == "delivered":
-                return True
-            plan = delivery.get("plan")
-            planned = len(plan["parts"]) if plan is not None else None
-            if planned is not None and planned != count:
-                raise TranscriptError(f"{row_id} plans {planned} part(s), not {count}")
-            parts = delivery["parts"] or [None] * count
-            if len(parts) != count:
-                raise TranscriptError(f"{row_id} was split into {len(parts)} part(s), not {count}")
-            if parts[index] is None:
-                now = _utc_now()
-                receipt: dict[str, Any] = {"delivered_at": now}
-                if native_message_id:
-                    receipt["native_message_id"] = native_message_id
-                if skipped:
-                    receipt["skipped"] = skipped
-                parts[index] = receipt
-                state = "delivered" if all(part is not None for part in parts) else "pending"
-                conn.execute(
-                    messages.update()
-                    .where(messages.c.id == row_id)
-                    .values(
-                        metadata_json=json.dumps({**metadata, "delivery": {**delivery, "state": state, "parts": parts}}),
-                        updated_at=now,
-                    )
-                )
-            return all(part is not None for part in parts)
-
-
 async def _settle(task: asyncio.Future[Any]) -> None:
     """Wait for ``task`` to finish, whatever cancellations arrive meanwhile."""
     while not task.done():
@@ -548,49 +294,6 @@ async def _settle(task: asyncio.Future[Any]) -> None:
         # The cancelled caller does not see this outcome; retrieve it so a failed
         # commit is not reported as an unhandled task exception.
         task.exception()
-
-
-# --- Turn outcome ----------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class CommittedFinal:
-    """A Turn's committed final response: the Turn's outcome, whatever its delivery state."""
-
-    row_id: str
-    session_id: str
-    text: str
-    outcome: FinalOutcome
-
-
-def committed_final_for_turn(conn: Connection, turn_id: str) -> Optional[CommittedFinal]:
-    """The final response a run committed for ``turn_id``, read from the delivery plan's ``turn_id``.
-
-    Storage only: the Turn owner reads it at startup recovery, before any backend is
-    constructed, to settle a Turn whose answer committed before the process died.
-    """
-    if not turn_id:
-        return None
-    row = conn.execute(
-        select(messages.c.id, messages.c.session_id, messages.c.content_text, messages.c.content_json)
-        .where(
-            messages.c.type.in_(FINAL_TYPES),
-            messages.c.context_seq.is_not(None),
-            func.json_extract(messages.c.metadata_json, "$.delivery.plan.turn_id") == turn_id,
-        )
-        .order_by(messages.c.context_seq.desc())
-        .limit(1)
-    ).first()
-    if row is None:
-        return None
-    try:
-        payload = _versioned(_json_object(row.content_json, row.id).get(MODEL_KEY), row.id)
-        outcome = final_outcome(_message(payload.get("message"), AssistantMessage, row.id))
-    except TranscriptError:
-        # The row exists but cannot show it succeeded.
-        logger.warning("Committed final %s of Turn %s is unreadable; recording it as failed", row.id, turn_id)
-        outcome = "failed"
-    return CommittedFinal(row_id=row.id, session_id=row.session_id, text=row.content_text or "", outcome=outcome)
 
 
 # --- allocation and attribution ----------------------------------------------
@@ -798,37 +501,6 @@ def _is_current_version(payload: Mapping[str, Any]) -> bool:
     return isinstance(version, int) and not isinstance(version, bool) and version == PAYLOAD_VERSION
 
 
-def _delivery(raw_metadata: Any, row_id: str) -> dict[str, Any]:
-    delivery = _json_object(raw_metadata, row_id).get("delivery")
-    parts = delivery.get("parts") if isinstance(delivery, dict) else None
-    if (
-        not isinstance(delivery, dict)
-        or delivery.get("state") not in ("pending", "delivered")
-        or not isinstance(parts, list)
-        or any(part is not None and not isinstance(part, dict) for part in parts)
-    ):
-        raise TranscriptError(f"response {row_id} has no readable delivery state")
-    result: dict[str, Any] = {"state": delivery["state"], "parts": list(parts)}
-    plan = delivery.get("plan")
-    if plan is not None:
-        if not isinstance(plan, dict) or not isinstance(plan.get("parts"), list):
-            raise TranscriptError(f"response {row_id} has an unreadable delivery plan")
-        result["plan"] = plan
-    if isinstance(delivery.get("footer"), str):
-        result["footer"] = delivery["footer"]
-    return result
-
-
-def _initial_delivery(display: RenderedDisplay) -> dict[str, Any]:
-    """The outbox state a response commits with: pending while anything is left to send."""
-    if display.delivery is None:
-        return {"state": "pending" if display.text.strip() else "delivered", "parts": []}
-    plan = dict(display.delivery)
-    if not isinstance(plan.get("parts"), list):
-        raise TranscriptError("a delivery plan needs a list of parts")
-    return {"state": "pending" if plan["parts"] else "delivered", "parts": [], "plan": plan}
-
-
 def _json_object(raw: Any, row_id: str) -> dict[str, Any]:
     try:
         value = json.loads(raw or "{}")
@@ -837,17 +509,6 @@ def _json_object(raw: Any, row_id: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TranscriptError(f"row {row_id} holds a JSON {type(value).__name__}, not an object")
     return value
-
-
-def _display(rendered: Union[str, RenderedDisplay]) -> RenderedDisplay:
-    if isinstance(rendered, str):
-        return RenderedDisplay(rendered)
-    if not isinstance(rendered, RenderedDisplay) or not isinstance(rendered.text, str):
-        raise TypeError("a display renderer returns a str or a RenderedDisplay")
-    if MODEL_KEY in rendered.content:
-        raise TranscriptError(f"display content must not set the reserved {MODEL_KEY!r} key")
-    delivery = None if rendered.delivery is None else _canonical(dict(rendered.delivery), "delivery plan")
-    return RenderedDisplay(rendered.text, _canonical(dict(rendered.content), "display content"), delivery)
 
 
 def _canonical(value: dict[str, Any], what: str) -> dict[str, Any]:

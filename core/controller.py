@@ -1016,12 +1016,12 @@ class Controller:
             except Exception as e:
                 logger.error(f"Failed to restore active polls: {e}", exc_info=True)
 
-    async def _restore_avibe_agent_deliveries(self, platforms: set[str]) -> None:
-        """Re-deliver Avibe Agent replies a crash committed but never delivered, once they can be."""
+    async def _recover_avibe_agent_runtime_state(self) -> None:
+        """Settle the Avibe Agent's open tool calls and prune settled jobs left by the previous process."""
         avibe_agent = getattr(getattr(self, "agent_service", None), "agents", {}).get("avibe")
-        restore = getattr(avibe_agent, "restore_pending_deliveries", None)
-        if callable(restore):
-            await restore(platforms)
+        recover = getattr(avibe_agent, "recover_runtime_state", None)
+        if callable(recover):
+            await recover()
 
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
@@ -1045,10 +1045,6 @@ class Controller:
                     )
             except Exception:
                 logger.exception("Failed to report interrupted turns for %s", platform)
-        try:
-            await self._restore_avibe_agent_deliveries(platforms)
-        except Exception:
-            logger.exception("Failed to restore Avibe Agent deliveries for %s", platform)
         self.scheduled_task_service.notify_transport_ready(platform)
         notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
         if callable(notify_update_checker):
@@ -1105,9 +1101,9 @@ class Controller:
         # embedded and test paths that run a controller are unaffected.
         self._publish_readiness_unless_im_runtime_failed()
         try:
-            await self._restore_avibe_agent_deliveries(workbench_platforms)
+            await self._recover_avibe_agent_runtime_state()
         except Exception:
-            logger.exception("Failed to restore Avibe Agent deliveries for the Workbench")
+            logger.exception("Failed to recover the Avibe Agent's runtime state")
         try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:

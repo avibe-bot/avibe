@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urljoin
 from modules.agents.catalog import AGENT_BACKENDS
 
@@ -32,8 +32,6 @@ from core.message_mirror import (
     agent_message_exists,
     persist_agent_message,
     persist_silent_terminal,
-    load_committed_agent_message,
-    publish_committed_agent_message,
 )
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -160,49 +158,6 @@ class ActivityOutputDeliveryError(RuntimeError):
         self.durable = durable
         self.message_id = message_id
         self.cause = cause
-
-
-# Context keys an IM client reads when it sends; a delivery plan keeps exactly these.
-_PLAN_TARGET_KEYS = ("is_dm", "chat_type", "reply_broadcast", "agent_session_id", "workbench_session_id", "platform")
-
-
-@dataclass(frozen=True)
-class CommittedOutput:
-    """An agent output whose ``messages`` row its backend committed before delivery.
-
-    The Avibe Agent's transcript rows are the messages (agent-core C-5): the
-    dispatcher delivers such a row and never persists it again. ``plan`` is the
-    delivery decided when the row committed (``plan_committed_delivery``): its
-    target and every part. Delivery replays the plan and recomputes nothing;
-    each part is acknowledged through ``acknowledge(index, count,
-    native_message_id, skipped=None)`` before the next is sent, only with evidence
-    of its effect (a message id, a persisted row, an upload) or an explicit
-    ``skipped`` reason decided before sending. A failed part is never
-    acknowledged and stops the delivery, so the row stays pending for
-    re-delivery (``recovery.md`` D1/D2).
-    ``delivered_parts`` holds the receipts of an earlier attempt by part index;
-    ``footer`` is the result footer written when the run settled.
-    """
-
-    row_id: str
-    plan: Mapping[str, Any]
-    acknowledge: Callable[..., Awaitable[Any]]
-    delivered_parts: tuple[bool, ...] = ()
-    footer: Optional[str] = None
-
-    def part_delivered(self, index: int, count: int) -> bool:
-        return len(self.delivered_parts) == count and self.delivered_parts[index]
-
-    def target(self) -> MessageContext:
-        record = self.plan["target"]
-        return MessageContext(
-            user_id=str(record.get("user_id") or ""),
-            channel_id=str(record.get("channel_id") or ""),
-            platform=record.get("platform"),
-            thread_id=record.get("thread_id"),
-            message_id=record.get("message_id"),
-            platform_specific=dict(record.get("platform_specific") or {}),
-        )
 
 
 def _owned_agent_run_ids(payload: dict[str, Any]) -> list[str]:
@@ -2628,7 +2583,6 @@ class ConsolidatedMessageDispatcher:
         terminal_error: Optional[str] = None,
         delivery: DeliveryEvidence | None = None,
         citations: Optional[CitationBundle] = None,
-        committed: CommittedOutput | None = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -2681,10 +2635,6 @@ class ConsolidatedMessageDispatcher:
         that also gets the sidecar, bound to the body it was measured in, so the
         Web transcript can render compact badges while every other surface keeps
         the plain Markdown links.
-
-        ``committed`` names the already-persisted row of a backend that writes
-        its own transcript (see ``CommittedOutput``): it is delivered from that
-        row, part by part, and never persisted here.
         """
         settings_manager = self.controller.get_settings_manager_for_context(context)
         im_client = self._get_im_client(context)
@@ -2890,11 +2840,8 @@ class ConsolidatedMessageDispatcher:
         # row must follow the reply to where it was actually delivered (IM
         # cross-platform history) — persist_agent_message attributes IM rows to
         # this target's scope.
-        target_context = committed.target() if committed is not None else self._get_target_context(context)
-        if committed is not None:
-            im_client = self._get_im_client(target_context)
-        # A committed row's plan already decided whether it is delivered outward.
-        suppresses_outward_delivery = committed is None and bool(
+        target_context = self._get_target_context(context)
+        suppresses_outward_delivery = bool(
             (context.platform_specific or {}).get("suppress_delivery")
         )
         output_metadata = output_semantics.provenance(context) if output is not None else None
@@ -2907,6 +2854,9 @@ class ConsolidatedMessageDispatcher:
                 "delivery_suppressed": True,
             }
         native_output_id = output_semantics.native_message_id(target_context) if output is not None else None
+        # A backend that commits its own transcript row passes it here: every persist
+        # site below then writes that row's display columns instead of a second row.
+        existing_row_id = output_semantics.persisted_row_id
 
         # For a result, persist the SAME cleaned text the user receives:
         # process_reply() strips file:// markdown links + the trailing
@@ -3086,6 +3036,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -3096,6 +3047,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
                 else:
                     persisted_output = persist_agent_message(
@@ -3105,6 +3057,7 @@ class ConsolidatedMessageDispatcher:
                         metadata=output_metadata,
                         native_message_id=native_output_id,
                         citations=citations,
+                        existing_row_id=existing_row_id,
                     )
                 local_message_id = (persisted_output or {}).get("id") or (
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
@@ -3298,15 +3251,7 @@ class ConsolidatedMessageDispatcher:
                 footer_kwargs = {"subtext": done_footer} if done_footer else {}
 
                 # Deliver the result as a NEW message: inline / split / summarized.
-                committed_incomplete = False
-                if committed is not None:
-                    complete, first_sent_id = await self._deliver_committed_parts(
-                        target_context, committed, live_footer=done_footer
-                    )
-                    primary_message_id = first_sent_id or (committed.row_id if complete else None)
-                    committed_incomplete = not complete
-                    scheduled_anchor_message_id = first_sent_id if target_context.platform != "avibe" else None
-                elif self._result_within_limit(context, display_text):
+                if self._result_within_limit(context, display_text):
                     try:
                         primary_message_id = await self._send_result_inline(
                             im_client,
@@ -3380,8 +3325,7 @@ class ConsolidatedMessageDispatcher:
                             )
 
                 # --- Fallback: card content rejected (e.g. table over limit) ---
-                # A committed row keeps its own part layout; it is re-delivered instead.
-                if primary_message_id is None and display_text and committed is None:
+                if primary_message_id is None and display_text:
                     logger.warning("All direct result sends failed; attempting fallback delivery")
                     file_uploaded = False
 
@@ -3417,8 +3361,7 @@ class ConsolidatedMessageDispatcher:
                 try:
                     if delivered_as_attachment:
                         notice = self._t("info.resultDeliveredAsAttachment")
-                    elif (primary_message_id is None and display_text) or committed_incomplete:
-                        # A committed row stays pending and is retried; the user is told this attempt failed.
+                    elif primary_message_id is None and display_text:
                         notice = self._t("error.resultDeliveryFailed")
                     else:
                         notice = None
@@ -3427,8 +3370,8 @@ class ConsolidatedMessageDispatcher:
                 except Exception:
                     logger.error("Failed to send delivery status notification")
 
-                # Upload extracted file attachments (a committed row's files are parts of its plan)
-                if enhanced and enhanced.files and committed is None:
+                # Upload extracted file attachments
+                if enhanced and enhanced.files:
                     await self._upload_file_links(
                         im_client, target_context, _written_files(enhanced.files, citations)
                     )
@@ -3509,11 +3452,7 @@ class ConsolidatedMessageDispatcher:
                 # failed every send/upload (primary_message_id is None) is NOT
                 # recorded, matching the old outbound mirror's success-only rule.
                 persisted_output = None
-                if committed is not None:
-                    # The committed row is the persisted output. Settlement only reads it:
-                    # publishing it is the planned ``row`` part, never a side effect here.
-                    persisted_output = load_committed_agent_message(committed.row_id)
-                elif persists_without_delivery or primary_message_id is not None:
+                if persists_without_delivery or primary_message_id is not None:
                     # A failed terminal result persists as type='error' so it shows in
                     # the transcript/inbox like any terminal message but is NOT counted
                     # as an unread agent reply (unread queries are result-only). Codex P2.
@@ -3546,6 +3485,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -3556,6 +3496,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
 
                 if settlement_waits_for_persistence:
@@ -3688,24 +3629,9 @@ class ConsolidatedMessageDispatcher:
         # Persist the intermediate log row BEFORE the mute filter so muted
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
-        if committed is not None:
-            if committed.plan.get("live_log"):
-                if output_semantics.detached:
-                    return None
-                # The process log, with the other backends' settings semantics; no outbox receipt.
-                return await self._deliver_process_log(
-                    im_client,
-                    context,
-                    target_context,
-                    "assistant",
-                    text,
-                    status_label=None,
-                    settings_manager=settings_manager,
-                    settings_key=settings_key,
-                )
-            _complete, delivered_id = await self._deliver_committed_parts(target_context, committed, live_footer=None)
-            return delivered_id
-        persist_agent_message(target_context, canonical_type, persist_text, citations=citations)
+        persist_agent_message(
+            target_context, canonical_type, persist_text, citations=citations, existing_row_id=existing_row_id
+        )
         # Web only: the same text additionally lands as a transcript-visible
         # ``interim`` row. Every backend emits ``assistant`` only once later output
         # has proved the text is not the Turn's final answer, so this never
@@ -3724,30 +3650,7 @@ class ConsolidatedMessageDispatcher:
         # status line, the consolidated log, the hidden-type log preview - so write
         # the citations into ``text`` once here rather than at each of them.
         text = materialize_citations(text, citations)
-        return await self._deliver_process_log(
-            im_client,
-            context,
-            target_context,
-            canonical_type,
-            text,
-            status_label=status_label,
-            settings_manager=settings_manager,
-            settings_key=settings_key,
-        )
 
-    async def _deliver_process_log(
-        self,
-        im_client,
-        context: MessageContext,
-        target_context: MessageContext,
-        canonical_type: str,
-        text: str,
-        *,
-        status_label: Optional[str],
-        settings_manager,
-        settings_key: str,
-    ) -> Optional[str]:
-        """Show one intermediate message per the channel's progress style and visibility."""
         # Target platform toolcall-delivery gate stays in FRONT of the concise
         # shortcut: when a turn is routed via ``delivery_override`` to a target
         # that cannot deliver toolcalls (e.g. the WeChat override flow), the
@@ -3984,218 +3887,6 @@ class ConsolidatedMessageDispatcher:
 
         return await im_client.send_message(context, text, parse_mode=parse_mode, **footer)
 
-    def plan_committed_delivery(self, context: MessageContext, text: str, *, final: bool) -> dict[str, Any]:
-        """Decide, once, everything a surface will send for a committed agent row.
-
-        The plan is committed with the row and replayed by every delivery attempt
-        (``CommittedOutput``), so re-delivery after a crash or an upgrade sends what
-        the live path would have sent: the routed target (scheduled
-        ``delivery_override`` included), the row's finality, the exact text parts
-        and their quick replies, and every attachment as a part of its own. Only
-        the result footer, which depends on the run's outcome, is added later.
-        """
-        target = self._get_target_context(context)
-        spec = target.platform_specific or {}
-        plan: dict[str, Any] = {
-            "version": 1,
-            "final": final,
-            # The Turn this row answers: its committed final is that Turn's outcome.
-            "turn_id": str((context.platform_specific or {}).get("turn_token") or "") or None,
-            "target": {
-                "platform": target.platform,
-                "channel_id": target.channel_id,
-                "user_id": target.user_id,
-                "thread_id": target.thread_id,
-                "message_id": target.message_id,
-                "platform_specific": {
-                    key: spec[key]
-                    for key in _PLAN_TARGET_KEYS
-                    if key in spec and isinstance(spec[key], (str, bool, int, float, type(None)))
-                },
-            },
-            "parse_mode": "markdown",
-            "parts": [],
-        }
-        if (context.platform_specific or {}).get("suppress_delivery"):
-            # Local history only: the row already is everything a background Session keeps.
-            plan["suppressed"] = True
-            return plan
-        visible = strip_silent_blocks(text)
-        if target.platform == "avibe":
-            # The row is the Workbench message; long narration also gets its transcript copy.
-            if visible.strip():
-                plan["parts"].append({"kind": "row"})
-            if not final and self._is_interim_worthy(visible):
-                plan["parts"].append({"kind": "interim", "text": visible})
-            return plan
-        if not final:
-            # IM narration is live, best-effort process output, as for the other backends:
-            # it is shown once by the running Turn and is not part of the outbox.
-            if visible.strip():
-                plan["live_log"] = True
-            return plan
-        capabilities = self._capabilities(target)
-        enhanced = process_reply(
-            text,
-            include_quick_replies=getattr(self.controller.config, "reply_enhancements", True),
-            allow_unseparated_quick_replies=capabilities.supports_quick_replies,
-        )
-        body = enhanced.text if enhanced.text.strip() else enhanced.visible_text
-        buttons = [button.text for button in enhanced.buttons] if capabilities.supports_quick_replies else []
-        plan["footer_mode"] = "subtext" if capabilities.supports_status_bubble else "fold"
-        parts: list[dict[str, Any]] = []
-        if body.strip():
-            if self._result_within_limit(target, body):
-                parts.append({"kind": "text", "text": body})
-            elif self._should_split_long_result(target) and (split := self._plan_result_split_for_context(
-                target, body
-            )).links_whole:
-                parts.extend({"kind": "text", "text": chunk} for chunk in split.chunks)
-            else:
-                summary = self._build_result_summary(body, self._get_result_max_chars(target))
-                parts.append({"kind": "text", "text": summary})
-                parts.append({"kind": "document", "text": body})
-            last_text = max(index for index, part in enumerate(parts) if part["kind"] == "text")
-            if buttons:
-                parts[last_text]["buttons"] = buttons
-        parts.extend(
-            {"kind": "file", "path": link.path, "label": link.label, "is_image": link.is_image} for link in enhanced.files
-        )
-        plan["parts"] = parts
-        return plan
-
-    async def _deliver_committed_parts(
-        self,
-        target_context: MessageContext,
-        committed: CommittedOutput,
-        *,
-        live_footer: Optional[str],
-    ) -> tuple[bool, Optional[str]]:
-        """Send a committed row's planned parts that have no receipt, in order.
-
-        Returns whether every part now has a receipt and the first platform message
-        id sent. The planned parts are the only content-bearing effects a committed
-        row has (the ledger's effect table). Every platform call goes through
-        ``_committed_call``, the one evidence rule; a part is acknowledged with that
-        evidence or with an explicit skipped reason decided before sending. A part
-        without evidence is not acknowledged and stops the delivery, so later parts
-        wait behind it and the row stays pending.
-        """
-        plan = committed.plan
-        parts = list(plan.get("parts") or [])
-        count = len(parts)
-        im_client = self._get_im_client(target_context)
-        footer = committed.footer or live_footer
-        text_indexes = [index for index, part in enumerate(parts) if part.get("kind") == "text"]
-        last_text = text_indexes[-1] if text_indexes else None
-        parse_mode = plan.get("parse_mode") or "markdown"
-        first_id: Optional[str] = None
-        for index, part in enumerate(parts):
-            if committed.part_delivered(index, count):
-                continue
-            kind = part.get("kind")
-            evidence: Optional[str] = None
-            skipped: Optional[str] = None
-            if kind == "row":
-
-                async def announce() -> Optional[str]:
-                    row = publish_committed_agent_message(target_context, committed.row_id)
-                    return row.get("id") if row else None
-
-                evidence = await self._committed_call("Workbench row", announce)
-            elif kind == "interim":
-                evidence = await self._committed_call(
-                    "interim copy", lambda: self._committed_interim(target_context, committed.row_id, part["text"])
-                )
-            elif kind == "text":
-                body = part["text"]
-                subtext = None
-                if index == last_text and footer:
-                    if plan.get("footer_mode") == "subtext":
-                        subtext = footer
-                    else:
-                        body = self._fold_footer(body, footer)
-                buttons = [QuickReplyButton(text=label) for label in part.get("buttons") or []]
-                for part_buttons in ((buttons, []) if buttons else ([],)):
-                    evidence = await self._committed_call(
-                        "result part",
-                        lambda part_buttons=part_buttons: self._send_result_inline(
-                            im_client, target_context, body, part_buttons, parse_mode, subtext=subtext
-                        ),
-                    )
-                    if evidence is not None:
-                        break
-                if evidence is None:
-                    # The live path's fallback rung for rejected content: the part as a document.
-                    evidence = await self._committed_call(
-                        "result part as a document",
-                        lambda: self._upload_result_document(im_client, target_context, body),
-                    )
-            elif kind == "document":
-                evidence = await self._committed_call(
-                    "result document", lambda: self._upload_result_document(im_client, target_context, part["text"])
-                )
-            elif kind == "file":
-                link = FileLink(label=part.get("label") or "", path=part["path"], is_image=bool(part.get("is_image")))
-                skipped, resolved, title = self._file_link_upload(im_client, link)
-                if skipped is None:
-                    evidence = await self._committed_file_upload(
-                        im_client, target_context, resolved, title, is_image=link.is_image
-                    )
-            else:
-                logger.error("Committed row %s has an unknown delivery part %r", committed.row_id, kind)
-            if evidence is None and skipped is None:
-                return False, first_id
-            await committed.acknowledge(index, count, evidence, skipped=skipped)
-            if evidence is not None and kind not in ("row", "interim"):
-                first_id = first_id or evidence
-        return True, first_id
-
-    async def _committed_call(self, label: str, call: Callable[[], Awaitable[Any]]) -> Optional[str]:
-        """The one evidence rule of committed delivery: a truthy platform id, or nothing.
-
-        Every platform call a committed part makes goes through here. ``None``,
-        ``""``, ``False``, any other non-id result, and a raise are failures, and no
-        part is acknowledged on them (``recovery.md`` D1). No call site interprets
-        a result itself.
-        """
-        try:
-            result = await call()
-        except Exception as err:
-            logger.warning("Committed delivery: %s failed: %s", label, err)
-            return None
-        if isinstance(result, bool) or not isinstance(result, (str, int)) or not str(result):
-            logger.warning("Committed delivery: %s returned no evidence (%r)", label, result)
-            return None
-        return str(result)
-
-    async def _committed_interim(self, target_context: MessageContext, row_id: str, text: str) -> Optional[str]:
-        """Write a narration's Workbench transcript copy once; the copy's id, ours or an earlier attempt's."""
-        native_id = f"interim:{row_id}"
-        row = persist_agent_message(target_context, "interim", text, native_message_id=native_id)
-        if row is None:
-            # A duplicate write is refused by its native id: the earlier attempt's copy is the receipt.
-            row = agent_message_exists(target_context, native_id)
-        return row.get("id") if row else None
-
-    async def _committed_file_upload(
-        self, im_client, context: MessageContext, path: str, title: str, *, is_image: bool
-    ) -> Optional[str]:
-        """Upload one planned file; an image falls back to a file upload, as on the live path."""
-        if self._is_video_path(path):
-            return await self._committed_call(
-                "video upload", lambda: im_client.upload_video_from_path(context, file_path=path, title=title)
-            )
-        if is_image:
-            uploaded = await self._committed_call(
-                "image upload", lambda: im_client.upload_image_from_path(context, file_path=path, title=title)
-            )
-            if uploaded is not None:
-                return uploaded
-        return await self._committed_call(
-            "file upload", lambda: im_client.upload_file_from_path(context, file_path=path, title=title)
-        )
-
     async def _send_split_result_messages(
         self,
         im_client,
@@ -4333,110 +4024,86 @@ class ConsolidatedMessageDispatcher:
         files,
     ) -> None:
         """Upload local files referenced by ``file://`` links."""
+        import os
+        from pathlib import Path
+
         if not hasattr(im_client, "upload_file_from_path"):
             logger.debug("IM client does not support upload_file_from_path; skipping file uploads")
             return
 
-        for fl in files:
-            if await self._upload_file_link(im_client, context, fl) == "unsupported":
-                return
-
-    def _file_link_upload(self, im_client, fl) -> tuple[Optional[str], str, str]:
-        """``(skip reason, resolved path, upload title)`` for one ``file://`` link.
-
-        The skip reason is ``uploads_unsupported`` for a client without file uploads
-        and ``file_missing`` for a path that is not a file; ``None`` means upload it.
-        """
-        import os
-        from pathlib import Path
-
-        from modules.im.base import BaseIMClient
-
-        upload = getattr(type(im_client), "upload_file_from_path", None)
-        if upload is None or upload is BaseIMClient.upload_file_from_path:
-            return "uploads_unsupported", "", ""
-        if not os.path.isfile(fl.path):
-            logger.warning("File not found, skipping upload: %s", fl.path)
-            return "file_missing", "", ""
-        try:
-            resolved = Path(fl.path).resolve(strict=True)
-        except (OSError, ValueError):
-            logger.warning("Cannot resolve file path, skipping: %s", fl.path)
-            return "file_missing", "", ""
-        # Use link label as title, but preserve file extension so users can
-        # download/open files correctly on all platforms.
-        upload_title = (fl.label or "").strip() or os.path.basename(fl.path)
-        if resolved.suffix and not Path(upload_title).suffix:
-            upload_title = f"{upload_title}{resolved.suffix}"
-        return None, str(resolved), upload_title
-
-    async def _upload_file_link(self, im_client, context: MessageContext, fl) -> str:
-        """Upload one ``file://`` link on the live path: ``uploaded``, ``skipped``, or ``unsupported``."""
-        skip, resolved_path, upload_title = self._file_link_upload(im_client, fl)
-        if skip == "uploads_unsupported":
-            return "unsupported"
-        if skip is not None:
-            return "skipped"
-        from pathlib import Path
-
-        resolved = Path(resolved_path)
         notify_wechat_failure = self._is_wechat_context(context)
-        try:
-            upload_result = None
-            if self._is_video_path(str(resolved)):
-                upload_result = await im_client.upload_video_from_path(
-                    context,
-                    file_path=str(resolved),
-                    title=upload_title,
-                )
-            elif getattr(fl, "is_image", False):
-                try:
-                    upload_result = await im_client.upload_image_from_path(
+
+        for fl in files:
+            if not os.path.isfile(fl.path):
+                logger.warning("File not found, skipping upload: %s", fl.path)
+                continue
+
+            try:
+                resolved = Path(fl.path).resolve(strict=True)
+            except (OSError, ValueError):
+                logger.warning("Cannot resolve file path, skipping: %s", fl.path)
+                continue
+
+            # Use link label as title, but preserve file extension so users can
+            # download/open files correctly on all platforms.
+            upload_title = (fl.label or "").strip() or os.path.basename(fl.path)
+            src_ext = resolved.suffix
+            if src_ext and not Path(upload_title).suffix:
+                upload_title = f"{upload_title}{src_ext}"
+
+            try:
+                upload_result = None
+                if self._is_video_path(str(resolved)):
+                    upload_result = await im_client.upload_video_from_path(
                         context,
                         file_path=str(resolved),
                         title=upload_title,
                     )
-                    if notify_wechat_failure and not upload_result:
-                        raise RuntimeError("image upload returned no message id")
-                except Exception as image_err:
-                    logger.warning(
-                        "Image upload failed for %s, fallback to file upload: %r",
-                        fl.path,
-                        image_err,
-                    )
+                elif getattr(fl, "is_image", False):
+                    try:
+                        upload_result = await im_client.upload_image_from_path(
+                            context,
+                            file_path=str(resolved),
+                            title=upload_title,
+                        )
+                        if notify_wechat_failure and not upload_result:
+                            raise RuntimeError("image upload returned no message id")
+                    except Exception as image_err:
+                        logger.warning(
+                            "Image upload failed for %s, fallback to file upload: %r",
+                            fl.path,
+                            image_err,
+                        )
+                        upload_result = await im_client.upload_file_from_path(
+                            context,
+                            file_path=str(resolved),
+                            title=upload_title,
+                        )
+                else:
                     upload_result = await im_client.upload_file_from_path(
                         context,
                         file_path=str(resolved),
                         title=upload_title,
                     )
-            else:
-                upload_result = await im_client.upload_file_from_path(
-                    context,
-                    file_path=str(resolved),
-                    title=upload_title,
-                )
-            if notify_wechat_failure and not upload_result:
-                await self._send_file_upload_failure_notice(
-                    im_client,
-                    context,
-                    file_path=str(resolved),
-                    file_name=upload_title,
-                )
-                return "failed"
-        except NotImplementedError:
-            logger.debug("IM client does not implement file uploads; skipping")
-            return "unsupported"
-        except Exception as err:
-            logger.warning("Failed to upload file %s: %r", fl.path, err)
-            if notify_wechat_failure:
-                await self._send_file_upload_failure_notice(
-                    im_client,
-                    context,
-                    file_path=str(resolved),
-                    file_name=upload_title,
-                )
-            return "failed"
-        return "uploaded"
+                if notify_wechat_failure and not upload_result:
+                    await self._send_file_upload_failure_notice(
+                        im_client,
+                        context,
+                        file_path=str(resolved),
+                        file_name=upload_title,
+                    )
+            except NotImplementedError:
+                logger.debug("IM client does not implement file uploads; skipping")
+                return
+            except Exception as err:
+                logger.warning("Failed to upload file %s: %r", fl.path, err)
+                if notify_wechat_failure:
+                    await self._send_file_upload_failure_notice(
+                        im_client,
+                        context,
+                        file_path=str(resolved),
+                        file_name=upload_title,
+                    )
 
     def _register_public_file_download_url(
         self,

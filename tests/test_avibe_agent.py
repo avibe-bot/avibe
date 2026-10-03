@@ -10,8 +10,8 @@ dispatcher), with a scripted provider and test-owned tools:
 * a P1 steer enters the running loop after the tool batch, even when its row
   appears after the steer was accepted;
 * Stop aborts the run and settles the Turn as stopped;
-* a committed row whose delivery a crash interrupted is re-delivered once on
-  Workbench, and part by part on IM (recovery.md D1/D2);
+* a committed row is delivered through the shared dispatcher, which writes its
+  display into that row instead of persisting a second one;
 * resume settles open tool calls and admits accepted, unconsumed inputs before
   the next model call, never running the model on its own (T2, T3, T4);
 * failures show localized copy in English and Chinese.
@@ -172,6 +172,7 @@ class _Controller:
         self.released: list[str] = []
         self.started: list[Optional[str]] = []
         self.hub_calls: list[str] = []
+        self.hub_protocol = "anthropic"
         self.agent: Optional[AvibeAgent] = None
         self.agent_service = SimpleNamespace(
             mark_runtime_turn_started=self._native_start,
@@ -223,7 +224,7 @@ class _Controller:
             context_window=32000,
             max_output_tokens=4096,
             supports_tools=True,
-            protocol="anthropic",
+            protocol=self.hub_protocol,
             provider="test-provider",
             supports_images=True,
         )
@@ -465,20 +466,17 @@ async def test_a_turn_commits_its_context_once_and_shows_the_reply_once(
         project(rows[:3]).messages,
     ]
     assert harness.provider.requests[0].endpoint.base_url == "http://hub.invalid/avibe/v1"
-    # One row per response: the dispatcher delivered the committed rows and persisted no copies.
+    # One row per response: the dispatcher wrote its display into the committed rows, never a copy.
     [result] = harness.rows("result")
     [narration] = harness.rows("assistant")
     assert result["id"] == rows[3].row_id and result["content_text"] == "两个文件。"
     assert narration["id"] == rows[1].row_id
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
     assert harness.controller.terminals == [
         {"turn": _turn(request.context), "is_error": False, "settled_by": "terminal_result"}
     ]
     if platform == "avibe":
         announced = [payload["id"] for name, payload in published if name == "message.new"]
         assert announced.count(result["id"]) == 1
-        # The row is the Workbench message; nothing sends the reply as a separate copy.
-        assert "两个文件。" not in harness.controller.im_client.sent
     else:
         assert harness.controller.im_client.sent.count("两个文件。") == 1
         assert harness.controller.im_client.sent[0] == "Listing."
@@ -557,58 +555,6 @@ async def test_stop_aborts_the_running_tool_and_settles_the_turn_as_stopped(
         {"turn": _turn(request.context), "is_error": False, "settled_by": "stopped"}
     ]
     assert not any("❌" in sent for sent in harness.controller.im_client.sent)
-
-
-async def test_a_committed_reply_a_crash_left_undelivered_reaches_workbench_once(
-    engine, session, tmp_path, published
-) -> None:
-    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok again"))]])
-    request = harness.request("hello")
-    # The first process commits the reply and dies before delivering it.
-    harness.controller._native_start(request.context)
-    await harness.agent.store.consume_input(
-        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("hello"),))
-    )
-    orphan = await harness.agent.store.append_response(SESSION, assistant("answer before the crash"), final=True)
-
-    # The restarted process delivers it once its surface is ready; later Turns do not deliver it again.
-    harness.new_agent()
-    assert await harness.agent.restore_pending_deliveries({"avibe"}) == 1
-    harness.new_agent()
-    await harness.agent.handle_message(harness.request("next"))
-
-    announced = [payload["id"] for name, payload in published if name == "message.new"]
-    assert announced.count(orphan.row_id) == 1
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
-
-
-async def test_an_im_reply_resends_only_its_unconfirmed_parts(engine, session, tmp_path, published) -> None:
-    long_reply = "你" * 1000  # 3,000 bytes: two WeChat parts
-    harness = _Harness(engine, tmp_path, "wechat", [[Done(assistant(long_reply))], [Done(assistant("ok"))]])
-    harness.controller.im_client.fail_sends = {2}
-    harness.controller.im_client.fail_uploads = 1  # and the document fallback fails too
-
-    await harness.agent.handle_message(harness.request("write a long answer"))
-
-    [reply] = await harness.agent.store.pending_deliveries(SESSION)
-    first_part = harness.controller.im_client.sent[0]
-    assert [part is not None for part in reply.parts] == [True, False]
-
-    harness.new_agent()
-    await harness.agent.handle_message(harness.request("next"))
-
-    sent = harness.controller.im_client.sent
-    # The first attempt sent part one and a delivery-failure notice; resume sends part two only.
-    # The first attempt sent part one, then the existing delivery-failure notice; resume sends part two only.
-    rest = long_reply[len(first_part):]
-    assert sent.count(first_part) == 1 and sent.count(rest) == 1
-    assert sent[1] == i18n_t("error.resultDeliveryFailed", "en")
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
-    with engine.connect() as conn:
-        delivery = json.loads(
-            conn.execute(select(messages.c.metadata_json).where(messages.c.id == reply.row_id)).scalar_one()
-        )["delivery"]
-    assert delivery["state"] == "delivered" and len(delivery["parts"]) == 2
 
 
 async def test_resume_settles_open_calls_and_admits_unconsumed_inputs_before_the_next_call(
@@ -699,6 +645,25 @@ async def test_a_fork_from_an_earlier_message_continues_only_the_inherited_prefi
     assert "source continues" not in json.dumps([str(message) for message in request.messages], ensure_ascii=False)
 
 
+async def test_a_google_hop_is_called_over_chat_at_the_gateway_prefix(engine, session, tmp_path, published) -> None:
+    asked: list[str] = []
+    harness = _Harness(
+        engine, tmp_path, "avibe", [[Done(assistant("hi"))]],
+        providers=lambda protocol: asked.append(protocol) or harness.provider,
+    )
+    harness.controller.hub_protocol = "google"
+
+    await harness.agent.handle_message(harness.request("hello"))
+
+    # Model Hub's google hop is its /v1beta Gemini surface; the agent speaks Chat to /v1.
+    [request] = harness.provider.requests
+    assert asked == ["openai_chat"]
+    assert (request.endpoint.protocol, request.endpoint.base_url, request.endpoint.provider) == (
+        "openai_chat", "http://hub.invalid/avibe/v1", "test-provider"
+    )
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
 @pytest.mark.parametrize("kind", sorted({*_KIND_KEYS, "unknown", "context_exhausted"}))
 def test_every_error_kind_has_english_and_chinese_copy(kind: str) -> None:
     key = error_key(kind)
@@ -721,7 +686,7 @@ async def test_a_failed_run_shows_localized_copy_and_a_refusal_shows_its_explana
     sent = harness.controller.im_client.sent
     empty_copy = i18n_t("avibeAgent.error.emptyResponse", language)
     refusal_copy = i18n_t("avibeAgent.error.refusal", language)
-    # Each failed final carries its own explanation, so a re-delivery after a crash shows it too.
+    # Each failed final carries its own explanation in its row.
     assert sent == [empty_copy, refusal_copy]
     assert sorted(row["content_text"] for row in harness.rows("error")) == sorted([empty_copy, refusal_copy])
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [True, True]
@@ -744,81 +709,7 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(engine, s
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [True]
 
 
-
-# --- a committed row is delivered from its persisted plan (recovery.md D1/D2) ---------------
-
-
-async def _crash_after_commit(harness: _Harness, body: str, *messages: AssistantMessage, finals=None) -> list:
-    """The first process commits rows for a Turn and dies before delivering any of them."""
-    request = harness.request(body)
-    harness.controller._native_start(request.context)
-    await harness.agent.store.consume_input(
-        harness.session_id, request.context.platform_specific["delivery_id"], UserMessage((text(body),))
-    )
-    rows = []
-    for index, message in enumerate(messages):
-        final = (finals or [False] * len(messages))[index]
-        rows.append(await harness.agent.store.append_response(harness.session_id, message, final=final))
-    return rows
-
-
-async def test_a_recovered_reply_goes_to_the_scheduled_override_target(engine, session, tmp_path, published) -> None:
-    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("report ready"))]])
-    request = harness.request("scheduled report")
-    request.context.platform_specific["delivery_override"] = {
-        "platform": "telegram", "channel_id": "C-report", "user_id": "u-report",
-    }
-    harness.controller.im_client.fail_sends = {1}
-    harness.controller.im_client.fail_uploads = 1  # and the document fallback fails too
-
-    await harness.agent.handle_message(request)
-    harness.new_agent()
-    await harness.agent.restore_pending_deliveries({"telegram"})
-
-    replies = [(channel, text) for channel, route, text in harness.controller.im_client.routes if route == "reply"]
-    assert replies == [("C-report", "report ready")]
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
-
-
-async def test_recovery_resends_the_persisted_split_after_a_limit_change(
-    engine, session, tmp_path, published, monkeypatch
-) -> None:
-    long_reply = "你" * 1000  # 3,000 bytes: two WeChat parts at today's limit
-    harness = _Harness(engine, tmp_path, "wechat", [[Done(assistant(long_reply))]])
-    harness.controller.im_client.fail_sends = {2}
-    harness.controller.im_client.fail_uploads = 1  # and the document fallback fails too
-    await harness.agent.handle_message(harness.request("write a long answer"))
-    first_part = harness.controller.im_client.sent[0]
-    # A later release splits WeChat replies differently.
-    monkeypatch.setattr(ConsolidatedMessageDispatcher, "_get_result_max_bytes", lambda self, context: 900)
-
-    harness.new_agent()
-    await harness.agent.restore_pending_deliveries({"wechat"})
-
-    sent = harness.controller.im_client.sent
-    assert sent.count(first_part) == 1 and first_part + sent[-1] == long_reply
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
-
-
-async def test_an_attachment_is_acknowledged_only_after_its_upload(engine, session, tmp_path, published) -> None:
-    report = tmp_path / "report.txt"
-    report.write_text("numbers", encoding="utf-8")
-    reply = f"Here is the report: [report](file://{report})"
-    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant(reply))]])
-    harness.controller.im_client.fail_uploads = 1
-
-    await harness.agent.handle_message(harness.request("send me the report"))
-    [pending] = await harness.agent.store.pending_deliveries(SESSION)
-    assert harness.controller.im_client.uploads == []
-
-    harness.new_agent()
-    await harness.agent.restore_pending_deliveries({"telegram"})
-
-    assert harness.controller.im_client.uploads == [str(report)]
-    assert [text for _channel, route, text in harness.controller.im_client.routes if route == "reply"] == [
-        "Here is the report: report"
-    ]
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
+# --- settlement and run shape -----------------------------------------------------------
 
 
 async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_path, published) -> None:
@@ -842,10 +733,27 @@ async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_pa
 
     await harness.agent.handle_message(harness.request("start it"))
 
-    # The reply committed before cleanup failed, so only settlement knows the run failed.
-    [result] = harness.rows("result")
+    # The reply committed before cleanup failed, so only settlement knows the run failed: the
+    # dispatcher writes the failed outcome into that row, as for any failed terminal result.
+    [result] = harness.rows("error")
+    assert result["content_text"] == "两个文件。"
     assert json.loads(result["content_json"])["result_footer"] == "❌ failed"
+    assert (await harness.context_rows())[-1].row_id == result["id"]
     assert harness.controller.terminals[-1]["is_error"] is True
+
+
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+async def test_a_silent_final_shows_nothing_and_completes(engine, session, tmp_path, published, platform) -> None:
+    harness = _Harness(engine, tmp_path, platform, [[Done(assistant("<silent>nothing to add</silent>"))]])
+
+    await harness.agent.handle_message(harness.request("fyi"))
+
+    # The row keeps the reply in the context, and no surface shows its markup.
+    [row] = harness.rows("result")
+    assert row["content_text"] == ""
+    assert (await harness.context_rows())[-1].message.content[0] == text("<silent>nothing to add</silent>")
+    assert harness.controller.im_client.sent == []
+    assert harness.controller.terminals[-1]["is_error"] is False
 
 
 async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session, tmp_path, published) -> None:
@@ -870,66 +778,6 @@ async def test_an_idle_session_holds_no_adapter_state(engine, session, tmp_path,
     assert harness.agent._runtimes == {}
     assert harness.agent.store._env_state == {}
     assert not getattr(harness.agent.store, "_responses", {})
-
-
-# --- round 2: receipts are evidence, recovery reads only the plan, the final row owns the outcome ---
-
-
-def _receipts(engine, row_id: str) -> dict:
-    with engine.connect() as conn:
-        return json.loads(conn.execute(select(messages.c.metadata_json).where(messages.c.id == row_id)).scalar_one())[
-            "delivery"
-        ]
-
-
-async def test_recovery_waits_for_the_planned_target_transport(engine, session, tmp_path, published) -> None:
-    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("report ready"))]])
-    request = harness.request("scheduled report")
-    request.context.platform_specific["delivery_override"] = {
-        "platform": "wechat", "channel_id": "W-report", "user_id": "u-report",
-    }
-    harness.controller.im_client.fail_sends = {1}  # the override target is not reachable yet
-    harness.controller.im_client.fail_uploads = 1  # and the document fallback fails too
-    await harness.agent.handle_message(request)
-
-    harness.new_agent()
-    # The source transport becoming ready does not deliver a row planned for another target.
-    assert await harness.agent.restore_pending_deliveries({"telegram"}) == 0
-    assert await harness.agent.restore_pending_deliveries({"wechat"}) == 1
-    assert [(channel, text) for channel, route, text in harness.controller.im_client.routes if route == "reply"] == [
-        ("W-report", "report ready")
-    ]
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
-
-
-async def test_an_interim_copy_is_acknowledged_only_once_it_is_persisted(
-    engine, session, tmp_path, published, monkeypatch
-) -> None:
-    import core.message_dispatcher as dispatcher_module
-
-    narration = "Reading the configuration and the tests before changing anything. " * 4  # interim-worthy
-    call = ToolCallBlock(id="call_1", name="echo", arguments={})
-    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant(narration, calls=(call,)))], [Done(assistant("ok"))]])
-    real_persist = dispatcher_module.persist_agent_message
-    failures = {"interim": 1}
-
-    def flaky_persist(context, canonical_type, text, **kwargs):
-        if failures.get(canonical_type):
-            failures[canonical_type] -= 1
-            return None  # persist_agent_message reports a failed write as None
-        return real_persist(context, canonical_type, text, **kwargs)
-
-    monkeypatch.setattr(dispatcher_module, "persist_agent_message", flaky_persist)
-    await harness.agent.handle_message(harness.request("look around"))
-
-    [pending] = await harness.agent.store.pending_deliveries(SESSION)
-    harness.new_agent()
-    await harness.agent.restore_pending_deliveries({"avibe"})
-    await harness.agent.restore_pending_deliveries({"avibe"})
-
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
-    assert len(harness.rows("interim")) == 1
-    assert pending.row_id in {row["id"] for row in harness.rows("assistant")}
 
 
 async def test_a_background_final_settles_with_its_committed_text(engine, session, tmp_path, published) -> None:
@@ -983,15 +831,21 @@ async def test_a_stop_after_the_final_reply_committed_loses_the_race(
     assert harness.controller.terminals[-1] == {
         "turn": _turn(request.context), "is_error": False, "settled_by": "terminal_result"
     }
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
 
 
-async def test_the_config_refresh_registers_and_retires_the_backend(engine) -> None:
+async def test_the_config_refresh_registers_and_retires_the_backend(engine, monkeypatch) -> None:
     from config.v2_compat import to_app_config
     from config.v2_config import V2Config
     from core.agent_auth_service import AgentAuthService
 
     agents: dict[str, Any] = {}
+    recovered: list[AvibeAgent] = []
+
+    async def recover(agent) -> None:
+        recovered.append(agent)
+
+    # A backend enabled after startup missed the startup recovery (T2, J5); it runs on registration.
+    monkeypatch.setattr(AvibeAgent, "recover_runtime_state", recover)
 
     async def refresh_runtime_config(name, runtime_config) -> bool:
         return False
@@ -1014,6 +868,7 @@ async def test_the_config_refresh_registers_and_retires_the_backend(engine) -> N
         controller.config = to_app_config(config)
         await owner._apply_backend_runtime_refresh("avibe")
         assert isinstance(agents.get("avibe"), AvibeAgent) is enabled
+    assert len(recovered) == 2 and recovered[-1] is agents["avibe"]
 
 
 async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, session, tmp_path, published) -> None:
@@ -1031,8 +886,8 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
         find_job=lambda session_id, call_id: "job_1" if (session_id, call_id) == (SESSION, "call_bash") else None,
     )
     harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
-    # The crashed process left a running foreground command; its tool-call response had
-    # nothing to show, so no outbox row is pending for this Session.
+    # The crashed process left a running foreground command, and no Turn will resume this
+    # Session: startup itself must settle the open call.
     request = harness.request("run the slow suite")
     harness.controller._native_start(request.context)
     await harness.agent.store.consume_input(
@@ -1041,93 +896,15 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
     call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "pytest -q"})
     await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
     jobs.states["job_1"] = JobStatus("running")
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
 
     for _ in range(2):
         harness.new_agent()
-        await harness.agent.restore_pending_deliveries({"telegram"})
+        await harness.agent.recover_runtime_state()
 
     rows = await harness.context_rows()
     assert rows[-1].kind == "tool_result" and "now Watch watch_job_1" in rows[-1].message.content[0].text
     assert rendered == [("call_bash", "job_1", "watch_job_1")] and jobs.watches == {"job_1": "watch_job_1"}
     assert harness.provider.requests == []
-
-
-# --- round 3: one evidence rule, one outcome rule, every recovery trigger ------------------
-
-
-@pytest.mark.parametrize(
-    "part, failure",
-    [
-        ("text", ""),
-        ("text", None),
-        ("text", False),
-        ("text", "raise"),
-        ("file", ""),
-        ("file", None),
-        ("file", "raise"),
-    ],
-)
-async def test_a_part_without_evidence_is_never_acknowledged(
-    engine, session, tmp_path, published, part, failure
-) -> None:
-    report = tmp_path / "report.txt"
-    report.write_text("numbers", encoding="utf-8")
-    reply = f"Here is the report: [report](file://{report})"
-    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant(reply))]])
-    client = harness.controller.im_client
-    if part == "text":
-        # The send and the live path's document fallback both come back without evidence.
-        if failure == "raise":
-            client.fail_sends, client.fail_uploads = {1}, 1
-        else:
-            client.send_results, client.upload_results = {1: failure}, [failure]
-    elif failure == "raise":
-        client.fail_uploads = 1
-    else:
-        client.upload_results = [failure]
-
-    await harness.agent.handle_message(harness.request("send me the report"))
-    [pending] = await harness.agent.store.pending_deliveries(SESSION)
-    index = 0 if part == "text" else 1
-    assert pending.parts == () or pending.parts[index] is None
-
-    harness.new_agent()
-    await harness.agent.restore_pending_deliveries({"telegram"})
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
-    assert client.uploads == [str(report)]
-
-
-async def test_enabling_the_backend_live_delivers_rows_left_pending(engine, session, tmp_path, published) -> None:
-    from config.v2_config import V2Config
-    from core.agent_auth_service import AgentAuthService
-
-    harness = _Harness(engine, tmp_path, "telegram", [])
-    # The previous process committed a reply and stopped before delivering it; avibe then
-    # started disabled, so no readiness callback could restore it.
-    await _crash_after_commit(harness, "go", assistant("the answer"), finals=[True])
-    controller = harness.controller
-    agents: dict[str, Any] = {}
-
-    async def refresh_runtime_config(_name, _runtime_config) -> bool:
-        return False
-
-    controller.agent_service.agents = agents
-    controller.agent_service.register = lambda agent: agents.__setitem__(agent.name, agent)
-    controller.agent_service.refresh_runtime_config = refresh_runtime_config
-    controller.agent_service.runtime_turn_tokens_for_backend = lambda _backend: {}
-    controller.agent_service.release_runtime_turn_tokens = lambda _tokens: None
-    controller.im_clients = {"telegram": controller.im_client}
-    controller.is_im_transport_ready = lambda platform: True
-    config = V2Config.default()
-    config.agents.avibe.enabled = True
-    config.save()
-
-    await AgentAuthService(controller)._apply_backend_runtime_refresh("avibe")
-
-    assert isinstance(agents.get("avibe"), AvibeAgent)
-    assert controller.im_client.sent.count("the answer") == 1
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
 
 
 async def test_a_provider_that_fails_to_close_does_not_fail_a_delivered_turn(
@@ -1164,73 +941,7 @@ async def test_a_provider_that_fails_to_close_does_not_fail_a_delivered_turn(
     assert closed == ["anthropic", "google"]
 
 
-# --- round 4: every content-bearing effect of a committed row is a planned part -----------
-
-
-@pytest.mark.parametrize("platform", ["avibe", "telegram"])
-async def test_every_content_effect_of_a_committed_row_happens_once_across_sweeps(
-    engine, session, tmp_path, published, monkeypatch, platform
-) -> None:
-    import core.message_dispatcher as dispatcher_module
-
-    report = tmp_path / "report.txt"
-    report.write_text("numbers", encoding="utf-8")
-    reply = f"Here is the report: [report](file://{report})"
-    harness = _Harness(engine, tmp_path, platform, [[Done(assistant(reply))]])
-    client = harness.controller.im_client
-    real_publish = dispatcher_module.publish_committed_agent_message
-    failures = {"publish": 1}
-
-    def flaky_publish(context, row_id):
-        if failures["publish"]:
-            failures["publish"] -= 1
-            return None  # the planned row part's publication fails once
-        return real_publish(context, row_id)
-
-    if platform == "avibe":
-        monkeypatch.setattr(dispatcher_module, "publish_committed_agent_message", flaky_publish)
-    else:
-        client.upload_results = [""]  # the planned file part comes back without evidence once
-
-    await harness.agent.handle_message(harness.request("send me the report"))
-    [row] = harness.rows("result")
-    for _ in range(2):
-        harness.new_agent()
-        await harness.agent.restore_pending_deliveries({platform})
-
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
-    announced = [payload for name, payload in published if name == "message.new" and payload.get("id") == row["id"]]
-    inbox = [payload for name, payload in published if name == "inbox.session.updated"]
-    if platform == "avibe":
-        assert len(announced) == 1 and len(inbox) == 1
-        # The only send is the failed attempt's notice (class (c)); the row is never sent as content.
-        assert client.sent == [i18n_t("error.resultDeliveryFailed", "en")] and client.uploads == []
-    else:
-        assert announced == [] and inbox == []
-        assert client.sent.count("Here is the report: report") == 1 and client.uploads == [str(report)]
-
-
-@pytest.mark.parametrize("platform", ["avibe", "telegram"])
-async def test_a_committed_row_ranks_its_session_when_it_is_persisted(
-    engine, session, tmp_path, published, platform
-) -> None:
-    harness = _Harness(engine, tmp_path, platform, [])
-    # Committed, never delivered: the rank asserts persisted output, not delivery.
-    await _crash_after_commit(harness, "go", assistant("the answer"), finals=[True])
-
-    with engine.connect() as conn:
-        last_active = conn.execute(
-            select(agent_sessions.c.last_active_at).where(agent_sessions.c.id == SESSION)
-        ).scalar_one()
-    assert last_active != NOW
-    activity = [payload for name, payload in published if name == "session.activity"]
-    assert len(activity) == (1 if platform == "avibe" else 0)
-
-
-# --- round 4 self-review: sweep liveness, self-explaining finals, per-row target filtering ---
-
-
-async def test_a_startup_sweep_never_waits_for_a_running_session(engine, session, tmp_path, published) -> None:
+async def test_startup_recovery_never_waits_for_a_running_session(engine, session, tmp_path, published) -> None:
     started, release = asyncio.Event(), asyncio.Event()
 
     async def slow(arguments, ctx):
@@ -1242,98 +953,28 @@ async def test_a_startup_sweep_never_waits_for_a_running_session(engine, session
     running = asyncio.create_task(harness.agent.handle_message(harness.request("work")))
     await started.wait()
     try:
-        # The running Session's own resume already did T2, T3 and D1; the sweep must not block on it.
-        await asyncio.wait_for(harness.agent.restore_pending_deliveries({"avibe"}), timeout=2)
+        # The running Session's own resume already did T2 and T3; startup recovery must not block on it.
+        await asyncio.wait_for(harness.agent.recover_runtime_state(), timeout=2)
     finally:
         release.set()
         await running
 
 
-@pytest.mark.parametrize("final", ["refusal", "empty"])
-async def test_a_crash_after_a_failed_final_still_shows_its_explanation(
-    engine, session, tmp_path, published, final
-) -> None:
-    from core.session_turns import SessionTurnManager
-
-    message = AssistantMessage((), ORIGIN, "refusal" if final == "refusal" else "stop")
-    harness = _Harness(engine, tmp_path, "telegram", [[Done(message)]])
-    request = harness.request("answer")
-    turn_id = _turn(request.context)
-
-    class _Crash(BaseException):
-        pass
-
-    async def crash_before_settlement(_run) -> None:
-        raise _Crash()
-
-    harness.agent._settle = crash_before_settlement
-    with pytest.raises(_Crash):
-        await harness.agent.handle_message(request)
-    manager = SessionTurnManager(harness.controller, build_context=lambda sid: request.context)
-    manager._engine = engine
-    notices: list[str] = []
-
-    async def emit(_context, kind, body, **_kwargs):
-        notices.append(kind)
-        return "msg"
-
-    manager.controller = SimpleNamespace(**{**vars(harness.controller), "emit_agent_message": emit})
-    manager._active_identity = lambda *_args: None
-    await manager.recover_durable_delivery_state(SESSION, service_restart=True)
-    harness.new_agent()
-    await harness.agent.restore_pending_deliveries({"telegram"})
-
-    explanation = i18n_t(f"avibeAgent.error.{'refusal' if final == 'refusal' else 'emptyResponse'}", "en")
-    with engine.connect() as conn:
-        turn = message_deliveries.get_turn(conn, turn_id)
-    assert (turn["terminal_outcome"], turn["terminal_evidence_kind"]) == ("failed", "committed_final")
-    assert json.loads(turn["terminal_evidence_json"])["result_text"] == explanation
-    assert notices == [] and harness.controller.im_client.sent.count(explanation) == 1
+# --- narration is live best-effort output; failed finals carry error semantics -------------
 
 
-async def test_a_sweep_delivers_only_rows_planned_for_its_ready_transport(
-    engine, session, tmp_path, published
-) -> None:
-    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("for wechat"))], [Done(assistant("for telegram"))]])
-    client = harness.controller.im_client
-    override = harness.request("scheduled report")
-    override.context.platform_specific["delivery_override"] = {"platform": "wechat", "channel_id": "W-report"}
-    client.fail_sends, client.fail_uploads = {1}, 1
-    await harness.agent.handle_message(override)
-    plain = harness.request("normal question")
-    # This Turn's resume retries the WeChat row, then its own reply fails too: both stay pending.
-    client.fail_sends, client.fail_uploads = set(range(client.attempts + 1, client.attempts + 5)), 2
-    await harness.agent.handle_message(plain)
-    assert len(await harness.agent.store.pending_deliveries(SESSION)) == 2
-    client.fail_sends, client.fail_uploads = set(), 0
-    attempts = client.attempts
-
-    harness.new_agent()
-    await harness.agent.restore_pending_deliveries({"telegram"})
-
-    replies = [(channel, body) for channel, route, body in client.routes if route == "reply"]
-    assert replies == [("C1", "for telegram")]
-    assert client.attempts == attempts + 1
-    [left] = await harness.agent.store.pending_deliveries(SESSION)
-    assert left.plan["target"]["platform"] == "wechat"
-
-
-# --- scope A': IM narration is live best-effort output; failed finals carry error semantics ---
-
-
-async def test_im_narration_is_live_best_effort_outside_the_outbox(engine, session, tmp_path, published) -> None:
+async def test_im_narration_is_live_best_effort_output(engine, session, tmp_path, published) -> None:
     call = ToolCallBlock(id="call_1", name="echo", arguments={})
     shown = _Harness(engine, tmp_path, "telegram", [[Done(assistant("First look.", calls=(call,)))], [Done(assistant("done"))]])
     await shown.agent.handle_message(shown.request("go"))
-    # Shown live through the process log, like the other backends, and never queued for delivery.
+    # Shown live through the process log, like the other backends.
     assert shown.controller.im_client.routes[0] == ("C1", "message", "First look.")
-    assert await shown.agent.store.pending_deliveries(SESSION) == []
 
     failing = _Harness(engine, tmp_path, "telegram", [[Done(assistant("Second look.", calls=(call,)))], [Done(assistant("ok"))]])
     failing.controller.im_client.fail_sends = {1}
     await failing.agent.handle_message(failing.request("again"))
     failing.new_agent()
-    await failing.agent.restore_pending_deliveries({"telegram"})
+    await failing.agent.recover_runtime_state()
     # Best effort: a failed narration send is not retried; the final reply was delivered.
     assert "Second look." not in failing.controller.im_client.sent
     assert failing.controller.im_client.sent.count("ok") == 1
@@ -1342,7 +983,6 @@ async def test_im_narration_is_live_best_effort_outside_the_outbox(engine, sessi
     hidden.controller.settings_manager.hidden = {"assistant"}
     await hidden.agent.handle_message(hidden.request("once more"))
     assert "Third look." not in hidden.controller.im_client.sent
-    assert await hidden.agent.store.pending_deliveries(SESSION) == []
 
 
 @pytest.mark.parametrize("final, row_type", [("answer", "result"), ("empty", "error"), ("refusal", "error")])
@@ -1363,10 +1003,132 @@ async def test_a_final_is_stored_with_its_outcome_semantics(
     # The row is still the Turn's final response in the context and in delivery.
     entries = await harness.context_rows()
     assert entries[-1].kind == "response" and entries[-1].row_id == row["id"]
-    assert await harness.agent.store.pending_deliveries(SESSION) == []
     assert [name for name, payload in published if name == "message.new" and payload.get("id") == row["id"]] == [
         "message.new"
     ]
+
+
+# --- the dispatcher writes a committed row's display instead of a second row ---------------
+
+_SHIP = "Shipped.\n\n---\n[✅ Merge] | [👀 Review]"
+
+
+@pytest.mark.parametrize(
+    "platform, suppressed, site",
+    [
+        ("avibe", False, "result"),
+        ("telegram", False, "result"),
+        ("avibe", True, "result"),
+        ("telegram", True, "result"),
+        ("avibe", False, "assistant"),
+        ("telegram", True, "assistant"),
+    ],
+)
+async def test_every_persist_site_writes_the_committed_row_instead_of_a_second_one(
+    engine, session, tmp_path, published, platform, suppressed, site
+) -> None:
+    call = ToolCallBlock(id="call_1", name="echo", arguments={})
+    narration, final = (_SHIP, "ok") if site == "assistant" else ("Looking.", _SHIP)
+    harness = _Harness(
+        engine, tmp_path, platform, [[Done(assistant(narration, calls=(call,)))], [Done(assistant(final))]]
+    )
+    request = harness.request("ship it")
+    request.context.platform_specific["suppress_delivery"] = suppressed
+
+    await harness.agent.handle_message(request)
+
+    responses = {entry.row_id: entry.message for entry in await harness.context_rows() if entry.kind == "response"}
+    agent_rows = harness.rows("assistant") + harness.rows("result") + harness.rows("error")
+    # Every row the dispatcher persisted for the agent is a committed response, once.
+    assert sorted(row["id"] for row in agent_rows) == sorted(responses)
+    [row] = [row for row in agent_rows if row["type"] == site]
+    body = json.loads(row["content_json"])
+    assert body["kind"] == site and body["text"] == row["content_text"]
+    # The model payload is untouched: the context still reads the raw reply.
+    assert responses[row["id"]].content[0] == text(_SHIP)
+    assert json.loads(row["metadata_json"]).get("delivery_suppressed", False) is suppressed
+    if site == "result":
+        # The dispatcher's display copy, as for any backend: the quick replies left the text.
+        assert row["content_text"].startswith("Shipped.") and "[✅ Merge]" not in row["content_text"]
+        if platform == "avibe":
+            assert body["quick_replies"] == ["✅ Merge", "👀 Review"]
+
+
+async def _committed_final(harness: _Harness, body: str):
+    """A final response the store committed, before anything delivered it."""
+    request = harness.request("summarize")
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("summarize"),))
+    )
+    return request, await harness.agent.store.append_response(SESSION, assistant(body), final=True)
+
+
+def _announced(published, row_id: str) -> int:
+    return sum(1 for name, payload in published if name == "message.new" and payload.get("id") == row_id)
+
+
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+async def test_a_retried_output_is_recognized_by_the_committed_row_it_wrote(
+    engine, session, tmp_path, published, platform
+) -> None:
+    from core.message_output import MessageOutput
+
+    harness = _Harness(engine, tmp_path, platform, [])
+    request, final = await _committed_final(harness, "the summary")
+    output = MessageOutput(idempotency_key="reply", persisted_row_id=final.row_id)
+
+    for _ in range(2):
+        await harness.controller.emit_agent_message(request.context, "result", "the summary", output=output)
+
+    # The committed row carries the output's identity, so the retry is a duplicate.
+    [row] = harness.rows("result")
+    assert row["id"] == final.row_id and row["native_message_id"] == output.native_message_id(request.context)
+    if platform == "avibe":
+        assert _announced(published, final.row_id) == 1
+    else:
+        assert harness.controller.im_client.sent == ["the summary"]
+
+
+async def test_a_committed_row_never_takes_a_native_id_another_row_holds(engine, session, tmp_path, published) -> None:
+    from core.message_mirror import persist_agent_message
+
+    harness = _Harness(engine, tmp_path, "avibe", [])
+    request, first = await _committed_final(harness, "first")
+    later = await harness.agent.store.append_response(SESSION, assistant("later"), final=True)
+    persist_agent_message(request.context, "result", "first", native_message_id="out_1", existing_row_id=first.row_id)
+
+    # A concurrent duplicate of the same output, written into a different committed row.
+    persist_agent_message(request.context, "result", "later", native_message_id="out_1", existing_row_id=later.row_id)
+
+    rows = {row["id"]: row for row in harness.rows("result")}
+    assert rows[first.row_id]["native_message_id"] == "out_1"
+    assert rows[later.row_id]["native_message_id"] is None
+    assert json.loads(rows[later.row_id]["content_json"])["kind"] == "result"
+
+
+async def test_a_suppressed_committed_row_becomes_a_receipt_when_its_output_is_sent(
+    engine, session, tmp_path, published
+) -> None:
+    from core.message_output import MessageOutput
+
+    harness = _Harness(engine, tmp_path, "avibe", [])
+    request, final = await _committed_final(harness, "the nightly summary")
+    output = MessageOutput(idempotency_key="reply", persisted_row_id=final.row_id)
+    background = MessageContext(
+        **{**request.context.__dict__, "platform_specific": {**request.context.platform_specific, "suppress_delivery": True}}
+    )
+
+    await harness.controller.emit_agent_message(background, "result", "the nightly summary", output=output)
+    [local] = harness.rows("result")
+    assert json.loads(local["metadata_json"])["delivery_suppressed"] is True
+    assert _announced(published, final.row_id) == 0
+
+    await harness.controller.emit_agent_message(request.context, "result", "the nightly summary", output=output)
+    [shown] = harness.rows("result")
+    assert shown["id"] == final.row_id and shown["native_message_id"] == local["native_message_id"]
+    assert "delivery_suppressed" not in json.loads(shown["metadata_json"])
+    assert _announced(published, final.row_id) == 1
 
 
 # --- real wiring: the merged tools, job host and Watch hand-over ---------------------------
@@ -1433,7 +1195,7 @@ async def test_resume_settles_a_real_bash_job_through_the_real_renderer(
             await _until(lambda: suite.jobs.status(job_id).state == "exited", "the command never exited")
 
         harness.new_agent()
-        await harness.agent.restore_pending_deliveries({"avibe"})
+        await harness.agent.recover_runtime_state()
 
         result = (await harness.context_rows())[-1]
         assert result.kind == "tool_result"
@@ -1491,7 +1253,7 @@ async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(engine
             os.utime(entry, (week_ago, week_ago))
 
     harness.new_agent()
-    await harness.agent.restore_pending_deliveries({"avibe"})
+    await harness.agent.recover_runtime_state()
 
     # Startup settles c's open call from its job's output (T2) before any file goes.
     [c_result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"][-1:]
