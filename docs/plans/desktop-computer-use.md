@@ -22,7 +22,8 @@ Cua Driver is a Rust runtime that observes and operates native apps on macOS,
 Windows, and Linux. It exposes an MCP stdio server: screenshots, window and
 accessibility state, click, type, hotkeys, scroll, drag, clipboard, and
 sessions. It delivers input in the background where the platform allows it,
-so it does not steal focus or move the user's pointer. Its embedded mode exists
+so it does not move the user's pointer and normally leaves focus alone (see
+Focus boundary). Its embedded mode exists
 for agent harnesses: the host app requests the macOS grants once, and the
 driver runs inside the host's TCC responsibility chain.
 
@@ -337,13 +338,28 @@ running. The tray keeps the shell alive after the window closes.
   - `bring_to_front`, `move_cursor`, and `invoke_menu` are excluded. The first
     persistently takes the foreground, and the second can move the user's real
     pointer. `invoke_menu` temporarily activates the target and restores the
-    previous app only on a best-effort basis. All three break the promise that
-    background work leaves focus and pointer alone. The remaining 28 were
-    checked against the driver's macOS guide (`MACOS.md` at the pinned tag).
-    Only foreground delivery activates a window, and the server rejects it on
-    macOS. `launch_app` launches without activation. `set_window_frame` moves a
-    window without focusing it. The release check repeats this review for every
-    new driver version. On macOS the computer MCP server also admits an input
+    previous app only on a best-effort basis. Activation is the purpose of all
+    three, so they are removed.
+  - **Focus boundary (macOS).** Avibe cannot promise that no background
+    input ever takes focus. An app can activate itself in response to any
+    event, and the driver's guide (`MACOS.md` at the pinned tag, "The
+    no-foreground contract") names shortcuts that do. So the boundary is
+    what Avibe enforces:
+    - No tool exists whose purpose is activation.
+    - Foreground delivery is rejected, and input must address one window
+      (below).
+    - The driver keeps its 1000 ms focus-steal lease, which reverts an
+      activation seen during the post-action watch.
+    - As defense in depth, the server rejects the focus-intent shortcuts
+      that guide names: `⌘L`, `⌘⇧G`, and the browser tab shortcuts `⌘1`
+      to `⌘9`, `⌘[`, `⌘]`, `⌘⇧[`, and `⌘⇧]`. The prompt says to open a URL
+      with `launch_app` and `urls` instead.
+
+    What remains is that an app may still raise itself after background
+    input. The idle-desktop validation measures this, and the user docs
+    state it. The release check re-reads that guide section for every new
+    driver version.
+  - **Window-only input (macOS).** The computer MCP server admits an input
     call only when it addresses one window: a `pid` with a `window_id`, or an
     element token. It rejects any other targeting, including a desktop target
     (`target.kind: "desktop"` or `scope: "desktop"`), `delivery_mode:
@@ -516,7 +532,9 @@ running. The tray keeps the shell alive after the window closes.
   untrusted, and observe state before retrying any action, since an error result
   does not prove the action failed. If every window comes back AX-unresolved and
   the desktop shows no apps, the screen is likely locked: stop and tell the
-  user. On macOS, no tool may deliberately take focus or move the pointer; if
+  user. On macOS, it never uses focus-intent shortcuts (open URLs with
+  `launch_app` and `urls`), and no tool may deliberately take focus or move the
+  pointer; if
   only a foreground action would work, the agent tells the user. On Windows, the
   Q6 run decides foreground use.
 
