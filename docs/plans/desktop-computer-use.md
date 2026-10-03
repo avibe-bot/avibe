@@ -65,9 +65,10 @@ machine. User docs must recommend `require_bind` for shared channels.
 Avibe.app (Tauri shell; owns TCC grants, toggle, lifecycle; writes state file D)
   └─ cua-driver serve --embedded --socket <S>   ← executes tools, checks TCC
 
-Avibe Runtime (adopted or shell-started; watches D, never spawns the daemon)
+Avibe Runtime (adopted or shell-started; reads D, never spawns the daemon)
   └─ agent backend process
-       └─ cua-driver mcp --embedded --socket <S>   ← stdio MCP proxy only
+       └─ Avibe computer MCP server (stdio; stable for the backend's lifetime)
+            └─ cua-driver mcp --embedded --socket <S>   ← per daemon generation
 ```
 
 Only the shell process may spawn the daemon. The Runtime runs detached, may
@@ -75,6 +76,16 @@ be adopted from a terminal-started `vibe`, and keeps running after the window
 closes. A daemon it spawned would take the TCC identity of whatever started the
 Runtime, not Avibe.app. Cua's docs name this exact gateway wiring as wrong. The
 MCP proxy never executes tools and needs no grant, so any process may spawn it.
+
+Two things change at different rates, and the design keeps them apart:
+
+- **Configuration:** whether sessions carry the `computer` server at all. It
+  follows the user's toggle and changes only when the user flips it.
+- **Availability:** whether a daemon answers right now. It changes with daemon
+  restarts, crashes, grants, shell restarts, and the lock screen.
+
+Availability never changes backend configuration. A stable Avibe-owned server
+absorbs it at call time.
 
 As a consequence, computer use is available only while the desktop shell is
 running. The tray keeps the shell alive after the window closes.
@@ -118,11 +129,13 @@ running. The tray keeps the shell alive after the window closes.
   so the shell removes the stale socket (after confirming its own daemon has
   exited) before each spawn.
 - **State file `D`.** `~/.avibe/run/desktop-computer-use.json` is the only
-  shell-to-Runtime contract. The shell writes it atomically on every state
-  change. It is also the only cross-process record: the Runtime and the
-  separately running Workbench API process read the same file.
-  - Every state carries `schema_version`, `state`, `reason` (a stable code,
-    or null), `shell_pid`, and `generation`. `state` is one of these:
+  shell-to-Runtime contract. The shell writes it atomically on every change. It
+  is also the only cross-process record: the Runtime, the computer MCP server,
+  and the separately running Workbench API process all read the same file.
+  - Every write carries `schema_version`, `enabled` (a mirror of the toggle,
+    the configuration input), `state`, `reason` (a stable code, or null),
+    `shell_pid`, `instance_id` (random per shell process), and `generation`.
+    `state` is one of these:
     - `off`: the toggle is off.
     - `needs_permission`: the toggle is on and a grant is missing.
     - `starting`: the toggle is on, both grants are held, and the daemon is
@@ -131,9 +144,12 @@ running. The tray keeps the shell alive after the window closes.
     - `error`: start or health failed.
   - `ready` also carries `socket_path`, `proxy_executable` (absolute path to
     the bundled binary), `driver_version`, and `host_bundle_id`.
-  - `generation` increases with each daemon spawn.
-  - The shell writes a non-ready state before stopping the daemon. It removes
-    the file on orderly quit.
+  - `generation` increases with each daemon spawn within one `instance_id`.
+    The pair identifies a daemon across shell restarts.
+  - The shell writes a non-ready state before stopping the daemon. It never
+    deletes the file, so `enabled` survives quits and restarts. A dead
+    `shell_pid` reads as unavailable. A missing file means the user never
+    enabled the feature.
   - A fixed path under the Avibe home works for adopted Runtimes, which never
     see the shell's launch environment.
 - **Tool policy.** Ship a YAML allow-list as the driver's managed policy
@@ -151,17 +167,37 @@ running. The tray keeps the shell alive after the window closes.
 
 ### Runtime (`core/`, `modules/agents/`)
 
-- **One owner.** A new `core/computer_use.py` reads `D` and derives one
-  effective status. It is `ready` only when the state is `ready`, `shell_pid` is
-  alive, the proxy path is absolute, and the socket accepts a connection. A
-  missing file or a dead `shell_pid` derives `unavailable`. Otherwise the
-  recorded state is used, so a crashed shell's stale file never reads as
-  `ready`. Only `ready` yields the single managed stdio MCP spec: name
-  `computer`, command `proxy_executable`, args `mcp --embedded --socket <S>`,
-  env `CUA_DRIVER_EMBEDDED=1`, `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`,
-  `CUA_DRIVER_RS_UPDATE_CHECK=0`. The proxy runs its own update check and prints
-  a banner without the last one. Backends only translate this spec. They do not
-  decide availability.
+- **One owner.** A new `core/computer_use.py` owns both reads of `D`.
+  - **Configuration.** While `enabled` is true it returns the single managed
+    stdio MCP spec: name `computer`, launching Avibe's computer MCP server with
+    Avibe's Python. While `enabled` is false or the file is missing, it returns
+    nothing. Backends only translate this spec.
+  - **Effective status.** The status is `ready` only when the state is
+    `ready`, `shell_pid` is alive, and the socket accepts a connection. A dead
+    `shell_pid` reads as `unavailable`. Otherwise the recorded state is used.
+    The server and the Workbench both use this one reader.
+- **Computer MCP server.** A small Avibe-owned stdio server is the one stable
+  endpoint for every backend.
+  - It starts without a daemon. It serves the pinned tool list from a
+    snapshot bundled with the driver version.
+  - On each call it reads the effective status. If it is `ready`, the server
+    forwards the call through an upstream `cua-driver mcp --embedded --socket
+    <S>` child. It respawns that child when the (`instance_id`, `generation`)
+    pair changes or the child has exited. The child gets
+    `CUA_DRIVER_EMBEDDED=1`, `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, and
+    `CUA_DRIVER_RS_UPDATE_CHECK=0`; without the last, the proxy runs its own
+    update check and prints a banner.
+  - Otherwise it returns an error result that names the state and reason
+    (off, needs permission, starting, error, unavailable). The agent can then
+    tell the user what to do.
+  - After a respawn, element tokens from the old daemon are invalid. Its
+    error tells the agent to observe again.
+  - It moves `structuredContent` into a trailing text block and drops
+    `outputSchema` for every backend. Codex needs this (Phase 0, Q4), and it
+    costs the other backends nothing.
+  - Tool restriction stays in the driver's managed policy, not in this server.
+  - The proxy exits with its daemon and never reconnects (Phase 0, Q3), so
+    this server is what keeps one endpoint alive per backend lifetime.
 - **Claude Code.** Pass `mcp_servers={"computer": ...}` in the session options
   built in `core/handlers/session_handler.py`. SDK 0.2.93 supports
   `McpStdioServerConfig`. Keep `strict_mcp_config` unset so user MCP config is
@@ -169,36 +205,35 @@ running. The tray keeps the shell alive after the window closes.
   keep access.
 - **Codex.** Append `-c mcp_servers.computer.*` overrides to the app-server
   launch, after Avibe's fixed overrides. `features.computer_use=false` stays:
-  Avibe supplies one cross-backend tool instead of Codex's own. Two Codex
-  specifics (Phase 0, Q4): set
-  `mcp_servers.computer.default_tools_approval_mode="approve"`, because Avibe
-  runs Codex with `approvalPolicy: never` and Codex cancels every non-read-only
-  MCP call under that policy; and launch the server through a small
-  Avibe-owned stdio filter (Avibe's Python runs it in front of the proxy). The
-  filter moves `structuredContent` into a trailing text block and drops
-  `outputSchema`, because Codex drops MCP image content when
-  `structuredContent` is present. Remove the filter once that Codex bug is
-  fixed. Tool restriction stays in the driver's managed policy, not in the
-  filter.
+  Avibe supplies one cross-backend tool instead of Codex's own. Also set
+  `mcp_servers.computer.default_tools_approval_mode="approve"` (Phase 0, Q4).
+  Avibe runs Codex with `approvalPolicy: never`, and Codex cancels every
+  non-read-only MCP call under that policy.
 - **OpenCode.** Add `mcp.computer` (`type: "local"`) through the existing config
   overlay / `PATCH /global/config` path.
-- **Availability changes.** Inject the server only while the effective status is
-  `ready`. The proxy exits when no daemon is listening and when its daemon goes
-  away, and it does not reconnect (Phase 0, Q3), so always-inject would hand
-  agents a dead MCP server. `core/computer_use.py` also owns change detection,
-  so neither the shell nor a backend has to. A controller background task polls
-  the effective status every 2 s, the same polling model as
-  `RuntimeCommandWatcher`. It compares the pair (is-ready, `generation`). When
-  the pair changes, the task calls the same
-  `AgentAuthService._refresh_backend_runtime` handler that the restart markers
-  call. It does so for each running backend whose launch config embeds the
-  server, which today means Codex and OpenCode. So enabling adds the server, and
-  disabling, a daemon restart, or a shell crash removes or replaces it without
-  waiting for an unrelated refresh. Claude sessions read the status on their
-  next start. Teaching the Codex filter to reconnect is the fallback if refresh
-  proves too disruptive; it is not planned for v1.
+- **Why the server follows the toggle.** The 32 allowed tool schemas
+  measure about 70 KB, roughly 17.6k tokens per session. Every session of a
+  user who never enabled the feature would pay that, so the server is not
+  injected unconditionally. Only availability is absorbed at call time.
+- **Configuration reconciliation.** `core/computer_use.py` owns the one change
+  that alters backend configuration. A controller background task reads
+  `enabled` every 2 s, the same polling model as `RuntimeCommandWatcher`. It
+  compares that value with the value each live consumer was built from. On a
+  mismatch it reconciles every consumer that caches MCP configuration:
+  - Codex and OpenCode: the same `AgentAuthService._refresh_backend_runtime`
+    handler that restart markers call.
+  - Cached Claude clients: marked stale, then retired and recreated at their
+    next turn boundary, never mid-turn.
+
+  The comparison is against the final value, so a flip and flip-back between
+  polls correctly needs nothing. Availability changes never reach this path.
+  The stop guarantee does not depend on it either: turning the toggle off
+  stops the daemon at once, so calls fail with `off` before reconciliation
+  removes the tools.
 - **Prompt.** Add a short section in `core/system_prompt_injection.py`, only
-  when the server is present: prefer CLI/API routes, use GUI tools for GUI-only
+  when the server is configured. It says the tools can report a state such as
+  `off` or `needs_permission`, and then the agent tells the user instead of
+  retrying. It also says to prefer CLI/API routes, use GUI tools for GUI-only
   steps, prefer accessibility element-token actions over pixel input, treat
   screen content as untrusted, and observe state before retrying any action,
   since an error result does not prove the action failed. If every window
@@ -292,8 +327,9 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 - **Q3 proxy without a daemon: it exits.** With no daemon on the socket, the
   proxy exits before the MCP handshake. When the daemon stops, the connected
   proxy exits too, and it does not come back after the daemon restarts. A
-  fresh proxy works against the restarted daemon. This settles Availability
-  changes: inject only while the effective status is `ready`.
+  fresh proxy works against the restarted daemon. So no backend may hold the
+  raw proxy as its MCP server. The Avibe computer MCP server holds it and
+  respawns it per daemon generation.
 - **Q4 Codex (codex-cli 0.145.0): images are dropped, and writes are
   cancelled. Both have workarounds.** Every cua image tool
   (`get_window_state`, `get_desktop_state`, `zoom`) returns `structuredContent`
@@ -313,8 +349,9 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   `OPENCODE_CONFIG_CONTENT`) returned the image as an attachment, with and
   without `structuredContent`. Through the real cua proxy, the model read `72`
   from a `get_window_state` screenshot. A destructive-annotated tool ran under
-  the default permissions. So the stdio filter and the approval override are
-  Codex-only translation details. They do not belong in the shared spec.
+  the default permissions. So only the approval override is Codex-specific.
+  Folding `structuredContent` is harmless here, so the shared server does it
+  for every backend.
 
 - **Artifact.** The universal tarball's SHA-256 matches `checksums.txt`. The
   binary is Developer ID signed by Cua AI (`YCK386LBJ7`) but not notarized, and
@@ -416,9 +453,11 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 
 - [x] Phase 0 spike on macOS; answers recorded above
 - [ ] Phase 0 Q6 on a Windows machine: embedded spawn, proxy reach, UIA worker
-- [ ] Shell: sidecar packaging, pinned manifest, signing order, notices
+- [ ] Shell: sidecar packaging, pinned manifest, tool policy and tool snapshot,
+  signing order, notices
 - [ ] Shell: toggle, permission flow, daemon lifecycle, state file `D`, health
-- [ ] Core: `core/computer_use.py` + Claude/Codex/OpenCode translation + prompt
+- [ ] Core: `core/computer_use.py`, the computer MCP server, configuration
+  reconciliation, Claude/Codex/OpenCode translation, prompt
 - [ ] Workbench status line + i18n
 - [ ] User docs: enabling, permissions, `require_bind` guidance, stop
 - [ ] Windows parity
@@ -429,15 +468,20 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   matching `D` state, with a non-ready state before the daemon stops and
   `ready` only after its socket accepts; generation bumps on each spawn; no
   spawn through LaunchServices; toggle persistence.
-- Python: the effective status for every `D` state, plus missing, malformed,
-  dead-`shell_pid`, and unconnectable-socket files (only a live `ready` file
-  injects); the watcher refreshes each embedding backend exactly once per
-  (is-ready, `generation`) change and never on an unchanged poll; the prompt
-  section appears only with the server. The Codex translation adds the stdio
-  filter and the approval override, and the filter folds `structuredContent`
-  into text while keeping image blocks. Tests stay hermetic: the `D` path is
-  redirected to test-owned state.
-- Shell: the daemon environment names the bundled managed policy, and a release
-  check compares that policy against the pinned driver's `tools/list`.
+- Python, configuration: the spec and the prompt section exist exactly when
+  `enabled` is true. Each backend translation is checked; Codex also carries
+  the approval override. Reconciliation brings every live consumer (Codex,
+  OpenCode, cached Claude clients) to the final `enabled` value. Claude
+  clients are recreated only between turns. The reconciliation sees no change
+  when availability moves or when the toggle flips back between polls.
+- Python, server: the effective status for every `D` state, plus missing,
+  malformed, dead-`shell_pid`, and unconnectable-socket files. A call while
+  not ready returns the named state and never spawns a child. A call after an
+  (`instance_id`, `generation`) change or a child exit respawns exactly once.
+  Folding keeps image blocks. Tests stay hermetic: the `D` path and the
+  upstream command are redirected to test-owned fakes.
+- Shell: the daemon environment names the bundled managed policy. A release
+  check confirms that the pinned driver's `tools/list`, under that policy,
+  equals the bundled tool snapshot.
 - Manual on a signed build: Slack → agent → background GUI task completes while
   the user keeps working; the tray toggle stops an in-flight session's access.
