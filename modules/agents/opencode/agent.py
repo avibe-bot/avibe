@@ -781,6 +781,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self._runtime.durable_poll_generations = self._durable_poll_generations
         self._runtime.on_generation_ready = self._attach_generation_activation
         self._runtime.on_generation_stopping = self._on_generation_stopping
+        self._runtime.holds_activities = self._generation_holds_activities
         self._session_manager = OpenCodeSessionManager(self.settings_manager, self.name)
 
         self._poll_loop = OpenCodePollLoop(self)
@@ -1031,6 +1032,12 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # work keeps a generation from stopping unless it is forced. No
             # commit fenced by this identity is lost when it retires.
             registry.retire_if_current(identity, lambda: True)
+
+    def _generation_holds_activities(self, generation: OpenCodeGeneration) -> bool:
+        service = getattr(self.controller, "agent_service", None)
+        holds = getattr(service, "activation_has_activities", None)
+        identity = generation.identity if isinstance(generation.identity, RuntimeActivationIdentity) else None
+        return bool(callable(holds) and holds(self.name, identity))
 
     async def _on_generation_stopping(self, generation: OpenCodeGeneration, force: bool) -> None:
         self._retire_generation_activation(generation)

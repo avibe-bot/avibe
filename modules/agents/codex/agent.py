@@ -2350,6 +2350,13 @@ class CodexAgent(BaseAgent):
             self._session_has_turn(base_session_id) for base_session_id in runtime.threads
         ):
             return False
+        if not dead:
+            # An Activity this process started keeps it, though no Session
+            # binding names it after its turn ended or its Session moved.
+            service = getattr(getattr(self, "controller", None), "agent_service", None)
+            holds = getattr(service, "activation_has_activities", None)
+            if callable(holds) and holds(self.name, runtime.activation):
+                return False
         ownership = await self._ownership_snapshot(generation)
         if ownership is None:
             return False

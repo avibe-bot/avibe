@@ -229,6 +229,19 @@ class AgentService:
             self.on_activity_terminal(activity)
         return completed
 
+    def activation_has_activities(
+        self, backend: str, activation_identity: Optional[RuntimeActivationIdentity]
+    ) -> bool:
+        """Whether a process still runs an Activity it started.
+
+        A graceful stop must decline while one does: an Activity can outlive
+        its turn and its Session's move to a newer process, so no Session
+        binding names it any longer.
+        """
+        if activation_identity is None:
+            return False
+        return self.activities.has_active_for_activation(backend, activation_identity)
+
     def force_end_activation_activities(
         self,
         backend: str,

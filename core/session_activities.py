@@ -983,6 +983,16 @@ class SessionActivityRegistry:
     def has_active(self, backend: str, runtime_key: str) -> bool:
         return bool(self.active_for_runtime(backend, runtime_key))
 
+    def has_active_for_activation(
+        self, backend: str, activation_identity: RuntimeActivationIdentity
+    ) -> bool:
+        """Whether an active Activity was started under ``activation_identity``."""
+        with self._lock:
+            return any(
+                key[0] == str(backend) and identity is activation_identity
+                for key, identity in self._active_identities.items()
+            )
+
     def runtime_keys_for_activation(
         self, backend: str, activation_identity: RuntimeActivationIdentity
     ) -> set[str]:

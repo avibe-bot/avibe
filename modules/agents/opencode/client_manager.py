@@ -307,6 +307,9 @@ class OpenCodeRuntime:
         self.durable_poll_generations: Optional[Callable[[], Mapping[str, Optional[str]]]] = None
         self.on_generation_ready: Optional[Callable[[OpenCodeGeneration], None]] = None
         self.on_generation_stopping: Optional[Callable[[OpenCodeGeneration, bool], Awaitable[None]]] = None
+        # Whether a generation still runs an Activity it started; a graceful
+        # stop declines while it does.
+        self.holds_activities: Optional[Callable[[OpenCodeGeneration], bool]] = None
 
     def renew(self) -> None:
         """New turns start a new generation; running work stays where it is.
@@ -636,12 +639,16 @@ class OpenCodeRuntime:
         """
 
         generation = wrapper.runtime
-        if not force and generation.process_alive() and not generation.is_drained():
-            # A run marker that no durable poll backs, left by an adoption
-            # that could not read the durable polls, keeps the process only
-            # until a later sweep's retry of that reconciliation succeeds.
-            self._reconcile_run_markers(generation, self._durable_polls())
+        if not force and generation.process_alive():
             if not generation.is_drained():
+                # A run marker that no durable poll backs, left by an adoption
+                # that could not read the durable polls, keeps the process only
+                # until a later sweep's retry of that reconciliation succeeds.
+                self._reconcile_run_markers(generation, self._durable_polls())
+                if not generation.is_drained():
+                    return False
+            # An Activity outlives its turn, so no binding names it any longer.
+            if self.holds_activities is not None and self.holds_activities(generation):
                 return False
         if self.on_generation_stopping is not None:
             await self.on_generation_stopping(generation, force)

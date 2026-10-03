@@ -409,6 +409,55 @@ def test_runtime_gen_020_a_busy_generation_finishes_its_run_while_new_turns_move
     assert new.generation_id in fake_processes.alive
 
 
+def test_an_old_generation_stays_until_the_activity_it_started_ends(fake_processes):
+    """A launch change retires the old generation, and its turn ends, but a
+    background Activity it started still runs there. No binding names that
+    Activity, so the graceful stop asks for it by activation and waits."""
+
+    from core.runtime_activation import RuntimeActivationRegistry
+    from core.session_activities import SessionActivityRegistry
+    from modules.agents.service import AgentService
+
+    activation = RuntimeActivationRegistry()
+    service = AgentService(
+        SimpleNamespace(),
+        activities=SessionActivityRegistry(activation_registry=activation),
+        activation_registry=activation,
+    )
+    agent = _stopping_agent(service, activation)
+
+    async def scenario():
+        runtime = agent._runtime
+        first = await runtime.acquire(OpenCodeLaunchSpec(digest="v1", binary="opencode"))
+        old = first.generation.runtime
+        service.activities.start(
+            backend="opencode",
+            runtime_key="base-1:/work",
+            session_id=None,
+            activity_id="task-1",
+            kind="task",
+            activation_identity=old.identity,
+        )
+        await runtime.acquire(OpenCodeLaunchSpec(digest="v2", binary="opencode"))
+        await first.release()
+        await runtime.reap()
+        kept_for_its_activity = old in runtime.generations() and old not in fake_processes.stopped
+        service.activities.complete(
+            backend="opencode",
+            runtime_key="base-1:/work",
+            activity_id="task-1",
+            status="completed",
+            activation_identity=old.identity,
+        )
+        await runtime.reap()
+        return old, kept_for_its_activity
+
+    old, kept_for_its_activity = asyncio.run(scenario())
+
+    assert kept_for_its_activity
+    assert fake_processes.stopped == [old]
+
+
 def test_a_current_generation_whose_process_died_is_replaced(fake_processes):
     async def scenario():
         runtime = _runtime()
@@ -1335,6 +1384,7 @@ def _stopping_agent(agent_service, runtime_activation=None) -> OpenCodeAgent:
     agent._runtime = _runtime()
     agent._runtime.on_generation_ready = agent._attach_generation_activation
     agent._runtime.on_generation_stopping = agent._on_generation_stopping
+    agent._runtime.holds_activities = agent._generation_holds_activities
     return agent
 
 

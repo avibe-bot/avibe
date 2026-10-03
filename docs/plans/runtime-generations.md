@@ -310,7 +310,10 @@ Implemented in the first PR; the Codex and OpenCode adapters build on it.
   - Adapters provide `start(spec)` and `stop(generation, force) -> bool`, and
     own the routing of bound work. The core decides "drained" from its own
     binding count alone. A graceful stop may decline with `False` while the
-    adapter's own evidence still shows work.
+    adapter's own evidence still shows work. That evidence always includes
+    an Activity the process started (`AgentService.activation_has_activities`):
+    an Activity can outlive its turn and its Session's move to a newer
+    process, so no Session binding names it any longer.
   - Admission is pure bookkeeping: every state change happens in one
     synchronous step, and no admission path ever awaits a teardown. One
     reconciler task per set owns every stop. It runs stops one at a time and,

@@ -1181,6 +1181,52 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(commits, [False])
         transport.stop.assert_awaited_once_with()
 
+    async def test_a_graceful_stop_waits_for_an_activity_its_sessions_no_longer_name(self):
+        """The Session moved its thread to a newer process, but an Activity it
+        started here still runs: the old process stays until that Activity ends."""
+        from core.session_activities import SessionActivityRegistry
+        from modules.agents.service import AgentService
+
+        activation = RuntimeActivationRegistry()
+        service = AgentService(
+            controller=SimpleNamespace(),
+            activities=SessionActivityRegistry(activation_registry=activation),
+            activation_registry=activation,
+        )
+        agent = init_generation_state(object.__new__(CodexAgent))
+        agent._session_mgr = SimpleNamespace(invalidate_thread=Mock())
+        agent._turn_registry = SimpleNamespace(get_active_turn=Mock(return_value=None), clear_session=Mock())
+        agent.controller = SimpleNamespace(runtime_activation=activation, agent_service=service)
+        identity = activation.attach("codex", "/tmp/work#1")
+        transport = SimpleNamespace(stop=AsyncMock(), is_alive=True, _process=None)
+        generation = install_codex_transport(agent, "/tmp/work", transport, activation=identity)
+        service.activities.start(
+            backend="codex",
+            runtime_key="session-1:/tmp/work",
+            session_id="ses-1",
+            activity_id="task-1",
+            kind="task",
+            activation_identity=identity,
+        )
+
+        async def drained(_agent, generations):
+            # No Session binding names the Activity any longer.
+            return tuple(SimpleNamespace(blocks_transport_replacement=False) for _ in generations)
+
+        with patch.object(CodexAgent, "_ownership_snapshots", new=drained):
+            self.assertFalse(await agent._stop_generation(generation, False))
+            transport.stop.assert_not_awaited()
+            service.activities.complete(
+                backend="codex",
+                runtime_key="session-1:/tmp/work",
+                activity_id="task-1",
+                status="completed",
+                activation_identity=identity,
+            )
+            self.assertTrue(await agent._stop_generation(generation, False))
+
+        transport.stop.assert_awaited_once_with()
+
     async def test_graceful_stop_rechecks_ownership_inside_the_fence(self):
         """An owner that commits after the drained check keeps its process."""
         agent = init_generation_state(object.__new__(CodexAgent))
