@@ -873,7 +873,6 @@ def test_end_codex_settles_clears_and_stops_the_last_users_app_server():
         end_work.assert_awaited_once_with(
             "codex",
             base_session_ids={"b1"},
-            activity_runtime_keys={"b1:/w"},
             activation_identities={None},
             reason="backend_refresh",
             agent=agent,

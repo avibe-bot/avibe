@@ -1345,34 +1345,56 @@ async def _bind_turn(agent: OpenCodeAgent, digest: str, base: str, workdir: str)
     return binding.generation.runtime
 
 
-def test_a_cap_forced_stop_settles_the_activities_of_the_sessions_it_interrupts(fake_processes):
-    """A fourth launch spec force-stops the oldest busy generation: the
-    sessions on it get their turns and their background Activities settled
-    as a runtime update, by the runtime keys the ownership snapshot gives them."""
+def test_a_cap_forced_stop_settles_the_turns_and_activities_of_its_process(fake_processes):
+    """A fourth launch spec force-stops the oldest busy generation as a
+    runtime update: the turn of the session bound to it, and every Activity
+    its process started, including one whose session it no longer serves."""
 
-    interrupted: list[dict] = []
+    from core.runtime_activation import RuntimeActivationRegistry
+    from core.session_activities import SessionActivityRegistry
+    from modules.agents.service import AgentService
 
-    async def force_end_runtime_work(backend, *, base_session_ids, activity_runtime_keys, reason, activation_identities, agent):
-        interrupted.append(
-            {"backend": backend, "sessions": set(base_session_ids), "keys": set(activity_runtime_keys), "reason": reason}
-        )
+    releases: list[tuple[set[str], str]] = []
 
-    agent = _stopping_agent(SimpleNamespace(force_end_runtime_work=force_end_runtime_work))
+    async def release_for_backend_refresh(*, backend, base_session_ids, settled_by):
+        releases.append((set(base_session_ids), settled_by))
+
+    activation = RuntimeActivationRegistry()
+    service = AgentService(
+        SimpleNamespace(session_turns=SimpleNamespace(release_for_backend_refresh=release_for_backend_refresh)),
+        activities=SessionActivityRegistry(activation_registry=activation),
+        activation_registry=activation,
+    )
+    settled = []
+    service.on_activity_terminal = settled.append
+    agent = _stopping_agent(service, activation)
 
     async def scenario():
         generations = [
             await _bind_turn(agent, digest, f"base-{index}", f"/work/{index}")
             for index, digest in enumerate(("v1", "v2", "v3"))
         ]
+        oldest = generations[0]
+        for runtime_key, activity_id in (("base-0:/work/0", "task-0"), ("base-moved:/work/0", "task-moved")):
+            service.activities.start(
+                backend="opencode",
+                runtime_key=runtime_key,
+                session_id=None,
+                activity_id=activity_id,
+                kind="task",
+                activation_identity=oldest.identity,
+            )
         await agent._runtime.acquire(OpenCodeLaunchSpec(digest="v4", binary="opencode"))
         await agent._runtime._generations.settled()
-        return generations[0]
+        return oldest
 
     oldest = asyncio.run(scenario())
 
     assert fake_processes.stopped == [oldest]
-    assert interrupted == [
-        {"backend": "opencode", "sessions": {"base-0"}, "keys": {"base-0:/work/0"}, "reason": "backend_refresh"}
+    assert releases == [({"base-0"}, "backend_refresh")]
+    assert sorted((task.id, task.status, task.metadata.get("interrupt_reason")) for task in settled) == [
+        ("task-0", "killed", "backend_refresh"),
+        ("task-moved", "killed", "backend_refresh"),
     ]
 
 

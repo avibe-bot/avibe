@@ -1038,13 +1038,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._interrupt_generation_work(generation)
 
     async def _interrupt_generation_work(self, generation: OpenCodeGeneration) -> None:
-        """Settle every turn and Activity bound to a generation being force-stopped.
+        """Settle every turn and Activity of a generation being force-stopped.
 
         Only this agent's bindings name the sessions, so a disabled agent's
         stop never reaches a re-enabled agent's work. A stop is retried while
         its process survives, and a retry settles only the sessions no earlier
-        attempt settled: the core settles by session, and a settled session's
-        next turn may already run on the re-enabled agent.
+        attempt settled: the core settles turns by session, and a settled
+        session's next turn may already run on the re-enabled agent. Every
+        Activity started under this generation's activation settles too, bound
+        session or not: an Activity can outlive its foreground turn.
         """
 
         sessions = {
@@ -1052,8 +1054,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             for base_session_id, bound in self._session_generations.items()
             if bound is generation
         }
-        if not sessions:
-            return
         logger.warning(
             "Force-stopping OpenCode generation %s interrupts %s session(s)",
             generation.generation_id,
@@ -1061,35 +1061,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         )
         unsettled = sessions - generation.interrupted_sessions
         force_end = getattr(getattr(self.controller, "agent_service", None), "force_end_runtime_work", None)
-        if unsettled and callable(force_end):
-            # A re-enabled agent's Activities can share these sessions' runtime
-            # keys, so only those started under this agent's processes end.
-            identities = {
-                own.identity
-                for own in (*self._runtime.generations(), generation)
-                if isinstance(own.identity, RuntimeActivationIdentity)
-            }
+        if callable(force_end):
             await force_end(
                 self.name,
                 base_session_ids=unsettled,
-                # The runtime keys the ownership snapshot gives these sessions,
-                # so their Activities and Runs settle with the process.
-                activity_runtime_keys=self._activity_runtime_keys(unsettled),
-                activation_identities=identities or {None},
+                activation_identities={generation.identity},
                 reason=self._forced_stop_reason,
                 agent=self,
             )
             generation.interrupted_sessions |= unsettled
-        await self._cancel_active_requests(base_session_ids=sessions)
-
-    def _activity_runtime_keys(self, base_session_ids: set[str]) -> set[str]:
-        keys = set()
-        for base_session_id in base_session_ids:
-            request_session = self._session_manager.get_request_session(base_session_id)
-            working_path = request_session[1] if request_session and len(request_session) >= 2 else None
-            if working_path:
-                keys.add(f"{base_session_id}:{working_path}")
-        return keys
+        if sessions:
+            await self._cancel_active_requests(base_session_ids=sessions)
 
     def _bound_generation(self, base_session_id: str | None) -> OpenCodeGeneration | None:
         return self._session_generations.get(str(base_session_id or ""))

@@ -1212,12 +1212,13 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         """End kills the process only after the ending Session's Activities settle."""
         agent = init_generation_state(object.__new__(CodexAgent))
         events = []
+        activation = object()
 
         async def stop():
             events.append("stop")
 
-        async def end_work(backend, *, base_session_ids, activity_runtime_keys, activation_identities, reason, agent):
-            events.append(("settle", backend, set(base_session_ids), set(activity_runtime_keys), reason))
+        async def end_work(backend, *, base_session_ids, activation_identities, reason, agent):
+            events.append(("settle", backend, set(base_session_ids), activation_identities, reason))
 
         transport = SimpleNamespace(stop=stop, _process=None)
         agent._session_mgr = SimpleNamespace(invalidate_thread=Mock(), clear=Mock())
@@ -1227,35 +1228,56 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             clear_session=Mock(),
         )
         agent.controller = SimpleNamespace(agent_service=SimpleNamespace(force_end_runtime_work=end_work))
-        install_codex_transport(agent, "/tmp/work", transport, sessions={"session-1": "thread-1"})
+        install_codex_transport(
+            agent, "/tmp/work", transport, sessions={"session-1": "thread-1"}, activation=activation
+        )
 
         self.assertTrue((await agent.end_session("session-1"))["process_killed"])
 
         self.assertEqual(
             events,
-            [("settle", "codex", set(), {"session-1:/tmp/work"}, "backend_refresh"), "stop"],
+            [("settle", "codex", set(), {activation}, "backend_refresh"), "stop"],
         )
 
-    async def test_forced_stop_settles_activity_only_work(self):
-        """A forced stop ends durable Activities even when no foreground turn runs."""
+    async def test_a_forced_stop_settles_activities_its_sessions_no_longer_name(self):
+        """An Activity outlives its turn and its Session's thread move; a forced stop still ends it.
+
+        The process's Activities are found by its activation, not by the
+        Sessions still bound to it.
+        """
+        from core.session_activities import SessionActivityRegistry
+        from modules.agents.service import AgentService
+
+        activation = RuntimeActivationRegistry()
+        service = AgentService(
+            controller=SimpleNamespace(),
+            activities=SessionActivityRegistry(activation_registry=activation),
+            activation_registry=activation,
+        )
+        settled = []
+        service.on_activity_terminal = settled.append
         agent = init_generation_state(object.__new__(CodexAgent))
-        transport = SimpleNamespace(stop=AsyncMock(), _process=None)
         agent._session_mgr = SimpleNamespace(invalidate_thread=Mock())
         agent._turn_registry = SimpleNamespace(get_active_turn=Mock(return_value=None), clear_session=Mock())
-        agent.controller = SimpleNamespace(
-            agent_service=SimpleNamespace(force_end_runtime_work=AsyncMock())
+        agent.controller = SimpleNamespace(agent_service=service)
+        identity = activation.attach("codex", "/tmp/work#1")
+        transport = SimpleNamespace(stop=AsyncMock(), _process=None)
+        # The Session's thread already moved to a newer process: none is bound here.
+        generation = install_codex_transport(agent, "/tmp/work", transport, activation=identity)
+        service.activities.start(
+            backend="codex",
+            runtime_key="session-1:/tmp/work",
+            session_id="ses-1",
+            activity_id="task-1",
+            kind="task",
+            activation_identity=identity,
         )
-        generation = install_codex_transport(agent, "/tmp/work", transport, sessions={"session-1": "thread-1"})
 
         self.assertTrue(await agent._stop_generation(generation, True))
 
-        agent.controller.agent_service.force_end_runtime_work.assert_awaited_once_with(
-            "codex",
-            base_session_ids=set(),
-            activity_runtime_keys={"session-1:/tmp/work"},
-            activation_identities={None},
-            reason="backend_refresh",
-            agent=agent,
+        self.assertEqual(
+            [(activity.id, activity.status, activity.metadata.get("interrupt_reason")) for activity in settled],
+            [("task-1", "killed", "backend_refresh")],
         )
         transport.stop.assert_awaited_once_with()
 

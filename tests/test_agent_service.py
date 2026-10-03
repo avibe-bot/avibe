@@ -801,7 +801,7 @@ def test_a_runtime_force_end_spares_the_next_turn_admitted_while_it_settles() ->
             release_for_backend_refresh=release_for_backend_refresh,
         )
 
-        await service.force_end_runtime_work("claude", base_session_ids={"s1"}, activity_runtime_keys=set())
+        await service.force_end_runtime_work("claude", base_session_ids={"s1"}, activation_identities=())
 
         assert not second_task.done()
         controller.emit_agent_message.assert_not_awaited()
@@ -849,7 +849,7 @@ def test_runtime_gen_006_a_disabled_agents_retried_stop_spares_the_re_enabled_ag
         await service.force_end_runtime_work(
             "claude",
             base_session_ids={"s1"},
-            activity_runtime_keys=set(),
+            activation_identities=(),
             reason="backend_disabled",
             agent=disabled,
         )
