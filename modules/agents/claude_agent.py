@@ -2392,8 +2392,11 @@ class ClaudeAgent(BaseAgent):
                             )
 
                         if text_parts:
-                            formatted_assistant = formatter.format_assistant_message(text_parts)
-                            self._pending_assistant_message[composite_key] = formatted_assistant
+                            # Claude writes Markdown; keep it as written, like the
+                            # Result and every other backend's narration.
+                            self._pending_assistant_message[composite_key] = "\n\n".join(
+                                text_parts
+                            )
                             pending_assistant_phase = response_phase
 
                         # AskUserQuestion handling disabled - SDK cannot respond programmatically
@@ -4745,10 +4748,8 @@ class ClaudeAgent(BaseAgent):
                         parse_mode="markdown",
                         status_label=toolcall_label,
                     )
-                if formatter is not None and assistant_text:
-                    self._pending_assistant_message[composite_key] = (
-                        formatter.format_assistant_message([assistant_text])
-                    )
+                if assistant_text:
+                    self._pending_assistant_message[composite_key] = assistant_text
             except asyncio.CancelledError:
                 raise
             except Exception:

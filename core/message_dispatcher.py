@@ -63,6 +63,7 @@ from storage.background import (
     normalize_run_status,
 )
 from vibe.i18n import t as i18n_t
+from vibe.message_types import TRANSCRIPT_COPY_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -3617,22 +3618,51 @@ class ConsolidatedMessageDispatcher:
             )
             return None
 
-        # Persist the intermediate log row BEFORE the mute filter so muted
-        # assistant / tool_call messages still land in the store (product
-        # requirement: the process log is complete even when a channel hides it).
-        persist_agent_message(target_context, canonical_type, persist_text, citations=citations)
-        # Web only: the same text additionally lands as a transcript-visible
+        # Web only: substantial narration also lands as a transcript-visible
         # ``interim`` row. Every backend emits ``assistant`` only once later output
         # has proved the text is not the Turn's final answer, so this never
         # duplicates the result. ``level="process"`` keeps a row log-only (for
         # example reasoning summaries).
+        interim_row = None
         if (
             canonical_type == "assistant"
             and level != "process"
             and target_context.platform == "avibe"
-            and self._is_interim_worthy(persist_text)
         ):
-            persist_agent_message(target_context, "interim", persist_text, citations=citations)
+            # The bubble is the agent's words like a reply, so it gets the same
+            # button parse, and only the remaining body decides if it is one.
+            interim = process_reply(
+                raw_text,
+                include_quick_replies=getattr(
+                    self.controller.config, "reply_enhancements", True
+                ),
+                allow_unseparated_quick_replies=self._supports_quick_replies(
+                    target_context
+                ),
+                keep_file_links=True,
+            )
+            if self._is_interim_worthy(interim.text):
+                interim_row = persist_agent_message(
+                    target_context,
+                    "interim",
+                    interim.text,
+                    quick_replies=[
+                        b.text for b in _written_buttons(interim.buttons, citations)
+                    ]
+                    or None,
+                    citations=citations,
+                )
+        # Persist the intermediate log row BEFORE the mute filter so muted
+        # assistant / tool_call messages still land in the store (product
+        # requirement: the process log is complete even when a channel hides it).
+        # Only a narration whose bubble was stored is left out of Activity.
+        persist_agent_message(
+            target_context,
+            canonical_type,
+            persist_text,
+            citations=citations,
+            metadata={TRANSCRIPT_COPY_KEY: "interim"} if interim_row else None,
+        )
 
         # The row above is the only copy of an intermediate message that carries a
         # sidecar. Everything left below is what the channel is shown - the concise

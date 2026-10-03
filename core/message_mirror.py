@@ -35,7 +35,7 @@ from core.services import sessions as workbench_sessions_service
 from modules.im.base import MessageContext
 from storage import agent_events_service, messages_service, settings_service
 from storage.db import get_cached_sqlite_engine
-from vibe.message_types import spec_for
+from vibe.message_types import activity_role_for, spec_for
 
 logger = logging.getLogger(__name__)
 
@@ -546,7 +546,7 @@ def persist_agent_message(
         if context.platform == "avibe" and not suppress_delivery and (
             message_type in messages_service.TRANSCRIPT_TYPES
             or (
-                spec_for(message_type)["activityRole"] == "activity"
+                activity_role_for(message_type, metadata) == "activity"
                 and _activity_streaming_enabled()
             )
         ):

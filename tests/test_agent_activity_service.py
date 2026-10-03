@@ -275,6 +275,38 @@ def test_a_narration_row_carries_its_citation_sidecar(isolated_state):
     assert "citations" not in rows["m_plain"]
 
 
+def test_narration_the_transcript_draws_is_not_repeated_in_activity(isolated_state):
+    """A narration with an ``interim`` transcript copy appears once, as the bubble."""
+    engine = create_sqlite_engine()
+    sid = "ses_twin"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_u", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q", source="user")
+        _msg(
+            conn, scope, sid, mid="m_long", mtype="assistant", author="agent",
+            created_at="2026-06-01T10:00:01.000000+00:00", text="Found it.\nThe cache is shared.\nFixing it.",
+            metadata={"transcript_copy": "interim"},
+        )
+        _msg(
+            conn, scope, sid, mid="m_bubble", mtype="interim", author="agent",
+            created_at="2026-06-01T10:00:01.000000+00:00", text="Found it.\nThe cache is shared.\nFixing it.",
+        )
+        _evt(conn, scope, sid, eid="e_tool", created_at="2026-06-01T10:00:02.000000+00:00", text="🔧 `Bash`")
+        _msg(
+            conn, scope, sid, mid="m_short", mtype="assistant", author="agent",
+            created_at="2026-06-01T10:00:03.000000+00:00", text="Still working.",
+        )
+        _msg(conn, scope, sid, mid="m_r", mtype="result", author="agent", created_at="2026-06-01T10:00:04.000000+00:00", text="done")
+
+    with engine.connect() as conn:
+        summary = agent_activity_service.list_turn_groups(conn, session_id=sid)
+        [group] = summary["groups"]
+        detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id=group["id"])
+
+    assert detail is not None
+    assert [row["id"] for row in detail["rows"]] == ["e_tool", "m_short"]
+
+
 def test_agent_annotation_marks_are_not_activity(isolated_state):
     engine = create_sqlite_engine()
     sid = "ses_sp"

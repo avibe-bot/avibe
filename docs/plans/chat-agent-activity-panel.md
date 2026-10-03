@@ -73,6 +73,11 @@ Event rows:
   users read the content). Wrapped, rendered with the existing `Markdown`
   component in a compact style (smaller font); no truncation. In the compact
   running viewport the fixed window simply follows the tail.
+  Narration that the Web transcript already draws as a muted `interim` bubble
+  (owner decision, 2026-10-02) is not repeated here: its `assistant` row carries
+  `metadata.transcript_copy = "interim"`, which `activity_role_for` maps to role
+  `none` for both the durable groups and the live stream. Short narration below
+  the bubble threshold and process-only rows stay in the panel.
 
 Grouping rules:
 
