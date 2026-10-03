@@ -57,10 +57,21 @@ class AdapterTranscriptStore:
         # Per Session, the environment the context last recorded; evicted by ``forget``
         # when the adapter retires the Session's runtime.
         self._env_state: dict[str, dict[str, str]] = {}
+        # Per Session, the Agent of the Turn writing it (its request snapshot), so a
+        # mid-Turn change of the Session's selected Agent never re-attributes its rows.
+        self._agents: dict[str, str] = {}
+
+    def bind_agent(self, session_id: str, agent_name: Optional[str]) -> None:
+        """Attribute the Session's next writes to the running Turn's Agent."""
+        if agent_name:
+            self._agents[session_id] = agent_name
+        else:
+            self._agents.pop(session_id, None)
 
     def forget(self, session_id: str) -> None:
         """Drop per-Session state; the next consumption reads the environment from the rows again."""
         self._env_state.pop(session_id, None)
+        self._agents.pop(session_id, None)
         self._store.forget(session_id)
 
     # --- TranscriptStore -----------------------------------------------------
@@ -80,19 +91,23 @@ class AdapterTranscriptStore:
         return entry
 
     async def append_response(self, session_id: str, message: AssistantMessage, *, final: bool) -> ContextEntry:
-        entry = await self._store.append_response(session_id, message, final=final)
+        entry = await self._store.append_response(
+            session_id, message, final=final, agent_name=self._agents.get(session_id)
+        )
         self._on_response(session_id, entry.row_id, message)
         return entry
 
     async def append_tool_result(
         self, session_id: str, message: ToolResultMessage, *, details: Mapping[str, Any]
     ) -> ContextEntry:
-        return await self._store.append_tool_result(session_id, message, details=details)
+        return await self._store.append_tool_result(
+            session_id, message, details=details, agent_name=self._agents.get(session_id)
+        )
 
     async def append_payload(
         self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state"], payload: Mapping[str, Any]
     ) -> ContextEntry:
-        return await self._store.append_payload(session_id, kind, payload)
+        return await self._store.append_payload(session_id, kind, payload, agent_name=self._agents.get(session_id))
 
     # --- implementation ------------------------------------------------------
 

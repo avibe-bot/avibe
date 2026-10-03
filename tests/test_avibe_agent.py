@@ -47,7 +47,7 @@ from storage import message_deliveries
 from storage.agent_transcript import resolve_fork_anchor_seq
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions, messages, session_turns
+from storage.models import agent_events, agent_sessions, messages, session_turns
 from storage.settings_service import upsert_scope
 from tests.agent_core.fakes import ORIGIN, FakeJobHost, FakeTool, ScriptedProvider, assistant
 from vibe.i18n import t as i18n_t
@@ -233,7 +233,8 @@ class _Controller:
         """The Turn owner's native start: bind the steer identity, materialize the input row."""
         turn_id = _turn(context)
         target = ActiveSteerTarget("runtime", turn_id, context, None, self.agent)
-        native = self.agent.steering_native_turn_id(target)
+        # Outside a run (a crash simulation), the identity a previous process's adapter bound.
+        native = self.agent.steering_native_turn_id(target) or f"avibe:previous-process:{turn_id}"
         self.started.append(native)
         with self.engine.begin() as conn:
             turn = message_deliveries.get_turn(conn, turn_id)
@@ -461,7 +462,8 @@ async def test_a_turn_commits_its_context_once_and_shows_the_reply_once(
     # The clock fields follow include_time_info (off here), as every input prefix does.
     assert "date:" not in environment.text and "timezone:" not in environment.text
     # The steer identity existed when the Turn owner bound the native start.
-    assert harness.controller.started == [f"avibe:{_turn(request.context)}"]
+    [native] = harness.controller.started
+    assert native.startswith("avibe:") and native.endswith(f":{_turn(request.context)}")
     # A10: every request is the context rebuilt from the tables at that point.
     assert [request_.messages for request_ in harness.provider.requests] == [
         project(rows[:1]).messages,
@@ -535,6 +537,51 @@ async def test_a_setup_failure_after_the_route_resolved_fails_the_hub_attempt(
     # Through the same Hub-aware failure path as any other run failure, before any dispatch.
     assert len(reported) == 1 and harness.controller.started == []
     assert harness.controller.terminals[-1]["is_error"] is True
+
+
+async def test_committed_rows_keep_the_agent_that_ran_the_turn(engine, session, tmp_path, published) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(arguments, ctx):
+        started.set()
+        await release.wait()
+        return ToolResult((text("a.py"),))
+
+    harness = _Harness(engine, tmp_path, "avibe", _tool_turn(), tools=[FakeTool("echo", execute=slow)])
+    request = harness.request("list files")
+    request.vibe_agent_name = "avibe"
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    await started.wait()
+    with engine.begin() as conn:
+        # The user picks another Agent while this Turn runs.
+        conn.execute(
+            update(agent_sessions).where(agent_sessions.c.id == SESSION).values(agent_name="reviewer", agent_backend="codex")
+        )
+    release.set()
+    await running
+
+    with engine.connect() as conn:
+        names = {
+            row.author_name
+            for row in conn.execute(
+                select(messages.c.author_name).where(
+                    messages.c.session_id == SESSION, messages.c.author == "agent", messages.c.context_seq.is_not(None)
+                )
+            )
+        } | {
+            row.agent_name
+            for row in conn.execute(
+                select(agent_events.c.agent_name).where(
+                    agent_events.c.session_id == SESSION, agent_events.c.context_seq.is_not(None)
+                )
+            )
+        }
+    assert names == {"avibe"}
+    with engine.connect() as conn:
+        backends = set(conn.execute(
+            select(agent_events.c.backend).where(agent_events.c.session_id == SESSION, agent_events.c.context_seq.is_not(None))
+        ).scalars())
+    assert backends == {"avibe"}
 
 
 async def test_a_steer_enters_after_the_tool_batch_even_when_its_row_arrives_late(
@@ -632,40 +679,18 @@ async def test_reconcile_reports_a_steer_attempt_only_from_evidence(engine, sess
     assert (await harness.agent.reconcile_steer_attempt(reconcile, None)).outcome is SteerOutcome.UNKNOWN
 
 
-async def test_reconcile_settles_an_attempt_a_previous_process_opened(engine, session, tmp_path, published) -> None:
-    from core.services.agent_steering import SteerReconcileRequest
-    from storage.models import message_deliveries as delivery_rows
-
-    harness = _Harness(engine, tmp_path, "avibe", [])
-    request = harness.request("long task")
-    turn_id = _turn(request.context)
-    harness.controller._native_start(request.context)
-    native = f"avibe:{turn_id}"
-    _delivery_id, attempt_id = harness.open_steer("and this", turn_id, native)
-    with engine.begin() as conn:
-        # The steer was in flight when the previous process died; no live call can answer it now.
-        conn.execute(
-            update(delivery_rows)
-            .where(delivery_rows.c.current_attempt_id == attempt_id)
-            .values(current_attempt_opened_at="2026-01-01T00:00:00.000000Z")
-        )
-
-    receipt = await harness.agent.reconcile_steer_attempt(SteerReconcileRequest(SESSION, turn_id, native, attempt_id), None)
-
-    assert receipt.outcome is SteerOutcome.NOT_ACTIVE
-
-
-async def test_reconcile_settles_an_attempt_a_retired_adapter_opened(engine, session, tmp_path, published) -> None:
+async def test_reconcile_settles_an_attempt_another_adapter_instance_opened(engine, session, tmp_path, published) -> None:
     from core.services.agent_steering import SteerReconcileRequest
 
     harness = _Harness(engine, tmp_path, "avibe", [])
     request = harness.request("long task")
     turn_id = _turn(request.context)
     harness.controller._native_start(request.context)
-    native = f"avibe:{turn_id}"
+    [native] = harness.controller.started
     _delivery_id, attempt_id = harness.open_steer("and this", turn_id, native)
-    # The backend is disabled and enabled again in this process: a new adapter owns no live call for it.
-    await asyncio.sleep(1.1)
+    # A retired adapter (the backend disabled and enabled again, even within one second) or a
+    # previous process: the native turn id names the instance that ran the Turn, so no clock
+    # is needed to tell that no call of this adapter can settle the attempt.
     harness.new_agent()
 
     receipt = await harness.agent.reconcile_steer_attempt(SteerReconcileRequest(SESSION, turn_id, native, attempt_id), None)
@@ -790,7 +815,7 @@ async def test_resume_settles_open_calls_and_admits_unconsumed_inputs_before_the
     )
     await harness.agent.store.append_response(SESSION, assistant("Running.", calls=calls), final=False)
     jobs.states["job_1"] = JobStatus("running")
-    steer_id, attempt = harness.open_steer("and the docs", _turn(first.context), f"avibe:{_turn(first.context)}")
+    steer_id, attempt = harness.open_steer("and the docs", _turn(first.context), harness.controller.started[-1])
     harness.accept_steer(steer_id, attempt, _turn(first.context))
 
     harness.new_agent()
@@ -855,7 +880,7 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
         )
         assert message_deliveries.open_steer_attempt(
             conn, steer["id"], expected_version=int(steer["version"]), turn_id=turn_id,
-            attempt_id="att_agent_steer", expected_native_turn_id=f"avibe:{turn_id}",
+            attempt_id="att_agent_steer", expected_native_turn_id=harness.controller.started[-1],
         )
         assert message_deliveries.materialize_steer_acceptance(
             conn, leader_delivery_id=steer["id"], expected_attempt_id="att_agent_steer", turn_id=turn_id, evidence={}
@@ -1221,6 +1246,28 @@ async def test_a_turn_queued_behind_a_stopped_one_settles_the_call_it_left_open(
     results = [entry for entry in rows if entry.kind == "tool_result"]
     assert [entry.message.tool_call_id for entry in results] == ["call_1"]
     assert results[0].context_seq < next(entry.context_seq for entry in rows if entry.row_id.startswith("dlv_turn_2"))
+
+
+@pytest.mark.parametrize("phase", ["terminal_result", "preflight_failure"])
+async def test_a_failure_while_settling_reaches_the_shared_owner(engine, session, tmp_path, published, phase) -> None:
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("the answer"))]])
+    if phase == "preflight_failure":
+        async def refuse(*_args, **_kwargs):
+            raise RuntimeError("no source serves this model")
+
+        harness.controller.model_hub_runtime = SimpleNamespace(resolve=refuse)
+    emit = harness.controller.emit_agent_message
+
+    async def broken_terminal(context, message_type, text, *args, **kwargs):
+        if message_type in ("result", "error", "notify"):
+            raise RuntimeError("the settings lookup failed")
+        return await emit(context, message_type, text, *args, **kwargs)
+
+    harness.controller.emit_agent_message = broken_terminal
+
+    # AgentService's fallback releases the runtime gate only if the failure reaches it.
+    with pytest.raises(RuntimeError, match="settings lookup"):
+        await harness.agent.handle_message(harness.request("hello"))
 
 
 async def test_a_refused_model_route_fails_before_the_input_is_written(engine, session, tmp_path, published) -> None:

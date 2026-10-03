@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -135,6 +136,7 @@ class _Run:
     request: AgentRequest
     session_id: str
     turn_id: str
+    instance: str
     agent: Optional[Agent] = None
     router: Optional[HubModelRouter] = None
     cwd: str = ""
@@ -153,7 +155,8 @@ class _Run:
 
     @property
     def native_turn_id(self) -> str:
-        return f"{BACKEND}:{self.turn_id}"
+        """``avibe:<adapter instance>:<turn>``: the instance that runs the Turn, for steer reconcile."""
+        return f"{BACKEND}:{self.instance}:{self.turn_id}"
 
 
 @dataclass
@@ -197,12 +200,10 @@ class AvibeAgent(BaseAgent):
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.
         self._runtimes: dict[str, _SessionRuntime] = {}
-        # When this adapter was registered, before any of its runs: a steer attempt opened
-        # earlier belongs to a previous process or a retired adapter, so no live call of
-        # this one can settle it.
-        # Attempt timestamps have whole seconds, so this one does too: an attempt in the
-        # registration second stays UNKNOWN rather than risk a false NOT_ACTIVE.
-        self._started_at = datetime.now(timezone.utc).replace(microsecond=0)
+        # This adapter instance, named in every native turn id it reports: a steer attempt
+        # whose Turn another instance ran (a retired adapter or a previous process) has no
+        # live call here that could settle it.
+        self._instance = secrets.token_hex(4)
         # J5 while the service runs: when the jobs directory was last pruned, and the pass in flight.
         self._pruned_at: Optional[float] = None
         self._prune_task: Optional[asyncio.Task] = None
@@ -215,7 +216,9 @@ class AvibeAgent(BaseAgent):
         The Turn's state (its Stop intent, router, and failure route) is published
         before anything is awaited, so a Stop in any phase is honored: before the
         dispatch marks it settles the Turn as stopped with nothing dispatched. Every
-        exception goes to the Hub-aware ``_fail``, and every exit closes the router.
+        exception raised before settlement goes to the Hub-aware ``_fail``; one raised during
+        or after it propagates to ``AgentService``, whose fallback releases the runtime gate;
+        every exit closes the router.
         """
         context = request.context
         payload = context.platform_specific or {}
@@ -225,16 +228,21 @@ class AvibeAgent(BaseAgent):
         if not session_id or not turn_id or not input_id:
             await self._fail(request, "generic", "Avibe Agent turn has no Session, Turn, or input identity.")
             return
-        turn = _Run(request, session_id, turn_id)
+        turn = _Run(request, session_id, turn_id, self._instance)
         async with self._held(session_id, run=turn) as runtime:
             try:
                 await self._run_turn(runtime, turn, input_id)
             except Exception as error:
+                if turn.settled:
+                    # Raised during or after settlement (its emits, or a failure notice): the
+                    # shared owner's fallback releases the runtime gate, so it must see it.
+                    raise
                 logger.exception("Avibe Agent turn failed for Session %s", session_id)
-                if not turn.settled:
-                    await self._fail(request, "generic", f"turn failed: {error}", cause=error)
+                turn.settled = True
+                await self._fail(request, "generic", f"turn failed: {error}", cause=error)
             finally:
                 await self._admit_returned_inputs(turn)
+                self.store.bind_agent(session_id, None)
                 if turn.router is not None:
                     await turn.router.aclose()
                 self._prune_jobs_soon()
@@ -242,6 +250,9 @@ class AvibeAgent(BaseAgent):
     async def _run_turn(self, runtime: _SessionRuntime, turn: _Run, input_id: str) -> None:
         request, session_id = turn.request, turn.session_id
         context = request.context
+        # Rows this Turn writes are the Turn's Agent's, from its request snapshot, even if the
+        # Session's selected Agent changes while it runs.
+        self.store.bind_agent(session_id, request.vibe_agent_name)
         await self._resume(runtime)
         if turn.stop_requested:
             return await self._settle_stopped(turn)
@@ -465,12 +476,11 @@ class AvibeAgent(BaseAgent):
 
         ACCEPTED when its row was consumed or the live run accepted it; otherwise
         UNKNOWN, because the live attempt in this process owns its definitive
-        negative receipt. Only an attempt opened before this adapter was registered
-        (by a previous process or a retired adapter) is NOT_ACTIVE: no call of this
-        adapter can still settle it.
+        negative receipt. Only an attempt on a Turn another adapter instance ran (its native
+        turn id names that instance: a retired adapter or a previous process) is
+        NOT_ACTIVE: no call of this adapter can settle it.
         """
-        leader = await asyncio.to_thread(self._attempt_leader, request.attempt_id)
-        message_id, opened_at = leader if leader is not None else (None, None)
+        message_id = await asyncio.to_thread(self._attempt_leader_id, request.attempt_id)
         if message_id is not None and await asyncio.to_thread(self._consumed, message_id):
             return steer_result(SteerOutcome.ACCEPTED, turn_id=request.expected_logical_turn_id)
         run = self._run_for(request.target_session_id, request.expected_logical_turn_id)
@@ -481,8 +491,8 @@ class AvibeAgent(BaseAgent):
         ):
             # The accepted steer is still queued in the live run that owns it.
             return steer_result(SteerOutcome.ACCEPTED, turn_id=run.turn_id)
-        if opened_at is not None and opened_at < self._started_at:
-            return steer_result(SteerOutcome.NOT_ACTIVE, reason="previous_adapter")
+        if not request.expected_native_turn_id.startswith(f"{BACKEND}:{self._instance}:"):
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="another_adapter_instance")
         return steer_result(SteerOutcome.UNKNOWN, reason="no_attempt_evidence")
 
     # --- one run ---------------------------------------------------------------
@@ -1034,18 +1044,11 @@ class AvibeAgent(BaseAgent):
 
     def _attempt_leader_id(self, attempt_id: str) -> Optional[str]:
         """The ``messages.id`` a steer attempt materializes as: its first Delivery."""
-        leader = self._attempt_leader(attempt_id)
-        return leader[0] if leader is not None else None
-
-    def _attempt_leader(self, attempt_id: str) -> Optional[tuple[str, Optional[datetime]]]:
-        """The attempt's first Delivery id, and when the attempt was opened."""
         if not attempt_id:
             return None
         with self._engine.connect() as conn:
             rows = delivery_store.attempt_deliveries(conn, attempt_id)
-        if not rows:
-            return None
-        return str(rows[0]["id"]), _instant(rows[0].get("current_attempt_opened_at"))
+        return str(rows[0]["id"]) if rows else None
 
     def _consumed(self, message_id: str) -> bool:
         with self._engine.connect() as conn:

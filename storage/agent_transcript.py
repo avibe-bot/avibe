@@ -82,6 +82,8 @@ INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 FINAL_TYPES = ("result", "error")
 RESPONSE_TYPES = ("assistant", *FINAL_TYPES)
 CONTEXT_VISIBILITY = "context"
+# Only the Avibe Agent writes context rows; the Session's routed backend may change mid-Turn.
+CONTEXT_WRITER = "avibe"
 PAYLOAD_VERSION = 1
 
 PayloadKind = Literal["compaction", "context_edit", "agent_state"]
@@ -195,14 +197,16 @@ class SQLiteTranscriptStore:
 
         return await self._write(session_id, work)
 
-    async def append_response(self, session_id: str, message: AssistantMessage, *, final: bool) -> ContextEntry:
+    async def append_response(
+        self, session_id: str, message: AssistantMessage, *, final: bool, agent_name: Optional[str] = None
+    ) -> ContextEntry:
         if not isinstance(message, AssistantMessage):
             raise TypeError("append_response takes an AssistantMessage")
         model = _canonical({"version": PAYLOAD_VERSION, "message": message_to_dict(message)}, "response")
         display_text = self._render(message, final=final)
 
         def work(conn: Connection) -> ContextEntry:
-            origin = _turn_origin(conn, session_id)
+            origin = _turn_origin(conn, session_id, agent_name)
             seq = _next_context_seq(conn, session_id)
             row = messages_service.append(
                 conn,
@@ -222,7 +226,12 @@ class SQLiteTranscriptStore:
         return await self._write(session_id, work)
 
     async def append_tool_result(
-        self, session_id: str, message: ToolResultMessage, *, details: Mapping[str, Any]
+        self,
+        session_id: str,
+        message: ToolResultMessage,
+        *,
+        details: Mapping[str, Any],
+        agent_name: Optional[str] = None,
     ) -> ContextEntry:
         if not isinstance(message, ToolResultMessage):
             raise TypeError("append_tool_result takes a ToolResultMessage")
@@ -231,16 +240,21 @@ class SQLiteTranscriptStore:
             payload["details"] = dict(details)
         payload = _canonical(payload, "tool result")
         return await self._write(
-            session_id, lambda conn: self._append_event(conn, session_id, "tool_result", payload, message)
+            session_id,
+            lambda conn: self._append_event(conn, session_id, "tool_result", payload, message, agent_name),
         )
 
-    async def append_payload(self, session_id: str, kind: PayloadKind, payload: Mapping[str, Any]) -> ContextEntry:
+    async def append_payload(
+        self, session_id: str, kind: PayloadKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None
+    ) -> ContextEntry:
         if kind not in ("compaction", "context_edit", "agent_state"):
             raise ValueError(f"not a payload entry kind: {kind!r}")
         data = _canonical(dict(payload), f"{kind} payload")
         if not _is_current_version(data):
             raise ValueError(f"a {kind} payload needs version {PAYLOAD_VERSION}")
-        return await self._write(session_id, lambda conn: self._append_event(conn, session_id, kind, data, None))
+        return await self._write(
+            session_id, lambda conn: self._append_event(conn, session_id, kind, data, None, agent_name)
+        )
 
     # --- implementation -------------------------------------------------------
 
@@ -266,8 +280,9 @@ class SQLiteTranscriptStore:
         kind: EntryKind,
         payload: dict[str, Any],
         message: Optional[ToolResultMessage],
+        agent_name: Optional[str] = None,
     ) -> ContextEntry:
-        origin = _turn_origin(conn, session_id)
+        origin = _turn_origin(conn, session_id, agent_name)
         seq = _next_context_seq(conn, session_id)
         row = agent_events_service.append(
             conn,
@@ -337,9 +352,15 @@ def _next_context_seq(conn: Connection, session_id: str) -> int:
     return top + 1
 
 
-def _turn_origin(conn: Connection, session_id: str) -> _TurnOrigin:
+def _turn_origin(conn: Connection, session_id: str, agent_name: Optional[str] = None) -> _TurnOrigin:
+    """Where an inserted row belongs, and the Agent that wrote it.
+
+    ``agent_name`` is the running Turn's Agent (its request snapshot): the Session's
+    selected Agent may change mid-Turn, so the Session row is only the fallback for a
+    write outside a Turn (startup recovery).
+    """
     session = conn.execute(
-        select(agent_sessions.c.agent_name, agent_sessions.c.agent_backend).where(agent_sessions.c.id == session_id)
+        select(agent_sessions.c.agent_name).where(agent_sessions.c.id == session_id)
     ).first()
     if session is None:
         raise TranscriptError(f"Session {session_id} does not exist")
@@ -367,7 +388,7 @@ def _turn_origin(conn: Connection, session_id: str) -> _TurnOrigin:
         )
         if home is None:
             raise TranscriptError(f"Session {session_id} has consumed no input; a context row answers a Turn")
-        return _TurnOrigin(home.platform, home.id, None, session.agent_name, session.agent_backend)
+        return _TurnOrigin(home.platform, home.id, None, agent_name or session.agent_name, CONTEXT_WRITER)
     platform, scope_id = latest.platform, latest.scope_id
     turn_id = conn.execute(
         select(message_deliveries.c.turn_id)
@@ -390,7 +411,7 @@ def _turn_origin(conn: Connection, session_id: str) -> _TurnOrigin:
         ).first()
         if initial is not None:
             platform, scope_id = initial.platform, initial.scope_id
-    return _TurnOrigin(platform, scope_id, turn_id, session.agent_name, session.agent_backend)
+    return _TurnOrigin(platform, scope_id, turn_id, agent_name or session.agent_name, CONTEXT_WRITER)
 
 
 # --- fork ancestry -------------------------------------------------------------
