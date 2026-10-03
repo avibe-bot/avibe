@@ -2248,6 +2248,10 @@ class AgentAuthService:
         except Exception as err:  # noqa: BLE001
             logger.warning("Failed to sync built-in Agents after backend runtime refresh: %s", err)
 
+    @staticmethod
+    def _disable_teardown_key(backend: str, agent: Any) -> str:
+        return f"disabled:{backend}:{id(agent)}"
+
     async def _stop_disabled_backend(self, backend: str, *, unregister: bool) -> bool:
         """Disabling a backend is an explicit user action: stop its work now.
 
@@ -2286,7 +2290,7 @@ class AgentAuthService:
         run_teardown = getattr(agent_service, "run_teardown", None)
         if callable(run_teardown):
             # The agent is out of routing, so this owner retries a failed stop.
-            await run_teardown(f"disabled:{backend}:{id(agent)}", stop_processes)
+            await run_teardown(self._disable_teardown_key(backend, agent), stop_processes)
         else:
             await finish_native_operation(stop_processes())
         if unregister:
@@ -2347,6 +2351,11 @@ class AgentAuthService:
         if newly_disabled:
             await self._stop_disabled_backend(backend, unregister=False)
             return
+        cancel_teardown = getattr(agent_service, "cancel_teardown", None)
+        if agent is not None and callable(cancel_teardown):
+            # Claude keeps its agent while disabled. Once it is enabled again,
+            # a disable teardown still pending would close the new clients.
+            cancel_teardown(self._disable_teardown_key(backend, agent))
         self._sync_builtin_default_agents()
 
     async def _refresh_backend_runtime(self, backend: str) -> None:

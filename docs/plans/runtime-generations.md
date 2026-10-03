@@ -453,7 +453,7 @@ simply stop the work, and that machinery is gone.
 | --- | --- |
 | `renew_runtime(config, *, config_save)` | Unchanged. |
 | `reap_runtime_generations()` | Called by the 60 s sweep on every registered agent. |
-| `shutdown_runtime()` | Stop every process of this agent now, with no notice of its own. Disable, service shutdown, and probe teardown call it. |
+| `shutdown_runtime()` | Stop every process of this agent now, with no notice of its own. Disable, service shutdown, and probe teardown call it. It raises when any process survives or leftover adoption failed, so `AgentService.run_teardown` keeps the teardown and the idle sweep retries it; a retry must be idempotent. |
 
 ### Startup
 
