@@ -2277,9 +2277,19 @@ class AgentAuthService:
         async def stop_processes() -> None:
             if agent is None:
                 return
-            stop = getattr(agent, "shutdown_runtime" if unregister else "refresh_auth_state", None)
-            if callable(stop):
-                await stop()
+            shutdown = getattr(agent, "shutdown_runtime", None)
+            if callable(shutdown):
+                await shutdown()
+
+        async def close_claude_clients() -> None:
+            # The renewal that disabled Claude made every client stale, and a
+            # stale idle client is reclaimed by the idle sweep. Reclaim them now;
+            # one that fails or is still settling goes at the next sweep, which
+            # never touches a client created after Claude is enabled again.
+            session_handler = getattr(self.controller, "session_handler", None)
+            evict = getattr(session_handler, "evict_idle_sessions", None)
+            if callable(evict):
+                await evict(0)
 
         async def disable() -> None:
             try:
@@ -2287,12 +2297,18 @@ class AgentAuthService:
             except Exception:
                 # Stopping the processes still ends that work; never skip it.
                 logger.warning("Interrupting disabled %s backend's work failed", backend, exc_info=True)
-            run_teardown = getattr(agent_service, "run_teardown", None)
-            if callable(run_teardown):
-                # The agent is out of routing, so this owner retries a failed stop.
-                await run_teardown(self._disable_teardown_key(backend, agent), stop_processes)
+            if not unregister:
+                try:
+                    await close_claude_clients()
+                except Exception:
+                    logger.warning("Closing disabled %s clients failed; the idle sweep retries", backend, exc_info=True)
             else:
-                await stop_processes()
+                run_teardown = getattr(agent_service, "run_teardown", None)
+                if callable(run_teardown):
+                    # The agent is out of routing, so this owner retries a failed stop.
+                    await run_teardown(self._disable_teardown_key(backend, agent), stop_processes)
+                else:
+                    await stop_processes()
             if unregister:
                 setattr(self.controller.config, backend, None)
             self._sync_builtin_default_agents()
@@ -2371,12 +2387,6 @@ class AgentAuthService:
         if newly_disabled:
             await self._stop_disabled_backend(backend, unregister=False)
             return
-        cancel_teardown = getattr(agent_service, "cancel_teardown", None)
-        enabled = getattr(runtime_config, "enabled", True) is not False
-        if enabled and agent is not None and callable(cancel_teardown):
-            # Claude keeps its agent while disabled. Once it is enabled again,
-            # a disable teardown still pending would close the new clients.
-            cancel_teardown(self._disable_teardown_key(backend, agent))
         self._sync_builtin_default_agents()
 
     async def _refresh_backend_runtime(self, backend: str) -> None:

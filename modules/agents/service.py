@@ -250,10 +250,6 @@ class AgentService:
             return False
         return True
 
-    def cancel_teardown(self, key: str) -> None:
-        """Drop a pending teardown that no longer applies, for example on re-enable."""
-        self._pending_teardowns.pop(key, None)
-
     async def retry_teardowns(self) -> None:
         for key, teardown in list(self._pending_teardowns.items()):
             await self.run_teardown(key, teardown)

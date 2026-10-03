@@ -147,8 +147,8 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         """RUNTIME-GEN-004 and -006: Claude stays registered and renews in place.
 
         Disabling it is the user's own interruption: its running work settles
-        with the interruption notice and every client closes at once. Saving
-        again while it is already disabled interrupts nothing more.
+        with the disabled notice, and its now-stale clients are reclaimed.
+        Saving again while it is already disabled interrupts nothing more.
         """
         for was_enabled, enabled in ((True, True), (True, False), (False, False)):
             controller = _StubController()
@@ -156,6 +156,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             agent = SimpleNamespace(renew_runtime=AsyncMock(), refresh_auth_state=AsyncMock())
             controller.agent_service = SimpleNamespace(agents={"claude": agent})
             controller.backend_restart_coordinator = SimpleNamespace(interrupt_backend=AsyncMock())
+            controller.session_handler = SimpleNamespace(evict_idle_sessions=AsyncMock(return_value=0))
             service = AgentAuthService(controller)
             runtime_config = SimpleNamespace(enabled=enabled)
             service._load_backend_runtime_config = lambda _backend, config=runtime_config: config
@@ -167,62 +168,36 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             assert controller.agent_service.agents["claude"] is agent
             stopped = was_enabled and not enabled
             assert controller.backend_restart_coordinator.interrupt_backend.await_count == int(stopped)
-            assert agent.refresh_auth_state.await_count == int(stopped)
+            assert controller.session_handler.evict_idle_sessions.await_args_list == (
+                [((0,),)] if stopped else []
+            )
+            agent.refresh_auth_state.assert_not_awaited()
 
-    async def test_re_enabling_claude_drops_a_pending_disable_teardown(self):
-        """A Claude disable whose client close failed must not close the clients
-        of the re-enabled backend when the idle sweep retries it."""
+    async def test_a_failed_claude_disable_leaves_nothing_to_race_a_re_enable(self):
+        """The retry for a failed Claude disable is the idle sweep's stale-client
+        eviction, which a re-enable's new clients are never part of; no pending
+        teardown exists that could close them."""
         from modules.agents.service import AgentService
 
         controller = _StubController()
         controller.config.claude = SimpleNamespace(enabled=True)
-        agent = SimpleNamespace(
-            name="claude",
-            renew_runtime=AsyncMock(),
-            refresh_auth_state=AsyncMock(side_effect=[RuntimeError("client busy"), None]),
-        )
+        agent = SimpleNamespace(name="claude", renew_runtime=AsyncMock(), refresh_auth_state=AsyncMock())
         controller.agent_service = AgentService(controller)
         controller.agent_service.register(agent)
         controller.backend_restart_coordinator = SimpleNamespace(interrupt_backend=AsyncMock())
+        controller.session_handler = SimpleNamespace(evict_idle_sessions=AsyncMock(side_effect=RuntimeError("busy")))
         service = AgentAuthService(controller)
         service._sync_builtin_default_agents = lambda: None
-
         service._load_backend_runtime_config = lambda _backend: SimpleNamespace(enabled=False)
-        await service.renew_backend_runtime("claude")
-        assert agent.refresh_auth_state.await_count == 1
 
+        await service.renew_backend_runtime("claude")
         controller.config.claude = SimpleNamespace(enabled=False)
         service._load_backend_runtime_config = lambda _backend: SimpleNamespace(enabled=True)
         await service.renew_backend_runtime("claude")
         await controller.agent_service.retry_teardowns()
 
-        assert agent.refresh_auth_state.await_count == 1
-
-    async def test_saving_claude_again_while_disabled_keeps_its_pending_teardown(self):
-        """Only re-enabling cancels a failed disable teardown; another save while
-        Claude stays disabled leaves the retry that closes the surviving clients."""
-        from modules.agents.service import AgentService
-
-        controller = _StubController()
-        controller.config.claude = SimpleNamespace(enabled=True)
-        agent = SimpleNamespace(
-            name="claude",
-            renew_runtime=AsyncMock(),
-            refresh_auth_state=AsyncMock(side_effect=[RuntimeError("client busy"), None]),
-        )
-        controller.agent_service = AgentService(controller)
-        controller.agent_service.register(agent)
-        controller.backend_restart_coordinator = SimpleNamespace(interrupt_backend=AsyncMock())
-        service = AgentAuthService(controller)
-        service._sync_builtin_default_agents = lambda: None
-        service._load_backend_runtime_config = lambda _backend: SimpleNamespace(enabled=False)
-
-        await service.renew_backend_runtime("claude")
-        controller.config.claude = SimpleNamespace(enabled=False)
-        await service.renew_backend_runtime("claude")
-        await controller.agent_service.retry_teardowns()
-
-        assert agent.refresh_auth_state.await_count == 2
+        assert controller.agent_service._pending_teardowns == {}
+        agent.refresh_auth_state.assert_not_awaited()
 
     async def test_enabling_opencode_in_a_running_controller_restores_its_durable_polls(self):
         """Work a crashed controller left while OpenCode was off is delivered
