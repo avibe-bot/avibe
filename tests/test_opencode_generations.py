@@ -728,6 +728,84 @@ def test_runtime_gen_023_the_ui_process_leases_the_controllers_generation_over_c
     assert invalid.status_code == 400
 
 
+def test_a_ui_request_running_past_its_lease_window_keeps_its_generation_until_release(fake_processes, monkeypatch):
+    """A UI request on a leased generation runs past the window its lease was
+    asked for, while a config change retires that generation. The controller
+    keeps the process until the UI releases the lease, and stops it then. The
+    leased client starts no request that could outlive the lease."""
+
+    import httpx
+
+    from core.internal_server import create_app
+    from modules.agents.opencode.client_manager import lease_opencode_server
+    from vibe import internal_client
+
+    runtime = _runtime()
+
+    async def lease_generation(_purpose, *, ttl_seconds):
+        lease_id, generation = await runtime.lease(OpenCodeLaunchSpec(digest="v1", binary="opencode"), ttl_seconds)
+        return {"lease_id": lease_id, "server": generation}
+
+    app = create_app(
+        SimpleNamespace(
+            agent_service=SimpleNamespace(
+                agents={
+                    "opencode": SimpleNamespace(
+                        lease_generation=lease_generation, release_generation_lease=runtime.release_lease
+                    )
+                }
+            )
+        )
+    )
+
+    async def post(path, payload=None):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
+            response = await client.post(path, json=payload)
+        return {"status_code": response.status_code, "body": response.json()}
+
+    async def create_lease(purpose, *, ttl_seconds):
+        return await post("/internal/opencode/generation-leases", {"purpose": purpose, "ttl_seconds": ttl_seconds})
+
+    async def release_lease(lease_id):
+        return await post(f"/internal/opencode/generation-leases/{lease_id}/release")
+
+    reached: list[str] = []
+
+    async def no_server_in_this_test(self):
+        reached.append(self.base_url)
+        raise ConnectionError("no OpenCode server in this test")
+
+    monkeypatch.setattr(internal_client, "create_opencode_generation_lease", create_lease)
+    monkeypatch.setattr(internal_client, "release_opencode_generation_lease", release_lease)
+    monkeypatch.setattr(opencode_server.OpenCodeServerClient, "_get_http_session", no_server_in_this_test)
+
+    async def scenario():
+        # The shortest window a lease is granted for.
+        lease = await lease_opencode_server("provider catalog", ttl_seconds=1.0)
+        leased = runtime.current()
+        # A config change: the next turn starts a new generation, and the
+        # leased one retires.
+        await runtime.acquire(OpenCodeLaunchSpec(digest="v2", binary="opencode"))
+        # The UI request runs past the window the lease was asked for.
+        await asyncio.sleep(1.2)
+        await runtime.reap()
+        during_the_request = list(fake_processes.stopped)
+        try:
+            await lease.server.get_providers()
+        except (TimeoutError, ConnectionError) as exc:
+            late_request = type(exc).__name__
+        await lease.release()
+        await runtime.reap()
+        return leased, during_the_request, late_request
+
+    leased, during_the_request, late_request = asyncio.run(scenario())
+
+    assert during_the_request == []
+    assert fake_processes.stopped == [leased]
+    # Past its window, a request whose timeout could outlive the lease never starts.
+    assert (late_request, reached) == ("TimeoutError", [])
+
+
 def test_a_ui_lease_release_reaches_its_runtime_after_the_backend_is_disabled(fake_processes):
     import httpx
 

@@ -354,6 +354,10 @@ class OpenCodeServerClient:
         self._lock_loop: Optional[asyncio.AbstractEventLoop] = None
         self._active_requests = 0
         self._last_prompt_started_at: dict[str, float] = {}
+        # The event-loop time a lease on this process expires, for a client in
+        # another process than the controller. No request starts that its
+        # timeout could carry past it, so the process never stops under one.
+        self.lease_expires_at: Optional[float] = None
 
     def _get_lock(self) -> asyncio.Lock:
         """Get or create an asyncio.Lock bound to the current event loop."""
@@ -368,6 +372,11 @@ class OpenCodeServerClient:
 
     @asynccontextmanager
     async def _request_scope(self):
+        if (
+            self.lease_expires_at is not None
+            and asyncio.get_running_loop().time() + self.request_timeout_seconds > self.lease_expires_at
+        ):
+            raise TimeoutError(f"The OpenCode lease on {self.base_url} ends before this request could")
         self._active_requests += 1
         try:
             yield

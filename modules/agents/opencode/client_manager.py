@@ -60,6 +60,9 @@ _VERSION_RE = re.compile(r"\d+\.\d+\.\d+[0-9A-Za-z.+-]*")
 _binary_versions: dict[tuple[Any, ...], Optional[str]] = {}
 # A lease outlives no caller: the UI process renews nothing and releases on exit.
 MAX_LEASE_SECONDS = 1800.0
+# The longest one request may run on a generation leased outside the
+# controller. Such a lease lasts this much past the window its caller asks for.
+LEASED_REQUEST_TIMEOUT_SECONDS = 60
 # The runtime holding each live lease. A release reaches it there even after
 # its backend was disabled and its agent unregistered.
 _LEASE_HOLDERS: dict[str, "OpenCodeRuntime"] = {}
@@ -700,6 +703,12 @@ async def lease_opencode_server(
 
     In the controller the agent leases directly. Any other process asks the
     controller over control IPC and talks to the leased generation over HTTP.
+    There, ``ttl_seconds`` is the window in which the caller may start
+    requests, and the lease lasts one request timeout longer. The lease, timed
+    from before the controller grants it, ends no earlier here than in the
+    controller, and the leased client starts no request that could outlive
+    it. The controller never stops the process under a running request, and
+    the lease only stays behind a caller that died holding it.
     """
 
     agent_service = getattr(controller, "agent_service", None)
@@ -719,8 +728,10 @@ async def lease_opencode_server(
 
     from vibe import internal_client
 
+    lease_seconds = ttl_seconds + LEASED_REQUEST_TIMEOUT_SECONDS
+    requested_at = asyncio.get_running_loop().time()
     try:
-        result = await internal_client.create_opencode_generation_lease(purpose, ttl_seconds=ttl_seconds)
+        result = await internal_client.create_opencode_generation_lease(purpose, ttl_seconds=lease_seconds)
     except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout) as exc:
         raise OpenCodeRuntimeUnavailableError("controller_unavailable", str(exc)) from exc
     body = result.get("body") if isinstance(result.get("body"), dict) else {}
@@ -730,13 +741,22 @@ async def lease_opencode_server(
             str(body.get("detail") or ""),
         )
     lease_id = str(body["lease_id"])
+    request_timeout = body.get("request_timeout_seconds")
     server = OpenCodeServerClient(
         str(body["base_url"]),
-        request_timeout_seconds=int(body.get("request_timeout_seconds") or 60),
+        # Bounded, so every request it starts ends before its lease does.
+        request_timeout_seconds=(
+            request_timeout
+            if isinstance(request_timeout, int)
+            and not isinstance(request_timeout, bool)
+            and 0 < request_timeout <= LEASED_REQUEST_TIMEOUT_SECONDS
+            else LEASED_REQUEST_TIMEOUT_SECONDS
+        ),
         model_hub_provider_ids=tuple(
             item for item in body.get("model_hub_provider_ids") or () if isinstance(item, str) and item
         ),
     )
+    server.lease_expires_at = requested_at + lease_seconds
 
     async def _release_remote() -> None:
         try:
