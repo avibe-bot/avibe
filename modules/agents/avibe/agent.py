@@ -105,7 +105,8 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
     """Tool-call paths relative to the run's cwd, as the Claude backend shows them."""
 
     def relative(path: str) -> str:
-        absolute = os.path.abspath(os.path.expanduser(path))
+        # A relative argument names a path under the run's cwd, as the tool resolves it.
+        absolute = os.path.abspath(os.path.join(cwd, os.path.expanduser(path)) if cwd else os.path.expanduser(path))
         if not cwd:
             return absolute
         shown = os.path.relpath(absolute, cwd)
@@ -204,6 +205,9 @@ class AvibeAgent(BaseAgent):
         # whose Turn another instance ran (a retired adapter or a previous process) has no
         # live call here that could settle it.
         self._instance = secrets.token_hex(4)
+        # Steer attempts whose live call is in flight in this instance: until it returns,
+        # that call owns the attempt's receipt.
+        self._steering: set[str] = set()
         # J5 while the service runs: when the jobs directory was last pruned, and the pass in flight.
         self._pruned_at: Optional[float] = None
         self._prune_task: Optional[asyncio.Task] = None
@@ -447,6 +451,13 @@ class AvibeAgent(BaseAgent):
         run = self._run_for(request.target_session_id, request.expected_logical_turn_id)
         if run is None or request.expected_native_turn_id != run.native_turn_id:
             return steer_result(SteerOutcome.NOT_ACTIVE, reason="not_active")
+        self._steering.add(request.attempt_id)
+        try:
+            return await self._steer(run, request)
+        finally:
+            self._steering.discard(request.attempt_id)
+
+    async def _steer(self, run: _Run, request: SteerRequest) -> SteerResult:
         try:
             message_id = await asyncio.to_thread(self._attempt_leader_id, request.attempt_id)
             if message_id is None:
@@ -474,11 +485,12 @@ class AvibeAgent(BaseAgent):
     async def reconcile_steer_attempt(self, request: SteerReconcileRequest, target: Any) -> SteerResult:
         """Evidence about a prior steer attempt, as the Codex and OpenCode reconcilers give it.
 
-        ACCEPTED when its row was consumed or the live run accepted it; otherwise
-        UNKNOWN, because the live attempt in this process owns its definitive
-        negative receipt. Only an attempt on a Turn another adapter instance ran (its native
-        turn id names that instance: a retired adapter or a previous process) is
-        NOT_ACTIVE: no call of this adapter can settle it.
+        ACCEPTED when its row was consumed or the live run accepted it. UNKNOWN while
+        a call could still settle it: its live steer call is in flight here, or the Turn
+        it targets is still running (that call may not have started yet). Otherwise
+        NOT_ACTIVE: the attempt's Turn ran on another adapter instance (a retired adapter
+        or a previous process; the native turn id names it), or this instance's live
+        call has returned and its run is gone, so nothing here can settle it.
         """
         message_id = await asyncio.to_thread(self._attempt_leader_id, request.attempt_id)
         if message_id is not None and await asyncio.to_thread(self._consumed, message_id):
@@ -493,7 +505,11 @@ class AvibeAgent(BaseAgent):
             return steer_result(SteerOutcome.ACCEPTED, turn_id=run.turn_id)
         if not request.expected_native_turn_id.startswith(f"{BACKEND}:{self._instance}:"):
             return steer_result(SteerOutcome.NOT_ACTIVE, reason="another_adapter_instance")
-        return steer_result(SteerOutcome.UNKNOWN, reason="no_attempt_evidence")
+        if request.attempt_id in self._steering or (
+            run is not None and run.native_turn_id == request.expected_native_turn_id
+        ):
+            return steer_result(SteerOutcome.UNKNOWN, reason="in_progress")
+        return steer_result(SteerOutcome.NOT_ACTIVE, reason="settled_here")
 
     # --- one run ---------------------------------------------------------------
 

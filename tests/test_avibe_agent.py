@@ -664,19 +664,26 @@ async def test_reconcile_reports_a_steer_attempt_only_from_evidence(engine, sess
     )
     await preparing.wait()
     reconcile = SteerReconcileRequest(SESSION, turn_id, native, attempt_id)
+
+    async def outcome() -> SteerOutcome:
+        return (await harness.agent.reconcile_steer_attempt(reconcile, None)).outcome
+
     try:
-        # No evidence the run has the steer: neither accepted nor a negative.
-        assert (await harness.agent.reconcile_steer_attempt(reconcile, None)).outcome is SteerOutcome.UNKNOWN
+        # No evidence the run has the steer, and its live call is in flight: neither accepted nor a negative.
+        assert await outcome() is SteerOutcome.UNKNOWN
+        release.set()
+        await running
+        # The run is gone, but the live call still owns the attempt's receipt.
+        assert await outcome() is SteerOutcome.UNKNOWN
         fail.set()
         assert (await steering).outcome is SteerOutcome.REFUSED
-        # The live attempt owns its refusal; a reconcile never issues a second negative receipt.
-        assert (await harness.agent.reconcile_steer_attempt(reconcile, None)).outcome is SteerOutcome.UNKNOWN
     finally:
         fail.set()
         release.set()
         await running
-    # Its run is gone, but this process opened the attempt: still the live path's to settle.
-    assert (await harness.agent.reconcile_steer_attempt(reconcile, None)).outcome is SteerOutcome.UNKNOWN
+    # The live call returned (its receipt may have been lost) and its run is gone: nothing here can
+    # settle the attempt, so it is not left in reconciliation until a restart.
+    assert await outcome() is SteerOutcome.NOT_ACTIVE
 
 
 async def test_reconcile_settles_an_attempt_another_adapter_instance_opened(engine, session, tmp_path, published) -> None:
@@ -1367,6 +1374,17 @@ async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_
     [row] = harness.rows("error")
     assert row["id"] == final.row_id and row["content_text"].strip()
     assert harness.controller.terminals[-1]["is_error"] is True
+
+
+async def test_a_relative_tool_path_is_shown_under_the_runs_cwd(engine, session, tmp_path, published) -> None:
+    from modules.agents.avibe.agent import _relative_to
+
+    project = tmp_path / "project"
+    shown = _relative_to(str(project))
+    # The tool reads src/app.py under the run's cwd; the line shows it as such, not under the controller's cwd.
+    assert shown("src/app.py") == "src/app.py"
+    assert shown(str(project / "core" / "foo.py")) == "core/foo.py"
+    assert shown("/etc/hosts") == "/etc/hosts"
 
 
 async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session, tmp_path, published) -> None:

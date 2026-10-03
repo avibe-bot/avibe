@@ -90,7 +90,7 @@ sent with that request gets the error result `Tool <name> is not available.`
 | Event | Avibe effect |
 | --- | --- |
 | `run_started` | none; the Turn was opened by its delivery |
-| `text_delta`, `thinking_delta` | streaming progress (status bubble, Workbench live text) |
+| `text_delta`, `thinking_delta` | dropped in v1: no backend shows live partial text, so progress comes from the committed narration and tool lines, as for the other backends (live partial text is a follow-up that needs a new UI surface for every backend, `avibe-agent-core.md` §10) |
 | `message_committed` | the committed `messages` row is delivered: `assistant` as activity, `result` as the reply |
 | `tool_started` | `agent_events` `tool_call` trace row; IM progress line |
 | `tool_progress` | status bubble update |
