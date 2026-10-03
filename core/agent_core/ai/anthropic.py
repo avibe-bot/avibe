@@ -46,6 +46,14 @@ from core.agent_core.messages import (
 
 ANTHROPIC_VERSION = "2023-06-01"
 _MAX_CACHE_BREAKPOINTS = 4
+_LEGACY_THINKING_BUDGETS = {
+    "minimal": 1024,
+    "low": 2048,
+    "medium": 8192,
+    "high": 16384,
+    "xhigh": 16384,
+    "max": 16384,
+}
 _KNOWN_STREAM_EVENTS = frozenset(
     {
         "message_start",
@@ -606,7 +614,7 @@ class AnthropicAdapter(ProviderAdapter):
                 terminal = assembler.terminal(assembler.incomplete())
                 if terminal is not None:
                     yield terminal
-            async for event in drive_sse_stream(
+            driver = drive_sse_stream(
                 self._client,
                 method="POST",
                 url=url,
@@ -618,8 +626,12 @@ class AnthropicAdapter(ProviderAdapter):
                 resolver=self._served_hop_resolver,
                 gateway=self._gateway,
                 translate=translate,
-            ):
-                yield event
+            )
+            try:
+                async for event in driver:
+                    yield event
+            finally:
+                await driver.aclose()
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
@@ -673,8 +685,20 @@ def build_messages_payload(
     if effort in {"none", "off", "disabled"}:
         payload["thinking"] = {"type": "disabled"}
     elif effort:
-        payload["thinking"] = {"type": "adaptive"}
-        payload["output_config"] = {"effort": _anthropic_effort(effort)}
+        if _uses_adaptive_thinking(request.endpoint.model_id):
+            payload["thinking"] = {"type": "adaptive"}
+            payload["output_config"] = {"effort": _anthropic_effort(effort)}
+        else:
+            # Pi's Anthropic adapter uses legacy budget thinking for Claude
+            # 4.5 and older families. The API requires room for the thinking
+            # budget and a response, so expand the request ceiling exactly as
+            # Pi's adjustMaxTokensForThinking helper does.
+            budget = _LEGACY_THINKING_BUDGETS.get(effort, _LEGACY_THINKING_BUDGETS["high"])
+            payload["max_tokens"] = max(payload["max_tokens"], budget + 1024)
+            payload["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": budget,
+            }
     return payload
 
 
@@ -832,7 +856,24 @@ def _normalize_stop_reason(value: Any) -> str:
 
 
 def _anthropic_effort(effort: str) -> str:
-    return {"minimal": "low", "xhigh": "max"}.get(effort, effort)
+    return {"minimal": "low"}.get(effort, effort)
+
+
+def _uses_adaptive_thinking(model_id: str) -> bool:
+    normalized = model_id.lower().replace(".", "-")
+    return any(
+        family in normalized
+        for family in (
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-fable-5",
+            "claude-mythos-5",
+        )
+    )
 
 
 def _string(value: Any) -> str:

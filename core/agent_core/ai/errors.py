@@ -227,7 +227,16 @@ def _classify_kind(
     if is_overflow_message(message, status=status):
         return "overflow"
     if exc is not None:
-        if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError, OSError)):
+        if isinstance(
+            exc,
+            (
+                TimeoutError,
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                httpx.TransportError,
+                OSError,
+            ),
+        ):
             return "network"
         return "unknown"
     lowered = message.lower()
@@ -317,10 +326,9 @@ def _find_code(value: Any, *, protocol: str | None = None) -> str | None:
     if isinstance(value, Mapping):
         # Prefer a specific code on the current envelope. Generic wrapper
         # statuses such as INVALID_ARGUMENT still defer to nested provider
-        # details (for example Gemini's API_KEY_INVALID reason).
+        # details from provider-specific nested error metadata.
         key_order = {
             "anthropic": ("type", "status"),
-            "google": ("status", "type"),
             "openai_chat": ("code", "type"),
             "openai_responses": ("code", "type"),
         }.get(protocol, ("code", "status", "type"))

@@ -35,7 +35,6 @@ def _request(protocol: str) -> ModelRequest:
         "anthropic": "anthropic",
         "openai_chat": "openai",
         "openai_responses": "openai",
-        "google": "google",
     }[protocol]
     return ModelRequest(
         endpoint=ModelEndpoint(
@@ -402,6 +401,16 @@ _CASES = (
                 "usage": {"input": 7, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": None},
             },
         },
+        "avibe": {
+            "outcome": "error",
+            "kind": "network",
+            "retryable": True,
+            "partial": {
+                "stop_reason": "error",
+                "content": [],
+                "usage": {"input": 7, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": None},
+            },
+        },
     },
     {
         "name": "anthropic_unknown_event_is_ignored",
@@ -762,7 +771,7 @@ _CASES = (
         },
         "avibe": {
             "outcome": "error",
-            "kind": "unknown",
+            "kind": "network",
             "retryable": False,
             "partial": {
                 "stop_reason": "error",
@@ -838,6 +847,7 @@ _CONTRACT_DEVIATIONS = {
     "chat_finish_reason_end_maps_to_stop",
     "chat_malformed_tool_arguments",
     "chat_eof_after_text_is_partial_abort",
+    "anthropic_message_start_stop_reason_survives_eof",
     "anthropic_empty_block_end_then_error",
     "anthropic_malformed_delta",
 }

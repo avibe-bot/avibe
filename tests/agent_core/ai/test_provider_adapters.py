@@ -11,7 +11,6 @@ import pytest
 
 from core.agent_core.ai.anthropic import AnthropicAdapter
 from core.agent_core.ai._common import read_response_body
-from core.agent_core.ai.google import GoogleAdapter, build_google_payload
 from core.agent_core.ai.openai_chat import OpenAIChatAdapter, build_chat_payload
 from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter, build_responses_payload
 from core.agent_core.ai.provider import (
@@ -26,6 +25,7 @@ from core.agent_core.ai.provider import (
     ToolCallDelta,
     ToolCallStart,
 )
+from core.agent_core.ai.registry import ADAPTERS, adapter_class
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
@@ -56,7 +56,7 @@ def _request(
             base_url,
             model_id,
             "token",
-            provider={"anthropic": "anthropic", "openai_chat": "openai", "openai_responses": "openai", "google": "google"}[protocol],
+            provider={"anthropic": "anthropic", "openai_chat": "openai", "openai_responses": "openai"}[protocol],
         ),
         system="system",
         messages=messages or (UserMessage((TextBlock(text="hello"),)),),
@@ -65,6 +65,12 @@ def _request(
         reasoning_effort="high",
         supports_images=supports_images,
     )
+
+
+def test_registry_exposes_only_v1_protocols() -> None:
+    assert set(ADAPTERS) == {"anthropic", "openai_chat", "openai_responses"}
+    with pytest.raises(ValueError, match="unsupported provider protocol: google"):
+        adapter_class("google")
 
 
 async def _events(adapter: Any, request: ModelRequest, cancel: CancelToken | None = None) -> list[Any]:
@@ -127,12 +133,6 @@ async def test_anthropic_streams_thinking_tool_arguments_and_usage() -> None:
             'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
             "/v1/responses",
         ),
-        (
-            GoogleAdapter,
-            "google",
-            'data: {"candidates":[{"finishReason":"STOP"}]}\n\n',
-            "/v1/models/model-x:streamGenerateContent",
-        ),
     ],
 )
 async def test_adapters_join_protocol_path_before_existing_query(
@@ -155,33 +155,7 @@ async def test_adapters_join_protocol_path_before_existing_query(
 
     assert isinstance(events[-1], Done)
     assert seen[0].path == expected_path
-    assert seen[0].query == b"tenant=blue" + (b"&alt=sse" if protocol == "google" else b"")
-
-
-@pytest.mark.asyncio
-async def test_google_full_protocol_endpoint_is_not_joined_twice_or_duplicated() -> None:
-    body = 'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-    seen: list[httpx.URL] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request.url)
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(
-            GoogleAdapter(client),
-            _request(
-                "google",
-                base_url=(
-                    "https://gateway.test/models/real-model:streamGenerateContent"
-                    "?alt=sse&tenant=blue"
-                ),
-            ),
-        )
-
-    assert isinstance(events[-1], Done)
-    assert seen[0].path == "/models/real-model:streamGenerateContent"
-    assert seen[0].query == b"alt=sse&tenant=blue"
+    assert seen[0].query == b"tenant=blue"
 
 
 @pytest.mark.asyncio
@@ -877,12 +851,6 @@ async def test_responses_ignores_unread_fields_on_non_function_output_items() ->
             "anthropic",
             'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","code":529,"message":"Overloaded"}}\n\n',
             "overloaded",
-        ),
-        (
-            GoogleAdapter,
-            "google",
-            'data: {"error":{"status":"RESOURCE_EXHAUSTED","code":"429","message":"busy"}}\n\n',
-            "rate_limit",
         ),
     ],
 )
@@ -1756,44 +1724,6 @@ async def test_chat_emits_block_end_for_each_final_block() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gemini_keeps_parallel_idless_calls_distinct() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{"path":"a"}}},{"functionCall":{"name":"read","args":{"path":"b"}}}]}}]}\n\n'
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    final = events[-1]
-    assert isinstance(final, Done)
-    assert [call.arguments for call in final.message.tool_calls] == [{"path": "a"}, {"path": "b"}]
-    assert len([event for event in events if isinstance(event, ToolCallDelta)]) == 2
-
-
-@pytest.mark.asyncio
-async def test_gemini_carries_tool_thought_signature_and_usage() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_1","name":"read","args":{"path":"x"}},"thoughtSignature":"opaque"}]}}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":4,"thoughtsTokenCount":2}}\n\n'
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    final = events[-1]
-    assert isinstance(final, Done)
-    assert final.message.tool_calls[0].signature == "opaque"
-    assert final.message.usage == Usage(input_tokens=7, output_tokens=6, reasoning_tokens=2)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("adapter_type", "protocol", "body", "expected"),
     [
@@ -1809,12 +1739,6 @@ async def test_gemini_carries_tool_thought_signature_and_usage() -> None:
             "openai_responses",
             'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":4,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}}}\n\n',
             Usage(input_tokens=5, output_tokens=4, cache_read_tokens=3, cache_write_tokens=2),
-        ),
-        (
-            GoogleAdapter,
-            "google",
-            'data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":3,"candidatesTokenCount":4,"thoughtsTokenCount":1}}\n\n',
-            Usage(input_tokens=7, output_tokens=5, cache_read_tokens=3, reasoning_tokens=1),
         ),
     ],
 )
@@ -1852,137 +1776,6 @@ async def test_anthropic_usage_keeps_total_cache_write_tokens() -> None:
     final = events[-1]
     assert isinstance(final, Done)
     assert final.message.usage == Usage(input_tokens=1, cache_write_tokens=25)
-
-
-@pytest.mark.asyncio
-async def test_gemini_malformed_function_call_is_error_even_with_partial_call() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_1","name":"read","args":{"path":"x"}}}]},"finishReason":"MALFORMED_FUNCTION_CALL"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    final = events[-1]
-    assert isinstance(final, Done)
-    assert final.message.stop_reason == "error"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("finish_reason", "expected_stop"),
-    [("SAFETY", "safety"), ("MAX_TOKENS", "length"), ("OTHER_ERROR", "error")],
-)
-async def test_gemini_non_tool_stop_preserves_calls_for_loop_settlement(
-    finish_reason: str,
-    expected_stop: str,
-) -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{"path":"x"}}}]}}]}\n\n'
-        f'data: {{"candidates":[{{"finishReason":"{finish_reason}"}}]}}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    final = events[-1]
-    assert isinstance(final, Done)
-    assert final.message.stop_reason == expected_stop
-    assert len(final.message.tool_calls) == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("reason", "expected"),
-    [
-        ("SPII", "safety"),
-        ("IMAGE_PROHIBITED_CONTENT", "safety"),
-        ("IMAGE_RECITATION", "error"),
-        ("IMAGE_OTHER", "error"),
-        ("LANGUAGE", "error"),
-        ("NO_IMAGE", "error"),
-        ("FINISH_REASON_UNSPECIFIED", "error"),
-        ("OTHER", "error"),
-        ("UNEXPECTED_TOOL_CALL", "error"),
-        ("TOO_MANY_TOOL_CALLS", "error"),
-    ],
-)
-async def test_gemini_finish_reasons_preserve_safety_and_tool_errors(reason: str, expected: str) -> None:
-    body = f'data: {{"candidates":[{{"finishReason":"{reason}"}}]}}\n\n'
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    final = events[-1]
-    assert isinstance(final, Done)
-    assert final.message.stop_reason == expected
-
-
-def test_gemini_merges_consecutive_tool_results_into_one_user_turn() -> None:
-    messages = (
-        ToolResultMessage(
-            tool_call_id="call_a",
-            tool_name="read",
-            content=(TextBlock(text="a"),),
-        ),
-        ToolResultMessage(
-            tool_call_id="call_b",
-            tool_name="read",
-            content=(TextBlock(text="b"),),
-        ),
-    )
-
-    payload = build_google_payload(_request("google", messages=messages), messages)
-
-    assert len(payload["contents"]) == 1
-    assert payload["contents"][0]["role"] == "user"
-    assert len(payload["contents"][0]["parts"]) == 2
-
-
-@pytest.mark.asyncio
-async def test_gemini_preserves_text_parts_around_tool_calls() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"text":"before"},{"functionCall":{"name":"read","args":{"path":"x"}}},{"text":"after"}]}}]}\n\n'
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    final = events[-1]
-    assert isinstance(final, Done)
-    assert final.message.content[0] == TextBlock("before")
-    assert isinstance(final.message.content[1], ToolCallBlock)
-    assert final.message.content[2] == TextBlock("after")
-
-
-@pytest.mark.parametrize(
-    ("model", "effort", "expected"),
-    [
-        ("gemini-2.5-pro", "none", {"includeThoughts": True, "thinkingBudget": 128}),
-        ("unknown-model", "none", None),
-    ],
-)
-def test_gemini_thinking_config_uses_known_minimum_or_omits_unknown(
-    model: str,
-    effort: str,
-    expected: dict[str, Any] | None,
-) -> None:
-    from core.agent_core.ai.google import _thinking_config
-
-    assert _thinking_config(model, effort) == expected
 
 
 @pytest.mark.asyncio
@@ -2202,6 +1995,77 @@ class _StalledStream(httpx.AsyncByteStream):
         self.closed.set()
 
 
+class _StalledFirstByteStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.closed = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __aiter__(self):
+        self.started.set()
+        await self.release.wait()
+        yield b"data: [DONE]\n\n"
+
+    async def aclose(self) -> None:
+        self.closed.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["open", "first_byte", "idle"])
+async def test_shared_driver_bounds_each_network_wait(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    import core.agent_core.ai._common as common
+
+    monkeypatch.setattr(common, "CONNECT_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(common, "TIME_TO_FIRST_BYTE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(common, "IDLE_CHUNK_TIMEOUT_S", 0.01)
+    opened = asyncio.Event()
+    first_byte_stream = _StalledFirstByteStream()
+    idle_stream = _StalledStream(
+        b'data: {"choices":[{"delta":{},"finish_reason":null}]}\n\n'
+    )
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        if phase == "open":
+            opened.set()
+            await asyncio.Event().wait()
+        if phase == "first_byte":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=first_byte_stream,
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=idle_stream,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        task = asyncio.create_task(
+            _events(OpenAIChatAdapter(client), _request("openai_chat"))
+        )
+        if phase == "open":
+            await opened.wait()
+        elif phase == "first_byte":
+            await first_byte_stream.started.wait()
+        else:
+            await idle_stream.started.wait()
+        events = await asyncio.wait_for(task, timeout=1)
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "network"
+    assert error.retryable is True
+    assert error.partial is None
+    if phase == "first_byte":
+        assert first_byte_stream.closed.is_set()
+    elif phase == "idle":
+        assert idle_stream.closed.is_set()
+
+
 @pytest.mark.asyncio
 async def test_cancellation_after_placeholder_slot_has_no_partial_message() -> None:
     stream = _StalledStream(
@@ -2278,6 +2142,18 @@ class _CloseFailStream(httpx.AsyncByteStream):
         raise OSError("close failed")
 
 
+class _TrackCloseStream(httpx.AsyncByteStream):
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.closed = asyncio.Event()
+
+    async def __aiter__(self):
+        yield self.body
+
+    async def aclose(self) -> None:
+        self.closed.set()
+
+
 class _DelayedReadErrorStream(httpx.AsyncByteStream):
     def __init__(self, first_chunk: bytes, order: list[str]) -> None:
         self.first_chunk = first_chunk
@@ -2326,7 +2202,6 @@ _CANCELLATION_CASES = (
     (AnthropicAdapter, "anthropic", 'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n'),
     (OpenAIChatAdapter, "openai_chat", 'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":null}]}\n\n'),
     (OpenAIResponsesAdapter, "openai_responses", 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'),
-    (GoogleAdapter, "google", 'data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n'),
 )
 
 
@@ -2445,11 +2320,6 @@ async def test_all_adapters_cancel_during_served_hop_resolution(
         "openai_responses",
         'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
     ),
-    (
-        GoogleAdapter,
-        "google",
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n',
-    ),
 ])
 async def test_close_failure_cannot_emit_a_second_terminal_event(
     adapter_type: Any,
@@ -2486,6 +2356,52 @@ async def test_consumer_close_suppresses_response_close_failure() -> None:
         first = await anext(stream)
         assert isinstance(first, TextDelta)
         await stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "body"),
+    [
+        (
+            AnthropicAdapter,
+            "anthropic",
+            b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+            b'data: {"type":"message_stop"}\n\n',
+        ),
+        (
+            OpenAIChatAdapter,
+            "openai_chat",
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            b'data: [DONE]\n\n',
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+        ),
+    ],
+)
+async def test_consumer_close_after_terminal_closes_response(
+    adapter_type: Any,
+    protocol: str,
+    body: bytes,
+) -> None:
+    stream = _TrackCloseStream(body)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        response_stream = adapter_type(client).stream(_request(protocol), CancelToken())
+        while not isinstance((event := await anext(response_stream)), (Done, ProviderError)):
+            pass
+        await response_stream.aclose()
+
+    assert stream.closed.is_set()
 
 
 @pytest.mark.asyncio
@@ -2545,11 +2461,6 @@ _DELAYED_READ_ERROR_CASES = (
         "openai_responses",
         b'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\n'
         b'data: {"type":"response.output_text.delta","output_index":0,"delta":"partial"}\n\n',
-    ),
-    (
-        GoogleAdapter,
-        "google",
-        b'data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n',
     ),
 )
 
@@ -2747,51 +2658,6 @@ _WIRE_EVENT_CASES = (
         "auth",
         False,
     ),
-    (
-        GoogleAdapter,
-        "google",
-        'data: {"error":{"status":"RESOURCE_EXHAUSTED","message":"busy"}}\n\n',
-        "error",
-        None,
-        "rate_limit",
-        False,
-    ),
-    (
-        GoogleAdapter,
-        "google",
-        'data: {"error":{"status":"UNAUTHENTICATED","message":"bad key"}}\n\n',
-        "error",
-        None,
-        "auth",
-        False,
-    ),
-    (
-        GoogleAdapter,
-        "google",
-        'data: {"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":3}}\n\n',
-        "done",
-        "safety",
-        None,
-        None,
-    ),
-    (
-        GoogleAdapter,
-        "google",
-        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"","args":{}}}]}}]}\n\n',
-        "error",
-        None,
-        "invalid_request",
-        False,
-    ),
-    (
-        GoogleAdapter,
-        "google",
-        'data: {"candidates":[{"finishReason":"MAX_TOKENS"}]}\n\n',
-        "done",
-        "length",
-        None,
-        None,
-    ),
 )
 
 
@@ -2810,11 +2676,6 @@ _WIRE_SHAPE_CASES = (
         OpenAIResponsesAdapter,
         "openai_responses",
         'data: {"type":"response.completed","response":{"status":"completed","usage":[]}}\n\n',
-    ),
-    (
-        GoogleAdapter,
-        "google",
-        'data: {"candidates":[{"content":{"parts":[{"text":"x","thought":"yes"}]}}]}\n\n',
     ),
     (
         AnthropicAdapter,
@@ -2898,11 +2759,6 @@ _WIRE_SHAPE_CASES = (
             '{"status":"incomplete","incomplete_details":"max_output_tokens"}}\n\n'
         ),
     ),
-    (
-        GoogleAdapter,
-        "google",
-        'data: {"promptFeedback":{"blockReason":{"reason":"SAFETY"}}}\n\n',
-    ),
     *(
         (adapter, protocol, f"data: {json.dumps(frame)}\n\n")
         for adapter, protocol, frame in [
@@ -2923,11 +2779,6 @@ _WIRE_SHAPE_CASES = (
             (OpenAIResponsesAdapter, "openai_responses", {"type": "response.failed", "response": {"error": [], "usage": {"input_tokens": 4}}}),
             (OpenAIResponsesAdapter, "openai_responses", {"type": "response.failed", "response": {"usage": []}}),
             (OpenAIResponsesAdapter, "openai_responses", {"type": "response.incomplete", "response": {"status": "incomplete", "incomplete_details": {"reason": 2}}}),
-            (GoogleAdapter, "google", {"promptFeedback": "blocked", "candidates": [{"finishReason": "STOP"}]}),
-            (GoogleAdapter, "google", {"error": {"message": 7}}),
-            (GoogleAdapter, "google", {"usageMetadata": {"promptTokenCount": -1}}),
-            (GoogleAdapter, "google", {"usageMetadata": {"candidatesTokenCount": "2"}}),
-            (GoogleAdapter, "google", {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"functionCall": {"id": 2, "name": "read"}}]}}]}),
         ]
     ),
 )
@@ -2941,7 +2792,6 @@ _WIRE_SHAPE_CASES = (
         (AnthropicAdapter, "anthropic", {"type": "permission_error", "message": "denied"}, "auth"),
         (OpenAIChatAdapter, "openai_chat", {"code": "invalid_api_key", "message": "denied"}, "auth"),
         (OpenAIResponsesAdapter, "openai_responses", {"code": "server_error", "message": "busy"}, "server"),
-        (GoogleAdapter, "google", {"status": "INVALID_ARGUMENT", "message": "denied", "details": [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "API_KEY_INVALID"}]}, "auth"),
     ],
 )
 async def test_provider_error_envelope_is_classified_identically_from_every_source(
@@ -3082,11 +2932,6 @@ async def test_cancellation_during_stream_open_ends_with_aborted_error() -> None
             'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\n'
             'data: {"type":"response.output_text.delta","output_index":0,"delta":"partial"}\n\n',
         ),
-        (
-            GoogleAdapter,
-            "google",
-            'data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n',
-        ),
     ],
 )
 async def test_eof_without_protocol_terminal_is_not_success(
@@ -3170,12 +3015,12 @@ async def test_adapter_error_redaction_preserves_json_classification() -> None:
         "provider failed: x-goog-api-key=google-secret",
     ],
 )
-async def test_google_api_key_is_redacted_from_error_bodies(body: str) -> None:
+async def test_shared_error_parser_redacts_google_api_key(body: str) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text=body)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
 
     error = events[-1]
     assert isinstance(error, ProviderError)
@@ -3212,14 +3057,6 @@ async def test_google_api_key_is_redacted_from_error_bodies(body: str) -> None:
                 '"output":[],"usage":{"input_tokens":"2"}}}\n\n'
             ),
         ),
-        (
-            GoogleAdapter,
-            "google",
-            (
-                'data: {"candidates":[{"finishReason":"STOP"}],'
-                '"usageMetadata":{"promptTokenCount":"2"}}\n\n'
-            ),
-        ),
     ],
 )
 async def test_adapters_reject_malformed_present_usage_counters(
@@ -3250,7 +3087,9 @@ async def test_chat_requires_finish_reason_before_done_marker() -> None:
         events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
 
     assert isinstance(events[-1], ProviderError)
-    assert events[-1].kind == "unknown"
+    assert events[-1].kind == "network"
+    assert events[-1].retryable is True
+    assert events[-1].partial is None
 
 
 @pytest.mark.asyncio
@@ -3268,6 +3107,45 @@ async def test_chat_finish_reason_can_terminate_at_eof_without_done_marker() -> 
 
 
 @pytest.mark.asyncio
+async def test_chat_max_tokens_maps_to_length() -> None:
+    body = (
+        'data: {"choices":[{"delta":{"content":"partial"},"finish_reason":"max_tokens"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    final = events[-1]
+    assert isinstance(final, Done)
+    assert final.message.stop_reason == "length"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_reason", ["safety", "recitation"])
+async def test_chat_native_safety_overrides_stop(native_reason: str) -> None:
+    body = (
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}}]},"finish_reason":null}]}\n\n'
+        f'data: {json.dumps({"choices": [{"delta": {}, "finish_reason": "stop", "native_finish_reason": native_reason}]})}\n\n'
+        "data: [DONE]\n\n"
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    final = events[-1]
+    assert isinstance(final, Done)
+    assert final.message.stop_reason == "safety"
+    assert len(final.message.tool_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_chat_unknown_finish_reason_is_canonical_error() -> None:
     body = 'data: {"choices":[{"delta":{},"finish_reason":"future_reason"}]}\n\ndata: [DONE]\n\n'
 
@@ -3279,23 +3157,6 @@ async def test_chat_unknown_finish_reason_is_canonical_error() -> None:
 
     assert isinstance(events[-1], Done)
     assert events[-1].message.stop_reason == "error"
-
-
-@pytest.mark.asyncio
-async def test_gemini_keeps_usage_after_finish_reason_frame() -> None:
-    body = (
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-        'data: {"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    assert isinstance(events[-1], Done)
-    assert events[-1].message.usage == Usage(input_tokens=3, output_tokens=2)
 
 
 @pytest.mark.asyncio
@@ -3344,7 +3205,8 @@ async def test_anthropic_message_start_requires_message_stop_even_with_stop_reas
 
     error = events[-1]
     assert isinstance(error, ProviderError)
-    assert error.kind == "unknown"
+    assert error.kind == "network"
+    assert error.retryable is True
     assert error.partial is not None
     assert error.partial.usage == Usage(input_tokens=7)
 
@@ -3427,27 +3289,6 @@ async def test_responses_reasoning_snapshot_emits_unseen_suffix() -> None:
     ]
     assert isinstance(events[-1], Done)
     assert events[-1].message.content == (ThinkingBlock("plan\n\nfinal"),)
-
-
-@pytest.mark.asyncio
-async def test_gemini_repeated_explicit_ids_remain_distinct_calls() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"same","name":"read","args":{"path":"a"}}},{"functionCall":{"id":"same","name":"read","args":{"path":"b"}}}]}}]}\n\n'
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    assert isinstance(events[-1], Done)
-    assert [call.arguments for call in events[-1].message.tool_calls] == [
-        {"path": "a"},
-        {"path": "b"},
-    ]
-    assert [call.id for call in events[-1].message.tool_calls] == ["same", "call_1"]
 
 
 @pytest.mark.asyncio
@@ -3583,153 +3424,6 @@ async def test_chat_arguments_before_name_are_emitted_after_tool_start() -> None
     ]
     assert isinstance(events[-1], Done)
     assert events[-1].message.tool_calls[0].arguments == {"path": "x"}
-
-
-@pytest.mark.asyncio
-async def test_gemini_text_part_signature_is_kept_on_thinking_block() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"text":"think","thought":true},{"text":"answer","thoughtSignature":"sigA"}]}}]}\n\n'
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    assert isinstance(events[-1], Done)
-    assert events[-1].message.content == (
-        ThinkingBlock("think", "sigA"),
-        TextBlock("answer"),
-    )
-
-
-@pytest.mark.asyncio
-async def test_gemini_empty_text_part_keeps_thought_signature() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"text":"think","thought":true},{"text":"","thoughtSignature":"sigA"}]}}]}\n\n'
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    assert isinstance(events[-1], Done)
-    assert events[-1].message.content == (ThinkingBlock("think", "sigA"),)
-
-
-@pytest.mark.asyncio
-async def test_gemini_text_signature_without_thinking_block_is_preserved() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"text":"answer","thoughtSignature":"sigA"}]}}]}\n\n'
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    final = events[-1]
-    assert isinstance(final, Done)
-    assert final.message.content == (
-        TextBlock("answer"),
-        ThinkingBlock("", "sigA"),
-    )
-
-
-@pytest.mark.asyncio
-async def test_gemini_function_call_signature_is_kept_on_tool_call() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{"path":"x"}},"thoughtSignature":"sig-call"}]}}]}\n\n'
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    final = events[-1]
-    assert isinstance(final, Done)
-    assert final.message.content == (
-        ToolCallBlock("call_0", "read", {"path": "x"}, signature="sig-call"),
-    )
-
-
-@pytest.mark.asyncio
-async def test_gemini_string_function_arguments_are_replayed() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":"{\\"path\\":\\"x\\"}"}}]}}]}\n\n'
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    assert isinstance(events[-1], Done)
-    assert events[-1].message.tool_calls[0].arguments == {"path": "x"}
-
-
-@pytest.mark.asyncio
-async def test_gemini_signed_thought_part_is_replayed() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"text":"plan","thought":true,"thoughtSignature":"sig"}]}}]}\n\n'
-        'data: {"candidates":[{"finishReason":"STOP"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    assert isinstance(events[-1], Done)
-    assert events[-1].message.content == (ThinkingBlock("plan", "sig"),)
-
-
-@pytest.mark.asyncio
-async def test_gemini_thought_signature_rejects_wrong_type() -> None:
-    body = (
-        'data: {"candidates":[{"content":{"parts":[{"text":"plan","thought":true,"thoughtSignature":7}]}}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    error = events[-1]
-    assert isinstance(error, ProviderError)
-    assert error.kind == "invalid_request"
-
-
-@pytest.mark.asyncio
-async def test_gemini_ignores_null_optional_stream_fields() -> None:
-    body = (
-        'data: {"error":null,"usageMetadata":null,"candidates":[{"finishReason":null,"content":{"parts":[{"text":null,"functionCall":null}]}}]}\n\n'
-        'data: {"candidates":null,"promptFeedback":null}\n\n'
-        'data: {"candidates":[{"content":null,"finishReason":"STOP"}]}\n\n'
-    )
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(GoogleAdapter(client), _request("google"))
-
-    assert isinstance(events[-1], Done)
-    assert events[-1].message.stop_reason == "stop"
 
 
 @pytest.mark.asyncio

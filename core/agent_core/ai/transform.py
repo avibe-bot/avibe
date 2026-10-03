@@ -56,7 +56,7 @@ def normalize_tool_call_id(tool_call_id: str, protocol: str = "anthropic") -> st
     """Return a deterministic id accepted by all supported native protocols."""
 
     # Anthropic's documented alphabet is the strictest common subset. The
-    # generated id is also accepted by OpenAI and Gemini tool correlations.
+    # The generated id is also accepted by OpenAI tool correlations.
     del protocol
     if _SAFE_TOOL_ID.fullmatch(tool_call_id) and len(tool_call_id) <= 64:
         return tool_call_id

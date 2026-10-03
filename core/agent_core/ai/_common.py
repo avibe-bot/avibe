@@ -50,6 +50,14 @@ _URL_RE = re.compile(
 )
 WireTranslator = Callable[[AsyncIterator[SSEEvent]], AsyncIterator[Any]]
 
+# A provider that never produces headers or pauses forever between chunks must
+# not hold an agent turn indefinitely. These bounds are deliberately shared by
+# every native adapter; the loop may retry the resulting network error only
+# when no model output has been emitted.
+CONNECT_TIMEOUT_S = 10.0
+TIME_TO_FIRST_BYTE_TIMEOUT_S = 30.0
+IDLE_CHUNK_TIMEOUT_S = 30.0
+
 
 def usage_counter_error(
     value: Any,
@@ -706,6 +714,7 @@ class StreamAssembler:
     def incomplete(self) -> ProviderError:
         return self.error(
             f"{self.protocol} stream ended before terminal event",
+            kind="network",
         )
 
     def terminal(self, event: Done | ProviderError) -> Done | ProviderError | None:
@@ -779,9 +788,9 @@ def join_endpoint_url(base_url: str, suffix: str) -> str:
 
     The endpoint may already be a complete protocol URL (useful for custom
     gateways), and the protocol suffix may add its own query parameters, as
-    Gemini does with ``alt=sse``. URL parsing keeps credentials out of this
-    operation's string manipulation and prevents a base query from becoming
-    part of the request path.
+    Some protocols add query parameters to their stream endpoint. URL parsing
+    keeps credentials out of this operation's string manipulation and prevents
+    a base query from becoming part of the request path.
     """
 
     base = urlsplit(base_url)
@@ -848,7 +857,7 @@ def dispatch_wire_event(
 
     Native adapters use this at the protocol boundary before validating the
     shape of a known event. A missing ``type`` is allowed only for protocols
-    whose stream frames are implicitly typed (Chat Completions and Gemini).
+    whose stream frames are implicitly typed (Chat Completions).
     """
 
     if not isinstance(event, Mapping):
@@ -922,8 +931,6 @@ def auth_headers(endpoint: ModelEndpoint, *, provider: str, gateway: bool) -> di
         headers["Authorization"] = f"Bearer {endpoint.token}"
     elif provider == "anthropic":
         headers["x-api-key"] = endpoint.token
-    elif provider == "google":
-        headers["x-goog-api-key"] = endpoint.token
     else:
         headers["Authorization"] = f"Bearer {endpoint.token}"
     return headers
@@ -937,15 +944,25 @@ async def iter_sse_events(
 
     parser = SSEParser()
     iterator = response.aiter_bytes().__aiter__()
+    first_chunk = True
     while True:
         if cancel.cancelled:
             return
         try:
-            chunk = await _await_network(iterator.__anext__(), cancel)
+            chunk = await _await_network(
+                iterator.__anext__(),
+                cancel,
+                timeout_s=(
+                    TIME_TO_FIRST_BYTE_TIMEOUT_S
+                    if first_chunk
+                    else IDLE_CHUNK_TIMEOUT_S
+                ),
+            )
         except StopAsyncIteration:
             break
         if chunk is None:
             return
+        first_chunk = False
         for event in parser.feed(chunk):
             yield event
     for event in parser.finish():
@@ -976,61 +993,65 @@ async def drive_sse_stream(
 
     response: httpx.Response | None = None
     candidate: Done | ProviderError | None = None
-    consumer_closed = False
     assembler.begin_driver()
     try:
-        if cancel.cancelled:
-            candidate = assembler.aborted(cancel.reason)
-        else:
-            request = client.build_request(method, url, json=json_body, headers=headers)
-            response = await _await_network(client.send(request, stream=True), cancel)
-            if response is None:
+        try:
+            if cancel.cancelled:
                 candidate = assembler.aborted(cancel.reason)
             else:
-                resolved_origin = await resolve_served_origin(
-                    endpoint,
-                    response.headers,
-                    resolver,
-                    gateway=gateway,
-                    cancel=cancel,
+                request = client.build_request(method, url, json=json_body, headers=headers)
+                response = await _await_network(
+                    client.send(request, stream=True),
+                    cancel,
+                    timeout_s=CONNECT_TIMEOUT_S,
                 )
-                if resolved_origin is None:
+                if response is None:
                     candidate = assembler.aborted(cancel.reason)
                 else:
-                    assembler.set_origin(*resolved_origin)
-                    if response.status_code >= 400:
-                        body = await read_response_body(response, cancel)
-                        if body is None:
-                            candidate = assembler.aborted(cancel.reason)
-                        else:
-                            candidate = assembler.error(
-                                body,
-                                status=response.status_code,
-                                headers=response.headers,
-                            )
+                    resolved_origin = await resolve_served_origin(
+                        endpoint,
+                        response.headers,
+                        resolver,
+                        gateway=gateway,
+                        cancel=cancel,
+                    )
+                    if resolved_origin is None:
+                        candidate = assembler.aborted(cancel.reason)
                     else:
-                        async for item in translate(iter_sse_events(response, cancel)):
-                            if isinstance(item, (Done, ProviderError)):
-                                candidate = item
-                                break
-                            yield item
-                        if candidate is None:
-                            candidate = (
-                                assembler.aborted(cancel.reason)
-                                if cancel.cancelled
-                                else assembler.incomplete()
-                            )
-    except (GeneratorExit, asyncio.CancelledError):
-        consumer_closed = True
-        raise
-    except Exception as exc:
-        candidate = assembler.exception(exc)
-    finally:
-        assembler.end_driver()
-        if candidate is not None and not consumer_closed:
+                        assembler.set_origin(*resolved_origin)
+                        if response.status_code >= 400:
+                            body = await read_response_body(response, cancel)
+                            if body is None:
+                                candidate = assembler.aborted(cancel.reason)
+                            else:
+                                candidate = assembler.error(
+                                    body,
+                                    status=response.status_code,
+                                    headers=response.headers,
+                                )
+                        else:
+                            async for item in translate(iter_sse_events(response, cancel)):
+                                if isinstance(item, (Done, ProviderError)):
+                                    candidate = item
+                                    break
+                                yield item
+                            if candidate is None:
+                                candidate = (
+                                    assembler.aborted(cancel.reason)
+                                    if cancel.cancelled
+                                    else assembler.incomplete()
+                                )
+        except (GeneratorExit, asyncio.CancelledError):
+            raise
+        except Exception as exc:
+            candidate = assembler.exception(exc)
+
+        if candidate is not None:
             terminal = assembler.terminal(candidate)
             if terminal is not None:
                 yield terminal
+    finally:
+        assembler.end_driver()
         if response is not None:
             try:
                 await _await_network(response.aclose(), CancelToken())
@@ -1041,7 +1062,12 @@ async def drive_sse_stream(
                 pass
 
 
-async def _await_network(awaitable: Awaitable[_T], cancel: CancelToken) -> _T | None:
+async def _await_network(
+    awaitable: Awaitable[_T],
+    cancel: CancelToken,
+    *,
+    timeout_s: float | None = None,
+) -> _T | None:
     """Own one cancellable network await for opening, reads, and body reads."""
 
     if cancel.cancelled:
@@ -1054,8 +1080,16 @@ async def _await_network(awaitable: Awaitable[_T], cancel: CancelToken) -> _T | 
     try:
         done, _ = await asyncio.wait(
             {operation, cancellation},
+            timeout=timeout_s,
             return_when=asyncio.FIRST_COMPLETED,
         )
+        if not done:
+            operation.cancel()
+            with _suppress_base_exceptions():
+                await operation
+            raise TimeoutError(
+                f"provider network operation timed out after {timeout_s:.1f}s"
+            )
         if cancellation in done and cancel.cancelled:
             operation.cancel()
             with _suppress_base_exceptions():
@@ -1096,15 +1130,25 @@ async def read_response_body(
     """Read an error body through the shared cancellation owner with a byte cap."""
 
     iterator = response.aiter_bytes().__aiter__()
+    first_chunk = True
     chunks: list[bytes] = []
     size = 0
     while size < max_bytes:
         try:
-            chunk = await _await_network(iterator.__anext__(), cancel)
+            chunk = await _await_network(
+                iterator.__anext__(),
+                cancel,
+                timeout_s=(
+                    TIME_TO_FIRST_BYTE_TIMEOUT_S
+                    if first_chunk
+                    else IDLE_CHUNK_TIMEOUT_S
+                ),
+            )
         except StopAsyncIteration:
             break
         if chunk is None:
             return None
+        first_chunk = False
         if not chunk:
             continue
         remaining = max_bytes - size
@@ -1329,5 +1373,4 @@ def _default_provider(protocol: str) -> str:
         "anthropic": "anthropic",
         "openai_chat": "openai",
         "openai_responses": "openai",
-        "google": "google",
     }.get(protocol, protocol)

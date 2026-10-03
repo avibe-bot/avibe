@@ -101,6 +101,7 @@ class OpenAIChatAdapter(ProviderAdapter):
                 yield terminal
             return
         finish_reason: str | None = None
+        native_finish_reason: str | None = None
         refusal_seen = False
         protocol_terminal = False
         try:
@@ -109,7 +110,7 @@ class OpenAIChatAdapter(ProviderAdapter):
             headers.setdefault("content-type", "application/json")
             url = join_endpoint_url(request.endpoint.base_url, "/chat/completions")
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
-                nonlocal finish_reason, refusal_seen, protocol_terminal
+                nonlocal finish_reason, native_finish_reason, refusal_seen, protocol_terminal
                 async for event in events:
                     if cancel.cancelled:
                         terminal = assembler.terminal(assembler.aborted(cancel.reason))
@@ -234,8 +235,23 @@ class OpenAIChatAdapter(ProviderAdapter):
                             )
                             if terminal is not None:
                                 yield terminal
-                            return
+                                return
                         finish_reason = _string(choice.get("finish_reason"))
+                    raw_native_finish_reason = choice.get("native_finish_reason")
+                    if raw_native_finish_reason is not None and not isinstance(
+                        raw_native_finish_reason, str
+                    ):
+                        terminal = assembler.terminal(
+                            assembler.error(
+                                "OpenAI Chat native_finish_reason must be a string",
+                                kind="invalid_request",
+                            )
+                        )
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    if raw_native_finish_reason is not None:
+                        native_finish_reason = _string(raw_native_finish_reason)
                     delta = choice.get("delta")
                     if delta is None or not isinstance(delta, Mapping):
                         if delta is None:
@@ -369,8 +385,13 @@ class OpenAIChatAdapter(ProviderAdapter):
                                 )
                                 key = assembler.fallback_tool_key(
                                     native_id=raw_id or None,
-                                    allocate=has_new_identity,
+                                    allocate=False,
                                 )
+                                if key is None:
+                                    key = assembler.fallback_tool_key(
+                                        native_id=raw_id or None,
+                                        allocate=has_new_identity,
+                                    )
                                 if key is None:
                                     terminal = assembler.terminal(
                                         assembler.error(
@@ -496,12 +517,16 @@ class OpenAIChatAdapter(ProviderAdapter):
                 final = assembler.finalize(
                     "refusal"
                     if refusal_seen
-                    else _normalize_stop(finish_reason, assembler.has_tools())
+                    else _normalize_stop(
+                        finish_reason,
+                        assembler.has_tools(),
+                        native_finish_reason=native_finish_reason,
+                    )
                 )
                 terminal = assembler.terminal(final if isinstance(final, ProviderError) else Done(final))
                 if terminal is not None:
                     yield terminal
-            async for event in drive_sse_stream(
+            driver = drive_sse_stream(
                 self._client,
                 method="POST",
                 url=url,
@@ -513,8 +538,12 @@ class OpenAIChatAdapter(ProviderAdapter):
                 resolver=self._served_hop_resolver,
                 gateway=self._gateway,
                 translate=translate,
-            ):
-                yield event
+            )
+            try:
+                async for event in driver:
+                    yield event
+            finally:
+                await driver.aclose()
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
@@ -622,10 +651,21 @@ def _chat_content(
     return result or [{"type": "text", "text": "(no content)"}]
 
 
-def _normalize_stop(reason: str | None, has_tools: bool) -> str:
+def _normalize_stop(
+    reason: str | None,
+    has_tools: bool,
+    *,
+    native_finish_reason: str | None = None,
+) -> str:
+    if reason == "stop" and native_finish_reason:
+        native = native_finish_reason.lower()
+        if native not in {"stop", "end_turn", "tool_calls", "function_call"}:
+            reason = native
     normalized = {
         "length": "length",
+        "max_tokens": "length",
         "content_filter": "safety",
+        "recitation": "safety",
         "refusal": "refusal",
         "safety": "safety",
         "tool_calls": "tool_use",
@@ -684,7 +724,10 @@ def _signature_details(signature: str) -> Any:
 
 
 def _openai_effort(value: str) -> str:
-    return {"xhigh": "high", "max": "high"}.get(value.lower(), value.lower())
+    # Pi preserves extended tiers when the resolved model advertises them;
+    # the loop has already filtered ``reasoning_effort`` through
+    # ModelCapabilities.reasoning_efforts.
+    return value.lower()
 
 
 def _uses_completion_tokens(model: str, effort: str | None) -> bool:

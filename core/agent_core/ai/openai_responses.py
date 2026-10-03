@@ -1075,7 +1075,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 terminal = assembler.terminal(assembler.incomplete())
                 if terminal is not None:
                     yield terminal
-            async for event in drive_sse_stream(
+            driver = drive_sse_stream(
                 self._client,
                 method="POST",
                 url=url,
@@ -1087,8 +1087,12 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 resolver=self._served_hop_resolver,
                 gateway=self._gateway,
                 translate=translate,
-            ):
-                yield event
+            )
+            try:
+                async for event in driver:
+                    yield event
+            finally:
+                await driver.aclose()
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
@@ -1398,7 +1402,10 @@ def _reasoning_summary_text(item: Mapping[str, Any]) -> str | None:
 
 
 def _openai_effort(value: str) -> str:
-    return {"xhigh": "high", "max": "high"}.get(value.lower(), value.lower())
+    # Pi preserves extended tiers when the resolved model advertises them;
+    # the loop has already filtered ``reasoning_effort`` through
+    # ModelCapabilities.reasoning_efforts.
+    return value.lower()
 
 
 def _string(value: Any) -> str:

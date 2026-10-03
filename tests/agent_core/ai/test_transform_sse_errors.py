@@ -26,7 +26,6 @@ _PROTOCOL_ORIGINS = (
     Origin("anthropic", "anthropic", "model"),
     Origin("openai", "openai_chat", "model"),
     Origin("openai", "openai_responses", "model"),
-    Origin("google", "google", "model"),
 )
 
 
@@ -67,9 +66,9 @@ def test_sse_parser_strips_one_utf8_bom_at_stream_start() -> None:
 
 
 def test_cross_provider_transform_drops_opaque_payload_and_answers_orphaned_calls() -> None:
-    source = Origin("google", "google", "gemini-test")
+    source = Origin("openai", "openai_chat", "foreign-test")
     target = Origin("anthropic", "anthropic", "claude-test")
-    call = ToolCallBlock("call|foreign", "read", {"path": "x"}, signature="gemini-opaque")
+    call = ToolCallBlock("call|foreign", "read", {"path": "x"}, signature="foreign-opaque")
     messages = (
         UserMessage((ImageBlock("image/png", "token", "shot.png"),)),
         AssistantMessage(
@@ -132,7 +131,7 @@ def test_transform_keeps_normalized_tool_ids_unique_per_request() -> None:
                 ToolCallBlock(unsafe_id, "first", {"n": 1}),
                 ToolCallBlock(colliding_safe_id, "second", {"n": 2}),
             ),
-            origin=Origin("google", "google", "model"),
+            origin=Origin("openai", "openai_responses", "model"),
             stop_reason="tool_use",
         ),
     )
@@ -261,19 +260,6 @@ def test_provider_auth_codes_are_not_retryable(code: str) -> None:
     assert error.retryable is False
 
 
-def test_google_invalid_api_key_reason_overrides_invalid_argument_status() -> None:
-    error = classify_error(
-        status=400,
-        body=(
-            '{"error":{"status":"INVALID_ARGUMENT",'
-            '"details":[{"reason":"API_KEY_INVALID"}]}}'
-        ),
-    )
-
-    assert error.kind == "auth"
-    assert error.retryable is False
-
-
 def test_specific_provider_code_precedes_nested_detail_code() -> None:
     error = classify_error(
         status=400,
@@ -290,14 +276,6 @@ def test_specific_provider_code_precedes_nested_detail_code() -> None:
 def test_network_errors_are_retryable_before_any_streamed_output() -> None:
     error = classify_error(exc=httpx.ConnectError("connection failed"))
     assert error.kind == "network"
-    assert error.retryable is True
-
-
-@pytest.mark.parametrize("code", ["UNAVAILABLE", "DEADLINE_EXCEEDED"])
-def test_google_transient_status_codes_are_retryable(code: str) -> None:
-    error = classify_error(code=code, body="transient upstream failure")
-
-    assert error.kind == "server"
     assert error.retryable is True
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from core.agent_core.ai.anthropic import AnthropicAdapter
-from core.agent_core.ai.google import GoogleAdapter
 from core.agent_core.ai.openai_chat import OpenAIChatAdapter
 from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter
 from core.agent_core.ai.provider import ProviderAdapter
@@ -15,7 +14,6 @@ ADAPTERS: dict[ProtocolName, type[ProviderAdapter]] = {
     "anthropic": AnthropicAdapter,
     "openai_chat": OpenAIChatAdapter,
     "openai_responses": OpenAIResponsesAdapter,
-    "google": GoogleAdapter,
 }
 
 
