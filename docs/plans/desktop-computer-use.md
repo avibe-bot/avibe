@@ -119,16 +119,19 @@ running. The tray keeps the shell alive after the window closes.
     socket and does not derive it from its own package version. The Controller
     is what reads `D`, and `/ready` may pair a newer UI with an older
     Controller. Only a definitive answer means unsupported: a 404, or a schema
-    below the one the shell writes. The answer also carries the Controller's
-    `controller_id`, which is random per Controller process. The cached answer
-    is keyed by that id, and it is cleared whenever the `/ready` monitor re-runs
-    adoption. Only a cached answer from the same Controller is ever reused. A
-    transport error, such as an IPC timeout or a reset, keeps that
-    same-Controller answer. A transient failure therefore never stops a healthy
-    daemon. Losing the Runtime itself is already handled by the `/ready`
-    monitor. Any other non-definitive answer, such as a 500 or a malformed body,
-    also keeps the last known answer. Before the first definitive answer, the
-    shell spawns nothing and retries on the next `/ready` tick.
+    below the one the shell writes. A Controller too old to know the capability
+    operation answers the IPC call with its unknown-operation error. The UI maps
+    that to `computer_use_schema: 0`, which is definitive. The answer also
+    carries the Controller's `controller_id`, which is random per Controller
+    process. The cached answer is keyed by that id, and it is cleared whenever
+    the `/ready` monitor re-runs adoption. Only a cached answer from the same
+    Controller is ever reused. A transport error, such as an IPC timeout or a
+    reset, keeps that same-Controller answer. A transient failure therefore
+    never stops a healthy daemon. Losing the Runtime itself is already handled
+    by the `/ready` monitor. Any other non-definitive answer, such as a 500 or a
+    malformed body, also keeps the last known answer. Before the first
+    definitive answer, the shell spawns nothing and retries on the next `/ready`
+    tick.
   - Turning the toggle on requires that value to cover the schema the shell
     writes. Otherwise the shell refuses to turn it on, and the menu text says
     the Avibe service must restart to support computer use.
@@ -173,7 +176,7 @@ running. The tray keeps the shell alive after the window closes.
   | `off` | toggle on, Runtime lacks a covering `computer_use_schema` | `off` | refuse; the menu says the Avibe service must restart |
   | `off` | toggle on, both grants held | `starting` | spawn |
   | `off` | toggle on, a grant missing | `needs_permission` | prompt and run the capture probe (the only prompting path) |
-    | shell launch | `D` unreadable, malformed, or of a newer `schema_version` | unchanged | spawn nothing and do not rewrite `D`; the menu warns. Only an explicit toggle action overwrites it |
+  | shell launch | `D` unreadable, malformed, or of a newer `schema_version` | unchanged | spawn nothing and do not rewrite `D`; the menu warns. Only an explicit toggle action overwrites it |
   | shell launch | `enabled` and recorded `state` is `error` | `error` | none; no spawn |
   | shell launch | `D` missing or not `enabled` | `off` | if `D` exists, write `off` with this shell's `instance_id` |
   | shell launch | `enabled`, Runtime lacks a covering `computer_use_schema` | `needs_runtime` | none; no spawn |
@@ -184,24 +187,21 @@ running. The tray keeps the shell alive after the window closes.
   | any `enabled` state except `error` | a successful `/ready` is followed by an unsupported capabilities answer | `needs_runtime` | stop the daemon if running |
   | `needs_permission` | grant check passes | `starting` | spawn |
   | `needs_permission` | app activation, grant check still fails, no fallback attempt yet in this activation | `starting` | spawn once (stale-preflight fallback) |
-  | `starting` | socket accepts and health passes | `ready` | none |
-  | `starting` | health reports a missing grant | `needs_permission` | stop the daemon; no prompt |
-    | `starting` | spawn, socket, or health fails otherwise, or `health_report` exceeds its 5 s deadline | `error` | stop the daemon; record the reason |
-    | `ready` | daemon `health_report` reports a missing grant | `needs_permission` | stop the daemon |
-    | `ready` | daemon exits unexpectedly, or its socket refuses or its `health_report` times out on 2 consecutive checks | `starting` | stop the daemon if alive; respawn with backoff; after 3 failures in 5 minutes, go to `error` |
-    | any `enabled` state except `error` | quit | `stopped` | stop the daemon |
+  | `starting` | socket accepts and the health check returns `pass` | `ready` | none |
+  | `starting` | the health check returns `missing_grant` | `needs_permission` | stop the daemon; no prompt |
+  | `starting` | spawn or socket fails, or the health check returns `unhealthy` | `error` | stop the daemon; record the reason |
+  | `ready` | the health check returns `missing_grant` | `needs_permission` | stop the daemon |
+  | `ready` | daemon exits unexpectedly, or its socket refuses or the health check returns `unhealthy` on 2 consecutive ticks | `starting` | stop the daemon if alive; respawn with backoff; after 3 failures in 5 minutes, go to `error` |
+  | any `enabled` state except `error` | quit | `stopped` | stop the daemon |
   | `error` | quit | `error` | none; `error` is kept across relaunch |
 
-  - **Grant check.** Silent, and it runs only while `enabled`. It fires on
-    app activation, and every 5 s. In `needs_permission`, it uses the shell's
-    own `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess`. In `ready`,
-    it uses the daemon's `health_report` instead. That process reads its
-    grants fresh, so a stale shell preflight can never stop a daemon that the
-    fallback just brought up. Each ready-state `health_report` gets a 5 s
-    deadline. Two consecutive timeouts count as an unhealthy daemon, the same
-    as two socket refusals. The same 5 s tick also probes the daemon's
-    socket. A wedged daemon that is alive but not accepting is treated like
-    one that exited.
+  - **Grant check.** Silent, and it runs only while `enabled`. It fires on app
+    activation, and every 5 s. In `needs_permission`, it uses the shell's own
+    `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess`. In `ready`, it
+    runs the daemon health check below instead. That process reads its grants
+    fresh, so a stale shell preflight can never stop a daemon that the fallback
+    just brought up. The same 5 s tick also probes the daemon's socket. A wedged
+    daemon that is alive but not accepting is treated like one that exited.
   - **Stale preflight.** macOS caches TCC answers per process, so the
     shell's own preflight can stay false after the user grants access in
     System Settings. The fallback row covers that case.
@@ -218,19 +218,28 @@ running. The tray keeps the shell alive after the window closes.
   - **No indirection.** Every row names its target state and action. `error`
     leaves only through toggle off (the first row), and a later toggle on
     starts from `off`.
-  - **Health (macOS).** Call `health_report` and read its `checks` array.
-    Require `tcc_accessibility` and `tcc_screen_recording` to pass, and require
-    the `bundle_identity` check to pass with `identity_source:
-    parent_application`, and require `ax_capability` to pass. `health_report` is
-    read-only and skips `screen_capture_capability` (Phase 0 output), so capture
-    is proven functionally: the check also calls `get_desktop_state` with
-    `max_image_dimension: 64` and requires an image. That is the
-    host-attribution evidence Phase 0 Q1 recorded. `source.attribution` belongs
-    to `check_permissions`, which the policy excludes, so it is never read.
-    Windows emits different checks (`ax_capability`,
-    `screen_capture_capability`), so its predicate is set by the Windows Q6 run,
-    not by reusing these. The menu shows the localized reason for
-    `needs_permission` and `error`.
+  - **Health check.** One composite operation with one 5 s deadline in total.
+    It returns exactly one of `pass`, `missing_grant`, or `unhealthy`, and
+    the lifecycle rows refer only to those three outcomes. A check added
+    later therefore needs no new row. On macOS, the check runs these steps:
+    1. Call `health_report` and read its `checks` array.
+    2. If `tcc_accessibility` or `tcc_screen_recording` fails, return
+       `missing_grant`.
+    3. Require `bundle_identity` to pass with `identity_source:
+       parent_application`, which is the host-attribution evidence of Phase
+       0 Q1. Also require `ax_capability` to pass.
+    4. Call `get_desktop_state` with `max_image_dimension: 64`, and require
+       an image. `health_report` is read-only and skips
+       `screen_capture_capability` (Phase 0 output), so capture is proven
+       this way.
+
+    Any other failure, an error, or the deadline expiring returns
+    `unhealthy`, with the failing step as the reason. `source.attribution`
+    belongs to `check_permissions`, which the policy excludes, so it is
+    never read. Windows emits different checks (`ax_capability`,
+    `screen_capture_capability`), so the Windows Q6 run sets the steps there.
+    The menu shows the localized reason for `needs_permission` and
+    `error`.
   - **Orderly quit.** Write `stopped`, then stop the daemon. `D` keeps
     `enabled`, and the effective-status table reads `stopped` as
     `shell_not_running`, the same as a released shell lock after a crash.
@@ -751,11 +760,12 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   state observation, a daemon respawn revives each session before its next call,
   a session's calls run one at a time and `end_session` waits for earlier ones,
   a stale shell preflight does not stop a `ready` daemon, a 500 from
-  capabilities keeps the last answer only for the same `controller_id`, a hung
-  `health_report` leads to a respawn, a stop-and-re-enable voids every lease,
-  and the other gets `desktop_busy` until `end_session` or 60 s idle. Tests stay
-  hermetic: the `D` path and the upstream command are redirected to test-owned
-  fakes.
+  capabilities keeps the last answer only for the same `controller_id`, a health
+  check that hangs or fails on any step returns `unhealthy` at start and in
+  `ready`, an old Controller's unknown-operation error reads as schema `0`, a
+  stop-and-re-enable voids every lease, and the other gets `desktop_busy` until
+  `end_session` or 60 s idle. Tests stay hermetic: the `D` path and the upstream
+  command are redirected to test-owned fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
   check confirms that the pinned driver's `tools/list`, under that policy,
   equals the bundled tool snapshot. For a Runtime without a covering
