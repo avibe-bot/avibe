@@ -211,6 +211,12 @@ class AvibeAgent(BaseAgent):
                 )
                 agent_input: Optional[AgentInput] = AgentInput(input_id, message)
                 while agent_input is not None:
+                    if run.stop_requested:
+                        # A Stop acknowledged before the loop could abort, such as while an
+                        # input was still being prepared: no run starts. An input left
+                        # unconsumed is admitted at the Session's next resume (T3).
+                        run.reason = "aborted"
+                        break
                     async for event in run.agent.run(agent_input, turn_id=turn_id):
                         await self._on_event(run, event)
                     agent_input = await self._continuing_input(run)
@@ -534,14 +540,20 @@ class AvibeAgent(BaseAgent):
         if not open_calls:
             return
         suite = self._tools()
-        # A call's job started after the response carrying the call committed; a job an
-        # earlier call with a reused id started is older (one rule with J5).
-        committed = await asyncio.to_thread(self._committed_at, [owner.row_id for owner, _ in open_calls])
-        job_ids = {}
-        for owner, call in open_calls:
-            job_id = suite.find_job(owner.session_id, call.id, created_since=committed.get(owner.row_id))
-            if job_id is not None:
-                job_ids[(owner.session_id, call.id)] = job_id
+
+        def find_jobs() -> dict[tuple[str, str], str]:
+            # A call's job started after the response carrying the call committed; a job an
+            # earlier call with a reused id started is older (one rule with J5).
+            committed = self._committed_at([owner.row_id for owner, _ in open_calls])
+            found = {}
+            for owner, call in open_calls:
+                job_id = suite.find_job(owner.session_id, call.id, created_since=committed.get(owner.row_id))
+                if job_id is not None:
+                    found[(owner.session_id, call.id)] = job_id
+            return found
+
+        # Each lookup lists the jobs directory: one pass, off the event loop.
+        job_ids = await asyncio.to_thread(find_jobs)
         await settle_open_calls(
             session_id=session_id,
             store=self.store,

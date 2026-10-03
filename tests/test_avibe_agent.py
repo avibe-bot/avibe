@@ -837,6 +837,38 @@ async def test_a_background_final_settles_with_its_committed_text(engine, sessio
     assert harness.controller.terminals[-1]["is_error"] is False
 
 
+async def test_a_stop_while_the_input_is_prepared_starts_no_run(engine, session, tmp_path, published) -> None:
+    from modules.im.base import FileAttachment
+
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("an answer nobody wants"))]])
+    preparing, release = asyncio.Event(), asyncio.Event()
+    snapshot = harness.agent.media.snapshot
+
+    async def slow_snapshot(*args, **kwargs):
+        preparing.set()
+        await release.wait()
+        return await snapshot(*args, **kwargs)
+
+    harness.agent.media.snapshot = slow_snapshot
+    request = harness.request("look at this")
+    request.files = [FileAttachment(name="shot.png", mimetype="image/png", local_path=str(image))]
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    await preparing.wait()
+
+    assert await harness.agent.handle_stop(AgentRequest(**{**request.__dict__, "message": "stop"})) is True
+    release.set()
+    await running
+
+    # The acknowledged Stop holds: no model call, nothing sent, the Turn settles as stopped.
+    assert harness.provider.requests == []
+    assert harness.controller.im_client.sent == []
+    assert harness.controller.terminals == [
+        {"turn": _turn(request.context), "is_error": False, "settled_by": "stopped"}
+    ]
+
+
 async def test_a_stop_after_the_final_reply_committed_loses_the_race(
     engine, session, tmp_path, published, monkeypatch
 ) -> None:

@@ -400,3 +400,9 @@ contracts and checked against the implementing lane's code before they are close
 | P1 | `avibe-agent-core.md` | Keep background descendants inside the job lifecycle |
 | P2 | `loop-control.md` | Avoid delivering refusal errors twice |
 | P2 | `message.schema.json` | Require content in canonical tool results |
+
+## 10. Follow-ups
+
+| Item | Owner | Note |
+| --- | --- | --- |
+| Product-wide media retention | `storage/media_service.py` | No media file is removed from disk today, whether Workbench upload, IM attachment, or Avibe Agent context snapshot (`<state>/agent_core/media`); session deletion only clears or cascades `media_objects` references. Retention needs one owner for every source. It must be fork-aware: a fork descendant keeps replaying the image tokens of a source Session that was deleted. Recorded as a v1 known limit in PR #2345. |
