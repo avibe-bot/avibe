@@ -342,14 +342,16 @@ def test_a_disable_whose_interruption_fails_still_stops_and_retries_the_processe
     async def run() -> None:
         agent = _DisabledAgent("codex")
         controller, _auth, coordinator = _disabling_controller(agent)
-        controller.session_turns.release_for_backend_refresh = AsyncMock(side_effect=RuntimeError("db busy"))
+        controller.session_turns.release_for_backend_refresh = AsyncMock(side_effect=[RuntimeError("db busy"), 0])
         agent.shutdown_runtime.side_effect = [RuntimeError("process survived"), None]
 
         assert await coordinator.request_restart("codex", config_save=True) == "restarted"
 
         assert "codex" not in controller.agent_service.agents
         assert agent.shutdown_runtime.await_count == 1
+        # The retry settles the work that failed to settle and stops the process.
         await controller.agent_service.retry_teardowns()
+        assert controller.session_turns.release_for_backend_refresh.await_count == 2
         assert agent.shutdown_runtime.await_count == 2
         await controller.agent_service.retry_teardowns()
         assert agent.shutdown_runtime.await_count == 2

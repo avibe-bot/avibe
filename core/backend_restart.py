@@ -626,6 +626,10 @@ class BackendRestartCoordinator:
                     else:
                         lease.release()
 
+    def backend_lock(self, backend: str) -> asyncio.Lock:
+        """The lock every application of ``backend``'s config holds."""
+        return self._request_locks.setdefault(backend, asyncio.Lock())
+
     async def request_restart(self, backend: str, *, config_save: bool = False) -> str:
         """Apply a backend's persisted runtime config; nothing waits or is interrupted.
 

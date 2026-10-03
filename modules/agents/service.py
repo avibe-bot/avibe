@@ -54,7 +54,7 @@ class AgentService:
         self.agents: Dict[str, BaseAgent] = {}
         # Teardowns that must finish even after they failed once, such as a
         # disabled backend's processes; the idle sweep retries them.
-        self._pending_teardowns: Dict[str, Callable[[], Awaitable[None]]] = {}
+        self._pending_teardowns: Dict[str, tuple[Callable[[], Awaitable[None]], Optional[asyncio.Lock]]] = {}
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
         self.activities = activities or SessionActivityRegistry()
@@ -231,13 +231,20 @@ class AgentService:
         self.agents[agent.name] = agent
         logger.info(f"Registered agent backend: {agent.name}")
 
-    async def run_teardown(self, key: str, teardown: Callable[[], Awaitable[None]]) -> bool:
+    async def run_teardown(
+        self,
+        key: str,
+        teardown: Callable[[], Awaitable[None]],
+        *,
+        retry_lock: Optional[asyncio.Lock] = None,
+    ) -> bool:
         """Run a teardown that must eventually finish; True once it has.
 
         A failure is logged and kept, and ``retry_teardowns`` runs it again on
         every idle sweep until it succeeds. Nothing else owns the processes it
         stops: their agent is already gone. A cancelled requester never leaves
-        a teardown half done.
+        a teardown half done. A retry holds ``retry_lock``, the lock the first
+        run's caller held, so it never interleaves with a later change.
         """
         from core.backend_restart import finish_native_operation
 
@@ -246,13 +253,18 @@ class AgentService:
             await finish_native_operation(teardown())
         except Exception:
             logger.warning("Teardown %s failed; the idle sweep retries it", key, exc_info=True)
-            self._pending_teardowns[key] = teardown
+            self._pending_teardowns[key] = (teardown, retry_lock)
             return False
         return True
 
     async def retry_teardowns(self) -> None:
-        for key, teardown in list(self._pending_teardowns.items()):
-            await self.run_teardown(key, teardown)
+        for key, (teardown, retry_lock) in list(self._pending_teardowns.items()):
+            if retry_lock is None:
+                await self.run_teardown(key, teardown)
+                continue
+            async with retry_lock:
+                if key in self._pending_teardowns:
+                    await self.run_teardown(key, teardown, retry_lock=retry_lock)
 
     def _on_activity_output_settled(self, activity: Any) -> None:
         agent = self.agents.get(str(getattr(activity, "backend", "") or ""))

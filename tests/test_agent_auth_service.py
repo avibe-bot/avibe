@@ -173,10 +173,10 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             )
             agent.refresh_auth_state.assert_not_awaited()
 
-    async def test_a_failed_claude_disable_leaves_nothing_to_race_a_re_enable(self):
-        """The retry for a failed Claude disable is the idle sweep's stale-client
-        eviction, which a re-enable's new clients are never part of; no pending
-        teardown exists that could close them."""
+    async def test_a_failed_claude_disable_retry_never_touches_work_after_a_re_enable(self):
+        """A failed Claude disable is retried, but once Claude is enabled again the
+        retry no longer interrupts work, and its client reclamation only takes
+        clients from before the renewal, never the re-enabled backend's."""
         from modules.agents.service import AgentService
 
         controller = _StubController()
@@ -184,8 +184,10 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         agent = SimpleNamespace(name="claude", renew_runtime=AsyncMock(), refresh_auth_state=AsyncMock())
         controller.agent_service = AgentService(controller)
         controller.agent_service.register(agent)
-        controller.backend_restart_coordinator = SimpleNamespace(interrupt_backend=AsyncMock())
-        controller.session_handler = SimpleNamespace(evict_idle_sessions=AsyncMock(side_effect=RuntimeError("busy")))
+        controller.backend_restart_coordinator = SimpleNamespace(
+            interrupt_backend=AsyncMock(side_effect=[RuntimeError("db busy"), None])
+        )
+        controller.session_handler = SimpleNamespace(evict_idle_sessions=AsyncMock(return_value=0))
         service = AgentAuthService(controller)
         service._sync_builtin_default_agents = lambda: None
         service._load_backend_runtime_config = lambda _backend: SimpleNamespace(enabled=False)
@@ -196,6 +198,8 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         await service.renew_backend_runtime("claude")
         await controller.agent_service.retry_teardowns()
 
+        assert controller.backend_restart_coordinator.interrupt_backend.await_count == 1
+        assert controller.session_handler.evict_idle_sessions.await_args_list == [((0,),), ((0,),)]
         assert controller.agent_service._pending_teardowns == {}
         agent.refresh_auth_state.assert_not_awaited()
 

@@ -487,6 +487,9 @@ class AgentAuthService:
         # reload V2Config-backed credentials. The hook receives ``(backend,)``
         # and runs in a worker thread to avoid blocking the auth event loop.
         self._post_web_success_hook: Optional[Any] = None
+        # Bumped each time a backend's enabled config is applied; see
+        # ``_stop_disabled_backend``.
+        self._enablements: dict[str, int] = {}
 
     @property
     def _flows(self) -> dict[str, AgentAuthFlow]:
@@ -2291,24 +2294,44 @@ class AgentAuthService:
             if callable(evict):
                 await evict(0)
 
-        async def disable() -> None:
-            try:
-                await interrupt_work()
-            except Exception:
-                # Stopping the processes still ends that work; never skip it.
-                logger.warning("Interrupting disabled %s backend's work failed", backend, exc_info=True)
-            if not unregister:
+        # The interrupt settles only the work that ran before this disable. A
+        # retry after the backend is enabled again must not touch new work, so
+        # it is skipped once a later enable bumped the backend's enablement.
+        enablement = self._enablements.get(backend, 0)
+        interrupted = False
+
+        async def teardown() -> None:
+            nonlocal interrupted
+            interrupt_error = None
+            if not interrupted and self._enablements.get(backend, 0) == enablement:
                 try:
-                    await close_claude_clients()
-                except Exception:
-                    logger.warning("Closing disabled %s clients failed; the idle sweep retries", backend, exc_info=True)
+                    await interrupt_work()
+                    interrupted = True
+                except Exception as exc:  # retried with the stop below
+                    interrupt_error = exc
+            # Stopping the processes still ends that work; never skip it.
+            if unregister:
+                await stop_processes()
             else:
-                run_teardown = getattr(agent_service, "run_teardown", None)
-                if callable(run_teardown):
-                    # The agent is out of routing, so this owner retries a failed stop.
-                    await run_teardown(self._disable_teardown_key(backend, agent), stop_processes)
-                else:
-                    await stop_processes()
+                await close_claude_clients()
+            if interrupt_error is not None:
+                raise interrupt_error
+
+        async def disable() -> None:
+            run_teardown = getattr(agent_service, "run_teardown", None)
+            if callable(run_teardown):
+                # The agent is out of routing, or Claude is disabled, so this
+                # owner retries a failed settlement or stop at each idle sweep,
+                # holding the lock this backend's config changes hold.
+                coordinator = getattr(self.controller, "backend_restart_coordinator", None)
+                backend_lock = getattr(coordinator, "backend_lock", None)
+                await run_teardown(
+                    self._disable_teardown_key(backend, agent),
+                    teardown,
+                    retry_lock=backend_lock(backend) if callable(backend_lock) else None,
+                )
+            else:
+                await teardown()
             if unregister:
                 setattr(self.controller.config, backend, None)
             self._sync_builtin_default_agents()
@@ -2369,6 +2392,9 @@ class AgentAuthService:
         if runtime_config is None:
             await self._stop_disabled_backend(backend, unregister=True)
             return
+        if getattr(runtime_config, "enabled", True) is not False:
+            # A disable's pending retry must not interrupt work admitted from now on.
+            self._enablements[backend] = self._enablements.get(backend, 0) + 1
         if getattr(runtime_config, "enabled", True) is not False and self._register_missing_backend_agent(
             backend, runtime_config
         ):
