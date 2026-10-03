@@ -2433,45 +2433,25 @@ class CodexAgent(BaseAgent):
         )
         end_work = getattr(service, "force_end_runtime_work", None)
         if callable(end_work):
-            await end_work(self.name, base_session_ids=busy, activity_runtime_keys=set(), reason=reason)
-        # A durable Activity can outlive its foreground turn and keep this
-        # process owned, so every bound Session's Activities settle too: those
-        # this agent's processes started, never another agent's under the same
-        # runtime key.
-        self._end_own_activities(service, sessions, runtime, reason)
-
-    def _end_own_activities(
-        self,
-        service: Any,
-        sessions: set[str],
-        runtime: _CodexRuntime,
-        reason: str,
-    ) -> None:
-        end_runtime = getattr(getattr(service, "activities", None), "end_runtime", None)
-        if not callable(end_runtime):
-            return
-        identities = {
-            other.activation
-            for runtimes in self._runtimes.values()
-            for other in runtimes
-            if other.activation is not None
-        }
-        if runtime.activation is not None:
-            identities.add(runtime.activation)
-        on_terminal = getattr(service, "on_activity_terminal", None)
-        for base_session_id in sessions:
-            for identity in identities or {None}:
-                completed = end_runtime(
-                    self.name,
-                    f"{base_session_id}:{runtime.cwd}",
-                    status="killed",
-                    retain_terminal_snapshots=True,
-                    activation_identity=identity,
-                    metadata={"interrupt_reason": reason},
-                )
-                for activity in completed:
-                    if callable(on_terminal):
-                        on_terminal(activity)
+            # A durable Activity can outlive its foreground turn and keep this
+            # process owned, so every bound Session's Activities settle too:
+            # those this agent's processes started, never another agent's
+            # under the same runtime key.
+            identities = {
+                other.activation
+                for runtimes in self._runtimes.values()
+                for other in runtimes
+                if other.activation is not None
+            }
+            if runtime.activation is not None:
+                identities.add(runtime.activation)
+            await end_work(
+                self.name,
+                base_session_ids=busy,
+                activity_runtime_keys={f"{base_session_id}:{runtime.cwd}" for base_session_id in sessions},
+                activation_identities=identities or {None},
+                reason=reason,
+            )
 
     async def _stop_runtime(
         self,

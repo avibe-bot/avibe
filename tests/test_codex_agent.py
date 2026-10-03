@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.resource_governance import AgentResourceFailure
 from core.runtime_activation import RuntimeActivationRegistry
-from core.session_activities import SessionActivityRegistry
 from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
 from modules.agents.base import BaseAgent as RealBaseAgent
 from modules.agents.codex.transport import CodexResponseTooLargeError, CodexRPCError
@@ -1217,13 +1216,9 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         async def stop():
             events.append("stop")
 
-        async def end_work(backend, *, base_session_ids, activity_runtime_keys, reason):
-            events.append(("settle turns", backend, set(base_session_ids), reason))
+        async def end_work(backend, *, base_session_ids, activity_runtime_keys, activation_identities, reason):
+            events.append(("settle", backend, set(base_session_ids), set(activity_runtime_keys), reason))
 
-        activities = SessionActivityRegistry()
-        activities.start(
-            backend="codex", runtime_key="session-1:/tmp/work", session_id="ses-1", activity_id="task-1", kind="task"
-        )
         transport = SimpleNamespace(stop=stop, _process=None)
         agent._session_mgr = SimpleNamespace(invalidate_thread=Mock(), clear=Mock())
         agent._turn_registry = SimpleNamespace(
@@ -1231,20 +1226,14 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             has_pending_turn_start=lambda _base: False,
             clear_session=Mock(),
         )
-        agent.controller = SimpleNamespace(
-            agent_service=SimpleNamespace(
-                force_end_runtime_work=end_work,
-                activities=activities,
-                on_activity_terminal=lambda activity: events.append(("settled", activity.id, activity.status)),
-            )
-        )
+        agent.controller = SimpleNamespace(agent_service=SimpleNamespace(force_end_runtime_work=end_work))
         install_codex_transport(agent, "/tmp/work", transport, sessions={"session-1": "thread-1"})
 
         self.assertTrue((await agent.end_session("session-1"))["process_killed"])
 
         self.assertEqual(
             events,
-            [("settle turns", "codex", set(), "backend_refresh"), ("settled", "task-1", "killed"), "stop"],
+            [("settle", "codex", set(), {"session-1:/tmp/work"}, "backend_refresh"), "stop"],
         )
 
     async def test_forced_stop_settles_activity_only_work(self):
@@ -1253,23 +1242,19 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         transport = SimpleNamespace(stop=AsyncMock(), _process=None)
         agent._session_mgr = SimpleNamespace(invalidate_thread=Mock())
         agent._turn_registry = SimpleNamespace(get_active_turn=Mock(return_value=None), clear_session=Mock())
-        activities = SessionActivityRegistry()
-        activities.start(
-            backend="codex", runtime_key="session-1:/tmp/work", session_id="ses-1", activity_id="task-1", kind="task"
-        )
-        settled = []
         agent.controller = SimpleNamespace(
-            agent_service=SimpleNamespace(
-                force_end_runtime_work=AsyncMock(), activities=activities, on_activity_terminal=settled.append
-            )
+            agent_service=SimpleNamespace(force_end_runtime_work=AsyncMock())
         )
         generation = install_codex_transport(agent, "/tmp/work", transport, sessions={"session-1": "thread-1"})
 
         self.assertTrue(await agent._stop_generation(generation, True))
 
-        self.assertEqual(
-            [(activity.id, activity.status, activity.metadata.get("interrupt_reason")) for activity in settled],
-            [("task-1", "killed", "backend_refresh")],
+        agent.controller.agent_service.force_end_runtime_work.assert_awaited_once_with(
+            "codex",
+            base_session_ids=set(),
+            activity_runtime_keys={"session-1:/tmp/work"},
+            activation_identities={None},
+            reason="backend_refresh",
         )
         transport.stop.assert_awaited_once_with()
 
