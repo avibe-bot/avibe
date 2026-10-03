@@ -217,6 +217,7 @@ scenarios:
       - tests/test_opencode_restore_polls.py::test_two_overlapping_restores_of_one_durable_poll_start_exactly_one_loop
       - tests/test_opencode_restore_polls.py::test_a_restore_whose_generation_rewrite_fails_runs_nothing_and_the_sweep_restores_it
       - tests/test_opencode_restore_polls.py::test_a_poll_task_whose_rebind_cannot_be_recorded_leaves_its_turn_live_for_the_sweep
+      - tests/test_opencode_restore_polls.py::test_a_restore_whose_publication_fails_leaves_no_poll_task_waiting_on_it
   - id: RUNTIME-GEN-023
     name: The UI process never launches OpenCode; it leases the controller's generation over control IPC
     status: covered

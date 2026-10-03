@@ -1652,3 +1652,52 @@ def test_a_poll_task_whose_rebind_cannot_be_recorded_leaves_its_turn_live_for_th
     assert asyncio.run(run()) == ([], [], [True])
     assert failed == [] and removed == ["oc-1"]
     assert [entry[1] for entry in request_sessions] == ["oc-1"]
+
+
+def test_a_restore_whose_publication_fails_leaves_no_poll_task_waiting_on_it() -> None:
+    """Two polls are handed off, and marking the first one's session running
+    fails. The restore publishes the first and fails, and must not leave the
+    second waiting for a publication that never comes: that task is cancelled
+    before its loop, releasing its binding and request, and the poll stays
+    durable until the next sweep restores it."""
+
+    polls = {
+        "oc-1": _make_poll(platform="avibe", base_session_id="ses_1", opencode_session_id="oc-1"),
+        "oc-2": _make_poll(platform="avibe", base_session_id="ses_2", opencode_session_id="oc-2"),
+    }
+    agent, _status_writes, removed, _request_sessions = _build_agent(polls)
+    marked: list[str] = []
+
+    def restore_running(session_id: str) -> None:
+        marked.append(session_id)
+        if len(marked) == 1:
+            raise RuntimeError("database is locked")
+
+    agent.controller.session_turns.restore_running = restore_running
+    _retry_restores_at_the_sweep(agent)
+
+    async def run():
+        with pytest.raises(RuntimeError, match="database is locked"):
+            await agent.restore_active_polls()
+        handed_off = dict(agent._active_requests)
+        await asyncio.wait(handed_off.values(), timeout=1.0)
+        left = (
+            sorted(key for key, task in handed_off.items() if not task.done()),
+            sorted(agent._active_requests),
+            [binding.released for binding in agent._runtime.bindings],
+            sorted(polls),
+        )
+        # Only a task that would wait forever is still running here.
+        for task in handed_off.values():
+            task.cancel()
+        await asyncio.wait(handed_off.values())
+        await agent.reap_runtime_generations()
+        await asyncio.gather(*agent._active_requests.values())
+        return left
+
+    waiting, requests, released, durable = asyncio.run(run())
+
+    assert (waiting, requests, released, durable) == ([], [], [True, True], ["oc-2"])
+    # The first poll ran once published; the sweep restored and ran the second.
+    assert marked == ["ses_1", "ses_2"]
+    assert removed == ["oc-1", "oc-2"] and polls == {}

@@ -165,6 +165,16 @@ class _RestoredPollUnrecorded(RuntimeError):
     """A restored poll binds elsewhere than it names, and that was not recorded."""
 
 
+@dataclass
+class _RestoredPollHandoff:
+    """A poll task a restore started, waiting for the restore to publish it."""
+
+    ready: asyncio.Future[bool]
+    published: asyncio.Event
+    poll_info: Any
+    task: asyncio.Task
+
+
 def _poll_runs_in(poll_info: Any, records: list[dict[str, Any]]) -> bool:
     """Whether one of ``records`` names the process executing a poll's run.
 
@@ -2725,9 +2735,38 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         """
 
         async with self._restore_lock:
-            return await self._restore_active_polls(platforms)
+            handed_off: list[_RestoredPollHandoff] = []
+            try:
+                return await self._restore_active_polls(platforms, handed_off)
+            finally:
+                await self._abandon_unpublished_polls(handed_off)
 
-    async def _restore_active_polls(self, platforms: set[str] | None) -> int:
+    async def _abandon_unpublished_polls(self, handed_off: list["_RestoredPollHandoff"]) -> None:
+        """Cancel every poll task a restore handed off but never published.
+
+        A restore that ends early, cancelled or failing, would leave each such
+        task waiting for a publication that never comes, holding its request
+        and binding. Cancelled before its poll loop starts, the task releases
+        both, and the poll stays durable for the sweep's next restore.
+        """
+
+        abandoned: list[asyncio.Task] = []
+        for handoff in handed_off:
+            if handoff.published.is_set():
+                continue
+            self._polls_awaiting_restore.add(handoff.poll_info.opencode_session_id)
+            handoff.task.cancel()
+            abandoned.append(handoff.task)
+        if abandoned:
+            # Bounded like a forced stop's cancellation: a stuck cleanup must
+            # not hold the restore lock, and each task still finishes its own.
+            await asyncio.wait(abandoned, timeout=2.0)
+
+    async def _restore_active_polls(
+        self,
+        platforms: set[str] | None,
+        restoration_results: list["_RestoredPollHandoff"],
+    ) -> int:
         active_polls = self.sessions.get_all_active_polls()
         if not active_polls:
             logger.debug("No active polls to restore")
@@ -2738,9 +2777,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
         restored_count = 0
         stale_poll_ids = []
-        restoration_results: list[
-            tuple[asyncio.Future[bool], asyncio.Event, Any]
-        ] = []
 
         for session_id, poll_info in active_polls.items():
             poll_platform = restored_platform_from_poll_info(poll_info)
@@ -3027,7 +3063,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 await self._release_binding(binding)
                 raise
             restoration_results.append(
-                (restoration_ready, restoration_published, poll_info)
+                _RestoredPollHandoff(restoration_ready, restoration_published, poll_info, task)
             )
             self._active_requests[poll_info.base_session_id] = task
             self._session_manager.set_request_session(
@@ -3051,21 +3087,21 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
         if restoration_results:
             registered = await asyncio.gather(
-                *(future for future, _, _ in restoration_results)
+                *(handoff.ready for handoff in restoration_results)
             )
-            for is_registered, (_, published, poll_info) in zip(
+            for is_registered, handoff in zip(
                 registered,
                 restoration_results,
             ):
                 try:
                     if not is_registered:
                         continue
-                    workbench_session_id = self._workbench_session_id_for_poll(poll_info)
+                    workbench_session_id = self._workbench_session_id_for_poll(handoff.poll_info)
                     if workbench_session_id:
                         self.controller.session_turns.restore_running(workbench_session_id)
                     restored_count += 1
                 finally:
-                    published.set()
+                    handoff.published.set()
 
         if restored_count > 0:
             logger.info(f"Restored {restored_count} active poll loop(s)")
