@@ -317,7 +317,10 @@ Implemented in the first PR; the Codex and OpenCode adapters build on it.
     after each, re-evaluates the cap and which generations are drained.
   - The cap counts every attached generation, including ones whose graceful
     stop declined. When a unit is over the cap, the oldest generation is
-    force-stopped.
+    force-stopped. Admission never waits, so while a forced stop is still
+    running, a unit can briefly exceed the cap by one generation for each new
+    spec that arrives. The adapter's forced stop has a bounded kill timeout,
+    and once it returns, the reconciler stops the unit back down to the cap.
   - A declined stop is retried on the next release or sweep. A failed or
     cancelled stop is retried only by the next sweep; the generation is
     `closed`, so it never serves a turn again. A sweep or stop-all that
@@ -441,10 +444,19 @@ reply. After this step:
   refresh that tears a runtime down survives only inside `migration_guard`.
 
 Every lookup that serves running work reaches retired agents too: Stop,
-Activity callbacks, liveness, Running Agents (listing and End), the sweep,
-service shutdown, and the native credential cutover. Admitting new work, and
-steering new input into a running turn, use only registered agents, so a
-disabled backend takes no new input.
+Activity callbacks and output grace, liveness, Running Agents (listing and
+End), session clearing (`/new`), poll restore, config and transport
+propagation, the native credential mirror, the sweep, service shutdown, and
+the native credential cutover. Admitting new work, and steering new input into
+a running turn, use only registered agents, so a disabled backend takes no new
+input. `AgentService.runtime_agents(backend)` is the one lookup for the first
+group; `AgentService.agents` serves only the second.
+
+A controller that starts with OpenCode disabled builds a drain-only agent
+before it restores any poll, and keeps it with `AgentService.retire_agent`
+without registering it. Its restored polls bind the generations they ran on,
+because a stopping unit still binds recovered work, so their results are
+delivered before the processes stop.
 
 ### Adapter hooks
 

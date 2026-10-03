@@ -449,6 +449,30 @@ def test_a_reap_during_a_pass_retries_a_stop_that_pass_already_declined():
     asyncio.run(run())
 
 
+def test_a_stopping_unit_still_binds_recovered_work_to_a_live_generation():
+    """A disabled backend's runtime keeps a restored poll's process until that poll is released."""
+    runtimes = _Runtimes()
+    generations = runtimes.generation_set()
+
+    async def run():
+        runtimes.live.append("previous")
+        runtimes.decline_stops = 1
+        previous = await generations.adopt(_Spec("old"), "previous", current=False)
+        await generations.stop_all(force=False)
+        with pytest.raises(RuntimeUnitStopping):
+            await generations.acquire(_Spec("old"))
+
+        restored = await generations.bind(previous)
+        await generations.reap()
+        assert "previous" in runtimes.live
+
+        await restored.release()
+        await generations.settled()
+        assert runtimes.live == [] and generations.generations == ()
+
+    asyncio.run(run())
+
+
 def test_a_failed_start_leaves_the_current_generation_serving():
     runtimes = _Runtimes()
     generations = runtimes.generation_set()

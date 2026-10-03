@@ -2178,8 +2178,9 @@ class AgentAuthService:
                 getattr(self.controller, name, None)
                 for name in ("command_handler", "settings_handler", "message_handler", "session_handler")
             )
-            agents = getattr(getattr(self.controller, "agent_service", None), "agents", {})
-            owners.extend(agents.values())
+            # Retired agents still run processes that read the credential.
+            runtime_agents = getattr(getattr(self.controller, "agent_service", None), "runtime_agents", None)
+            owners.extend(runtime_agents() if callable(runtime_agents) else ())
             for backend, values in snapshot.items():
                 targets = []
                 for owner in owners:

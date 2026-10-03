@@ -592,20 +592,29 @@ class AgentService:
 
     async def clear_sessions(self, session_key: str) -> Dict[str, int]:
         cleared: Dict[str, int] = {}
-        for name in list(self.agents.keys()):
+        for name in dict.fromkeys(name for name, _agent in (*self.agents.items(), *self._retired_agents)):
             count = await self.clear_backend_sessions(name, session_key)
             if count:
                 cleared[name] = count
         return cleared
 
     async def clear_backend_sessions(self, agent_name: str, session_key: str) -> int:
-        agent = self.get(agent_name)
-        runtime_key_getter = getattr(agent, "runtime_turn_keys_for_session_key", None)
-        runtime_keys = runtime_key_getter(session_key) if callable(runtime_key_getter) else set()
-        runtime_tokens = self._runtime_turn_tokens(runtime_keys, backend=agent.name)
-        count = await agent.clear_sessions(session_key)
-        for runtime_key, runtime_token in runtime_tokens.items():
-            self.release_runtime_turn_key(runtime_key, runtime_token)
+        """Clear a session key on every agent of a backend that may hold it.
+
+        A disabled backend's retired agent still holds its Sessions, and a
+        re-enabled agent must not resume a conversation the user cleared.
+        """
+        agents = self.runtime_agents(agent_name)
+        if not agents:
+            raise KeyError(agent_name)
+        count = 0
+        for agent in agents:
+            runtime_key_getter = getattr(agent, "runtime_turn_keys_for_session_key", None)
+            runtime_keys = runtime_key_getter(session_key) if callable(runtime_key_getter) else set()
+            runtime_tokens = self._runtime_turn_tokens(runtime_keys, backend=agent.name)
+            count += await agent.clear_sessions(session_key)
+            for runtime_key, runtime_token in runtime_tokens.items():
+                self.release_runtime_turn_key(runtime_key, runtime_token)
         return count
 
     def release_runtime_turns_for_backend(self, agent_name: str) -> None:

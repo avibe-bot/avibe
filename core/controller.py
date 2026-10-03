@@ -419,7 +419,8 @@ class Controller:
                 handler.im_client = self.im_client
                 handler.settings_manager = self.settings_manager
                 handler.sessions = self.sessions
-        for agent in getattr(getattr(self, "agent_service", None), "agents", {}).values():
+        # A disabled backend's retired agent still delivers its running work.
+        for agent in self.agent_service.runtime_agents():
             agent.config = new_config
             agent.im_client = self.im_client
             agent.settings_manager = self.settings_manager
@@ -735,6 +736,8 @@ class Controller:
         from storage.session_activities import SQLiteSessionActivityStore
 
         activity_store = SQLiteSessionActivityStore(get_cached_sqlite_engine())
+        # Set once a startup adopted what a crashed controller left for disabled OpenCode.
+        self._opencode_drain_checked = False
         self.agent_service = AgentService(
             self,
             activities=SessionActivityRegistry(
@@ -1002,14 +1005,35 @@ class Controller:
         if coordinator is not None and "opencode" in coordinator._blocked_backends():
             coordinator.restore_migration_blocks()
             return
-        opencode_agent = self.agent_service.agents.get("opencode")
-        if opencode_agent and hasattr(opencode_agent, "restore_active_polls"):
+        await self._retire_unowned_opencode_runtime()
+        # A drain-only or retired agent restores the polls of the work it runs,
+        # so that work still delivers its result.
+        for opencode_agent in self.agent_service.runtime_agents("opencode"):
+            if not hasattr(opencode_agent, "restore_active_polls"):
+                continue
             try:
                 restored = await opencode_agent.restore_active_polls(platforms)  # type: ignore[attr-defined]
                 if restored > 0:
                     logger.info(f"Restored {restored} active OpenCode poll(s)")
             except Exception as e:
                 logger.error(f"Failed to restore active polls: {e}", exc_info=True)
+
+    async def _retire_unowned_opencode_runtime(self) -> None:
+        """Adopt what a crashed controller left running when OpenCode is disabled.
+
+        No registered agent would ever adopt those servers. An agent that only
+        drains adopts them before any poll is restored: work still running
+        finishes and delivers, and the rest stops. It is created at most once.
+        """
+        if getattr(self, "_opencode_drain_checked", False) or "opencode" in self.agent_service.agents:
+            return
+        self._opencode_drain_checked = True
+        try:
+            from modules.agents.opencode import OpenCodeAgent
+
+            await self.agent_service.retire_agent("opencode", OpenCodeAgent.draining(self))
+        except Exception as e:
+            logger.error("Failed to retire the OpenCode servers a previous controller left: %s", e, exc_info=True)
 
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
@@ -1111,13 +1135,9 @@ class Controller:
             logger.error("Failed to start runtime command watcher: %s", e, exc_info=True)
 
         try:
-            if "opencode" not in getattr(agent_service, "agents", {}):
-                # OpenCode is disabled, so no registered agent will adopt what a
-                # crashed controller left running. An agent that only drains
-                # adopts it: work still running finishes, the rest stops now.
-                from modules.agents.opencode import OpenCodeAgent
-
-                await agent_service.retire_agent("opencode", OpenCodeAgent.draining(self))
+            # A startup whose poll restore was held back by migration recovery
+            # still adopts what a crashed controller left; a no-op otherwise.
+            await self._retire_unowned_opencode_runtime()
         except Exception as e:
             logger.error("Failed to retire the OpenCode servers a previous controller left: %s", e, exc_info=True)
 

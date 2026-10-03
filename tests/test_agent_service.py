@@ -2422,3 +2422,31 @@ def test_real_child_exit_after_acceptance_recovers_runtime_fifo() -> None:
             service.release_runtime_turn(second.context)
 
     asyncio.run(_run())
+
+
+def test_runtime_gen_006_clearing_a_session_reaches_a_disabled_backends_retired_agent() -> None:
+    """RUNTIME-GEN-006: /new clears a Session on the retired agent too.
+
+    Otherwise a re-enabled backend could resume the conversation the user cleared.
+    """
+
+    class _Agent:
+        def __init__(self) -> None:
+            self.name = "codex"
+            self.cleared: list[str] = []
+
+        async def clear_sessions(self, session_key: str) -> int:
+            self.cleared.append(session_key)
+            return 1
+
+    async def run() -> None:
+        service = AgentService(controller=SimpleNamespace())
+        retired, fresh = _Agent(), _Agent()
+        service.register(retired)
+        await service.retire_backend("codex")
+        service.register(fresh)
+
+        assert await service.clear_sessions("slack::C1") == {"codex": 2}
+        assert retired.cleared == ["slack::C1"] and fresh.cleared == ["slack::C1"]
+
+    asyncio.run(run())

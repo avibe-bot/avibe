@@ -9,12 +9,22 @@ import pytest
 from core.controller import Controller
 
 
+def _agent_service(agents):
+    """The registry the controller reads; this suite starts with no retired agent."""
+    return SimpleNamespace(
+        agents=agents,
+        runtime_agents=lambda backend=None: [
+            agent for name, agent in agents.items() if backend in (None, name)
+        ],
+        retire_agent=AsyncMock(),
+    )
+
+
 def test_runtime_services_start_when_post_update_notification_fails() -> None:
     controller = Controller.__new__(Controller)
     opencode_agent = SimpleNamespace(restore_active_polls=AsyncMock(return_value=0))
     codex_agent = SimpleNamespace(prepare_model_hub_runtime=AsyncMock())
-    controller.agent_service = SimpleNamespace(
-        agents={"opencode": opencode_agent, "codex": codex_agent}
+    controller.agent_service = _agent_service({"opencode": opencode_agent, "codex": codex_agent}
     )
     controller.primary_platform = "discord"
     controller.update_checker = SimpleNamespace(
@@ -70,7 +80,7 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
 def test_transport_ready_restores_only_its_state() -> None:
     controller = Controller.__new__(Controller)
     opencode_agent = SimpleNamespace(restore_active_polls=AsyncMock(return_value=1))
-    controller.agent_service = SimpleNamespace(agents={"opencode": opencode_agent})
+    controller.agent_service = _agent_service({"opencode": opencode_agent})
     controller.primary_platform = "discord"
     controller.update_checker = SimpleNamespace(
         check_and_send_post_update_notification=AsyncMock(return_value=True),
@@ -114,8 +124,7 @@ def test_transport_ready_registers_polls_before_owner_recovery() -> None:
             restore_entered.set()
             return 1
 
-        controller.agent_service = SimpleNamespace(
-            agents={
+        controller.agent_service = _agent_service({
                 "opencode": SimpleNamespace(
                     restore_active_polls=AsyncMock(side_effect=restore_active_polls)
                 )
@@ -214,7 +223,7 @@ def test_runtime_owner_recovery_isolates_optional_model_hub_failure(
 
 def test_runtime_ready_fails_closed_after_queue_recovery_failure() -> None:
     controller = Controller.__new__(Controller)
-    controller.agent_service = SimpleNamespace(agents={})
+    controller.agent_service = _agent_service({})
     controller.primary_platform = "discord"
     controller.update_checker = SimpleNamespace(
         check_and_send_post_update_notification=AsyncMock(),
@@ -252,7 +261,7 @@ def test_runtime_ready_fails_closed_after_queue_recovery_failure() -> None:
 
 def test_runtime_ready_fails_closed_after_fallback_recovery_failure() -> None:
     controller = Controller.__new__(Controller)
-    controller.agent_service = SimpleNamespace(agents={})
+    controller.agent_service = _agent_service({})
     controller.primary_platform = "discord"
     controller.update_checker = SimpleNamespace(
         check_and_send_post_update_notification=AsyncMock(),

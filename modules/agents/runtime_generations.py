@@ -144,8 +144,12 @@ class RuntimeGenerationSet(Generic[_S, _R]):
             return self._bind(generation)
 
     async def bind(self, generation: RuntimeGeneration[_S, _R]) -> RuntimeBinding[_S, _R]:
-        """Bind recovered work, such as a restored poll, to its known generation."""
-        self._admitting()
+        """Bind recovered work, such as a restored poll, to its known generation.
+
+        Recovered work is not new work, so a stopping unit still binds it: a
+        disabled backend's runtime finishes and delivers what was already
+        running, and the generation stops once that work is released.
+        """
         if generation.stopped:
             raise RuntimeError("cannot bind work to a stopped runtime generation")
         return self._bind(generation)
