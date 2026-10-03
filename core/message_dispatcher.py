@@ -49,6 +49,7 @@ from core.reply_enhancer import (
     strip_silent_blocks,
 )
 from core.run_settlement import (
+    SETTLED_BY_BACKEND_DISABLED,
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
@@ -265,7 +266,7 @@ async def _stream_chunk(
         # ``SETTLED_BY_NO_TERMINAL_RESULT`` is the pessimistic default a fallback
         # releaser writes, and upgrading THAT when a real result lands is the whole
         # point of this line.
-        if sink.get("settled_by") not in (SETTLED_BY_STOPPED, SETTLED_BY_BACKEND_REFRESH):
+        if sink.get("settled_by") not in (SETTLED_BY_STOPPED, SETTLED_BY_BACKEND_REFRESH, SETTLED_BY_BACKEND_DISABLED):
             sink["settled_by"] = SETTLED_BY_TERMINAL_RESULT
         done = sink.get("done_event")
         if done is not None:

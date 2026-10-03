@@ -2253,7 +2253,7 @@ class AgentAuthService:
 
         A Codex or OpenCode agent first leaves the registry, so no new message
         reaches it. Its running turns and Activities then settle with the
-        runtime-interruption notice, and every process of the backend stops.
+        backend-disabled notice, and every process of the backend stops.
         Claude stays registered while disabled, and its clients are closed.
         """
         from core.backend_restart import finish_native_operation
@@ -2266,7 +2266,9 @@ class AgentAuthService:
             coordinator = getattr(self.controller, "backend_restart_coordinator", None)
             interrupt = getattr(coordinator, "interrupt_backend", None)
             if callable(interrupt):
-                await interrupt(backend)
+                from core.run_settlement import SETTLED_BY_BACKEND_DISABLED
+
+                await interrupt(backend, reason=SETTLED_BY_BACKEND_DISABLED)
             if agent is None:
                 return
             if unregister:

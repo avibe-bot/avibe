@@ -413,9 +413,11 @@ the running turn was interrupted, and only then did the held messages get the
 1. The save reaches `request_restart("codex", config_save=True)`. The Codex
    agent leaves the registry at once, so a new message gets the disabled
    reply without waiting.
-2. The turn in `~/app` and its Activities settle with the
-   runtime-interruption notice, through the coordinator's
-   `interrupt_backend`, which the native credential cutover also uses.
+2. The turn in `~/app` and its Activities settle as `backend_disabled`,
+   through the coordinator's `interrupt_backend`, which the native credential
+   cutover also uses with `backend_refresh`. The conversation is told "This
+   turn was stopped because Codex was turned off", and a Harness run ends
+   `canceled` with the same explanation, because the user chose this.
 3. `shutdown_runtime()` stops every app-server of the agent, and the agent is
    gone. A turn that raced the disable fails visibly with
    `error.agentRuntimeRetired` and starts nothing.

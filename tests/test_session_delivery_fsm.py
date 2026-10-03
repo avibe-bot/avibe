@@ -5460,7 +5460,7 @@ def test_forced_refresh_tells_a_restored_conversation_turn_why_it_stopped(manage
         assert asyncio.run(restarted.notify_transport_ready("avibe")) == 1
     assert [kind for kind, _text in emitted] == ["notify"] * (1 if first_send_delivers else 2)
     assert all(
-        text.startswith("⚠️ This turn was interrupted — its Agent runtime was restarted")
+        text.startswith("⚠️ This turn was interrupted — its Agent runtime had to be replaced")
         for _kind, text in emitted
     )
     assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
@@ -5516,7 +5516,7 @@ def test_forced_backend_refresh_fails_unresolved_start_instead_of_blocking(
     assert _row(engine, delivery_id)["state"] == "retired"
     # MH-MIG-012: the refresh retired this conversation's input, so it says so.
     assert [kind for kind, _text in emitted] == ["notify"]
-    assert emitted[0][1].startswith("⚠️ This turn was interrupted — its Agent runtime was restarted")
+    assert emitted[0][1].startswith("⚠️ This turn was interrupted — its Agent runtime had to be replaced")
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)
         status = conn.execute(

@@ -8256,7 +8256,7 @@ def test_refresh_ending_the_last_activity_keeps_the_runs_first_cause(
             False,
             "failed",
             "backend_refresh",
-            "[Avibe Harness] This run was interrupted because its Agent runtime was refreshed",
+            "[Avibe Harness] This run was interrupted because its Agent runtime had to be replaced",
         ),
         # A user's cancellation that wins the race is still the user's stop.
         ("killed", "backend_refresh", True, "canceled", "stopped", "[Avibe Harness] This run was stopped"),

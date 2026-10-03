@@ -779,16 +779,25 @@ class BackendRestartCoordinator:
             return {"state": "unavailable"}
         return {"state": "applied"}
 
-    async def interrupt_backend(self, backend: str) -> None:
-        """Settle every turn and Activity running on ``backend`` with the
-        runtime-interruption notice, ahead of a forced stop or refresh."""
+    async def interrupt_backend(self, backend: str, *, reason: str | None = None) -> None:
+        """Settle every turn and Activity running on ``backend`` ahead of a
+        forced stop or refresh.
+
+        ``reason`` is the settlement and picks the notice: a runtime refresh by
+        default, or ``SETTLED_BY_BACKEND_DISABLED`` when the user turned the
+        backend off.
+        """
+        from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
+
+        settled_by = reason or SETTLED_BY_BACKEND_REFRESH
         session_ids = self.controller.session_turns.active_runtime_session_ids_for_backend(backend)
         await self.controller.session_turns.release_for_backend_refresh(
             backend=backend,
             base_session_ids=session_ids,
+            settled_by=settled_by,
         )
         await self.controller.agent_service.force_cancel_backend_turns(backend)
-        self.controller.agent_service.force_end_backend_activities(backend)
+        self.controller.agent_service.force_end_backend_activities(backend, reason=settled_by)
 
     async def _has_active_turns(self, backend: str) -> bool:
         service = self.controller.agent_service

@@ -191,14 +191,18 @@ class AgentService:
             logger.debug("Backend active-runtime probe failed for %s", backend, exc_info=True)
             return True
 
-    def force_end_backend_activities(self, backend: str) -> list[Any]:
-        """End every Activity of a runtime the service is tearing down itself."""
+    def force_end_backend_activities(self, backend: str, *, reason: str = SETTLED_BY_BACKEND_REFRESH) -> list[Any]:
+        """End every Activity of a runtime the service is tearing down itself.
+
+        ``reason`` is the settlement: a runtime refresh, or the user disabling
+        the backend.
+        """
         # The cause rides on each Activity it ends, so a settlement retried
-        # after a transient failure or a restart still reports the refresh.
+        # after a transient failure or a restart still reports it.
         completed = self.activities.end_backend(
             backend,
             status="killed",
-            metadata={"interrupt_reason": SETTLED_BY_BACKEND_REFRESH},
+            metadata={"interrupt_reason": reason},
         )
         for activity in completed:
             self.on_activity_terminal(activity)

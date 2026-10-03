@@ -8,6 +8,7 @@ import pytest
 
 from core.backend_restart import BackendRestartCoordinator, NativeCredentialLease, NativeMigrationBlockedError
 from core.controller import Controller
+from core.run_settlement import SETTLED_BY_BACKEND_DISABLED
 
 
 class _AgentService:
@@ -34,7 +35,7 @@ class _AgentService:
     def backend_runtime_active(self, backend: str) -> bool:
         return self.runtime_active
 
-    def force_end_backend_activities(self, backend: str) -> list:
+    def force_end_backend_activities(self, backend: str, *, reason: str = "backend_refresh") -> list:
         assert backend == "opencode"
         return []
 
@@ -321,8 +322,9 @@ def test_runtime_gen_006_disabling_a_backend_stops_its_work_at_once():
 
         assert "codex" not in controller.agent_service.agents
         assert controller.config.codex is None
+        # The user's own interruption is reported as such, not as a runtime refresh.
         controller.session_turns.release_for_backend_refresh.assert_awaited_once_with(
-            backend="codex", base_session_ids={"ses-1"}
+            backend="codex", base_session_ids={"ses-1"}, settled_by=SETTLED_BY_BACKEND_DISABLED
         )
         assert order == [("cancel", "codex"), ("stop", "codex")]
         controller.session_turns.begin_backend_drain.assert_not_called()

@@ -159,7 +159,8 @@
         "noTerminalResult": "[Avibe Harness] 本次 run 结束时 Agent 没有产出结果。turn 在 Agent 回复前就被释放，因此没有记录任何输出。请检查 Agent 日志；如果这项工作仍需完成，请重新运行。",
         "stopped": "[Avibe Harness] 本次 run 在 Agent 产出结果前被停止，因此没有最终结果。Agent 此前已经发出的输出仍会保留在这次 run 上。",
         "refusedConcurrentTurn": "[Avibe Harness] 本次 run 被跳过：同一 session 已有另一个 turn 正在执行。一个 session 同时只运行一个 turn，请在当前 turn 结束后重新触发。",
-        "backendRefresh": "[Avibe Harness] 本次 run 执行途中，它所用的 Agent 运行时被刷新，因此被中断，通常发生在刚保存 Agent 设置之后。这次 run 本身没有问题，请重新触发。",
+        "backendRefresh": "[Avibe Harness] 本次 run 执行途中，它所用的 Agent 运行时不得不被替换，因此被中断，例如凭据迁移，或同时运行的运行时版本过多。这次 run 本身没有问题，请重新触发。",
+        "backendDisabled": "[Avibe Harness] 本次 run 已停止，因为它所用的 Agent 后端被关闭了。请在设置中重新开启该后端；如果这项工作仍需完成，再重新触发。",
         "restarted": "[Avibe Harness] 本次 run 执行途中被中断。已执行的部分不会丢失，如果这项工作仍需完成，请重新触发。",
         "interrupted": "[Avibe Harness] 本次 run 在执行途中被中断。该次执行已被记录，不会重新排队。如果这项工作仍需完成，请重新触发。",
         "orphaned": "[Avibe Harness] 本次 run 没有任何执行在推进它，通常是服务在它执行途中重启导致的。已执行的部分不会丢失，如果这项工作仍需完成，请重新触发。",
@@ -236,6 +237,7 @@
       "reason": {
         "stopped": "被手动停止",
         "backendRefresh": "所用的 Agent 运行时被刷新",
+        "backendDisabled": "所用的 Agent 后端被关闭",
         "interrupted": "正在执行的任务被中断",
         "evicted": "所属会话被回收",
         "restarted": "服务重启",
@@ -1039,7 +1041,8 @@
   },
   "turn": {
     "interrupted": {
-      "backendRefresh": "⚠️ 本轮执行被中断——它运行期间 Agent 运行时被重启（例如在模型网关和直连之间切换，或保存了 Agent 设置）。如果这项工作仍然需要完成，请重新发送请求。",
+      "backendRefresh": "⚠️ 本轮执行被中断——它运行期间 Agent 运行时不得不被替换（例如凭据迁移）。如果这项工作仍需完成，请重新发送请求。",
+      "backendDisabled": "⏹ 本轮执行已停止，因为 {agent} 已被关闭。请在设置中重新开启它；如果这项工作仍需完成，再重新发送请求。",
       "serviceRestart": "⚠️ 本轮执行被中断——Avibe 服务在它运行期间重启。如果这项工作仍然需要完成，请重新发送请求。"
     }
   },

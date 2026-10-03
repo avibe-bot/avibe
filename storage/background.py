@@ -1795,6 +1795,7 @@ RUN_INTERRUPTION_REASONS = frozenset(
     {
         "stopped",
         "backend_refresh",
+        "backend_disabled",
         "interrupted",
         "evicted",
         "restarted",

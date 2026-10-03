@@ -16,6 +16,7 @@ from config.v2_config import ModelHubConfig
 from core.os_errors import format_os_errno
 
 from core.run_settlement import (
+    SETTLED_BY_BACKEND_DISABLED,
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
@@ -2198,6 +2199,7 @@ class TurnCorrelationRegistry:
             elif settled_by in {
                 SETTLED_BY_NO_TERMINAL_RESULT,
                 SETTLED_BY_BACKEND_REFRESH,
+                SETTLED_BY_BACKEND_DISABLED,
             }:
                 interrupted_attempt = (
                     trace.pending_attempt.payload()

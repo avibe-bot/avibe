@@ -3212,7 +3212,49 @@ def test_release_for_backend_refresh_names_the_interruption(harness, decided_by)
         assert len(notices) == 1
         channel, kind, text = notices[0]
         assert (channel, kind) == ("ses_opencode", "notify")
-        assert text.startswith("⚠️ This turn was interrupted — its Agent runtime was restarted")
+        assert text.startswith("⚠️ This turn was interrupted — its Agent runtime had to be replaced")
+
+
+def test_runtime_gen_006_a_disabled_backend_tells_the_turn_it_was_turned_off():
+    """RUNTIME-GEN-006: disabling a backend names itself as the cause.
+
+    The turn settles as ``backend_disabled``, not as a runtime refresh, and the
+    conversation is told which backend was turned off.
+    """
+    controller = _build_controller_double()
+    manager = session_turns.SessionTurnManager(controller)
+    controller.set_agent_status = lambda *_args: None
+    notices = []
+
+    async def _emit(context, kind, text, **_kwargs):
+        notices.append((context.channel_id, kind, text))
+        return "notice-1"
+
+    controller.emit_agent_message = _emit
+
+    async def _go():
+        ctx = MessageContext(user_id="U", channel_id="ses_codex", platform="avibe")
+        ctx.platform_specific = {
+            "agent_session_id": "ses_codex",
+            "agent_session_target": {"agent_backend": "codex"},
+        }
+        sink_key = resolve_turn_sink_key(controller, ctx)
+        controller.register_turn_sink(sink_key, on_chunk=None, done_event=asyncio.Event())
+        task = asyncio.create_task(asyncio.sleep(60))
+        await asyncio.sleep(0)
+        manager.in_flight["ses_codex"] = session_turns.Turn(task=task, context=ctx, logical_turn_id="turn-1")
+        await manager.release_for_backend_refresh(
+            backend="codex", base_session_ids={"ses_codex"}, settled_by="backend_disabled"
+        )
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return controller.get_turn_sink(sink_key)
+
+    sink = asyncio.run(_go())
+
+    assert sink["settled_by"] == "backend_disabled"
+    assert [(channel, kind) for channel, kind, _text in notices] == [("ses_codex", "notify")]
+    assert notices[0][2].startswith("⏹ This turn was stopped because Codex was turned off.")
 
 
 def test_release_for_backend_refresh_leaves_other_backend_turn_running():

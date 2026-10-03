@@ -198,7 +198,7 @@ async def test_busy_guard_interrupts_running_work_then_retires_and_yields():
         order.append("mutate")
     assert order == [("cancel", "codex"), ("refresh", "codex", True), "retire", "mutate"]
     controller.session_turns.release_for_backend_refresh.assert_awaited_once_with(
-        backend="codex", base_session_ids={"session-1"},
+        backend="codex", base_session_ids={"session-1"}, settled_by="backend_refresh",
     )
     assert not admissions and not turns
 
