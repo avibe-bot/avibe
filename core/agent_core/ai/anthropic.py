@@ -799,15 +799,7 @@ def _error_event_shape_error(chunk: Mapping[str, Any]) -> str | None:
 def _anthropic_usage(value: Any) -> Any:
     if not isinstance(value, Mapping):
         return None
-    cache_creation = value.get("cache_creation")
-    cache_write = value.get("cache_creation_input_tokens", 0)
-    if not isinstance(cache_write, int) or isinstance(cache_write, bool) or cache_write < 0:
-        cache_write = 0
-        if isinstance(cache_creation, Mapping):
-            cache_write = sum(
-                _nonnegative(cache_creation.get(key))
-                for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
-            )
+    cache_write = _anthropic_cache_write_tokens(value)
     return _usage(
         _nonnegative(value.get("input_tokens")),
         _nonnegative(value.get("output_tokens")),
@@ -825,9 +817,24 @@ def _merge_anthropic_usage(current: Any, value: Any) -> Any:
         _pick(value, "input_tokens", current.input_tokens),
         _pick(value, "output_tokens", current.output_tokens),
         _pick(value, "cache_read_input_tokens", current.cache_read_tokens),
-        _pick(value, "cache_creation_input_tokens", current.cache_write_tokens),
+        _anthropic_cache_write_tokens(value, current.cache_write_tokens),
         _pick_nested(value, "output_tokens_details", "thinking_tokens", current.reasoning_tokens),
     )
+
+
+def _anthropic_cache_write_tokens(value: Mapping[str, Any], fallback: int = 0) -> int:
+    """Keep Anthropic's aggregate cache count, falling back only when absent."""
+
+    aggregate = value.get("cache_creation_input_tokens")
+    if "cache_creation_input_tokens" in value and aggregate is not None:
+        return _nonnegative(aggregate)
+    breakdown = value.get("cache_creation")
+    if isinstance(breakdown, Mapping):
+        return sum(
+            _nonnegative(breakdown.get(key))
+            for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+        )
+    return fallback
 
 
 def _usage(input_tokens: int = 0, output_tokens: int = 0, cache_read: int = 0, cache_write: int = 0, reasoning: int | None = None) -> Any:

@@ -1028,7 +1028,7 @@ async def drive_sse_stream(
                         candidate = assembler.aborted(cancel.reason)
                     else:
                         assembler.set_origin(*resolved_origin)
-                        if response.status_code >= 400:
+                        if not 200 <= response.status_code < 300:
                             try:
                                 body = await read_response_body(response, cancel)
                             except (GeneratorExit, asyncio.CancelledError):
@@ -1042,6 +1042,12 @@ async def drive_sse_stream(
                             else:
                                 if body is None:
                                     candidate = assembler.aborted(cancel.reason)
+                                elif 300 <= response.status_code < 400:
+                                    candidate = assembler.error(
+                                        body or f"provider endpoint returned HTTP {response.status_code} redirect",
+                                        status=response.status_code,
+                                        headers=response.headers,
+                                    )
                                 else:
                                     candidate = assembler.error(
                                         body,
@@ -1110,28 +1116,50 @@ async def _await_network(
             return_when=asyncio.FIRST_COMPLETED,
         )
         if not done:
-            operation.cancel()
-            with _suppress_base_exceptions():
-                await operation
+            await _cancel_and_join(operation)
             raise TimeoutError(
                 f"provider network operation timed out after {timeout_s:.1f}s"
             )
         if cancellation in done and cancel.cancelled:
-            operation.cancel()
-            with _suppress_base_exceptions():
-                await operation
+            await _cancel_and_join(operation)
             return None
         return operation.result()
+    except TimeoutError:
+        raise
     except BaseException:
-        operation.cancel()
-        with _suppress_base_exceptions():
-            await operation
+        await _cancel_and_join(operation)
         raise
     finally:
         if not cancellation.done():
             cancellation.cancel()
             with _suppress_cancelled():
                 await cancellation
+
+
+async def _cancel_and_join(operation: asyncio.Future[Any]) -> None:
+    """Cancel an I/O task without hanging on a non-cooperative awaitable."""
+
+    if operation.done():
+        _consume_task_result(operation)
+        return
+    operation.cancel()
+    try:
+        done, _ = await asyncio.wait({operation}, timeout=CLEANUP_TIMEOUT_S)
+    except asyncio.CancelledError:
+        if not operation.done():
+            operation.add_done_callback(_consume_task_result)
+        raise
+    if operation not in done:
+        operation.add_done_callback(_consume_task_result)
+    else:
+        _consume_task_result(operation)
+
+
+def _consume_task_result(operation: asyncio.Future[Any]) -> None:
+    try:
+        operation.result()
+    except BaseException:
+        pass
 
 
 class _CancelledDependency(Exception):
@@ -1224,14 +1252,6 @@ class _suppress_cancelled:
 
     def __exit__(self, exception_type: type[BaseException] | None, exception: BaseException | None, traceback: Any) -> bool:
         return exception_type is asyncio.CancelledError
-
-
-class _suppress_base_exceptions:
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, exception_type: type[BaseException] | None, exception: BaseException | None, traceback: Any) -> bool:
-        return exception_type is not None
 
 
 def json_object(data: str) -> dict[str, Any] | None:

@@ -486,6 +486,15 @@ class Agent:
                 close = getattr(stream, "aclose", None)
                 if close is not None:
                     await self._cleanup(close, stream=True)
+            if terminal.partial is not None and terminal.partial.usage is not None and not terminal.partial.content:
+                row = await self._response(terminal.partial, final=False)
+                if not self._consumer_closed:
+                    await emit(
+                        MessageCommitted,
+                        message_id=row.row_id,
+                        context_seq=row.context_seq,
+                        final=False,
+                    )
             retry_error = terminal
             retries += 1
             await self._scope.call(lambda: asyncio.sleep(delay))

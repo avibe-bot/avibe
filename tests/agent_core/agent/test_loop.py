@@ -39,7 +39,7 @@ from core.agent_core.agent.models import RetryPolicy
 from core.agent_core.ai.provider import Done, ModelCapabilities, ProviderError, TextDelta, ThinkingDelta, ToolCallStart
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.harness.projection import project
-from core.agent_core.messages import ThinkingBlock, ToolCallBlock, ToolResultMessage, UserMessage, text
+from core.agent_core.messages import AssistantMessage, ThinkingBlock, ToolCallBlock, ToolResultMessage, Usage, UserMessage, text
 from core.agent_core.tools.base import ToolResult
 from tests.agent_core.fakes import (
     FakeJobHost,
@@ -586,11 +586,47 @@ async def test_retry_obeys_provider_flag_and_allows_usage_only_partial(streamed,
         assert events[-1].reason == "error"
         assert sleeps == []
     else:
-        # A usage-only partial is evidence for the next attempt, not emitted
-        # model output. The provider has already marked the error retryable.
+        # A usage-only partial is persisted as a non-final model response, not
+        # merged into the successful attempt. The provider owns retryability.
         assert len(provider.requests) == agent.models.resolutions == 2
         assert sleeps == [3.0]
         assert events[-1].reason == "completed"
+
+
+async def test_retry_preserves_usage_only_partial_in_successful_response():
+    store = InMemoryTranscriptStore()
+    first_partial = AssistantMessage(
+        content=(),
+        origin=assistant().origin,
+        stop_reason="error",
+        usage=Usage(input_tokens=5, output_tokens=2, cache_write_tokens=1),
+    )
+    successful = AssistantMessage(
+        content=assistant("done").content,
+        origin=assistant().origin,
+        stop_reason="stop",
+        usage=Usage(input_tokens=7, output_tokens=3, cache_read_tokens=4),
+    )
+    provider = ScriptedProvider(
+        [
+            [ProviderError("rate_limit", "busy", True, partial=first_partial)],
+            [Done(successful)],
+        ]
+    )
+
+    events = await collect(
+        make_agent(provider, store=store, retry=RetryPolicy(initial_delay_s=0))
+    )
+
+    assert events[-1].reason == "completed"
+    responses = [row.message for row in await store.load("session") if row.kind == "response"]
+    assert len(responses) == 2
+    assert responses[0].usage == Usage(input_tokens=5, output_tokens=2, cache_write_tokens=1)
+    assert responses[1].usage == Usage(
+        input_tokens=7,
+        output_tokens=3,
+        cache_read_tokens=4,
+    )
 
 
 @pytest.mark.parametrize(

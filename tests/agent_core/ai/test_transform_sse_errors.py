@@ -261,6 +261,20 @@ def test_auth_statuses_are_not_retryable(status: int) -> None:
 
 
 @pytest.mark.parametrize(
+    "body",
+    [
+        "provider rejected password=super-secret",
+        "provider rejected https://model.test/v1?password=super-secret",
+    ],
+)
+def test_error_message_redacts_password_named_and_query_values(body: str) -> None:
+    error = classify_error(body=body)
+
+    assert "super-secret" not in error.message
+    assert "[redacted]" in error.message
+
+
+@pytest.mark.parametrize(
     "code",
     [
         "authentication_error",

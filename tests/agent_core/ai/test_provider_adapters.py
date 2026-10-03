@@ -1780,6 +1780,25 @@ async def test_anthropic_usage_keeps_total_cache_write_tokens() -> None:
 
 
 @pytest.mark.asyncio
+async def test_anthropic_usage_falls_back_to_nested_cache_write_tokens() -> None:
+    body = (
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":1,"cache_creation":{"ephemeral_5m_input_tokens":15,"ephemeral_1h_input_tokens":10}}}}\n\n'
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+        'data: {"type":"message_stop"}\n\n'
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(AnthropicAdapter(client), _request("anthropic"))
+
+    final = events[-1]
+    assert isinstance(final, Done)
+    assert final.message.usage == Usage(input_tokens=1, cache_write_tokens=25)
+
+
+@pytest.mark.asyncio
 async def test_chat_reasoning_field_is_replayed_as_a_marker() -> None:
     body = (
         'data: {"choices":[{"delta":{"reasoning_content":"plan"},"finish_reason":"stop"}]}\n\n'
@@ -1952,6 +1971,26 @@ async def test_http_413_is_classified_as_overflow() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_redirect_is_terminal_invalid_request() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            307,
+            headers={"location": "https://other.test/v1"},
+            text='{"error":{"message":"password=super-secret"}}',
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert error.status == 307
+    assert error.retryable is False
+    assert "super-secret" not in error.message
+
+
+@pytest.mark.asyncio
 async def test_ipv6_endpoint_in_error_text_keeps_one_sanitized_terminal() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -2011,6 +2050,29 @@ class _StalledFirstByteStream(httpx.AsyncByteStream):
         self.closed.set()
 
 
+class _NonCooperativeReadStream(httpx.AsyncByteStream):
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancel_seen = asyncio.Event()
+        self.cancel_count = 0
+        self.closed = asyncio.Event()
+
+    async def __aiter__(self):
+        self.started.set()
+        while not self.release.is_set():
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancel_count += 1
+                self.cancel_seen.set()
+        yield b"data: [DONE]\n\n"
+
+    async def aclose(self) -> None:
+        self.closed.set()
+        self.release.set()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["open", "first_byte", "idle"])
 async def test_shared_driver_bounds_each_network_wait(
@@ -2068,6 +2130,37 @@ async def test_shared_driver_bounds_each_network_wait(
 
 
 @pytest.mark.asyncio
+async def test_non_cooperative_stream_cancellation_join_does_not_block_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import core.agent_core.ai._common as common
+
+    monkeypatch.setattr(common, "TIME_TO_FIRST_BYTE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(common, "CLEANUP_TIMEOUT_S", 0.01)
+    stream = _NonCooperativeReadStream()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        task = asyncio.create_task(_events(OpenAIChatAdapter(client), _request("openai_chat")))
+        await stream.started.wait()
+        events = await asyncio.wait_for(task, timeout=0.5)
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "network"
+    assert error.retryable is True
+    assert stream.cancel_seen.is_set()
+    assert stream.cancel_count == 1
+    assert stream.closed.is_set()
+
+
+@pytest.mark.asyncio
 async def test_cancellation_after_placeholder_slot_has_no_partial_message() -> None:
     stream = _StalledStream(
         b'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\n'
@@ -2120,6 +2213,28 @@ class _ErrorBodyReadFailure(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         self.closed.set()
+
+
+@pytest.mark.asyncio
+async def test_redirect_error_body_read_failure_is_terminal_invalid_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import core.agent_core.ai._common as common
+
+    monkeypatch.setattr(common, "TIME_TO_FIRST_BYTE_TIMEOUT_S", 0.01)
+    stream = _ErrorBodyReadFailure()
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(307, stream=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "invalid_request"
+    assert error.status == 307
+    assert error.retryable is False
 
 
 class _StalledLoader(MediaLoader):
