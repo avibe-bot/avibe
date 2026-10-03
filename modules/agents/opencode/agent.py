@@ -799,6 +799,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         # no turn's cleanup waits on another generation's start or stop.
         self._lifecycle_tasks: set[asyncio.Task] = set()
         self._resource_failures: Dict[tuple[Any, ...], AgentResourceFailure | None] = {}
+        # One restore at a time: an enable-triggered restore can overlap an
+        # IM-ready or reconnect one, and a poll is claimed only at its handoff.
+        self._restore_lock = asyncio.Lock()
 
     def _durable_poll_generations(self) -> Dict[str, Optional[str]]:
         return {
@@ -2650,8 +2653,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         return base_session_id or None
 
     async def restore_active_polls(self, platforms: set[str] | None = None) -> int:
-        """Restore active poll loops that were interrupted by vibe-remote restart."""
+        """Restore active poll loops that were interrupted by vibe-remote restart.
 
+        Callers pass only platforms whose transport can deliver. Overlapping
+        calls run one after another, so a poll whose loop one of them started
+        is seen as running by the next and never gets a second loop.
+        """
+
+        async with self._restore_lock:
+            return await self._restore_active_polls(platforms)
+
+    async def _restore_active_polls(self, platforms: set[str] | None) -> int:
         active_polls = self.sessions.get_all_active_polls()
         if not active_polls:
             logger.debug("No active polls to restore")

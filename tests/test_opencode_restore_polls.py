@@ -144,6 +144,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     agent._steering_states = {}
     agent._restored_poll_servers = {}
     agent._settling_request_tasks = set()
+    agent._restore_lock = asyncio.Lock()
 
     server = _Server()
     serve_opencode_agent(agent, server)
@@ -1450,3 +1451,48 @@ def test_a_cancelled_restore_releases_the_binding_its_poll_task_never_took(stage
     asyncio.run(run())
 
     assert agent._runtime.bindings and all(binding.released for binding in agent._runtime.bindings)
+
+
+def test_two_overlapping_restores_of_one_durable_poll_start_exactly_one_loop() -> None:
+    """OpenCode is enabled in a running controller while an IM transport
+    reconnects: two restores overlap. The durable poll gets exactly one loop,
+    so its result is delivered once."""
+
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    listing = asyncio.Event()
+    proceed = asyncio.Event()
+    finish_loop = asyncio.Event()
+    loops: list[str] = []
+    list_messages = agent._test_server.list_messages
+
+    async def slow_list_messages(*args, **kwargs):
+        listing.set()
+        await proceed.wait()
+        return await list_messages(*args, **kwargs)
+
+    class _HeldPollLoop:
+        async def run_restored_poll_loop(self, poll_info, _server):
+            loops.append(poll_info.opencode_session_id)
+            await finish_loop.wait()
+            return True
+
+        async def remove_restored_ack(self, _poll_info):
+            return None
+
+    agent._test_server.list_messages = slow_list_messages
+    agent._poll_loop = _HeldPollLoop()
+
+    async def run() -> list[str]:
+        first = asyncio.get_running_loop().create_task(agent.restore_active_polls())
+        await listing.wait()
+        second = asyncio.get_running_loop().create_task(agent.restore_active_polls())
+        await asyncio.sleep(0)
+        proceed.set()
+        await asyncio.gather(first, second)
+        started = list(loops)
+        finish_loop.set()
+        await asyncio.gather(*agent._active_requests.values())
+        return started
+
+    assert asyncio.run(run()) == ["oc-1"]
