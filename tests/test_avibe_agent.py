@@ -526,6 +526,54 @@ async def test_a_steer_enters_after_the_tool_batch_even_when_its_row_arrives_lat
     assert late.outcome is SteerOutcome.NOT_ACTIVE
 
 
+async def test_reconcile_reports_a_steer_only_as_the_run_received_it(engine, session, tmp_path, published) -> None:
+    from core.services.agent_steering import SteerReconcileRequest
+    from modules.im.base import FileAttachment
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(arguments, ctx):
+        started.set()
+        await release.wait()
+        return ToolResult((text("a.py"),))
+
+    harness = _Harness(engine, tmp_path, "avibe", _tool_turn(), tools=[FakeTool("echo", execute=slow)])
+    request = harness.request("list files")
+    turn_id = _turn(request.context)
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    await started.wait()
+    native = harness.controller.started[0]
+    _delivery_id, attempt_id = harness.open_steer("look at this", turn_id, native)
+    preparing, fail = asyncio.Event(), asyncio.Event()
+
+    async def vanished(*_args, **_kwargs):
+        preparing.set()
+        await fail.wait()
+        raise OSError("the attachment is gone")
+
+    # The steer's image is still being snapshotted when the Turn owner reconciles the attempt.
+    harness.agent.media.snapshot_file = vanished
+    attachment = FileAttachment(name="shot.png", mimetype="image/png", local_path=str(tmp_path / "shot.png"))
+    steering = asyncio.create_task(
+        harness.agent.steer_active_turn(
+            SteerRequest(SESSION, turn_id, native, "look at this", attempt_id=attempt_id, files=(attachment,)),
+            ActiveSteerTarget("runtime", turn_id, request.context, request, harness.agent),
+        )
+    )
+    await preparing.wait()
+    reconcile = SteerReconcileRequest(SESSION, turn_id, native, attempt_id)
+    try:
+        # The run has not received the steer: it is neither accepted nor gone.
+        assert (await harness.agent.reconcile_steer_attempt(reconcile, None)).outcome is SteerOutcome.UNKNOWN
+        fail.set()
+        assert (await steering).outcome is SteerOutcome.REFUSED
+        assert (await harness.agent.reconcile_steer_attempt(reconcile, None)).outcome is SteerOutcome.REFUSED
+    finally:
+        fail.set()
+        release.set()
+        await running
+
+
 async def test_a_run_ended_by_design_still_answers_the_steer_its_turn_accepted(
     engine, session, tmp_path, published
 ) -> None:
@@ -688,6 +736,49 @@ async def test_a_fork_from_an_earlier_message_continues_only_the_inherited_prefi
     [request] = child.provider.requests
     assert request.messages == project(rows[:3]).messages
     assert "source continues" not in json.dumps([str(message) for message in request.messages], ensure_ascii=False)
+
+
+async def test_a_fork_settles_a_call_it_inherited_open_with_the_sources_result(
+    engine, session, tmp_path, published
+) -> None:
+    # The source's job is gone (J5 pruned it once the source's call settled).
+    suite = ToolSuite(
+        jobs=FakeJobHost(),
+        create_tools=lambda jobs_, sink: [FakeTool("bash")],
+        render_recovered=_unused_renderer,
+        find_job=lambda *_args, **_kwargs: None,
+    )
+    call = ToolCallBlock(id="call_1", name="bash", arguments={"command": "make release"})
+    source = _Harness(
+        engine, tmp_path, "avibe", [[Done(assistant("Releasing.", calls=(call,)))], [Done(assistant("Released."))]],
+        tools=[FakeTool("bash", result=ToolResult((text("release 1.2.0 published"),)))],
+    )
+    await source.agent.handle_message(source.request("ship it"))
+    narration = (await source.context_rows())[1]
+    with engine.begin() as conn:
+        # A fork from the narration message: its anchor precedes the call's result.
+        _insert_session(
+            conn,
+            "ses_child",
+            _SCOPES["avibe"],
+            {
+                "created_via": "session_fork",
+                "fork_source_session_id": SESSION,
+                "fork_source_message_id": narration.row_id,
+                "fork_source_context_seq": resolve_fork_anchor_seq(conn, SESSION, narration.row_id),
+            },
+        )
+    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))]], suite=suite, session_id="ses_child")
+
+    await child.agent.handle_message(child.request("what happened?"))
+
+    rows = await child.context_rows()
+    assert [(entry.session_id, entry.kind) for entry in rows[:3]] == [
+        (SESSION, "input"), (SESSION, "response"), ("ses_child", "tool_result")
+    ]
+    # The child settles with what the source recorded, not with an uncertain effect.
+    assert rows[2].message.content == (text("release 1.2.0 published"),)
+    assert child.provider.requests[0].messages == project(rows[:4]).messages
 
 
 async def test_a_google_hop_is_called_over_chat_at_the_gateway_prefix(engine, session, tmp_path, published) -> None:
@@ -1402,3 +1493,31 @@ async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(engine
     present = {name: Path(suite.jobs.output_path(job_id)).parent.exists() for name, job_id in jobs.items()}
     # J5: a job is removed only once its call has a durable result and no Watch still manages it.
     assert present == {"a": False, "b": True, "c": False, "d": True, "e": True}
+
+
+
+async def test_a_running_service_prunes_settled_jobs_after_its_runs(engine, session, tmp_path, published) -> None:
+    suite = local_tool_suite(str(tmp_path / "jobs"))
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("done"))]], suite=suite)
+    request = harness.request("run it")
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run it"),))
+    )
+    call = ToolCallBlock(id="call_old", name="bash", arguments={"command": "printf out"})
+    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    job_id = await _real_job(suite, "printf out", call_id="call_old", cwd=tmp_path)
+    await _until(lambda: suite.jobs.status(job_id).state == "exited", "the job never exited")
+    await harness.agent.store.append_tool_result(
+        SESSION, ToolResultMessage("call_old", "bash", (text("out"),)), details={"job_id": job_id}
+    )
+    await harness.agent.store.append_response(SESSION, assistant("finished"), final=True)
+    job_dir = Path(suite.jobs.output_path(job_id)).parent
+    week_ago = time.time() - 8 * 24 * 3600
+    for entry in job_dir.iterdir():
+        os.utime(entry, (week_ago, week_ago))
+
+    # No restart: the service has been up since the job ran, and the next Turn ends.
+    await harness.agent.handle_message(harness.request("anything else?"))
+
+    await _until(lambda: not job_dir.exists(), "a settled job outlived its retention while the service ran")

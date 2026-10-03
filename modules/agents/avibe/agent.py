@@ -46,6 +46,7 @@ from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.projection import open_tool_calls
+from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
     IMAGE_MIME_TYPES,
     AssistantMessage,
@@ -82,6 +83,7 @@ from storage.agent_transcript import (
     SQLiteTranscriptStore,
     final_outcome,
     render_text,
+    source_tool_result,
 )
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
@@ -92,6 +94,7 @@ BACKEND = "avibe"
 # Final responses whose empty text is explained by the stop itself (loop-control.md section 2).
 _EXPLAINED_STOPS = ("refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
+_JOB_PRUNE_INTERVAL_S = 3600.0
 
 
 def _instant(value: Any) -> Optional[datetime]:
@@ -124,6 +127,8 @@ class _Run:
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
     # This run's committed responses by row id, for delivering them; released with the run.
     responses: dict[str, AssistantMessage] = field(default_factory=dict)
+    # Each steer attempt this run has seen: UNKNOWN while it is prepared, then its receipt.
+    steers: dict[str, SteerOutcome] = field(default_factory=dict)
     stop_requested: bool = False
 
     @property
@@ -173,6 +178,9 @@ class AvibeAgent(BaseAgent):
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.
         self._runtimes: dict[str, _SessionRuntime] = {}
+        # J5 while the service runs: when the jobs directory was last pruned, and the pass in flight.
+        self._pruned_at: Optional[float] = None
+        self._prune_task: Optional[asyncio.Task] = None
 
     # --- BaseAgent -----------------------------------------------------------
 
@@ -198,7 +206,7 @@ class AvibeAgent(BaseAgent):
             except Exception as error:
                 await self._fail_preflight(request, error)
                 return
-            run = self._new_run(request, session_id, turn_id, cwd, router)
+            run = self._new_run(request, session_id, turn_id, cwd, router, await self._avibe_sections(request, cwd))
             runtime.cwd = cwd
             runtime.run = run
             try:
@@ -225,6 +233,7 @@ class AvibeAgent(BaseAgent):
                 runtime.run = None
                 await self._admit_returned_inputs(run)
                 await run.router.aclose()
+                self._prune_jobs_soon()
 
     async def handle_stop(self, request: AgentRequest) -> bool:
         session_id = self._session_id(request.context)
@@ -283,8 +292,17 @@ class AvibeAgent(BaseAgent):
                     logger.exception("Avibe Agent startup tool-call recovery failed for Session %s", session_id)
         await self._prune_settled_jobs()
 
+    def _prune_jobs_soon(self) -> None:
+        """J5 while the service runs: runs create jobs, so a run's end prunes, at most hourly, off the Turn."""
+        if self._pruned_at is not None and time.monotonic() - self._pruned_at < _JOB_PRUNE_INTERVAL_S:
+            return
+        if self._prune_task is not None and not self._prune_task.done():
+            return
+        self._prune_task = asyncio.create_task(self._prune_settled_jobs(), name="avibe-agent-job-prune")
+
     async def _prune_settled_jobs(self) -> None:
-        """J5 at startup: remove finished jobs whose call has a durable result and whose Watch settled."""
+        """J5: remove finished jobs whose call has a durable result and whose Watch settled."""
+        self._pruned_at = time.monotonic()
         try:
             suite = self._tools()
             if suite.prune is not None:
@@ -347,18 +365,23 @@ class AvibeAgent(BaseAgent):
         run = self._run_for(request.target_session_id, request.expected_logical_turn_id)
         if run is None or request.expected_native_turn_id != run.native_turn_id:
             return steer_result(SteerOutcome.NOT_ACTIVE, reason="not_active")
+        run.steers[request.attempt_id] = SteerOutcome.UNKNOWN
         try:
             message_id = await asyncio.to_thread(self._attempt_leader_id, request.attempt_id)
             if message_id is None:
+                run.steers[request.attempt_id] = SteerOutcome.REFUSED
                 return steer_result(SteerOutcome.REFUSED, reason="attempt_unknown")
             message = await self._render_input(
                 request.target_session_id, request.text, request.files, request.input_metadata
             )
         except Exception:
             logger.exception("Avibe Agent could not prepare a steer for Session %s", request.target_session_id)
+            run.steers[request.attempt_id] = SteerOutcome.REFUSED
             return steer_result(SteerOutcome.REFUSED, reason="preparation_failed")
         if await run.agent.steer(AgentInput(message_id, message)):
+            run.steers[request.attempt_id] = SteerOutcome.ACCEPTED
             return steer_result(SteerOutcome.ACCEPTED, turn_id=run.turn_id)
+        run.steers[request.attempt_id] = SteerOutcome.REFUSED
         return steer_result(SteerOutcome.REFUSED, reason="run_closed")
 
     def reconciliation_steer_target(self, request: SteerReconcileRequest) -> ActiveSteerTarget:
@@ -371,15 +394,25 @@ class AvibeAgent(BaseAgent):
         )
 
     async def reconcile_steer_attempt(self, request: SteerReconcileRequest, target: Any) -> SteerResult:
-        """A steer is in-process: it is accepted only while its run is alive or once consumed."""
-        run = self._run_for(request.target_session_id, request.expected_logical_turn_id)
+        """A steer is in-process: its evidence is the consumed row, or the live run's own receipt.
+
+        While the run lives, the answer is what that run recorded for the attempt:
+        ACCEPTED only once ``Agent.steer`` accepted it, UNKNOWN while it is still
+        being prepared (or not yet seen), REFUSED once the run refused it.
+        """
         message_id = await asyncio.to_thread(self._attempt_leader_id, request.attempt_id)
         if message_id is not None and await asyncio.to_thread(self._consumed, message_id):
             return steer_result(SteerOutcome.ACCEPTED, turn_id=request.expected_logical_turn_id)
-        if run is not None and run.native_turn_id == request.expected_native_turn_id:
+        run = self._run_for(request.target_session_id, request.expected_logical_turn_id)
+        if run is None or run.native_turn_id != request.expected_native_turn_id:
+            return steer_result(SteerOutcome.NOT_ACTIVE, reason="not_active")
+        outcome = run.steers.get(request.attempt_id, SteerOutcome.UNKNOWN)
+        if outcome is SteerOutcome.ACCEPTED:
             # The accepted steer is still queued in the live run that owns it.
             return steer_result(SteerOutcome.ACCEPTED, turn_id=run.turn_id)
-        return steer_result(SteerOutcome.NOT_ACTIVE, reason="not_active")
+        if outcome is SteerOutcome.REFUSED:
+            return steer_result(SteerOutcome.REFUSED, reason="run_closed")
+        return steer_result(SteerOutcome.UNKNOWN, reason="in_progress")
 
     # --- one run ---------------------------------------------------------------
 
@@ -408,6 +441,7 @@ class AvibeAgent(BaseAgent):
         turn_id: str,
         cwd: str,
         router: HubModelRouter,
+        sections: str,
     ) -> _Run:
         suite = self._tools()
         agent = Agent(
@@ -423,7 +457,7 @@ class AvibeAgent(BaseAgent):
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
         tools = tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id)))
         agent.set_tools(tools)
-        agent.system = system_prompt([tool.spec.name for tool in tools], self._avibe_sections(request, cwd))
+        agent.system = system_prompt([tool.spec.name for tool in tools], sections)
         return _Run(agent, router, request, session_id, turn_id, cwd)
 
     async def _on_event(self, run: _Run, event: AgentEvent) -> None:
@@ -541,19 +575,31 @@ class AvibeAgent(BaseAgent):
             return
         suite = self._tools()
 
-        def find_jobs() -> dict[tuple[str, str], str]:
+        def evidence() -> tuple[list[ContextEntry], dict[tuple[str, str], str]]:
             # A call's job started after the response carrying the call committed; a job an
-            # earlier call with a reused id started is older (one rule with J5).
+            # earlier call with a reused id started is older (one rule with J5). A call this
+            # Session inherited open from a fork source that settled it takes that result.
             committed = self._committed_at([owner.row_id for owner, _ in open_calls])
-            found = {}
-            for owner, call in open_calls:
-                job_id = suite.find_job(owner.session_id, call.id, created_since=committed.get(owner.row_id))
-                if job_id is not None:
-                    found[(owner.session_id, call.id)] = job_id
-            return found
+            inherited, found = [], {}
+            with self._engine.connect() as conn:
+                for owner, call in open_calls:
+                    since = committed.get(owner.row_id)
+                    if owner.session_id != session_id and since is not None:
+                        result = source_tool_result(conn, session_id, call.id, committed_since=_microsecond_text(since))
+                        if result is not None:
+                            inherited.append(result)
+                            continue
+                    job_id = suite.find_job(owner.session_id, call.id, created_since=since)
+                    if job_id is not None:
+                        found[(owner.session_id, call.id)] = job_id
+            return inherited, found
 
-        # Each lookup lists the jobs directory: one pass, off the event loop.
-        job_ids = await asyncio.to_thread(find_jobs)
+        # Each job lookup lists the jobs directory: one pass, off the event loop.
+        inherited, job_ids = await asyncio.to_thread(evidence)
+        for result in inherited:
+            await self.store.append_tool_result(
+                session_id, result.message, details=dict(result.payload.get("details") or {})
+            )
         await settle_open_calls(
             session_id=session_id,
             store=self.store,
@@ -669,12 +715,17 @@ class AvibeAgent(BaseAgent):
             return error_text(kind, self._language())
         return strip_silent_blocks(value)
 
-    def _avibe_sections(self, request: AgentRequest, cwd: str) -> str:
+    async def _avibe_sections(self, request: AgentRequest, cwd: str) -> str:
+        """Avibe's injected prompt sections, built off the event loop as the other backends build them.
+
+        Skill resolution scans the filesystem and may run ``claude plugin list``.
+        """
         from core.managed_skills import managed_skill_claude_cli_path, managed_skill_project_base
         from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 
         context = request.context
-        return build_system_prompt_injection(
+        return await asyncio.to_thread(
+            build_system_prompt_injection,
             agent_instructions=request.vibe_agent_system_prompt or "",
             backend=BACKEND,
             include_quick_replies=getattr(self.config, "reply_enhancements", True)

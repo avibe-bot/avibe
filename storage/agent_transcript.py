@@ -23,7 +23,8 @@ Delivery, and that Turn's initial Delivery names the input row. That is the
 channel the Turn answers, where ``persist_agent_message`` attributes the same
 output, and a steer from another surface does not re-home the reply. An input
 without a Delivery link stands for itself. ``agent_events.turn_id`` is that
-Turn.
+Turn. A fork that settles the calls it inherited open before its first input
+attributes those rows to its own scope, with no Turn.
 
 Fork. A child inherits its source's context rows up to ``anchor_seq``, read
 from the top-level Session metadata ``fork_source_session_id`` and
@@ -70,7 +71,7 @@ from core.agent_core.messages import (
 )
 from storage import agent_events_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
-from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
+from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 # A final response is ``result``, or ``error`` when ``final_outcome`` says it failed:
@@ -336,7 +337,20 @@ def _turn_origin(conn: Connection, session_id: str) -> _TurnOrigin:
         .limit(1)
     ).first()
     if latest is None:
-        raise TranscriptError(f"Session {session_id} has consumed no input; a context row answers a Turn")
+        # A fork settles the calls it inherited open (T2) before it consumes its first
+        # input: those rows belong to the Session's own scope, outside any Turn.
+        home = (
+            conn.execute(
+                select(scopes.c.id, scopes.c.platform)
+                .select_from(agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id))
+                .where(agent_sessions.c.id == session_id)
+            ).first()
+            if _fork_link(conn, session_id) is not None
+            else None
+        )
+        if home is None:
+            raise TranscriptError(f"Session {session_id} has consumed no input; a context row answers a Turn")
+        return _TurnOrigin(home.platform, home.id, None, session.agent_name, session.agent_backend)
     platform, scope_id = latest.platform, latest.scope_id
     turn_id = conn.execute(
         select(message_deliveries.c.turn_id)
@@ -399,6 +413,47 @@ def resolve_fork_anchor_seq(conn: Connection, source_session_id: str, anchor_mes
         )
     ).scalar()
     return max(value for value in (inherited, own_messages, own_events) if value is not None)
+
+
+def source_tool_result(
+    conn: Connection, session_id: str, tool_call_id: str, *, committed_since: str
+) -> Optional[ContextEntry]:
+    """The result a fork source committed for a call ``session_id`` inherited open.
+
+    A fork anchored between a response and its tool results inherits those calls
+    open. A source's own result, the earliest one committed for the call at or after
+    ``committed_since`` (the response's commit time, so a reused call id cannot
+    match an earlier call), records what happened; the child settles with it
+    instead of re-deriving it from job state that J5 may since have pruned.
+    """
+    sources = [member for member, _bound in _ancestry(conn, session_id)[1:]]
+    if not sources:
+        return None
+    row = (
+        conn.execute(
+            select(
+                agent_events.c.id,
+                agent_events.c.session_id,
+                agent_events.c.context_seq,
+                agent_events.c.content_json,
+                agent_events.c.event_type,
+                agent_events.c.visibility,
+            )
+            .where(
+                agent_events.c.session_id.in_(sources),
+                agent_events.c.event_type == _EVENT_TYPE_BY_KIND["tool_result"],
+                agent_events.c.visibility == CONTEXT_VISIBILITY,
+                agent_events.c.context_seq.is_not(None),
+                agent_events.c.created_at >= committed_since,
+                func.json_extract(agent_events.c.content_json, "$.message.tool_call_id") == tool_call_id,
+            )
+            .order_by(agent_events.c.created_at, agent_events.c.id)
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
+    return _event_entry(row["session_id"], row) if row is not None else None
 
 
 def _fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:
