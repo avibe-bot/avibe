@@ -1571,17 +1571,16 @@ class ClaudeAgent(BaseAgent):
             return []
         run = self._echoed_receipt_run(receipts, text)
         if run is None:
-            if origin == "human":
-                # Only Avibe writes human input to this process, so this echo is
-                # Avibe input in a shape the receipts do not model. The stream
-                # gives no sound boundary for which receipts it covers, so they
-                # stay pending; make the drift loud instead of guessing.
-                logger.warning(
-                    "Claude replayed human input that matches no pending receipt for %s; "
-                    "%d input receipt(s) remain pending",
-                    composite_key,
-                    len(receipts),
-                )
+            # A human or origin-less replay is Avibe input in a shape the receipts
+            # do not model. The stream gives no sound boundary for which receipts
+            # it covers, so they stay pending; make the drift loud instead of
+            # guessing.
+            logger.warning(
+                "Claude replayed input that matches no pending receipt for %s; "
+                "%d input receipt(s) remain pending",
+                composite_key,
+                len(receipts),
+            )
             return []
         start, end = run
         consumed = receipts[start:end]

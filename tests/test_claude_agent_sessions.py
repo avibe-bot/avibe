@@ -1622,6 +1622,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             # Avibe input in a shape the receipts do not model: nothing is
             # guessed, and the drift is logged.
             ("unrecognized human", "first steer, rewritten", {"kind": "human"}, queued),
+            ("unrecognized origin-less", "first steer, rewritten", None, queued),
             # Same text as the queued run, but an injected turn is not Avibe input.
             ("injected notification", "first steer\nsecond steer", {"kind": "task-notification"}, queued),
         )
@@ -1699,7 +1700,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     )
                     agent_logger.warning("receiver finished")
                 drifted = any("matches no pending receipt" in line for line in logs.output)
-                self.assertEqual(drifted, name == "unrecognized human")
+                self.assertEqual(drifted, name.startswith("unrecognized"))
 
                 self.assertEqual(observed_pending, [still_pending])
                 if settles:

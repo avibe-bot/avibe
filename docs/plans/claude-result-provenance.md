@@ -145,7 +145,7 @@ receives a human Result. It predates the rule and needs its own decision.
 Fact 6 is resolved in the receipt owner (HFR-487). The merged replay is the
 queued inputs joined by newlines, so one echo consumes the matching contiguous
 FIFO run of receipts. Echoes with another explicit origin never consume receipts,
-even when their text matches. A human-origin echo that matches no receipt is
+even when their text matches. A human-origin or origin-less echo that matches no receipt is
 Avibe input in a shape the receipts do not model; it logs a warning and leaves
 the receipts pending. The stream exposes no sound boundary for which receipts
 such an echo covers, so a release heuristic would trade a loud wedge for silent
