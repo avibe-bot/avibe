@@ -1589,6 +1589,8 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
     harness.agent._sessions_with_open_tail = unavailable
     with pytest.raises(RuntimeError):
         await harness.agent.recover_runtime_state()
+    assert harness.agent.recovering
+    harness.agent.stop_recovery()
     harness.agent._sessions_with_open_tail = scan
     await harness.agent.recover_runtime_state()
     rows = await harness.context_rows()
@@ -2135,6 +2137,99 @@ async def test_startup_hands_a_foreground_job_to_its_watch_with_the_backend_disa
     finally:
         if suite.jobs.status(job_id).state == "running":
             await suite.jobs.kill(job_id)
+
+
+async def _two_sessions_with_open_calls(engine, tmp_path, suite) -> tuple[_Harness, str, str]:
+    """SESSION's open call has a running job; ses_b's has one that exited."""
+    with engine.begin() as conn:
+        _insert_session(conn, "ses_b", _SCOPES["avibe"])
+    jobs = {}
+    for session_id, command in ((SESSION, "sleep 30"), ("ses_b", "printf done")):
+        harness = _Harness(engine, tmp_path, "avibe", [], suite=suite, session_id=session_id)
+        request = harness.request("run it")
+        harness.controller._native_start(request.context)
+        await harness.agent.store.consume_input(
+            session_id, request.context.platform_specific["delivery_id"], UserMessage((text("run it"),))
+        )
+        call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": command})
+        await harness.agent.store.append_response(session_id, assistant("", calls=(call,)), final=False)
+        jobs[session_id] = await suite.jobs.start(
+            command, cwd=str(tmp_path), env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            timeout_s=None, session_id=session_id, tool_call_id="call_bash",
+        )
+    await _until(lambda: suite.jobs.status(jobs["ses_b"]).state == "exited", "ses_b's job never exited")
+    return harness, jobs[SESSION], jobs["ses_b"]
+
+
+def _hand_over_failing_once(monkeypatch) -> list[str]:
+    """Watch hand-over raises on its first call, as a transient DB or Watch failure would."""
+    import core.watches as watches_module
+    import modules.agents.avibe.agent as agent_module
+
+    calls: list[str] = []
+    real = watches_module.hand_over_job
+
+    async def flaky(meta, **kwargs):
+        calls.append(str(meta.get("job_id")))
+        if len(calls) == 1:
+            raise RuntimeError("the Watch store is locked")
+        return await real(meta, **kwargs)
+
+    monkeypatch.setattr(watches_module, "hand_over_job", flaky)
+    monkeypatch.setattr(agent_module, "_RECOVERY_RETRY_DELAYS_S", (0.05, 0.05), raising=False)
+    monkeypatch.setattr(agent_module, "_RECOVERY_RETRY_PERIOD_S", 0.05, raising=False)
+    return calls
+
+
+async def _results(engine, session_id: str) -> list[str]:
+    with engine.connect() as conn:
+        return list(conn.execute(
+            select(agent_events.c.content_text).where(
+                agent_events.c.session_id == session_id, agent_events.c.event_type == "tool_result"
+            )
+        ).scalars())
+
+
+async def test_startup_recovery_retries_a_session_it_could_not_settle(engine, session, tmp_path, published, monkeypatch) -> None:
+    from core.watches import ManagedWatchStore
+
+    _hand_over_failing_once(monkeypatch)
+    suite = local_tool_suite(str(tmp_path / "jobs"))
+    harness, running, _exited = await _two_sessions_with_open_calls(engine, tmp_path, suite)
+    agent = harness.new_agent()
+    try:
+        # The first pass settles ses_b and fails SESSION; it reports that, not success.
+        assert await agent.recover_runtime_state() == [SESSION]
+        assert len(await _results(engine, "ses_b")) == 1
+        # Without any Turn, a retry hands SESSION's running job to its Watch.
+        await _until(lambda: ManagedWatchStore().find_job_watch(running) is not None, "the retry never handed over")
+        await _until(lambda: not agent.recovering, "the retry never finished")
+        assert len(await _results(engine, SESSION)) == 1 and len(await _results(engine, "ses_b")) == 1
+    finally:
+        agent.stop_recovery()
+        await suite.jobs.kill(running)
+
+
+async def test_startup_recovery_retries_with_the_backend_disabled(engine, session, tmp_path, published, monkeypatch) -> None:
+    from core.controller import Controller
+    from core.watches import ManagedWatchStore
+
+    _hand_over_failing_once(monkeypatch)
+    harness, running, _exited = await _two_sessions_with_open_calls(engine, tmp_path, local_tool_suite())
+    controller = SimpleNamespace(
+        agent_service=SimpleNamespace(agents={}),
+        config=SimpleNamespace(avibe=None, platform="avibe", language="en"),
+        im_client=None,
+        settings_manager=SimpleNamespace(),
+    )
+    try:
+        await Controller._recover_avibe_agent_runtime_state(controller)
+        # The unregistered adapter is kept while its retry runs, and the retry settles the Session.
+        assert controller._avibe_recovery_agent.recovering
+        await _until(lambda: ManagedWatchStore().find_job_watch(running) is not None, "the retry never handed over")
+    finally:
+        controller._avibe_recovery_agent.stop_recovery()
+        await harness.suite.jobs.kill(running)
 
 
 async def test_the_default_job_host_lives_in_the_watch_jobs_dir(engine, session, tmp_path) -> None:

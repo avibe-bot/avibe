@@ -1029,7 +1029,13 @@ class Controller:
             from modules.agents.avibe import AvibeAgent
 
             avibe_agent = AvibeAgent(self)
-        await avibe_agent.recover_runtime_state()
+        try:
+            await avibe_agent.recover_runtime_state()
+        finally:
+            if avibe_agent.recovering:
+                # Its retry task keeps trying until every Session settles; hold the adapter
+                # (registered or not) so that task lives, and stop it at service stop.
+                self._avibe_recovery_agent = avibe_agent
 
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
@@ -2356,6 +2362,15 @@ class Controller:
         show_git_checkpoint_service = getattr(self, "show_git_checkpoint_service", None)
         if show_git_checkpoint_service is not None:
             show_git_checkpoint_service.stop()
+
+        recovery_agent = getattr(self, "_avibe_recovery_agent", None)
+        if recovery_agent is not None:
+            # Startup recovery's retries end with the service; the next start recovers again.
+            async def _stop_avibe_recovery() -> None:
+                recovery_agent.stop_recovery()
+
+            _stop_loop_coroutine(_stop_avibe_recovery(), "Avibe Agent recovery retry")
+            self._avibe_recovery_agent = None
 
         try:
             codex_agent = self.agent_service.agents.get("codex")

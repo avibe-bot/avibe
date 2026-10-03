@@ -21,6 +21,7 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import os
 import secrets
@@ -98,6 +99,9 @@ BACKEND = "avibe"
 _EXPLAINED_STOPS = ("refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
 _JOB_PRUNE_INTERVAL_S = 3600.0
+# Startup recovery retries a Session it could not settle: 5 s, 30 s, 2 min, then every 10 min.
+_RECOVERY_RETRY_DELAYS_S = (5.0, 30.0, 120.0)
+_RECOVERY_RETRY_PERIOD_S = 600.0
 
 
 def _relative_to(cwd: str) -> Callable[[str], str]:
@@ -195,6 +199,8 @@ class AvibeAgent(BaseAgent):
         # J5 while the service runs: when the jobs directory was last pruned, and the pass in flight.
         self._pruned_at: Optional[float] = None
         self._prune_task: Optional[asyncio.Task] = None
+        # Startup recovery's retry while some Session has not settled (``recover_runtime_state``).
+        self._recovery_task: Optional[asyncio.Task] = None
 
     # --- BaseAgent -----------------------------------------------------------
 
@@ -335,31 +341,85 @@ class AvibeAgent(BaseAgent):
             if rt.run is not None and rt.run.request.session_key == session_key
         }
 
-    async def recover_runtime_state(self) -> None:
-        """At startup or live registration: settle open tool calls and prune settled jobs (T2, J5).
+    async def recover_runtime_state(self) -> list[str]:
+        """At startup or live registration: settle open tool calls, then prune settled jobs (T2, J5).
 
-        Never calls the model. T3 stays with each Session's resume.
+        Returns the Sessions it could not settle, never success over a failure. While
+        any remain, one retry task keeps trying until every candidate has settled
+        (``_retry_recovery``). Never calls the model; T3 stays with each Session's resume.
         """
-        await self._recover_open_tool_calls()
+        try:
+            failed = await self._recover_round()
+        except Exception:
+            # The candidate scan itself failed: nothing is known to have settled.
+            self._ensure_recovery_retry()
+            raise
+        if failed:
+            self._ensure_recovery_retry()
+        return failed
 
-    async def _recover_open_tool_calls(self) -> None:
-        """At startup, settle every Session's open tool calls before any run (recovery.md T2).
+    @property
+    def recovering(self) -> bool:
+        """Whether recovery is still retrying a Session it could not settle."""
+        return self._recovery_task is not None and not self._recovery_task.done()
+
+    async def _recover_round(self) -> list[str]:
+        """One recovery pass; J5 pruning follows a pass that settled every candidate."""
+        failed = await self._recover_open_tool_calls()
+        if not failed:
+            await self._prune_settled_jobs()
+        return failed
+
+    def _ensure_recovery_retry(self) -> None:
+        if self._recovery_task is None or self._recovery_task.done():
+            self._recovery_task = asyncio.create_task(self._retry_recovery(), name="avibe-agent-recovery-retry")
+
+    async def _retry_recovery(self) -> None:
+        """Retry startup recovery with backoff until every candidate Session has settled.
+
+        No kill fail-safe: a transient DB or Watch failure must not kill a user's command,
+        whose own wrapper deadline still bounds it. ``stop_recovery`` ends the retries.
+        """
+        for attempt in itertools.count():
+            delay = _RECOVERY_RETRY_DELAYS_S[attempt] if attempt < len(_RECOVERY_RETRY_DELAYS_S) else (
+                _RECOVERY_RETRY_PERIOD_S
+            )
+            await asyncio.sleep(delay)
+            try:
+                failed = await self._recover_round()
+            except Exception:
+                logger.exception("Avibe Agent recovery pass failed; retrying")
+                continue
+            if not failed:
+                logger.info("Avibe Agent recovery settled every Session")
+                return
+            logger.error("Avibe Agent recovery could not settle Sessions %s; retrying", ", ".join(failed))
+
+    def stop_recovery(self) -> None:
+        """Stop retrying recovery (service stop, or the backend being disabled)."""
+        if self._recovery_task is not None and not self._recovery_task.done():
+            self._recovery_task.cancel()
+        self._recovery_task = None
+
+    async def _recover_open_tool_calls(self) -> list[str]:
+        """Settle every candidate Session's open tool calls (recovery.md T2); return those that failed.
 
         Eager, not at the Session's next message: a running foreground job is handed to
-        its Watch now (J6), so no command outlives its Turn without an owner. Settlement
-        is idempotent, so a pass that failed can simply run again. Never calls the
-        model; T3 stays with each Session's resume.
+        its Watch now (J6), so no command outlives its Turn without an owner. A Session a
+        run holds is skipped: its own resume settles open calls first. Settlement is
+        idempotent, so a Session that failed is simply tried again.
         """
+        failed: list[str] = []
         for session_id in await asyncio.to_thread(self._sessions_with_open_tail):
             async with self._held(session_id, wait=False) as runtime:
                 if runtime is None:
-                    # A run holds the Session; its own resume settles open calls first.
                     continue
                 try:
                     await self._settle_open_calls(runtime)
                 except Exception:
-                    logger.exception("Avibe Agent startup tool-call recovery failed for Session %s", session_id)
-        await self._prune_settled_jobs()
+                    logger.exception("Avibe Agent tool-call recovery failed for Session %s", session_id)
+                    failed.append(session_id)
+        return failed
 
     def _prune_jobs_soon(self) -> None:
         """J5 while the service runs: runs create jobs, so a run's end prunes, at most hourly, off the Turn."""
@@ -407,6 +467,7 @@ class AvibeAgent(BaseAgent):
 
     async def shutdown_runtime(self) -> None:
         """Disabling the backend ends its runs; the rolling refresh drains Turns before this."""
+        self.stop_recovery()
         for runtime in list(self._runtimes.values()):
             if runtime.run is not None:
                 runtime.run.stop_requested = True
