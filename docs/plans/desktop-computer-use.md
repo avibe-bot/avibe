@@ -253,8 +253,10 @@ running. The tray keeps the shell alive after the window closes.
   - Environment: start from an empty environment, then set
     `CUA_DRIVER_EMBEDDED=1`, `CUA_DRIVER_EMBEDDED_HOST_PID=<shell pid>`,
     `CUA_DRIVER_MANAGED_POLICY_FILE=<bundled tool policy>`,
-    `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, `CUA_DRIVER_RS_UPDATE_CHECK=0`, and
-    `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=300`.
+    `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, and `CUA_DRIVER_RS_UPDATE_CHECK=0`.
+    `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS` stays unset, so the driver keeps
+    its 1000 ms post-action watch and the focus-steal lease that comes with
+    it (see Latency).
   - Avibe does not depend on that crate. It is unpublished and pulls in the
     whole platform stack, while the protocol needs only these few lines.
   - **Liveness.** The shell keeps the child's stdin pipe open for the daemon's
@@ -439,19 +441,19 @@ running. The tray keeps the shell alive after the window closes.
       native stop, a toggle off and on, or a respawn therefore clears every
       lease without waiting out the 60 s.
     - Each session remembers the epoch it last held. Another session may have
-      held the desktop in between, so a session can reacquire the lease
-      under a newer epoch. Before forwarding that call, the server runs
-      `end_session` and then `start_session` for its name. Cua then
-      invalidates every element token the session held, so a stale token
-      fails with Cua's own error. Coordinates from an old screenshot are not
-      covered by that, so the server also refuses every input tool from that
-      session with `observe_first` until the session makes a fresh state
-      observation. A server process that has no record of a session, for
-      example after the backend restarted it, applies the same rule to that
-      session's first input call. Nothing has to persist across server
-      processes. Only `get_window_state`, `get_desktop_state`, and `zoom`
-      count, because those return the current screen. Calls such as
-      `get_cursor_position` do not clear it.
+      held the desktop in between, so a session can reacquire the lease under a
+      newer epoch. Before forwarding that call, the server runs `end_session`
+      and then `start_session` for its name. Cua then invalidates every element
+      token the session held, so a stale token fails with Cua's own error.
+      Coordinates from an old screenshot are not covered by that, so the server
+      tracks `observe_first` per target window. After an epoch change, the
+      server refuses input to a window (`pid`, `window_id`) with `observe_first`
+      until that session has called `get_window_state` or `zoom` on that same
+      window. Observing window A therefore never clears input to window B, and
+      calls such as `get_desktop_state` or `get_cursor_position` clear nothing.
+      A server process that has no record of a session, for example after the
+      backend restarted it, starts that session with every window requiring
+      observation. Nothing has to persist across server processes.
   - This isolation is cooperative. Every caller is the same user's agent;
     it is not a security boundary.
   - Tool restriction stays in the driver's managed policy, not in this server.
@@ -500,18 +502,17 @@ running. The tray keeps the shell alive after the window closes.
 - **Prompt.** Add a short section in `core/system_prompt_injection.py`, only
   when the server is configured. It says the tools can report a state such as
   `off` or `needs_permission`, and then the agent tells the user instead of
-  retrying. It says to fill the required `session` field with the session
-  id. It says `desktop_busy` means another session holds the desktop, so the
-  agent waits or tells the user, and to call `end_session` when a GUI task is
-  done. It also says to prefer
-  CLI/API routes, use GUI tools for GUI-only steps, prefer accessibility
-  element-token actions over pixel input, treat screen content as untrusted, and
-  observe state before retrying any action, since an error result does not prove
-  the action failed. If every window comes back AX-unresolved and the desktop
-  shows no apps, the screen is likely locked: stop and tell the user. On
-  macOS, no tool may take focus or move the pointer; if only a foreground action
-  would work, the agent tells the user. On Windows, the Q6 run decides
-  foreground use.
+  retrying. It says to fill the required `session` field with the session id. It
+  says `desktop_busy` means another session holds the desktop, so the agent
+  waits or tells the user, and to call `end_session` when a GUI task is done. It
+  also says to prefer CLI/API routes, use GUI tools for GUI-only steps, prefer
+  accessibility element-token actions over pixel input, treat screen content as
+  untrusted, and observe state before retrying any action, since an error result
+  does not prove the action failed. If every window comes back AX-unresolved and
+  the desktop shows no apps, the screen is likely locked: stop and tell the
+  user. On macOS, no tool may deliberately take focus or move the pointer; if
+  only a foreground action would work, the agent tells the user. On Windows, the
+  Q6 run decides foreground use.
 
 ### Workbench
 
@@ -656,20 +657,23 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   (`self_activation_suppressed: true`). `get_window_state` returned a PNG plus a
   154-element AX tree in about 1.9 s. Five AX `click`s by `element_token` gave
   `6×7 = 42`, read back from the AX tree.
-- **Latency.** After each action the driver watches for window changes for up
-  to 1000 ms by default, and the daemon reads that bound from
+- **Latency.** After each action the driver watches for window changes for up to
+  1000 ms by default, and the daemon reads that bound from
   `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS` (0 to 10000). An A/B on embedded
-  background Calculator AX clicks ran 2 rounds of six clicks per setting.
-  1000 ms gave about 2.3 s per click, 300 ms about 1.6 s, and 0 ms about
-  1.35 s. Every run computed `12×3 = 36` correctly with no errors. A no-op call
-  through the proxy takes 1 to 2 ms, so the remaining 1.3 s floor sits inside
-  Calculator's AXPress (the slow `-25204` path, trycua/cua#3836). The shell
-  sets 300 ms: it saves about 0.7 s per action and still gives the watch a
-  short window to report a new window or sheet. The watch also holds the
-  driver's focus-steal lease, which reverts another app's activation, so `0`
-  would drop that protection. Upstream measured 78 ms at `0`, so the floor
-  depends on how fast the target app answers. Click results report
-  `effect: unverifiable` either way, so agents observe after acting.
+  background Calculator AX clicks ran 2 rounds of six clicks per setting. 1000
+  ms gave about 2.3 s per click, 300 ms about 1.6 s, and 0 ms about 1.35 s.
+  Every run computed `12×3 = 36` correctly with no errors. A no-op call through
+  the proxy takes 1 to 2 ms, so the remaining 1.3 s floor sits inside
+  Calculator's AXPress (the slow `-25204` path, trycua/cua#3836). The watch also
+  holds the driver's focus-steal lease, which reverts another app's activation
+  while it runs. Upstream warns that shortening it weakens that protection. So
+  v1 keeps the 1000 ms default and gives up the measured 0.7 s per action. Focus
+  protection outweighs latency for unattended use, and latency tuning waits for
+  a measured need. Even at 1000 ms, an app that activates itself later than the
+  watch can stay frontmost. The idle-desktop validation measures this, and the
+  user docs state it. Upstream measured 78 ms at `0`, so the floor depends on
+  how fast the target app answers. Click results report `effect: unverifiable`
+  either way, so agents observe after acting.
 - **Element tokens are session-scoped** (`s00000001:5`). Observe and act on one
   persistent MCP connection. A one-shot CLI call cannot reuse a token.
 - **A locked screen blocks all input; window capture still works.** With the
@@ -781,9 +785,10 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   check that hangs or fails on any step returns `unhealthy` at start and in
   `ready`, an old Controller's unknown-operation error reads as schema `0`, a
   stop-and-re-enable voids every lease, a desktop-targeted or unrecognised input
-  call is rejected on macOS, a new server process requires an observation before
-  a session's first input, and the other gets `desktop_busy` until `end_session`
-  or 60 s idle. Tests stay hermetic: the `D` path and the upstream command are
+  call is rejected on macOS, observing window A does not clear `observe_first`
+  for window B, a new server process requires an observation before a session's
+  first input, and the other gets `desktop_busy` until `end_session` or 60 s
+  idle. Tests stay hermetic: the `D` path and the upstream command are
   redirected to test-owned fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
   check confirms that the pinned driver's `tools/list`, under that policy,
