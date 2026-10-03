@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Mapping
+from itertools import groupby
 from typing import Any
 
 import httpx
@@ -662,7 +663,21 @@ def build_chat_payload(
     loaded_images: Mapping[str, tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     payload_messages: list[dict[str, Any]] = [{"role": "system", "content": request.system}]
-    payload_messages.extend(_message_to_chat(message, request.supports_images, loaded_images) for message in messages)
+    # Pi keeps every correlated text tool result adjacent, then sends images
+    # from that complete group in one supported multimodal user continuation.
+    for tool_group, group in groupby(messages, key=lambda message: isinstance(message, ToolResultMessage)):
+        image_parts: list[dict[str, Any]] = []
+        for message in group:
+            payload_messages.append(_message_to_chat(message, request.supports_images, loaded_images))
+            if tool_group and request.supports_images:
+                images = tuple(block for block in message.content if isinstance(block, ImageBlock))
+                if images:
+                    image_parts.extend(_chat_content(images, True, loaded_images))
+        if image_parts:
+            payload_messages.append({
+                "role": "user",
+                "content": [{"type": "text", "text": "Attached image(s) from tool result:"}, *image_parts],
+            })
     payload: dict[str, Any] = {
         "model": request.endpoint.model_id,
         "messages": payload_messages,
@@ -728,12 +743,10 @@ def _message_to_chat(
             output["content"] = ""
         return output
     if isinstance(message, ToolResultMessage):
-        values = content_parts(message.content, include_images=supports_images, loaded_images=loaded_images)
-        text = "\n".join(
-            part["text"] if part["type"] == "text" else f"[image: {part['media_token']}]"
-            for part in values
-        )
-        return {"role": "tool", "tool_call_id": message.tool_call_id, "content": text or "(no tool output)"}
+        text = "\n".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text is not None)
+        has_images = any(isinstance(block, ImageBlock) for block in message.content)
+        content = text or ("(see attached image)" if has_images else "(no tool output)")
+        return {"role": "tool", "tool_call_id": message.tool_call_id, "content": content}
     raise TypeError(f"unsupported message {type(message).__name__}")
 
 
@@ -789,11 +802,14 @@ def _openai_usage(value: Mapping[str, Any]) -> Any:
 
     prompt_details = value.get("prompt_tokens_details")
     completion_details = value.get("completion_tokens_details")
-    cache_read_tokens = (
-        _nonnegative(prompt_details.get("cached_tokens"))
-        if isinstance(prompt_details, Mapping)
-        else _nonnegative(value.get("prompt_cache_hit_tokens") or value.get("cached_tokens"))
-    )
+    # Pi uses nullish precedence per counter, not truthiness or the presence
+    # of its containing object. An explicit zero must stop the fallback.
+    cache_read = prompt_details.get("cached_tokens") if isinstance(prompt_details, Mapping) else None
+    if cache_read is None:
+        cache_read = value.get("prompt_cache_hit_tokens")
+    if cache_read is None:
+        cache_read = value.get("cached_tokens")
+    cache_read_tokens = _nonnegative(cache_read)
     cache_write_tokens = (
         _nonnegative(prompt_details.get("cache_write_tokens"))
         if isinstance(prompt_details, Mapping)

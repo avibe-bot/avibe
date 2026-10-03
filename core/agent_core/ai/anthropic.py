@@ -662,7 +662,7 @@ class AnthropicAdapter(ProviderAdapter):
                                         yield terminal
                                     return
                                 stop_reason = _normalize_stop_reason(delta.get("stop_reason"))
-                        assembler.set_usage(_merge_anthropic_usage(assembler.usage, usage))
+                        assembler.set_usage(_anthropic_usage(usage, current=assembler.usage))
                     elif event_type == "error":
                         shape_error = _error_event_shape_error(chunk)
                         if shape_error is not None:
@@ -904,19 +904,9 @@ def _error_event_shape_error(chunk: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _anthropic_usage(value: Any) -> Any:
-    if not isinstance(value, Mapping):
-        return None
-    cache_write = _anthropic_cache_write_tokens(value)
-    return _usage(
-        _nonnegative(value.get("input_tokens")),
-        _nonnegative(value.get("output_tokens")),
-        _nonnegative(value.get("cache_read_input_tokens")),
-        _nonnegative(cache_write),
-    )
+def _anthropic_usage(value: Any, *, current: Any = None) -> Any:
+    """Normalize both initial and delta usage with one non-null field mapping."""
 
-
-def _merge_anthropic_usage(current: Any, value: Any) -> Any:
     if not isinstance(value, Mapping):
         return current
     if current is None:

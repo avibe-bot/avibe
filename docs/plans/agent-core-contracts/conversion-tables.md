@@ -44,6 +44,7 @@ construct partials, mark terminal state, or parse final tool arguments.
 | Stable tool id and native id map | `StreamAssembler.tool_start` → `_set_tool_id`, `tool_state` | The three adapters' tool-call translation branches only; explicit canonical IDs consult the same ownership map as native/fallback IDs. A collision receives a fresh monotonic fallback ID before `ToolCallStart`; native item aliases and arguments stay separate. |
 | Final JSON argument validation | `StreamAssembler.finalize` → `parsed_arguments` | The three adapters call `finalize` once after their protocol terminator; malformed arguments are a C-2 terminal `invalid_request` deviation from Pi's permissive partial parser |
 | Usage and early usage retention | `set_usage` | Anthropic `message_start`/`message_delta`; Chat usage chunks; Responses terminal response |
+| Per-protocol usage field normalization | `_anthropic_usage`, `_openai_usage`, `_responses_usage` | One normalizer per adapter. Anthropic start and delta share the same non-null merge; Chat chunk and choice usage share the same counter-level fallback order. See the field ledger below. |
 | Partial on every error and abort | `StreamAssembler.partial`, `error`, `exception`, `aborted`, `incomplete` | `drive_sse_stream` owns HTTP, transport-read, error-body, cancellation, and translator exceptions; protocol translators only request assembler errors |
 | Exactly one terminal event before response cleanup | `drive_sse_stream` → `StreamAssembler.terminal` | The driver commits the translator's candidate or its own transport/incomplete outcome before `response.aclose`; cleanup cannot replace a consumer/task cancellation |
 | Endpoint redaction | `errors.sanitize_endpoint_text`, called inside `redact_provider_text` | Includes preparation errors, HTTP error bodies, stream errors, network errors, and close failures. JSON is decoded before sanitizing its string values, so escaped quotes remain valid; URL userinfo, queries and fragments are removed before credential markers are inserted. Surrounding punctuation is preserved. |
@@ -216,6 +217,65 @@ No further local reviewer was launched; Codex remains the reviewer of record.
 | P2 duplicate explicit canonical tool-call IDs | C-2 per-message identity: `_set_tool_id` checks ownership, allocates a collision-free fallback, and charges the actual chosen ID before emission | `test_responses_parallel_calls_have_unique_explicit_canonical_ids`: duplicate IDs arriving at either added or done; distinct native item IDs, arguments, starts and final blocks |
 | P2 unverified redacted thinking shifts published indexes | C-1 opaque-origin stripping + C-2 stable content indexes: skip unverified redacted thinking before slot allocation, preserving verified opaque blocks | `test_gateway_origin_sanitization_preserves_streamed_block_indexes`: missing, invalid and verified served-hop reports with redacted thinking followed by thinking, text and a tool |
 
+### Round 14 usage and tool-image dispositions
+
+The repeated usage class had two local causes: Anthropic's initial and delta
+paths had separate field mappings, and Chat selected a cache source by object
+presence rather than counter presence. Both paths now have one normalizer
+per protocol. The image defect came from assuming one canonical message
+always maps to one Chat message; request conversion now handles a consecutive
+tool-result group as Pi does.
+
+| Finding | Decision rule / fix | Source and boundary evidence |
+| --- | --- | --- |
+| P2 Anthropic initial reasoning usage lost | C-2 usage/data preservation: the same non-null mapping normalizes start and delta, including already-admitted reasoning details. Missing/null delta fields preserve the initial count; explicit zero replaces it. | Pi `anthropic-messages.ts:680-688,829-854` supplies early usage plus non-null field merge. Pi itself omits reasoning at start; applying its delta mapping there is an explicit C-2 deviation. `test_anthropic_usage_fields_share_start_and_delta_normalization` and the usage-only abort fixture cover final and partial outcomes. |
+| P2 Chat cache fallback suppressed by a partial nested object | Pi parity: select nested `cached_tokens`, then `prompt_cache_hit_tokens`, then top-level `cached_tokens`, using nullish precedence at every step; zero is authoritative. | Pi `openai-completions.ts:1522-1546`; `test_chat_usage_fields_follow_pi_nullish_precedence` covers chunk and choice usage, empty/partial/null details and explicit zero. |
+| P1 Chat vision tool images replaced by media tokens | Pi parity + C-1/C-2 image capability: emit all correlated text tool results first, then one user continuation containing their loaded image data URLs. Image-only results say `(see attached image)`; empty results say `(no tool output)`. Non-vision transforms keep the existing named placeholders without loading bytes. | Pi `openai-completions.ts:1399-1457`; `test_chat_tool_result_images_follow_the_complete_tool_group` checks parallel calls, mixed text/images, distinct snapshot bytes/MIME types, end-of-history and following-user boundaries, and the capability gate. |
+
+The 32-case adapter selection failed first in 16 cases, with 16 controls
+passing, before the production fixes. A sandboxed, network-disabled probe
+then drove Pi's actual handlers at `7fbbd5f4a1d982bb02d63472dde0774fa639f99b`:
+20 Chat usage projections, seven Anthropic usage projections, two tool-image
+request projections, and one five-field Responses usage projection. The
+recorded fixture values are in `test_provider_adapters.py`; no provider call
+or credentials were used. The only difference in the seven Anthropic
+projections is the explicitly preserved initial reasoning count when later
+delta usage omits it. No local reviewer was launched.
+
+### Usage field ledger (Pi `7fbbd5f`)
+
+Each normalizer maps all five canonical `Usage` fields. There is no separate
+initial-only mapper. Declared wire validation still rejects wrong types and
+negative counters before normalization. Missing optional reasoning remains
+unknown in canonical usage instead of inventing Pi's default zero; reported
+reasoning is a subset of output, never added to it. Pi's cost, `totalTokens`
+and separate `cacheWrite1h` fields have no canonical counterparts and do not
+introduce new catalog or message fields.
+
+| Adapter / normalizer | Canonical field | Wire mapping and precedence | Pi source / recorded fixture |
+| --- | --- | --- | --- |
+| Anthropic / `_anthropic_usage` | `input_tokens` | `input_tokens`; no cache subtraction. Start defaults to zero; missing/null delta preserves current. | `anthropic-messages.ts:682,831-832`; start/delta table: `7 → 11`, explicit zero and null controls |
+| Anthropic / `_anthropic_usage` | `output_tokens` | `output_tokens`, already including reasoning; same non-null merge. | `:683,834-835`; start/delta table: `9 → 18` |
+| Anthropic / `_anthropic_usage` | `cache_read_tokens` | `cache_read_input_tokens`; same non-null merge. | `:684,837-838`; start/delta table: `3 → 4` |
+| Anthropic / `_anthropic_usage` | `cache_write_tokens` | `cache_creation_input_tokens` is the aggregate, never added to its TTL breakdown. Existing C-2 data-preservation fallback sums `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens` only when the aggregate is absent/null. | `:685-686,840-847`; start/delta table: `5 → 8`; existing aggregate/TTL cache-write fixtures |
+| Anthropic / `_anthropic_usage` | `reasoning_tokens` | `output_tokens_details.thinking_tokens`; missing/null delta preserves current, explicit zero replaces it. The same mapping now preserves an admitted initial value (C-2 deviation from Pi's initial parser). | `:849-853`; start/delta table: initial `6`, explicit delta `12` or `0`; usage-only abort retains `6` |
+| Chat / `_openai_usage` | `input_tokens` | `max(0, prompt_tokens - cache_read_tokens - cache_write_tokens)` | `openai-completions.ts:1522,1537`; Pi upstream `openai-completions-tool-choice.test.ts:1676-1760`: `100 - 50 - 30 = 20` |
+| Chat / `_openai_usage` | `output_tokens` | `completion_tokens`, already including reasoning | `:1539-1543`; upstream reasoning fixture `:1641-1673`: output `33`, reasoning `21`, not output `54` |
+| Chat / `_openai_usage` | `cache_read_tokens` | First non-null of `prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens`, `cached_tokens`, then zero; explicit zero stops fallback | `:1523-1524`; actual-parser fixture matrix: partial object + `80`, top-level `90`, and nested/top-level zero controls |
+| Chat / `_openai_usage` | `cache_write_tokens` | `prompt_tokens_details.cache_write_tokens`, otherwise zero; separate from cache reads | `:1525,1545`; upstream `50` read / `30` write fixture and partial-object `5` write fixture |
+| Chat / `_openai_usage` | `reasoning_tokens` | `completion_tokens_details.reasoning_tokens`; absent field is canonical `None` | `:1546`; upstream explicit `0` and `21` fixtures |
+| Responses / `_responses_usage` | `input_tokens` | `max(0, input_tokens - cache_read_tokens - cache_write_tokens)` | `openai-responses-shared.ts:561-568`; combined actual-parser fixture `10 - 3 - 2 = 5` |
+| Responses / `_responses_usage` | `output_tokens` | `output_tokens`, already including reasoning | `:569`; same fixture: `4` |
+| Responses / `_responses_usage` | `cache_read_tokens` | `input_tokens_details.cached_tokens`, otherwise zero | `:564,570`; same fixture: `3` |
+| Responses / `_responses_usage` | `cache_write_tokens` | `input_tokens_details.cache_write_tokens`, otherwise zero | `:565,571`; same fixture: `2` |
+| Responses / `_responses_usage` | `reasoning_tokens` | `output_tokens_details.reasoning_tokens`; absent field is canonical `None` | `:572`; same fixture: `2`; `test_provider_usage_excludes_cached_input_tokens` |
+
+Anthropic's [Messages API reference](https://platform.claude.com/docs/en/api/typescript/messages)
+defines `output_tokens_details.thinking_tokens` as the internal-reasoning
+decomposition of billed output tokens. The preservation rule applies when
+that optional field is supplied; it does not assume every message start
+contains a final reasoning count.
+
 ## Pi branch audit
 
 The following rows are the branch-by-branch audit against Pi revision
@@ -243,7 +303,7 @@ origin, retry, cancellation, media, or message-shape rules.
 | Chat | `:680-701` finish blocks and terminal checks | `OpenAIChatAdapter._stream` → finish/EOF checks | Same terminal requirement; malformed final arguments are a C-2 `invalid_request` deviation from Pi's permissive parser. |
 | Chat | top-level provider error | `OpenAIChatAdapter._stream` → top-level error branch | Same classification, with canonical partial usage and streamed retry boundary. |
 | Chat | aborted/error cleanup | `openai-completions.ts:702-724` | Same assembled partial policy through `StreamAssembler`. |
-| Anthropic | `anthropic-messages.ts:665-690` message start | `AnthropicAdapter._stream` → `message_start` | Same early usage capture; cache-write total is retained. |
+| Anthropic | `anthropic-messages.ts:665-690` message start | `AnthropicAdapter._stream` → `message_start` | Same early usage capture; cache-write total is retained. C-2 additionally preserves an admitted initial reasoning breakdown through the same normalizer used for deltas. |
 | Anthropic | `:691-738` block start | `AnthropicAdapter._stream` → `content_block_start` | Same supported text/thinking/redacted/tool blocks and initial content; non-empty initial `tool_use.input` is retained when no JSON delta follows (rule (b), preventing tool-argument loss); opaque payloads follow C-1 origin rules. |
 | Anthropic | `:739-784` content deltas | `AnthropicAdapter._stream` → `content_block_delta` | Same supported delta accumulation and signature append; malformed known fields are a C-2 terminal `invalid_request` deviation. |
 | Anthropic | `:785-816` block stop | `AnthropicAdapter._stream` → `content_block_stop` | Same block finalization. |
@@ -293,7 +353,7 @@ case.
 | Anthropic | content deltas text/thinking/signature/input JSON | corresponding delta/state; wrong field types are terminal malformed metadata; wrong-kind and unknown delta variants are ignored | `test_anthropic_malformed_delta_is_terminal_invalid_request`, `test_anthropic_known_delta_fields_reject_wrong_types`, `test_anthropic_wrong_kind_delta_is_ignored_like_pi`, `test_anthropic_ignores_unknown_delta_variants_like_pi` |
 | Anthropic | known event shape validation | malformed indexes, envelopes, or usage objects are terminal `invalid_request` | `test_wire_event_matrix_has_one_explicit_outcome` malformed Anthropic tuples plus the focused malformed-event tests |
 | Anthropic | `content_block_stop` | block end only for non-empty visible output; late deltas for a closed block are ignored | `test_anthropic_streams_thinking_tool_arguments_and_usage`, `test_anthropic_empty_block_end_does_not_count_as_streamed_output` |
-| Anthropic | `message_delta` | merge non-null usage and normalize stop reason; explicit `null` fields preserve earlier `message_start` counts; malformed usage is terminal | `test_anthropic_streams_thinking_tool_arguments_and_usage`, `test_anthropic_null_delta_usage_does_not_erase_message_start_usage`, `test_anthropic_malformed_message_delta_usage_is_terminal_invalid_request` |
+| Anthropic | `message_delta` | merge non-null usage and normalize stop reason; explicit `null` fields preserve earlier `message_start` counts; malformed usage is terminal | `test_anthropic_streams_thinking_tool_arguments_and_usage`, `test_anthropic_usage_fields_share_start_and_delta_normalization`, `test_anthropic_malformed_message_delta_usage_is_terminal_invalid_request` |
 | Anthropic | `message_stop` or EOF | `message_stop` completes only with a captured stop reason; after `message_start`, EOF without `message_stop` is incomplete even when a stop reason was captured; a no-`message_start` stream with a stop reason follows Pi's completion path | `test_anthropic_message_stop_without_reason_is_terminal_error`, `test_anthropic_message_start_requires_message_stop_even_with_stop_reason`, `test_anthropic_stop_reason_allows_eof_without_message_stop_like_pi` |
 | Anthropic | `error`/transport close | classified error with assembled partial and early usage; an empty placeholder block does not make the error non-retryable | `_WIRE_EVENT_CASES` Anthropic rows, `test_close_failure_cannot_emit_a_second_terminal_event` |
 | Anthropic | unknown top-level event | named unknown events are ignored before JSON parsing, matching Pi; valid data-only JSON frames are accepted under the documented rule (b) deviation, while malformed data-only frames are ignored like Pi | `test_anthropic_ignores_unknown_top_level_events_like_pi`, `test_anthropic_ignores_unknown_sse_event_before_parsing_like_pi`, `test_anthropic_malformed_data_only_frame_is_ignored_like_pi` |
@@ -352,7 +412,7 @@ Anthropic stream events:
 
 | Wire event | Outcome | Provider event / state |
 | --- | --- | --- |
-| `message_start.message.usage` | delta/state | Initial `Usage`; `input_tokens` excludes cache reads and writes. |
+| `message_start.message.usage` | delta/state | Initial `Usage` through the same normalizer as message delta, preserving all reported counters including `output_tokens_details.thinking_tokens`; `input_tokens` excludes cache reads and writes. |
 | `content_block_start` (`text`, `thinking`, `redacted_thinking`, `tool_use`) | delta/state | Creates the canonical block, preserves initial text/thinking/input, and `tool_use` emits `ToolCallStart`. Empty tool names are terminal `invalid_request`. |
 | `content_block_delta.text_delta` | delta | `TextDelta`. |
 | `content_block_delta.thinking_delta` | delta | `ThinkingDelta`. |
@@ -389,7 +449,7 @@ Anthropic stop reasons:
 | Assistant text | `role="assistant"`, string `content`. |
 | Thinking | Same-origin signed details are replayed as `reasoning_details` when the signature is structured; provider-compatible legacy signatures use `reasoning_content`, `reasoning`, or `reasoning_text`; unsigned thinking is text. |
 | Tool call | `tool_calls[].type="function"` with `id`, `function.name`, and JSON `function.arguments`. |
-| Tool result | `role="tool"` with `tool_call_id` and text content. |
+| Tool result | `role="tool"` with `tool_call_id` and text content. Consecutive results stay adjacent; if `supports_images`, their loaded image bytes follow in one `role="user"` multimodal continuation after the complete group. Image-only tool text is `(see attached image)` and empty tool text is `(no tool output)`, matching Pi `openai-completions.ts:1399-1457`. Without image capability, C-1's named text placeholders remain. |
 | Tools | `tools[].type="function"` with `function.name`, `description`, and `parameters`. |
 | Reasoning effort | `reasoning_effort`; supported declared values, including explicit `none`, are forwarded unchanged, while `off`/`disabled` are omitted. |
 | Usage request | `stream_options.include_usage=true`. |
@@ -406,7 +466,7 @@ Chat stream events:
 | `choices[0].delta.function_call.name/arguments` | delta | Legacy single-call form; normalized into the same tool-call state machine. |
 | `choices[0].finish_reason` | state | Stop reason. `max_tokens` becomes `length`; unknown values become terminal `error`, not `stop`. |
 | `choices[0].native_finish_reason` | state | A non-normal native reason such as `safety` or `recitation` overrides `finish_reason="stop"`; this prevents tool execution after a safety stop from a converted Gemini response. |
-| `usage` | state | `Usage` from prompt/completion tokens, cached prompt tokens, and reasoning completion details; cached read/write tokens are excluded from `input_tokens`. |
+| `usage` | state | One `_openai_usage` normalizer for chunk and choice usage. Cache reads use the first non-null nested `cached_tokens`, top-level `prompt_cache_hit_tokens`, or top-level `cached_tokens`; zero is authoritative. Cached read/write tokens are excluded from `input_tokens`; reasoning is already included in output. |
 | top-level `error` frame before deltas | retryable or terminal `ProviderError` | Classified from error type/code. |
 | top-level `error` frame after deltas | terminal `ProviderError` | Partial content and usage are retained; `retryable=false`. |
 | `data: [DONE]` | Done or terminal error | Completes the response only after a `finish_reason`; without one it is an incomplete `network` error, retryable only when no model output was emitted. A finish reason may also complete at clean EOF. |

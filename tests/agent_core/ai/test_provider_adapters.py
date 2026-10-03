@@ -2285,7 +2285,8 @@ async def test_chat_finish_reason_end_maps_to_stop() -> None:
 @pytest.mark.asyncio
 async def test_anthropic_abort_after_message_start_keeps_usage_in_partial() -> None:
     stream = _StalledStream(
-        b'data: {"type":"message_start","message":{"usage":{"input_tokens":7}}}\n\n'
+        b'data: {"type":"message_start","message":{"usage":{"input_tokens":7,"output_tokens":9,'
+        b'"output_tokens_details":{"thinking_tokens":6}}}}\n\n'
     )
 
     def handler(_: httpx.Request) -> httpx.Response:
@@ -2302,16 +2303,41 @@ async def test_anthropic_abort_after_message_start_keeps_usage_in_partial() -> N
     assert isinstance(events[-1], ProviderError)
     assert events[-1].partial is not None
     assert events[-1].partial.content == ()
-    assert events[-1].partial.usage == Usage(input_tokens=7)
+    assert events[-1].partial.usage == Usage(input_tokens=7, output_tokens=9, reasoning_tokens=6)
 
 
 @pytest.mark.asyncio
-async def test_anthropic_null_delta_usage_does_not_erase_message_start_usage() -> None:
-    body = (
-        'data: {"type":"message_start","message":{"usage":{"input_tokens":7}}}\n\n'
-        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":null,"output_tokens":null}}\n\n'
-        'data: {"type":"message_stop"}\n\n'
-    )
+@pytest.mark.parametrize(
+    ("delta_usage", "expected"),
+    [
+        (None, Usage(7, 9, 3, 5, 6)),
+        ({}, Usage(7, 9, 3, 5, 6)),
+        ({"input_tokens": None, "output_tokens": None, "cache_read_input_tokens": None,
+          "cache_creation_input_tokens": None, "output_tokens_details": None}, Usage(7, 9, 3, 5, 6)),
+        ({"output_tokens_details": {}}, Usage(7, 9, 3, 5, 6)),
+        ({"output_tokens_details": {"thinking_tokens": None}}, Usage(7, 9, 3, 5, 6)),
+        ({"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+          "cache_creation_input_tokens": 0, "output_tokens_details": {"thinking_tokens": 0}},
+         Usage(0, 0, 0, 0, 0)),
+        ({"input_tokens": 11, "output_tokens": 18, "cache_read_input_tokens": 4,
+          "cache_creation_input_tokens": 8, "output_tokens_details": {"thinking_tokens": 12}},
+         Usage(11, 18, 4, 8, 12)),
+    ],
+)
+async def test_anthropic_usage_fields_share_start_and_delta_normalization(
+    delta_usage: dict[str, Any] | None, expected: Usage,
+) -> None:
+    # Pi's non-null delta merge applies to every field. C-2 additionally keeps
+    # an admitted thinking-token count when it is supplied at message_start.
+    frames = [
+        {"type": "message_start", "message": {"usage": {
+            "input_tokens": 7, "output_tokens": 9, "cache_read_input_tokens": 3,
+            "cache_creation_input_tokens": 5, "output_tokens_details": {"thinking_tokens": 6},
+        }}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": delta_usage},
+        {"type": "message_stop"},
+    ]
+    body = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames)
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
@@ -2321,7 +2347,7 @@ async def test_anthropic_null_delta_usage_does_not_erase_message_start_usage() -
 
     final = events[-1]
     assert isinstance(final, Done)
-    assert final.message.usage == Usage(input_tokens=7)
+    assert final.message.usage == expected
 
 
 def test_chat_reasoning_models_use_completion_token_limit() -> None:
@@ -2362,19 +2388,78 @@ def test_anthropic_adaptive_xhigh_maps_to_max_effort() -> None:
     assert payload["output_config"] == {"effort": "max"}
 
 
-def test_chat_tool_result_images_become_explicit_placeholders() -> None:
-    tool_result = ToolResultMessage(
-        tool_call_id="call_1",
-        tool_name="screenshot",
-        content=(ImageBlock("image/png", "media-1", "shot.png"),),
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supports_images", [True, False])
+@pytest.mark.parametrize("followed_by_user", [True, False])
+async def test_chat_tool_result_images_follow_the_complete_tool_group(
+    supports_images: bool, followed_by_user: bool,
+) -> None:
+    # Pi batches images after all consecutive tool results. The real adapter
+    # also has to load snapshots and preserve C-1's non-vision placeholders.
+    assistant = AssistantMessage(
+        content=tuple(ToolCallBlock(f"call_{i}", "read", {}) for i in range(3)),
+        origin=Origin("openai", "openai_chat", "model-x"),
+        stop_reason="tool_use",
     )
-
-    payload = build_chat_payload(
-        _request("openai_chat", messages=(tool_result,), supports_images=True),
-        (tool_result,),
+    messages = (
+        assistant,
+        ToolResultMessage("call_0", "read", (ImageBlock("image/png", "media-1", "one.png"),)),
+        ToolResultMessage("call_1", "read", (
+            TextBlock("Read image file"), ImageBlock("image/png", "media-2", "two.png"),
+        )),
+        ToolResultMessage("call_2", "read", ()),
     )
+    if followed_by_user:
+        messages += (UserMessage((TextBlock("Compare them"),)),)
+    class ToolImageLoader(_Loader):
+        async def load(self, media_token: str) -> tuple[bytes, str]:
+            self.tokens.append(media_token)
+            return {
+                "media-1": (b"first", "image/jpeg"),
+                "media-2": (b"second", "image/png"),
+            }[media_token]
 
-    assert payload["messages"][1]["content"] == "[image: media-1]"
+    loader = ToolImageLoader()
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200, text='data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(
+            OpenAIChatAdapter(client, media_loader=loader),
+            _request("openai_chat", messages=messages, supports_images=supports_images),
+        )
+    assert isinstance(events[-1], Done)
+    wire = captured["messages"]
+    assert [message["role"] for message in wire] == (
+        ["system", "assistant", "tool", "tool", "tool"]
+        + (["user"] if supports_images else [])
+        + (["user"] if followed_by_user else [])
+    )
+    assert [message["tool_call_id"] for message in wire[2:5]] == ["call_0", "call_1", "call_2"]
+    assert [call["id"] for call in wire[1]["tool_calls"]] == ["call_0", "call_1", "call_2"]
+    assert wire[4]["content"] == "(no tool output)"
+    assert "media-1" not in json.dumps(wire)
+    assert "media-2" not in json.dumps(wire)
+    if supports_images:
+        assert loader.tokens == ["media-1", "media-2"]
+        assert wire[2]["content"] == "(see attached image)"
+        assert wire[3]["content"] == "Read image file"
+        assert wire[5]["content"] == [
+            {"type": "text", "text": "Attached image(s) from tool result:"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,Zmlyc3Q="}},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,c2Vjb25k"}},
+        ]
+    else:
+        assert loader.tokens == []
+        assert wire[2]["content"] == "[image: one.png]"
+        assert wire[3]["content"] == "Read image file\n[image: two.png]"
+    if followed_by_user:
+        assert wire[-1] == {"role": "user", "content": "Compare them"}
 
 
 @pytest.mark.asyncio
@@ -2408,8 +2493,8 @@ async def test_chat_emits_block_end_for_each_final_block() -> None:
         (
             OpenAIResponsesAdapter,
             "openai_responses",
-            'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":4,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}}}\n\n',
-            Usage(input_tokens=5, output_tokens=4, cache_read_tokens=3, cache_write_tokens=2),
+            'data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":4,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":2},"output_tokens_details":{"reasoning_tokens":2}}}}\n\n',
+            Usage(input_tokens=5, output_tokens=4, cache_read_tokens=3, cache_write_tokens=2, reasoning_tokens=2),
         ),
     ],
 )
@@ -2428,6 +2513,46 @@ async def test_provider_usage_excludes_cached_input_tokens(
     final = events[-1]
     assert isinstance(final, Done)
     assert final.message.usage == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage_location", ["chunk", "choice"])
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        # The first two wire fixtures come from Pi's openai-completions-tool-choice
+        # usage tests; the rest exercise parseChunkUsage's exact nullish order.
+        ({"prompt_tokens": 100, "completion_tokens": 5,
+          "prompt_tokens_details": {"cached_tokens": 50, "cache_write_tokens": 30},
+          "completion_tokens_details": {"reasoning_tokens": 0}}, Usage(20, 5, 50, 30, 0)),
+        ({"prompt_tokens": 10, "completion_tokens": 33,
+          "prompt_tokens_details": {"cached_tokens": 0},
+          "completion_tokens_details": {"reasoning_tokens": 21}}, Usage(10, 33, 0, 0, 21)),
+        ({"prompt_tokens": 100, "prompt_tokens_details": {}, "prompt_cache_hit_tokens": 80}, Usage(20, 0, 80)),
+        ({"prompt_tokens": 100, "prompt_tokens_details": {"cache_write_tokens": 5},
+          "cached_tokens": 80}, Usage(15, 0, 80, 5)),
+        ({"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": None},
+          "prompt_cache_hit_tokens": 80, "cached_tokens": 90}, Usage(20, 0, 80)),
+        ({"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 0},
+          "prompt_cache_hit_tokens": 80, "cached_tokens": 90}, Usage(100)),
+        ({"prompt_tokens": 100, "prompt_cache_hit_tokens": 0, "cached_tokens": 90}, Usage(100)),
+        ({"prompt_tokens": 100, "prompt_cache_hit_tokens": None, "cached_tokens": 90}, Usage(10, 0, 90)),
+        ({"prompt_tokens": 100, "prompt_tokens_details": None, "cached_tokens": 90}, Usage(10, 0, 90)),
+        ({"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 30}},
+         Usage(0, 0, 80, 30)),
+    ],
+)
+async def test_chat_usage_fields_follow_pi_nullish_precedence(
+    usage_location: str, fields: dict[str, Any], expected: Usage,
+) -> None:
+    choice = {"delta": {}, "finish_reason": "stop"}
+    frame: dict[str, Any] = {"choices": [choice]}
+    (frame if usage_location == "chunk" else choice)["usage"] = fields
+    body = f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=body))) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+    assert isinstance(events[-1], Done)
+    assert events[-1].message.usage == expected
 
 
 @pytest.mark.asyncio
