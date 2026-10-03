@@ -120,8 +120,10 @@ running. The tray keeps the shell alive after the window closes.
     unsupported: a 404, or a schema below the one the shell writes. A transport
     error, such as an IPC timeout or a reset, keeps the last known answer. A
     transient failure therefore never stops a healthy daemon. Losing the Runtime
-    itself is already handled by the `/ready` monitor. Any other answer,
-    including a 404 from a pre-feature Runtime, means unsupported.
+    itself is already handled by the `/ready` monitor. Any other
+    non-definitive answer, such as a 500 or a malformed body, also keeps the
+    last known answer. Before the first definitive answer, the shell spawns
+    nothing and retries on the next `/ready` tick.
   - Turning the toggle on requires that value to cover the schema the shell
     writes. Otherwise the shell refuses to turn it on, and the menu text says
     the Avibe service must restart to support computer use.
@@ -180,15 +182,17 @@ running. The tray keeps the shell alive after the window closes.
   | `starting` | socket accepts and health passes | `ready` | none |
   | `starting` | health reports a missing grant | `needs_permission` | stop the daemon; no prompt |
   | `starting` | spawn, socket, or health fails otherwise | `error` | stop the daemon; record the reason |
-  | `ready` | grant check fails | `needs_permission` | stop the daemon |
+    | `ready` | daemon `health_report` reports a missing grant | `needs_permission` | stop the daemon |
   | `ready` | daemon exits unexpectedly, or its socket refuses on 2 consecutive checks | `starting` | stop the daemon if alive; respawn with backoff; after 3 failures in 5 minutes, go to `error` |
     | any `enabled` state except `error` | quit | `stopped` | stop the daemon |
   | `error` | quit | `error` | none; `error` is kept across relaunch |
 
   - **Grant check.** Silent, and it runs only while `enabled`. It fires on
-    app activation, and every 5 s while in `needs_permission` or `ready`.
-    `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess` give the shell's
-    own answer. While `ready`, the same 5 s tick also probes the daemon's
+    app activation, and every 5 s. In `needs_permission`, it uses the shell's
+    own `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess`. In `ready`,
+    it uses the daemon's `health_report` instead. That process reads its
+    grants fresh, so a stale shell preflight can never stop a daemon that the
+    fallback just brought up. The same 5 s tick also probes the daemon's
     socket. A wedged daemon that is alive but not accepting is treated like
     one that exited.
   - **Stale preflight.** macOS caches TCC answers per process, so the
@@ -371,9 +375,15 @@ running. The tray keeps the shell alive after the window closes.
     - The server adds a required `session` string to every advertised
       tool schema, so schema-driven clients always send it. The injected
       prompt says to fill it with the session id.
-    - Before forwarding a session's first call, or its first call after an
-      `end_session`, the server calls `start_session` for that name, which
-      creates or revives it. Agents never manage the Cua session lifecycle.
+    - The server calls `start_session` for a session's name before forwarding
+      in three cases: its first call, its first call after an
+      `end_session`, and its first call after the daemon key (`instance_id`,
+      `generation`) changes. That call creates or revives the session. Agents
+      never manage the Cua session lifecycle.
+    - Calls from one session run one at a time, and the server queues the
+      rest. So a session never has two calls in flight. An `end_session`
+      releases the lease only after the calls queued before it have
+      finished.
     - The server forwards the id as the named Cua session. Element tokens
       and session state are therefore per Avibe session, even on one shared
       upstream connection.
@@ -396,11 +406,13 @@ running. The tray keeps the shell alive after the window closes.
     - A lease whose daemon key differs from `D`'s current one is void. A
       native stop, a toggle off and on, or a respawn therefore clears every
       lease without waiting out the 60 s.
-    - Each session remembers the epoch it last held. A session that
-      reacquires the lease under a newer epoch, because another session held
-      the desktop in between, gets `observe_first` for any action call until
-      it makes one observation call. It can never act on stale observations
-      or element tokens.
+    - Each session remembers the epoch it last held. Another session may have
+      held the desktop in between, so a session can reacquire the lease
+      under a newer epoch. Before forwarding that call, the server runs
+      `end_session` and then `start_session` for its name. Cua then
+      invalidates every element token the session held, so a stale token
+      fails with Cua's own error and the agent has to observe again. The
+      server keeps no observe-first rule of its own.
   - This isolation is cooperative. Every caller is the same user's agent;
     it is not a security boundary.
   - Tool restriction stays in the driver's managed policy, not in this server.
@@ -715,11 +727,14 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   advertised schema requires `session`. Two sessions get separate Cua sessions
   on one upstream connection. A session that called `end_session` works again on
   its next call. Simultaneous first calls from two processes yield exactly one
-  holder, a 120 s call keeps its lease, a session that lost the lease
-  in between gets `observe_first` before acting, a stop-and-re-enable voids
-  every lease, and the other gets `desktop_busy` until
-  `end_session` or 60 s idle. Tests stay hermetic: the `D` path and the upstream
-  command are redirected to test-owned fakes.
+  holder, a 120 s call keeps its lease, a session that lost the lease in between
+  has its old element tokens rejected, a daemon respawn revives each session
+  before its next call, a session's calls run one at a time and `end_session`
+  waits for earlier ones, a stale shell preflight does not stop a `ready`
+  daemon, a 500 from capabilities keeps the last answer, a stop-and-re-enable
+  voids every lease, and the other gets `desktop_busy` until `end_session` or 60
+  s idle. Tests stay hermetic: the `D` path and the upstream command are
+  redirected to test-owned fakes.
 - Shell: the daemon environment names the bundled managed policy. A release
   check confirms that the pinned driver's `tools/list`, under that policy,
   equals the bundled tool snapshot. For a Runtime without a covering
