@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple
 from uuid import uuid4
@@ -119,6 +120,19 @@ class _ClaudeReceiverCleanupRequired(RuntimeError):
     def __init__(self, composite_key: str):
         self.composite_key = composite_key
         super().__init__(f"Claude receiver cleanup is still pending for {composite_key}")
+
+
+@dataclass(frozen=True)
+class _ClaudeLaunchInputs:
+    """One Claude turn's whole configuration, read in one step at admission.
+
+    Its Model Hub resolution, client reuse check, and any new client all derive
+    from it, so a save or renewal landing mid-admission cannot split them.
+    """
+
+    epoch: int
+    config: Any
+    hub_config: Any
 
 
 class SessionHandler(BaseHandler):
@@ -488,6 +502,7 @@ class SessionHandler(BaseHandler):
         effective_effort: Optional[str],
         system_prompt: Any,
         model_hub_launch: "ModelHubLaunch",
+        launch_inputs: "_ClaudeLaunchInputs | None" = None,
     ) -> bool:
         """Retire a cached client whose launch inputs changed; True once it is gone.
 
@@ -507,7 +522,12 @@ class SessionHandler(BaseHandler):
             ("reasoning_effort_changed", getattr(client, "_vibe_reasoning_effort", None) != effective_effort),
             (
                 "runtime_renewed",
-                getattr(client, "_vibe_runtime_epoch", 0) != getattr(self.controller, "claude_runtime_epoch", 0),
+                getattr(client, "_vibe_runtime_epoch", 0)
+                != (
+                    launch_inputs.epoch
+                    if launch_inputs is not None
+                    else getattr(self.controller, "claude_runtime_epoch", 0)
+                ),
             ),
             ("system_prompt_changed", self.claude_system_prompts.get(composite_key) != system_prompt),
             (
@@ -516,7 +536,9 @@ class SessionHandler(BaseHandler):
                 != managed_skill_environment(
                     working_path,
                     project_base=managed_skill_project_base(context),
-                    claude_cli_path=managed_skill_claude_cli_path(self.config),
+                    claude_cli_path=managed_skill_claude_cli_path(
+                        SimpleNamespace(claude=launch_inputs.config) if launch_inputs is not None else self.config
+                    ),
                 ),
             ),
             ("git_path_changed", getattr(client, "_vibe_git_path_state", None) != self._claude_git_path_state(working_path)),
@@ -561,6 +583,7 @@ class SessionHandler(BaseHandler):
         effective_effort: Optional[str],
         agent_system_prompt: Optional[str],
         model_hub_launch: "ModelHubLaunch",
+        launch_inputs: "_ClaudeLaunchInputs | None" = None,
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
         if client is None:
@@ -577,6 +600,7 @@ class SessionHandler(BaseHandler):
             session_anchor=base_session_id,
             agent_system_prompt=agent_system_prompt,
             working_path=working_path,
+            claude_config=launch_inputs.config if launch_inputs is not None else None,
         )
         if await self._replace_stale_cached_claude_client(
             composite_key,
@@ -586,6 +610,7 @@ class SessionHandler(BaseHandler):
             effective_effort=effective_effort,
             system_prompt=next_system_prompt,
             model_hub_launch=model_hub_launch,
+            launch_inputs=launch_inputs,
         ):
             return None
 
@@ -627,6 +652,7 @@ class SessionHandler(BaseHandler):
         effective_agent: str,
         agent_system_prompt: Optional[str],
         model_hub_launch: "ModelHubLaunch",
+        launch_inputs: "_ClaudeLaunchInputs | None" = None,
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
         if client is None:
@@ -653,6 +679,7 @@ class SessionHandler(BaseHandler):
             session_anchor=base_session_id,
             agent_system_prompt=next_agent_system_prompt,
             working_path=working_path,
+            claude_config=launch_inputs.config if launch_inputs is not None else None,
         )
         if await self._replace_stale_cached_claude_client(
             composite_key,
@@ -662,6 +689,7 @@ class SessionHandler(BaseHandler):
             effective_effort=effective_effort,
             system_prompt=next_system_prompt,
             model_hub_launch=model_hub_launch,
+            launch_inputs=launch_inputs,
         ):
             return None
         if desired_model:
@@ -1250,6 +1278,13 @@ class SessionHandler(BaseHandler):
         else:
             base_session_id, working_path, composite_key = self.get_session_info(context, source=turn_source)
 
+        router = getattr(self.controller, "model_hub_runtime", None)
+        hub_snapshot = getattr(router, "snapshot", None)
+        launch_inputs = _ClaudeLaunchInputs(
+            epoch=getattr(self.controller, "claude_runtime_epoch", 0),
+            config=getattr(self.config, "claude", None),
+            hub_config=hub_snapshot() if callable(hub_snapshot) else None,
+        )
         settings_key = self._get_settings_key(context)
         session_key = self._get_session_key(context)
         # Resume the native session bound to the RESERVED workbench row (by PK).
@@ -1311,6 +1346,7 @@ class SessionHandler(BaseHandler):
             launch_model or "",
             process_scope=cached_key or composite_key,
             context=context,
+            config=launch_inputs.hub_config,
         )
         bind_launch(context, model_hub_launch)
         runtime_model = model_hub_launch.runtime_model or launch_model
@@ -1343,6 +1379,7 @@ class SessionHandler(BaseHandler):
                 effective_effort=effective_effort,
                 agent_system_prompt=None,
                 model_hub_launch=model_hub_launch,
+                launch_inputs=launch_inputs,
             )
             if client is not None:
                 return client
@@ -1366,6 +1403,7 @@ class SessionHandler(BaseHandler):
                 effective_agent=effective_agent,
                 agent_system_prompt=agent_system_prompt,
                 model_hub_launch=model_hub_launch,
+                launch_inputs=launch_inputs,
             )
             if client is not None:
                 return client
@@ -1393,6 +1431,7 @@ class SessionHandler(BaseHandler):
                     effective_agent=effective_agent,
                     agent_system_prompt=agent_system_prompt,
                     model_hub_launch=model_hub_launch,
+                    launch_inputs=launch_inputs,
                 )
             else:
                 client = await self._reuse_cached_claude_session_if_available(
@@ -1406,6 +1445,7 @@ class SessionHandler(BaseHandler):
                     effective_effort=effective_effort,
                     agent_system_prompt=None,
                     model_hub_launch=model_hub_launch,
+                    launch_inputs=launch_inputs,
                 )
             if client is not None:
                 return client
@@ -1424,6 +1464,7 @@ class SessionHandler(BaseHandler):
                 effective_effort=effective_effort,
                 agent_system_prompt=agent_system_prompt,
                 fork_session=bool(fork_source_claude_session_id),
+                launch_inputs=launch_inputs,
             )
             if not create_future.done():
                 create_future.set_result(client)
@@ -1453,12 +1494,20 @@ class SessionHandler(BaseHandler):
         effective_effort: Optional[str],
         agent_system_prompt: Optional[str],
         fork_session: bool = False,
+        launch_inputs: "_ClaudeLaunchInputs | None" = None,
     ) -> ClaudeSDKClient:
-        # One coherent config for the whole launch: a renewal while this client
-        # is created leaves it on the epoch and config it started with, and its
-        # next turn moves it.
-        runtime_epoch = getattr(self.controller, "claude_runtime_epoch", 0)
-        claude_config = getattr(self.config, "claude", None)
+        # One coherent config for the whole launch, taken at the turn's
+        # admission: a renewal while this turn resolves or creates its client
+        # leaves it on the epoch and config it started with, and its next turn
+        # moves it.
+        if launch_inputs is None:
+            launch_inputs = _ClaudeLaunchInputs(
+                epoch=getattr(self.controller, "claude_runtime_epoch", 0),
+                config=getattr(self.config, "claude", None),
+                hub_config=None,
+            )
+        runtime_epoch = launch_inputs.epoch
+        claude_config = launch_inputs.config
         launch_config = SimpleNamespace(claude=claude_config)
 
         # Ensure working directory exists

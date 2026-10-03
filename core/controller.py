@@ -2377,6 +2377,13 @@ class Controller:
                 _stop_loop_coroutine(codex_agent.shutdown_runtime(), "Codex runtime")
         except Exception as e:
             logger.debug(f"Codex runtime cleanup skipped: {e}")
+        try:
+            # A disabled backend whose stop failed has no other owner: its
+            # agent is out of routing and the idle sweep that retries it is
+            # already cancelled, so shutdown makes the last attempt.
+            _stop_loop_coroutine(self.agent_service.retry_teardowns(), "Pending backend teardowns")
+        except Exception as e:
+            logger.debug(f"Pending backend teardowns skipped: {e}")
 
         # Cancel receiver tasks without awaiting (they may belong to other loops)
         try:

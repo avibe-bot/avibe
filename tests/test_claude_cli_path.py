@@ -716,6 +716,43 @@ def test_a_renewal_during_client_creation_leaves_one_coherent_launch_config(monk
     assert client._vibe_runtime_epoch == 0
 
 
+def test_a_renewal_during_hub_launch_resolution_leaves_one_coherent_launch_config(monkeypatch, tmp_path) -> None:
+    """RUNTIME-GEN-001: a turn's whole configuration is one load at admission.
+
+    A save and renewal that land while the turn is still resolving its Model Hub
+    launch, before any client exists, change neither the CLI path nor the
+    epoch it launches with; the session's next turn moves it.
+    """
+    from modules.agents import model_hub as model_hub_module
+
+    captured = {}
+
+    class Client:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self):
+            pass
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    resolve = model_hub_module.resolve_model_hub_launch
+
+    async def renew_while_resolving(*args, **kwargs):
+        controller.config.claude = _ClaudeRuntimeConfig(cli_path="/opt/renewed/claude")
+        handler.renew_runtime()
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(model_hub_module, "resolve_model_hub_launch", renew_while_resolving)
+
+    client = _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+
+    assert captured["options"].cli_path == "/usr/local/bin/claude-proxy"
+    assert client._vibe_runtime_epoch == 0
+
+
 def test_a_config_save_that_only_changes_live_fields_renews_no_client() -> None:
     """RUNTIME-GEN-005: an idle-timeout save keeps every cached client; other changes renew."""
     from modules.agents.claude_agent import ClaudeAgent
