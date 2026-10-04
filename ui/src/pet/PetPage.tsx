@@ -256,7 +256,11 @@ const PetSurface: React.FC = () => {
         void setPanel(!expanded);
       }}
     >
-      <PetAvatar pose={pose} badge={state === 'ready' ? unreadCount : 0} />
+      <PetAvatar
+        pose={pose}
+        badge={state === 'ready' ? unreadCount : 0}
+        activities={data.turn?.background_activities.length ?? 0}
+      />
     </button>
   );
 

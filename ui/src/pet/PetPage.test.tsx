@@ -701,3 +701,24 @@ describe('PetPage review fixes, round 8', () => {
     expect((screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement).value).toBe('continue');
   });
 });
+
+describe('PetPage review fixes, round 9', () => {
+  it('shows a background-work count on the collapsed pet without changing its pose', async () => {
+    api.getTurnState.mockImplementation(async () => ({
+      ...idleTurn,
+      background_activities: [
+        { id: 'r1', backend: 'codex', runtime_key: 'k', session_id: 'x', kind: 'agent_run', status: 'running', description: null, started_at: '', updated_at: '' },
+        { id: 'w1', backend: 'codex', runtime_key: 'k', session_id: 'x', kind: 'watch', status: 'running', description: null, started_at: '', updated_at: '' },
+      ],
+    }) as never);
+    try {
+      devBind('S');
+      render(<PetPage />);
+      expect(await screen.findByLabelText('chat.activities.running')).toBeTruthy();
+      expect(screen.getByLabelText('chat.activities.running').textContent).toBe('2');
+      expect(pose()).toBe('idle');
+    } finally {
+      api.getTurnState.mockImplementation(async () => idleTurn);
+    }
+  });
+});

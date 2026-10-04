@@ -30,7 +30,17 @@ const POSES: Record<PetPose, string> = {
 // nothing; any other pose keeps breathing while the window is visible.
 const BREATHING_SETTLE_MS = 30 * 1000;
 
-export const PetAvatar: React.FC<{ pose: PetPose; badge?: number }> = ({ pose, badge = 0 }) => {
+/**
+ * `badge`: unread replies (top right). `activities`: background work for the
+ * session (delegated runs, watches, tasks), shown as a small count at the
+ * bottom left so it is visible while the pet is collapsed; it never changes
+ * the pose, which reflects only the agent itself.
+ */
+export const PetAvatar: React.FC<{ pose: PetPose; badge?: number; activities?: number }> = ({
+  pose,
+  badge = 0,
+  activities = 0,
+}) => {
   const { t } = useTranslation();
   return (
     <div className="pet-avatar" data-pose={pose}>
@@ -43,6 +53,14 @@ export const PetAvatar: React.FC<{ pose: PetPose; badge?: number }> = ({ pose, b
           aria-label={t('pet.unreadBadge', { count: badge })}
         >
           {badge > 99 ? '99+' : badge}
+        </span>
+      )}
+      {activities > 0 && (
+        <span
+          className="absolute bottom-1 left-1 flex h-5 min-w-5 items-center justify-center rounded-full border border-mint/40 bg-mint-soft px-1.5 text-[11px] font-semibold leading-none text-mint-ink"
+          aria-label={t('chat.activities.running', { count: activities })}
+        >
+          {activities > 99 ? '99+' : activities}
         </span>
       )}
     </div>
