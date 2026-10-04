@@ -187,10 +187,16 @@ const PetSurface: React.FC = () => {
 
   const { markRead } = inbox;
 
+  // One message in flight at a time, from any entry point (text or a quick
+  // reply): a second turn must not race the first. A ref, so two sends in one
+  // tick are also one.
+  const sendingRef = useRef(false);
   const send = useCallback(async (text: string, metadata?: Record<string, unknown>) => {
     // Only a session this page has validated as writable accepts input; a
     // restored or just-picked binding waits for its first successful read.
     if (!binding || data.session?.id !== binding || !text.trim()) return false;
+    if (sendingRef.current) return false;
+    sendingRef.current = true;
     setSending(true);
     try {
       const row = await api.sendSessionMessage(binding, { text, ...(metadata ? { metadata } : {}) });
@@ -203,27 +209,23 @@ const PetSurface: React.FC = () => {
     } catch {
       return false;
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   }, [api, binding, data]);
 
-  // A completed send clears the draft only if it is still exactly the text
-  // submitted: an edit while the POST was pending keeps what is on screen,
-  // and text that was sent never lingers to be sent again elsewhere.
-  // One text submission at a time: Enter while a POST is pending must not send
-  // the same draft again. A ref, so two Enters in one tick are also one send.
-  const submittingRef = useRef(false);
+  // A completed send clears the draft only if it is still the same text in
+  // the same session it was submitted from. A binding change already empties
+  // the draft, so sent text never lingers for another session, and text typed
+  // there afterwards is never cleared by the old send.
   const submit = async () => {
     const submitted = draft;
+    const submittedFor = binding;
     const text = submitted.trim();
-    if (!text || submittingRef.current) return;
-    submittingRef.current = true;
-    try {
-      if (!(await send(text))) return;
-      setDraft((current) => (current === submitted ? '' : current));
-    } finally {
-      submittingRef.current = false;
-    }
+    if (!text) return;
+    if (!(await send(text))) return;
+    if (petShell.currentBinding() !== submittedFor) return;
+    setDraft((current) => (current === submitted ? '' : current));
   };
 
   // QuickReplies locks the group locally; the Runtime's message.updated for the
@@ -276,6 +278,7 @@ const PetSurface: React.FC = () => {
       }}
       exchange={exchange}
       markRead={markRead}
+      onRead={data.refreshTail}
       running={data.running}
       queued={(data.turn?.pending_input_count ?? 0) > 0}
       activities={data.turn?.background_activities ?? []}
@@ -314,6 +317,8 @@ type PanelProps = {
   onPick: (sessionId: string) => void;
   exchange: ReturnType<typeof latestExchange>;
   markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>;
+  /** Re-read the tail after a read is applied, so rendered rows converge. */
+  onRead: () => void;
   running: boolean;
   queued: boolean;
   activities: SessionActivityState[];
@@ -356,7 +361,13 @@ const PetPanel: React.FC<PanelProps> = ({ inputRef, ...props }) => {
         <SessionSwitcher current={binding} onPick={props.onPick} />
       ) : binding ? (
         <>
-          <ExchangeView exchange={props.exchange} running={props.running} binding={binding} markRead={props.markRead} />
+          <ExchangeView
+            exchange={props.exchange}
+            running={props.running}
+            binding={binding}
+            markRead={props.markRead}
+            onRead={props.onRead}
+          />
           <ActivityLine activities={props.activities} />
           <NeedsInput
             vaultRequestIds={props.vaultRequestIds}
@@ -406,9 +417,10 @@ const ExchangeView: React.FC<{
   running: boolean;
   binding: string;
   markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>;
-}> = ({ exchange, running, binding, markRead }) => {
+  onRead: () => void;
+}> = ({ exchange, running, binding, markRead, onRead }) => {
   const { t } = useTranslation();
-  usePetMarkRead(binding, exchange, markRead);
+  usePetMarkRead(binding, exchange, markRead, onRead);
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2 text-[13px]">
       {exchange.user && (
@@ -529,6 +541,7 @@ function usePetMarkRead(
   binding: string,
   exchange: ReturnType<typeof latestExchange>,
   markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>,
+  onRead: () => void,
 ): void {
   const last = exchange.results[exchange.results.length - 1];
   const unreadId = last && last.read_at === null ? last.id : null;
@@ -543,9 +556,12 @@ function usePetMarkRead(
       if (markedRef.current === marker) markedRef.current = null;
     };
     markRead(binding, unreadId).then((applied) => {
-      if (!applied) forget();
+      // An applied read converges the rendered rows from the server, so a
+      // later reply never replays this one as unread.
+      if (applied) onRead();
+      else forget();
     }, forget);
-  }, [binding, unreadId, exchange.unreadComplete, visible, markRead]);
+  }, [binding, unreadId, exchange.unreadComplete, visible, markRead, onRead]);
 }
 
 const subscribeVisibility = (listener: () => void) => {

@@ -31,6 +31,8 @@ export type PetSessionData = {
   running: boolean;
   /** Merge a row the pet itself just sent. */
   noteSent: (message: WorkbenchMessage | null) => void;
+  /** Re-read the tail from the server. */
+  refreshTail: () => void;
 };
 
 type Tail = { messages: WorkbenchMessage[]; hasOlder: boolean };
@@ -215,5 +217,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
     sources.turn.refresh();
   }, [sources, sessionId]);
 
-  return { session, messages: tail.messages, hasOlder: tail.hasOlder, turn, running: working, noteSent };
+  const refreshTail = useCallback(() => sources.tail.refresh(), [sources]);
+
+  return { session, messages: tail.messages, hasOlder: tail.hasOlder, turn, running: working, noteSent, refreshTail };
 }

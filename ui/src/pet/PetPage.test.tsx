@@ -648,3 +648,56 @@ describe('PetPage review fixes, round 7', () => {
     expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
   });
 });
+
+describe('PetPage review fixes, round 8', () => {
+  it('does not replay a reply it already marked read when a newer one arrives', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null, text: 'first reply' })];
+    unreadBySession = { S: 1 };
+    markRead.mockImplementationOnce(async () => {
+      // The server applied the read: the tail now reports r1 read.
+      tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { text: 'first reply' })];
+      return true;
+    });
+    devBind('S');
+    render(<PetPage />);
+    summon('show');
+    await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r1'));
+    await waitFor(() => expect(api.listSessionMessages.mock.calls.length).toBeGreaterThan(1));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    const r2 = message('r2', 'S', { read_at: null, text: 'second reply' });
+    tails.S = [...tails.S, r2];
+    await emit((h) => h.onMessageNew?.(r2));
+    await screen.findByText('second reply');
+    expect(screen.queryByText('first reply')).toBeNull();
+  });
+
+  it('keeps one message in flight across text and quick replies', async () => {
+    const pending = deferred<WorkbenchMessage>();
+    api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S', { content: { quick_replies: ['Yes', 'No'] } })];
+    devBind('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await userEvent.click(await screen.findByText('Yes'));
+    await userEvent.type(input, 'also this{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
+    await act(async () => pending.resolve(message('sent', 'S', { author: 'user', type: 'user' })));
+  });
+
+  it('does not clear a draft typed in another session by an older send', async () => {
+    const pending = deferred<WorkbenchMessage>();
+    api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
+    devBind('A');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    await userEvent.type(input, 'continue{Enter}');
+    await bound('B');
+    await screen.findByText('Session B');
+    const inputB = screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    await userEvent.type(inputB, 'continue');
+    await act(async () => pending.resolve(message('a-sent', 'A', { author: 'user', type: 'user' })));
+    expect((screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement).value).toBe('continue');
+  });
+});
