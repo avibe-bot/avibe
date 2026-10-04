@@ -359,6 +359,39 @@ def test_the_state_cap_is_a_tenth_of_the_route_window_up_to_25000(window, cap):
     assert state_cap(replace(CAPABILITIES, context_window=window)) == cap
 
 
+def test_each_artifact_list_keeps_its_50_most_recent_paths_across_checkpoints():
+    rows, payload = Rows(), None
+    rows.input("touch many files")
+    for start, stop in ((0, 200), (200, 350), (350, 500)):
+        for index in range(start, stop):
+            rows.tool("read", "r", call_id=f"r{index}", path=f"read/{index:03}.py")
+            rows.tool("write", "w", call_id=f"w{index}", path=f"write/{index:03}.py")
+        rows.input("next")
+        view = context_view(rows.rows)
+        payload = compaction_payload(
+            view,
+            len(view.units) - 1,
+            mode="dropped",
+            reason="overflow",
+            checkpoint="",
+            skills=(),
+            state=(),
+            earlier_record=None,
+            tokens_before=1,
+            threshold=2,
+            summarizer=None,
+            usage=None,
+        )
+        rows.add("compaction", payload=payload)
+    # Most recently touched first, 50 kept, the rest counted, in the row and in what the model reads.
+    assert payload["files_read"] == [f"read/{index:03}.py" for index in range(499, 449, -1)]
+    assert payload["files_modified"] == [f"write/{index:03}.py" for index in range(499, 449, -1)]
+    assert (payload["files_read_more"], payload["files_modified_more"]) == (450, 450)
+    artifacts = payload["summary"].split("<artifacts>\n", 1)[1].split("</artifacts>", 1)[0]
+    assert artifacts.count("- read/") == 50 and artifacts.count("- write/") == 50
+    assert artifacts.count("- and 450 more\n") == 2
+
+
 def test_the_checkpoint_request_is_the_owner_approved_prompt_verbatim():
     contract = CONTRACT.read_text()
     section = contract[contract.index("## 11. Checkpoint request") :]
@@ -443,7 +476,7 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
         usage=None,
     )
     assert second["files_read"] == ["a.py"]
-    assert second["files_modified"] == ["b.py", "c.py"]
+    assert second["files_modified"] == ["c.py", "b.py"]  # most recently touched first
     assert second["current_request"] == first["current_request"]
     assert second["skills"] == [{"name": "s"}, {"name": "u"}, {"name": "t"}]
     assert second["summarized_to_seq"] > first["summarized_to_seq"]

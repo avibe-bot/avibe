@@ -128,7 +128,9 @@
         "first_kept_seq",
         "summarized_to_seq",
         "files_read",
+        "files_read_more",
         "files_modified",
+        "files_modified_more",
         "skills",
         "tokens_before",
         "tokens_after_estimate",
@@ -202,14 +204,26 @@
           "items": {
             "type": "string"
           },
-          "description": "Paths given to `read` and never to `write` or `edit`, cumulative."
+          "maxItems": 50,
+          "description": "Paths given to `read` and never to `write` or `edit`, cumulative, most recently touched first, at most 50."
+        },
+        "files_read_more": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many read paths were pushed out of `files_read`, cumulative."
         },
         "files_modified": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Paths given to `write` or `edit`, cumulative."
+          "maxItems": 50,
+          "description": "Paths given to `write` or `edit`, cumulative, most recently touched first, at most 50."
+        },
+        "files_modified_more": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many modified paths were pushed out of `files_modified`, cumulative."
         },
         "skills": {
           "type": "array",

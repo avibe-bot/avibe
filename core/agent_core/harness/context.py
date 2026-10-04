@@ -48,6 +48,8 @@ THRESHOLD_RATIO = 0.9
 KEEP_MAX = 20_000
 KEEP_RATIO = 0.25
 IMAGE_TOKENS = 1_600
+#: Each artifact list a checkpoint carries keeps this many paths, most recently touched first, then a count (section 7).
+ARTIFACTS_LISTED = 50
 #: Everything a checkpoint rehydrates (section 7): a tenth of the route's window, at most this many tokens.
 STATE_TOKENS = 25_000
 STATE_RATIO = 0.1
@@ -517,10 +519,29 @@ def _unique(items: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> tuple[list[str], list[str]]:
-    """Cumulative artifacts: the path of each call that succeeded (no hook rewrites arguments under C-9)."""
-    read: list[str] = list(previous.get("files_read", ()))
-    modified: list[str] = list(previous.get("files_modified", ()))
+@dataclass(frozen=True)
+class _Artifacts:
+    """Each list most recently touched first, ``ARTIFACTS_LISTED`` kept; ``*_more`` counts the paths pushed out."""
+
+    read: list[str]
+    read_more: int
+    modified: list[str]
+    modified_more: int
+
+
+def _recent(touched: Sequence[str], earlier: Sequence[str], more: int) -> tuple[list[str], int]:
+    """``touched`` (in touch order) ahead of ``earlier`` (most recent first), the first ``ARTIFACTS_LISTED`` kept."""
+    paths = _unique([*reversed(touched), *earlier])
+    return paths[:ARTIFACTS_LISTED], more + max(0, len(paths) - ARTIFACTS_LISTED)
+
+
+def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> _Artifacts:
+    """Cumulative artifacts: the path of each call that succeeded (no hook rewrites arguments under C-9).
+
+    Bounded across checkpoints (section 7): a long-lived Session would otherwise carry every path it ever touched.
+    """
+    read: list[str] = []
+    modified: list[str] = []
     for unit in head:
         message = unit.lead.message
         if not isinstance(message, AssistantMessage):
@@ -533,9 +554,16 @@ def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> tuple[list[str]
                 read.append(path)
             elif call.name in {"write", "edit"}:
                 modified.append(path)
-    modified = _unique(modified)
-    changed = set(modified)
-    return [path for path in _unique(read) if path not in changed], modified
+    modified_listed, modified_more = _recent(
+        modified, previous.get("files_modified", ()), previous.get("files_modified_more", 0)
+    )
+    changed = {*modified, *modified_listed}
+    read_listed, read_more = _recent(
+        [path for path in read if path not in changed],
+        [path for path in previous.get("files_read", ()) if path not in changed],
+        previous.get("files_read_more", 0),
+    )
+    return _Artifacts(read_listed, read_more, modified_listed, modified_more)
 
 
 def carried_skills(view: ContextView, cut: int) -> tuple[SkillRef, ...]:
@@ -567,7 +595,9 @@ def render_summary(
     *,
     checkpoint: str,
     files_read: Sequence[str],
+    files_read_more: int,
     files_modified: Sequence[str],
+    files_modified_more: int,
     earlier_record: Optional[str],
     current_request: Optional[str],
 ) -> str:
@@ -575,8 +605,10 @@ def render_summary(
     if checkpoint:
         lines += [CHECKPOINT_FRAMING, "", checkpoint, ""]
     lines.append("<artifacts>")
-    for label, paths in (("Read", files_read), ("Modified", files_modified)):
-        lines += [f"{label}:", *(f"- {path}" for path in paths)] if paths else [f"{label}: (none)"]
+    lists = (("Read", files_read, files_read_more), ("Modified", files_modified, files_modified_more))
+    for label, paths, more in lists:
+        listed = [*(f"- {path}" for path in paths), *([f"- and {more} more"] if more else [])]
+        lines += [f"{label}:", *listed] if listed else [f"{label}: (none)"]
     lines.append("</artifacts>")
     if earlier_record:
         lines += ["<earlier-record>", EARLIER_RECORD_LEAD, earlier_record, "</earlier-record>"]
@@ -605,7 +637,7 @@ def compaction_payload(
     previous_row = view.compaction
     previous = previous_row.payload if previous_row is not None else {}
     head = view.units[:cut]
-    read, modified = _files(previous, head)
+    files = _files(previous, head)
     request_id: Optional[str] = None
     request: Optional[str] = None
     if view.units[cut].lead.kind != "input":
@@ -620,8 +652,10 @@ def compaction_payload(
         "reason": reason,
         "summary": render_summary(
             checkpoint=checkpoint,
-            files_read=read,
-            files_modified=modified,
+            files_read=files.read,
+            files_modified=files.modified,
+            files_read_more=files.read_more,
+            files_modified_more=files.modified_more,
             earlier_record=earlier_record,
             current_request=request,
         ),
@@ -632,8 +666,10 @@ def compaction_payload(
         "previous_compaction_id": previous_row.row_id if previous_row is not None else None,
         "current_request": request,
         "current_request_message_id": request_id,
-        "files_read": read,
-        "files_modified": modified,
+        "files_read": files.read,
+        "files_read_more": files.read_more,
+        "files_modified": files.modified,
+        "files_modified_more": files.modified_more,
         "skills": [{"name": skill.name} for skill in skills],
         "tokens_before": tokens_before,
         "tokens_after_estimate": 0,

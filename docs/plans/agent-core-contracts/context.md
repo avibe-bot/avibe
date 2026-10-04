@@ -200,9 +200,11 @@ is written, so projection stays a pure function of the rows:
 
   <artifacts>
   Read:
-  - <path, cumulative across checkpoints>
+  - <path, cumulative across checkpoints, most recently touched first, at most 50>
+  - and <N> more
   Modified:
-  - <path, cumulative across checkpoints>
+  - <path, cumulative across checkpoints, most recently touched first, at most 50>
+  - and <N> more
   </artifacts>
   <earlier-record>
   The full text of the earlier conversation is still stored. To look up a detail, run:
@@ -215,8 +217,12 @@ is written, so projection stays a pure function of the rows:
   ```
 
   `Read` lists paths of successful `read` calls that no `write` or `edit` touched; `Modified` lists paths of
-  successful `write` or `edit` calls; `(none)` when a list is empty. `<earlier-record>` is left out when the adapter supplies no command, and
-  `<current-request>` when the cut did not split a turn.
+  successful `write` or `edit` calls; `(none)` when a list is empty. Each list keeps its 50 most recently touched
+  paths and counts the ones pushed out (`files_read_more`, `files_modified_more`), in the row and in the text; the
+  full history stays reachable through `<earlier-record>`. This is an Avibe deviation from Pi, which keeps every
+  path: Avibe Sessions are long-lived (IM threads and Workbench Sessions that run for weeks), so an unbounded list
+  would turn a working Session into a forced `/new`. `<earlier-record>` is left out when the adapter supplies no
+  command, and `<current-request>` when the cut did not split a turn.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment block
   (C-7 §8; a checkpoint always happens inside a run), pending Watches, Tasks, and delegated Runs from the Harness
   tables, and skill bodies by name (at most 5,000 tokens each). All of it is capped for the route the next request
@@ -321,7 +327,9 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   once, at the transition; the adapter shows nothing for it. The pause clears by itself after 30 minutes
   (`PAUSE_SECONDS`), or as soon as a request goes to another route (provider, api, model) than the one it began on,
   whichever comes first; both counters clear with it, and the next threshold tries again. The pause is decided first
-  on every request, and while it holds nothing is built for a compaction (no hypothetical drop, no host call). A
+  on every request, and while it holds nothing is built for a compaction (no hypothetical drop, no host call); the
+  overflow ladder is one loop that reads the live guard before every step, so a checkpoint failure that begins the
+  pause ends the ladder there (the request is sent if it can fit and was not refused), never in a drop. A
   guard transition belongs to the route its checkpoint request ran on, a retry's fallback included. The counters
   and the pause (`paused_at`, `paused_route`) are durable loop state, stored beside the hook state in `agent_state`
   rows (`AgentState.context`), so they survive restarts and forks; projection takes them from the latest

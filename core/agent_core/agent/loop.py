@@ -1143,16 +1143,21 @@ class Agent:
         emit: Callable[..., Awaitable[None]],
         ladder: _Ladder,
     ) -> bool:
-        """C-9 on the final request (sections 3 and 8); True when it changed the context."""
+        """C-9 on the final request (sections 3 and 8); True when it changed the context.
+
+        The pause is read from the live guard at every decision, never kept: a checkpoint failure in this pass can
+        begin it.
+        """
         # The pause first: while it holds nothing is compacted, so nothing is built for a compaction either.
-        paused = await self._paused(selected)
+        await self._expire_pause(selected)
         if not plan.can_fit and (
-            paused or not (await self._minimal(system, selected, request, view, plan))[1].can_fit
+            self._guard["paused"] or not (await self._minimal(system, selected, request, view, plan))[1].can_fit
         ):
             # (d): paused, or not even the request the drop would leave (its row and the last unit) can fit. The
             # provider never sees it.
             raise self._exhausted(request, view, plan)
-        shrink, ladder.refused = ladder.refused, False
+        refused, ladder.refused = ladder.refused, False
+        shrink = refused
         if not shrink:
             if self.context.clear_tool_results and (
                 plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold()
@@ -1161,7 +1166,7 @@ class Agent:
                 if targets:
                     await self._commit_context([("context_edit", clear_edit(target)) for target in targets], self._guard)
                     return True
-            if plan.est >= plan.threshold and not ladder.compacted and not paused:
+            if plan.est >= plan.threshold and not ladder.compacted and not self._guard["paused"]:
                 cut = normal_cut(view.units, plan.keep)
                 if cut is not None:
                     ladder.compacted = True
@@ -1178,15 +1183,12 @@ class Agent:
             if not shrink and plan.fits:
                 return False
             # With no checkpoint request left to try, a request that can fit at all is sent; the provider judges.
-            if not shrink and (ladder.summary_failed or paused) and plan.can_fit:
+            if not shrink and (ladder.summary_failed or self._guard["paused"]) and plan.can_fit:
                 return False
-        if paused:
-            # Paused, nothing is compacted (section 10): a request that cannot be sent ends the turn.
-            raise self._exhausted(request, view, plan)
-        return await self._shrink(system, selected, request, view, plan, emit, ladder)
+        return await self._shrink(system, selected, request, view, plan, emit, ladder, refused=refused)
 
-    async def _paused(self, selected: ModelSelection) -> bool:
-        """Whether auto-compaction is paused for this request (section 10).
+    async def _expire_pause(self, selected: ModelSelection) -> None:
+        """Clear a pause that no longer holds for this request (section 10).
 
         A pause holds for ``PAUSE_SECONDS`` on the route it began on; after that, or on another route, it clears
         by itself, with both counters, and the next threshold tries again. The clear is a guard transition like any
@@ -1194,12 +1196,23 @@ class Agent:
         """
         guard = self._guard
         if not guard["paused"]:
-            return False
-        route = _route(selected)
-        if guard.get("paused_route") == route and self.context.clock() - guard.get("paused_at", 0) < PAUSE_SECONDS:
-            return True
+            return
+        held = self.context.clock() - guard.get("paused_at", 0) < PAUSE_SECONDS
+        if held and guard.get("paused_route") == _route(selected):
+            return
         await self._commit_context([], _GUARD_DEFAULT)
-        return False
+
+    def _hold(self, request: ModelRequest, view: ContextView, plan: Budget, *, refused: bool) -> bool:
+        """The pause rule (section 10), read from the live guard before every step of the ladder.
+
+        Not paused: False, and the step may run. Paused: nothing is compacted; a request that can fit and the
+        provider has not refused is sent as it is (True), and any other ends the turn ``context_exhausted``.
+        """
+        if not self._guard["paused"]:
+            return False
+        if refused or not plan.can_fit:
+            raise self._exhausted(request, view, plan)
+        return True
 
     async def _minimal(
         self, system: str, selected: ModelSelection, request: ModelRequest, view: ContextView, plan: Budget
@@ -1276,22 +1289,34 @@ class Agent:
         plan: Budget,
         emit: Callable[..., Awaitable[None]],
         ladder: _Ladder,
+        *,
+        refused: bool,
     ) -> bool:
-        """One step of the overflow ladder (section 8); False when nothing can move and the provider judges."""
+        """The overflow ladder (section 8), one loop; True when a step changed the context, False to send as it is.
+
+        Every step is preceded by the pause rule on the live guard (``_hold``), as the stage decides the pause
+        first: a failed checkpoint that begins the pause ends the ladder there, never in a drop.
+        """
         units = view.units
-        if not ladder.summary_failed and not ladder.compacted:
-            ladder.compacted = True
-            cut = normal_cut(units, plan.keep)
-            if cut is not None and self._fork_fits(system, selected, view, "normal", cut):
-                outcome = await self._checkpoint(
-                    system, selected, request, view, plan, cut, mode="normal", reason="overflow", emit=emit
-                )
-                if outcome.ok:
-                    return True
-                ladder.summary_failed = not outcome.overflow
-        if not ladder.summary_failed and ladder.rolls < MAX_ROLLS:
-            cut = rolling_cut(units, lambda cut: self._fork_fits(system, selected, view, "rolling", cut))
-            if cut is not None:
+        while True:
+            if self._hold(request, view, plan, refused=refused):
+                return False
+            if not ladder.summary_failed and not ladder.compacted:
+                ladder.compacted = True
+                cut = normal_cut(units, plan.keep)
+                if cut is not None and self._fork_fits(system, selected, view, "normal", cut):
+                    outcome = await self._checkpoint(
+                        system, selected, request, view, plan, cut, mode="normal", reason="overflow", emit=emit
+                    )
+                    if outcome.ok:
+                        return True
+                    ladder.summary_failed = not outcome.overflow
+                continue
+            if not ladder.summary_failed and ladder.rolls < MAX_ROLLS:
+                cut = rolling_cut(units, lambda cut: self._fork_fits(system, selected, view, "rolling", cut))
+                if cut is None:
+                    ladder.rolls = MAX_ROLLS
+                    continue
                 ladder.rolls += 1
                 outcome = await self._checkpoint(
                     system, selected, request, view, plan, cut, mode="rolling", reason="overflow", emit=emit
@@ -1299,15 +1324,14 @@ class Agent:
                 if outcome.ok:
                     return True
                 ladder.summary_failed = True
-            else:
-                ladder.rolls = MAX_ROLLS
-        cut = half_cut(units)
-        if cut is not None:
-            await self._drop(selected, request, view, plan, cut, emit)
-            return True
-        if ladder.overflows or not plan.can_fit:
-            raise self._exhausted(request, view, plan)
-        return False
+                continue
+            cut = half_cut(units)
+            if cut is not None:
+                await self._drop(selected, request, view, plan, cut, emit)
+                return True
+            if ladder.overflows or not plan.can_fit:
+                raise self._exhausted(request, view, plan)
+            return False
 
     def _exhausted(self, request: ModelRequest, view: ContextView, plan: Budget) -> _Exhausted:
         """Section 8 (d): what fills the request, for the user's stop message."""

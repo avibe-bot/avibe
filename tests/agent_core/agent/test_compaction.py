@@ -689,6 +689,23 @@ async def test_while_paused_a_request_that_cannot_be_sent_ends_the_turn_and_noth
     assert [row.kind for row in rows[len(before) :]] == ["input"]
 
 
+async def test_a_checkpoint_failure_that_pauses_mid_ladder_drops_nothing_and_stops_the_request():
+    failing = [Done(assistant(CHECKPOINT, stop_reason="length"))]
+    store, context = InMemoryTranscriptStore(), ContextConfig(clear_tool_results=False)
+    late = [Done(assistant("sent after a drop"))]  # only a request after a drop would reach it
+    model = Model([*history(), [Done(assistant("ok"))], [Done(assistant("ok"))], late], [failing] * 3)
+    agent = make_agent(model, store=store, selection=ROOMY, context=context, tools=[reader(tokens(1))])
+    await run(agent)
+    await run(agent, tokens(30_000), row="one")  # a threshold checkpoint fails: one
+    await run(agent, "again", row="two")  # two
+    # A request that cannot fit and that no fork can take whole: the ladder's rolling checkpoint fails a third time,
+    # which pauses auto-compaction, so the ladder's next step is the pause rule, never a drop.
+    events = await run(agent, tokens(70_000), row="three")
+    assert len(model.checkpoint_requests) == 3
+    assert not [row for row in await store.load("session") if row.kind == "compaction"]
+    assert events[-1].reason == "context_exhausted" and [e for e in events if isinstance(e, CompactionPaused)]
+
+
 class _FallbackOnRetry(FakeModelRouter):
     """The primary route; while ``retrying`` is set, a retry resolves to the fallback."""
 
@@ -1138,7 +1155,7 @@ async def test_a_long_session_keeps_every_conversation_request_under_T():
         request.messages[0].content[0].text.startswith("<context-checkpoint>")
         for request in model.checkpoint_requests[1:]
     )
-    assert compactions[-1].payload["files_read"] == [f"f{index}" for index in range(7)]
+    assert compactions[-1].payload["files_read"] == [f"f{index}" for index in range(6, -1, -1)]  # most recent first
     assert all(row.payload["previous_compaction_id"] == prior.row_id for prior, row in zip(compactions, compactions[1:]))
     # A fork anchored before the first checkpoint projects the original context.
     original = project(rows, fork_point=compactions[0].context_seq - 1).messages

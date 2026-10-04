@@ -184,6 +184,8 @@ COMPACTION = {  # the current C-9 ``Compaction`` shape (transcript-rows.schema.j
     "current_request_message_id": None,
     "files_read": ["core/paths.py"],
     "files_modified": [],
+    "files_modified_more": 0,
+    "files_read_more": 0,
     "skills": [],
     "tokens_before": 100,
     "tokens_after_estimate": 40,
