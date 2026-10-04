@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
+from core.agent_core.ai.provider import ModelCapabilities
 from core.agent_core.harness.projection import ContextView, Unit
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
@@ -38,6 +39,8 @@ from core.agent_core.tools.base import ToolSpec
 
 # --- constants (context.md) -----------------------------------------------------
 
+DEFAULT_CONTEXT_WINDOW = 128_000
+DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 MARGIN_MIN = 8_000
 MARGIN_RATIO = 0.03
 THRESHOLD_RATIO = 0.9
@@ -239,31 +242,56 @@ def add_usage(total: Optional[Usage], usage: Optional[Usage]) -> Optional[Usage]
     )
 
 
-def _valid_baseline(message: Message) -> bool:
-    return (
-        isinstance(message, AssistantMessage)
-        and message.stop_reason not in {"error", "aborted"}
-        and message.usage is not None
-        and usage_total(message.usage) > 0
-    )
+# --- request accounting (context.md sections 1 and 2) ---------------------------------
 
 
-def occupancy(view: ContextView, *, system: str, tools: Sequence[ToolSpec], rehydrated: Sequence[Message]) -> int:
-    """``est``: the last valid response's usage after the boundary plus what was appended since.
+@dataclass(frozen=True)
+class Anchor:
+    """A request the provider answered with valid usage, with the response it answered (section 2)."""
 
-    With no such response, the tokens of the whole projected request.
+    system: str
+    tools: tuple[ToolSpec, ...]
+    messages: tuple[Message, ...]
+    response: AssistantMessage
+
+
+def anchor(system: str, tools: Sequence[ToolSpec], messages: Sequence[Message], response: Message) -> Optional[Anchor]:
+    """The anchor a response makes, or None: a failed or aborted response, or no usage, never anchors."""
+    if (
+        isinstance(response, AssistantMessage)
+        and response.stop_reason not in {"error", "aborted"}
+        and response.usage is not None
+        and usage_total(response.usage) > 0
+    ):
+        return Anchor(system, tuple(tools), tuple(messages), response)
+    return None
+
+
+def output_tokens(capabilities: ModelCapabilities, configured: int) -> int:
+    """``O``: the hop's ``max_output_tokens`` (8,192 when unknown), capped by the Agent's output budget."""
+    hop = capabilities.max_output_tokens
+    return min(configured, DEFAULT_MAX_OUTPUT_TOKENS if hop is None else hop)
+
+
+def _estimate(
+    system: str, tools: Sequence[ToolSpec], messages: Sequence[Message], anchors: Sequence[Anchor]
+) -> int:
+    """Usage of the latest request whose prefix is still this one's, plus what follows its response.
+
+    With no such request, UTF-8 bytes / 4 of the whole request.
     """
-    for index in range(len(view.units) - 1, -1, -1):
-        unit = view.units[index]
-        lead = unit.lead
-        if lead.kind == "response" and lead.context_seq > view.boundary_seq and _valid_baseline(lead.message):
-            after = [message for _, message in unit.entries[1:]]
-            after += [message for later in view.units[index + 1 :] for message in later.messages]
-            return usage_total(lead.message.usage) + messages_tokens(after)
-    return request_tokens(system, tools, (*rehydrated, *view.messages))
-
-
-# --- limits (context.md section 1) ------------------------------------------------
+    tools = tuple(tools)
+    for item in reversed(anchors):
+        sent = len(item.messages)
+        if (
+            item.system == system
+            and item.tools == tools
+            and len(messages) > sent
+            and tuple(messages[:sent]) == item.messages
+            and messages[sent] == item.response
+        ):
+            return usage_total(item.response.usage) + messages_tokens(messages[sent + 1 :])
+    return request_tokens(system, tools, messages)
 
 
 def fit_result(content: Sequence[UserContent], limit: int) -> tuple[UserContent, ...]:
@@ -287,41 +315,61 @@ def fit_result(content: Sequence[UserContent], limit: int) -> tuple[UserContent,
 
 @dataclass(frozen=True)
 class Budget:
+    """One request measured against the route resolved for it; evaluated afresh before every model request."""
+
     window: int
     input_limit: int
     output: int
     margin: int
     threshold: int
     keep: int
-
-    def fits(self, tokens: int) -> bool:
-        """Whether a conversation request of ``tokens`` asking for ``O`` stays inside ``L_in`` with the margin."""
-        return tokens + self.output + self.margin <= self.input_limit
-
-    def can_fit(self, tokens: int) -> bool:
-        """Whether a conversation request of ``tokens`` asking for ``O`` can fit at all, without the margin."""
-        return tokens + self.output <= self.input_limit
-
-    def fork_fits(self, tokens: int) -> bool:
-        """Whether a checkpoint request of ``tokens`` can fit at all; the provider remains the judge."""
-        return tokens + self.checkpoint_max_tokens <= self.input_limit
-
-    def fork_room(self, tokens: int) -> int:
-        """What the window leaves a checkpoint request of ``tokens`` (the request message included) to grow by."""
-        return self.input_limit - tokens - self.checkpoint_max_tokens
+    est: int
 
     @property
     def checkpoint_max_tokens(self) -> int:
         return min(CHECKPOINT_MAX_TOKENS, self.output)
 
+    @property
+    def fits(self) -> bool:
+        """A conversation request asking for ``O`` stays inside ``L_in`` with the margin."""
+        return self.est + self.output + self.margin <= self.input_limit
 
-def budget(*, context_window: int, input_limit: Optional[int], max_tokens: int) -> Budget:
-    window = context_window
-    limit = input_limit if input_limit is not None else window
+    @property
+    def can_fit(self) -> bool:
+        """A conversation request asking for ``O`` can fit at all, without the margin."""
+        return self.est + self.output <= self.input_limit
+
+    @property
+    def fork_room(self) -> int:
+        """What the window leaves a checkpoint request (its request message included) to grow by."""
+        return self.input_limit - self.est - self.checkpoint_max_tokens
+
+    @property
+    def fork_fits(self) -> bool:
+        """A checkpoint request can fit at all; the provider remains the judge."""
+        return self.fork_room >= 0
+
+
+def budget(
+    *,
+    system: str,
+    tools: Sequence[ToolSpec],
+    messages: Sequence[Message],
+    capabilities: ModelCapabilities,
+    max_tokens: int,
+    anchors: Sequence[Anchor] = (),
+) -> Budget:
+    """``W, L_in, O, M, T`` from the capabilities of the route resolved for this request, and its ``est``.
+
+    The one place these values are computed (sections 1 and 2); ``max_tokens`` is the Agent's output budget.
+    """
+    window = DEFAULT_CONTEXT_WINDOW if capabilities.context_window is None else capabilities.context_window
+    limit = window if capabilities.input_limit is None else capabilities.input_limit
+    output = output_tokens(capabilities, max_tokens)
     margin = max(MARGIN_MIN, math.ceil(MARGIN_RATIO * window))
-    threshold = min(limit - max_tokens - margin, math.floor(THRESHOLD_RATIO * window))
+    threshold = min(limit - output - margin, math.floor(THRESHOLD_RATIO * window))
     keep = max(0, min(KEEP_MAX, math.floor(KEEP_RATIO * threshold)))
-    return Budget(window, limit, max_tokens, margin, threshold, keep)
+    return Budget(window, limit, output, margin, threshold, keep, _estimate(system, tools, messages, anchors))
 
 
 # --- clearing (context.md section 4) ------------------------------------------------

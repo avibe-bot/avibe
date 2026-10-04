@@ -79,8 +79,6 @@ class ContextView:
     units: tuple[Unit, ...]
     #: Row ids of tool results a ``context_edit`` replaced.
     edited: frozenset[str]
-    #: The latest ``context_compaction`` or ``context_edit`` row; usage before it is ignored.
-    boundary_seq: int
     context_seq: int
     state: Mapping[str, Any]
     context_state: Mapping[str, Any]
@@ -277,19 +275,17 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
     context_state: Mapping[str, Any] = {}
     compaction: Optional[ContextEntry] = None
     edits: dict[str, str] = {}
-    boundary = 0
     for row in rows:
         if row.kind == "agent_state":
             state = row.payload["state"]
             context_state = row.payload.get("context", {})
         elif row.kind == "compaction":
-            compaction, boundary = row, row.context_seq
+            compaction = row
         elif row.kind == "context_edit":
             target = rows_by_id.get(row.payload["target_event_id"])
             if target is None or target.kind != "tool_result" or target.context_seq >= row.context_seq:
                 raise ProjectionError(f"context_edit row {row.row_id} targets no earlier tool result")
             edits[target.row_id] = row.payload["replacement"]["text"]
-            boundary = row.context_seq
     first_kept = compaction.payload["first_kept_seq"] if compaction is not None else 0
     units: list[Unit] = []
     for row in rows:
@@ -318,7 +314,6 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
         checkpoint=checkpoint,
         units=tuple(deepcopy(units)),
         edited=frozenset(edits),
-        boundary_seq=boundary,
         context_seq=rows[-1].context_seq if rows else 0,
         state=deepcopy(state),
         context_state=deepcopy(context_state),

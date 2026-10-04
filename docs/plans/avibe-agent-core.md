@@ -176,11 +176,12 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
 `context_compaction` row. Compaction and clearing only append rows.
 
 - **Limits from Model Hub.** `W`, `L_in`, and `O` come from the served hop's `context_window`, `input_limit`, and
-  `max_output_tokens` (128,000 and 8,192 when unknown) and are recomputed for every request.
+  `max_output_tokens` (128,000 and 8,192 when unknown); one pure function computes them and `est` immediately
+  before every model request.
   `M = max(8,000, 3% W)`, `T = min(L_in - O - M, 0.9 W)`.
-- **Trigger** before every model request, including inside the tool loop: `est` is the usage of the last valid
-  response after the latest checkpoint or edit plus UTF-8 bytes / 4 of everything appended since (1,600 per image);
-  with no such response, UTF-8 bytes / 4 of the projected request. Compact when `est >= T`.
+- **Trigger** before every model request, including inside the tool loop: `est` is the usage of the latest answered
+  request whose prefix is still the current request's, plus UTF-8 bytes / 4 of everything after its response (1,600
+  per image); otherwise UTF-8 bytes / 4 of the whole request. Compact when `est >= T`.
 - **Cut** before a user message or before an assistant message whose tool batch follows it, keeping
   `min(20K, 0.25 T)` verbatim; a split turn's user message is copied into the checkpoint as `<current-request>`.
 - **Checkpoint delivery is a fork**: the same model, system prompt, tools, tool choice, and reasoning settings, the

@@ -14,25 +14,12 @@ from core.agent_core.ai.provider import (
 )
 from core.agent_core.messages import ProtocolName
 
-DEFAULT_CONTEXT_WINDOW = 128_000
-DEFAULT_MAX_OUTPUT_TOKENS = 8_192
-
-
 @dataclass(frozen=True)
 class ModelSelection:
+    """A resolved route; C-9 derives every limit from its ``capabilities`` (``harness.context.budget``)."""
+
     endpoint: ModelEndpoint
     capabilities: ModelCapabilities
-
-    @property
-    def context_window(self) -> int:
-        """Effective C-9 budget; preserve nullable source capabilities."""
-        value = self.capabilities.context_window
-        return DEFAULT_CONTEXT_WINDOW if value is None else value
-
-    @property
-    def max_output_tokens(self) -> int:
-        value = self.capabilities.max_output_tokens
-        return DEFAULT_MAX_OUTPUT_TOKENS if value is None else value
 
 
 class ModelRouter(Protocol):

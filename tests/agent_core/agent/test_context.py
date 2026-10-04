@@ -10,13 +10,15 @@ from __future__ import annotations
 import math
 import random
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from core.agent_core.ai.provider import ModelCapabilities
 from core.agent_core.harness.context import (
-    CLEARED_PLACEHOLDER,
     SkillRef,
+    anchor,
     budget,
     carried_skills,
     checkpoint_request,
@@ -26,7 +28,6 @@ from core.agent_core.harness.context import (
     half_cut,
     message_tokens,
     normal_cut,
-    occupancy,
     request_tokens,
     rolling_cut,
     text_tokens,
@@ -34,6 +35,7 @@ from core.agent_core.harness.context import (
 )
 from core.agent_core.harness.projection import context_view, project
 from core.agent_core.harness.store import ContextEntry
+from core.agent_core.tools.base import ToolSpec
 from core.agent_core.messages import (
     AssistantMessage,
     ImageBlock,
@@ -98,55 +100,70 @@ def test_the_estimate_counts_utf8_bytes_so_chinese_is_not_undercounted():
 
 
 @pytest.mark.parametrize(
-    "window,input_limit,output,margin,threshold,keep",
+    "window,input_limit,hop_output,configured,output,margin,threshold,keep",
     [
-        (200_000, None, 32_000, 8_000, 160_000, 20_000),
-        (1_000_000, None, 32_000, 30_000, 900_000, 20_000),
-        (128_000, None, 8_192, 8_000, 111_808, 20_000),
-        (400_000, 272_000, 128_000, 12_000, 132_000, 20_000),
-        (32_000, None, 4_096, 8_000, 19_904, 4_976),
+        (200_000, None, 32_000, 64_000, 32_000, 8_000, 160_000, 20_000),
+        (1_000_000, None, 32_000, 32_000, 32_000, 30_000, 900_000, 20_000),
+        (None, None, None, 8_192, 8_192, 8_000, 111_808, 20_000),  # unknown: W = 128,000, O = 8,192
+        (400_000, 272_000, 128_000, 128_000, 128_000, 12_000, 132_000, 20_000),
+        (32_000, None, 64_000, 4_096, 4_096, 8_000, 19_904, 4_976),  # O is the request's, capped by the Agent
     ],
 )
-def test_limits_follow_the_frozen_formula(window, input_limit, output, margin, threshold, keep):
-    plan = budget(context_window=window, input_limit=input_limit, max_tokens=output)
-    assert (plan.margin, plan.threshold, plan.keep) == (margin, threshold, keep)
-    limit = input_limit or window
-    assert plan.fits(limit - output - margin) and not plan.fits(limit - output - margin + 1)
+def test_limits_follow_the_frozen_formula_from_the_route_capabilities(
+    window, input_limit, hop_output, configured, output, margin, threshold, keep
+):
+    capabilities = ModelCapabilities(context_window=window, input_limit=input_limit, max_output_tokens=hop_output)
+    plan = budget(system="", tools=(), messages=(), capabilities=capabilities, max_tokens=configured)
+    assert (plan.output, plan.margin, plan.threshold, plan.keep) == (output, margin, threshold, keep)
     assert plan.checkpoint_max_tokens == min(16_000, output)
+    limit = input_limit or window or 128_000
+    at_limit = budget(
+        system="x" * 4 * (limit - output - margin),
+        tools=(),
+        messages=(),
+        capabilities=capabilities,
+        max_tokens=configured,
+    )
+    assert at_limit.fits and not replace(at_limit, est=at_limit.est + 1).fits
 
 
 def _usage(total: int) -> Usage:
     return Usage(input_tokens=total - 10, output_tokens=10)
 
 
-def test_the_estimate_starts_from_the_last_valid_usage_after_the_latest_checkpoint_or_edit():
-    rows = Rows()
-    rows.input("x" * 400)
-    read = ToolCallBlock("r", "read", {"path": "f"})
-    rows.response(read, usage=_usage(5_000))
-    result = rows.result(read, "y" * 4_000)
-    rows.response(usage=_usage(9_999), stop_reason="error")  # a failed response never anchors
-    rows.response(usage=Usage())  # nor one without usage
-    view = context_view(rows.rows)
-    after = message_tokens(result.message) + 2 * message_tokens(assistant(""))
-    assert occupancy(view, system="s", tools=(), rehydrated=()) == 5_000 + after
+CAPABILITIES = ModelCapabilities(context_window=32_000, max_output_tokens=4_096)
 
-    edited = Rows()
-    edited.rows = list(rows.rows)
-    edited.add(
-        "context_edit",
-        payload={
-            "version": 1,
-            "target_event_id": result.row_id,
-            "replacement": {"text": CLEARED_PLACEHOLDER},
-            "reason": "clear_old_tool_result",
-        },
-    )
-    view = context_view(edited.rows)
-    # Usage before an edit is ignored: the whole projected request is estimated.
-    assert occupancy(view, system="s", tools=(), rehydrated=()) == request_tokens("s", (), view.messages)
-    edited.response(usage=_usage(700))
-    assert occupancy(context_view(edited.rows), system="s", tools=(), rehydrated=()) == 700
+
+def test_usage_anchors_the_estimate_only_while_its_request_is_still_the_prefix():
+    read = ToolCallBlock("r", "read", {"path": "f"})
+    sent = (user("x" * 400),)
+    response = AssistantMessage((read,), ORIGIN, "tool_use", usage=_usage(5_000))
+    result = ToolResultMessage("r", "read", (text("y" * 4_000),))
+    later = assistant("z" * 40)
+    current = (*sent, response, result, later)
+    made = anchor("system", (), sent, response)
+    anchored = budget(system="system", tools=(), messages=current, capabilities=CAPABILITIES, max_tokens=4_096, anchors=(made,))
+    assert anchored.est == 5_000 + message_tokens(result) + message_tokens(later)
+    full = request_tokens("system", (), current)
+    changed = [
+        ("other system", (), current),  # the system prompt changed
+        ("system", (ToolSpec("t", "d", {}),), current),  # the tool definitions changed
+        ("system", (), (user("rehydrated"), *current)),  # something now comes before the transcript
+        ("system", (), (user("x" * 399 + "!"), response, result, later)),  # an edit inside the anchored prefix
+        ("system", (), sent),  # the response is not in this request
+    ]
+    for system, tools, messages in changed:
+        plan = budget(system=system, tools=tools, messages=messages, capabilities=CAPABILITIES, max_tokens=4_096, anchors=(made,))
+        assert plan.est == request_tokens(system, tools, messages)
+    assert budget(system="system", tools=(), messages=current, capabilities=CAPABILITIES, max_tokens=4_096).est == full
+    # A change after the anchored response is not a prefix change: it is counted by its bytes.
+    cleared = (*sent, response, ToolResultMessage("r", "read", (text("cleared"),)), later)
+    plan = budget(system="system", tools=(), messages=cleared, capabilities=CAPABILITIES, max_tokens=4_096, anchors=(made,))
+    assert plan.est == 5_000 + message_tokens(cleared[2]) + message_tokens(later)
+    # A failed or aborted response, or one without usage, never anchors.
+    assert anchor("system", (), sent, AssistantMessage((read,), ORIGIN, "error", usage=_usage(9_999))) is None
+    assert anchor("system", (), sent, AssistantMessage((read,), ORIGIN, "tool_use", usage=Usage())) is None
+    assert anchor("system", (), sent, AssistantMessage((read,), ORIGIN, "tool_use")) is None
 
 
 def _random_rows(seed: int) -> list[ContextEntry]:

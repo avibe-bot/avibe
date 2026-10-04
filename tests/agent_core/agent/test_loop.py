@@ -38,6 +38,7 @@ from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import RetryPolicy
 from core.agent_core.ai.provider import Done, ModelCapabilities, ProviderError, TextDelta, ThinkingDelta, ToolCallStart
 from core.agent_core.agent.models import ModelSelection
+from core.agent_core.harness.context import budget
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import AssistantMessage, ThinkingBlock, ToolCallBlock, ToolResultMessage, Usage, UserMessage, text
 from core.agent_core.tools.base import ToolResult
@@ -907,9 +908,10 @@ async def test_output_budget_uses_configured_budget_and_known_or_default_provide
 
 
 @pytest.mark.parametrize("window,expected", [(None, 128000), (32000, 32000)])
-def test_router_selection_exposes_effective_context_budget_without_forging_capabilities(window, expected):
+def test_the_context_budget_defaults_an_unknown_window_without_forging_capabilities(window, expected):
     selection = ModelSelection(ENDPOINT, ModelCapabilities(context_window=window))
-    assert selection.context_window == expected
+    plan = budget(system="", tools=(), messages=(), capabilities=selection.capabilities, max_tokens=8192)
+    assert plan.window == expected
     assert selection.capabilities.context_window == window
 
 

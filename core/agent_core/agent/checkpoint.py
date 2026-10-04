@@ -65,6 +65,7 @@ class CheckpointPolicy(Hooks):
         try:
             arguments = prepare_edit_arguments(call.arguments) if call.name == "edit" else call.arguments
             target = os.path.realpath(resolve_to_cwd(str_arg(arguments, "path"), self._cwd))
+            # commonpath raises ValueError for paths on different Windows drives: outside, so denied.
+            return target != self._scratch and os.path.commonpath((target, self._scratch)) == self._scratch
         except (ToolInputError, OSError, ValueError):
             return False
-        return target != self._scratch and os.path.commonpath((target, self._scratch)) == self._scratch

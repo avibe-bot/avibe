@@ -16,7 +16,7 @@ from dataclasses import replace
 
 import pytest
 
-from core.agent_core.agent.checkpoint import BUDGET_USED, DENIED
+from core.agent_core.agent.checkpoint import BUDGET_USED, DENIED, CheckpointPolicy
 from core.agent_core.agent.events import (
     AgentError,
     AssistantTextDelta,
@@ -29,7 +29,9 @@ from core.agent_core.agent.events import (
     RunEnded,
     ToolStarted,
 )
+from core.agent_core.agent.hooks import Deny, Hooks
 from core.agent_core.agent.loop import Agent
+from core.agent_core.agent.models import RetryPolicy
 from core.agent_core.ai._common import endpoint_origin, prepare_messages
 from core.agent_core.ai.anthropic import build_messages_payload
 from core.agent_core.ai.openai_chat import build_chat_payload
@@ -129,16 +131,20 @@ class Host:
         return [f"<state skills={len(request.skills)} mid_turn={request.mid_turn}/>"]
 
 
-def make_agent(model, *, store=None, tools=(), hooks=(), selection=SELECTION, context=None, cwd="/test-owned"):
+def make_agent(
+    model, *, store=None, tools=(), hooks=(), selection=SELECTION, context=None, cwd="/test-owned", **options
+):
+    selections = selection if isinstance(selection, tuple) else (selection,)
     return Agent(
         session_id="session",
-        models=FakeModelRouter(model, (selection,)),
+        models=FakeModelRouter(model, selections),
         tools=tools,
         hooks=hooks,
         store=store or InMemoryTranscriptStore(),
         jobs=FakeJobHost(),
         cwd=cwd,
         context=context or ContextConfig(),
+        **options,
     )
 
 
@@ -322,6 +328,17 @@ async def test_the_checkpoint_policy_allows_reads_and_scratch_writes_and_never_r
     assert events[-1].reason == "completed"
 
 
+async def test_a_target_the_platform_cannot_compare_with_the_scratch_dir_is_denied(tmp_path, monkeypatch):
+    # On Windows, commonpath raises ValueError for paths on different drives (D:\\notes.txt vs C:\\scratch).
+    def other_drive(paths):
+        raise ValueError("Paths don't have the same drive")
+
+    policy = CheckpointPolicy(cwd=str(tmp_path), scratch_dir=str(tmp_path / "scratch"))
+    monkeypatch.setattr("core.agent_core.agent.checkpoint.os.path.commonpath", other_drive)
+    write = ToolCallBlock("w", "write", {"path": str(tmp_path / "elsewhere"), "content": "no"})
+    assert await policy.before_tool(write, None) == Deny(DENIED)
+
+
 async def test_the_checkpoint_turn_gets_five_tool_rounds_then_must_write():
     tools = [reader(tokens(3_000)), FakeTool("bash")]
     rounds = [call("read", f"r{index}", path="f") for index in range(5)]
@@ -463,6 +480,88 @@ async def test_failed_checkpoints_leave_the_context_and_three_pause_auto_compact
     ]
     state = [row for row in await store.load("session") if row.kind == "agent_state"][-1]
     assert "context" not in state.payload  # back to the default: not paused, no failures
+
+
+async def test_the_guard_is_durable_before_its_outcome_is_announced():
+    store = InMemoryTranscriptStore()
+    model = Model(reads(7), FAILURES)
+    agent = make_agent(model, store=store, tools=[sized_reader(6_000, 6_000, 6_000, 2_000, 500, 500, 500)])
+    seen = []
+    async for event in agent.run(input_row("input", "go"), turn_id="input"):
+        if isinstance(event, (CompactionFailed, CompactionPaused)):
+            # A crash right after this event must not lose the transition it announces.
+            state = [row for row in await store.load("session") if row.kind == "agent_state"][-1]
+            seen.append((type(event).__name__, state.payload["context"]["failures"], state.payload["context"]["paused"]))
+    assert seen == [
+        ("CompactionFailed", 1, False),
+        ("CompactionFailed", 2, False),
+        ("CompactionFailed", 3, True),
+        ("CompactionPaused", 3, True),
+    ]
+
+
+async def test_a_failed_checkpoint_attempt_keeps_every_partial_in_its_audit():
+    retried = assistant("", stop_reason="error")
+    retried = replace(retried, usage=Usage(input_tokens=50, output_tokens=0))
+    streamed = replace(assistant("half a checkpoint", stop_reason="error"), usage=Usage(input_tokens=70, output_tokens=9))
+    turn = [
+        [ProviderError("server", "upstream reset", True, partial=retried)],
+        [ProviderError("server", "upstream failed", False, partial=streamed)],
+    ]
+    model = Model(history(), turn)
+    agent = make_agent(model, tools=[reader(tokens(3_000))], retry=RetryPolicy(initial_delay_s=0))
+    await run(agent)
+    assert [event async for event in agent.compact(turn_id="compact")][-1].reason == "error"
+    (_, _, audit), = agent.store.audits
+    assert audit["outcome"] == "failed"
+    assert [message["content"] for message in audit["messages"]] == [[], [{"type": "text", "text": "half a checkpoint"}]]
+    assert audit["usage"] == {"input_tokens": 120, "output_tokens": 9, "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+
+async def test_a_checkpoint_turn_measures_each_request_on_the_route_resolved_for_it():
+    # The route resolves again for the turn's second request and lands on a 12,000-token window with 2,048 output.
+    small = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=12_000, max_output_tokens=2_048))
+    store = InMemoryTranscriptStore()
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))]))
+    tool = reader("small")
+    model = Model([], [call("read", "first", path="f"), call("read", "second", path="f"), [Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, store=store, tools=[tool], selection=(SELECTION, small))
+    assert [event async for event in agent.compact(turn_id="compact")][-1].reason == "completed"
+    first, second, third = model.checkpoint_requests
+    assert (first.max_tokens, second.max_tokens) == (4_096, 2_048)
+    # On the small window the second read no longer fits the floor: denied, never run.
+    assert [ctx.tool_call_id for _, ctx in tool.calls] == ["first"]
+    assert third.messages[-1].content[0].text == BUDGET_USED
+
+
+async def test_usage_anchors_the_estimate_only_while_its_request_is_still_the_prefix():
+    # Every response reports a tiny usage. After the third read, hook state makes rehydration put 10,000
+    # tokens before the transcript: the anchored usage no longer describes the request's prefix.
+    class Count(Hooks):
+        async def after_tool(self, call, result, ctx):
+            ctx.state["reads"] = ctx.state.get("reads", 0) + 1
+
+    def rehydrate(state):
+        return (UserMessage((text(tokens(10_000)),)),) if state.get("reads", 0) >= 3 else ()
+
+    tiny = Usage(input_tokens=100, output_tokens=10)
+    reads_ = [[Done(replace(assistant(calls=[ToolCallBlock(f"r{i}", "read", {"path": "f"})]), usage=tiny))] for i in range(3)]
+    model = Model([*reads_, [Done(replace(assistant("done"), usage=tiny))]], [[Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, tools=[reader(tokens(4_000))], hooks=[Count()], rehydrate=rehydrate)
+    await run(agent)
+    # Requests 2 and 3 are anchored (110 + the newest result); request 4 has a new prefix, so its est is its
+    # UTF-8 size, about 22,000 tokens, and crosses T.
+    assert [is_checkpoint(request) for request in model.requests] == [False, False, False, True, False]
+
+
+async def test_the_request_right_after_a_checkpoint_is_measured_and_rolls_when_it_does_not_fit():
+    big = [[Done(assistant(tokens(16_000)))], [Done(assistant("short"))]]
+    model = Model(reads(6), big)
+    agent = make_agent(model, tools=[sized_reader(5_000, 5_000, 5_000, 2_000, 2_000, 2_000)])
+    events = await run(agent)
+    assert [event.mode for event in events if isinstance(event, CompactionFinished)] == ["normal", "rolling"]
+    for request in model.conversation_requests:
+        assert request_tokens(request.system, request.tools, request.messages) + 4_096 + 8_000 <= 32_000
 
 
 async def test_three_ineffective_checkpoints_pause_auto_compaction():

@@ -55,7 +55,7 @@ from core.agent_core.agent.hooks import (
 )
 from core.agent_core.agent.jobs import TrackingJobHost
 from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
-from core.agent_core.agent.models import DEFAULT_MAX_OUTPUT_TOKENS, ModelRouter, ModelSelection, RetryPolicy
+from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
 from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
 from core.agent_core.ai.provider import (
@@ -71,15 +71,18 @@ from core.agent_core.harness.context import (
     CHECKPOINT_TOOL_ROUNDS,
     CHECKPOINT_TOOL_SLACK,
     CLEAR_SOFT_RATIO,
+    DEFAULT_MAX_OUTPUT_TOKENS,
     INEFFECTIVE_RATIO,
     MAX_OVERFLOWS,
     MAX_ROLLS,
     PAUSE_AFTER,
     PROMPT_VERSION,
+    Anchor,
     Budget,
     ContextConfig,
     StateRequest,
     add_usage,
+    anchor,
     budget,
     carried_skills,
     checkpoint_request,
@@ -89,10 +92,9 @@ from core.agent_core.harness.context import (
     compaction_payload,
     fit_result,
     half_cut,
-    message_tokens,
     messages_tokens,
     normal_cut,
-    occupancy,
+    output_tokens,
     request_tokens,
     rolling_cut,
     summarized_to_seq,
@@ -147,7 +149,10 @@ class _Exhausted(Exception):
 
 #: C-9 guard state (``AgentState.context``) before anything happened.
 _GUARD_DEFAULT: dict[str, Any] = {"failures": 0, "ineffective": 0, "paused": False}
-_CHECKPOINT_PROMPT_TOKENS = message_tokens(checkpoint_request())
+#: The checkpoint request without a focus, as the fit checks measure it.
+_CHECKPOINT_REQUEST = checkpoint_request()
+#: Recent answered requests kept to anchor the estimate (section 2); older ones rarely still match.
+_ANCHORS_KEPT = 4
 
 
 async def _silent(*_: Any, **__: Any) -> None:
@@ -166,7 +171,7 @@ class _Ladder:
 
 @dataclass(frozen=True)
 class _Sizing:
-    """The context of the next request, measured against its hop's limits."""
+    """The next conversation request in units, with its budget on the route resolved for it."""
 
     selected: ModelSelection
     system: str
@@ -174,7 +179,10 @@ class _Sizing:
     rehydrated: tuple[Message, ...]
     view: ContextView
     budget: Budget
-    est: int
+
+    @property
+    def messages(self) -> tuple[Message, ...]:
+        return (*self.rehydrated, *self.view.messages)
 
     def prefix(self, cut: int) -> tuple[Message, ...]:
         """The projected messages up to ``cut``: what a rolling checkpoint summarizes."""
@@ -246,6 +254,7 @@ class Agent:
         self._guard: dict[str, Any] = dict(_GUARD_DEFAULT)
         self._committed_guard: Optional[dict[str, Any]] = None
         self._last_model_at: Optional[float] = None
+        self._anchors: tuple[Anchor, ...] = ()
         self._seq = 0
 
     def set_tools(self, tools: Sequence[Tool]) -> None:
@@ -560,10 +569,6 @@ class Agent:
         if selected.capabilities.supports_tools is False:
             raise UnsupportedModelRoute("The selected model does not support tools; the agent requires tool support.")
 
-    def _max_tokens(self, selected: ModelSelection) -> int:
-        """``O``: the configured output budget, capped by the hop's maximum (C-9 section 1)."""
-        return min(self.max_tokens, selected.max_output_tokens)
-
     def _rehydrated(self) -> tuple[Message, ...]:
         return tuple(self.rehydrate(deepcopy(self._ctx.state))) if self.rehydrate else ()
 
@@ -589,7 +594,7 @@ class Agent:
             system=system,
             messages=messages,
             tools=tuple(deepcopy(tool.spec) for tool in tools.values()),
-            max_tokens=self._max_tokens(selected) if max_tokens is None else max_tokens,
+            max_tokens=output_tokens(capabilities, self.max_tokens) if max_tokens is None else max_tokens,
             reasoning_effort=(
                 self.reasoning_effort
                 if capabilities.supports_reasoning is True and self.reasoning_effort in capabilities.reasoning_efforts
@@ -615,13 +620,16 @@ class Agent:
         selected: Optional[ModelSelection] = None,
         *,
         build: Optional[Callable[[ModelSelection], Awaitable[tuple[ModelRequest, dict[str, Tool]]]]] = None,
+        partials: Optional[list[AssistantMessage]] = None,
     ) -> AsyncIterator[tuple[Done | ProviderError, dict[str, Tool]]]:
         """One model request with its transient retries.
 
         A conversation request first applies C-9 (``_manage_context``) and enters
         the overflow ladder when the provider rejects it as overflow. ``build``
         makes a checkpoint turn's request instead: no context management, and
-        nothing it streams is committed.
+        nothing it streams is committed; a retried attempt's partial goes to
+        ``partials`` for the turn's audit. Every answered request with valid
+        usage becomes an estimate anchor (C-9 section 2).
         """
         checkpoint = build is not None
         ladder = _Ladder()
@@ -687,6 +695,10 @@ class Agent:
                     else None
                 )
                 if delay is None and not relieve:
+                    if isinstance(terminal, Done):
+                        made = anchor(request.system, request.tools, request.messages, terminal.message)
+                        if made is not None:
+                            self._anchors = (*self._anchors[1 - _ANCHORS_KEPT :], made)
                     # The caller admits and commits this terminal inside the
                     # scope, BEFORE aclose. Never retry an accepted terminal.
                     yield terminal, tools
@@ -704,7 +716,9 @@ class Agent:
                 retries, started, retry_error = 0, time.monotonic(), None
                 continue
             if checkpoint:
-                # A checkpoint turn's attempt is never context, not even its usage.
+                # A checkpoint turn's attempt is never context; its partial is kept for the audit.
+                if partials is not None and terminal.partial is not None:
+                    partials.append(terminal.partial)
                 terminal = replace(terminal, partial=None)
             if terminal.partial is not None and terminal.partial.usage is not None and not terminal.partial.content:
                 row = await self._response(terminal.partial, final=False)
@@ -1014,21 +1028,26 @@ class Agent:
                 break
         return last is not None and self.context.clock() - last > self.context.cache_ttl_s
 
+    def _tool_specs(self) -> tuple[ToolSpec, ...]:
+        return tuple(tool.spec for tool in (self._run_tools if self._run_tools is not None else self._tools).values())
+
+    def _budget(self, system: str, selected: ModelSelection, messages: Sequence[Message]) -> Budget:
+        """C-9 accounting for a request about to go out on ``selected``: evaluated afresh, never kept."""
+        return budget(
+            system=system,
+            tools=self._tool_specs(),
+            messages=messages,
+            capabilities=selected.capabilities,
+            max_tokens=self.max_tokens,
+            anchors=self._anchors,
+        )
+
     def _sizing(self, system: str, selected: ModelSelection) -> _Sizing:
-        tools = tuple(tool.spec for tool in (self._run_tools if self._run_tools is not None else self._tools).values())
+        """The next conversation request, in units, with its budget on ``selected``."""
         rehydrated = self._rehydrated()
         view = context_view(self._rows)
-        plan = budget(
-            context_window=selected.context_window,
-            input_limit=selected.capabilities.input_limit,
-            max_tokens=self._max_tokens(selected),
-        )
-        est = occupancy(view, system=system, tools=tools, rehydrated=rehydrated)
-        return _Sizing(selected, system, tools, rehydrated, view, plan, est)
-
-    def _fits(self, system: str, selected: ModelSelection) -> bool:
-        sizing = self._sizing(system, selected)
-        return sizing.budget.fits(sizing.est)
+        plan = self._budget(system, selected, (*rehydrated, *view.messages))
+        return _Sizing(selected, system, self._tool_specs(), rehydrated, view, plan)
 
     async def _manage_context(
         self, system: str, selected: ModelSelection, emit: Callable[..., Awaitable[None]], ladder: _Ladder
@@ -1038,9 +1057,8 @@ class Agent:
             return
         self._check_model_route(selected)
         sizing = self._sizing(system, selected)
-        plan = sizing.budget
         if self.context.clear_tool_results and (
-            sizing.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold()
+            sizing.budget.est >= CLEAR_SOFT_RATIO * sizing.budget.threshold or self._cache_cold()
         ):
             targets = clearable_results(sizing.view)
             if targets:
@@ -1053,13 +1071,13 @@ class Agent:
                     )
                     self._rows.append(row)
                 sizing = self._sizing(system, selected)
-        if sizing.est < plan.threshold or ladder.compacted or self._guard["paused"]:
+        if sizing.budget.est < sizing.budget.threshold or ladder.compacted or self._guard["paused"]:
             return
-        cut = normal_cut(sizing.view.units, plan.keep)
+        cut = normal_cut(sizing.view.units, sizing.budget.keep)
         if cut is None:
             return
         ladder.compacted = True
-        if not plan.fork_fits(sizing.est + _CHECKPOINT_PROMPT_TOKENS):
+        if not self._budget(system, selected, (*sizing.messages, _CHECKPOINT_REQUEST)).fork_fits:
             await self._relieve(system, selected, emit, ladder)
             return
         attempt = await self._checkpoint(sizing, cut, mode="normal", reason="threshold", emit=emit)
@@ -1069,6 +1087,9 @@ class Agent:
         elif not attempt.ok:
             # The context stays as it is and the request is sent; an overflow then skips to (c).
             ladder.summary_failed = True
+        elif not self._sizing(system, selected).budget.fits:
+            # The request right after a checkpoint is measured like any other.
+            await self._relieve(system, selected, emit, ladder)
 
     async def _relieve(
         self, system: str, selected: ModelSelection, emit: Callable[..., Awaitable[None]], ladder: _Ladder
@@ -1076,26 +1097,25 @@ class Agent:
         """Section 8: step by step until the request fits, at least one step; raises ``_Exhausted`` at (d)."""
         while True:
             sizing = self._sizing(system, selected)
-            plan, units = sizing.budget, sizing.view.units
+            units = sizing.view.units
             least = (*sizing.prefix(0), *(units[-1].messages if units else ()))
-            if not plan.can_fit(request_tokens(sizing.system, sizing.tools, least)):
+            if not self._budget(system, selected, least).can_fit:
                 # (d) already: even the current request and the latest tool batch alone cannot fit.
                 raise self._exhausted(sizing)
             models = not ladder.summary_failed and not self._guard["paused"]
             if models and not ladder.compacted:
                 ladder.compacted = True
-                cut = normal_cut(units, plan.keep)
-                if cut is not None and plan.fork_fits(sizing.est + _CHECKPOINT_PROMPT_TOKENS):
+                cut = normal_cut(units, sizing.budget.keep)
+                if cut is not None and self._budget(system, selected, (*sizing.messages, _CHECKPOINT_REQUEST)).fork_fits:
                     attempt = await self._checkpoint(sizing, cut, mode="normal", reason="overflow", emit=emit)
-                    if attempt.ok and self._fits(system, selected):
+                    if attempt.ok and self._sizing(system, selected).budget.fits:
                         return
                     ladder.summary_failed = not attempt.ok and not attempt.overflow
                     continue
             if models and ladder.rolls < MAX_ROLLS:
 
                 def fork_fits(cut: int) -> bool:
-                    head = request_tokens(sizing.system, sizing.tools, sizing.prefix(cut))
-                    return plan.fork_fits(head + _CHECKPOINT_PROMPT_TOKENS)
+                    return self._budget(system, selected, (*sizing.prefix(cut), _CHECKPOINT_REQUEST)).fork_fits
 
                 cut = rolling_cut(units, fork_fits)
                 if cut is not None:
@@ -1103,17 +1123,17 @@ class Agent:
                     attempt = await self._checkpoint(sizing, cut, mode="rolling", reason="overflow", emit=emit)
                     if not attempt.ok:
                         ladder.summary_failed = True
-                    elif self._fits(system, selected):
+                    elif self._sizing(system, selected).budget.fits:
                         return
                     continue
                 ladder.rolls = MAX_ROLLS
             cut = half_cut(units)
             if cut is None:
-                if ladder.overflows or not plan.can_fit(sizing.est):
+                if ladder.overflows or not sizing.budget.can_fit:
                     raise self._exhausted(sizing)
                 return  # nothing more can move out, and the provider has not refused it yet
             await self._drop(sizing, cut, emit)
-            if self._fits(system, selected):
+            if self._sizing(system, selected).budget.fits:
                 return
 
     def _exhausted(self, sizing: _Sizing) -> _Exhausted:
@@ -1141,6 +1161,7 @@ class Agent:
         cut = normal_cut(sizing.view.units, sizing.budget.keep)
         if cut is None:
             # Everything is within the kept tail: the adapter tells the user there is nothing to compact yet.
+            await self._save_state()
             await emit(CompactionSkipped, reason="manual")
             return "completed"
         attempt = await self._checkpoint(
@@ -1161,18 +1182,13 @@ class Agent:
     ) -> _Attempt:
         """Sections 6 and 7: a forked checkpoint turn; on success its row joins the context."""
         await emit(CompactionStarted, reason=reason)
-        plan = sizing.budget
         prompt = checkpoint_request(focus)
-        if mode == "normal":
-            base = (*sizing.rehydrated, *sizing.view.messages)
-            estimate = sizing.est
-        else:
-            base = sizing.prefix(cut)
-            estimate = request_tokens(sizing.system, sizing.tools, base)
-        estimate += message_tokens(prompt)
+        base = sizing.messages if mode == "normal" else sizing.prefix(cut)
         policy = CheckpointPolicy(cwd=self.cwd, scratch_dir=self.context.scratch_dir)
         hooks = (*self.hooks, policy)
-        turn: list[Message] = []
+        turn: list[Message] = []  # what the turn's next request carries after the checkpoint request
+        produced: list[Message] = []  # what the turn produced, failed attempts' partials included
+        partials: list[AssistantMessage] = []
         usage: Optional[Usage] = None
         origin = None
         rounds = 0
@@ -1180,16 +1196,29 @@ class Agent:
         overflow = False
         checkpoint = ""
         selected: Optional[ModelSelection] = sizing.selected
-        while True:
+        route = sizing.selected  # the route the turn's latest request went out on
+
+        async def build(selection: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
+            nonlocal route
+            route = selection
             messages = (*base, prompt, *turn)
+            plan = self._budget(sizing.system, selection, messages)
+            return await self._request(
+                sizing.system, selection, messages=messages, max_tokens=plan.checkpoint_max_tokens, hooks=hooks
+            )
 
-            async def build(selection: ModelSelection, messages: tuple[Message, ...] = messages):
-                return await self._request(
-                    sizing.system, selection, messages=messages, max_tokens=plan.checkpoint_max_tokens, hooks=hooks
-                )
-
-            async with self._model(sizing.system, _silent, selected, build=build) as (terminal, tools):
+        while True:
+            async with self._model(sizing.system, _silent, selected, build=build, partials=partials) as (
+                terminal,
+                tools,
+            ):
                 selected = None
+            if isinstance(terminal, ProviderError) and terminal.partial is not None:
+                partials.append(terminal.partial)
+            for partial in partials:
+                produced.append(partial)
+                usage = add_usage(usage, partial.usage)
+            partials.clear()
             if isinstance(terminal, ProviderError):
                 overflow = terminal.kind == "overflow"
                 error = f"{terminal.kind}: {terminal.message}"
@@ -1197,6 +1226,7 @@ class Agent:
             message = terminal.message
             self._scope.check()
             turn.append(message)
+            produced.append(message)
             usage = add_usage(usage, message.usage)
             origin = message.origin
             if message.stop_reason == "stop" and not message.tool_calls:
@@ -1213,36 +1243,38 @@ class Agent:
                 error = "The checkpoint turn kept calling tools after its tool budget was used up."
                 break
             rounds += 1
-            estimate += message_tokens(message)
             for call in message.tool_calls:
                 self._scope.check()
-                # The bound is the window: a tool runs only while the request can still grow by the floor.
-                room = plan.fork_room(estimate)
+                # The bound is the window of the route the turn is on: a tool runs only while its next
+                # request can still grow by the floor (section 6).
+                room = self._budget(sizing.system, route, (*base, prompt, *turn)).fork_room
                 policy.open = policy.open and rounds <= CHECKPOINT_TOOL_ROUNDS and room >= CHECKPOINT_TOOL_FLOOR
                 result = await self._checkpoint_tool(call, tools, hooks, limit=room - CHECKPOINT_TOOL_SLACK)
                 turn.append(result)
-                estimate += message_tokens(result)
+                produced.append(result)
         record: dict[str, Any] = {
             "version": 1,
             "reason": reason,
             "mode": mode,
-            "messages": [message_to_dict(message) for message in turn],
+            "messages": [message_to_dict(message) for message in produced],
         }
         if usage is not None:
             record["usage"] = usage_to_dict(usage)
         if not checkpoint:
+            # The guard is durable before anyone hears of the outcome (section 10).
+            paused = self._count(ok=False)
+            await self._save_state()
             await self._record_turn({**record, "outcome": "failed", "error": error, "compaction_event_id": None})
             await emit(CompactionFailed, reason=reason, error=error)
-            self._guard["failures"] += 1
-            if self._guard["failures"] >= PAUSE_AFTER:
-                await self._pause("failures", emit)
+            if paused:
+                await emit(CompactionPaused, cause=paused)
             return _Attempt(False, overflow)
         summarizer = {
             "origin": {"provider": origin.provider, "api": origin.api, "model": origin.model},
             "prompt_version": PROMPT_VERSION,
             "rounds": rounds,
         }
-        row = await self._commit_compaction(
+        row, paused = await self._commit_compaction(
             sizing,
             cut,
             mode=mode,
@@ -1262,15 +1294,25 @@ class Agent:
             tokens_before=row.payload["tokens_before"],
             tokens_after_estimate=row.payload["tokens_after_estimate"],
         )
-        self._guard["failures"] = 0
-        if mode == "normal":
-            if row.payload["tokens_after_estimate"] >= INEFFECTIVE_RATIO * row.payload["threshold"]:
-                self._guard["ineffective"] += 1
-                if self._guard["ineffective"] >= PAUSE_AFTER:
-                    await self._pause("ineffective", emit)
-            else:
-                self._guard["ineffective"] = 0
+        if paused:
+            await emit(CompactionPaused, cause=paused)
         return _Attempt(True)
+
+    def _count(self, *, ok: bool, ineffective: Optional[bool] = None) -> Optional[str]:
+        """Count one checkpoint attempt (section 10); the pause cause when it paused auto-compaction."""
+        cause = None
+        if not ok:
+            self._guard["failures"] += 1
+            cause = "failures" if self._guard["failures"] >= PAUSE_AFTER else None
+        else:
+            self._guard["failures"] = 0
+            if ineffective is not None:
+                self._guard["ineffective"] = self._guard["ineffective"] + 1 if ineffective else 0
+                cause = "ineffective" if self._guard["ineffective"] >= PAUSE_AFTER else None
+        if cause is None or self._guard["paused"]:
+            return None
+        self._guard["paused"] = True
+        return cause
 
     async def _checkpoint_tool(
         self, original: ToolCallBlock, tools: Mapping[str, Tool], hooks: Sequence[Hooks], *, limit: int
@@ -1292,7 +1334,7 @@ class Agent:
         """Section 8 (c): the earliest part moves out with no model call; the previous checkpoint stays."""
         await emit(CompactionStarted, reason="overflow")
         previous = sizing.view.compaction
-        row = await self._commit_compaction(
+        row, _ = await self._commit_compaction(
             sizing,
             cut,
             mode="dropped",
@@ -1324,7 +1366,8 @@ class Agent:
         summarizer: Optional[Mapping[str, Any]],
         usage: Optional[Usage],
         mid_turn: bool,
-    ) -> ContextEntry:
+    ) -> tuple[ContextEntry, Optional[str]]:
+        """Write the row, counting a checkpoint request's success first so the guard commits with it."""
         view = sizing.view
         host = self.context.host
         skills = carried_skills(view, cut)
@@ -1346,7 +1389,7 @@ class Agent:
             skills=skills,
             state=state,
             earlier_record=earlier,
-            tokens_before=sizing.est,
+            tokens_before=sizing.budget.est,
             threshold=sizing.budget.threshold,
             summarizer=summarizer,
             usage=usage,
@@ -1354,15 +1397,19 @@ class Agent:
         seq = max((row.context_seq for row in self._rows), default=0) + 1
         candidate = ContextEntry(self.session_id, seq, "compaction", "uncommitted-compaction", payload=payload)
         after = context_view([*self._rows, candidate])
-        payload["tokens_after_estimate"] = request_tokens(
-            sizing.system, sizing.tools, (*sizing.rehydrated, *after.messages)
-        )
+        payload["tokens_after_estimate"] = self._budget(
+            sizing.system, sizing.selected, (*sizing.rehydrated, *after.messages)
+        ).est
+        paused = None
+        if summarizer is not None:
+            ineffective = payload["tokens_after_estimate"] >= INEFFECTIVE_RATIO * payload["threshold"]
+            paused = self._count(ok=True, ineffective=ineffective if mode == "normal" else None)
         await self._save_state()
         row = await self._scope.call(
             lambda: self.store.append_payload(self.session_id, "compaction", payload), interruptible=False
         )
         self._rows.append(row)
-        return row
+        return row, paused
 
     async def _record_turn(self, payload: Mapping[str, Any]) -> None:
         """The checkpoint turn's audit row (section 6); never context, so losing it never fails the run."""
@@ -1375,8 +1422,3 @@ class Agent:
             raise
         except Exception as error:
             self._outcome.diagnostic(type(error).__name__, f"Checkpoint audit failed: {error}")
-
-    async def _pause(self, cause: str, emit: Callable[..., Awaitable[None]]) -> None:
-        if not self._guard["paused"]:
-            self._guard["paused"] = True
-            await emit(CompactionPaused, cause=cause)

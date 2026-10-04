@@ -54,8 +54,9 @@ input consumption. The run yields a clear error and terminal event without a
 provider request. Unknown tool support still sends tools. Unknown/false image
 and reasoning support is disabled; reasoning also requires a declared effort.
 The configured output budget defaults to 8,192 and is capped by the provider's
-maximum (8,192 when unknown); that cap is C-9's `O`. `ModelSelection.context_window`
-is C-9's `W` (128,000 when unknown).
+maximum (8,192 when unknown); that cap is C-9's `O`. Every C-9 limit (`W` is
+128,000 when unknown) comes from `harness.context.budget`, evaluated before each
+model request on the route resolved for it.
 The shared nullable source capabilities are not changed into guessed values.
 Before-model rewrites affect a detached request only, including endpoint headers.
 The router's cached selection is never mutated. Tools execute against the

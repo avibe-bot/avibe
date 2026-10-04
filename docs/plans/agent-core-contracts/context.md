@@ -16,9 +16,12 @@ projects the full original context (C-5 §4).
 
 ## 1. Limits
 
-The hop capabilities Model Hub returns for the request (C-6) give the limits. They are recomputed for every request
-from the hop resolved for it, so a route change is picked up at the next request; a smaller window than expected is
-handled by the overflow path (§8).
+The hop capabilities Model Hub returns for the request (C-6) give the limits. One pure function,
+`harness/context.budget(request, capabilities, anchors)`, computes `W, L_in, O, M, T, keep` and the request's `est`
+(§2), and it is evaluated immediately before every model request (conversation, checkpoint, and rolling requests,
+and the request right after a checkpoint) on the capabilities of the route resolved for that request. Nothing else
+computes or keeps these values, so a route change is picked up at once; a smaller window than expected is handled
+by the overflow path (§8).
 
 ```text
 W    = context_window                              (128,000 when unknown)
@@ -40,15 +43,16 @@ A message counts its text, its thinking text and signature (replayed reasoning p
 JSON arguments, and signature, and 1,600 tokens per image.
 
 ```text
-est = usage of the last valid response after the latest checkpoint or edit
+est = usage of the latest answered request whose prefix is still this request's prefix
         (input_tokens + cache_read_tokens + cache_write_tokens + output_tokens)
-      + tokens of every projected message after that response
+      + tokens of every message after that request's response
 ```
 
-A response is valid when it neither failed nor was aborted and reports non-zero usage. Usage reported before the
-latest `context_compaction` or `context_edit` row is ignored. With no valid response after them (right after a
-checkpoint, or a provider that reports no usage), `est` is the tokens of the whole projected request: system prompt,
-tool definitions, and messages.
+Usage is valid only for a response that neither failed nor was aborted and reports non-zero usage, and only while
+the request it answered (system prompt, tool definitions, and messages, rehydrated ones included) is still a prefix of
+the current request, with the response right after it. A checkpoint, an edit inside that prefix, a changed system
+prompt or tool set, or new rehydrated state therefore drops it, as does a new Agent that never sent the request.
+Otherwise `est` is the tokens of the whole request: system prompt, tool definitions, and messages.
 
 ## 3. Before every model request
 
@@ -59,7 +63,8 @@ Checked before every model request of a run, including inside the tool loop and 
 2. **Checkpoint** when `est >= T`, auto-compaction is not paused (§10), and there is something to summarize, at most
    once per model request: a normal checkpoint (§6, reason `threshold`) when the forked request can fit, otherwise
    the overflow ladder from (b) (§8, reason `overflow`). A failed checkpoint leaves the context as it is and the
-   request is sent; a checkpoint request the provider rejects as overflow continues at (b).
+   request is sent; a checkpoint request the provider rejects as overflow continues at (b). After a successful one,
+   the request is measured again and enters the ladder when it still does not fit.
 
 A request the provider rejects as overflow (`ProviderError.kind == "overflow"`, classified by
 `ai/errors.is_overflow_message`, HTTP 413, and `context_length_exceeded`) enters the overflow ladder (§8) and is retried.
@@ -116,15 +121,17 @@ A checkpoint is written by a **fork** of the conversation, the only delivery pat
 | Tool | Rule |
 | --- | --- |
 | `read` | allowed |
-| `write`, `edit` | allowed only when the target's real path is inside this Session's scratch directory, `<state>/agent_core/scratch/<session_id>/` |
+| `write`, `edit` | allowed only when the target's real path is inside this Session's scratch directory, `<state>/agent_core/scratch/<session_id>/`; a path that cannot be compared with it (another Windows drive, an invalid path) is outside |
 | memory-read tools | reserved: allowed once they exist |
 | `bash` and every other tool | denied, never executed |
 
 - A denied call gets the error result `This is a checkpoint turn: tools that act outside your own scratch space are
   unavailable. Write the checkpoint now.`
+- Every request of the turn is measured on the route resolved for it (§1): its `max_tokens` is that route's
+  `min(16,000, O)`.
 - The bound is the window, not `T`, the same way in threshold, manual, and rolling turns. Before each call,
-  `room = L_in - est - min(16,000, O)`, where `est` is the turn's next request (the checkpoint request and the turn's
-  messages so far included). A call runs only while `room >= 4,000` tokens, and its result is cut to
+  `room = L_in - est - min(16,000, O)` on the route of the turn's latest request, where `est` is the turn's next
+  request (the checkpoint request and the turn's messages so far included). A call runs only while `room >= 4,000` tokens, and its result is cut to
   `room - 1,000` tokens, head kept, ending with `[Output truncated to fit this checkpoint turn: showing about
   <shown> of <total> tokens. Read a smaller range if you need more.]`, so a single read cannot push the turn out of
   the window.
@@ -134,7 +141,8 @@ A checkpoint is written by a **fork** of the conversation, the only delivery pat
 - The checkpoint is the text of a final response that stops with `stop` and calls no tool; only a `tool_use` stop
   with calls continues the turn. Anything else (a length stop, a `tool_use` stop without calls, calls under any other
   stop, an error, or no text) is a failure, and nothing enters the context.
-- The turn's messages are recorded once per attempt, outcome included, as an audit row
+- The turn's messages, including the partial of every failed or retried attempt and its usage, are recorded once
+  per attempt, outcome included, as an audit row
   (`agent_events.event_type = 'context_checkpoint_turn'`, `visibility = 'audit'`, no `context_seq`; shape
   `CheckpointTurn`), never as context.
 
@@ -227,7 +235,8 @@ ends the run `context_exhausted`, as in P1. The adapter supplies:
   count. After 3 consecutive failures or 3 ineffective checkpoints, auto-compaction pauses for the Session: threshold
   checkpoints stop, and the overflow ladder skips straight to (c). The `compaction_paused` event fires once, at the
   transition, and the adapter tells the user. The counters and the pause are durable loop state, stored beside the
-  hook state in `agent_state` rows (`AgentState.context`), so they survive restarts and forks.
+  hook state in `agent_state` rows (`AgentState.context`), so they survive restarts and forks. Each transition is
+  committed before the event that announces it (with the checkpoint row on success).
 - **Manual `/compact [focus]`** clears the pause and both counters, then runs a normal checkpoint with reason
   `manual`; its own outcome counts as above. When everything is within the kept tail, it emits `compaction_skipped`
   and ends `completed`, and the adapter replies briefly that there is nothing to compact yet.
