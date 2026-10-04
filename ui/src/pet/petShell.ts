@@ -19,8 +19,9 @@ type Snapshot = { binding: string | null | undefined };
 let snapshot: Snapshot = { binding: undefined };
 let pendingSummon: PetIntent | null = null;
 let started = false;
-// Bumped by every `pet:bound` event, so a `pet_ready()` answer captured before
-// a newer bind cannot overwrite it.
+// Bumped by every binding change after start (a `pet:bound` event or this
+// page's own pick or clear), so a `pet_ready()` answer captured before it
+// cannot overwrite it.
 let boundEvents = 0;
 const storeListeners = new Set<() => void>();
 const summonListeners = new Set<() => void>();
@@ -57,8 +58,11 @@ const start = () => {
 };
 
 export const petShell = {
-  /** The binding as this page last heard it; updates come from `pet:bound`. */
-  setBinding: setBindingState,
+  /** A binding change made by this page (a pick, a clear, or reverting one). */
+  setBinding: (binding: string | null) => {
+    boundEvents += 1;
+    setBindingState(binding);
+  },
 
   /** Take the waiting summon, if any. */
   takeSummon: (): PetIntent | null => {

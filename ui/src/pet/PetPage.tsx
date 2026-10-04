@@ -84,6 +84,14 @@ const PetSurface: React.FC = () => {
   const [layout, setLayout] = useState<PetLayout>({ panel_side: 'left', panel_edge: 'bottom' });
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [draft, setDraft] = useState('');
+  // A draft belongs to the session it was typed for: changing the binding
+  // starts empty, so text meant for A can never be sent to B. Adjusted during
+  // render, React's pattern for state that follows a prop.
+  const [draftFor, setDraftFor] = useState(binding);
+  if (draftFor !== binding) {
+    setDraftFor(binding);
+    setDraft('');
+  }
   const [sending, setSending] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -180,7 +188,9 @@ const PetSurface: React.FC = () => {
   const { markRead } = inbox;
 
   const send = useCallback(async (text: string, metadata?: Record<string, unknown>) => {
-    if (!binding || !text.trim()) return false;
+    // Only a session this page has validated as writable accepts input; a
+    // restored or just-picked binding waits for its first successful read.
+    if (!binding || data.session?.id !== binding || !text.trim()) return false;
     setSending(true);
     try {
       const row = await api.sendSessionMessage(binding, { text, ...(metadata ? { metadata } : {}) });
@@ -276,6 +286,7 @@ const PetSurface: React.FC = () => {
       onDraft={setDraft}
       onSubmit={() => void submit()}
       sending={sending}
+      canSend={Boolean(binding) && data.session?.id === binding}
       inputRef={inputRef}
     />
   ) : null;
@@ -313,6 +324,8 @@ type PanelProps = {
   onDraft: (value: string) => void;
   onSubmit: () => void;
   sending: boolean;
+  /** The bound session has been read and is writable. */
+  canSend: boolean;
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
 };
 
@@ -372,7 +385,7 @@ const PetPanel: React.FC<PanelProps> = ({ inputRef, ...props }) => {
               aria-label={t('pet.inputPlaceholder')}
               className="max-h-24 min-h-8 flex-1 resize-none rounded-lg border border-input bg-background px-2.5 py-1.5 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />
-            <Button type="submit" size="icon" className="size-8" disabled={props.sending || !props.draft.trim()} aria-label={t('pet.send')}>
+            <Button type="submit" size="icon" className="size-8" disabled={props.sending || !props.canSend || !props.draft.trim()} aria-label={t('pet.send')}>
               <ArrowUp className="size-4" />
             </Button>
           </form>

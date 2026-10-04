@@ -576,3 +576,48 @@ describe('PetPage review fixes, round 5', () => {
     expect(invoke.mock.calls.filter(([command]) => command === 'pet_unbind')).toHaveLength(1);
   });
 });
+
+describe('PetPage review fixes, round 6', () => {
+  it('accepts no input for a binding whose session has not been validated yet', async () => {
+    const validation = deferred<{ status: number; session: WorkbenchSession | null }>();
+    sessionReads.S = () => validation.promise;
+    devBind('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await userEvent.type(input, 'too early{Enter}');
+    expect(api.sendSessionMessage).not.toHaveBeenCalled();
+    await act(async () => validation.resolve({ status: 200, session: session('S') }));
+    await userEvent.type(input, '{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts an empty draft when the binding changes', async () => {
+    devBind('A');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    await userEvent.type(input, 'meant for A');
+    await bound('B');
+    await screen.findByText('Session B');
+    expect((screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('keeps a pick made while pet_ready is still answering', async () => {
+    const ready = deferred<unknown>();
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return ready.promise;
+      if (command === 'pet_bind') return Promise.resolve({ shown: false });
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    switcherSessions = [session('B')];
+    render(<PetPage />);
+    await userEvent.click(await screen.findByLabelText('pet.toggle'));
+    await userEvent.click(await screen.findByText('Session B'));
+    await act(async () => ready.resolve({ binding: 'A', summon_pending: null }));
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('B'));
+    expect(api.getSessionResult).not.toHaveBeenCalledWith('A');
+  });
+});
