@@ -103,7 +103,7 @@ sent with that request gets the error result `Tool <name> is not available.`
 | `tool_progress` | dropped in v1: no backend shows live tool output, so a running tool shows its `tool_started` line, as for the other backends (live tool output joins the live partial text and progress follow-up, `avibe-agent-core.md` §10) |
 | `tool_finished` | the committed `tool_result` row; a handed-over job names its Watch |
 | `steer_applied` | the steer delivery is accepted into the running Turn |
-| `compaction_started`, `compaction_finished`, `compaction_failed`, `compaction_paused` | none: compaction is invisible (C-9 `context.md` §10); a finished one lowers the session's token snapshot |
+| `compaction_started`, `compaction_finished`, `compaction_failed` | none: compaction is invisible (C-9 `context.md` §10); a finished one lowers the session's token snapshot |
 | `context_exhausted` | the run's stop message: the conversation has grown too long to continue reliably; start a new session with `/new` (C-9 `context.md` §9); the parts are diagnostic |
 | `run_ended` | `MessageOutput` settles the Turn; `cause` is the error that decided the outcome, from which the adapter takes the failure's kind, text, and Model Hub attribution (a diagnostic is never the cause) |
 | `error` | `notify` / `error` row; the text shown is the adapter's localized copy for the event's `kind` (`vibe/i18n`), and `message` is diagnostic detail, never display copy; `origin` (`source` or `local`, set where the loop raises the error) decides whether Model Hub records the failure against the route (C-9 `context.md` §9) |

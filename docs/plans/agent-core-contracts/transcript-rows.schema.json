@@ -323,7 +323,7 @@
       }
     },
     "AgentState": {
-      "description": "`agent_events.content_json` of an `agent_state` row: loop state at a commit point (loop-control.md section 7, context.md section 10). Not projected into messages.",
+      "description": "`agent_events.content_json` of an `agent_state` row: hook state at a commit point (loop-control.md section 7). Not projected into messages.",
       "type": "object",
       "required": [
         "version",
@@ -336,53 +336,6 @@
         },
         "state": {
           "type": "object"
-        },
-        "context": {
-          "type": "object",
-          "description": "Context-management guard state (context.md section 10). Written only by C-9's own commits, together with the hook state of that commit point; projection takes it from the latest agent_state row that carries it. A pause records when (`paused_at`, the ContextConfig clock's epoch seconds) and on which route (`paused_route`) it began; it clears by itself 30 minutes later or on another route.",
-          "required": [
-            "failures",
-            "ineffective",
-            "paused"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "failures": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "ineffective": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "paused": {
-              "type": "boolean"
-            },
-            "paused_at": {
-              "type": "number",
-              "minimum": 0
-            },
-            "paused_route": {
-              "type": "object",
-              "required": [
-                "provider",
-                "api",
-                "model"
-              ],
-              "additionalProperties": false,
-              "properties": {
-                "provider": {
-                  "type": "string"
-                },
-                "api": {
-                  "type": "string"
-                },
-                "model": {
-                  "type": "string"
-                }
-              }
-            }
-          }
         }
       }
     },

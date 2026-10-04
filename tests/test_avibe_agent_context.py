@@ -1,11 +1,11 @@
 """C-9 context management in the Avibe Agent (``agent-core-contracts/context.md`` section 9).
 
-Through the adapter's real boundaries (the transcript store on a temporary SQLite database, the Delivery rows, and
-the shared dispatcher), with a scripted provider: the limits come from the Model Hub model definition; a checkpoint
-carries the adapter's lookup command and state, and the user sees nothing of it; the pause is silent, and a context
-that cannot fit ends the Turn with the one notice; Model Hub hears only of failures the served source produced; the
-first input after a checkpoint carries every environment field the context no longer shows. The host's parts are
-checked against real rows and the real read-only query guard.
+Through the adapter's real boundaries (the transcript store on a temporary SQLite database, the Delivery rows, and the
+shared dispatcher), with a scripted provider: the limits come from the Model Hub model definition; a checkpoint
+carries the adapter's lookup command and state, and the user sees nothing of it; failed checkpoints are silent, and a
+context that cannot fit ends the Turn with the one notice; Model Hub hears only of failures the served source
+produced; the first input after a checkpoint carries every environment field the context no longer shows. The host's
+parts are checked against real rows and the real read-only query guard.
 """
 
 from __future__ import annotations
@@ -298,26 +298,24 @@ async def test_model_hub_hears_only_of_failures_the_served_source_produced(engin
 # --- what the user is told -------------------------------------------------------------------------------
 
 
-async def test_a_pause_is_silent_and_a_context_that_then_cannot_fit_ends_with_the_one_notice(engine, session, tmp_path):
+async def test_failed_checkpoints_are_silent_and_a_context_that_then_cannot_fit_ends_with_the_one_notice(
+    engine, session, tmp_path
+):
+    sizes = iter((12_000, 500, 2_000))
+
+    async def read(arguments, ctx):
+        return ToolResult((text(tokens(next(sizes))),))
+
+    def call(call_id: str) -> list:
+        return [Done(assistant(calls=[ToolCallBlock(call_id, "read", {"path": "a.py"})]))]
+
     failing = [Done(assistant(CHECKPOINT, stop_reason="length"))]
-    scripts = [
-        [Done(assistant("one"))],
-        failing,
-        [Done(assistant("two"))],
-        failing,
-        [Done(assistant("three"))],
-        failing,
-        [Done(assistant("four"))],
-    ]
-    harness = _Harness(engine, tmp_path, "avibe", scripts, language="zh")
-    for body in (tokens(11_000), tokens(12_000), "a", "b"):
-        await _turn(harness, body)
-    # Three failed checkpoints pause auto-compaction, and the user is told nothing.
-    assert _texts(harness, "result") == ["one", "two", "three", "four"] and not harness.rows("notify")
-    sent = len(harness.provider.requests)
-    await _turn(harness, tokens(8_000))
-    # Paused, nothing compacts: a request that cannot be sent ends the Turn with the one notice.
-    assert len(harness.provider.requests) == sent
+    scripts = [call("r1"), failing, call("r2"), failing, call("r3")]
+    harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[FakeTool("read", execute=read)], language="zh")
+    await _turn(harness, tokens(12_000))
+    # Two requests of the Turn cross T and their checkpoints fail, silently; the Turn then stops compacting, and the
+    # request the last result leaves cannot fit: it ends the Turn with the one notice, and nothing was compacted.
+    assert sum(is_checkpoint(request) for request in harness.provider.requests) == 2
     assert not [row for row in await harness.context_rows() if row.kind == "compaction"]
     assert _texts(harness, "notify") == [f"❌ {i18n_t('avibeAgent.error.contextExhausted', 'zh')}"]
 

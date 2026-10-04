@@ -42,7 +42,6 @@ from core.agent_core.agent.events import (
     AgentError,
     AgentEvent,
     CompactionFinished,
-    CompactionPaused,
     MessageCommitted,
     RunEnded,
     ToolStarted,
@@ -601,9 +600,6 @@ class AvibeAgent(BaseAgent):
         elif isinstance(event, CompactionFinished):
             # Silent (C-9 section 10); the session's occupancy snapshot drops with the context.
             self._note_total(run, event.tokens_after_estimate)
-        elif isinstance(event, CompactionPaused):
-            # Silent too: the pause clears by itself; a context that then cannot fit ends the Turn with the one notice.
-            logger.info("Avibe Agent auto-compaction paused for Session %s (%s)", run.session_id, event.cause)
 
     async def _settle(self, run: _Run) -> None:
         """Settle the Turn from the run's outcome (loop-control.md section 6).

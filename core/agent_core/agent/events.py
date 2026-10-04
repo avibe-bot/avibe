@@ -111,15 +111,6 @@ class CompactionFailed:
 
 
 @dataclass(frozen=True)
-class CompactionPaused:
-    """Auto-compaction paused for the Session (C-9 section 10); emitted once, at the transition."""
-
-    turn_id: str
-    seq: int
-    cause: Literal["failures", "ineffective"]
-
-
-@dataclass(frozen=True)
 class ContextPart:
     name: Literal["system", "tools", "history", "current_request", "latest_tool_batch", "output"]
     tokens: int
@@ -165,7 +156,6 @@ AgentEvent = Union[
     CompactionStarted,
     CompactionFinished,
     CompactionFailed,
-    CompactionPaused,
     ContextExhausted,
     RunEnded,
     AgentError,

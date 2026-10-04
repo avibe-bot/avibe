@@ -165,11 +165,8 @@ def _state_row(context):
         _checkpoint_row(2, 1, summarizer={"origin": {}, "prompt_version": "v", "rounds": 0}),
         _checkpoint_row(2, 1, usage={"input_tokens": -1}),
         _checkpoint_row(2, 1, unexpected=True),
-        _state_row({"failures": "1", "ineffective": 0, "paused": False}),
-        _state_row({"failures": 0, "ineffective": 0}),
-        _state_row({"failures": 0, "ineffective": 0, "paused": 1}),
-        _state_row({"failures": 0, "ineffective": 0, "paused": True, "paused_at": "now"}),
-        _state_row({"failures": 0, "ineffective": 0, "paused": True, "paused_route": {"provider": "p"}}),
+        # Hook state only: C-9 keeps no guard in the rows.
+        _state_row({"failures": 0, "ineffective": 0, "paused": False}),
     ],
 )
 def test_malformed_context_rows_fail_explicitly_instead_of_projecting_a_wrong_context(row):
@@ -177,24 +174,13 @@ def test_malformed_context_rows_fail_explicitly_instead_of_projecting_a_wrong_co
         project([ContextEntry("session", 1, "input", "in-1", user("start")), row])
 
 
-#: A pause records when it began and on which route (C-9 section 10).
-PAUSED = {
-    "failures": 3,
-    "ineffective": 0,
-    "paused": True,
-    "paused_at": 1_000.5,
-    "paused_route": {"provider": "p", "api": "anthropic", "model": "m"},
-}
-
-
-def test_a_complete_checkpoint_row_and_guard_state_load():
+def test_a_complete_checkpoint_row_loads():
     rows = [
         ContextEntry("session", 1, "input", "in-1", user("start")),
-        _state_row(PAUSED),
+        ContextEntry("session", 2, "agent_state", "state", payload={"version": 1, "state": {}}),
         _checkpoint_row(3, 1, summarizer=None, current_request="go", current_request_message_id="in-1"),
     ]
     projected = project(rows)
-    assert projected.context_state == PAUSED
     assert [block.text for block in projected.messages[0].content] == ["SUMMARY", "STATE"]
 
 

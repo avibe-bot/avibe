@@ -44,8 +44,6 @@ class Projection:
     messages: tuple[Message, ...]
     context_seq: int
     state: Mapping[str, Any] = field(default_factory=dict)
-    #: Context-management guard state (``AgentState.context``), restored like hook state.
-    context_state: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -81,7 +79,6 @@ class ContextView:
     edited: frozenset[str]
     context_seq: int
     state: Mapping[str, Any]
-    context_state: Mapping[str, Any]
 
     @property
     def messages(self) -> tuple[Message, ...]:
@@ -184,14 +181,6 @@ def _count(value: Any) -> bool:
     return type(value) is int and value >= 0
 
 
-#: ``AgentState.context``: the guard; a pause records when and on which route it began (C-9 section 10).
-_CONTEXT_STATE = _object(
-    {"failures": _count, "ineffective": _count, "paused": lambda value: type(value) is bool},
-    {
-        "paused_at": lambda value: type(value) in (int, float) and value >= 0,
-        "paused_route": _reads(origin_from_dict),
-    },
-)
 #: ``ModelResponse.request``: what C-9 records about the request a response answered.
 _REQUEST_FACTS = _object({"tokens": _count})
 _PAYLOAD_SHAPES: dict[str, Check] = {
@@ -232,10 +221,7 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
             "reason": _one_of("clear_old_tool_result"),
         }
     ),
-    "agent_state": _object(
-        {"version": _one_of(1), "state": lambda value: isinstance(value, dict)},
-        {"context": _CONTEXT_STATE},
-    ),
+    "agent_state": _object({"version": _one_of(1), "state": lambda value: isinstance(value, dict)}),
 }
 
 
@@ -285,14 +271,11 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
     results, _ = _index_results(rows)
     rows_by_id = {row.row_id: row for row in rows}
     state: Mapping[str, Any] = {}
-    context_state: Mapping[str, Any] = {}
     compaction: Optional[ContextEntry] = None
     edits: dict[str, str] = {}
     for row in rows:
         if row.kind == "agent_state":
             state = row.payload["state"]
-            # Only C-9's own commits carry the guard state; a hook-state row leaves it as it was.
-            context_state = row.payload.get("context", context_state)
         elif row.kind == "compaction":
             compaction = row
         elif row.kind == "context_edit":
@@ -330,7 +313,6 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
         edited=frozenset(edits),
         context_seq=rows[-1].context_seq if rows else 0,
         state=deepcopy(state),
-        context_state=deepcopy(context_state),
     )
 
 
@@ -349,7 +331,7 @@ def project(
     """
     view = context_view(entries, fork_point=fork_point)
     messages = (*deepcopy(tuple(rehydrated)), *view.messages)
-    return Projection(system, messages, view.context_seq, view.state, view.context_state)
+    return Projection(system, messages, view.context_seq, view.state)
 
 
 def validate_message_append(

@@ -83,14 +83,14 @@ before a retry alike:
    sees the request.
 2. **Clear** (§4) when the provider cache is cold (no model request for longer than the cache TTL, 300 s by
    default; after a restart, measured from the latest response row's `created_at`) or `est >= 0.8 * T`.
-3. **Checkpoint** when `est >= T`, auto-compaction is not paused (§10), and there is something to summarize, at most
-   once per model request: a normal checkpoint (§6, reason `threshold`) when the fork it would send can fit,
+3. **Checkpoint** when `est >= T`, the run has not stopped compacting (§10), and there is something to summarize,
+   at most once per model request: a normal checkpoint (§6, reason `threshold`) when the fork it would send can fit,
    otherwise the overflow ladder from (b) (§8, reason `overflow`). A checkpoint request that overflows continues at
    (b).
 4. **Ladder** (§8) when the request does not fit. With no checkpoint request left to try (one failed for this
-   request other than by overflow, or auto-compaction is paused), a request that can fit is sent and the provider
-   judges. While auto-compaction is paused nothing is compacted at all: a request that cannot fit, or that the
-   provider refuses as overflow, ends the run `context_exhausted` (§10).
+   request other than by overflow, or the run has stopped compacting), a request that can fit is sent and the
+   provider judges. Once the run has stopped compacting nothing is compacted at all: a request that cannot fit, or
+   that the provider refuses as overflow, ends the run `context_exhausted` (§10).
 
 A request the provider rejects as overflow (`ProviderError.kind == "overflow"`, classified by
 `ai/errors.is_overflow_message`, HTTP 413, and `context_length_exceeded`) before anything was streamed, and with no
@@ -260,7 +260,7 @@ once the request fits:
 - (d) **Stop**: when the request and its minimal request (what the drop would leave of it: the drop's own row, §8 c,
   plus the last unit; §3) both cannot fit (checked in the stage, §3,
   before provider admission), when nothing more can move out of a request that cannot fit or that the provider
-  refused, after 4 provider overflows of one request, or while auto-compaction is paused (§10), the run ends
+  refused, after 4 provider overflows of one request, or once the run has stopped compacting (§10), the run ends
   `context_exhausted` and the `context_exhausted` event says what fills the context. No model is called for a
   context that cannot fit.
 
@@ -306,37 +306,30 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   are gone. The Avibe Agent works out an
   input's environment delta against the inputs the projected context keeps, so the input carries every field the
   context no longer shows, and forgets what it sent when a checkpoint commits.
-- The one user-visible text of context management, through `vibe/i18n`: when a run ends `context_exhausted`, the
-  stop message says the conversation has grown too long to continue reliably and suggests starting a new session
-  with `/new`. Compaction itself, the pause included, shows nothing. A failure is recorded against the Model Hub route
-  only when the served source produced it, which the loop states on every `error` event (`origin`, set where the
-  error is raised): `source` for a C-2 provider error other than an overflow (our request was too large) or the
-  loop's own abort, an answer the loop rejected (a failed or empty answer, a refusal, tool calls under `length` past
-  the retries or under another stop), or a reply the transcript cannot hold; `local` for everything else (an
-  overflow or a context that cannot fit, a Stop, a hook, tool, or store error). The adapter takes the failure (its
-  kind, text, and attribution) from `run_ended.cause`, the error that decided the run's outcome, never from a
-  diagnostic.
+- The one user-visible text of context management, through `vibe/i18n`: when a run ends `context_exhausted`, the stop
+  message says the conversation has grown too long to continue reliably and suggests starting a new session with
+  `/new`. Compaction itself, a failed checkpoint included, shows nothing. A failure is recorded against the Model Hub
+  route only when the served source produced it, which the loop states on every `error` event (`origin`, set where the
+  error is raised): `source` for a C-2 provider error other than an overflow (our request was too large) or the loop's
+  own abort, an answer the loop rejected (a failed or empty answer, a refusal, tool calls under `length` past the
+  retries or under another stop), or a reply the transcript cannot hold; `local` for everything else (an overflow or a
+  context that cannot fit, a Stop, a hook, tool, or store error). The adapter takes the failure (its kind, text, and
+  attribution) from `run_ended.cause`, the error that decided the run's outcome, never from a diagnostic.
 
 ## 10. Guards
 
 - **One compaction in flight per Session.** A checkpoint turn never starts another; it runs inside a run, and an
   Agent refuses a second run while one is active; across Agent instances the adapter's Session writer lock
   serializes them.
-- **Pause.** Each failed checkpoint counts as a failure; a successful one resets the count. A successful
-  normal checkpoint whose result is still at least `0.75 * T` counts as ineffective; an effective one resets that
-  count. After 3 consecutive failures or 3 ineffective checkpoints, auto-compaction pauses for the Session: nothing
-  is compacted (no checkpoint, no mechanical drop), a request that can fit is still sent, and one that cannot fit or
-  that the provider refuses as overflow ends the run `context_exhausted` (§8 d). The `compaction_paused` event fires
-  once, at the transition; the adapter shows nothing for it. The pause clears by itself after 30 minutes
-  (`PAUSE_SECONDS`), or as soon as a request goes to another route (provider, api, model) than the one it began on,
-  whichever comes first; both counters clear with it, and the next threshold tries again. The pause is decided first
-  on every request, and while it holds nothing is built for a compaction (no hypothetical drop, no host call); the
-  overflow ladder is one loop that reads the live guard before every step, so a checkpoint failure that begins the
-  pause ends the ladder there (the request is sent if it can fit and was not refused), never in a drop. A
-  guard transition belongs to the route its checkpoint request ran on, a retry's fallback included. The counters
-  and the pause (`paused_at`, `paused_route`) are durable loop state, stored beside the hook state in `agent_state`
-  rows (`AgentState.context`), so they survive restarts and forks; projection takes them from the latest
-  `agent_state` row that carries them. A pause that clears commits at once, like every guard transition (invariant 3).
+- **A per-run bound on unproductive checkpoints.** A checkpoint attempt that fails, or a normal one whose result is
+  still at least `0.75 * T` (ineffective), is unproductive; an effective one is not counted. After 2 unproductive
+  attempts in one run (`UNPRODUCTIVE_CHECKPOINTS`), the run stops compacting: nothing more is compacted in it (no
+  checkpoint, no mechanical drop), a request that can fit is still sent, and one that cannot fit or that the
+  provider refuses as overflow ends the run `context_exhausted` (§8 d). The bound is read live first on every
+  request, so nothing is built for a compaction it forbids (no hypothetical drop, no host call), and before every
+  step of the overflow ladder, which is one loop, so an attempt that uses it up ends the ladder there, never in a
+  drop. It is held in memory and never persisted: the next run starts at zero, whatever route or restart lies
+  between, so wasted checkpoint spend is at most 2 attempts per Turn. Nothing of it is shown to the user.
 
 **Ordering and ownership invariants.** This list is the one normative statement of these rules; the other sections
 refer to it. Each has a test in `tests/agent_core/agent/test_compaction.py` (route: `test_context.py`; the ledger's
@@ -358,11 +351,9 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    table (a denial is its fixed text), then execution (a scratch `write` or `edit` relative to the root's
    descriptor, as joined work an abort waits for), then the bound on the result of every call that ran (§6). The
    two fixed texts are never cut.
-3. **One commit for C-9 state.** A transition (its `context_edit` rows, its `context_compaction` row, the guard and
-   pause, and the hook state of that commit point in `AgentState`) is written in one transaction
-   (`append_payloads`), before any event announces it; a failed commit leaves nothing. Every guard transition goes
-   through it, the ones with no other row included (a failed checkpoint, a pause that clears). Nothing else writes
-   `AgentState.context`.
+3. **One commit for C-9 state.** A transition (its `context_edit` rows or its `context_compaction` row, and the hook
+   state of that commit point in `AgentState`) is written in one transaction (`append_payloads`), before any event
+   announces it; a failed commit leaves nothing. C-9 keeps no other durable state.
 4. **One attempt ledger.** Every model attempt of a run (success, overflow, error, retry, checkpoint) records its
    request, its response or partial, and so its usage, in one place. The checkpoint audit and the request facts of a
    committed response (the anchor) read only from it. An attempt that does not become the run's response is never
@@ -376,7 +367,7 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    usage are kept in its `CheckpointTurn` row (§6), which the turn writes by the same rule: once, on every exit but
    an abort, whichever step ends it (compose, provider, admission, the host's state or lookup, building the row,
    commit). A failed request or a host failure after the model answered is a failed checkpoint, counted by the
-   guard; an engine error building the row, or a failed commit, ends the run with nothing landed (invariant 3).
+   run's bound; an engine error building the row, or a failed commit, ends the run with nothing landed (invariant 3).
 5. **Route-scoped anchors.** An anchor answered by another origin (provider, api, model) is invalid (§2).
 6. **One admission path.** Every response, of every purpose (conversation, checkpoint), and every partial with
    content is admitted in one place, the model call, before anything acts on it: it must be valid after the

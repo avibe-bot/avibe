@@ -81,9 +81,9 @@ CHECKPOINT_TRUNCATED = (
 )
 MAX_ROLLS = 2
 MAX_OVERFLOWS = 4
-PAUSE_AFTER = 3
-#: How long auto-compaction stays paused on one route; it clears by itself after this (section 10).
-PAUSE_SECONDS = 30 * 60
+#: Unproductive checkpoint attempts (failed, or normal with a result still at least ``INEFFECTIVE_RATIO * T``) a run
+#: makes before it stops compacting for the rest of the run; held in memory, never persisted (section 10).
+UNPRODUCTIVE_CHECKPOINTS = 2
 INEFFECTIVE_RATIO = 0.75
 
 PROMPT_VERSION = "checkpoint-v2"
@@ -527,16 +527,26 @@ def _unique(items: Sequence[str]) -> list[str]:
 def truncate_middle_bytes(text: str, limit: int) -> str:
     """``text`` cut in the middle to at most ``limit`` UTF-8 bytes with an ellipsis, on character boundaries.
 
-    Its head and its tail (a file name) stay. The estimate counts UTF-8 bytes (section 2), so a byte bound is a
-    token bound whatever the script.
+    Its head and its tail (a file name) stay. Bytes are counted as the estimate counts them (section 2, lone
+    surrogates included, as a POSIX path's undecodable bytes arrive), so a byte bound is a token bound whatever the
+    script.
     """
-    data = text.encode("utf-8")
-    if len(data) <= limit:
+    if _utf8(text) <= limit:
         return text
-    room = limit - len("…".encode("utf-8"))
-    tail = room // 2
-    head = data[: room - tail].decode("utf-8", "ignore")
-    return f"{head}…{data[len(data) - tail :].decode('utf-8', 'ignore')}"
+    room = limit - _utf8("…")
+    head = _within(text, room - room // 2)
+    tail = _within(text[::-1], room // 2)[::-1]
+    return f"{head}…{tail}"
+
+
+def _within(text: str, limit: int) -> str:
+    """The longest prefix of ``text`` within ``limit`` estimate bytes."""
+    used = 0
+    for index, char in enumerate(text):
+        used += _utf8(char)
+        if used > limit:
+            return text[:index]
+    return text
 
 
 @dataclass(frozen=True)
@@ -550,8 +560,14 @@ class _Artifacts:
 
 
 def _recent(touched: Sequence[str], earlier: Sequence[str], more: int) -> tuple[list[str], int]:
-    """``touched`` (in touch order) ahead of ``earlier`` (most recent first), the first ``ARTIFACTS_LISTED`` kept."""
-    paths = _unique([*reversed(touched), *earlier])
+    """``touched`` paths (in touch order) ahead of ``earlier`` ones (stored, most recent first), at most
+    ``ARTIFACTS_LISTED`` kept and the rest counted.
+
+    A touched path is one file per original path, so distinct files whose cut forms look alike stay distinct; an
+    earlier path's stored form is the only identity it has left.
+    """
+    shown = [truncate_middle_bytes(path, ITEM_BYTES) for path in _unique(reversed(touched))]
+    paths = [*shown, *(path for path in _unique(earlier) if path not in set(shown))]
     return paths[:ARTIFACTS_LISTED], more + max(0, len(paths) - ARTIFACTS_LISTED)
 
 
@@ -570,18 +586,18 @@ def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> _Artifacts:
             path = call.arguments.get("path")
             if entry is None or result.is_error or not isinstance(path, str) or not path:
                 continue
-            path = truncate_middle_bytes(path, ITEM_BYTES)
             if call.name == "read":
                 read.append(path)
             elif call.name in {"write", "edit"}:
                 modified.append(path)
-    modified_listed, modified_more = _recent(
-        modified, previous.get("files_modified", ()), previous.get("files_modified_more", 0)
-    )
-    changed = {*modified, *modified_listed}
+    earlier_modified = previous.get("files_modified", ())
+    modified_listed, modified_more = _recent(modified, earlier_modified, previous.get("files_modified_more", 0))
+    # Whether a file was modified is decided on its original path; an earlier one only has its stored form.
+    changed, changed_forms = set(modified), {*modified_listed, *earlier_modified}
+    touched_read = [path for path in read if path not in changed]
     read_listed, read_more = _recent(
-        [path for path in read if path not in changed],
-        [path for path in previous.get("files_read", ()) if path not in changed],
+        [path for path in touched_read if truncate_middle_bytes(path, ITEM_BYTES) not in earlier_modified],
+        [path for path in previous.get("files_read", ()) if path not in changed_forms],
         previous.get("files_read_more", 0),
     )
     return _Artifacts(read_listed, read_more, modified_listed, modified_more)

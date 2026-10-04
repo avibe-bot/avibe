@@ -162,7 +162,7 @@ localize that error rather than deliver a silent success.
   one, an overflow before anything was streamed and with no content in its
   partial enters the C-9 overflow ladder, which stops as `context.md` §8 (d) says.
 - Projection consumes store-resolved ancestry, sorts by sequence, restores hook
-  and guard state, applies the latest checkpoint and every context edit, and
+  state, applies the latest checkpoint and every context edit, and
   answers orphans with deterministic interrupted text. It has no job host or
   external settler. The caller supplies the system prompt and hook-rehydrated
   messages; a checkpoint's state is in its row.

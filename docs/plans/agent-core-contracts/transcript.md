@@ -16,7 +16,7 @@ unique per Session across both tables (partial unique index on each table, plus 
 | tool result | `agent_events` | `tool_result` | `context` | `content_json` = `ToolResult` |
 | checkpoint | `agent_events` | `context_compaction` | `context` | `content_json` = `Compaction` |
 | cleared result | `agent_events` | `context_edit` | `context` | `content_json` = `ContextEdit` |
-| hook and guard state | `agent_events` | `agent_state` | `context` | `content_json` = `AgentState` |
+| hook state | `agent_events` | `agent_state` | `context` | `content_json` = `AgentState` |
 
 A final response is `error` when it failed by itself (no text of its own: an empty answer, or a refusal or safety
 stop without an explanation), as the other backends' failed terminal rows are. A successful final with nothing to show

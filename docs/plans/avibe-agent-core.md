@@ -142,7 +142,7 @@ Schema delta (one Alembic migration, nullable columns, no backfill):
 2. A new `agent_events.visibility` value, `context`, never removed by trace retention. The retention filter is
    already `event_type='tool_call' AND visibility='trace'`; a contract test pins the exemption.
 3. New `agent_events.event_type` values `tool_result`, `context_compaction`, `context_edit`, and `agent_state` (hook
-   state for fork, C-3, and the C-9 guard state), registered where the activity panel reads event types.
+   state for fork and C-3), registered where the activity panel reads event types.
 4. For this backend, `agent_sessions.native_session_id` is the Avibe Session id.
 
 Rules:
@@ -198,9 +198,9 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
   route, a tenth of its window up to 25,000 tokens), and the verbatim tail. No synthetic "continue" message.
 - **Overflow ladder**, bounded per request: the normal checkpoint; fork-summarize the prefix up to the cut nearest
   half the tokens, moved earlier until it fits (rolling); with no model call, move the earliest part out (dropped); stop and say what fills the context.
-- **Guards**: one compaction in flight per Session; 3 consecutive failures or 3 ineffective checkpoints pause
-  auto-compaction for the Session, silently; the pause clears by itself after 30 minutes or on another route, and
-  while it holds a request that cannot fit ends the turn. Compaction is invisible: there is no manual `/compact`
+- **Guards**: one compaction in flight per Session; after 2 failed or ineffective checkpoints in one Turn, the Turn
+  stops compacting, silently, and a request that then cannot fit ends it; nothing of the bound is persisted, so the
+  next Turn tries again. Compaction is invisible: there is no manual `/compact`
   (owner decision, 2026-10-05), and the only user-visible text is the stop message of a context that cannot fit,
   which suggests starting a new session with `/new`.
 - **Deferred**: background precompute, server-side compaction (hard constraint 8), automatic re-read of modified
@@ -305,7 +305,7 @@ Properties; the test suites enumerate cases.
 - **A3 Durability.** SIGKILL at any point resumes with no committed entry lost and no command executed twice; the
   context rebuilt from the tables is always a valid request for every protocol.
 - **A4 Bounded context.** A session with more than 10,000 messages keeps every request within its model's input
-  limit, and under its T unless auto-compaction is paused or a checkpoint for that request failed (C-9 §3).
+  limit, and under its T unless the Turn has stopped compacting or a checkpoint for that request failed (C-9 §3).
   Compaction and clearing only insert rows. A fork anchored before a checkpoint projects the full original context.
   With a provider that always overflows, one request makes at most two checkpoint model calls and then ends in a
   user-visible stop (C-9 `context.md` §8).

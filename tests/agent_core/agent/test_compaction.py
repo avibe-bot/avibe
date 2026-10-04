@@ -25,7 +25,6 @@ from core.agent_core.agent.events import (
     AssistantTextDelta,
     CompactionFailed,
     CompactionFinished,
-    CompactionPaused,
     ContextExhausted,
     MessageCommitted,
     RunEnded,
@@ -43,7 +42,6 @@ from core.agent_core.agent.models import ModelSelection
 from core.agent_core.cancel import CancelToken
 from core.agent_core.harness.context import (
     CHECKPOINT_REQUEST,
-    PAUSE_SECONDS,
     ContextConfig,
     StateRequest,
     message_tokens,
@@ -344,7 +342,7 @@ async def test_the_checkpoint_policy_allows_reads_and_scratch_writes_and_never_r
     rows = await agent.store.load("session")
     assert rows[: len(before)] == before
     # The crossing input stays as the tail, so this checkpoint counts as ineffective: its guard commits with it.
-    assert [row.kind for row in rows[len(before) :]] == ["input", "agent_state", "compaction", "response"]
+    assert [row.kind for row in rows[len(before) :]] == ["input", "compaction", "response"]
     assert not [event for event in events if isinstance(event, ToolStarted)]
     assert len(agent.store.audits[0][2]["messages"]) == 2 + len(calls)
     assert events[-1].reason == "completed"
@@ -369,8 +367,7 @@ async def test_a_malformed_checkpoint_response_fails_the_checkpoint_before_any_c
     failed = [event for event in events if isinstance(event, CompactionFailed)]
     assert len(failed) == 1 and failed[0].error.startswith("Provider protocol violation")
     rows = await agent.store.load("session")
-    assert rows[: len(before)] == before and [row.kind for row in rows[len(before) :]] == ["input", "agent_state", "response"]
-    assert rows[-2].payload["context"]["failures"] == 1  # a failed checkpoint, counted by the guard
+    assert rows[: len(before)] == before and [row.kind for row in rows[len(before) :]] == ["input", "response"]
     audit = agent.store.audits[-1][2]
     assert audit["outcome"] == "failed" and audit["error"] == failed[0].error
     # The audit keeps the refused response when JSON can hold it.
@@ -410,8 +407,7 @@ async def test_the_checkpoint_turn_gets_five_tool_rounds_then_must_write():
     failed = [event for event in events if isinstance(event, CompactionFailed)]
     assert len(failed) == 1 and "kept calling tools" in failed[0].error
     after = await agent.store.load("session")
-    assert after[: len(before)] == before and [row.kind for row in after[len(before) :]] == ["input", "agent_state", "response"]
-    assert after[-2].payload["context"] == {"failures": 1, "ineffective": 0, "paused": False}
+    assert after[: len(before)] == before and [row.kind for row in after[len(before) :]] == ["input", "response"]
     assert events[-1].reason == "completed"  # the request itself still went out
 
 
@@ -523,8 +519,7 @@ async def test_a_checkpoint_turn_is_finalized_once_whatever_step_fails(step, mon
     if step in ("row", "commit"):
         assert [row.kind for row in rows[len(before) :]] == ["input"] and events[-1].reason == "error"
     else:
-        assert [row.kind for row in rows[len(before) :]] == ["input", "agent_state", "response"]
-        assert rows[-2].payload["context"]["failures"] == 1
+        assert [row.kind for row in rows[len(before) :]] == ["input", "response"]
         failed = [event for event in events if isinstance(event, CompactionFailed)]
         assert len(failed) == 1 and store.audits[0][2]["error"] == failed[0].error
 
@@ -591,85 +586,26 @@ async def test_the_checkpoint_usage_keeps_every_reported_field():
     assert agent.store.audits[0][2]["usage"] == expected
 
 
-async def test_failed_checkpoints_leave_the_context_and_three_pause_auto_compaction():
+async def test_failing_checkpoints_stop_after_two_in_a_run_and_the_next_run_tries_again():
     store = InMemoryTranscriptStore()
-    model = Model(reads(7), FAILURES)
+    model = Model(reads(7), FAILURES[:2])
     agent = make_agent(model, store=store, tools=[sized_reader(6_000, 6_000, 6_000, 2_000, 500, 500, 500)])
     events = await run(agent)
-    # Requests 5, 6 and 7 each cross T, try once, fail, and are sent unchanged; request 8 is paused.
-    assert len(model.checkpoint_requests) == 3 and len(model.conversation_requests) == 8
+    # Requests 5 and 6 each cross T, try once, fail, and are sent unchanged; 7 and 8 cross it and are sent untried.
+    assert len(model.checkpoint_requests) == 2 and len(model.conversation_requests) == 8
     assert not [row for row in await store.load("session") if row.kind == "compaction"]
     assert [event.error.split(":")[0] for event in events if isinstance(event, CompactionFailed)] == [
         "The checkpoint turn stopped with length and no usable checkpoint.",
         "The checkpoint turn ended without checkpoint text.",
-        "server",
     ]
-    assert [event.cause for event in events if isinstance(event, CompactionPaused)] == ["failures"]
-    assert [audit["outcome"] for _, _, audit in store.audits] == ["failed"] * 3
-
-    # Durable: a new Agent over the same rows stays paused and sends no checkpoint request.
-    model = Model([call("read", "again", path="f"), [Done(assistant("ok"))]])
-    resumed = make_agent(model, store=store, tools=[reader(tokens(1))])
-    events = await run(resumed, row="next")
-    assert not model.checkpoint_requests and not [e for e in events if isinstance(e, CompactionPaused)]
-
-
-async def _paused(now, *, selection=SELECTION):
-    """Three failed checkpoints at clock ``now``: auto-compaction pauses on ``selection``'s route."""
-    store = InMemoryTranscriptStore()
-    model = Model(reads(7), FAILURES)
-    context = ContextConfig(clock=lambda: now[0], clear_tool_results=False)
-    agent = make_agent(model, store=store, selection=selection, context=context,
-                       tools=[sized_reader(6_000, 6_000, 6_000, 2_000, 500, 500, 500)])
-    events = await run(agent)
-    assert [event.cause for event in events if isinstance(event, CompactionPaused)] == ["failures"]
-    state = [row for row in await store.load("session") if row.kind == "agent_state"][-1].payload["context"]
-    assert state["paused"] and state["paused_at"] == now[0] and state["paused_route"]["model"] == "test-model"
-    return store, context
-
-
-@pytest.mark.parametrize("why", ["thirty minutes later", "another route"])
-async def test_a_pause_clears_by_itself_and_the_next_threshold_tries_again(why):
-    now = [1_000.0]
-    store, context = await _paused(now)
-    selection = SELECTION
-    if why == "thirty minutes later":
-        now[0] += PAUSE_SECONDS
-    else:
-        other = ModelEndpoint("anthropic", "http://model.invalid", "other-model", "", provider="test-provider")
-        selection = ModelSelection(other, SELECTION.capabilities)
-    model = Model([call("read", "again", path="f"), [Done(assistant("ok"))]], [[Done(assistant(CHECKPOINT))]])
-    agent = make_agent(model, store=store, selection=selection, context=context, tools=[reader(tokens(1))])
+    assert [audit["outcome"] for _, _, audit in store.audits] == ["failed"] * 2
+    assert events[-1].reason == "completed"
+    # Nothing is kept: the next run tries again.
+    model.conversation.extend([call("read", "again", path="f"), [Done(assistant("ok"))]])
+    model.checkpoint.append([Done(assistant(CHECKPOINT))])
     events = await run(agent, row="next")
-    assert len(model.checkpoint_requests) == 1 and events[-1].reason == "completed"
-    state = [row for row in await store.load("session") if row.kind == "agent_state"][-1]
-    assert state.payload["context"] == {"failures": 0, "ineffective": 0, "paused": False}
-
-
-async def test_a_pause_cleared_on_another_route_stays_cleared_after_a_restart():
-    now = [1_000.0]
-    store, context = await _paused(now)
-    other = ModelEndpoint("anthropic", "http://model.invalid", "other-model", "", provider="test-provider")
-    # A small request on a route with room: below its threshold, so the clear is the only C-9 transition.
-    small, committed = Model([[Done(assistant("ok"))]]), len(store.transactions)
-    roomy = ModelSelection(other, LARGE.capabilities)
-    events = await run(make_agent(small, store=store, selection=roomy, context=context), row="small")
-    assert not small.checkpoint_requests and events[-1].reason == "completed"
-    assert store.transactions[committed:] == [["agent_state"]]  # the clear commits on its own, through the one writer
-    # A new Agent, back on the first route within thirty minutes: the pause stays cleared, and the threshold tries.
-    model = Model([call("read", "again", path="f"), [Done(assistant("ok"))]], [[Done(assistant(CHECKPOINT))]])
-    events = await run(make_agent(model, store=store, context=context, tools=[reader(tokens(1))]), row="next")
-    assert len(model.checkpoint_requests) == 1 and events[-1].reason == "completed"
-
-
-async def test_a_pause_holds_for_thirty_minutes_on_its_route():
-    now = [1_000.0]
-    store, context = await _paused(now)
-    now[0] += PAUSE_SECONDS - 1
-    model = Model([call("read", "again", path="f"), [Done(assistant("ok"))]])
-    agent = make_agent(model, store=store, context=context, tools=[reader(tokens(1))])
-    events = await run(agent, row="next")
-    assert not model.checkpoint_requests and events[-1].reason == "completed"
+    assert len(model.checkpoint_requests) == 3 and events[-1].reason == "completed"
+    assert [row.kind for row in await store.load("session")].count("compaction") == 1
 
 
 class _UnusableHost(Host):
@@ -678,35 +614,54 @@ class _UnusableHost(Host):
         raise RuntimeError("the state store is down")
 
 
-async def test_while_paused_a_request_that_cannot_be_sent_ends_the_turn_and_nothing_compacts():
-    now = [1_000.0]
-    store, context = await _paused(now)
-    before = await store.load("session")
-    model, host = Model([]), _UnusableHost()
-    agent = make_agent(model, store=store, context=replace(context, host=host))
-    events = await run(agent, tokens(12_000), row="next")
-    assert not model.requests  # no checkpoint, no mechanical drop, and the provider never sees it
-    assert not host.states  # nothing is built for a compaction the pause forbids
+async def test_once_a_run_stops_compacting_a_request_that_cannot_fit_ends_it_and_nothing_is_built():
+    model, host = Model(reads(6), FAILURES[:2]), _UnusableHost()
+    agent = make_agent(
+        model, context=ContextConfig(host=host), tools=[sized_reader(6_000, 6_000, 6_000, 2_000, 500, 12_000)]
+    )
+    events = await run(agent)
+    # Two failed checkpoints stop compaction for the run; the request a 12,000-token result leaves cannot fit.
+    assert len(model.checkpoint_requests) == 2
+    assert not host.states  # no checkpoint row, not even the stop check's dry run, is built
     assert events[-1].reason == "context_exhausted" and [e for e in events if isinstance(e, ContextExhausted)]
-    rows = await store.load("session")
-    assert [row.kind for row in rows[len(before) :]] == ["input"]
+    assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
 
 
-async def test_a_checkpoint_failure_that_pauses_mid_ladder_drops_nothing_and_stops_the_request():
-    failing = [Done(assistant(CHECKPOINT, stop_reason="length"))]
-    store, context = InMemoryTranscriptStore(), ContextConfig(clear_tool_results=False)
-    late = [Done(assistant("sent after a drop"))]  # only a request after a drop would reach it
-    model = Model([*history(), [Done(assistant("ok"))], [Done(assistant("ok"))], late], [failing] * 3)
-    agent = make_agent(model, store=store, selection=ROOMY, context=context, tools=[reader(tokens(1))])
+async def test_the_second_unproductive_checkpoint_of_a_run_ends_a_request_that_cannot_fit_without_a_drop():
+    model = Model(reads(5), FAILURES[:2])
+    agent = make_agent(model, tools=[sized_reader(6_000, 6_000, 6_000, 2_000, 9_000)])
+    events = await run(agent)
+    # Request 5 crosses T and its checkpoint fails (one); request 6 cannot fit, its checkpoint fails too (two),
+    # so the run stops compacting: the request ends the run, never in a mechanical drop.
+    assert len(model.checkpoint_requests) == 2
+    assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
+    assert events[-1].reason == "context_exhausted"
+
+
+async def test_a_checkpoint_on_a_fallback_renders_its_state_for_the_conversation_route():
+    # The checkpoint's first attempt is refused on the primary and retried on a fallback with a far larger window;
+    # its state is still capped for the route the conversation's next request is composed for.
+    other = ModelEndpoint("anthropic", "http://model.invalid", "other-model", "", provider="test-provider")
+    router = None
+
+    def busy(request):
+        router.retrying = True
+        return [ProviderError("rate_limit", "busy", True)]
+
+    def answers(request):
+        router.retrying = False
+        assert request.endpoint.model_id == "other-model"
+        return [Done(assistant(CHECKPOINT))]
+
+    host = Host()
+    model = Model(after_checkpoint(), [busy, answers])
+    fallback = ModelSelection(other, replace(ROOMY.capabilities, context_window=1_000_000))
+    router = _FallbackOnRetry(model, ROOMY, fallback)
+    agent = make_agent(model, models=router, context=ContextConfig(host=host), tools=[reader(tokens(3_000))],
+                       retry=RetryPolicy(initial_delay_s=0))
     await run(agent)
-    await run(agent, tokens(30_000), row="one")  # a threshold checkpoint fails: one
-    await run(agent, "again", row="two")  # two
-    # A request that cannot fit and that no fork can take whole: the ladder's rolling checkpoint fails a third time,
-    # which pauses auto-compaction, so the ladder's next step is the pause rule, never a drop.
-    events = await run(agent, tokens(70_000), row="three")
-    assert len(model.checkpoint_requests) == 3
-    assert not [row for row in await store.load("session") if row.kind == "compaction"]
-    assert events[-1].reason == "context_exhausted" and [e for e in events if isinstance(e, CompactionPaused)]
+    assert (await cross(agent))[-1].reason == "completed"
+    assert [request.cap for request in host.states] == [state_cap(ROOMY.capabilities)]
 
 
 class _FallbackOnRetry(FakeModelRouter):
@@ -719,56 +674,6 @@ class _FallbackOnRetry(FakeModelRouter):
     async def resolve(self):
         self.resolutions += 1
         return self.fallback if self.retrying else self.selections[0]
-
-
-async def test_a_failed_checkpoint_counts_against_the_route_it_ran_on():
-    other = ModelEndpoint("anthropic", "http://model.invalid", "other-model", "", provider="test-provider")
-    router = None
-
-    def busy(request):  # the checkpoint's first attempt, on the primary: retryable
-        router.retrying = True
-        return [ProviderError("rate_limit", "busy", True)]
-
-    def fails(request):  # the retry, on the fallback: a failed checkpoint
-        router.retrying = False
-        assert request.endpoint.model_id == "other-model"
-        return [Done(assistant(CHECKPOINT, stop_reason="length"))]
-
-    store = InMemoryTranscriptStore()
-    model = Model([*history(), *[[Done(assistant("ok"))]] * 3], [busy, fails] * 3)
-    router = _FallbackOnRetry(model, ROOMY, ModelSelection(other, ROOMY.capabilities))
-    context = ContextConfig(clear_tool_results=False)
-    agent = make_agent(model, store=store, models=router, context=context, tools=[reader(tokens(1))],
-                       retry=RetryPolicy(initial_delay_s=0))
-    await run(agent)
-    for row, value in (("one", tokens(30_000)), ("two", "again"), ("three", "again")):
-        await run(agent, value, row=row)
-    state = [row for row in await store.load("session") if row.kind == "agent_state"][-1].payload["context"]
-    assert state["paused"] and state["paused_route"]["model"] == "other-model"
-    # The primary did not fail: its next threshold tries again.
-    model.conversation.append([Done(assistant("ok"))])
-    model.checkpoint.append([Done(assistant(CHECKPOINT))])
-    tried = len(model.checkpoint_requests)
-    await run(agent, "four", row="four")
-    assert len(model.checkpoint_requests) == tried + 1
-
-
-async def test_the_guard_is_durable_before_its_outcome_is_announced():
-    store = InMemoryTranscriptStore()
-    model = Model(reads(7), FAILURES)
-    agent = make_agent(model, store=store, tools=[sized_reader(6_000, 6_000, 6_000, 2_000, 500, 500, 500)])
-    seen = []
-    async for event in agent.run(input_row("input", "go"), turn_id="input"):
-        if isinstance(event, (CompactionFailed, CompactionPaused)):
-            # A crash right after this event must not lose the transition it announces.
-            state = [row for row in await store.load("session") if row.kind == "agent_state"][-1]
-            seen.append((type(event).__name__, state.payload["context"]["failures"], state.payload["context"]["paused"]))
-    assert seen == [
-        ("CompactionFailed", 1, False),
-        ("CompactionFailed", 2, False),
-        ("CompactionFailed", 3, True),
-        ("CompactionPaused", 3, True),
-    ]
 
 
 async def test_a_failed_checkpoint_attempt_keeps_every_partial_in_its_audit():
@@ -872,15 +777,14 @@ async def test_the_request_right_after_a_checkpoint_is_measured_and_rolls_when_i
         assert request_tokens(request.system, request.tools, request.messages) + 4_096 + 8_000 <= 32_000
 
 
-async def test_three_ineffective_checkpoints_pause_auto_compaction():
-    bloated = [[Done(assistant(tokens(15_000)))] for _ in range(3)]
+async def test_two_ineffective_checkpoints_stop_compaction_for_the_run():
+    bloated = [[Done(assistant(tokens(15_000)))] for _ in range(2)]
     model = Model(reads(7), bloated)
     agent = make_agent(model, tools=[sized_reader(6_000, 6_000, 6_000, 6_000, 5_000, 5_000, 5_000)])
     events = await run(agent)
     finished = [event for event in events if isinstance(event, CompactionFinished)]
-    assert len(finished) == 3 and all(event.tokens_after_estimate >= 0.75 * THRESHOLD for event in finished)
-    assert [event.cause for event in events if isinstance(event, CompactionPaused)] == ["ineffective"]
-    assert len(model.checkpoint_requests) == 3  # the fourth crossing is skipped
+    assert len(finished) == 2 and all(event.tokens_after_estimate >= 0.75 * THRESHOLD for event in finished)
+    assert len(model.checkpoint_requests) == 2  # the next crossing is not tried in this run
 
 
 OVERFLOW = ProviderError("overflow", "prompt is too long: 40000 tokens > 32000 maximum", False, status=400)
@@ -1070,10 +974,11 @@ async def test_a_provider_that_always_overflows_stops_after_two_checkpoint_calls
     agent = make_agent(model, tools=[reader(tokens(1_500))])
     events = await run(agent)
     assert len(model.checkpoint_requests) == 2
-    assert len(model.conversation_requests) == 8 + 4  # the reads, then the request and its three retries
+    # The reads, then the refused request: its normal and rolling checkpoints are refused too, which stops the
+    # run's compaction, so the refusal ends the run; nothing is dropped.
+    assert len(model.conversation_requests) == 8 + 1
     assert events[-1].reason == "context_exhausted"
-    modes = [row.payload["mode"] for row in await agent.store.load("session") if row.kind == "compaction"]
-    assert set(modes) == {"dropped"}
+    assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
 
 
 async def test_one_compaction_is_in_flight_per_session():
@@ -1189,20 +1094,20 @@ class FailingTransactionStore(InMemoryTranscriptStore):
 
 
 async def test_invariant_3_a_c9_transition_commits_in_one_transaction_or_not_at_all():
-    # A checkpoint that comes out ineffective moves the guard; its guard and its row share one transaction.
+    # A checkpoint's row commits in one transaction or not at all.
     store = FailingTransactionStore(failures=1)
     model = Model(reads(4), [[Done(assistant(tokens(15_000)))]])
     agent = make_agent(model, store=store, tools=[sized_reader(6_000, 6_000, 6_000, 6_000)])
     events = await run(agent)
     rows = await store.load("session")
-    # Nothing of the failed transition is anywhere: no checkpoint, no guard state, no announcement.
-    assert not [row for row in rows if row.kind == "compaction" or "context" in row.payload]
+    # Nothing of the failed transition is anywhere: no checkpoint, no announcement.
+    assert not [row for row in rows if row.kind == "compaction"]
     assert [type(event).__name__ for event in events if "Compaction" in type(event).__name__] == ["CompactionStarted"]
     assert events[-1].reason == "error"
     model = Model(reads(1), [[Done(assistant(tokens(15_000)))]])
     agent = make_agent(model, store=store, tools=[sized_reader(1)])
     await run(agent, row="again")
-    assert store.transactions[-1] == ["agent_state", "compaction"]
+    assert store.transactions[-1] == ["compaction"]
 
 
 

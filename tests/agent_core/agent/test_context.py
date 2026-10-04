@@ -8,6 +8,7 @@ the checkpoint's model-facing text and row.
 from __future__ import annotations
 
 import math
+import os
 import random
 import re
 from dataclasses import replace
@@ -18,6 +19,7 @@ import pytest
 from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelRequest
 from core.agent_core.harness.context import (
     CLEARED_PLACEHOLDER,
+    ITEM_BYTES,
     SkillRef,
     budget,
     carried_skills,
@@ -36,6 +38,7 @@ from core.agent_core.harness.context import (
     rolling_cut,
     state_cap,
     text_tokens,
+    truncate_middle_bytes,
     unit_tokens,
 )
 from core.agent_core.harness.projection import context_view, project
@@ -433,6 +436,47 @@ def test_an_artifact_path_is_middle_truncated_so_a_list_stays_small(segment):
     assert listed[0].endswith("file-59.py")
     artifacts = payload["summary"].split("<artifacts>\n", 1)[1].split("</artifacts>", 1)[0]
     assert text_tokens(artifacts) <= 50 * 41 + 20  # a line: "- ", at most 160 bytes, a newline
+
+
+def test_a_path_with_undecodable_bytes_is_cut_like_any_other():
+    # A POSIX path need not be UTF-8: Python carries its undecodable bytes as lone surrogates.
+    short = os.fsdecode(b"/work/\xff/file.py")
+    assert truncate_middle_bytes(short, ITEM_BYTES) == short
+    long = os.fsdecode(b"/work/\xff/" + b"deep/" * 100 + b"file.py")
+    cut = truncate_middle_bytes(long, ITEM_BYTES)
+    assert len(cut.encode("utf-8", "surrogatepass")) <= ITEM_BYTES  # measured as the estimate measures it
+    assert cut.startswith("/work/\udcff/") and cut.endswith("file.py") and "…" in cut
+
+
+def test_distinct_long_paths_stay_distinct_files_after_their_display_is_cut():
+    # Two read paths and a written one that differ only deep in the middle: cut, they look alike, but each is still
+    # its own file, counted once, and reading one is not mistaken for writing another.
+    def path(middle: str) -> str:
+        return f"src/{'a/' * 100}{middle}/{'b/' * 100}mod.py"
+
+    rows = Rows()
+    rows.input("generate")
+    rows.tool("read", "r", call_id="r1", path=path("x"))
+    rows.tool("read", "r", call_id="r2", path=path("y"))
+    rows.tool("write", "w", call_id="w1", path=path("z"))
+    rows.input("next")
+    view = context_view(rows.rows)
+    payload = compaction_payload(
+        view,
+        len(view.units) - 1,
+        mode="dropped",
+        reason="overflow",
+        checkpoint="",
+        skills=(),
+        state=(),
+        earlier_record=None,
+        tokens_before=1,
+        threshold=2,
+        summarizer=None,
+        usage=None,
+    )
+    shown = truncate_middle_bytes(path("x"), ITEM_BYTES)
+    assert payload["files_read"] == [shown, shown] and payload["files_modified"] == [shown]
 
 
 def test_the_checkpoint_request_is_the_owner_approved_prompt_verbatim():

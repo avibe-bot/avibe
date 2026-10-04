@@ -27,7 +27,6 @@ from core.agent_core.agent.events import (
     AssistantThinkingDelta,
     CompactionFailed,
     CompactionFinished,
-    CompactionPaused,
     CompactionStarted,
     ContextExhausted,
     ContextPart,
@@ -58,7 +57,6 @@ from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
 from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
-from core.agent_core.ai._common import endpoint_origin
 from core.agent_core.ai.provider import (
     Done,
     ModelRequest,
@@ -74,10 +72,9 @@ from core.agent_core.harness.context import (
     CLEAR_SOFT_RATIO,
     DEFAULT_MAX_OUTPUT_TOKENS,
     INEFFECTIVE_RATIO,
+    UNPRODUCTIVE_CHECKPOINTS,
     MAX_OVERFLOWS,
     MAX_ROLLS,
-    PAUSE_AFTER,
-    PAUSE_SECONDS,
     PROMPT_VERSION,
     Anchor,
     Budget,
@@ -155,16 +152,8 @@ class _Exhausted(Exception):
         super().__init__(f"The context does not fit the model's input limit of {limit} tokens: {sizes}.")
 
 
-#: C-9 guard state (``AgentState.context``) before anything happened.
-_GUARD_DEFAULT: dict[str, Any] = {"failures": 0, "ineffective": 0, "paused": False}
 #: The checkpoint request (C-9 section 11); every checkpoint turn and the fit checks send exactly this.
 _CHECKPOINT_REQUEST = checkpoint_request()
-
-
-def _route(selection: ModelSelection) -> dict[str, str]:
-    """The route a pause is bound to: the provider, protocol, and model a request goes to (C-9 section 10)."""
-    origin = endpoint_origin(selection.endpoint)
-    return {"provider": origin.provider, "api": origin.api, "model": origin.model}
 
 
 #: The most a checkpoint-turn call that does not run adds: one of the policy's two fixed texts (never cut).
@@ -271,8 +260,8 @@ class Agent:
         self._rows: list[ContextEntry] = []
         self._committed_state: dict[str, Any] = {}
         self._committed_state_json = "{}"
-        self._guard: dict[str, Any] = dict(_GUARD_DEFAULT)
-        self._committed_guard: dict[str, Any] = dict(_GUARD_DEFAULT)
+        # C-9's per-run bound (section 10): unproductive checkpoint attempts this run, in memory only.
+        self._unproductive = 0
         # The run's attempt ledger (C-9): every model attempt, in order.
         self._attempts: list[_Attempt] = []
         self._last_model_at: Optional[float] = None
@@ -399,7 +388,7 @@ class Agent:
                     self._run_tools = None
 
     async def _save_state(self, *, cleanup: bool = False) -> None:
-        """Hook state at a commit point. C-9 guard state is written only by ``_commit_context``."""
+        """Hook state at a commit point; a C-9 transition writes it with its own rows (``_commit_context``)."""
         representation = state_representation(self._ctx.state)
         if representation == self._committed_state_json:
             return
@@ -478,8 +467,7 @@ class Agent:
                 self._ctx.state = deepcopy(dict(projection.state))
                 self._committed_state_json = state_representation(self._ctx.state)
                 self._committed_state = deepcopy(self._ctx.state)
-                self._guard = {**_GUARD_DEFAULT, **deepcopy(dict(projection.context_state))}
-                self._committed_guard = dict(self._guard)
+                self._unproductive = 0
                 self._attempts = []
                 loaded = True
                 system = self.system
@@ -1145,15 +1133,14 @@ class Agent:
     ) -> bool:
         """C-9 on the final request (sections 3 and 8); True when it changed the context.
 
-        The pause is read from the live guard at every decision, never kept: a checkpoint failure in this pass can
-        begin it.
+        Whether the run still compacts is read from its live bound at every decision, never kept: a checkpoint
+        attempt in this pass can use it up.
         """
-        # The pause first: while it holds nothing is compacted, so nothing is built for a compaction either.
-        await self._expire_pause(selected)
+        # The bound first: once the run has stopped compacting, nothing is built for a compaction either.
         if not plan.can_fit and (
-            self._guard["paused"] or not (await self._minimal(system, selected, request, view, plan))[1].can_fit
+            self._stopped or not (await self._minimal(system, selected, request, view, plan))[1].can_fit
         ):
-            # (d): paused, or not even the request the drop would leave (its row and the last unit) can fit. The
+            # (d): stopped, or not even the request the drop would leave (its row and the last unit) can fit. The
             # provider never sees it.
             raise self._exhausted(request, view, plan)
         refused, ladder.refused = ladder.refused, False
@@ -1164,9 +1151,9 @@ class Agent:
             ):
                 targets = clearable_results(view)
                 if targets:
-                    await self._commit_context([("context_edit", clear_edit(target)) for target in targets], self._guard)
+                    await self._commit_context([("context_edit", clear_edit(target)) for target in targets])
                     return True
-            if plan.est >= plan.threshold and not ladder.compacted and not self._guard["paused"]:
+            if plan.est >= plan.threshold and not ladder.compacted and not self._stopped:
                 cut = normal_cut(view.units, plan.keep)
                 if cut is not None:
                     ladder.compacted = True
@@ -1183,32 +1170,23 @@ class Agent:
             if not shrink and plan.fits:
                 return False
             # With no checkpoint request left to try, a request that can fit at all is sent; the provider judges.
-            if not shrink and (ladder.summary_failed or self._guard["paused"]) and plan.can_fit:
+            if not shrink and (ladder.summary_failed or self._stopped) and plan.can_fit:
                 return False
         return await self._shrink(system, selected, request, view, plan, emit, ladder, refused=refused)
 
-    async def _expire_pause(self, selected: ModelSelection) -> None:
-        """Clear a pause that no longer holds for this request (section 10).
-
-        A pause holds for ``PAUSE_SECONDS`` on the route it began on; after that, or on another route, it clears
-        by itself, with both counters, and the next threshold tries again. The clear is a guard transition like any
-        other: it commits at once through the one writer (invariant 3), so a later run reads it from the rows.
-        """
-        guard = self._guard
-        if not guard["paused"]:
-            return
-        held = self.context.clock() - guard.get("paused_at", 0) < PAUSE_SECONDS
-        if held and guard.get("paused_route") == _route(selected):
-            return
-        await self._commit_context([], _GUARD_DEFAULT)
+    @property
+    def _stopped(self) -> bool:
+        """The run has made ``UNPRODUCTIVE_CHECKPOINTS`` failed or ineffective checkpoint attempts (section 10)."""
+        return self._unproductive >= UNPRODUCTIVE_CHECKPOINTS
 
     def _hold(self, request: ModelRequest, view: ContextView, plan: Budget, *, refused: bool) -> bool:
-        """The pause rule (section 10), read from the live guard before every step of the ladder.
+        """The run's bound (section 10), read live before every step of the ladder.
 
-        Not paused: False, and the step may run. Paused: nothing is compacted; a request that can fit and the
-        provider has not refused is sent as it is (True), and any other ends the turn ``context_exhausted``.
+        Not stopped: False, and the step may run. Stopped: nothing more is compacted this run; a request that can
+        fit and the provider has not refused is sent as it is (True), and any other ends the run
+        ``context_exhausted``.
         """
-        if not self._guard["paused"]:
+        if not self._stopped:
             return False
         if refused or not plan.can_fit:
             raise self._exhausted(request, view, plan)
@@ -1294,8 +1272,8 @@ class Agent:
     ) -> bool:
         """The overflow ladder (section 8), one loop; True when a step changed the context, False to send as it is.
 
-        Every step is preceded by the pause rule on the live guard (``_hold``), as the stage decides the pause
-        first: a failed checkpoint that begins the pause ends the ladder there, never in a drop.
+        Every step is preceded by the run's bound, read live (``_hold``), as the stage reads it first: a checkpoint
+        attempt that uses the bound up ends the ladder there, never in a drop.
         """
         units = view.units
         while True:
@@ -1377,11 +1355,8 @@ class Agent:
         checkpoint = ""
         origin = None
         selection: Optional[ModelSelection] = selected
-        ran = selected  # the route the turn's latest request was composed for; the guard counts against it
 
         async def compose(route: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
-            nonlocal ran
-            ran = route
             fork, tools, fork_plan = self._fork(system, route, base, prompt, turn, anchor)
             if not fork_plan.can_fit:
                 raise _ForkTooLarge()
@@ -1455,6 +1430,7 @@ class Agent:
                     "rounds": rounds,
                 }
                 try:
+                    # Capped for ``selected``, the stage's route, which composes the conversation's next request.
                     hosted = await self._hosted(view, cut, selected)
                 except (_Aborted, asyncio.CancelledError):
                     raise
@@ -1477,13 +1453,12 @@ class Agent:
                     )
             if payload is None:
                 finished["error"] = error
-                guard, paused = self._counted(ran, ok=False)
-                await self._commit_context([], guard)
+                self._unproductive += 1
                 await emit(CompactionFailed, reason=reason, error=error)
-                if paused:
-                    await emit(CompactionPaused, cause=paused)
                 return _Outcome(False, overflow)
-            row, paused = await self._commit_compaction(payload, ran)
+            (row,) = await self._commit_context([("compaction", payload)])
+            if mode == "normal" and payload["tokens_after_estimate"] >= INEFFECTIVE_RATIO * payload["threshold"]:
+                self._unproductive += 1  # it made too little room to count as progress
             finished.update(outcome="completed", compaction_event_id=row.row_id)
             await emit(
                 CompactionFinished,
@@ -1493,8 +1468,6 @@ class Agent:
                 tokens_before=row.payload["tokens_before"],
                 tokens_after_estimate=row.payload["tokens_after_estimate"],
             )
-            if paused:
-                await emit(CompactionPaused, cause=paused)
             return _Outcome(True)
         except (_Aborted, asyncio.CancelledError):
             aborted = True  # the cancelled run scope admits no further store write
@@ -1532,25 +1505,6 @@ class Agent:
         if usage is not None:
             record["usage"] = usage_to_dict(usage)
         return {**record, **finished}
-
-    def _counted(
-        self, route: ModelSelection, *, ok: bool, ineffective: Optional[bool] = None
-    ) -> tuple[dict[str, Any], Optional[str]]:
-        """The guard after one checkpoint attempt on ``route`` (section 10), and the pause cause when it pauses now."""
-        guard = dict(self._guard)
-        cause = None
-        if not ok:
-            guard["failures"] += 1
-            cause = "failures" if guard["failures"] >= PAUSE_AFTER else None
-        else:
-            guard["failures"] = 0
-            if ineffective is not None:
-                guard["ineffective"] = guard["ineffective"] + 1 if ineffective else 0
-                cause = "ineffective" if guard["ineffective"] >= PAUSE_AFTER else None
-        if cause is None or guard["paused"]:
-            return guard, None
-        guard.update(paused=True, paused_at=self.context.clock(), paused_route=_route(route))
-        return guard, cause
 
     async def _checkpoint_tool(
         self, original: ToolCallBlock, tools: Mapping[str, Tool], policy: CheckpointPolicy, *, limit: int
@@ -1591,7 +1545,7 @@ class Agent:
         await emit(CompactionStarted, reason="overflow")
         hosted = await self._hosted(view, cut, selected)
         payload, _ = await self._compaction(request, view, plan, cut, **self._dropped(view), hosted=hosted)
-        row, _ = await self._commit_compaction(payload, None)
+        (row,) = await self._commit_context([("compaction", payload)])
         await emit(
             CompactionFinished,
             event_id=row.row_id,
@@ -1659,38 +1613,24 @@ class Agent:
             raise TypeError("ContextHost.render_state must return strings")
         return state, host.earlier_record(self.session_id, summarized_to_seq(view, cut))
 
-    async def _commit_compaction(
-        self, payload: Mapping[str, Any], route: Optional[ModelSelection]
-    ) -> tuple[ContextEntry, Optional[str]]:
-        """A built checkpoint row and, for a checkpoint request on ``route``, the guard it moves, in one commit."""
-        guard, paused = self._guard, None
-        if route is not None:
-            ineffective = payload["tokens_after_estimate"] >= INEFFECTIVE_RATIO * payload["threshold"]
-            guard, paused = self._counted(route, ok=True, ineffective=ineffective if payload["mode"] == "normal" else None)
-        (row,) = await self._commit_context([("compaction", payload)], guard)
-        return row, paused
-
     async def _commit_context(
-        self, rows: Sequence[tuple[Literal["compaction", "context_edit"], Mapping[str, Any]]], guard: Mapping[str, Any]
+        self, rows: Sequence[tuple[Literal["compaction", "context_edit"], Mapping[str, Any]]]
     ) -> tuple[ContextEntry, ...]:
         """The one writer of C-9 state (invariant 3).
 
-        Edits, a checkpoint, and the guard, with the hook state of this commit point, go in one transaction,
-        before any event announces the transition. A failed commit changes nothing, in memory or on disk.
+        Edits or a checkpoint, with the hook state of this commit point, go in one transaction, before any event
+        announces the transition. A failed commit changes nothing, in memory or on disk.
         """
         entries: list[tuple[str, Mapping[str, Any]]] = []
         representation = state_representation(self._ctx.state)
         state = deepcopy(self._ctx.state)
-        if dict(guard) != self._committed_guard or representation != self._committed_state_json:
-            entries.append(("agent_state", {"version": 1, "state": state, "context": dict(guard)}))
+        if representation != self._committed_state_json:
+            entries.append(("agent_state", {"version": 1, "state": state}))
         entries.extend(rows)
-        if not entries:
-            return ()
         committed = await self._scope.call(
             lambda: self.store.append_payloads(self.session_id, deepcopy(entries)), interruptible=False
         )
         self._rows.extend(committed)
-        self._guard, self._committed_guard = dict(guard), dict(guard)
         self._committed_state, self._committed_state_json = state, representation
         return tuple(row for row in committed if row.kind != "agent_state")
 

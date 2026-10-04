@@ -23,7 +23,6 @@
         "compaction_started",
         "compaction_finished",
         "compaction_failed",
-        "compaction_paused",
         "context_exhausted",
         "run_ended",
         "error"
@@ -286,29 +285,6 @@
             "enum": [
               "threshold",
               "overflow"
-            ]
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "compaction_paused"
-          }
-        }
-      },
-      "then": {
-        "description": "Auto-compaction paused for the Session (context.md section 10); emitted once, at the transition. The adapter shows nothing: the pause clears by itself after 30 minutes or on another route.",
-        "required": [
-          "cause"
-        ],
-        "properties": {
-          "cause": {
-            "enum": [
-              "failures",
-              "ineffective"
             ]
           }
         }
