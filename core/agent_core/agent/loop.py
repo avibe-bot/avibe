@@ -498,19 +498,26 @@ class Agent:
             except _Exhausted as error:
                 self._outcome.primary("context_exhausted")
                 await emit(ContextExhausted, limit=error.limit, parts=error.parts)
-                await emit(AgentError, kind="context_exhausted", message=str(error))
+                await emit(AgentError, kind="context_exhausted", message=str(error), origin="local")
             except _Aborted:
                 self._outcome.primary("aborted")
             except asyncio.CancelledError:
                 self._outcome.primary("aborted")
                 self._ctx.cancel.cancel("event consumer closed" if self._consumer_closed else "dependency cancelled")
                 if not self._consumer_closed:
-                    await emit(AgentError, kind="dependency_cancelled", message="An agent dependency was cancelled.")
+                    await emit(
+                        AgentError,
+                        kind="dependency_cancelled",
+                        message="An agent dependency was cancelled.",
+                        origin="local",
+                    )
             except Exception as error:
                 self._outcome.primary("error")
                 if isinstance(error, HookStateError):
                     self._ctx.state = deepcopy(self._committed_state)
-                await emit(AgentError, kind=type(error).__name__, message=str(error))
+                # A response the transcript cannot hold is the served model's; any other exception is the loop's own.
+                origin = "source" if isinstance(error, ProviderProtocolViolation) else "local"
+                await emit(AgentError, kind=type(error).__name__, message=str(error), origin=origin)
         finally:
             # If an external cancellation interrupted an exception handler,
             # admission still records its first cause before cleanup starts.
@@ -530,7 +537,7 @@ class Agent:
     async def _flush_diagnostics(self, emit: Callable[..., Awaitable[None]]) -> None:
         while self._outcome.diagnostics:
             kind, message = self._outcome.diagnostics[0]
-            await emit(AgentError, kind=kind, message=message)
+            await emit(AgentError, kind=kind, message=message, origin="local")
             self._outcome.diagnostics.popleft()
 
     async def _cleanup(self, factory: Callable[[], Awaitable[Any]], *, stream: bool = False) -> None:
@@ -844,7 +851,9 @@ class Agent:
                         else "error"
                     )
                     self._outcome.primary(reason)
-                    await emit(AgentError, kind=terminal.kind, message=terminal.message)
+                    # ``aborted`` is the loop's own cancellation; every other provider error is the source's.
+                    origin = "local" if terminal.kind == "aborted" else "source"
+                    await emit(AgentError, kind=terminal.kind, message=terminal.message, origin=origin)
                     if terminal.partial is not None:
                         row = await self._response(terminal.partial, final=False)
                         await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
@@ -859,6 +868,7 @@ class Agent:
                         AgentError,
                         kind=message.stop_reason,
                         message=message.error_message or f"Model stopped with {message.stop_reason}.",
+                        origin="local" if message.stop_reason == "aborted" else "source",
                     )
                 final = await self._commit_model_message(message, emit)
                 empty_reply = final and not any(
@@ -870,6 +880,7 @@ class Agent:
                         AgentError,
                         kind=message.stop_reason if message.stop_reason in {"refusal", "safety"} else "empty_response",
                         message=message.error_message or f"Model stopped with {message.stop_reason} without a reply.",
+                        origin="source",
                     )
             # aclose failures are diagnostics, never a reason to discard the
             # committed response or skip its tools. Primary errors precede them.
@@ -910,6 +921,7 @@ class Agent:
                             AgentError,
                             kind="length",
                             message="The model repeatedly exceeded its output limit while emitting a tool call.",
+                            origin="source",
                         )
                         return "error"
                     await self._drain_steers(emit)
@@ -921,6 +933,7 @@ class Agent:
                         AgentError,
                         kind=reason,
                         message=message.error_message or f"Model stopped with {reason}.",
+                        origin="source",
                     )
                 return "aborted" if message.stop_reason == "aborted" else "error"
             if failed:
@@ -1124,7 +1137,7 @@ class Agent:
             # never sees it.
             raise self._exhausted(request, view, plan)
         shrink, ladder.refused = ladder.refused, False
-        paused = self._paused(selected)
+        paused = await self._paused(selected)
         if not shrink:
             if self.context.clear_tool_results and (
                 plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold()
@@ -1157,12 +1170,12 @@ class Agent:
             raise self._exhausted(request, view, plan)
         return await self._shrink(system, selected, request, view, plan, emit, ladder)
 
-    def _paused(self, selected: ModelSelection) -> bool:
+    async def _paused(self, selected: ModelSelection) -> bool:
         """Whether auto-compaction is paused for this request (section 10).
 
         A pause holds for ``PAUSE_SECONDS`` on the route it began on; after that, or on another route, it clears
-        by itself, with both counters, and the next threshold tries again. The cleared guard commits with the next
-        C-9 transition, and until then the rule gives the same answer from the rows.
+        by itself, with both counters, and the next threshold tries again. The clear is a guard transition like any
+        other: it commits at once through the one writer (invariant 3), so a later run reads it from the rows.
         """
         guard = self._guard
         if not guard["paused"]:
@@ -1170,7 +1183,7 @@ class Agent:
         route = _route(selected)
         if guard.get("paused_route") == route and self.context.clock() - guard.get("paused_at", 0) < PAUSE_SECONDS:
             return True
-        self._guard = dict(_GUARD_DEFAULT)
+        await self._commit_context([], _GUARD_DEFAULT)
         return False
 
     async def _minimal(

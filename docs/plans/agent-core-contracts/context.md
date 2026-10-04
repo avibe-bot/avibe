@@ -215,9 +215,9 @@ is written, so projection stays a pure function of the rows:
   `Read` lists paths of successful `read` calls that no `write` or `edit` touched; `Modified` lists paths of
   successful `write` or `edit` calls; `(none)` when a list is empty. `<earlier-record>` is left out when the adapter supplies no command, and
   `<current-request>` when the cut did not split a turn.
-- `state`: texts the adapter rendered from their own stores when the checkpoint was written: skill bodies by name and
-  revision (at most 5,000 tokens each and 25,000 in total), pending Watches, Tasks, and delegated Runs from the Harness
-  tables, and the full environment block (C-7 §8); a checkpoint always happens inside a run.
+- `state`: texts the adapter rendered from their own stores when the checkpoint was written: the full environment
+  block (C-7 §8; a checkpoint always happens inside a run), pending Watches, Tasks, and delegated Runs from the Harness
+  tables, and skill bodies by name and revision (at most 5,000 tokens each), all within one 25,000-token budget.
 - Projection (C-5 §3): the system prompt, hook-rehydrated messages, one user message holding `summary` and then each
   `state` text as its own text block, then the rows from `first_kept_seq` on, with edits applied. A tool result whose
   call was summarized is left out with it. No synthetic "continue" message follows.
@@ -271,11 +271,13 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   and replies in `messages` of every Session whose rows the context holds (the Session and its fork ancestry, each
   up to its fork bound), through the last summarized `context_seq`, filtered by a `KEYWORD` the model replaces. It
   reads `messages` only, which every caller of `vibe data query` may read; tool outputs can be run again.
-- `ContextHost.render_state(StateRequest)`: the `state` texts (§7), rendered from their own stores: each skill the
-  summarized rows loaded, by name and its current revision (`<skill_content name revision>`, cut to 5,000 tokens with
-  a note saying how to load all of it; 25,000 in total, the rest named; a skill that no longer loads is named); the
-  Session's pending Watches, Tasks, and delegated Runs (`<pending-work>`, by kind, id, and label, from the Harness
-  tables, never a command); and the full environment block (C-7 §8).
+- `ContextHost.render_state(StateRequest)`: the `state` texts (§7), rendered from their own stores, in this order:
+  the full environment block (C-7 §8); the Session's pending Watches, Tasks, and delegated Runs (`<pending-work>`, by
+  kind, id, and label, from the Harness tables, never a command); and each skill the summarized rows loaded, by name
+  and its current revision (`<skill_content name revision>`, cut to 5,000 tokens with a note saying how to load all
+  of it; a skill that no longer loads is named). All of it shares one 25,000-token budget through one renderer: a
+  section keeps its items in order while they fit, and names what it leaves out (up to 20, then "and N more") with
+  how to get it back.
 - Skill loads marked in their results: a successful `vibe skill load` through `bash` records the skill's name and
   revision in the result's `details.skill`, so clearing spares it (§4) and a checkpoint carries it (§7).
 - A `TranscriptStore` (C-5 §2) implementing the whole protocol C-9 uses: `append_response(..., request=...)` keeps
@@ -291,8 +293,11 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
 - The one user-visible text of context management, through `vibe/i18n`: when a run ends `context_exhausted`, the
   stop message says the conversation has grown too long to continue reliably and suggests starting a new session
   with `/new`. Compaction itself, the pause included, shows nothing. A failure is recorded against the Model Hub route
-  only when the served source produced it (a C-2 provider error, the model's own failed answer, or a reply the
-  transcript cannot hold): never for a context that cannot fit, a Stop, or a local or store error.
+  only when the served source produced it, which the loop states on every `error` event (`origin`, set where the
+  error is raised): `source` for a C-2 provider error other than the loop's own abort, an answer the loop rejected
+  (a failed or empty answer, a refusal, tool calls under `length` past the retries or under another stop), or a
+  reply the transcript cannot hold; `local` for everything else (a context that cannot fit, a Stop, a hook, tool, or
+  store error).
 
 ## 10. Guards
 
@@ -309,7 +314,7 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   whichever comes first; both counters clear with it, and the next threshold tries again. The counters and the
   pause (`paused_at`, `paused_route`) are durable loop state, stored beside the hook state in `agent_state` rows
   (`AgentState.context`), so they survive restarts and forks; projection takes them from the latest `agent_state`
-  row that carries them, and a cleared pause commits with the next C-9 transition.
+  row that carries them. A pause that clears commits at once, like every guard transition (invariant 3).
 
 **Ordering and ownership invariants.** This list is the one normative statement of these rules; the other sections
 refer to it. Each has a test in `tests/agent_core/agent/test_compaction.py` (route: `test_context.py`; the ledger's
@@ -333,7 +338,8 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    two fixed texts are never cut.
 3. **One commit for C-9 state.** A transition (its `context_edit` rows, its `context_compaction` row, the guard and
    pause, and the hook state of that commit point in `AgentState`) is written in one transaction
-   (`append_payloads`), before any event announces it; a failed commit leaves nothing. Nothing else writes
+   (`append_payloads`), before any event announces it; a failed commit leaves nothing. Every guard transition goes
+   through it, the ones with no other row included (a failed checkpoint, a pause that clears). Nothing else writes
    `AgentState.context`.
 4. **One attempt ledger.** Every model attempt of a run (success, overflow, error, retry, checkpoint) records its
    request, its response or partial, and so its usage, in one place. The checkpoint audit and the request facts of a

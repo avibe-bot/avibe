@@ -638,7 +638,22 @@ async def test_a_pause_clears_by_itself_and_the_next_threshold_tries_again(why):
     assert len(model.checkpoint_requests) == 1 and events[-1].reason == "completed"
     state = [row for row in await store.load("session") if row.kind == "agent_state"][-1]
     assert state.payload["context"] == {"failures": 0, "ineffective": 0, "paused": False}
-    assert store.transactions[-1] == ["agent_state", "compaction"]  # the cleared pause commits with the checkpoint
+
+
+async def test_a_pause_cleared_on_another_route_stays_cleared_after_a_restart():
+    now = [1_000.0]
+    store, context = await _paused(now)
+    other = ModelEndpoint("anthropic", "http://model.invalid", "other-model", "", provider="test-provider")
+    # A small request on a route with room: below its threshold, so the clear is the only C-9 transition.
+    small, committed = Model([[Done(assistant("ok"))]]), len(store.transactions)
+    roomy = ModelSelection(other, LARGE.capabilities)
+    events = await run(make_agent(small, store=store, selection=roomy, context=context), row="small")
+    assert not small.checkpoint_requests and events[-1].reason == "completed"
+    assert store.transactions[committed:] == [["agent_state"]]  # the clear commits on its own, through the one writer
+    # A new Agent, back on the first route within thirty minutes: the pause stays cleared, and the threshold tries.
+    model = Model([call("read", "again", path="f"), [Done(assistant("ok"))]], [[Done(assistant(CHECKPOINT))]])
+    events = await run(make_agent(model, store=store, context=context, tools=[reader(tokens(1))]), row="next")
+    assert len(model.checkpoint_requests) == 1 and events[-1].reason == "completed"
 
 
 async def test_a_pause_holds_for_thirty_minutes_on_its_route():

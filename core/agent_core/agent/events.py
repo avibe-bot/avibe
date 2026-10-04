@@ -14,6 +14,9 @@ from typing import Literal, Optional, Union
 RunEndReason = Literal["completed", "aborted", "error", "ended_by_hook", "context_exhausted"]
 CompactionReason = Literal["threshold", "overflow"]
 CompactionMode = Literal["normal", "rolling", "dropped"]
+#: Who produced a failure: ``source`` is the served model (a provider error, an answer the loop rejected, a response
+#: the transcript cannot hold); ``local`` is everything else (a Stop, context exhaustion, a hook, tool, or store error).
+ErrorOrigin = Literal["source", "local"]
 
 
 @dataclass(frozen=True)
@@ -144,6 +147,7 @@ class AgentError:
     seq: int
     kind: str
     message: str
+    origin: ErrorOrigin
 
 
 AgentEvent = Union[

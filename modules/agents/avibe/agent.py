@@ -126,32 +126,6 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
     return relative
 
 
-#: Failures the served source produced (positive provenance): the C-2 provider error kinds, the model's own failed
-#: answers, and a reply the transcript cannot hold. Nothing else (context exhaustion, a Stop, a local or store
-#: error) is recorded against the Model Hub route.
-_SOURCE_FAILURES = frozenset(
-    {
-        "rate_limit",
-        "overloaded",
-        "network",
-        "server",
-        "auth",
-        "invalid_request",
-        "unknown",
-        "error",
-        "refusal",
-        "safety",
-        "empty_response",
-        "ProviderProtocolViolation",
-    }
-)
-
-
-def _source_failed(kind: Optional[str]) -> bool:
-    """Whether a failure is the served source's, so Model Hub records it against the route (C-6)."""
-    return kind in _SOURCE_FAILURES
-
-
 #: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
 _NO_OUTPUT_CAP = 1 << 30
 
@@ -171,7 +145,7 @@ class _Run:
     reason: Optional[str] = None
     # Model Hub's copy for a route it refused during the run (``_preflight``).
     refusal: Optional[str] = None
-    errors: list[tuple[str, str]] = field(default_factory=list)
+    errors: list[AgentError] = field(default_factory=list)
     final_row: Optional[str] = None
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
     # This run's committed responses by row id, for delivering them; released with the run.
@@ -622,7 +596,7 @@ class AvibeAgent(BaseAgent):
         elif isinstance(event, ToolStarted):
             await self._emit_tool_started(run, event)
         elif isinstance(event, AgentError):
-            run.errors.append((event.kind, event.message))
+            run.errors.append(event)
         elif isinstance(event, RunEnded):
             run.reason = event.reason
         elif isinstance(event, CompactionFinished):
@@ -646,7 +620,10 @@ class AvibeAgent(BaseAgent):
         run.settled = True
         request, context = run.request, run.request.context
         reason = run.reason or "error"
-        kind, diagnostic = run.errors[0] if run.errors else (None, reason)
+        first = run.errors[0] if run.errors else None
+        kind, diagnostic = (first.kind, first.message) if first is not None else (None, reason)
+        # Model Hub records a failure against the route only when the served source produced it (C-6).
+        source = first is not None and first.origin == "source"
         final = run.responses.get(run.final_row) if run.final_row else None
         if final is not None:
             if run.stop_requested and reason == "aborted":
@@ -658,7 +635,7 @@ class AvibeAgent(BaseAgent):
                 # A silent final whose run failed after the commit: like a final without text
                 # of its own (``_display_source``), its row carries the explanation.
                 body = error_text(kind or "empty_response", self._language(), reason=reason)
-            if failed and _source_failed(kind):
+            if failed and source:
                 await self.record_model_hub_native_failure(context, diagnostic or (kind or "failed final"))
             if body.strip():
                 # The same result path as the other backends; the row is already the message.
@@ -689,7 +666,7 @@ class AvibeAgent(BaseAgent):
                 context, "result", "", level="silent", output=terminal_output_for(request)
             )
             return
-        await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal)
+        await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source)
 
     async def _continuing_input(self, run: _Run) -> Optional[AgentInput]:
         """The input that continues a Turn whose run ended by design with inputs it accepted.
@@ -1194,11 +1171,14 @@ class AvibeAgent(BaseAgent):
         reason: Optional[str] = None,
         cause: Optional[BaseException] = None,
         refusal: Optional[str] = None,
+        source: bool = False,
     ) -> None:
-        """A failed Turn's notice; a Model Hub ``refusal`` copy takes precedence, as at preflight."""
-        # A failure the served source produced replaces that served attempt, as for the other backends; any other
-        # (a context that cannot fit, a Stop, a local error) leaves Model Hub's record as it is.
-        if _source_failed(kind):
+        """A failed Turn's notice; a Model Hub ``refusal`` copy takes precedence, as at preflight.
+
+        A failure the served ``source`` produced (``AgentError.origin``) replaces that served attempt, as for the
+        other backends; any other (a context that cannot fit, a Stop, a local error) leaves Model Hub's record as it is.
+        """
+        if source:
             await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
         await emit_backend_failure(
             self.controller,

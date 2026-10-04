@@ -400,7 +400,8 @@
       "then": {
         "required": [
           "kind",
-          "message"
+          "message",
+          "origin"
         ],
         "properties": {
           "kind": {
@@ -408,6 +409,13 @@
           },
           "message": {
             "type": "string"
+          },
+          "origin": {
+            "description": "source: the served model produced the failure (a provider error, an answer the loop rejected, a response the transcript cannot hold); local: everything else.",
+            "enum": [
+              "source",
+              "local"
+            ]
           }
         }
       }

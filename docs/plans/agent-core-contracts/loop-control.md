@@ -106,7 +106,7 @@ sent with that request gets the error result `Tool <name> is not available.`
 | `compaction_started`, `compaction_finished`, `compaction_failed`, `compaction_paused` | none: compaction is invisible (C-9 `context.md` §10); a finished one lowers the session's token snapshot |
 | `context_exhausted` | the run's stop message: the conversation has grown too long to continue reliably; start a new session with `/new` (C-9 `context.md` §9); the parts are diagnostic |
 | `run_ended` | `MessageOutput` settles the Turn |
-| `error` | `notify` / `error` row; the text shown is the adapter's localized copy for the event's `kind` (`vibe/i18n`), and `message` is diagnostic detail, never display copy |
+| `error` | `notify` / `error` row; the text shown is the adapter's localized copy for the event's `kind` (`vibe/i18n`), and `message` is diagnostic detail, never display copy; `origin` (`source` or `local`, set where the loop raises the error) decides whether Model Hub records the failure against the route (C-9 `context.md` §9) |
 
 ## 7. Snapshot and fork
 

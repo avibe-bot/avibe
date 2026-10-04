@@ -182,9 +182,18 @@ async def _failing_commit(harness: _Harness) -> None:
     harness.agent.store.append_payloads = append_payloads
 
 
+_CUT_CALL = [Done(assistant(calls=[ToolCallBlock("cut", "bash", {"command": "ls"})], stop_reason="length"))]
+
+
 @pytest.mark.parametrize(
     "case,recorded",
-    [("provider server error", 1), ("store failure after a good checkpoint", 0), ("provider refused", 1)],
+    [
+        ("provider server error", 1),
+        ("store failure after a good checkpoint", 0),
+        ("provider refused", 1),
+        ("tool call cut by the output limit past the retries", 1),
+        ("tool calls under a stop", 1),
+    ],
 )
 async def test_model_hub_hears_only_of_failures_the_served_source_produced(engine, session, tmp_path, case, recorded):
     reported: list[str] = []
@@ -197,6 +206,10 @@ async def test_model_hub_hears_only_of_failures_the_served_source_produced(engin
         scripts = [[ProviderError("server", "upstream failed", False)]]
     elif case == "provider refused":
         scripts = [[Done(assistant("", stop_reason="refusal"))]]
+    elif case == "tool call cut by the output limit past the retries":
+        scripts = [_CUT_CALL] * 10
+    elif case == "tool calls under a stop":
+        scripts = [[Done(assistant(calls=[ToolCallBlock("call", "bash", {"command": "ls"})], stop_reason="stop"))]]
     else:
         scripts = [[Done(assistant("noted"))], [Done(assistant(CHECKPOINT))]]
     harness = _Harness(engine, tmp_path, "avibe", scripts)
@@ -313,18 +326,18 @@ async def test_the_state_carries_skills_pending_work_and_the_environment(engine,
     host = AvibeContextHost(engine, environment=lambda _: {"cwd": "/work", "os": "macOS"}, skills=lambda _: skills)
     refs = (SkillRef("parser", "r1"), SkillRef("huge", "r2"), SkillRef("gone", "r3"))
     state = await host.render_state(StateRequest(SESSION, refs))
-    parser, huge, gone, pending, environment = state
+    environment, pending, parser, huge, gone = state
+    assert environment.startswith("<environment>") and "\ncwd: /work" in environment
+    assert "watch wd_1" in pending and "CI for #12" in pending and "agent_run run_1" in pending
     assert parser.startswith('<skill_content name="parser" revision="') and "Parse it." in parser
     assert text_tokens(huge) <= 5_000 and "vibe skill load -- huge" in huge  # cut, saying how to get all of it
     assert gone.startswith('<skill-unavailable name="gone">')
-    assert "watch wd_1" in pending and "CI for #12" in pending and "agent_run run_1" in pending
-    assert environment.startswith("<environment>") and "\ncwd: /work" in environment
     # Past the 25,000-token total, the remaining skills are named, not carried, and not even loaded; the catalog
     # is resolved once per checkpoint, however many skills it carries.
     skills.loads.clear()
     capped = await host.render_state(StateRequest(SESSION, tuple(SkillRef(name, "r") for name in many)))
-    assert sum(text_tokens(item) for item in capped[:-2]) <= 25_000
-    assert capped[-3].startswith("<skills-left-out>") and "big5" in capped[-3]
+    assert sum(text_tokens(item) for item in capped) <= 25_000
+    assert capped[-1].startswith('<left-out of="skills">') and "big5" in capped[-1]
     assert skills.snapshots == 2 and "big5" not in skills.loads
     # No pending work means no section; the environment block is always carried.
     with engine.begin() as conn:
@@ -334,17 +347,34 @@ async def test_the_state_carries_skills_pending_work_and_the_environment(engine,
     assert only.startswith("<environment>")
 
 
-async def test_every_skill_text_counts_against_the_one_total(engine, session):
-    # A long Session can carry hundreds of skills: bodies, unavailable notices, and the names left out all fit
-    # inside the 25,000-token total, the names listed up to 20 and then counted.
+async def test_all_rehydrated_state_shares_the_one_total(engine, session):
+    # A long Session can own hundreds of Watches and carry hundreds of skills: the environment block, the pending
+    # work, the skill bodies, the unavailable notices, and what is left out all fit inside the one 25,000-token
+    # total, each section naming at most 20 of what it left out and then counting the rest.
+    label = "CI for the release branch, then the nightly smoke run and the installer check"
+    for index in range(500):
+        _insert_definition(
+            engine, id=f"wd_{index:03}", definition_type="watch", name=f"{label} {index}", session_id=SESSION
+        )
     found = {f"skill-{index:03}": _skill(f"skill-{index:03}", tokens(3_000)) for index in range(0, 400, 2)}
-    host = AvibeContextHost(engine, environment=lambda _: {}, skills=lambda _: _Skills(found))
+    watches = "; ".join(f'wd_{index:03} "{label} {index}" command running' for index in range(500))
+    skills = _Skills(found)
+    host = AvibeContextHost(engine, environment=lambda _: {"cwd": "/work", "watches": watches}, skills=lambda _: skills)
     refs = tuple(SkillRef(f"skill-{index:03}", "r") for index in range(400))
-    *skill_texts, environment = await host.render_state(StateRequest(SESSION, refs))
-    assert sum(text_tokens(item) for item in skill_texts) <= 25_000
-    left_out = skill_texts[-1]
-    assert left_out.startswith("<skills-left-out>") and left_out.count("skill-") == 20
-    assert re.search(r", and \d+ more\.", left_out)
+    state = await host.render_state(StateRequest(SESSION, refs))
+    assert sum(text_tokens(item) for item in state) <= 25_000
+    environment, pending, pending_left_out = state[:3]
+    assert environment.startswith("<environment>") and "wd_499" in environment
+    assert pending.startswith("<pending-work>") and "watch wd_000" in pending
+    assert pending_left_out.startswith('<left-out of="pending work">') and pending_left_out.count("watch wd_") == 20
+    assert re.search(r", and \d+ more\.", pending_left_out)
+    skills_left_out = state[-1]
+    assert skills_left_out.startswith('<left-out of="skills">') and skills_left_out.count("skill-") == 20
+    assert re.search(r", and \d+ more\.", skills_left_out)
+    # Whatever fills it, the total holds: an environment block near the whole budget leaves the rest their notices.
+    for size in range(23_000, 25_001, 250):
+        host = AvibeContextHost(engine, environment=lambda _, size=size: {"cwd": tokens(size)}, skills=lambda _: skills)
+        assert sum(text_tokens(item) for item in await host.render_state(StateRequest(SESSION, refs))) <= 25_000, size
 
 
 async def test_a_successful_skill_load_is_recorded_in_the_bash_result():

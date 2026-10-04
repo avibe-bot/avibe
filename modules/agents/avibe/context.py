@@ -7,9 +7,9 @@
   context holds (the Session and its fork ancestry), up to the last summarized
   ``context_seq``;
 * ``render_state`` renders, from their own stores, the state a checkpoint
-  carries: the bodies of the skills the summarized rows loaded, the Session's
-  pending Watches, Tasks, and delegated Runs, and the full environment block
-  (a checkpoint always happens inside a run).
+  carries: the full environment block (a checkpoint always happens inside a
+  run), the Session's pending Watches, Tasks, and delegated Runs, and the bodies
+  of the skills the summarized rows loaded, all within one budget (``_render``).
 
 A skill load is a ``bash`` call to ``vibe skill load``; ``mark_skill_loads``
 records the skill's name and revision in that call's result details, which is
@@ -22,7 +22,7 @@ import asyncio
 import html
 import re
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
 
 from sqlalchemy.engine import Engine
 
@@ -30,15 +30,17 @@ from core.agent_core.harness.context import SkillRef, StateRequest, text_tokens
 from core.agent_core.tools.base import Tool, ToolContext, ToolResult, ToolSpec
 from modules.agents.avibe.prompt import render_environment
 
-#: Each skill body a checkpoint carries, and all of them together, in tokens (section 7).
+#: Everything a checkpoint rehydrates shares one budget, and each skill body is cut to its own, in tokens (section 7).
+STATE_TOKENS = 25_000
 SKILL_TOKENS = 5_000
-SKILLS_TOKENS = 25_000
-#: Below this much of the total left, no further skill can carry anything useful.
-_SKILL_FLOOR = 200
-#: The skills left out are named, at most this many, then "and N more"; that notice is kept inside the total.
+#: Below this much of the budget left, no further item can carry anything useful.
+_FLOOR = 200
+#: What a section leaves out is named, at most this many, then "and N more"; its wrapper and that notice are kept
+#: inside the budget.
 _LISTED = 20
 _NAME_CHARS = 64
 _NOTICE_TOKENS = 600
+_LABEL_CHARS = 200
 
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
 _SKILL_LOAD = re.compile(
@@ -103,6 +105,21 @@ class SkillScope:
         return skill_revision(skill) if skill is not None else None
 
 
+#: One item of rehydrated state: its name, and its text within a token limit (None when it cannot fit at all).
+_Item = Tuple[str, Callable[[int], Optional[str]]]
+
+
+@dataclass(frozen=True)
+class _Section:
+    """One kind of rehydrated state: its items in order, how its kept texts join (None: each is its own text), and
+    the hint its left-out notice ends with."""
+
+    name: str
+    items: Sequence[_Item]
+    join: Optional[Callable[[list[str]], str]]
+    hint: str
+
+
 class AvibeContextHost:
     """The loop's ``ContextHost`` for the Avibe Agent."""
 
@@ -139,65 +156,95 @@ class AvibeContextHost:
         return f'vibe data query --limit 100 --sql "{sql}"'
 
     async def render_state(self, request: StateRequest) -> list[str]:
-        texts = await self._skill_texts(request.session_id, request.skills)
-        pending = await asyncio.to_thread(self._pending_work, request.session_id)
-        if pending:
-            texts.append(pending)
-        texts.append(render_environment(self._environment(request.session_id)))
-        return texts
+        environment = render_environment(self._environment(request.session_id))
+        scope = self._skills(request.session_id)
+        return await asyncio.to_thread(self._state, request, environment, scope)
 
-    async def _skill_texts(self, session_id: str, skills: Sequence[SkillRef]) -> list[str]:
-        if not skills:
-            return []
-        scope = self._skills(session_id)
-        catalog = await asyncio.to_thread(scope.catalog) if scope is not None else None
-        from core.skill_observability import skill_revision
+    def _state(self, request: StateRequest, environment: str, scope: Optional[SkillScope]) -> list[str]:
+        sections = (
+            _Section("environment", (("environment", lambda limit: environment),), None, "The next input carries it."),
+            _Section(
+                "pending work",
+                self._pending_work(request.session_id),
+                lambda lines: "<pending-work>\n" + "".join(lines) + "</pending-work>",
+                "Each is still pending; `vibe watch list`, `vibe task list`, and `vibe runs list` show them.",
+            ),
+            _Section(
+                "skills",
+                _skill_items(scope, request.skills),
+                None,
+                "Run `vibe skill load -- <name>` for any you still need.",
+            ),
+        )
+        return _render(sections, STATE_TOKENS)
 
-        texts: list[str] = []
-        # Every skill text counts against the one total, the left-out notice's room reserved first.
-        budget = SKILLS_TOKENS - _NOTICE_TOKENS
-        left_out: list[str] = []
-        for ref in skills:
-            if budget < _SKILL_FLOOR:
-                left_out.append(ref.name)  # no room left: named, and not loaded
-                continue
-            skill = await asyncio.to_thread(scope.load, ref.name, catalog) if scope is not None else None
-            if skill is None or skill.body is None:
-                text: Optional[str] = (
-                    f'<skill-unavailable name="{_attr(ref.name)}">This skill no longer loads. Run '
-                    f"`vibe skill load -- {ref.name}` if you still need it.</skill-unavailable>"
-                )
-            else:
-                limit = min(SKILL_TOKENS, budget)
-                text = _skill_text(ref.name, skill_revision(skill) or ref.revision, skill.body, limit)
-            if text is None or text_tokens(text) > budget:
-                left_out.append(ref.name)
-                continue
-            budget -= text_tokens(text)
-            texts.append(text)
-        if left_out:
-            listed = ", ".join(name[:_NAME_CHARS] for name in left_out[:_LISTED])
-            more = f", and {len(left_out) - _LISTED} more" if len(left_out) > _LISTED else ""
-            texts.append(
-                f"<skills-left-out>Over the {SKILLS_TOKENS:,}-token budget for skills: {listed}{more}. Run "
-                "`vibe skill load -- <name>` for any you still need.</skills-left-out>"
-            )
-        return texts
-
-    def _pending_work(self, session_id: str) -> Optional[str]:
+    def _pending_work(self, session_id: str) -> tuple[_Item, ...]:
         from storage.workbench_sessions_service import derive_session_harness_activities
 
         with self._engine.connect() as conn:
             items = derive_session_harness_activities(conn, session_id)
-        if not items:
-            return None
-        lines = []
+        rendered = []
         for item in items:
             kind = item.get("item_kind") or "item"
-            label = str(item.get("label") or "").replace("\n", " ")
-            identity = str(item.get("id") or "").split(":", 1)[-1]
-            lines.append(f'- {kind} {identity} "{label}": {item.get("status")} since {item.get("since")}')
-        return "<pending-work>\n" + "\n".join(lines) + "\n</pending-work>"
+            label = " ".join(str(item.get("label") or "").split())[:_LABEL_CHARS]
+            name = f"{kind} {str(item.get('id') or '').split(':', 1)[-1]}"
+            line = f'- {name} "{label}": {item.get("status")} since {item.get("since")}\n'
+            rendered.append((name, lambda limit, line=line: line))
+        return tuple(rendered)
+
+
+def _render(sections: Sequence[_Section], budget: int) -> list[str]:
+    """The one renderer of rehydrated state: every section's texts, in order, within ``budget`` tokens in all.
+
+    The items of every section share one room, in order; each section's wrapper and left-out notice are paid from
+    what is held back for them. An item is rendered only when there is room for it; what does not fit is left out
+    and named, up to ``_LISTED`` names and then "and N more".
+    """
+    texts: list[str] = []
+    room = budget - _NOTICE_TOKENS * len(sections)
+    for section in sections:
+        kept: list[str] = []
+        left_out: list[str] = []
+        for name, render in section.items:
+            text = render(room) if room >= _FLOOR else None
+            if text is None or text_tokens(text) > room:
+                left_out.append(name)
+                continue
+            kept.append(text)
+            room -= text_tokens(text)
+        if kept:
+            texts.extend([section.join(kept)] if section.join is not None else kept)
+        if left_out:
+            listed = ", ".join(name[:_NAME_CHARS] for name in left_out[:_LISTED])
+            more = f", and {len(left_out) - _LISTED} more" if len(left_out) > _LISTED else ""
+            texts.append(
+                f'<left-out of="{section.name}">Over the {STATE_TOKENS:,}-token budget for carried state: '
+                f"{listed}{more}. {section.hint}</left-out>"
+            )
+    return texts
+
+
+def _skill_items(scope: Optional[SkillScope], skills: Sequence[SkillRef]) -> tuple[_Item, ...]:
+    """The carried skills as items: each loaded only when it is rendered, from one catalog per checkpoint."""
+    from core.skill_observability import skill_revision
+
+    catalog: list[Any] = []
+
+    def item(ref: SkillRef) -> _Item:
+        def render(limit: int) -> Optional[str]:
+            if scope is not None and not catalog:
+                catalog.append(scope.catalog())
+            skill = scope.load(ref.name, catalog[0]) if scope is not None else None
+            if skill is None or skill.body is None:
+                return (
+                    f'<skill-unavailable name="{_attr(ref.name)}">This skill no longer loads. Run '
+                    f"`vibe skill load -- {ref.name}` if you still need it.</skill-unavailable>"
+                )
+            return _skill_text(ref.name, skill_revision(skill) or ref.revision, skill.body, min(SKILL_TOKENS, limit))
+
+        return ref.name, render
+
+    return tuple(item(ref) for ref in skills)
 
 
 def _skill_text(name: str, revision: str, body: str, limit: int) -> Optional[str]:
