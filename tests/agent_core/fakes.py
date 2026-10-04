@@ -83,10 +83,13 @@ class FakeModelRouter:
 
 
 class InMemoryTranscriptStore:
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Optional[Callable[[], float]] = None) -> None:
         self.rows: dict[str, list[ContextEntry]] = {}
         self.forks: dict[str, Snapshot] = {}
         self.final: dict[str, bool] = {}
+        # C-9 checkpoint-turn audit rows: (session_id, row id, payload), never context.
+        self.audits: list[tuple[str, str, dict]] = []
+        self._clock = clock
         self._next_id = 0
 
     def fork(self, snapshot: Snapshot, *, session_id: str) -> None:
@@ -109,7 +112,8 @@ class InMemoryTranscriptStore:
             row_id = f"row_{self._next_id}"
         if any(entry.row_id == row_id for entry in entries):
             raise ValueError(f"input already consumed: {row_id}")
-        row = ContextEntry(session_id, seq, kind, row_id, deepcopy(message), deepcopy(payload or {}))
+        created_at = self._clock() if self._clock is not None else None
+        row = ContextEntry(session_id, seq, kind, row_id, deepcopy(message), deepcopy(payload or {}), created_at)
         self.rows.setdefault(session_id, []).append(row)
         return deepcopy(row)
 
@@ -126,6 +130,12 @@ class InMemoryTranscriptStore:
 
     async def append_payload(self, session_id, kind, payload: Mapping) -> ContextEntry:
         return await self._append(session_id, kind, payload=payload)
+
+    async def append_checkpoint_turn(self, session_id, payload: Mapping) -> str:
+        self._next_id += 1
+        row_id = f"audit_{self._next_id}"
+        self.audits.append((session_id, row_id, deepcopy(dict(payload))))
+        return row_id
 
 
 class FakeTool:

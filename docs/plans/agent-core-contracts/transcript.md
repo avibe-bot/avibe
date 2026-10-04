@@ -16,7 +16,7 @@ unique per Session across both tables (partial unique index on each table, plus 
 | tool result | `agent_events` | `tool_result` | `context` | `content_json` = `ToolResult` |
 | checkpoint | `agent_events` | `context_compaction` | `context` | `content_json` = `Compaction` |
 | cleared result | `agent_events` | `context_edit` | `context` | `content_json` = `ContextEdit` |
-| hook state | `agent_events` | `agent_state` | `context` | `content_json` = `AgentState` |
+| hook and guard state | `agent_events` | `agent_state` | `context` | `content_json` = `AgentState` |
 
 A final response is `error` when it failed by itself (no text of its own: an empty answer, or a refusal or safety
 stop without an explanation), as the other backends' failed terminal rows are. A successful final with nothing to show
@@ -26,7 +26,8 @@ the commit) types it `error`. Context loading accepts all three.
 
 Display-only rows keep `context_seq` null: `interim`, `notify`, an `error` that reports a run failure, `vault`,
 `output`, queued or removed inputs, and the `tool_call` trace row written at tool start (its `metadata_json` carries
-`tool_call_id` and `job_id` so the activity panel can pair it with the result).
+`tool_call_id` and `job_id` so the activity panel can pair it with the result). A checkpoint turn's audit row
+(`context_checkpoint_turn`, `visibility = 'audit'`, `CheckpointTurn`) is never context either (C-9 `context.md` §6).
 
 ## 2. Writing
 
@@ -55,15 +56,17 @@ Display-only rows keep `context_seq` null: `interim`, `notify`, an `error` that 
 
 1. Collect the context rows: the Session's own, plus its fork ancestry (§4).
 2. Order by `context_seq`.
-3. If a `context_compaction` row exists, take the latest; the context becomes its checkpoint message followed by the
-   rows with `context_seq >= first_kept_seq`, excluding every `context_compaction` row (including the selected one)
-   and `agent_state` rows.
+3. If a `context_compaction` row exists, take the latest; the context becomes its checkpoint message (its `summary`,
+   then each `state` text as its own block) followed by the rows with `context_seq >= first_kept_seq`, excluding every
+   `context_compaction` row (including the selected one) and `agent_state` rows. A tool result whose call was
+   summarized leaves with it.
 4. Apply `context_edit` rows: the latest edit per target replaces that tool result's content with its placeholder;
    the `context_edit` rows themselves are then removed, so the result is only messages.
 5. Answer any tool call that still has no committed result with the synthetic interrupted result from
    `cross-provider.md`. Projection never consults a live job; resume settles open calls durably first
    ([`recovery.md`](recovery.md)).
-6. Prepend the rebuilt system prompt and rehydrated state (plan §5.2); these are not rows.
+6. Prepend the rebuilt system prompt and hook-rehydrated messages; these are not rows. State rendered for a
+   checkpoint is in its row, so projection stays a pure function of the rows (C-9 `context.md` §7).
 
 ## 4. Fork
 

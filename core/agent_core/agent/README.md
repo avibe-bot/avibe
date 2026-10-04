@@ -1,7 +1,8 @@
-# Agent loop (P1)
+# Agent loop (P1, C-9 in P3)
 
-The change contract is C-3 plus C-5 projection steps 1, 2, 5, and 6 from
-`docs/plans/agent-core-contracts/`. Foundation types are unchanged.
+The change contract is C-3 plus C-5 projection from `docs/plans/agent-core-contracts/`,
+and C-9 context management (`context.md`) when the Agent has a `ContextConfig`.
+Foundation types are unchanged.
 
 ## Integration
 
@@ -24,6 +25,15 @@ async for event in agent.run(AgentInput(message_id, rendered_input), turn_id=tur
 pending = await agent.take_pending_inputs()
 ```
 
+C-9 is on when the adapter passes `context=ContextConfig(host=..., scratch_dir=...)`
+(`harness/context.py`). Before every model request the loop then clears old
+tool results, writes a forked checkpoint at T, and walks the overflow ladder;
+`agent.compact(turn_id=..., focus=...)` is `/compact`, refused while a run is
+active. Without a config nothing changes and an overflow ends the run
+`context_exhausted`. The `ContextHost` renders the `<earlier-record>` lookup and
+the state a checkpoint carries; the store adds `append_checkpoint_turn` for the
+checkpoint turn's audit row.
+
 `steer` and `follow_up` are async and return whether the active run accepted the
 input. `False` means the adapter keeps the persisted input in the P3 queue.
 An accepted input remains owned by the Agent until consumed or returned by
@@ -44,8 +54,8 @@ input consumption. The run yields a clear error and terminal event without a
 provider request. Unknown tool support still sends tools. Unknown/false image
 and reasoning support is disabled; reasoning also requires a declared effort.
 The configured output budget defaults to 8,192 and is capped by the provider's
-maximum (8,192 when unknown). `ModelSelection.context_window` exposes the C-9
-budget (128,000 when unknown); context management itself remains P3.
+maximum (8,192 when unknown); that cap is C-9's `O`. `ModelSelection.context_window`
+is C-9's `W` (128,000 when unknown).
 The shared nullable source capabilities are not changed into guessed values.
 Before-model rewrites affect a detached request only, including endpoint headers.
 The router's cached selection is never mutated. Tools execute against the
@@ -135,8 +145,9 @@ localize that error rather than deliver a silent success.
   budget ends with the original error, including when delay or route resolution
   crosses the deadline. Route resolution precedes request admission: expiry is
   checked before route validation, projection, rehydration or hooks can run.
-  Any streamed event or partial forbids retry. Overflow emits an error and ends
-  as `context_exhausted`.
+  Any streamed event or partial forbids retry. Without a `ContextConfig`, overflow
+  emits an error and ends as `context_exhausted`; with one, it enters the C-9
+  overflow ladder, which ends there only when nothing more can move out.
 - Projection consumes store-resolved ancestry, sorts by sequence, restores hook
   state, and answers orphans with deterministic interrupted text. It has no job
   host or external settler. The caller supplies rebuilt system/state messages.
@@ -174,8 +185,13 @@ is a later layer.
 
 ## Known by design
 
-- No compaction, context edits, overflow recovery, or provider transport here.
-  A P3 row raises `ProjectionError`; it is never silently ignored.
+- No provider transport here. Checkpoint rows are projected from the text and
+  state fixed when they were written; a malformed `context_compaction` or
+  `context_edit` row raises `ProjectionError` and is never silently ignored.
+- A checkpoint turn runs through `before_model` and `before_tool` only (the
+  checkpoint policy last). Its responses and results are never committed, so
+  `after_model` and `after_tool` do not see them, and it emits nothing but the
+  compaction events.
 - Store operations remain separate transactions under the queue lock (approved
   for v1 by the orchestrator). A crash between a non-final response and input
   consumption leaves that input queued for adapter recovery.

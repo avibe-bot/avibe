@@ -102,44 +102,36 @@
       }
     },
     "Compaction": {
-      "description": "`agent_events.content_json` of a `context_compaction` row (plan §5.2).",
+      "description": "`agent_events.content_json` of a `context_compaction` row (context.md section 7). Its model-facing content (`summary`, `state`) is fixed when it is written, so projection is a pure function of the rows.",
       "type": "object",
       "required": [
         "version",
-        "summary",
-        "first_kept_seq",
-        "summarized_from_seq",
-        "summarized_to_seq",
+        "mode",
         "reason",
+        "summary",
+        "checkpoint",
+        "state",
+        "first_kept_seq",
+        "summarized_to_seq",
+        "files_read",
+        "files_modified",
+        "skills",
         "tokens_before",
         "tokens_after_estimate",
-        "summarizer",
-        "files_read",
-        "files_modified"
+        "threshold"
       ],
       "additionalProperties": false,
       "properties": {
         "version": {
           "const": 1
         },
-        "summary": {
-          "type": "string",
-          "description": "Self-contained checkpoint text, including the mechanical file lists and `<current-request>` when present."
-        },
-        "first_kept_seq": {
-          "type": "integer"
-        },
-        "summarized_from_seq": {
-          "type": "integer"
-        },
-        "summarized_to_seq": {
-          "type": "integer"
-        },
-        "previous_compaction_id": {
-          "type": [
-            "string",
-            "null"
-          ]
+        "mode": {
+          "enum": [
+            "normal",
+            "rolling",
+            "dropped"
+          ],
+          "description": "`normal`: the fork summarized the whole conversation and the tail stays verbatim; `rolling`: the fork summarized the prefix up to the cut (overflow ladder b); `dropped`: the prefix moved out with no model call (overflow ladder c)."
         },
         "reason": {
           "enum": [
@@ -155,6 +147,84 @@
           ],
           "description": "Text after `/compact`."
         },
+        "summary": {
+          "type": "string",
+          "description": "The rendered `<context-checkpoint>` message: framing, checkpoint, `<artifacts>`, `<earlier-record>`, and `<current-request>` when present. Model-facing."
+        },
+        "checkpoint": {
+          "type": "string",
+          "description": "The model-written checkpoint. For `dropped`, the previous checkpoint's text, or empty when there was none."
+        },
+        "state": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "State the adapter rendered from its own stores when the checkpoint was written (skills, pending Harness work, the environment block); each is one text block after `summary`. Model-facing."
+        },
+        "first_kept_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "`context_seq` of the first unit kept verbatim."
+        },
+        "summarized_to_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The last `context_seq` moved out of the context; the `<earlier-record>` lookup reads through it."
+        },
+        "previous_compaction_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "current_request": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Verbatim text of the split turn's user message, carried across checkpoints while that turn lasts."
+        },
+        "current_request_message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files_read": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Paths given to `read` and never to `write` or `edit`, cumulative."
+        },
+        "files_modified": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Paths given to `write` or `edit`, cumulative."
+        },
+        "skills": {
+          "type": "array",
+          "description": "Skills loaded by summarized rows, cumulative, minus those whose load result is still in the context; their bodies are in `state`.",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "revision"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              }
+            }
+          }
+        },
         "tokens_before": {
           "type": "integer",
           "minimum": 0
@@ -163,13 +233,22 @@
           "type": "integer",
           "minimum": 0
         },
+        "threshold": {
+          "type": "integer",
+          "description": "T when the checkpoint was written; ineffective when `tokens_after_estimate >= 0.75 * threshold`."
+        },
         "summarizer": {
-          "type": "object",
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "The checkpoint turn; null for `dropped`.",
           "required": [
             "origin",
             "prompt_version",
-            "chunks"
+            "rounds"
           ],
+          "additionalProperties": false,
           "properties": {
             "origin": {
               "$ref": "message.schema.json#/definitions/Origin"
@@ -177,32 +256,16 @@
             "prompt_version": {
               "type": "string"
             },
-            "chunks": {
+            "rounds": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 0,
+              "description": "Tool rounds the turn used."
             }
           }
         },
         "usage": {
-          "$ref": "message.schema.json#/definitions/Usage"
-        },
-        "files_read": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "files_modified": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "current_request_message_id": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "$ref": "message.schema.json#/definitions/Usage",
+          "description": "Summed over the checkpoint turn's responses."
         }
       }
     },
@@ -243,7 +306,7 @@
       }
     },
     "AgentState": {
-      "description": "`agent_events.content_json` of an `agent_state` row: hook state at a commit point (loop-control.md section 7). Not projected into messages.",
+      "description": "`agent_events.content_json` of an `agent_state` row: loop state at a commit point (loop-control.md section 7, context.md section 10). Not projected into messages.",
       "type": "object",
       "required": [
         "version",
@@ -256,6 +319,87 @@
         },
         "state": {
           "type": "object"
+        },
+        "context": {
+          "type": "object",
+          "description": "Context-management guard state, written only once it differs from its default.",
+          "required": [
+            "failures",
+            "ineffective",
+            "paused"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "failures": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "ineffective": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "paused": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "CheckpointTurn": {
+      "description": "`agent_events.content_json` of a `context_checkpoint_turn` row (`visibility = 'audit'`, no `context_seq`): one checkpoint attempt and the messages its turn produced (context.md section 6). Never context.",
+      "type": "object",
+      "required": [
+        "version",
+        "reason",
+        "mode",
+        "outcome",
+        "messages"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "reason": {
+          "enum": [
+            "manual",
+            "threshold",
+            "overflow"
+          ]
+        },
+        "mode": {
+          "enum": [
+            "normal",
+            "rolling"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "failed"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compaction_event_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messages": {
+          "type": "array",
+          "description": "The turn's responses and tool results, in order.",
+          "items": {
+            "$ref": "message.schema.json"
+          }
+        },
+        "usage": {
+          "$ref": "message.schema.json#/definitions/Usage"
         }
       }
     }
@@ -263,38 +407,44 @@
   "examples": [
     {
       "version": 1,
-      "summary": "## Objective\nFix the failing path test...\n<files-modified>\ncore/paths.py\n</files-modified>",
-      "first_kept_seq": 412,
-      "summarized_from_seq": 1,
-      "summarized_to_seq": 411,
-      "previous_compaction_id": null,
+      "mode": "normal",
       "reason": "threshold",
       "focus": null,
+      "summary": "<context-checkpoint>\nThis is a record of the earlier part of this conversation, written for you so you can continue. ...\n\n# 1. Self and method\n...\n\n<artifacts>\nRead:\n- tests/test_paths.py\nModified:\n- core/paths.py\n</artifacts>\n<earlier-record>\n...\n</earlier-record>\n</context-checkpoint>",
+      "checkpoint": "# 1. Self and method\n...",
+      "state": [
+        "<loaded-skills>\n...\n</loaded-skills>"
+      ],
+      "first_kept_seq": 412,
+      "summarized_to_seq": 411,
+      "previous_compaction_id": null,
+      "current_request": null,
+      "current_request_message_id": null,
+      "files_read": [
+        "tests/test_paths.py"
+      ],
+      "files_modified": [
+        "core/paths.py"
+      ],
+      "skills": [],
       "tokens_before": 158432,
       "tokens_after_estimate": 31877,
+      "threshold": 155808,
       "summarizer": {
         "origin": {
           "provider": "anthropic",
           "api": "anthropic",
           "model": "claude-opus-5-5"
         },
-        "prompt_version": "ckpt-v1",
-        "chunks": 1
+        "prompt_version": "checkpoint-v2",
+        "rounds": 0
       },
       "usage": {
-        "input_tokens": 61210,
+        "input_tokens": 1210,
         "output_tokens": 2304,
-        "cache_read_tokens": 0,
+        "cache_read_tokens": 157020,
         "cache_write_tokens": 0
-      },
-      "files_read": [
-        "core/paths.py",
-        "tests/test_paths.py"
-      ],
-      "files_modified": [
-        "core/paths.py"
-      ],
-      "current_request_message_id": null
+      }
     }
   ]
 }

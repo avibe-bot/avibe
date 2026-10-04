@@ -21,7 +21,9 @@ class ContextEntry:
 
     ``row_id`` is ``messages.id`` for inputs and responses, ``agent_events.id``
     otherwise. ``message`` is set for inputs, responses, and tool results;
-    ``payload`` carries the versioned shape of the other kinds.
+    ``payload`` carries the versioned shape of the other kinds. ``created_at``
+    is the commit time in epoch seconds when the store knows it; C-9 reads a
+    response's to tell whether the provider cache has gone cold.
     """
 
     session_id: str
@@ -30,6 +32,7 @@ class ContextEntry:
     row_id: str
     message: Optional[Message] = None
     payload: Mapping[str, Any] = field(default_factory=dict)
+    created_at: Optional[float] = None
 
 
 class TranscriptStore(Protocol):
@@ -50,3 +53,7 @@ class TranscriptStore(Protocol):
     async def append_payload(
         self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state"], payload: Mapping[str, Any]
     ) -> ContextEntry: ...
+
+    async def append_checkpoint_turn(self, session_id: str, payload: Mapping[str, Any]) -> str:
+        """Record one checkpoint attempt (C-9 ``CheckpointTurn``) as an audit row outside the context; its id."""
+        ...
