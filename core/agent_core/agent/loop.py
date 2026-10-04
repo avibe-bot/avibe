@@ -31,6 +31,7 @@ from core.agent_core.agent.events import (
     CompactionStarted,
     ContextExhausted,
     ContextPart,
+    ErrorOrigin,
     MessageCommitted,
     RunEnded,
     RunEndReason,
@@ -349,12 +350,13 @@ class Agent:
         # awaits this queue while holding the input-admission lock.
         events: asyncio.Queue[AgentEvent] = asyncio.Queue(maxsize=64)
 
-        async def emit(event_type: Any, **fields: Any) -> None:
+        async def emit(event_type: Any, **fields: Any) -> Optional[AgentEvent]:
             if self._consumer_closed:
-                return
+                return None
             event = event_type(turn_id=turn_id, seq=self._seq, **fields)
             self._seq += 1
             await events.put(event)
+            return event
 
         worker = asyncio.create_task(drive(emit))
         receive: Optional[asyncio.Task] = None
@@ -496,28 +498,24 @@ class Agent:
             except _Ended:
                 self._outcome.primary("ended_by_hook")
             except _Exhausted as error:
-                self._outcome.primary("context_exhausted")
+                decided = self._outcome.primary("context_exhausted")
                 await emit(ContextExhausted, limit=error.limit, parts=error.parts)
-                await emit(AgentError, kind="context_exhausted", message=str(error), origin="local")
+                await self._error(emit, "context_exhausted", str(error), "local", cause=decided)
             except _Aborted:
                 self._outcome.primary("aborted")
             except asyncio.CancelledError:
-                self._outcome.primary("aborted")
+                decided = self._outcome.primary("aborted")
                 self._ctx.cancel.cancel("event consumer closed" if self._consumer_closed else "dependency cancelled")
                 if not self._consumer_closed:
-                    await emit(
-                        AgentError,
-                        kind="dependency_cancelled",
-                        message="An agent dependency was cancelled.",
-                        origin="local",
-                    )
+                    message = "An agent dependency was cancelled."
+                    await self._error(emit, "dependency_cancelled", message, "local", cause=decided)
             except Exception as error:
-                self._outcome.primary("error")
+                decided = self._outcome.primary("error")
                 if isinstance(error, HookStateError):
                     self._ctx.state = deepcopy(self._committed_state)
                 # A response the transcript cannot hold is the served model's; any other exception is the loop's own.
                 origin = "source" if isinstance(error, ProviderProtocolViolation) else "local"
-                await emit(AgentError, kind=type(error).__name__, message=str(error), origin=origin)
+                await self._error(emit, type(error).__name__, str(error), origin, cause=decided)
         finally:
             # If an external cancellation interrupted an exception handler,
             # admission still records its first cause before cleanup starts.
@@ -532,12 +530,24 @@ class Agent:
                 await cleanup
         if self._consumer_closed:
             raise asyncio.CancelledError()
-        await emit(RunEnded, reason=self._outcome.reason)
+        await emit(RunEnded, reason=self._outcome.reason, cause=self._outcome.cause)
+
+    async def _error(
+        self, emit: Callable[..., Awaitable[Any]], kind: str, message: str, origin: ErrorOrigin, *, cause: bool
+    ) -> None:
+        """The one place the loop announces an error: ``origin`` as its caller states it, where the error is raised.
+
+        ``cause``: the error decided the run's outcome (``OutcomeOwner.primary``), so ``RunEnded`` names it; a
+        diagnostic never does.
+        """
+        event = await emit(AgentError, kind=kind, message=message, origin=origin)
+        if cause:
+            self._outcome.cause = event
 
     async def _flush_diagnostics(self, emit: Callable[..., Awaitable[None]]) -> None:
         while self._outcome.diagnostics:
             kind, message = self._outcome.diagnostics[0]
-            await emit(AgentError, kind=kind, message=message, origin="local")
+            await self._error(emit, kind, message, "local", cause=False)
             self._outcome.diagnostics.popleft()
 
     async def _cleanup(self, factory: Callable[[], Awaitable[Any]], *, stream: bool = False) -> None:
@@ -850,10 +860,11 @@ class Agent:
                         if terminal.kind == "aborted"
                         else "error"
                     )
-                    self._outcome.primary(reason)
-                    # ``aborted`` is the loop's own cancellation; every other provider error is the source's.
-                    origin = "local" if terminal.kind == "aborted" else "source"
-                    await emit(AgentError, kind=terminal.kind, message=terminal.message, origin=origin)
+                    decided = self._outcome.primary(reason)
+                    # ``aborted`` is the loop's own cancellation and ``overflow`` says our request was too large;
+                    # every other provider error is the source's.
+                    origin = "local" if terminal.kind in {"aborted", "overflow"} else "source"
+                    await self._error(emit, terminal.kind, terminal.message, origin, cause=decided)
                     if terminal.partial is not None:
                         row = await self._response(terminal.partial, final=False)
                         await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
@@ -863,24 +874,27 @@ class Agent:
                 if not (message.tool_calls and message.stop_reason == "length"):
                     length_tool_retries = 0
                 if failed:
-                    self._outcome.primary("aborted" if message.stop_reason == "aborted" else "error")
-                    await emit(
-                        AgentError,
-                        kind=message.stop_reason,
-                        message=message.error_message or f"Model stopped with {message.stop_reason}.",
-                        origin="local" if message.stop_reason == "aborted" else "source",
+                    aborted = message.stop_reason == "aborted"
+                    decided = self._outcome.primary("aborted" if aborted else "error")
+                    await self._error(
+                        emit,
+                        message.stop_reason,
+                        message.error_message or f"Model stopped with {message.stop_reason}.",
+                        "local" if aborted else "source",
+                        cause=decided,
                     )
                 final = await self._commit_model_message(message, emit)
                 empty_reply = final and not any(
                     isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content
                 )
                 if empty_reply:
-                    self._outcome.primary("error")
-                    await emit(
-                        AgentError,
-                        kind=message.stop_reason if message.stop_reason in {"refusal", "safety"} else "empty_response",
-                        message=message.error_message or f"Model stopped with {message.stop_reason} without a reply.",
-                        origin="source",
+                    decided = self._outcome.primary("error")
+                    await self._error(
+                        emit,
+                        message.stop_reason if message.stop_reason in {"refusal", "safety"} else "empty_response",
+                        message.error_message or f"Model stopped with {message.stop_reason} without a reply.",
+                        "source",
+                        cause=decided,
                     )
             # aclose failures are diagnostics, never a reason to discard the
             # committed response or skip its tools. Primary errors precede them.
@@ -916,25 +930,22 @@ class Agent:
                     # tool call cannot spin forever after repeated truncation.
                     if length_tool_retries > self.retry.max_retries:
                         self._open = False
-                        self._outcome.primary("error")
-                        await emit(
-                            AgentError,
-                            kind="length",
-                            message="The model repeatedly exceeded its output limit while emitting a tool call.",
-                            origin="source",
+                        decided = self._outcome.primary("error")
+                        await self._error(
+                            emit,
+                            "length",
+                            "The model repeatedly exceeded its output limit while emitting a tool call.",
+                            "source",
+                            cause=decided,
                         )
                         return "error"
                     await self._drain_steers(emit)
                     continue
                 self._open = False
                 if not failed:
-                    self._outcome.primary("error")
-                    await emit(
-                        AgentError,
-                        kind=reason,
-                        message=message.error_message or f"Model stopped with {reason}.",
-                        origin="source",
-                    )
+                    decided = self._outcome.primary("error")
+                    message_text = message.error_message or f"Model stopped with {reason}."
+                    await self._error(emit, reason, message_text, "source", cause=decided)
                 return "aborted" if message.stop_reason == "aborted" else "error"
             if failed:
                 return "aborted" if message.stop_reason == "aborted" else "error"
@@ -1132,12 +1143,15 @@ class Agent:
         ladder: _Ladder,
     ) -> bool:
         """C-9 on the final request (sections 3 and 8); True when it changed the context."""
-        if not plan.can_fit and not (await self._minimal(system, selected, request, view, plan))[1].can_fit:
-            # (d): not even the request the drop would leave (its row and the last unit) can fit. The provider
-            # never sees it.
+        # The pause first: while it holds nothing is compacted, so nothing is built for a compaction either.
+        paused = await self._paused(selected)
+        if not plan.can_fit and (
+            paused or not (await self._minimal(system, selected, request, view, plan))[1].can_fit
+        ):
+            # (d): paused, or not even the request the drop would leave (its row and the last unit) can fit. The
+            # provider never sees it.
             raise self._exhausted(request, view, plan)
         shrink, ladder.refused = ladder.refused, False
-        paused = await self._paused(selected)
         if not shrink:
             if self.context.clear_tool_results and (
                 plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold()
@@ -1336,8 +1350,11 @@ class Agent:
         checkpoint = ""
         origin = None
         selection: Optional[ModelSelection] = selected
+        ran = selected  # the route the turn's latest request was composed for; the guard counts against it
 
         async def compose(route: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
+            nonlocal ran
+            ran = route
             fork, tools, fork_plan = self._fork(system, route, base, prompt, turn, anchor)
             if not fork_plan.can_fit:
                 raise _ForkTooLarge()
@@ -1433,13 +1450,13 @@ class Agent:
                     )
             if payload is None:
                 finished["error"] = error
-                guard, paused = self._counted(selected, ok=False)
+                guard, paused = self._counted(ran, ok=False)
                 await self._commit_context([], guard)
                 await emit(CompactionFailed, reason=reason, error=error)
                 if paused:
                     await emit(CompactionPaused, cause=paused)
                 return _Outcome(False, overflow)
-            row, paused = await self._commit_compaction(payload, selected)
+            row, paused = await self._commit_compaction(payload, ran)
             finished.update(outcome="completed", compaction_event_id=row.row_id)
             await emit(
                 CompactionFinished,

@@ -136,12 +136,13 @@ class Host:
 
 
 def make_agent(
-    model, *, store=None, tools=(), hooks=(), selection=SELECTION, context=None, cwd="/test-owned", **options
+    model, *, store=None, tools=(), hooks=(), selection=SELECTION, context=None, cwd="/test-owned", models=None,
+    **options,
 ):
     selections = selection if isinstance(selection, tuple) else (selection,)
     return Agent(
         session_id="session",
-        models=FakeModelRouter(model, selections),
+        models=models or FakeModelRouter(model, selections),
         tools=tools,
         hooks=hooks,
         store=store or InMemoryTranscriptStore(),
@@ -666,17 +667,68 @@ async def test_a_pause_holds_for_thirty_minutes_on_its_route():
     assert not model.checkpoint_requests and events[-1].reason == "completed"
 
 
+class _UnusableHost(Host):
+    async def render_state(self, request):
+        self.states.append(request)
+        raise RuntimeError("the state store is down")
+
+
 async def test_while_paused_a_request_that_cannot_be_sent_ends_the_turn_and_nothing_compacts():
     now = [1_000.0]
     store, context = await _paused(now)
     before = await store.load("session")
-    model = Model([])
-    agent = make_agent(model, store=store, context=context)
+    model, host = Model([]), _UnusableHost()
+    agent = make_agent(model, store=store, context=replace(context, host=host))
     events = await run(agent, tokens(12_000), row="next")
     assert not model.requests  # no checkpoint, no mechanical drop, and the provider never sees it
+    assert not host.states  # nothing is built for a compaction the pause forbids
     assert events[-1].reason == "context_exhausted" and [e for e in events if isinstance(e, ContextExhausted)]
     rows = await store.load("session")
     assert [row.kind for row in rows[len(before) :]] == ["input"]
+
+
+class _FallbackOnRetry(FakeModelRouter):
+    """The primary route; while ``retrying`` is set, a retry resolves to the fallback."""
+
+    def __init__(self, model, primary, fallback) -> None:
+        super().__init__(model, (primary,))
+        self.fallback, self.retrying = fallback, False
+
+    async def resolve(self):
+        self.resolutions += 1
+        return self.fallback if self.retrying else self.selections[0]
+
+
+async def test_a_failed_checkpoint_counts_against_the_route_it_ran_on():
+    other = ModelEndpoint("anthropic", "http://model.invalid", "other-model", "", provider="test-provider")
+    router = None
+
+    def busy(request):  # the checkpoint's first attempt, on the primary: retryable
+        router.retrying = True
+        return [ProviderError("rate_limit", "busy", True)]
+
+    def fails(request):  # the retry, on the fallback: a failed checkpoint
+        router.retrying = False
+        assert request.endpoint.model_id == "other-model"
+        return [Done(assistant(CHECKPOINT, stop_reason="length"))]
+
+    store = InMemoryTranscriptStore()
+    model = Model([*history(), *[[Done(assistant("ok"))]] * 3], [busy, fails] * 3)
+    router = _FallbackOnRetry(model, ROOMY, ModelSelection(other, ROOMY.capabilities))
+    context = ContextConfig(clear_tool_results=False)
+    agent = make_agent(model, store=store, models=router, context=context, tools=[reader(tokens(1))],
+                       retry=RetryPolicy(initial_delay_s=0))
+    await run(agent)
+    for row, value in (("one", tokens(30_000)), ("two", "again"), ("three", "again")):
+        await run(agent, value, row=row)
+    state = [row for row in await store.load("session") if row.kind == "agent_state"][-1].payload["context"]
+    assert state["paused"] and state["paused_route"]["model"] == "other-model"
+    # The primary did not fail: its next threshold tries again.
+    model.conversation.append([Done(assistant("ok"))])
+    model.checkpoint.append([Done(assistant(CHECKPOINT))])
+    tried = len(model.checkpoint_requests)
+    await run(agent, "four", row="four")
+    assert len(model.checkpoint_requests) == tried + 1
 
 
 async def test_the_guard_is_durable_before_its_outcome_is_announced():

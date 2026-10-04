@@ -205,3 +205,6 @@ timezone: Asia/Shanghai
 watches: wch_8f2k "nightly sync" command running; wch_3c1d job running
 </environment>
 ```
+
+`watches` names the Session's enabled Watches by id, name, and kind, never a command: at most 20, then `and N more`,
+so the block stays bounded on every input and in every checkpoint (C-9 `context.md` §9).

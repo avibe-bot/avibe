@@ -49,18 +49,16 @@ _SKILL_LOAD = re.compile(
 
 
 def output_budget(capabilities: Any) -> int:
-    """The output the Agent asks for on a route: its own maximum, at most a quarter of the window (8,192 floor).
+    """The output the Agent asks for on a route: its own maximum (8,192 when unknown), at most a quarter of the window.
 
-    Many Model Hub definitions list an output maximum as large as the window; reserving all of it would leave no room
-    for the context (C-9 section 1). An unknown maximum stays 8,192.
+    Many Model Hub definitions list an output maximum as large as the window, and a small route may list none;
+    reserving all of it, or the default, would leave no room for the context (C-9 section 1).
     """
     from core.agent_core.harness.context import DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS
 
     maximum = capabilities.max_output_tokens
-    if maximum is None:
-        return DEFAULT_MAX_OUTPUT_TOKENS
-    window = capabilities.context_window or DEFAULT_CONTEXT_WINDOW
-    return min(maximum, max(DEFAULT_MAX_OUTPUT_TOKENS, window // 4))
+    maximum = DEFAULT_MAX_OUTPUT_TOKENS if maximum is None else maximum
+    return min(maximum, (capabilities.context_window or DEFAULT_CONTEXT_WINDOW) // 4)
 
 
 def budgeted(selection: Any) -> Any:

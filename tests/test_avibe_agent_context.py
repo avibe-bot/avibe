@@ -23,6 +23,7 @@ from core.agent_core.messages import ToolCallBlock, UserMessage, text
 from core.agent_core.tools.base import ToolResult
 from core.managed_skills import ManagedSkill
 from modules.agents.avibe.context import AvibeContextHost, SkillScope, mark_skill_loads
+from modules.agents.avibe.prompt import current_environment
 from storage.models import agent_runs, run_definitions
 from storage.read_only_query import run_read_only_query
 from tests.agent_core.fakes import FakeTool, assistant
@@ -71,14 +72,20 @@ async def test_a_turn_runs_with_context_management_on_the_model_hub_limits(engin
     assert response.payload["request"]["tokens"] > 0  # context management is on: the anchor's facts are stored
 
 
-async def test_a_route_whose_output_maximum_fills_the_window_still_answers(engine, session, tmp_path):
-    # Many Model Hub definitions list an output maximum as large as the window (models.dev): asking for all of it
-    # would leave no room for the context. The Agent asks for at most a quarter of the window.
+@pytest.mark.parametrize(
+    "window,maximum,asked", [(262_144, 262_144, 65_536), (8_000, None, 2_000)], ids=["maximum fills", "small window"]
+)
+async def test_a_route_whose_output_maximum_fills_the_window_still_answers(
+    engine, session, tmp_path, window, maximum, asked
+):
+    # Many Model Hub definitions list an output maximum as large as the window (models.dev), and a small manual route
+    # may list none: asking for all of it, or for the 8,192 default, would leave no room for the context. The Agent
+    # asks for at most a quarter of any window.
     harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("hi"))]])
-    harness.controller.hub_limits = {"context_window": 262_144, "max_output_tokens": 262_144}
+    harness.controller.hub_limits = {"context_window": window, "max_output_tokens": maximum}
     await _turn(harness, "hello")
     assert _texts(harness, "result") == ["hi"]
-    assert harness.provider.requests[0].max_tokens == 65_536
+    assert harness.provider.requests[0].max_tokens == asked
 
 
 # --- a checkpoint ---------------------------------------------------------------------------------------
@@ -182,6 +189,36 @@ async def _failing_commit(harness: _Harness) -> None:
     harness.agent.store.append_payloads = append_payloads
 
 
+class _ClosingProvider:
+    """Each stream answers one terminal; a stream marked failing raises when the loop closes it (a diagnostic)."""
+
+    protocol = "anthropic"
+
+    def __init__(self, *streams) -> None:
+        self.streams = list(streams)
+
+    def stream(self, request, cancel):
+        terminal, failing = self.streams.pop(0)
+
+        class Stream:
+            done = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.done:
+                    raise StopAsyncIteration
+                self.done = True
+                return terminal
+
+            async def aclose(self):
+                if failing:
+                    raise OSError("stream close failed")
+
+        return Stream()
+
+
 _CUT_CALL = [Done(assistant(calls=[ToolCallBlock("cut", "bash", {"command": "ls"})], stop_reason="length"))]
 
 
@@ -193,6 +230,7 @@ _CUT_CALL = [Done(assistant(calls=[ToolCallBlock("cut", "bash", {"command": "ls"
         ("provider refused", 1),
         ("tool call cut by the output limit past the retries", 1),
         ("tool calls under a stop", 1),
+        ("a cleanup diagnostic before a provider error", 1),
     ],
 )
 async def test_model_hub_hears_only_of_failures_the_served_source_produced(engine, session, tmp_path, case, recorded):
@@ -212,7 +250,14 @@ async def test_model_hub_hears_only_of_failures_the_served_source_produced(engin
         scripts = [[Done(assistant(calls=[ToolCallBlock("call", "bash", {"command": "ls"})], stop_reason="stop"))]]
     else:
         scripts = [[Done(assistant("noted"))], [Done(assistant(CHECKPOINT))]]
-    harness = _Harness(engine, tmp_path, "avibe", scripts)
+    providers = None
+    if case == "a cleanup diagnostic before a provider error":
+        provider = _ClosingProvider(
+            [Done(assistant(calls=[ToolCallBlock("call", "bash", {"command": "true"})])), True],
+            [ProviderError("server", "upstream failed", False), False],
+        )
+        providers = lambda protocol: provider  # noqa: E731
+    harness = _Harness(engine, tmp_path, "avibe", scripts, providers=providers)
     harness.controller.model_hub_runtime.record_native_failure = record_native_failure
     if case == "store failure after a good checkpoint":
         await _turn(harness, tokens(11_000))
@@ -352,19 +397,21 @@ async def test_all_rehydrated_state_shares_the_one_total(engine, session):
     # work, the skill bodies, the unavailable notices, and what is left out all fit inside the one 25,000-token
     # total, each section naming at most 20 of what it left out and then counting the rest.
     label = "CI for the release branch, then the nightly smoke run and the installer check"
-    for index in range(500):
+    for index in range(800):
         _insert_definition(
             engine, id=f"wd_{index:03}", definition_type="watch", name=f"{label} {index}", session_id=SESSION
         )
     found = {f"skill-{index:03}": _skill(f"skill-{index:03}", tokens(3_000)) for index in range(0, 400, 2)}
-    watches = "; ".join(f'wd_{index:03} "{label} {index}" command running' for index in range(500))
+    lines = [f'wd_{index:03} "{label} {index}" command running' for index in range(800)]
     skills = _Skills(found)
-    host = AvibeContextHost(engine, environment=lambda _: {"cwd": "/work", "watches": watches}, skills=lambda _: skills)
+    host = AvibeContextHost(engine, environment=lambda _: current_environment("/work", lines), skills=lambda _: skills)
     refs = tuple(SkillRef(f"skill-{index:03}", "r") for index in range(400))
     state = await host.render_state(StateRequest(SESSION, refs))
     assert sum(text_tokens(item) for item in state) <= 25_000
     environment, pending, pending_left_out = state[:3]
-    assert environment.startswith("<environment>") and "wd_499" in environment
+    # The environment block keeps every field, its Watches bounded at the source (C-7).
+    assert environment.startswith("<environment>") and "\ncwd: " in environment and "\nshell: " in environment
+    assert "wd_019" in environment and "wd_020" not in environment and "; and 780 more\n" in environment
     assert pending.startswith("<pending-work>") and "watch wd_000" in pending
     assert pending_left_out.startswith('<left-out of="pending work">') and pending_left_out.count("watch wd_") == 20
     assert re.search(r", and \d+ more\.", pending_left_out)

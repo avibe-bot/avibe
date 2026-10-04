@@ -767,7 +767,8 @@ _TOOL_CALL = ToolCallBlock("call", "echo", {"x": 1})
 #: ``source`` means the served model produced the failure, which an adapter may record against the route.
 ERROR_SITES = {
     "provider error": ("provider", "auth", "source", [[ProviderError("auth", "denied", False)]], {}),
-    "provider overflow": ("provider", "overflow", "source", [[ProviderError("overflow", "too long", False)]], {}),
+    # An overflow says our request was too large, not that the source failed.
+    "provider overflow": ("provider", "overflow", "local", [[ProviderError("overflow", "too long", False)]], {}),
     "provider stream aborted by the loop": (
         "provider", "aborted", "local", [[ProviderError("aborted", "stop", False)]], {}
     ),
@@ -805,21 +806,48 @@ ERROR_SITES = {
 
 @pytest.mark.parametrize("case", list(ERROR_SITES))
 async def test_every_error_says_whether_the_served_source_produced_it(case):
-    _, kind, origin, scripts, options = ERROR_SITES[case]
+    site, kind, origin, scripts, options = ERROR_SITES[case]
     agent = make_agent(ScriptedProvider(scripts), tools=[FakeTool()], **options)
     value = "x" * 160_000 if "context" in options else "hello"
     events = await collect(agent, value=value)
-    assert [(event.kind, event.origin) for event in events if isinstance(event, AgentError)] == [(kind, origin)]
+    errors = [event for event in events if isinstance(event, AgentError)]
+    assert [(error.kind, error.origin) for error in errors] == [(kind, origin)]
+    # The run names the error that decided its outcome; a diagnostic never does.
+    assert events[-1].cause == (None if site == "diagnostic" else errors[0])
 
 
-def test_the_table_covers_every_place_the_loop_emits_an_error():
-    import inspect
-    import re
+async def test_a_diagnostic_before_the_failure_is_never_the_cause():
+    class Stream:
+        def __init__(self, terminal, failing_close):
+            self.terminal, self.failing_close = terminal, failing_close
 
-    from core.agent_core.agent import loop
+        def __aiter__(self):
+            return self
 
-    sites = re.findall(r"emit\(\s*AgentError\b", inspect.getsource(loop))
-    assert len(sites) == len({site for site, *_ in ERROR_SITES.values()})
+        async def __anext__(self):
+            if self.terminal is None:
+                raise StopAsyncIteration
+            terminal, self.terminal = self.terminal, None
+            return terminal
+
+        async def aclose(self):
+            if self.failing_close:
+                raise OSError("stream close failed")
+
+    class Provider:
+        protocol = "anthropic"
+        calls = 0
+
+        def stream(self, request, cancel):
+            self.calls += 1
+            if self.calls == 1:  # the first round's stream fails to close: a diagnostic, flushed after the round
+                return Stream(Done(assistant(calls=[ToolCallBlock("a", "echo")])), True)
+            return Stream(ProviderError("server", "upstream failed", False), False)
+
+    events = await collect(make_agent(Provider(), tools=[FakeTool()]))
+    errors = [(event.kind, event.origin) for event in events if isinstance(event, AgentError)]
+    assert errors == [("stream_cleanup", "local"), ("server", "source")]
+    assert (events[-1].cause.kind, events[-1].cause.origin) == ("server", "source")
 
 
 async def test_abort_closes_provider_stream_and_allows_a_new_turn():

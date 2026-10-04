@@ -586,7 +586,9 @@ async def test_committed_rows_keep_the_agent_that_ran_the_turn(engine, session, 
     assert backends == {"avibe"}
 
 
-async def test_the_environment_names_watches_without_their_commands(engine, session, tmp_path, published) -> None:
+async def test_the_environment_names_at_most_twenty_watches_without_their_commands(
+    engine, session, tmp_path, published
+) -> None:
     from core.watches import ManagedWatch
 
     secret = "curl -H 'Authorization: Bearer sk-live-secret' https://api.example"
@@ -595,6 +597,10 @@ async def test_the_environment_names_watches_without_their_commands(engine, sess
         ManagedWatch(
             id="wch_job", name=None, session_key="k", session_id=SESSION, shell_command=secret,
             metadata={"watch_target": {"kind": "job", "job_id": "job_1", "command": secret}},
+        ),
+        *(
+            ManagedWatch(id=f"wch_{index:02}", name=None, session_key="k", session_id=SESSION, shell_command=secret)
+            for index in range(23)
         ),
     ]
     harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("ok"))]])
@@ -606,6 +612,8 @@ async def test_the_environment_names_watches_without_their_commands(engine, sess
     block = (await harness.context_rows())[0].message.content[0].text
     assert "sk-live-secret" not in block and "curl" not in block
     assert 'wch_named "nightly sync" command' in block and "wch_job job" in block
+    # Bounded on every input: the first 20, then how many more.
+    assert "wch_17 command" in block and "wch_18" not in block and "; and 5 more\n" in block
 
 
 async def test_a_steer_enters_after_the_tool_batch_even_when_its_row_arrives_late(

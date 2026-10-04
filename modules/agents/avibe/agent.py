@@ -143,6 +143,8 @@ class _Run:
     cwd: str = ""
     settled: bool = False
     reason: Optional[str] = None
+    # The error that decided ``reason`` (``RunEnded.cause``): the failure's kind, text, and Model Hub attribution.
+    cause: Optional[AgentError] = None
     # Model Hub's copy for a route it refused during the run (``_preflight``).
     refusal: Optional[str] = None
     errors: list[AgentError] = field(default_factory=list)
@@ -598,7 +600,7 @@ class AvibeAgent(BaseAgent):
         elif isinstance(event, AgentError):
             run.errors.append(event)
         elif isinstance(event, RunEnded):
-            run.reason = event.reason
+            run.reason, run.cause = event.reason, event.cause
         elif isinstance(event, CompactionFinished):
             # Silent (C-9 section 10); the session's occupancy snapshot drops with the context.
             self._note_total(run, event.tokens_after_estimate)
@@ -620,10 +622,12 @@ class AvibeAgent(BaseAgent):
         run.settled = True
         request, context = run.request, run.request.context
         reason = run.reason or "error"
-        first = run.errors[0] if run.errors else None
-        kind, diagnostic = (first.kind, first.message) if first is not None else (None, reason)
-        # Model Hub records a failure against the route only when the served source produced it (C-6).
-        source = first is not None and first.origin == "source"
+        # The failure is the error that decided the outcome, never a diagnostic, whose text is only a fallback
+        # detail. Model Hub records it against the route only when the served source produced it (C-6).
+        cause = run.cause
+        kind = cause.kind if cause is not None else None
+        diagnostic = cause.message if cause is not None else run.errors[0].message if run.errors else reason
+        source = cause is not None and cause.origin == "source"
         final = run.responses.get(run.final_row) if run.final_row else None
         if final is not None:
             if run.stop_requested and reason == "aborted":

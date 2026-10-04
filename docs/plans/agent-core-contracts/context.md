@@ -38,8 +38,10 @@ keep = min(20,000, floor(0.25 * T))                the verbatim tail of a normal
 models.dev, where many models list an output maximum as large as the window: in the snapshot checked on 2026-10-04,
 1,337 of 8,150 entries with both limits have `max_output_tokens + M >= context_window` (so `T <= 0` and nothing could
 be sent), and 296 more would leave `T < 0.25 * W`. The adapter therefore asks for
-`min(max_output_tokens, max(8,192, floor(W / 4)))` on every hop it resolves (a retry's fallback included), 8,192 when
-the maximum is unknown; the limits themselves still come from Model Hub.
+`min(max_output_tokens, floor(W / 4))` on every hop it resolves (a retry's fallback included), the maximum 8,192 when
+unknown, so the output never takes more than a quarter of any window; the limits themselves still come from Model
+Hub. Below a window of about 12,000 tokens `T <= 0` (the fixed `M`), so C-9 checkpoints on every request until the
+pause (§10), as Pi's fixed reserve does.
 
 A conversation request **fits** when `est + O + M <= L_in`, where `est` is its estimate (§2); `M` absorbs the
 estimate's error. A request **can fit** when `est + O <= L_in`. A checkpoint request (§6) is sent only when it can
@@ -263,7 +265,7 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
 
 - The limits (§1): the route's capabilities come from the Model Hub model definition the user edits
   (`context_window`, `max_output_tokens`; `input_limit` stays unknown until Model Hub stores one, so `L_in = W`), and
-  the Agent asks for `min(max_output_tokens, max(8,192, floor(W / 4)))` (8,192 when unknown) on every hop it resolves,
+  the Agent asks for `min(max_output_tokens, floor(W / 4))` (the maximum 8,192 when unknown) on every hop it resolves,
   which is `O`.
 - `scratch_dir`: this Session's scratch directory, `<state>/agent_core/scratch/<session_id>/`; without it, the
   policy denies every write.
@@ -294,10 +296,12 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   stop message says the conversation has grown too long to continue reliably and suggests starting a new session
   with `/new`. Compaction itself, the pause included, shows nothing. A failure is recorded against the Model Hub route
   only when the served source produced it, which the loop states on every `error` event (`origin`, set where the
-  error is raised): `source` for a C-2 provider error other than the loop's own abort, an answer the loop rejected
-  (a failed or empty answer, a refusal, tool calls under `length` past the retries or under another stop), or a
-  reply the transcript cannot hold; `local` for everything else (a context that cannot fit, a Stop, a hook, tool, or
-  store error).
+  error is raised): `source` for a C-2 provider error other than an overflow (our request was too large) or the
+  loop's own abort, an answer the loop rejected (a failed or empty answer, a refusal, tool calls under `length` past
+  the retries or under another stop), or a reply the transcript cannot hold; `local` for everything else (an
+  overflow or a context that cannot fit, a Stop, a hook, tool, or store error). The adapter takes the failure (its
+  kind, text, and attribution) from `run_ended.cause`, the error that decided the run's outcome, never from a
+  diagnostic.
 
 ## 10. Guards
 
@@ -311,10 +315,12 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   that the provider refuses as overflow ends the run `context_exhausted` (§8 d). The `compaction_paused` event fires
   once, at the transition; the adapter shows nothing for it. The pause clears by itself after 30 minutes
   (`PAUSE_SECONDS`), or as soon as a request goes to another route (provider, api, model) than the one it began on,
-  whichever comes first; both counters clear with it, and the next threshold tries again. The counters and the
-  pause (`paused_at`, `paused_route`) are durable loop state, stored beside the hook state in `agent_state` rows
-  (`AgentState.context`), so they survive restarts and forks; projection takes them from the latest `agent_state`
-  row that carries them. A pause that clears commits at once, like every guard transition (invariant 3).
+  whichever comes first; both counters clear with it, and the next threshold tries again. The pause is decided first
+  on every request, and while it holds nothing is built for a compaction (no hypothetical drop, no host call). A
+  guard transition belongs to the route its checkpoint request ran on, a retry's fallback included. The counters
+  and the pause (`paused_at`, `paused_route`) are durable loop state, stored beside the hook state in `agent_state`
+  rows (`AgentState.context`), so they survive restarts and forks; projection takes them from the latest
+  `agent_state` row that carries them. A pause that clears commits at once, like every guard transition (invariant 3).
 
 **Ordering and ownership invariants.** This list is the one normative statement of these rules; the other sections
 refer to it. Each has a test in `tests/agent_core/agent/test_compaction.py` (route: `test_context.py`; the ledger's

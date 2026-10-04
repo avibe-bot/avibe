@@ -104,6 +104,10 @@ def local_timezone() -> str:
     return time.tzname[0] if time.tzname else "UTC"
 
 
+#: The environment block names at most this many Watches.
+_WATCHES_LISTED = 20
+
+
 def current_environment(
     cwd: str, watches: Sequence[str], *, include_time: bool = True, now: Optional[datetime] = None
 ) -> dict[str, str]:
@@ -115,7 +119,11 @@ def current_environment(
     }
     if include_time:
         fields.update(date=(now or datetime.now()).date().isoformat(), timezone=local_timezone())
-    fields["watches"] = "; ".join(watches) if watches else "none"
+    # Bounded on every input, and so in every checkpoint: the first ones, then how many more (tools.md section 8).
+    listed = list(watches[:_WATCHES_LISTED])
+    if len(watches) > _WATCHES_LISTED:
+        listed.append(f"and {len(watches) - _WATCHES_LISTED} more")
+    fields["watches"] = "; ".join(listed) if listed else "none"
     # One line per field: a value never carries the block's own line structure.
     return {name: " ".join(value.split()) if "\n" in value else value for name, value in fields.items()}
 

@@ -385,6 +385,29 @@
               "ended_by_hook",
               "context_exhausted"
             ]
+          },
+          "cause": {
+            "description": "The error event that decided the reason (the first cause), when an error did; a diagnostic never does.",
+            "type": "object",
+            "required": [
+              "kind",
+              "message",
+              "origin"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "source",
+                  "local"
+                ]
+              }
+            }
           }
         }
       }
@@ -411,7 +434,7 @@
             "type": "string"
           },
           "origin": {
-            "description": "source: the served model produced the failure (a provider error, an answer the loop rejected, a response the transcript cannot hold); local: everything else.",
+            "description": "source: the served model produced the failure (a provider error other than an overflow, an answer the loop rejected, a response the transcript cannot hold); local: everything else (a Stop, an overflow or context exhaustion, a hook, tool, or store error).",
             "enum": [
               "source",
               "local"
