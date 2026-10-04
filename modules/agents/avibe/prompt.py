@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence, Union
 
-from core.agent_core.harness.context import ITEM_BYTES, display
+from core.agent_core.harness.context import display, escape
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import TextBlock, UserMessage
 
@@ -107,8 +107,6 @@ def local_timezone() -> str:
 
 #: The environment block names at most this many Watches (tools.md section 8).
 _WATCHES_LISTED = 20
-#: The cwd keeps up to this many UTF-8 bytes: the model builds absolute paths from it, so a cut one would be false.
-CWD_BYTES = 1_024
 
 #: A field's raw value: text, or the Watches' lines.
 EnvironmentValue = Union[str, tuple[str, ...]]
@@ -140,14 +138,15 @@ def render_environment(fields: Mapping[str, EnvironmentValue]) -> str:
 
 
 def displayed_environment(fields: Mapping[str, EnvironmentValue]) -> dict[str, str]:
-    """Each field as the model reads it: one line of plain text (``display``), the cwd within ``CWD_BYTES`` and every
-    other value, each Watch's line included, within 160 bytes; the first Watches, then how many more."""
+    """Each field as the model reads it, one line of plain text: the cwd escaped and never cut (the model builds
+    absolute paths from it, so a cut one would be false; the OS bounds its length), every other value, each Watch's
+    line included, cut to 160 bytes (``display``); the first Watches, then how many more."""
     return {name: _shown(name, value) for name, value in fields.items()}
 
 
 def _shown(name: str, value: EnvironmentValue) -> str:
     if name != "watches":
-        return display(str(value), limit=CWD_BYTES if name == "cwd" else ITEM_BYTES)
+        return escape(str(value)) if name == "cwd" else display(str(value))
     # Bounded on every input, and so in every checkpoint: the first ones, then how many more (tools.md section 8).
     listed = [display(line) for line in value[:_WATCHES_LISTED]]
     if len(value) > _WATCHES_LISTED:
@@ -155,11 +154,11 @@ def _shown(name: str, value: EnvironmentValue) -> str:
     return "; ".join(listed) if listed else "none"
 
 
-def _exact(name: str, value: EnvironmentValue) -> bool:
-    """Whether the model reads the value itself rather than a cut or escaped stand-in for it."""
+def _whole(name: str, value: EnvironmentValue) -> bool:
+    """Whether the model reads all of the value: escaping is injective, so only a cut can hide a change."""
     if name != "watches":
-        return _shown(name, value) == value
-    return all(display(line) == line for line in value[:_WATCHES_LISTED])
+        return _shown(name, value) == escape(str(value))
+    return all(display(line) == escape(line) for line in value[:_WATCHES_LISTED])
 
 
 def parse_environment(text: str) -> Optional[dict[str, str]]:
@@ -188,14 +187,14 @@ def environment_delta(
     previous: Mapping[str, str], current: Mapping[str, EnvironmentValue]
 ) -> dict[str, EnvironmentValue]:
     """The fields the model must be told: every field on the first input, then each one whose display differs from
-    what the model last read (``previous``), or is not the value itself.
+    what the model last read (``previous``), or is cut.
 
-    Identity is the raw value, but the rows hold only what the model read: a cut or escaped display can look the same
-    after its value changed, so it never proves a field unchanged, and such a field is sent on every input.
+    Identity is the raw value, but the rows hold only what the model read: escaping is injective, so a whole display
+    proves its value unchanged, while a cut one can look the same after its value changed and is sent on every input.
     """
     shown = displayed_environment(current)
     return {
-        name: value for name, value in current.items() if previous.get(name) != shown[name] or not _exact(name, value)
+        name: value for name, value in current.items() if previous.get(name) != shown[name] or not _whole(name, value)
     }
 
 

@@ -186,7 +186,7 @@ async def test_a_skill_load_through_bash_is_marked_in_its_context_row(engine, se
     harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[bash])
     await _turn(harness, "load the parser skill")
     (result,) = [row for row in await harness.context_rows() if row.kind == "tool_result"]
-    # Clearing spares it and a checkpoint lists it by name (C-9 sections 4 and 7).
+    # A checkpoint that summarizes it lists the skill by name (C-9 section 7).
     assert result.payload["details"]["skills"] == [{"name": "parser"}]
 
 
@@ -340,8 +340,8 @@ async def test_the_earlier_record_hint_names_the_session_its_bound_and_its_fork_
 
 
 async def test_the_state_is_the_environment_core_fields_each_bounded_in_bytes(engine, session):
-    # The state is the environment's core fields only (no Watches, no skill bodies), each cut in the middle to 160
-    # UTF-8 bytes whatever the script, so the block is at most about 5 x 40 tokens by construction.
+    # The state is the environment's core fields only (no Watches, no skill bodies): the cwd whole (a cut absolute path
+    # would be false; the OS bounds it), every other field cut in the middle to 160 UTF-8 bytes whatever the script.
     fields = {
         "cwd": "/工作/" + "目录/" * 1_000,
         "os": "macOS " + "x" * 5_000,
@@ -354,39 +354,38 @@ async def test_the_state_is_the_environment_core_fields_each_bounded_in_bytes(en
     (environment,) = await host.render_state(StateRequest(SESSION))
     lines = environment.splitlines()[1:-1]
     assert [line.split(": ", 1)[0] for line in lines] == ["cwd", "os", "shell", "date", "timezone"]
-    # The cwd may take 1,024 bytes (a cut absolute path would be false); every other field 160.
-    assert len(lines[0].split(": ", 1)[1].encode()) <= 1_024
+    assert lines[0] == f"cwd: {fields['cwd']}"
     assert all(len(line.split(": ", 1)[1].encode()) <= 160 for line in lines[1:])
-    assert text_tokens(environment) <= (1_024 + 4 * 160 + 80) // 4
+    assert text_tokens(environment) <= (len(fields["cwd"].encode()) + 4 * 160 + 80) // 4
 
 
-async def test_a_cjk_cwd_of_300_bytes_is_kept_whole_on_every_input_and_in_the_state(engine, session):
-    from modules.agents.avibe.prompt import current_environment
+async def test_a_3000_byte_cwd_is_kept_whole_on_every_input_and_in_the_state(engine, session):
+    from modules.agents.avibe.prompt import current_environment, render_environment
 
-    cwd = "/工作区/" + "目录" * 48  # about 300 UTF-8 bytes, past the 160 every other field gets
+    # The cwd is never cut, only escaped: the model builds absolute paths from it, so a cut one would be false.
+    cwd = "/工作区/" + "/".join(["目录" * 40] * 12) + "/a<b"
     fields = current_environment(cwd, [])
-    assert fields["cwd"] == cwd and len(cwd.encode()) > 290
+    assert fields["cwd"] == cwd and len(cwd.encode()) > 2_900
+    shown = cwd.replace("<", "\\u003c")
+    assert f"\ncwd: {shown}\n" in render_environment(fields)  # every input
     host = AvibeContextHost(engine, environment=lambda _: fields)
     (environment,) = await host.render_state(StateRequest(SESSION))
-    assert f"\ncwd: {cwd}\n" in environment
+    assert f"\ncwd: {shown}\n" in environment and "…" not in environment
 
 
-async def test_two_cwds_that_look_alike_once_cut_are_still_two_environments(engine, session, tmp_path, monkeypatch):
-    import modules.agents.avibe.prompt as prompt
-
+async def test_two_values_that_look_alike_once_cut_are_still_two_environments(engine, session, tmp_path, monkeypatch):
     # Identity is the raw value, and only the block the model reads is cut (display): a cut display never proves a
-    # field unchanged, so two cwds alike in their head and tail still tell the model it moved. The cut is lowered so
-    # that the paths stay within what this filesystem allows (macOS: 1,024 bytes); the rule is the same at any cut.
-    monkeypatch.setattr(prompt, "CWD_BYTES", 256)
+    # field unchanged, so two shells alike in their head and tail still tell the model the shell changed. A value
+    # displayed whole is proved unchanged by its display, so the cwd is not sent again.
     scripts = [[Done(assistant("one"))], [Done(assistant("two"))]]
     harness = _Harness(engine, tmp_path, "avibe", scripts)
     for middle in ("one", "two"):
-        request = harness.request(f"in {middle}")
-        request.working_path = str(tmp_path / ("head" * 60) / middle / ("tail" * 60))
-        await harness.agent.handle_message(request)
+        monkeypatch.setenv("SHELL", f"/opt/{'head' * 40}{middle}{'tail' * 40}")
+        await _turn(harness, f"with {middle}")
     first, second = [row.message.content[0].text for row in await harness.context_rows() if row.kind == "input"]
-    assert first.split("\n")[1] == second.split("\n")[1]  # the same display ...
-    assert second.startswith("<environment>\ncwd: ")  # ... yet the second input says the cwd changed
+    shell = [line for line in first.split("\n") if line.startswith("shell: ")]
+    assert shell and shell[0] in second.split("\n")  # the same display ...
+    assert second.startswith("<environment>\nshell: ")  # ... yet the second input says the shell changed
 
 
 async def test_every_skill_a_successful_bash_result_loaded_is_recorded():

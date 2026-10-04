@@ -10,8 +10,8 @@
 
 A skill load is a ``bash`` call to ``vibe skill load``, which writes one
 ``<skill_content name="...">`` block per skill into the result; ``mark_skill_loads``
-records those names in the result's details (``details.skills``), which is how
-clearing spares a skill load and a checkpoint lists it by name (sections 4 and 7).
+records those names in the result's details (``details.skills``), which is how a
+checkpoint lists it by name (section 7). The result itself clears like any other.
 """
 
 from __future__ import annotations
@@ -128,5 +128,5 @@ class _SkillLoadMarking:
 
 
 def mark_skill_loads(tools: Sequence[Tool]) -> tuple[Tool, ...]:
-    """The tools with ``bash`` recording the skills it loads (section 4: a skill load is never cleared)."""
+    """The tools with ``bash`` recording the skills it loads, which a checkpoint lists by name (section 7)."""
     return tuple(_SkillLoadMarking(tool) if tool.spec.name == "bash" else tool for tool in tools)

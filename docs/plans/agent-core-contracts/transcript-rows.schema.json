@@ -109,7 +109,7 @@
                   }
                 }
               },
-              "description": "Set when the result carries skills `vibe skill load` loaded: one entry per top-level `<skill_content name>` block, in load order; used for clearing protection and for the names a checkpoint lists."
+              "description": "Set when the result carries skills `vibe skill load` loaded: one entry per top-level `<skill_content name>` block, in load order; the names a checkpoint lists. The result clears like any other."
             }
           }
         }

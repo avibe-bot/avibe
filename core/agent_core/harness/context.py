@@ -399,17 +399,6 @@ def budget(
 # --- clearing (context.md section 4) ------------------------------------------------
 
 
-def _skills(entry: ContextEntry) -> tuple[str, ...]:
-    """The names of the skills a tool result loaded (``details.skills``, which the adapter marks), in load order."""
-    details = entry.payload.get("details")
-    skills = details.get("skills") if isinstance(details, Mapping) else None
-    if not isinstance(skills, list):
-        return ()
-    return tuple(
-        skill["name"] for skill in skills if isinstance(skill, Mapping) and isinstance(skill.get("name"), str)
-    )
-
-
 def clearable_results(view: ContextView) -> tuple[ContextEntry, ...]:
     """The tool results to clear now, or none when clearing them would free under 20,000 tokens."""
     inputs = [index for index, unit in enumerate(view.units) if unit.lead.kind == "input"]
@@ -422,7 +411,6 @@ def clearable_results(view: ContextView) -> tuple[ContextEntry, ...]:
                 and isinstance(message, ToolResultMessage)
                 and message.tool_name in CLEARABLE_TOOLS
                 and entry.row_id not in view.edited
-                and not _skills(entry)
             ):
                 eligible.append((index, entry, message))
     candidates = [item for item in eligible[: max(0, len(eligible) - CLEAR_KEEP_RESULTS)] if item[0] < protected_from]
@@ -588,6 +576,17 @@ def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> _Artifacts:
     return _Artifacts(read_listed, read_omitted, modified_listed, modified_omitted)
 
 
+def _skills(entry: ContextEntry) -> tuple[str, ...]:
+    """The names of the skills a tool result loaded (``details.skills``, which the adapter marks), in load order."""
+    details = entry.payload.get("details")
+    skills = details.get("skills") if isinstance(details, Mapping) else None
+    if not isinstance(skills, list):
+        return ()
+    return tuple(
+        skill["name"] for skill in skills if isinstance(skill, Mapping) and isinstance(skill.get("name"), str)
+    )
+
+
 def carried_skills(view: ContextView, cut: int) -> tuple[tuple[str, ...], bool]:
     """The names of the skills loaded before the cut (and listed by the previous checkpoint), minus those loaded
     after it: the most recently loaded first, at most ``SKILLS_LISTED``, as loaded; and whether any was ever pushed
@@ -616,14 +615,26 @@ def summarized_to_seq(view: ContextView, cut: int) -> int:
     return max([previous, *seqs])
 
 
-def display(text: str, *, limit: int = ITEM_BYTES) -> str:
-    """One line of plain text for a path or a name the model reads (section 7): control characters and the markup
-    delimiters ``<`` and ``>`` escaped as ``\\uXXXX``, then cut in the middle to ``limit`` UTF-8 bytes. The row keeps
-    the original."""
-    escaped = "".join(
-        f"\\u{ord(char):04x}" if char in "<>" or unicodedata.category(char).startswith("C") else char for char in text
-    )
-    return truncate_middle_bytes(escaped, limit)
+def display(text: str) -> str:
+    """One line of plain text for a path or a name the model reads (section 7): ``escape``d, then cut in the middle to
+    ``ITEM_BYTES``. The row keeps the original."""
+    return truncate_middle_bytes(escape(text), ITEM_BYTES)
+
+
+def escape(text: str) -> str:
+    """``text`` as one line of plain text that closes no tag, injectively: a backslash doubled, then control
+    characters and the markup delimiters ``<`` and ``>`` as ``\\uXXXX`` (``\\UXXXXXXXX`` past the BMP). Two texts
+    never escape alike, so only a cut can make two displays look the same (section 7)."""
+    return "".join(_escaped(char) for char in text)
+
+
+def _escaped(char: str) -> str:
+    if char == "\\":
+        return "\\\\"
+    if char in "<>" or unicodedata.category(char).startswith("C"):
+        code = ord(char)
+        return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+    return char
 
 
 def artifacts_shown(window: int) -> int:

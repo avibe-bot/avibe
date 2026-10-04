@@ -104,8 +104,8 @@ each is sent only when it can fit.
 
 - Eligible: results of `read` and `bash` in the projected context (terminal screen snapshots join when they exist).
 - Protected: results after the second-latest input (the last 2 user turns; with fewer than 2 inputs since the latest
-  checkpoint, all of them), the newest 5 eligible results, skill loads (a result whose `details.skills` is set), and
-  results already cleared. Results before the latest checkpoint are not in the context.
+  checkpoint, all of them), the newest 5 eligible results, and results already cleared. A skill load clears like any
+  other result: the model loads the skill again by name when it needs it, as after a checkpoint (§7). Results before the latest checkpoint are not in the context.
 - Applied only when the candidates free at least 20,000 tokens, all at once, one `context_edit` row per result:
   `{"target_event_id": <tool_result row id>, "replacement": {"text": PLACEHOLDER}, "reason": "clear_old_tool_result"}`.
 - `PLACEHOLDER` = `[Old tool result cleared to save context. Re-run the tool or re-read the file if you need it again.]`
@@ -238,14 +238,15 @@ is written, so projection stays a pure function of the rows:
   most recently loaded first, at most 20, cumulative, stored as loaded, with the same mark (`skills_omitted`) and line
   for the ones pushed out; it is left out when there are none. A skill's instructions are never injected: the model loads the skill again, and `vibe skill
   load` checks the name against the catalog. Every path and name the model reads is one line of plain text
-  (`display`): control characters and `<`, `>` escaped as `\uXXXX`, then cut in the middle to 160 UTF-8 bytes on a
-  character boundary (its head and its file name stay), at most about 40 tokens whatever the script, so a filename can
-  neither add a line nor close a tag. `<earlier-record>` is the adapter's short hint, left out when it supplies none,
+  (`display`): escaped (`escape`: a backslash doubled, then control characters and `<`, `>` as `\uXXXX`, or
+  `\UXXXXXXXX` past the BMP), then cut in the middle to 160 UTF-8 bytes on a character boundary (its head and its file
+  name stay), at most about 40 tokens whatever the script, so a filename can neither add a line nor close a tag.
+  Escaping is injective, so two paths look alike only when a cut hides where they differ. `<earlier-record>` is the adapter's short hint, left out when it supplies none,
   and `<current-request>` is left out when the cut did not split a turn.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment's core
   fields (C-7 §8: cwd, os, shell, date, timezone; no Watches; each field displayed as every input's block displays it,
-  the cwd within 1,024 UTF-8 bytes and every other field 160 (`display`), so the block is at most about 256 + 4 x 40
-  tokens by construction; a checkpoint always happens inside
+  the cwd escaped and never cut, every other field cut to 160 UTF-8 bytes (`display`), so the block is the cwd, which
+  the OS bounds, plus at most about 4 x 40 tokens; a checkpoint always happens inside
   a run, and a Turn's own input carries only the fields that changed). Nothing else is rehydrated in v1: skills are
   listed by name in `<skills-loaded>`, pending work is the checkpoint's own "Waiting on", and the split turn's
   model-facing input, environment block included, is in `<current-request>`.
@@ -307,9 +308,9 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
 - Skill loads marked in their results: `vibe skill load` writes one `<skill_content name="...">` block per skill it
   loads, and every top-level block in a successful `bash` result is recorded in the result's `details.skills`
   (`[{name}]`), whatever the command looked like; blocks are parsed as balanced, so an example tag inside a skill's
-  body is not a load. Clearing spares the result (§4) and a checkpoint lists the names (§7). A command that only
-  prints such a block (a `cat` of a file) is marked too; that spares one result from clearing and lists a name the
-  model may reload, which `vibe skill load` checks, so it costs a few tokens and injects nothing.
+  body is not a load. A checkpoint lists the names (§7); the result clears like any other (§4). A command that only
+  prints such a block (a `cat` of a file) is marked too; that lists a name the model may reload, which `vibe skill
+  load` checks, so it costs a line and injects nothing.
 - A `TranscriptStore` (C-5 §2) implementing the whole protocol C-9 uses: `append_response(..., request=...)` keeps
   `ModelResponse.request` for the anchor (§2); `append_payloads(session_id, entries)` writes several payload rows in
   one transaction (invariant 3); `append_audit(session_id, kind, payload)` writes a non-context audit row,

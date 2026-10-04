@@ -25,6 +25,7 @@ from core.agent_core.harness.context import (
     checkpoint_request,
     clearable_results,
     compaction_payload,
+    display,
     fit_result,
     half_cut,
     checkpoint_max_tokens,
@@ -341,12 +342,14 @@ def test_the_half_cut_is_nearest_to_half_and_the_rolling_cut_moves_earlier_until
     assert half_cut(units[:1]) is None
 
 
-def test_clearing_spares_recent_turns_the_newest_results_and_skill_loads():
+def test_clearing_spares_recent_turns_and_the_newest_results_and_nothing_else():
     rows = Rows()
     big = "o" * 20_000  # 5,000 tokens each
     rows.input("turn 1")
+    # A skill load clears like any other result: its name is still listed when its row is summarized, and the model
+    # loads the skill again by name when it needs it (sections 4 and 7).
+    skill = rows.tool("bash", big, call_id="skill", command="vibe skill load x", skills=("x",))
     old = [rows.tool("bash", big, call_id=f"old-{index}", command="ls") for index in range(9)]
-    rows.tool("bash", big, call_id="skill", command="vibe skill load x", skills=("x",))
     rows.tool("write", big, call_id="write", path="f")
     rows.input("turn 2")
     rows.tool("read", big, call_id="recent-1", path="f")
@@ -355,7 +358,7 @@ def test_clearing_spares_recent_turns_the_newest_results_and_skill_loads():
     view = context_view(rows.rows)
     cleared = {entry.message.tool_call_id for entry in clearable_results(view)}
     # Results after the second-latest input are protected, then the newest 5 eligible results.
-    assert cleared == {call.id for call in old[:6]}
+    assert cleared == {skill.id, *(call.id for call in old[:6])}
 
     too_small = Rows()
     too_small.input("turn 1")
@@ -566,6 +569,37 @@ def test_distinct_long_paths_stay_distinct_files_after_their_display_is_cut():
         usage=None,
     )
     assert later["files_read"] == [path("y"), path("x")] and later["files_modified"] == [path("w"), path("z")]
+
+
+def test_two_paths_are_never_displayed_alike_unless_cut():
+    # Escaping is injective: a backslash is doubled first, so a literal "\u000a" in a filename never reads as an
+    # escaped newline, and a character past the BMP takes eight hex digits, so it never reads as a shorter one and a
+    # digit. After its results are summarized, the model can still tell the two files apart.
+    pairs = [("a\nb", "a\\u000ab"), ("a<b", "a\\u003cb"), ("\U000f0000", "\uf000" + "0")]
+    for real, literal in pairs:
+        assert display(real) != display(literal), (real, literal)
+    assert (display("a\nb"), display("a\\u000ab")) == ("a\\u000ab", "a\\\\u000ab")
+    rows = Rows()
+    rows.input("read both")
+    rows.tool("read", "r", call_id="r1", path="a\nb")
+    rows.tool("read", "r", call_id="r2", path="a\\u000ab")
+    rows.input("next")
+    view = context_view(rows.rows)
+    payload = compaction_payload(
+        view,
+        len(view.units) - 1,
+        mode="dropped",
+        reason="overflow",
+        checkpoint="",
+        state=(),
+        earlier_record=None,
+        tokens_before=1,
+        threshold=2,
+        window=200_000,
+        summarizer=None,
+        usage=None,
+    )
+    assert "Read:\n- a\\\\u000ab\n- a\\u000ab\n" in payload["summary"]
 
 
 def test_a_displayed_path_or_skill_name_is_one_line_of_plain_text():
