@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 from collections import deque
 from copy import deepcopy
 from dataclasses import replace
@@ -18,6 +19,7 @@ from dataclasses import replace
 import pytest
 
 from core.agent_core.agent.checkpoint import BUDGET_USED, DENIED, CheckpointPolicy, Decision
+from core.agent_core.agent.scratch import ScratchRoot
 from core.agent_core.agent.events import (
     AgentError,
     AssistantTextDelta,
@@ -445,6 +447,70 @@ async def test_a_checkpoint_turn_reserves_room_for_every_result_of_its_batch():
     assert request_tokens(second.system, second.tools, second.messages) + 4_096 <= 32_000
 
 
+class FailingHost(Host):
+    def __init__(self, step: str) -> None:
+        super().__init__()
+        self.step = step
+
+    def earlier_record(self, session_id, through_seq):
+        if self.step == "earlier_record":
+            raise RuntimeError("lookup unavailable")
+        return super().earlier_record(session_id, through_seq)
+
+    async def render_state(self, request):
+        if self.step == "render_state":
+            raise RuntimeError("state store unavailable")
+        return await super().render_state(request)
+
+
+_TWIN_READS = (ToolCallBlock("same", "read", {"path": "a"}), ToolCallBlock("same", "read", {"path": "b"}))
+
+
+#: An 8,000-token window: the forked request over the history cannot fit it.
+SMALL = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=8_000))
+
+
+@pytest.mark.parametrize("step", ["compose", "provider", "admission", "render_state", "earlier_record", "row", "commit"])
+async def test_a_checkpoint_turn_is_finalized_once_whatever_step_fails(step, monkeypatch):
+    # Invariant 4 for checkpoint turns: one audit on every exit. A failed request (compose, provider, admission) or a
+    # host failure after the model answered is a failed checkpoint, counted; an engine error building the row or a
+    # store failure ends the run with nothing landed (invariant 3), and still leaves the audit.
+    answers = {
+        "provider": [ProviderError("server", "upstream failed", False)],
+        "admission": [Done(AssistantMessage(_TWIN_READS, assistant().origin, "tool_use"))],
+    }
+    store = FailingTransactionStore(failures=0)
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))]))
+    before = await store.load("session")
+    if step == "row":
+        def broken(*args, **kwargs):
+            raise ValueError("engine bug")
+
+        monkeypatch.setattr("core.agent_core.agent.loop.compaction_payload", broken)
+    store.failures = 1 if step == "commit" else 0
+    model = Model([], [answers.get(step, [Done(assistant(CHECKPOINT))])])
+    agent = make_agent(
+        model,
+        store=store,
+        tools=[reader(tokens(3_000))],
+        selection=SMALL if step == "compose" else SELECTION,
+        context=ContextConfig(host=FailingHost(step)),
+    )
+    events = [event async for event in agent.compact(turn_id="compact")]
+
+    assert [audit["outcome"] for _, _, audit in store.audits] == ["failed"]
+    # The turn's response from the ledger; a request never sent, or a provider error with no partial, has none.
+    assert len(store.audits[0][2]["messages"]) == (0 if step in ("compose", "provider") else 1)
+    rows = await store.load("session")
+    if step in ("row", "commit"):
+        assert rows == before and events[-1].reason == "error"
+    else:
+        assert [row.kind for row in rows[len(before) :]] == ["agent_state"]
+        assert rows[-1].payload["context"]["failures"] == 1
+        failed = [event for event in events if isinstance(event, CompactionFailed)]
+        assert len(failed) == 1 and store.audits[0][2]["error"] == failed[0].error
+
+
 async def test_a_manual_compact_with_nothing_older_than_the_tail_is_skipped_without_a_model_call():
     model = Model([[Done(assistant("short"))]])
     agent = make_agent(model)
@@ -798,6 +864,41 @@ async def test_the_stage_judges_the_fork_it_would_send_exactly_as_the_turn_compo
     assert all(request.messages[0] == state for request in model.requests)
 
 
+async def test_the_stop_check_counts_the_split_turn_input_the_drop_would_copy():
+    # The last unit is a tool batch after a large input: moving everything else out still copies that input into
+    # <current-request>, so nothing can make the request fit. It stops before any checkpoint call or row.
+    model = Model([call("read", "big", path="f")], [[Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, tools=[reader(tokens(12_000))])
+    events = await run(agent, tokens(18_000))
+    assert events[-1].reason == "context_exhausted"
+    assert [event for event in events if isinstance(event, ContextExhausted)]
+    assert not model.checkpoint_requests
+    assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
+
+
+async def test_the_stop_check_budgets_exactly_the_request_the_drop_leaves(monkeypatch):
+    # One assembler of checkpoint + tail: the minimal request the stop check budgets is the request the conversation
+    # sends once the drop has moved everything but the last unit out.
+    seen = []
+    minimal = Agent._minimal
+
+    async def spy(self, *args, **kwargs):
+        composed, plan = await minimal(self, *args, **kwargs)
+        seen.append(composed)
+        return composed, plan
+
+    monkeypatch.setattr(Agent, "_minimal", spy)
+    host = Host()
+    failing = [Done(assistant(CHECKPOINT, stop_reason="length"))]  # the rolling checkpoint fails: the ladder drops
+    model = Model([[Done(assistant("ok"))], call("read", "big", path="f"), [Done(assistant("done"))]], [failing])
+    agent = make_agent(model, tools=[reader(tokens(16_000))], context=ContextConfig(host=host))
+    await run(agent, tokens(12_000), row="first")
+    events = await run(agent, "now read the big file", row="second")
+    assert [event.mode for event in events if isinstance(event, CompactionFinished)] == ["dropped"]
+    assert events[-1].reason == "completed"
+    assert seen and seen[0] == model.conversation_requests[-1]
+
+
 async def test_an_overflow_after_streamed_output_is_never_retried():
     # The adapter streamed text, then reported overflow without a partial: the user saw output, so no retry.
     model = Model([*history(), [TextDelta(0, "partial answer"), OVERFLOW]], [[Done(assistant(CHECKPOINT))]])
@@ -1035,6 +1136,42 @@ async def test_a_scratch_root_that_is_a_symlink_authorizes_nothing(tmp_path):
     calls = [ToolCallBlock("w", "write", {"path": "state/scratch/session/plan.md", "content": "no"})]
     results = await _scratch_compact(tmp_path, scratch, calls, [WriteTool()])
     assert results["w"].content[0].text == DENIED and not os.listdir(outside)
+
+
+async def test_an_abort_waits_for_a_scratch_worker_before_closing_the_root(tmp_path, monkeypatch):
+    # A worker thread outlives a cancelled await: the root's descriptor closes only after the worker is done with it.
+    scratch, outside = scratch_case(tmp_path)
+    entered, release, seen = threading.Event(), threading.Event(), []
+    original = ScratchRoot.write
+
+    def blocked(self, name, arguments):
+        entered.set()
+        release.wait(5)
+        try:
+            os.fstat(self._fd)
+            seen.append("open")
+        except OSError:
+            seen.append("closed")
+        return original(self, name, arguments)
+
+    monkeypatch.setattr(ScratchRoot, "write", blocked)
+    write = ToolCallBlock("w", "write", {"path": str(scratch / "plan.md"), "content": "plan"})
+    model = Model(history(), [[Done(AssistantMessage((write,), assistant().origin, "tool_use"))]])
+    agent = make_agent(model, tools=[reader(tokens(3_000))], context=ContextConfig(scratch_dir=str(scratch)))
+    await run(agent)
+    compacting = asyncio.ensure_future(_drain(agent.compact(turn_id="compact")))
+    await asyncio.to_thread(entered.wait, 5)
+    agent.abort("stop")
+    threading.Timer(0.2, release.set).start()
+    events = await compacting
+    assert events[-1].reason == "aborted"
+    assert seen == ["open"]
+    assert (scratch / "plan.md").read_text() == "plan"
+    assert sorted(os.listdir(scratch)) == ["escape", "plan.md"] and not os.listdir(outside)  # no temp file left
+
+
+async def _drain(stream):
+    return [event async for event in stream]
 
 
 @pytest.mark.parametrize("swap", ["root", "target"])

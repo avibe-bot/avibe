@@ -66,8 +66,11 @@ So does anything after `R`, an edit there included.
 Every conversation request takes the request pipeline (§10, invariant 1). Its C-9 stage, inside the tool loop and
 before a retry alike:
 
-1. **Stop** (§8 d) when the request cannot fit and neither can the request composed from the checkpoint and the
-   last unit alone, budgeted without the anchor (its history would be gone). The provider never sees the request.
+1. **Stop** (§8 d) when the request cannot fit and neither can its minimal request: the request the drop (§8 c)
+   would leave with everything but the last unit moved out (the drop's own row, with its `state` and, when the cut
+   splits a turn, its `<current-request>` copy, §5), budgeted without the anchor (its history would be gone). With
+   fewer than two units nothing can move out, and the minimal request is the request itself. The provider never
+   sees the request.
 2. **Clear** (§4) when the provider cache is cold (no model request for longer than the cache TTL, 300 s by
    default; after a restart, measured from the latest response row's `created_at`) or `est >= 0.8 * T`.
 3. **Checkpoint** when `est >= T`, auto-compaction is not paused (§10), and there is something to summarize, at most
@@ -137,7 +140,7 @@ budget (invariant 2):
 | Tool | Rule |
 | --- | --- |
 | `read` | allowed |
-| `write`, `edit` | allowed only for a single file name directly inside this Session's scratch root, `<state>/agent_core/scratch/<session_id>/` (the path's directory is the root; a name with a separator, `.`, or `..` is denied). Scratch is flat and is reached only through a directory descriptor: when the turn starts, it creates the root and opens it once (`O_DIRECTORY \| O_NOFOLLOW`, `fstat` a real directory; a symlink authorizes nothing). Every read, temporary file (`O_CREAT \| O_EXCL \| O_NOFOLLOW`), and publication (`os.replace` with `src_dir_fd`/`dst_dir_fd`) is relative to that descriptor, so renaming or swapping the root, or a name in it, after it was opened redirects nothing; a name is never followed, and one that is not a regular file when the call runs is refused. Where the platform cannot open and rename relative to a descriptor (Windows), scratch writes are denied and `read` stays allowed |
+| `write`, `edit` | allowed only for a single file name directly inside this Session's scratch root, `<state>/agent_core/scratch/<session_id>/` (the path's directory is the root; a name with a separator, `.`, or `..` is denied). Scratch is flat and is reached only through a directory descriptor: when the turn starts, it creates the root and opens it once (`O_DIRECTORY \| O_NOFOLLOW`, `fstat` a real directory; a symlink authorizes nothing). Every read, temporary file (`O_CREAT \| O_EXCL \| O_NOFOLLOW`), and publication (`os.replace` with `src_dir_fd`/`dst_dir_fd`) is relative to that descriptor, so renaming or swapping the root, or a name in it, after it was opened redirects nothing; a name is never followed, and one that is not a regular file when the call runs is refused. Where the platform cannot open and rename relative to a descriptor (Windows), scratch writes are denied and `read` stays allowed. Each scratch call runs as joined work an abort waits for, so the descriptor closes only after its worker thread is done |
 | memory-read tools | reserved: allowed once they exist |
 | `bash` and every other tool | denied, never executed |
 
@@ -165,10 +168,11 @@ budget (invariant 2):
   matching (`edit_diff`), BOM, and line-ending handling. The C-7 tools themselves are unchanged.
 - The checkpoint is the text of a final response that stops with `stop` and calls no tool; only a `tool_use` stop
   with calls continues the turn. Anything else (a response refused at admission, a length stop, a `tool_use` stop
-  without calls, calls under any other stop, an error, or no text) is a failure, and nothing enters the context.
+  without calls, calls under any other stop, an error, or no text) is a failure, and nothing enters the context;
+  so is a checkpoint whose row the host cannot complete (§10, invariant 4).
 - The turn's messages, read from the attempt ledger (§10, invariant 4) with every failed or retried attempt's
-  partial and its usage, and the turn's tool results, are recorded once per checkpoint turn, outcome included, as
-  an audit row
+  partial and its usage, and the turn's tool results, are recorded once per checkpoint turn, on every exit but an
+  abort (§10, invariant 4), outcome included, as an audit row
   (`agent_events.event_type = 'context_checkpoint_turn'`, `visibility = 'audit'`, no `context_seq`; shape
   `CheckpointTurn`), never as context.
 
@@ -228,15 +232,15 @@ once the request fits:
   at most 2 rolls per request.
 - (c) **Dropped**: when no checkpoint request can help (one failed for this request other than by overflow, a rolling
   one failed, no rolling prefix can fit, the rolls are used up, or auto-compaction is paused), no model is called:
-  the earliest part (§5) moves out of the context. The row keeps the previous checkpoint's text and the
+  the earliest part (§5) moves out of the context. Built like any checkpoint row (§7: fresh `state`, and
+  `<current-request>` when the cut splits a turn), the row keeps the previous checkpoint's text and the
   `<earlier-record>` pointer; `checkpoint` is empty when there was none, and the message then has no framing text.
   Repeated while the request still does not fit.
-- (d) **Stop**: when the request and its minimal request (the checkpoint and the last unit: the current request,
-  carried as `<current-request>`, plus the latest tool batch) both cannot fit (checked in the stage, §3, before
-  provider admission), when nothing more can move out of a request that cannot fit or that the provider refused, or
-  after 4 provider overflows of one request, the run ends
-  `context_exhausted` and the `context_exhausted` event says what fills the context. No model is called for a
-  context that cannot fit.
+- (d) **Stop**: when the request and its minimal request (what the drop would leave of it: the drop's own row, §8 c,
+  plus the last unit; §3) both cannot fit (checked in the stage, §3,
+  before provider admission), when nothing more can move out of a request that cannot fit or that the provider
+  refused, or after 4 provider overflows of one request, the run ends `context_exhausted` and the
+  `context_exhausted` event says what fills the context. No model is called for a context that cannot fit.
 
 An attempt the provider refused, or that is retried, is never context (§10, invariant 4).
 
@@ -287,7 +291,9 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    the C-9 stage, then the provider. Nothing changes a request after it is budgeted; a stage step that changes the
    context rebuilds the request from the top. Whether a request fits is always `budget()` on a request actually
    composed: the request to send, the fork the stage would send first (the checkpoint turn composes its requests the
-   same way, so the dry run and the turn cannot differ), and the stop check's minimal request (§3). The one bound
+   same way, so the dry run and the turn cannot differ), and the stop check's minimal request (§3: the drop's own
+   row for that cut, built by the one builder of checkpoint rows and projected like any context; with fewer than two
+   units, the request itself). The one bound
    that extends a budget by arithmetic is the checkpoint turn's tool room, from its latest request's budget (§6);
    the stop message after the fourth overflow re-measures the refused request. The single-unit stop (§8 d) is in
    the stage, before provider admission. Checkpoint requests take the same pipeline. In v1 an Agent with a
@@ -295,7 +301,8 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    hooks with context management are a post-v1 design item (plan §10).
 2. **One tool pipeline** in a checkpoint turn: the turn's budget (once closed, `BUDGET_USED`), then the checkpoint
    table (a denial is its fixed text), then execution (a scratch `write` or `edit` relative to the root's
-   descriptor), then the bound on the result of every call that ran (§6). The two fixed texts are never cut.
+   descriptor, as joined work an abort waits for), then the bound on the result of every call that ran (§6). The
+   two fixed texts are never cut.
 3. **One commit for C-9 state.** A transition (its `context_edit` rows, its `context_compaction` row, the guard and
    pause, and the hook state of that commit point in `AgentState`) is written in one transaction
    (`append_payloads`), before any event announces it; a failed commit leaves nothing. Nothing else writes
@@ -309,8 +316,11 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    admission, or a failed commit): one non-context `ModelAttempt` audit row, never a response row, written in every
    mode, with or without `ContextConfig`, on every exit of the model call but an abort; a failed audit write is a
    diagnostic and is not retried. The cancelled run scope admits no further store write, so an aborted call's
-   unaudited attempts are not kept. It is the one place that usage is kept. A checkpoint attempt's partials and usage are kept in
-   its `CheckpointTurn` row (§6).
+   unaudited attempts are not kept. It is the one place that usage is kept. A checkpoint attempt's partials and
+   usage are kept in its `CheckpointTurn` row (§6), which the turn writes by the same rule: once, on every exit but
+   an abort, whichever step ends it (compose, provider, admission, the host's state or lookup, building the row,
+   commit). A failed request or a host failure after the model answered is a failed checkpoint, counted by the
+   guard; an engine error building the row, or a failed commit, ends the run with nothing landed (invariant 3).
 5. **Route-scoped anchors.** An anchor answered by another origin (provider, api, model) is invalid (§2).
 6. **One admission path.** Every response, of every purpose (conversation, checkpoint), and every partial with
    content is admitted in one place, the model call, before anything acts on it: it must be valid after the
