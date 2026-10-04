@@ -1107,26 +1107,35 @@ def list_session_messages(
     return {"messages": rows, "next_after_id": next_after, "next_before_id": None}
 
 
-def first_user_text(conn: Connection, session_id: str) -> str:
-    """Return the first visible user text for a session, if any."""
+#: A slash command (``/compact``, ``/model x``): an action, not a prompt. A path such as ``/Users/x`` is text.
+_SLASH_COMMAND = re.compile(r"/[A-Za-z][\w-]*(?:@\S+)?(?:\s|$)")
 
-    row = conn.execute(
+
+def is_slash_command(text: str) -> bool:
+    return _SLASH_COMMAND.match(text.strip()) is not None
+
+
+def first_user_text(conn: Connection, session_id: str) -> str:
+    """Return the first visible user text for a session, if any; a slash command is never it (every backend)."""
+
+    rows = conn.execute(
         select(messages.c.content_text, messages.c.content_json)
         .where(messages.c.session_id == session_id)
         .where(messages.c.type == "user")
         .order_by(messages.c.created_at.asc(), messages.c.id.asc())
-        .limit(1)
-    ).first()
-    if row is None:
-        return ""
-    text = str(row[0] or "").strip()
-    if text:
-        return text
-    try:
-        content = json.loads(row[1] or "{}")
-    except json.JSONDecodeError:
-        return ""
-    return str(content.get("text") or "").strip() if isinstance(content, dict) else ""
+        .limit(20)
+    ).all()
+    for row in rows:
+        text = str(row[0] or "").strip()
+        if not text:
+            try:
+                content = json.loads(row[1] or "{}")
+            except json.JSONDecodeError:
+                content = {}
+            text = str(content.get("text") or "").strip() if isinstance(content, dict) else ""
+        if text and not is_slash_command(text):
+            return text
+    return ""
 
 
 ANNOTATION_TYPE = "annotation"

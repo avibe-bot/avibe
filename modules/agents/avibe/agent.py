@@ -89,7 +89,7 @@ from modules.agents.avibe.context import (
     compact_command,
     mark_skill_loads,
 )
-from modules.agents.avibe.errors import compact_text, context_exhausted_text, error_text
+from modules.agents.avibe.errors import compaction_failure_kind, compact_text, context_exhausted_text, error_text
 from modules.agents.avibe.media import MediaSnapshots
 from modules.agents.avibe.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
 from modules.agents.avibe.prompt import current_environment, system_prompt
@@ -130,6 +130,15 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
         return absolute if shown.startswith("../..") else shown
 
     return relative
+
+
+#: Failures no served source produced: Model Hub's record of the route stays as it is (``_source_failed``).
+_LOCAL_FAILURES = frozenset({"context_exhausted", "overflow", "aborted", "dependency_cancelled", "local"})
+
+
+def _source_failed(kind: Optional[str]) -> bool:
+    """Whether a failure is the served source's, so Model Hub records it against the route (C-6)."""
+    return kind not in _LOCAL_FAILURES
 
 
 #: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
@@ -348,8 +357,8 @@ class AvibeAgent(BaseAgent):
             answer, failed = compact_text("skipped", lang), False
         else:
             answer, failed = compact_text("failed", lang), True
-            # The served attempt failed, as a failed run reports it (``_settle``).
-            await self.record_model_hub_native_failure(context, f"manual compaction failed: {outcome.error}")
+            if _source_failed(compaction_failure_kind(outcome.error)):
+                await self.record_model_hub_native_failure(context, f"manual compaction failed: {outcome.error}")
         await self.emit_result_message(
             context,
             answer,
@@ -671,6 +680,9 @@ class AvibeAgent(BaseAgent):
                 logger.exception("Avibe Agent could not tell Session %s that auto-compaction paused", run.session_id)
         elif isinstance(event, (CompactionFinished, CompactionFailed, CompactionSkipped)):
             run.compaction = event  # automatic ones are silent; a manual one is answered (``_compact``)
+            if isinstance(event, CompactionFinished):
+                # The session's occupancy snapshot drops with the context, before anything shows it.
+                self._note_total(run, event.tokens_after_estimate)
 
     async def _settle(self, run: _Run) -> None:
         """Settle the Turn from the run's outcome (loop-control.md section 6).
@@ -698,7 +710,7 @@ class AvibeAgent(BaseAgent):
                 # A silent final whose run failed after the commit: like a final without text
                 # of its own (``_display_source``), its row carries the explanation.
                 body = error_text(kind or "empty_response", self._language(), reason=reason)
-            if failed:
+            if failed and _source_failed(kind):
                 await self.record_model_hub_native_failure(context, diagnostic or (kind or "failed final"))
             if body.strip():
                 # The same result path as the other backends; the row is already the message.
@@ -1219,7 +1231,12 @@ class AvibeAgent(BaseAgent):
         note = getattr(self.controller, "note_session_tokens", None)
         if usage is None or not callable(note):
             return
-        total = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens + usage.output_tokens
+        self._note_total(run, usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens + usage.output_tokens)
+
+    def _note_total(self, run: _Run, total: int) -> None:
+        note = getattr(self.controller, "note_session_tokens", None)
+        if not callable(note):
+            return
         try:
             note(run.request.context, total=total)
         except Exception:
@@ -1237,8 +1254,10 @@ class AvibeAgent(BaseAgent):
     ) -> None:
         """A failed Turn's notice. ``refusal`` is copy shown instead of the error kind's: Model Hub's for a route it
         refused (as at preflight), or what fills a context that cannot fit (C-9 section 8 d)."""
-        # A failure after Model Hub served the route replaces that served attempt, as for the other backends.
-        await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
+        # A failure the served source produced replaces that served attempt, as for the other backends; a local
+        # one (a context that cannot fit, a Stop) leaves Model Hub's record as it is.
+        if _source_failed(kind or reason):
+            await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
         await emit_backend_failure(
             self.controller,
             request.context,

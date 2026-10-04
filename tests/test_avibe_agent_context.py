@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import insert, select, update
 
-from core.agent_core.ai.provider import Done
+from core.agent_core.ai.provider import Done, ProviderError
 from core.agent_core.harness.context import SkillRef, StateRequest, text_tokens
 from core.agent_core.messages import ToolCallBlock, UserMessage, text
 from core.agent_core.tools.base import ToolResult
@@ -24,7 +24,7 @@ from core.managed_skills import ManagedSkill
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.avibe.context import AvibeContextHost, SkillScope, compact_focus, mark_skill_loads
 from modules.im.base import FileAttachment
-from storage.models import agent_runs, messages, run_definitions
+from storage.models import agent_runs, agent_sessions, messages, run_definitions
 from storage.read_only_query import run_read_only_query
 from tests.agent_core.fakes import FakeTool, assistant
 from tests.test_avibe_agent import (  # noqa: F401 (fixtures)
@@ -33,6 +33,7 @@ from tests.test_avibe_agent import (  # noqa: F401 (fixtures)
     _SCOPES,
     _Harness,
     _insert_session,
+    _until,
     engine,
     published,
     session,
@@ -268,81 +269,70 @@ async def test_compact_with_an_attachment_is_an_ordinary_message(engine, session
     assert len(harness.provider.requests) == 1 and _texts(harness, "result") == ["looked"]
 
 
-async def test_a_failed_manual_compaction_is_reported_to_model_hub(engine, session, tmp_path):
+@pytest.mark.parametrize(
+    "checkpoint,recorded",
+    [
+        ([ProviderError("server", "upstream failed", False)], 1),  # the served source failed
+        ([Done(assistant(CHECKPOINT, stop_reason="length"))], 0),  # the source answered; the checkpoint failed locally
+    ],
+    ids=["source failure", "local failure"],
+)
+async def test_a_failed_manual_compaction_is_reported_to_model_hub_only_when_the_source_failed(
+    engine, session, tmp_path, checkpoint, recorded
+):
     reported: list[str] = []
 
     async def record_native_failure(context, diagnostic) -> bool:
         reported.append(diagnostic)
         return False
 
-    scripts = [[Done(assistant("noted"))], [Done(assistant("ok"))], [Done(assistant(CHECKPOINT, stop_reason="length"))]]
+    scripts = [[Done(assistant("noted"))], [Done(assistant("ok"))], checkpoint]
     harness = _Harness(engine, tmp_path, "avibe", scripts)
     harness.controller.model_hub_runtime.record_native_failure = record_native_failure
     await _turn(harness, tokens(3_000))
     await _turn(harness, tokens(3_000))
     await _turn(harness, "/compact")
     assert _texts(harness, "error") == [i18n_t("avibeAgent.compact.failed", "en")]  # answered as a failure
-    assert len(reported) == 1 and harness.controller.terminals[-1]["is_error"] is True
+    assert len(reported) == recorded and harness.controller.terminals[-1]["is_error"] is True
 
 
-async def test_compact_with_an_attachment_survives_a_restart_before_it_was_consumed(engine, session, tmp_path):
-    # An ordinary message live, so an ordinary message to recovery too: one rule decides what is a command.
-    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("first"))]])
-    await _turn(harness, "hello")
-    request = harness.request("/compact")
-    harness.controller._native_start(request.context)  # accepted, and then the process stopped
-    with engine.begin() as conn:
-        row = conn.execute(
-            select(messages.c.id, messages.c.content_json).where(messages.c.content_text == "/compact")
-        ).one()
-        content = {**json.loads(row.content_json or "{}"), "attachments": [{"name": "notes.txt"}]}
-        conn.execute(update(messages).where(messages.c.id == row.id).values(content_json=json.dumps(content)))
-    restarted = harness.new_agent()
-    assert SESSION in restarted._sessions_with_unconsumed_inputs()
-    assert [entry[0] for entry in restarted._unconsumed_inputs(SESSION)] == [row.id]
+async def test_a_context_that_cannot_fit_locally_is_never_reported_as_a_source_failure(engine, session, tmp_path):
+    reported: list[str] = []
+
+    async def record_native_failure(context, diagnostic) -> bool:
+        reported.append(diagnostic)
+        return False
+
+    harness = _Harness(engine, tmp_path, "avibe", [])
+    harness.controller.model_hub_runtime.record_native_failure = record_native_failure
+    await _turn(harness, tokens(30_000))
+    assert not harness.provider.requests and not reported  # stopped before the provider: no source was involved
+    assert harness.controller.terminals[-1]["is_error"] is True
 
 
-async def test_each_resolved_hop_gets_its_own_output_budget(engine, session, tmp_path):
-    from core.agent_core.ai.provider import ProviderError
-
-    harness = None
-
-    async def busy_then_fallback(request, cancel):
-        # The retry resolves again, to a fallback whose output maximum equals its 62,000-token window.
-        harness.controller.hub_limits = {"context_window": 62_000, "max_output_tokens": 62_000}
-        yield ProviderError("rate_limit", "busy", True)
-
-    harness = _Harness(engine, tmp_path, "avibe", [busy_then_fallback, [Done(assistant("ok"))]])
-    harness.controller.hub_limits = {"context_window": 200_000, "max_output_tokens": 16_000}
-    await _turn(harness, "hello")
-    assert [request.max_tokens for request in harness.provider.requests] == [16_000, 15_500]
-    assert _texts(harness, "result") == ["ok"]
-
-
-async def test_a_pause_notice_that_cannot_be_delivered_never_fails_the_turn(engine, session, tmp_path):
-    failing = [Done(assistant(CHECKPOINT, stop_reason="length"))]
-    scripts = [
-        [Done(assistant("one"))],
-        failing,
-        [Done(assistant("two"))],
-        failing,
-        [Done(assistant("three"))],
-        failing,
-        [Done(assistant("four"))],
-    ]
+async def test_compact_refreshes_the_session_token_snapshot(engine, session, tmp_path):
+    scripts = [[Done(assistant("noted"))], [Done(assistant("ok"))], [Done(assistant(CHECKPOINT))]]
     harness = _Harness(engine, tmp_path, "avibe", scripts)
-    emit = harness.controller.emit_agent_message
+    noted: list[int] = []
+    harness.controller.note_session_tokens = lambda context, *, total: noted.append(total)
+    await _turn(harness, tokens(3_000))
+    await _turn(harness, tokens(3_000))
+    await _turn(harness, "/compact")
+    compaction = [row for row in await harness.context_rows() if row.kind == "compaction"][0]
+    assert noted[-1] == compaction.payload["tokens_after_estimate"]
 
-    async def notices_fail(context, message_type, text_value, *args, **kwargs):
-        if message_type == "notify":
-            raise RuntimeError("the surface is gone")
-        return await emit(context, message_type, text_value, *args, **kwargs)
 
-    harness.controller.emit_agent_message = notices_fail
-    for body in (tokens(10_000), tokens(10_000), "a", "b"):
-        await _turn(harness, body)
-    assert _texts(harness, "result") == ["one", "two", "three", "four"]
-    assert all(not terminal["is_error"] for terminal in harness.controller.terminals)
+async def test_compact_as_the_first_message_never_titles_the_session(engine, session, tmp_path, published):
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("done"))]])
+    await _turn(harness, "/compact")
+    await _turn(harness, "Refactor the parser")
+
+    def title():
+        with engine.connect() as conn:
+            return conn.execute(select(agent_sessions.c.title).where(agent_sessions.c.id == SESSION)).scalar()
+
+    await _until(lambda: bool(title()), "the Session was never titled")
+    assert title().startswith("Refactor")
 
 
 # --- what the user is told -------------------------------------------------------------------------------

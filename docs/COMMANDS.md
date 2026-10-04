@@ -125,7 +125,8 @@ there is nothing to compact yet. `/compact` also resumes automatic compaction af
   Workbench and every IM platform (on Slack, as `@Avibe /compact`). Other backends receive the text unchanged.
 - Sent while a reply is running, it waits and runs right after that reply. Send it as its own message: messages
   queued together while a reply runs are delivered as one.
-- The command itself never becomes part of the conversation the model sees.
+- The command itself never becomes part of the conversation the model sees, and a slash command is never used as a
+  session's title (for every backend).
 
 ### 2.5 Parser normalization and aliases
 

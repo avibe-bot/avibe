@@ -294,7 +294,8 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   a steer, and in recovery: a `/compact` carrying files is an ordinary message. Other backends receive the text
   unchanged.
 - The pause notice (§10) through `vibe/i18n`, once, as a `notify` message; and, after (d), a stop message that lists
-  what fills the context (`ContextExhausted`'s parts).
+  what fills the context (`ContextExhausted`'s parts). A failure is recorded against the Model Hub route only when
+  the served source produced it: never for a context that cannot fit, a Stop, or a checkpoint that failed locally.
 
 ## 10. Guards
 

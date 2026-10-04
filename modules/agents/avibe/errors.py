@@ -63,3 +63,23 @@ def context_exhausted_text(limit: int, parts: Sequence[Any], lang: str) -> str:
         f"{i18n_t(f'avibeAgent.contextPart.{part.name}', lang)} ~{part.tokens:,}" for part in parts
     )
     return i18n_t("avibeAgent.error.contextExhaustedParts", lang, limit=f"{limit:,}", parts=listed)
+
+
+#: The provider error kinds a checkpoint failure can carry (C-2 ``ErrorKind``), and a malformed reply.
+_PROVIDER_KINDS = frozenset(
+    {"overflow", "rate_limit", "overloaded", "network", "server", "auth", "invalid_request", "aborted", "unknown"}
+)
+
+
+def compaction_failure_kind(error: str) -> str:
+    """The kind of a ``CompactionFailed.error``, the one place its text is read.
+
+    The loop writes a provider failure as ``"<kind>: <message>"`` and a malformed reply as ``"Provider protocol
+    violation: ..."``; anything else (no text, a length stop, a fork that cannot fit) is the turn's own: ``local``.
+    """
+    if error.startswith("Provider protocol violation"):
+        return "ProviderProtocolViolation"
+    head = error.split(":", 1)[0].strip()
+    if head == "overflow" and "does not fit the model's input limit" in error:
+        return "local"  # the fork was never sent
+    return head if ":" in error and head in _PROVIDER_KINDS else "local"
