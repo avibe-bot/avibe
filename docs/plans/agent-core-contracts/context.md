@@ -103,7 +103,7 @@ each is sent only when it can fit.
 
 - Eligible: results of `read` and `bash` in the projected context (terminal screen snapshots join when they exist).
 - Protected: results after the second-latest input (the last 2 user turns; with fewer than 2 inputs since the latest
-  checkpoint, all of them), the newest 5 eligible results, skill loads (a result whose `details.skill` is set), and
+  checkpoint, all of them), the newest 5 eligible results, skill loads (a result whose `details.skills` is set), and
   results already cleared. Results before the latest checkpoint are not in the context.
 - Applied only when the candidates free at least 20,000 tokens, all at once, one `context_edit` row per result:
   `{"target_event_id": <tool_result row id>, "replacement": {"text": PLACEHOLDER}, "reason": "clear_old_tool_result"}`.
@@ -217,9 +217,10 @@ is written, so projection stays a pure function of the rows:
   `Read` lists paths of successful `read` calls that no `write` or `edit` touched; `Modified` lists paths of
   successful `write` or `edit` calls; `(none)` when a list is empty. `<earlier-record>` is left out when the adapter supplies no command, and
   `<current-request>` when the cut did not split a turn.
-- `state`: texts the adapter rendered from their own stores when the checkpoint was written: the full environment
-  block (C-7 §8; a checkpoint always happens inside a run), pending Watches, Tasks, and delegated Runs from the Harness
-  tables, and skill bodies by name and revision (at most 5,000 tokens each), all within one 25,000-token budget.
+- `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment block
+  (C-7 §8; a checkpoint always happens inside a run), pending Watches, Tasks, and delegated Runs from the Harness
+  tables, and skill bodies by name (at most 5,000 tokens each). All of it is capped for the route the next request
+  goes to: `state_cap = min(25,000, floor(0.1 * W))`, passed in `StateRequest.cap`.
 - Projection (C-5 §3): the system prompt, hook-rehydrated messages, one user message holding `summary` and then each
   `state` text as its own text block, then the rows from `first_kept_seq` on, with edits applied. A tool result whose
   call was summarized is left out with it. No synthetic "continue" message follows.
@@ -273,15 +274,19 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   and replies in `messages` of every Session whose rows the context holds (the Session and its fork ancestry, each
   up to its fork bound), through the last summarized `context_seq`, filtered by a `KEYWORD` the model replaces. It
   reads `messages` only, which every caller of `vibe data query` may read; tool outputs can be run again.
-- `ContextHost.render_state(StateRequest)`: the `state` texts (§7), rendered from their own stores, in this order:
-  the full environment block (C-7 §8); the Session's pending Watches, Tasks, and delegated Runs (`<pending-work>`, by
-  kind, id, and label, from the Harness tables, never a command); and each skill the summarized rows loaded, by name
-  and its current revision (`<skill_content name revision>`, cut to 5,000 tokens with a note saying how to load all
-  of it; a skill that no longer loads is named). All of it shares one 25,000-token budget through one renderer: a
-  section keeps its items in order while they fit, and names what it leaves out (up to 20, then "and N more") with
-  how to get it back.
-- Skill loads marked in their results: a successful `vibe skill load` through `bash` records the skill's name and
-  revision in the result's `details.skill`, so clearing spares it (§4) and a checkpoint carries it (§7).
+- `ContextHost.render_state(StateRequest)`: the `state` texts (§7), rendered from their own stores within
+  `StateRequest.cap`, in this order: the environment block (C-7 §8), whose core fields (cwd, os, shell, date,
+  timezone) come first and are never dropped, then as many Watches as the room left holds (at most 20, each name
+  capped at its source; core fields that cannot fit are a bug in the cap and raise); the Session's pending Watches,
+  Tasks, and delegated Runs (`<pending-work>`, by kind, id, and label, from the Harness tables, never a command); and
+  each skill the summarized rows loaded, by name, with the revision of the body it renders now
+  (`<skill_content name revision>`, cut to 5,000 tokens with a note saying how to load all of it; a skill that no
+  longer loads is named). One renderer bounds every section: room is held back for the most each section's wrapper
+  and notice can take, a section keeps its items in order while they fit, and it names what it leaves out (up to
+  20, then "and N more") with how to get it back.
+- Skill loads marked in their results: `vibe skill load` writes one `<skill_content name="...">` block per skill it
+  loads, and every such block in a successful `bash` result is recorded in the result's `details.skills`
+  (`[{name}]`), whatever the command looked like, so clearing spares it (§4) and a checkpoint carries it (§7).
 - A `TranscriptStore` (C-5 §2) implementing the whole protocol C-9 uses: `append_response(..., request=...)` keeps
   `ModelResponse.request` for the anchor (§2); `append_payloads(session_id, entries)` writes several payload rows in
   one transaction (invariant 3); `append_audit(session_id, kind, payload)` writes a non-context audit row,

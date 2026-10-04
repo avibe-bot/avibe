@@ -207,7 +207,7 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
             "summarized_to_seq": _count,
             "files_read": _list(_string),
             "files_modified": _list(_string),
-            "skills": _list(_object({"name": _string, "revision": _string})),
+            "skills": _list(_object({"name": _string})),
             "tokens_before": _count,
             "tokens_after_estimate": _count,
             "threshold": _integer,

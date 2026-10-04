@@ -598,6 +598,7 @@ async def test_the_environment_names_at_most_twenty_watches_without_their_comman
             id="wch_job", name=None, session_key="k", session_id=SESSION, shell_command=secret,
             metadata={"watch_target": {"kind": "job", "job_id": "job_1", "command": secret}},
         ),
+        ManagedWatch(id="wch_long", name="n" * 200, session_key="k", session_id=SESSION, shell_command=secret),
         *(
             ManagedWatch(id=f"wch_{index:02}", name=None, session_key="k", session_id=SESSION, shell_command=secret)
             for index in range(23)
@@ -612,8 +613,9 @@ async def test_the_environment_names_at_most_twenty_watches_without_their_comman
     block = (await harness.context_rows())[0].message.content[0].text
     assert "sk-live-secret" not in block and "curl" not in block
     assert 'wch_named "nightly sync" command' in block and "wch_job job" in block
-    # Bounded on every input: the first 20, then how many more.
-    assert "wch_17 command" in block and "wch_18" not in block and "; and 5 more\n" in block
+    # Bounded on every input: each name cut to 80 characters, the first 20, then how many more.
+    assert 'wch_long "' + "n" * 79 + '…" command' in block
+    assert "wch_16 command" in block and "wch_17" not in block and "; and 6 more\n" in block
 
 
 async def test_a_steer_enters_after_the_tool_batch_even_when_its_row_arrives_late(

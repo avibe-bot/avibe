@@ -17,8 +17,8 @@ from pathlib import Path
 import pytest
 from sqlalchemy import insert
 
-from core.agent_core.ai.provider import Done, ProviderError
-from core.agent_core.harness.context import SkillRef, StateRequest, text_tokens
+from core.agent_core.ai.provider import Done, ModelCapabilities, ProviderError
+from core.agent_core.harness.context import SkillRef, StateRequest, state_cap, text_tokens
 from core.agent_core.messages import ToolCallBlock, UserMessage, text
 from core.agent_core.tools.base import ToolResult
 from core.managed_skills import ManagedSkill
@@ -161,9 +161,8 @@ async def test_a_skill_load_through_bash_is_marked_in_its_context_row(engine, se
     harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[bash])
     await _turn(harness, "load the parser skill")
     (result,) = [row for row in await harness.context_rows() if row.kind == "tool_result"]
-    # Clearing spares it and a checkpoint carries it (C-9 sections 4 and 7); the revision is the skill's when it
-    # resolves, empty when it does not (as here, where no skill named parser is installed).
-    assert result.payload["details"]["skill"] == {"name": "parser", "revision": ""}
+    # Clearing spares it and a checkpoint carries it (C-9 sections 4 and 7).
+    assert result.payload["details"]["skills"] == [{"name": "parser"}]
 
 
 async def test_a_context_that_cannot_fit_locally_is_never_reported_as_a_source_failure(engine, session, tmp_path):
@@ -318,7 +317,7 @@ async def test_the_lookup_command_reads_the_summarized_rows_of_the_session_and_i
     child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("child reply"))]], session_id="ses_child")
     await _turn(child, "parser keyword child")
     child_rows = await child.context_rows()
-    host = AvibeContextHost(engine, environment=lambda _: {}, skills=lambda _: None)
+    host = AvibeContextHost(engine, environment=lambda _: {}, watches=lambda _: (), skills=lambda _: None)
     command = host.earlier_record("ses_child", child_rows[-1].context_seq)
     assert command.startswith('vibe data query --limit 100 --sql "') and command.endswith('"')
     sql = command[len('vibe data query --limit 100 --sql "') : -1].replace("KEYWORD", "parser keyword")
@@ -368,9 +367,10 @@ async def test_the_state_carries_skills_pending_work_and_the_environment(engine,
                 updated_at=NOW, metadata_json="{}",
             )
         )
-    host = AvibeContextHost(engine, environment=lambda _: {"cwd": "/work", "os": "macOS"}, skills=lambda _: skills)
-    refs = (SkillRef("parser", "r1"), SkillRef("huge", "r2"), SkillRef("gone", "r3"))
-    state = await host.render_state(StateRequest(SESSION, refs))
+    fields = {"cwd": "/work", "os": "macOS"}
+    host = AvibeContextHost(engine, environment=lambda _: fields, watches=lambda _: (), skills=lambda _: skills)
+    refs = (SkillRef("parser"), SkillRef("huge"), SkillRef("gone"))
+    state = await host.render_state(StateRequest(SESSION, refs, 25_000))
     environment, pending, parser, huge, gone = state
     assert environment.startswith("<environment>") and "\ncwd: /work" in environment
     assert "watch wd_1" in pending and "CI for #12" in pending and "agent_run run_1" in pending
@@ -380,7 +380,7 @@ async def test_the_state_carries_skills_pending_work_and_the_environment(engine,
     # Past the 25,000-token total, the remaining skills are named, not carried, and not even loaded; the catalog
     # is resolved once per checkpoint, however many skills it carries.
     skills.loads.clear()
-    capped = await host.render_state(StateRequest(SESSION, tuple(SkillRef(name, "r") for name in many)))
+    capped = await host.render_state(StateRequest(SESSION, tuple(SkillRef(name) for name in many), 25_000))
     assert sum(text_tokens(item) for item in capped) <= 25_000
     assert capped[-1].startswith('<left-out of="skills">') and "big5" in capped[-1]
     assert skills.snapshots == 2 and "big5" not in skills.loads
@@ -388,14 +388,16 @@ async def test_the_state_carries_skills_pending_work_and_the_environment(engine,
     with engine.begin() as conn:
         conn.execute(run_definitions.delete())
         conn.execute(agent_runs.delete())
-    (only,) = await host.render_state(StateRequest(SESSION, ()))
+    (only,) = await host.render_state(StateRequest(SESSION, (), 25_000))
     assert only.startswith("<environment>")
 
 
-async def test_all_rehydrated_state_shares_the_one_total(engine, session):
-    # A long Session can own hundreds of Watches and carry hundreds of skills: the environment block, the pending
-    # work, the skill bodies, the unavailable notices, and what is left out all fit inside the one 25,000-token
-    # total, each section naming at most 20 of what it left out and then counting the rest.
+@pytest.mark.parametrize("window", [8_000, 200_000], ids=["8K window", "200K window"])
+async def test_all_rehydrated_state_fits_the_state_cap_of_the_route(engine, session, window):
+    # A long Session can own hundreds of Watches and carry hundreds of skills. On any route, the environment's core
+    # fields come first and are never dropped, and its Watches fill the room left (at most 20, each name capped).
+    # The pending work, the skill bodies, the unavailable notices, and what is left out all fit inside the route's
+    # cap, each section naming at most 20 of what it left out and then counting the rest.
     label = "CI for the release branch, then the nightly smoke run and the installer check"
     for index in range(800):
         _insert_definition(
@@ -404,32 +406,38 @@ async def test_all_rehydrated_state_shares_the_one_total(engine, session):
     found = {f"skill-{index:03}": _skill(f"skill-{index:03}", tokens(3_000)) for index in range(0, 400, 2)}
     lines = [f'wd_{index:03} "{label} {index}" command running' for index in range(800)]
     skills = _Skills(found)
-    host = AvibeContextHost(engine, environment=lambda _: current_environment("/work", lines), skills=lambda _: skills)
-    refs = tuple(SkillRef(f"skill-{index:03}", "r") for index in range(400))
-    state = await host.render_state(StateRequest(SESSION, refs))
-    assert sum(text_tokens(item) for item in state) <= 25_000
-    environment, pending, pending_left_out = state[:3]
-    # The environment block keeps every field, its Watches bounded at the source (C-7).
-    assert environment.startswith("<environment>") and "\ncwd: " in environment and "\nshell: " in environment
-    assert "wd_019" in environment and "wd_020" not in environment and "; and 780 more\n" in environment
-    assert pending.startswith("<pending-work>") and "watch wd_000" in pending
-    assert pending_left_out.startswith('<left-out of="pending work">') and pending_left_out.count("watch wd_") == 20
-    assert re.search(r", and \d+ more\.", pending_left_out)
+    host = AvibeContextHost(
+        engine, environment=lambda _: current_environment("/work", lines), watches=lambda _: lines,
+        skills=lambda _: skills,
+    )
+    refs = tuple(SkillRef(f"skill-{index:03}") for index in range(400))
+    cap = state_cap(ModelCapabilities(context_window=window))
+    state = await host.render_state(StateRequest(SESSION, refs, cap))
+    assert sum(text_tokens(item) for item in state) <= cap
+    environment = state[0]
+    assert environment.startswith("<environment>")
+    assert all(f"\n{field}: " in environment for field in ("cwd", "os", "shell"))
+    assert "wd_000" in environment and "wd_020" not in environment and re.search(r"; and \d+ more\n", environment)
+    pending_left_out = next(item for item in state if item.startswith('<left-out of="pending work">'))
+    assert pending_left_out.count("watch wd_") == 20 and re.search(r", and \d+ more\.", pending_left_out)
     skills_left_out = state[-1]
     assert skills_left_out.startswith('<left-out of="skills">') and skills_left_out.count("skill-") == 20
     assert re.search(r", and \d+ more\.", skills_left_out)
-    # Whatever fills it, the total holds: an environment block near the whole budget leaves the rest their notices.
-    for size in range(23_000, 25_001, 250):
-        host = AvibeContextHost(engine, environment=lambda _, size=size: {"cwd": tokens(size)}, skills=lambda _: skills)
-        assert sum(text_tokens(item) for item in await host.render_state(StateRequest(SESSION, refs))) <= 25_000, size
+    # A cap that cannot hold even the environment's core fields is a bug in the cap, and it fails loudly.
+    with pytest.raises(ValueError):
+        await host.render_state(StateRequest(SESSION, refs, 50))
 
 
-async def test_a_successful_skill_load_is_recorded_in_the_bash_result():
-    loaded = '<skill_content name="parser" directory="/skills/parser">\nParse it.\n</skill_content>'
+async def test_every_skill_a_successful_bash_result_loaded_is_recorded():
+    # The record is what `vibe skill load` wrote into the result: a compound command, quoting, and a path to `vibe`
+    # do not matter. A failed command, or one that loaded nothing, records nothing.
+    def loaded(*names: str) -> ToolResult:
+        blocks = (f'<skill_content name="{name}" directory="/s/{name}">\nBody.\n</skill_content>' for name in names)
+        return ToolResult((text("\n".join(blocks)),))
+
     outputs = {
-        "vibe skill load -- parser": ToolResult((text(loaded),)),
-        "vibe skill load -- 'parser'": ToolResult((text(loaded),)),
-        '/usr/local/bin/vibe skill load "parser"': ToolResult((text(loaded),)),
+        "vibe skill load -- parser && vibe skill load -- 'lint'": loaded("parser", "lint"),
+        '/usr/local/bin/vibe skill load "parser"': loaded("parser"),
         "vibe skill load -- missing": ToolResult((text("Skill not found: missing"),), is_error=True),
         "ls": ToolResult((text("a b"),)),
     }
@@ -437,14 +445,14 @@ async def test_a_successful_skill_load_is_recorded_in_the_bash_result():
     async def run(arguments, ctx):
         return outputs[arguments["command"]]
 
-    bash = FakeTool("bash", execute=run)
-    (marked,) = mark_skill_loads([bash], lambda name: f"rev-{name}")
+    (marked,) = mark_skill_loads([FakeTool("bash", execute=run)])
     assert marked.spec.name == "bash"
-    for command in ("vibe skill load -- parser", "vibe skill load -- 'parser'", '/usr/local/bin/vibe skill load "parser"'):
-        result = await marked.execute({"command": command}, None)
-        assert result.details["skill"] == {"name": "parser", "revision": "rev-parser"}, command
+    compound = await marked.execute({"command": "vibe skill load -- parser && vibe skill load -- 'lint'"}, None)
+    assert compound.details["skills"] == [{"name": "parser"}, {"name": "lint"}]
+    path = await marked.execute({"command": '/usr/local/bin/vibe skill load "parser"'}, None)
+    assert path.details["skills"] == [{"name": "parser"}]
     for command in ("vibe skill load -- missing", "ls"):
-        assert "skill" not in (await marked.execute({"command": command}, None)).details
+        assert "skills" not in (await marked.execute({"command": command}, None)).details
 
 
 # --- end to end, through the real provider adapter ------------------------------------------------------------

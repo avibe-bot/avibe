@@ -48,6 +48,7 @@ from core.agent_core.harness.context import (
     StateRequest,
     message_tokens,
     request_tokens,
+    state_cap,
 )
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import (
@@ -220,7 +221,8 @@ async def test_a_threshold_checkpoint_forks_the_exact_prefix_and_leaves_checkpoi
     assert fork.messages[:-1] == project(before).messages  # the whole conversation, then the request
     assert compaction.payload["mode"] == "normal" and compaction.payload["reason"] == "threshold"
     assert compaction.payload["checkpoint"] == CHECKPOINT
-    assert host.states == [StateRequest("session", ())]
+    # The state is capped for the route the next request goes to.
+    assert host.states == [StateRequest("session", (), state_cap(SELECTION.capabilities))]
     assert host.records == [("session", compaction.payload["summarized_to_seq"])]
 
     # The next request: the checkpoint message (summary, then state), then the kept tool batch.

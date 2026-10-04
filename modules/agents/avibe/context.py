@@ -7,13 +7,15 @@
   context holds (the Session and its fork ancestry), up to the last summarized
   ``context_seq``;
 * ``render_state`` renders, from their own stores, the state a checkpoint
-  carries: the full environment block (a checkpoint always happens inside a
-  run), the Session's pending Watches, Tasks, and delegated Runs, and the bodies
-  of the skills the summarized rows loaded, all within one budget (``_render``).
+  carries within the cap of the route the next request goes to: the environment
+  block (its core fields always; a checkpoint always happens inside a run), the
+  Session's pending Watches, Tasks, and delegated Runs, and the bodies of the
+  skills the summarized rows loaded.
 
-A skill load is a ``bash`` call to ``vibe skill load``; ``mark_skill_loads``
-records the skill's name and revision in that call's result details, which is
-how clearing spares a skill load and a checkpoint carries it (section 4, 7).
+A skill load is a ``bash`` call to ``vibe skill load``, which writes one
+``<skill_content name="...">`` block per skill into the result; ``mark_skill_loads``
+records those names in the result's details (``details.skills``), which is how
+clearing spares a skill load and a checkpoint carries it (sections 4 and 7).
 """
 
 from __future__ import annotations
@@ -28,24 +30,20 @@ from sqlalchemy.engine import Engine
 
 from core.agent_core.harness.context import SkillRef, StateRequest, text_tokens
 from core.agent_core.tools.base import Tool, ToolContext, ToolResult, ToolSpec
-from modules.agents.avibe.prompt import render_environment
+from modules.agents.avibe.prompt import WATCHES_LISTED, render_environment
 
-#: Everything a checkpoint rehydrates shares one budget, and each skill body is cut to its own, in tokens (section 7).
-STATE_TOKENS = 25_000
+#: Each skill body a checkpoint carries, in tokens (section 7); all the state shares the route's cap (``state_cap``).
 SKILL_TOKENS = 5_000
-#: Below this much of the budget left, no further item can carry anything useful.
+#: Below this much of the room left, no further item can carry anything useful.
 _FLOOR = 200
-#: What a section leaves out is named, at most this many, then "and N more"; its wrapper and that notice are kept
-#: inside the budget.
+#: What a section leaves out is named, at most this many, then "and N more".
 _LISTED = 20
 _NAME_CHARS = 64
-_NOTICE_TOKENS = 600
 _LABEL_CHARS = 200
 
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
-_SKILL_LOAD = re.compile(
-    r"(?:^|[\s;&|(/])vibe\s+skill\s+load\s+(?:--\s+)?(?P<quote>['\"]?)(?P<name>[A-Za-z0-9][A-Za-z0-9._:-]*)(?P=quote)"
-)
+#: The block ``vibe skill load`` writes for each skill it loads (``render_skill_content``).
+_SKILL_CONTENT = re.compile(r'<skill_content name="([^"]*)"')
 
 
 def output_budget(capabilities: Any) -> int:
@@ -76,8 +74,8 @@ def budgeted(selection: Any) -> Any:
 class SkillScope:
     """Where a Session's skills resolve: its latest Turn's working directory and managed-skill bindings.
 
-    The same inputs the Turn's ``vibe skill load`` resolves with, so a revision recorded at load time and one
-    rendered later agree while the skill is unchanged.
+    The same inputs the Turn's ``vibe skill load`` resolves with, so a checkpoint carries the body the Turn would
+    load.
     """
 
     cwd: Optional[str]
@@ -95,12 +93,6 @@ class SkillScope:
         from core.managed_skills import load_skill
 
         return load_skill(name, self.cwd or None, resolved_skills=self.catalog() if catalog is None else catalog)
-
-    def revision(self, name: str) -> Optional[str]:
-        from core.skill_observability import skill_revision
-
-        skill = self.load(name)
-        return skill_revision(skill) if skill is not None else None
 
 
 #: One item of rehydrated state: its name, and its text within a token limit (None when it cannot fit at all).
@@ -126,10 +118,12 @@ class AvibeContextHost:
         engine: Engine,
         *,
         environment: Callable[[str], Mapping[str, str]],
+        watches: Callable[[str], Sequence[str]],
         skills: Callable[[str], Optional[SkillScope]],
     ) -> None:
         self._engine = engine
         self._environment = environment
+        self._watches = watches
         self._skills = skills
 
     def earlier_record(self, session_id: str, through_seq: int) -> Optional[str]:
@@ -154,13 +148,15 @@ class AvibeContextHost:
         return f'vibe data query --limit 100 --sql "{sql}"'
 
     async def render_state(self, request: StateRequest) -> list[str]:
-        environment = render_environment(self._environment(request.session_id))
+        fields, watches = self._environment(request.session_id), self._watches(request.session_id)
         scope = self._skills(request.session_id)
-        return await asyncio.to_thread(self._state, request, environment, scope)
+        return await asyncio.to_thread(self._state, request, fields, watches, scope)
 
-    def _state(self, request: StateRequest, environment: str, scope: Optional[SkillScope]) -> list[str]:
+    def _state(
+        self, request: StateRequest, fields: Mapping[str, str], watches: Sequence[str], scope: Optional[SkillScope]
+    ) -> list[str]:
+        """The environment block first, then every other section, all within ``request.cap``."""
         sections = (
-            _Section("environment", (("environment", lambda limit: environment),), None, "The next input carries it."),
             _Section(
                 "pending work",
                 self._pending_work(request.session_id),
@@ -174,7 +170,9 @@ class AvibeContextHost:
                 "Run `vibe skill load -- <name>` for any you still need.",
             ),
         )
-        return _render(sections, STATE_TOKENS)
+        reserved = sum(_reserve(section) for section in sections)
+        environment = _environment(fields, watches, request.cap - reserved)
+        return [environment, *_render(sections, request.cap - text_tokens(environment))]
 
     def _pending_work(self, session_id: str) -> tuple[_Item, ...]:
         from storage.workbench_sessions_service import derive_session_harness_activities
@@ -191,15 +189,55 @@ class AvibeContextHost:
         return tuple(rendered)
 
 
+def _environment(fields: Mapping[str, str], watches: Sequence[str], room: int) -> str:
+    """The environment block within ``room``: its core fields always, then the Watches the room still holds.
+
+    At most ``WATCHES_LISTED`` Watches, then how many more, as on every input (C-7). Core fields that do not fit are
+    a bug in the cap, never something to drop: it raises.
+    """
+    core = {name: value for name, value in fields.items() if name != "watches"}
+
+    def block(listed: int) -> str:
+        more = len(watches) - listed
+        names = [*watches[:listed], *([f"and {more} more"] if more else [])]
+        return render_environment({**core, "watches": "; ".join(names) or "none"})
+
+    listed = 0
+    while listed < min(len(watches), WATCHES_LISTED) and text_tokens(block(listed + 1)) <= room:
+        listed += 1
+    text = block(listed)
+    if text_tokens(text) > room:
+        raise ValueError(f"The state cap leaves {room} tokens, too few for the environment's core fields.")
+    return text
+
+
+def _left_out(section: _Section, names: Sequence[str]) -> str:
+    listed = ", ".join(name[:_NAME_CHARS] for name in names[:_LISTED])
+    more = f", and {len(names) - _LISTED} more" if len(names) > _LISTED else ""
+    return (
+        f'<left-out of="{section.name}">Left out to keep the carried state within its cap: {listed}{more}. '
+        f"{section.hint}</left-out>"
+    )
+
+
+def _reserve(section: _Section) -> int:
+    """The most a section's wrapper and left-out notice can take: the notice naming its longest names, all counted."""
+    if not section.items:
+        return 0
+    wrapper = text_tokens(section.join([])) if section.join is not None else 0
+    names = sorted((name[:_NAME_CHARS] for name, _ in section.items), key=lambda name: len(name.encode()), reverse=True)
+    return wrapper + text_tokens(_left_out(section, names))
+
+
 def _render(sections: Sequence[_Section], budget: int) -> list[str]:
     """The one renderer of rehydrated state: every section's texts, in order, within ``budget`` tokens in all.
 
-    The items of every section share one room, in order; each section's wrapper and left-out notice are paid from
-    what is held back for them. An item is rendered only when there is room for it; what does not fit is left out
-    and named, up to ``_LISTED`` names and then "and N more".
+    Each section's wrapper and left-out notice are paid from room held back for the most they can take
+    (``_reserve``); the items of every section share the rest, in order. An item is rendered only when there is
+    room for it; what does not fit is left out and named, up to ``_LISTED`` names and then "and N more".
     """
     texts: list[str] = []
-    room = budget - _NOTICE_TOKENS * len(sections)
+    room = budget - sum(_reserve(section) for section in sections)
     for section in sections:
         kept: list[str] = []
         left_out: list[str] = []
@@ -213,12 +251,7 @@ def _render(sections: Sequence[_Section], budget: int) -> list[str]:
         if kept:
             texts.extend([section.join(kept)] if section.join is not None else kept)
         if left_out:
-            listed = ", ".join(name[:_NAME_CHARS] for name in left_out[:_LISTED])
-            more = f", and {len(left_out) - _LISTED} more" if len(left_out) > _LISTED else ""
-            texts.append(
-                f'<left-out of="{section.name}">Over the {STATE_TOKENS:,}-token budget for carried state: '
-                f"{listed}{more}. {section.hint}</left-out>"
-            )
+            texts.append(_left_out(section, left_out))
     return texts
 
 
@@ -238,7 +271,7 @@ def _skill_items(scope: Optional[SkillScope], skills: Sequence[SkillRef]) -> tup
                     f'<skill-unavailable name="{_attr(ref.name)}">This skill no longer loads. Run '
                     f"`vibe skill load -- {ref.name}` if you still need it.</skill-unavailable>"
                 )
-            return _skill_text(ref.name, skill_revision(skill) or ref.revision, skill.body, min(SKILL_TOKENS, limit))
+            return _skill_text(ref.name, skill_revision(skill) or "", skill.body, min(SKILL_TOKENS, limit))
 
         return ref.name, render
 
@@ -265,11 +298,10 @@ def _attr(value: str) -> str:
 
 
 class _SkillLoadMarking:
-    """``bash`` that records a successful ``vibe skill load`` in its result details (``details.skill``)."""
+    """``bash`` that records the skills ``vibe skill load`` wrote into a successful result (``details.skills``)."""
 
-    def __init__(self, tool: Tool, revision: Callable[[str], Optional[str]]) -> None:
+    def __init__(self, tool: Tool) -> None:
         self._tool = tool
-        self._revision = revision
 
     @property
     def spec(self) -> ToolSpec:
@@ -280,19 +312,17 @@ class _SkillLoadMarking:
 
     async def execute(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
         result = await self._tool.execute(arguments, ctx)
-        command = arguments.get("command")
-        match = _SKILL_LOAD.search(command) if isinstance(command, str) else None
-        if match is None or result.is_error:
+        if result.is_error:
             return result
-        name = match.group("name")
+        # The record is the result itself: each block names one skill it loaded, whatever the command looked like.
         output = "".join(getattr(block, "text", None) or "" for block in result.content)
-        if f'<skill_content name="{_attr(name)}"' not in output:
-            return result  # the load did not happen
-        revision = await asyncio.to_thread(self._revision, name)
-        details = {**dict(result.details or {}), "skill": {"name": name, "revision": revision or ""}}
+        names = list(dict.fromkeys(html.unescape(name) for name in _SKILL_CONTENT.findall(output)))
+        if not names:
+            return result
+        details = {**dict(result.details or {}), "skills": [{"name": name} for name in names]}
         return replace(result, details=details)
 
 
-def mark_skill_loads(tools: Sequence[Tool], revision: Callable[[str], Optional[str]]) -> tuple[Tool, ...]:
+def mark_skill_loads(tools: Sequence[Tool]) -> tuple[Tool, ...]:
     """The tools with ``bash`` recording the skills it loads (section 4: a skill load is never cleared)."""
-    return tuple(_SkillLoadMarking(tool, revision) if tool.spec.name == "bash" else tool for tool in tools)
+    return tuple(_SkillLoadMarking(tool) if tool.spec.name == "bash" else tool for tool in tools)

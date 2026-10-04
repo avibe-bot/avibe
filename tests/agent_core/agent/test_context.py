@@ -34,6 +34,7 @@ from core.agent_core.harness.context import (
     request_facts,
     request_tokens,
     rolling_cut,
+    state_cap,
     text_tokens,
     unit_tokens,
 )
@@ -77,16 +78,16 @@ class Rows:
             message = AssistantMessage(message.content, message.origin, message.stop_reason, usage=usage)
         return self.add("response", message)
 
-    def result(self, call: ToolCallBlock, value: str, *, skill=None) -> ContextEntry:
-        details = {"skill": {"name": skill[0], "revision": skill[1]}} if skill else {}
+    def result(self, call: ToolCallBlock, value: str, *, skills=()) -> ContextEntry:
+        details = {"skills": [{"name": name} for name in skills]} if skills else {}
         return self.add(
             "tool_result", ToolResultMessage(call.id, call.name, (text(value),)), payload={"details": details}
         )
 
-    def tool(self, name: str, value: str, *, call_id: str, skill=None, **arguments) -> ToolCallBlock:
+    def tool(self, name: str, value: str, *, call_id: str, skills=(), **arguments) -> ToolCallBlock:
         call = ToolCallBlock(call_id, name, arguments)
         self.response(call)
-        self.result(call, value, skill=skill)
+        self.result(call, value, skills=skills)
         return call
 
 
@@ -333,7 +334,7 @@ def test_clearing_spares_recent_turns_the_newest_results_and_skill_loads():
     big = "o" * 20_000  # 5,000 tokens each
     rows.input("turn 1")
     old = [rows.tool("bash", big, call_id=f"old-{index}", command="ls") for index in range(9)]
-    rows.tool("bash", big, call_id="skill", command="vibe skill load x", skill=("x", "r1"))
+    rows.tool("bash", big, call_id="skill", command="vibe skill load x", skills=("x",))
     rows.tool("write", big, call_id="write", path="f")
     rows.input("turn 2")
     rows.tool("read", big, call_id="recent-1", path="f")
@@ -353,6 +354,11 @@ def test_clearing_spares_recent_turns_the_newest_results_and_skill_loads():
     assert clearable_results(context_view(too_small.rows)) == ()
 
 
+@pytest.mark.parametrize("window,cap", [(8_000, 800), (200_000, 20_000)], ids=["8K window", "200K window"])
+def test_the_state_cap_is_a_tenth_of_the_route_window_up_to_25000(window, cap):
+    assert state_cap(replace(CAPABILITIES, context_window=window)) == cap
+
+
 def test_the_checkpoint_request_is_the_owner_approved_prompt_verbatim():
     contract = CONTRACT.read_text()
     section = contract[contract.index("## 11. Checkpoint request") :]
@@ -367,13 +373,14 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
     rows.tool("read", "a", call_id="r1", path="a.py")
     rows.tool("write", "b", call_id="w1", path="b.py")
     rows.tool("read", "b", call_id="r2", path="b.py")
-    rows.tool("bash", "skill body", call_id="s1", command="vibe skill load s", skill=("s", "1"))
-    rows.tool("bash", "skill body", call_id="s2", command="vibe skill load t", skill=("t", "1"))
+    rows.tool("bash", "skill body", call_id="s1", command="vibe skill load s", skills=("s",))
+    # One call that loaded two skills: both are marked, and both are carried.
+    rows.tool("bash", "skill bodies", call_id="s2", command="vibe skill load t && vibe skill load u", skills=("t", "u"))
     rows.tool("read", "c", call_id="r3", path="c.py")
-    rows.tool("bash", "t again", call_id="s3", command="vibe skill load t", skill=("t", "2"))
+    rows.tool("bash", "t again", call_id="s3", command="vibe skill load t", skills=("t",))
     view = context_view(rows.rows)
     cut = 7  # before the read of c.py: the cut splits the parser turn
-    assert carried_skills(view, cut) == (SkillRef("s", "1"),)
+    assert carried_skills(view, cut) == (SkillRef("s"), SkillRef("u"))
     first = compaction_payload(
         view,
         cut,
@@ -438,7 +445,7 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
     assert second["files_read"] == ["a.py"]
     assert second["files_modified"] == ["b.py", "c.py"]
     assert second["current_request"] == first["current_request"]
-    assert second["skills"] == [{"name": "s", "revision": "1"}, {"name": "t", "revision": "2"}]
+    assert second["skills"] == [{"name": "s"}, {"name": "u"}, {"name": "t"}]
     assert second["summarized_to_seq"] > first["summarized_to_seq"]
     # No model checkpoint and no lookup command: no framing text, no pointer.
     assert second["summary"].startswith("<context-checkpoint>\n<artifacts>\n")

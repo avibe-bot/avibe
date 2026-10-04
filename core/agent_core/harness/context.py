@@ -48,6 +48,9 @@ THRESHOLD_RATIO = 0.9
 KEEP_MAX = 20_000
 KEEP_RATIO = 0.25
 IMAGE_TOKENS = 1_600
+#: Everything a checkpoint rehydrates (section 7): a tenth of the route's window, at most this many tokens.
+STATE_TOKENS = 25_000
+STATE_RATIO = 0.1
 
 CLEAR_SOFT_RATIO = 0.8
 CLEAR_MIN_TOKENS = 20_000
@@ -143,7 +146,6 @@ EARLIER_RECORD_LEAD = "The full text of the earlier conversation is still stored
 @dataclass(frozen=True)
 class SkillRef:
     name: str
-    revision: str
 
 
 @dataclass(frozen=True)
@@ -153,6 +155,14 @@ class StateRequest:
     session_id: str
     #: Skills the summarized rows loaded, latest load last, minus those still loaded in the kept rows.
     skills: tuple[SkillRef, ...]
+    #: The tokens the rendered state may take in all (``state_cap`` of the route the next request goes to).
+    cap: int
+
+
+def state_cap(capabilities: ModelCapabilities) -> int:
+    """What a checkpoint's rehydrated state may take on a route: a tenth of its window, at most ``STATE_TOKENS``."""
+    window = DEFAULT_CONTEXT_WINDOW if capabilities.context_window is None else capabilities.context_window
+    return min(STATE_TOKENS, math.floor(STATE_RATIO * window))
 
 
 class ContextHost(Protocol):
@@ -392,12 +402,15 @@ def budget(
 # --- clearing (context.md section 4) ------------------------------------------------
 
 
-def _skill(entry: ContextEntry) -> Optional[SkillRef]:
+def _skills(entry: ContextEntry) -> tuple[SkillRef, ...]:
+    """The skills a tool result loaded (``details.skills``, which the adapter marks), in load order."""
     details = entry.payload.get("details")
-    skill = details.get("skill") if isinstance(details, Mapping) else None
-    if isinstance(skill, Mapping) and isinstance(skill.get("name"), str) and isinstance(skill.get("revision"), str):
-        return SkillRef(skill["name"], skill["revision"])
-    return None
+    skills = details.get("skills") if isinstance(details, Mapping) else None
+    if not isinstance(skills, list):
+        return ()
+    return tuple(
+        SkillRef(skill["name"]) for skill in skills if isinstance(skill, Mapping) and isinstance(skill.get("name"), str)
+    )
 
 
 def clearable_results(view: ContextView) -> tuple[ContextEntry, ...]:
@@ -412,7 +425,7 @@ def clearable_results(view: ContextView) -> tuple[ContextEntry, ...]:
                 and isinstance(message, ToolResultMessage)
                 and message.tool_name in CLEARABLE_TOOLS
                 and entry.row_id not in view.edited
-                and _skill(entry) is None
+                and not _skills(entry)
             ):
                 eligible.append((index, entry, message))
     candidates = [item for item in eligible[: max(0, len(eligible) - CLEAR_KEEP_RESULTS)] if item[0] < protected_from]
@@ -527,23 +540,21 @@ def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> tuple[list[str]
 
 def carried_skills(view: ContextView, cut: int) -> tuple[SkillRef, ...]:
     """Skills loaded before the cut (and carried by the previous checkpoint), minus those loaded after it."""
-    loaded: dict[str, str] = {}
+    loaded: dict[str, None] = {}
     previous = view.compaction.payload if view.compaction is not None else {}
     for skill in previous.get("skills", ()):
         loaded.pop(skill["name"], None)
-        loaded[skill["name"]] = skill["revision"]
+        loaded[skill["name"]] = None
     for unit in view.units[:cut]:
         for entry, _ in unit.entries[1:]:
-            skill = _skill(entry) if entry is not None else None
-            if skill is not None:
+            for skill in _skills(entry) if entry is not None else ():
                 loaded.pop(skill.name, None)
-                loaded[skill.name] = skill.revision
+                loaded[skill.name] = None
     for unit in view.units[cut:]:
         for entry, _ in unit.entries[1:]:
-            skill = _skill(entry) if entry is not None else None
-            if skill is not None:
+            for skill in _skills(entry) if entry is not None else ():
                 loaded.pop(skill.name, None)
-    return tuple(SkillRef(name, revision) for name, revision in loaded.items())
+    return tuple(SkillRef(name) for name in loaded)
 
 
 def summarized_to_seq(view: ContextView, cut: int) -> int:
@@ -623,7 +634,7 @@ def compaction_payload(
         "current_request_message_id": request_id,
         "files_read": read,
         "files_modified": modified,
-        "skills": [{"name": skill.name, "revision": skill.revision} for skill in skills],
+        "skills": [{"name": skill.name} for skill in skills],
         "tokens_before": tokens_before,
         "tokens_after_estimate": 0,
         "threshold": threshold,

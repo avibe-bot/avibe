@@ -102,6 +102,7 @@ from core.agent_core.harness.context import (
     request_facts,
     request_tokens,
     rolling_cut,
+    state_cap,
     summarized_to_seq,
     text_tokens,
     unit_tokens,
@@ -1210,7 +1211,9 @@ class Agent:
         """
         if len(view.units) < 2:
             return request, plan  # nothing can move out
-        payload, after = await self._compaction(request, view, plan, len(view.units) - 1, **self._dropped(view))
+        cut = len(view.units) - 1
+        hosted = await self._hosted(view, cut, selected)
+        payload, after = await self._compaction(request, view, plan, cut, **self._dropped(view), hosted=hosted)
         minimal, _ = self._built(system, selected, messages=self._carried(after))
         return minimal, budget(minimal, selected.capabilities, transcript=after.messages)
 
@@ -1300,7 +1303,7 @@ class Agent:
                 ladder.rolls = MAX_ROLLS
         cut = half_cut(units)
         if cut is not None:
-            await self._drop(request, view, plan, cut, emit)
+            await self._drop(selected, request, view, plan, cut, emit)
             return True
         if ladder.overflows or not plan.can_fit:
             raise self._exhausted(request, view, plan)
@@ -1428,7 +1431,7 @@ class Agent:
                     "rounds": rounds,
                 }
                 try:
-                    hosted = await self._hosted(view, cut)
+                    hosted = await self._hosted(view, cut, selected)
                 except (_Aborted, asyncio.CancelledError):
                     raise
                 except Exception as failure:
@@ -1552,11 +1555,18 @@ class Agent:
         return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
 
     async def _drop(
-        self, request: ModelRequest, view: ContextView, plan: Budget, cut: int, emit: Callable[..., Awaitable[None]]
+        self,
+        selected: ModelSelection,
+        request: ModelRequest,
+        view: ContextView,
+        plan: Budget,
+        cut: int,
+        emit: Callable[..., Awaitable[None]],
     ) -> None:
         """Section 8 (c): the earliest part moves out with no model call; the previous checkpoint stays."""
         await emit(CompactionStarted, reason="overflow")
-        payload, _ = await self._compaction(request, view, plan, cut, **self._dropped(view))
+        hosted = await self._hosted(view, cut, selected)
+        payload, _ = await self._compaction(request, view, plan, cut, **self._dropped(view), hosted=hosted)
         row, _ = await self._commit_compaction(payload, None)
         await emit(
             CompactionFinished,
@@ -1579,15 +1589,15 @@ class Agent:
         checkpoint: str,
         summarizer: Optional[Mapping[str, Any]],
         usage: Optional[Usage],
-        hosted: Optional[tuple[tuple[str, ...], Optional[str]]] = None,
+        hosted: tuple[tuple[str, ...], Optional[str]],
     ) -> tuple[dict[str, Any], ContextView]:
         """The checkpoint row for ``cut`` (section 7), uncommitted, and the context it would leave.
 
         The one builder of a ``Compaction`` row: the drop, the checkpoint turn, and the stop check's dry run.
-        ``hosted`` is the host's part (``_hosted``) when the caller already has it.
+        ``hosted`` is the host's part (``_hosted``).
         """
         skills = carried_skills(view, cut)
-        state, earlier = hosted if hosted is not None else await self._hosted(view, cut)
+        state, earlier = hosted
         payload = compaction_payload(
             view,
             cut,
@@ -1609,12 +1619,17 @@ class Agent:
         payload["tokens_after_estimate"] = request_tokens(request.system, request.tools, self._carried(after))
         return payload, after
 
-    async def _hosted(self, view: ContextView, cut: int) -> tuple[tuple[str, ...], Optional[str]]:
-        """The host's part of a checkpoint row for ``cut``: the rendered ``state`` and the earlier-record lookup."""
+    async def _hosted(
+        self, view: ContextView, cut: int, route: ModelSelection
+    ) -> tuple[tuple[str, ...], Optional[str]]:
+        """The host's part of a checkpoint row for ``cut``: the rendered ``state`` and the earlier-record lookup.
+
+        ``route`` is the one the next request goes to; the state is capped for it (section 7).
+        """
         host = self.context.host
         if host is None:
             return (), None
-        needed = StateRequest(self.session_id, carried_skills(view, cut))
+        needed = StateRequest(self.session_id, carried_skills(view, cut), state_cap(route.capabilities))
         state = tuple(await self._scope.call(lambda: host.render_state(needed)))
         if not all(isinstance(item, str) for item in state):
             raise TypeError("ContextHost.render_state must return strings")

@@ -86,7 +86,7 @@ from modules.agents.avibe.context import (
 from modules.agents.avibe.errors import error_text
 from modules.agents.avibe.media import MediaSnapshots
 from modules.agents.avibe.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
-from modules.agents.avibe.prompt import current_environment, system_prompt
+from modules.agents.avibe.prompt import WATCH_NAME_CHARS, current_environment, system_prompt
 from modules.agents.avibe.store import AdapterTranscriptStore
 from modules.agents.avibe.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
@@ -202,7 +202,9 @@ class AvibeAgent(BaseAgent):
         )
         self._providers = providers or registry_providers(media_loader=self.media)
         # C-9: the Session parts a checkpoint carries (context.md section 9).
-        self.context_host = AvibeContextHost(self._engine, environment=self._environment, skills=self._skill_scope)
+        self.context_host = AvibeContextHost(
+            self._engine, environment=self._environment, watches=self._watch_lines, skills=self._skill_scope
+        )
         self._tool_suite = tool_suite
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.
@@ -580,10 +582,7 @@ class AvibeAgent(BaseAgent):
             context=ContextConfig(host=self.context_host, scratch_dir=str(self._state_dir / "scratch" / session_id)),
         )
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
-        tools = tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id)))
-        scope = self._skill_scope(session_id)
-        if scope is not None:
-            tools = mark_skill_loads(tools, scope.revision)
+        tools = mark_skill_loads(tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id))))
         agent.set_tools(tools)
         agent.system = system_prompt([tool.spec.name for tool in tools], sections)
         turn.agent, turn.cwd = agent, cwd
@@ -1105,6 +1104,8 @@ class AvibeAgent(BaseAgent):
             # credential, and the block is persisted and sent to the provider.
             kind = "job" if getattr(watch, "job_target", None) else "command"
             name = " ".join(str(getattr(watch, "name", None) or "").split())
+            if len(name) > WATCH_NAME_CHARS:
+                name = name[: WATCH_NAME_CHARS - 1] + "…"
             lines.append(f'{watch.id} "{name}" {kind} running' if name else f"{watch.id} {kind} running")
         return lines
 
