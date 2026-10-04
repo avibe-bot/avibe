@@ -56,18 +56,24 @@ class WriteTool:
             absolute = resolve_to_cwd(path, ctx.cwd)
         except ToolInputError as exc:
             return error_result(str(exc))
+        pinned = ctx.pinned_target
         async with file_mutation_lock(absolute):
             # Checked before each step, never in the middle of one, so the lock is held until
             # the filesystem operation in progress has finished.
             if ctx.cancel.cancelled:
                 return error_result("Operation aborted")
             try:
+                if pinned is not None:
+                    # Before any parent directory is created; write_bytes binds it again up to the rename.
+                    await to_thread_joined(_require_pinned_path, absolute, pinned)
                 refusal = await to_thread_joined(_prepare_target, absolute)
                 if refusal:
                     return error_result(f"Cannot write {path}: {refusal}.")
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
-                await to_thread_joined(write_text, absolute, content)
+                await to_thread_joined(write_text, absolute, content, pinned)
+            except NotPinned:
+                return error_result(f"Cannot write {path}: it no longer resolves to the authorized location.")
             except NotReplaceable:
                 return error_result(
                     f"Cannot write {path}: its directory is not writable, so the file cannot be replaced safely."
@@ -102,13 +108,26 @@ def _prepare_target(absolute: str) -> Optional[str]:
     return None
 
 
-def write_text(path: str, content: str) -> None:
+def write_text(path: str, content: str, pinned: Optional[str] = None) -> None:
     """UTF-8 without newline translation; ``content`` came through the one sanitizer for model text."""
-    write_bytes(path, content.encode("utf-8"))
+    write_bytes(path, content.encode("utf-8"), pinned=pinned)
 
 
 class FileChanged(Exception):
     """The file is no longer the one a read-modify-write read; nothing was written."""
+
+
+class NotPinned(Exception):
+    """The path no longer resolves to the target its caller authorized; nothing was written."""
+
+
+def _require_pinned(resolved: str, pinned: Optional[str]) -> None:
+    if pinned is not None and resolved != pinned:
+        raise NotPinned()
+
+
+def _require_pinned_path(path: str, pinned: str) -> None:
+    _require_pinned(os.path.realpath(path), pinned)
 
 
 class NotReplaceable(Exception):
@@ -140,10 +159,13 @@ def _require(expected: Optional[FileIdentity], path: str, st: os.stat_result) ->
         raise FileChanged()
 
 
-def _check_publishable(path: str, target: str, expected: Optional[FileIdentity]) -> None:
+def _check_publishable(
+    path: str, target: str, expected: Optional[FileIdentity], pinned: Optional[str] = None
+) -> None:
     """Right before the rename: ``path`` still names ``target``, which is absent or a writable regular file
-    (for a read-modify-write, the one that was read)."""
+    (for a read-modify-write, the one that was read), and is the ``pinned`` target when there is one."""
     current = os.path.realpath(path)
+    _require_pinned(current, pinned)
     if current != target:
         raise FileChanged()
     try:
@@ -159,7 +181,9 @@ def _check_publishable(path: str, target: str, expected: Optional[FileIdentity])
     _require(expected, current, st)
 
 
-def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None) -> None:
+def write_bytes(
+    path: str, data: bytes, expected: Optional[FileIdentity] = None, pinned: Optional[str] = None
+) -> None:
     """Create or replace ``path`` only once ``data`` is completely on disk.
 
     A failed write (a full disk, a quota) leaves the original, or its absence, as it was. The temp
@@ -175,9 +199,12 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
     writable regular file, as ``write`` first classified it; with ``expected``, it must also be the very
     file that was read. So a file swapped for a FIFO, a directory, or a read-only file, or a path
     retargeted to another file, is never written behind the result's back. POSIX has no
-    compare-and-rename, so a change between that check and the rename is not seen.
+    compare-and-rename, so a change between that check and the rename is not seen. With ``pinned``
+    (C-9's checkpoint turn), the path must also resolve to that authorized target, from the start
+    through that check.
     """
     target = os.path.realpath(path)
+    _require_pinned(target, pinned)
     try:
         mode: Optional[int] = stat.S_IMODE(os.stat(target).st_mode)
     except FileNotFoundError:
@@ -197,7 +224,7 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             os.fsync(handle.fileno())
             if mode is not None:
                 os.fchmod(handle.fileno(), mode)
-        _check_publishable(path, target, expected)
+        _check_publishable(path, target, expected, pinned)
         os.replace(tmp, target)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):

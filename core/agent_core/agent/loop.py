@@ -19,7 +19,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
-from core.agent_core.agent.checkpoint import CheckpointPolicy
+from core.agent_core.agent.checkpoint import BUDGET_USED, CheckpointPolicy
 from core.agent_core.agent.events import (
     AgentError,
     AgentEvent,
@@ -139,6 +139,10 @@ class ProviderProtocolViolation(ValueError):
 
 class UnsupportedModelRoute(ValueError):
     """The selected model cannot provide the tools required by the agent."""
+
+
+class HookContractError(ValueError):
+    """A ``before_model`` hook broke what context management owns (loop-control.md section 3, context.md section 10)."""
 
 
 class _Exhausted(Exception):
@@ -601,6 +605,7 @@ class Agent:
             ),
             supports_images=capabilities.supports_images is True,
         )
+        given = request
         for hook in self.hooks if hooks is None else hooks:
             decision = await self._hook(lambda: hook.before_model(request, self._ctx))
             if isinstance(decision, End):
@@ -608,6 +613,8 @@ class Agent:
                 raise _Ended()
             if decision is not None:
                 request = decision
+        if self.context is not None:
+            self._require_hook_contract(given, request)
         allowed = {spec.name for spec in request.tools}
         return request, {name: tool for name, tool in tools.items() if name in allowed}
 
@@ -718,7 +725,13 @@ class Agent:
                 ladder.refused = True
                 if ladder.overflows >= MAX_OVERFLOWS:
                     view = context_view(self._rows)
-                    raise self._exhausted(request, view, budget(request, route.capabilities, transcript=view.messages))
+                    projected = len(self._rehydrated()) + len(view.messages)
+                    raise self._exhausted(
+                        request,
+                        view,
+                        budget(request, route.capabilities, transcript=view.messages),
+                        messages_tokens(request.messages[projected:]),
+                    )
                 retries, started, retry_error = 0, time.monotonic(), None
                 continue
             retry_error = terminal
@@ -973,7 +986,9 @@ class Agent:
         )
         return result, end
 
-    async def _execute(self, tool: Tool, call: ToolCallBlock, emit: Callable[..., Awaitable[None]]) -> ToolResult:
+    async def _execute(
+        self, tool: Tool, call: ToolCallBlock, emit: Callable[..., Awaitable[None]], *, pinned: Optional[str] = None
+    ) -> ToolResult:
         # Progress is a latest-tail value, not an unbounded buffer of tool output.
         updates: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
 
@@ -989,6 +1004,7 @@ class Agent:
             dict(self.env),
             self._ctx.cancel,
             on_progress=progress,
+            pinned_target=pinned,
         )
         execution = asyncio.create_task(self._scope.call(lambda: tool.execute(call.arguments, ctx)))
         update = None
@@ -1044,17 +1060,33 @@ class Agent:
                 break
         return last is not None and self.context.clock() - last > self.context.cache_ttl_s
 
+    @staticmethod
+    def _require_hook_contract(given: ModelRequest, final: ModelRequest) -> None:
+        """Under C-9, routing owns the model and the projected messages are an immutable prefix (section 10)."""
+        route = ("protocol", "base_url", "model_id", "provider")
+        if any(getattr(given.endpoint, name) != getattr(final.endpoint, name) for name in route):
+            raise HookContractError(
+                "A before_model hook changed the model route; with context management on, routing owns the model."
+            )
+        if tuple(final.messages[: len(given.messages)]) != tuple(given.messages):
+            raise HookContractError(
+                "A before_model hook removed, reordered, or rewrote projected messages; it may only append."
+            )
+
     async def _compose(
         self, system: str, selected: ModelSelection, emit: Callable[..., Awaitable[None]], ladder: _Ladder
     ) -> tuple[ModelRequest, dict[str, Tool]]:
         """The conversation request pipeline (invariant 1)."""
         while True:
             view = context_view(self._rows)
-            request, tools = await self._request(system, selected, messages=(*self._rehydrated(), *view.messages))
+            projected = (*self._rehydrated(), *view.messages)
+            request, tools = await self._request(system, selected, messages=projected)
             if self.context is None:
                 return request, tools
             plan = budget(request, selected.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view))
-            if not await self._stage(system, selected, request, view, plan, emit, ladder):
+            # What hooks appended after the projected prefix: fixed overhead, like the system prompt.
+            transient = messages_tokens(request.messages[len(projected) :])
+            if not await self._stage(system, selected, request, view, plan, transient, emit, ladder):
                 return request, tools
 
     async def _stage(
@@ -1064,14 +1096,19 @@ class Agent:
         request: ModelRequest,
         view: ContextView,
         plan: Budget,
+        transient: int,
         emit: Callable[..., Awaitable[None]],
         ladder: _Ladder,
     ) -> bool:
-        """C-9 on the final request (sections 3 and 8); True when it changed the context."""
+        """C-9 on the final request (sections 3 and 8); True when it changed the context.
+
+        The projected messages are the request's prefix (``_require_hook_contract``), so moving history out
+        shrinks it by exactly that history; ``transient`` hook content is overhead no step can remove.
+        """
         head = [message for unit in view.units[:-1] for message in unit.messages]
         if max(0, plan.est - messages_tokens(head)) + plan.output > plan.input_limit:
-            # (d): even the checkpoint and the last unit alone cannot fit. The provider never sees it.
-            raise self._exhausted(request, view, plan)
+            # (d): even the checkpoint and the last unit, with the overhead, cannot fit. No history is dropped.
+            raise self._exhausted(request, view, plan, transient)
         shrink, ladder.refused = ladder.refused, False
         if not shrink:
             if self.context.clear_tool_results and (
@@ -1100,7 +1137,7 @@ class Agent:
             # With no checkpoint request left to try, a request that can fit at all is sent; the provider judges.
             if not shrink and (ladder.summary_failed or self._guard["paused"]) and plan.can_fit:
                 return False
-        return await self._shrink(system, selected, request, view, plan, emit, ladder)
+        return await self._shrink(system, selected, request, view, plan, transient, emit, ladder)
 
     def _fork_can_fit(self, selected: ModelSelection, plan: Budget, est: int) -> bool:
         """Whether a fork carrying ``est`` tokens and the checkpoint request can fit: a choice, not admission.
@@ -1117,6 +1154,7 @@ class Agent:
         request: ModelRequest,
         view: ContextView,
         plan: Budget,
+        transient: int,
         emit: Callable[..., Awaitable[None]],
         ladder: _Ladder,
     ) -> bool:
@@ -1153,21 +1191,23 @@ class Agent:
             await self._drop(request, view, plan, cut, emit)
             return True
         if ladder.overflows or not plan.can_fit:
-            raise self._exhausted(request, view, plan)
+            raise self._exhausted(request, view, plan, transient)
         return False
 
-    def _exhausted(self, request: ModelRequest, view: ContextView, plan: Budget) -> _Exhausted:
+    def _exhausted(self, request: ModelRequest, view: ContextView, plan: Budget, transient: int = 0) -> _Exhausted:
         """Section 8 (d): what fills the request, for the user's stop message."""
         last = view.units[-1] if view.units else None
         last_tokens = unit_tokens(last) if last is not None else 0
         parts = [
             ContextPart("system", text_tokens(request.system)),
             ContextPart("tools", request_tokens("", request.tools, ())),
-            ContextPart("history", max(0, messages_tokens(request.messages) - last_tokens)),
+            ContextPart("history", max(0, messages_tokens(request.messages) - last_tokens - transient)),
         ]
         if last is not None:
             name = "current_request" if last.lead.kind == "input" else "latest_tool_batch"
             parts.append(ContextPart(name, last_tokens))
+        if transient:
+            parts.append(ContextPart("transient", transient))
         parts.append(ContextPart("output", plan.output + plan.margin))
         return _Exhausted(plan.input_limit, tuple(parts))
 
@@ -1357,20 +1397,34 @@ class Agent:
     async def _checkpoint_tool(
         self, original: ToolCallBlock, tools: Mapping[str, Tool], policy: CheckpointPolicy, *, limit: int
     ) -> ToolResultMessage:
-        """The checkpoint turn's tool pipeline (invariant 2); nothing it produces is committed."""
-        call, result, end = await self._gate(deepcopy(original), self.hooks)
-        if end:
-            raise _Ended()
+        """The checkpoint turn's tool pipeline (invariant 2); nothing it produces is committed.
+
+        The budget first, then the user's ``before_tool``, then the table on the final arguments, then
+        execution pinned to the path the table authorized, then the bound on whatever result came out.
+        """
+        call = deepcopy(original)
+        if not policy.open:
+            # A closed budget answers every call; no hook is consulted.
+            result: Optional[ToolResult] = ToolResult((text(BUDGET_USED),), is_error=True)
+        else:
+            call, result, end = await self._gate(call, self.hooks)
+            if end:
+                raise _Ended()
+        pinned = None
         if result is None:
-            denial = await policy.before_tool(call, self._ctx)  # judged on the final arguments
-            if denial is not None:
-                result = ToolResult((text(denial.reason),), is_error=True)
+            decision = policy.decide(call)
+            if decision.denial is not None:
+                result = ToolResult((text(decision.denial),), is_error=True)
+            elif decision.pinned is not None:
+                # The tool runs against the real path authorized, and publishes only while it still resolves there.
+                pinned = decision.pinned
+                call = replace(call, arguments={**call.arguments, "path": pinned})
         if result is None:
             tool = tools.get(call.name)
             if tool is None:
                 result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
             else:
-                result = await self._execute(tool, call, _silent)
+                result = await self._execute(tool, call, _silent, pinned=pinned)
         # Every result that enters the turn is bounded, a hook's denial included.
         return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
 

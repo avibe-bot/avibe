@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections import deque
 from copy import deepcopy
 from dataclasses import replace
 
 import pytest
 
-from core.agent_core.agent.checkpoint import BUDGET_USED, DENIED, CheckpointPolicy
+from core.agent_core.agent.checkpoint import BUDGET_USED, DENIED, CheckpointPolicy, Decision
 from core.agent_core.agent.events import (
     AgentError,
     AssistantTextDelta,
@@ -57,6 +58,7 @@ from core.agent_core.messages import (
     text,
 )
 from core.agent_core.tools.base import ToolResult
+from core.agent_core.tools.write import WriteTool
 from tests.agent_core.fakes import (
     ENDPOINT,
     SELECTION,
@@ -336,7 +338,7 @@ async def test_a_target_the_platform_cannot_compare_with_the_scratch_dir_is_deni
     policy = CheckpointPolicy(cwd=str(tmp_path), scratch_dir=str(tmp_path / "scratch"))
     monkeypatch.setattr("core.agent_core.agent.checkpoint.os.path.commonpath", other_drive)
     write = ToolCallBlock("w", "write", {"path": str(tmp_path / "elsewhere"), "content": "no"})
-    assert await policy.before_tool(write, None) == Deny(DENIED)
+    assert policy.decide(write) == Decision(denial=DENIED)
 
 
 async def test_the_checkpoint_turn_gets_five_tool_rounds_then_must_write():
@@ -955,3 +957,129 @@ async def test_invariant_4_a_relieved_overflow_keeps_its_billed_usage_once():
     assert len(kept) == 1 and not kept[0].message.content
     compaction = next(row for row in rows if row.kind == "compaction")
     assert kept[0].context_seq < compaction.context_seq  # kept before the ladder ran
+
+
+# --- the hook contract under C-9 (context.md section 10; loop-control.md section 3) ------------------
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda endpoint: replace(endpoint, model_id="another-model"),
+        lambda endpoint: replace(endpoint, base_url="http://elsewhere.invalid"),
+        lambda endpoint: replace(endpoint, provider="another-provider"),
+        lambda endpoint: replace(endpoint, protocol="openai_chat"),
+    ],
+)
+async def test_a_hook_may_not_change_the_route_under_context_management(change):
+    class Reroute(Hooks):
+        async def before_model(self, request, ctx):
+            return replace(request, endpoint=change(request.endpoint))
+
+    model = Model([[Done(assistant("never"))]])
+    events = await run(make_agent(model, hooks=[Reroute()]))
+    assert not model.requests  # refused at the pipeline boundary, before admission
+    assert [event.kind for event in events if isinstance(event, AgentError)] == ["HookContractError"]
+    assert events[-1].reason == "error"
+
+
+@pytest.mark.parametrize(
+    "rewrite",
+    [
+        lambda messages: (UserMessage((text("prepended"),)), *messages),  # prepend
+        lambda messages: messages[1:],  # remove
+        lambda messages: (*messages[:-1], UserMessage((text("rewritten"),))),  # rewrite
+        lambda messages: tuple(reversed(messages)),  # reorder
+    ],
+)
+async def test_a_hook_may_only_append_to_the_projected_messages(rewrite):
+    class Rewrite(Hooks):
+        async def before_model(self, request, ctx):
+            if len(request.messages) < 3:
+                return None
+            return replace(request, messages=rewrite(request.messages))
+
+    model = Model([call("read", "r0", path="f"), [Done(assistant("never"))]])
+    events = await run(make_agent(model, tools=[reader("ok")], hooks=[Rewrite()]))
+    assert len(model.requests) == 1
+    assert [event.kind for event in events if isinstance(event, AgentError)] == ["HookContractError"]
+
+
+async def test_an_overflow_from_hook_content_alone_stops_without_dropping_history():
+    class Bloat(Hooks):
+        async def before_model(self, request, ctx):
+            return replace(request, messages=(*request.messages, UserMessage((text(tokens(30_000)),))))
+
+    store = InMemoryTranscriptStore()
+    await _history_on_a_large_window(store, [3_000] * 4)
+    before = await store.load("session")
+    model = Model([[Done(assistant("never"))]], [[Done(assistant(CHECKPOINT))]])
+    events = await run(make_agent(model, store=store, hooks=[Bloat()]))
+    exhausted = next(event for event in events if isinstance(event, ContextExhausted))
+    parts = {part.name: part.tokens for part in exhausted.parts}
+    assert parts["transient"] == 30_000
+    assert not model.requests
+    after = await store.load("session")
+    assert not [row for row in after if row.kind in {"compaction", "context_edit"}]
+    assert after[: len(before)] == before
+
+
+async def test_a_closed_budget_answers_before_any_user_hook_is_consulted():
+    seen = []
+
+    class Refuse(Hooks):
+        async def before_tool(self, call, ctx):
+            seen.append(call.id)
+            return Deny("a user policy says no")
+
+    rounds = [call("read", f"r{index}", path="f") for index in range(6)]
+    model = Model(history(), [*rounds, [Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, tools=[reader(tokens(3_000))], hooks=[Refuse()])
+    agent.hooks = ()
+    await run(agent)
+    agent.hooks = (Refuse(),)
+    events = [event async for event in agent.compact(turn_id="compact")]
+    assert events[-1].reason == "completed"
+    assert seen == ["r0", "r1", "r2", "r3", "r4"]  # the sixth round never reached the hook
+    sixth = [m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)][-1]
+    assert (sixth.tool_call_id, sixth.content[0].text) == ("r5", BUDGET_USED)
+
+
+@pytest.mark.parametrize("swap", ["link", "directory"])
+async def test_a_scratch_write_never_lands_outside_after_a_swap_between_policy_and_execution(tmp_path, swap):
+    scratch = tmp_path / "scratch" / "session"
+    (scratch / "notes").mkdir(parents=True)
+    (scratch / "link").symlink_to(scratch / "notes", target_is_directory=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    class SwappingWrite:
+        """The real write tool, with the swap landing after the policy authorized the call."""
+
+        spec = WriteTool().spec
+
+        async def execute(self, arguments, ctx):
+            if swap == "link":
+                (scratch / "link").unlink()
+                (scratch / "link").symlink_to(outside, target_is_directory=True)
+            else:
+                (scratch / "notes").rename(scratch / "moved")
+                (scratch / "notes").symlink_to(outside, target_is_directory=True)
+            return await WriteTool().execute(arguments, ctx)
+
+    write = ToolCallBlock("w", "write", {"path": "scratch/session/link/plan.md", "content": "plan"})
+    model = Model(
+        history(),
+        [[Done(AssistantMessage((write,), assistant().origin, "tool_use"))], [Done(assistant(CHECKPOINT))]],
+    )
+    tools = [reader(tokens(3_000)), SwappingWrite()]
+    agent = make_agent(model, tools=tools, context=ContextConfig(scratch_dir=str(scratch)), cwd=str(tmp_path))
+    await run(agent)
+    assert [event async for event in agent.compact(turn_id="compact")][-1].reason == "completed"
+    assert not os.listdir(outside)  # nothing outside, not even a temp file
+    result = [m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)][-1]
+    if swap == "link":
+        # The call ran against the path the policy authorized, not the link it was spelled with.
+        assert (scratch / "notes" / "plan.md").read_text() == "plan" and not result.is_error
+    else:
+        assert result.is_error and "no longer resolves to the authorized location" in result.content[0].text

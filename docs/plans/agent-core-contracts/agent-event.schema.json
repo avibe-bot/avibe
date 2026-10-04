@@ -376,6 +376,7 @@
                     "history",
                     "current_request",
                     "latest_tool_batch",
+                    "transient",
                     "output"
                   ]
                 },
@@ -385,7 +386,7 @@
                 }
               }
             },
-            "description": "Estimated tokens of the request's parts: `history` is everything before the last unit (the checkpoint included), the last unit is `current_request` (an input) or `latest_tool_batch` (a response and its results), and `output` is the reserved max_tokens plus the margin M."
+            "description": "Estimated tokens of the request's parts: `history` is everything before the last unit (the checkpoint included), the last unit is `current_request` (an input) or `latest_tool_batch` (a response and its results), `transient` is what `before_model` hooks appended after the projected messages, and `output` is the reserved max_tokens plus the margin M."
           }
         }
       }

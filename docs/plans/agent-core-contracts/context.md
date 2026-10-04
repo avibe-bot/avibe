@@ -127,13 +127,13 @@ A checkpoint is written by a **fork** of the conversation, the only delivery pat
   overflow. Its tool calls go through the tool pipeline (§10, invariant 2). Its responses and results are never
   committed to the context, so `after_model` and `after_tool` do not run and nothing is shown to the user.
 
-**Tool policy** ("dreaming": cognition allowed, actuation blocked), a declarative table judged after the user's
-`before_tool` hooks, on the arguments they leave:
+**Tool policy** ("dreaming": cognition allowed, actuation blocked), a declarative table judged after the turn's
+budget and the user's `before_tool` hooks, on the arguments they leave (invariant 2):
 
 | Tool | Rule |
 | --- | --- |
 | `read` | allowed |
-| `write`, `edit` | allowed only when the target's real path is inside this Session's scratch directory, `<state>/agent_core/scratch/<session_id>/`; a path that cannot be compared with it (another Windows drive, an invalid path) is outside |
+| `write`, `edit` | allowed only when the target's real path is inside this Session's scratch directory, `<state>/agent_core/scratch/<session_id>/`; a path that cannot be compared with it (another Windows drive, an invalid path) is outside. An allowed call runs against that real path and is pinned to it: `write` and `edit` publish only while the path still resolves there (`ToolContext.pinned_target`) |
 | memory-read tools | reserved: allowed once they exist |
 | `bash` and every other tool | denied, never executed |
 
@@ -147,9 +147,13 @@ A checkpoint is written by a **fork** of the conversation, the only delivery pat
   turn, a hook's or the policy's denial included, is cut to `room - 1,000` tokens, head kept, ending with
   `[Output truncated to fit this checkpoint turn: showing about <shown> of <total> tokens. Read a smaller range if
   you need more.]`, so a single result cannot push the turn out of the window.
-- At most 5 tool rounds. After them, or once `room` falls below the floor, every call, whatever the table says,
-  gets `This is a checkpoint turn and its tool budget is used up. Write the checkpoint now.` A response that still
-  calls tools after that ends the turn as failed.
+- At most 5 tool rounds. After them, or once `room` falls below the floor, the budget is closed: every call gets
+  `This is a checkpoint turn and its tool budget is used up. Write the checkpoint now.` before any user hook or the
+  table is consulted. A response that still calls tools after that ends the turn as failed.
+- A pinned write cannot be redirected by a symlink swapped after the table authorized it: the tool resolves the
+  authorized real path itself, and refuses when the path resolves elsewhere at its start or right before the rename.
+  The window between that last check and `rename(2)` remains, as for every write: tools audit ledger (PR #2346)
+  rows B4 and B7.
 - The checkpoint is the text of a final response that stops with `stop` and calls no tool; only a `tool_use` stop
   with calls continues the turn. Anything else (a length stop, a `tool_use` stop without calls, calls under any other
   stop, an error, or no text) is a failure, and nothing enters the context.
@@ -268,10 +272,17 @@ ends the run `context_exhausted`, as in P1. The adapter supplies:
 1. **One request pipeline.** Projection, then the user's `before_model` hooks, then `budget()` exactly once on that
    final request, then the C-9 stage, then the provider. Nothing changes a request after it is budgeted; a stage step
    that changes the context rebuilds the request from the top. The single-unit stop (§8 d) is in the stage, before
-   provider admission. Checkpoint requests take the same pipeline.
-2. **One tool pipeline** in a checkpoint turn: the user's `before_tool` (`Deny`, `AlterArgs`), then the checkpoint
-   policy on the final arguments, then execution, then the bound on every result that enters the turn, denials
-   included. Conversation artifacts are recorded from the final arguments after execution (§7).
+   provider admission. Checkpoint requests take the same pipeline. Under C-9 a `before_model` hook (C-3 §3) may
+   append messages and change the system prompt or tool definitions, and nothing else: routing owns the model (the
+   endpoint's protocol, base URL, provider, and model stay as resolved), and the projected messages are an immutable
+   prefix (no prepend, removal, reorder, or rewrite, which would also break the provider cache prefix and the fork's
+   byte-identical prefix). A violation ends the run with a `HookContractError`. So moving history out shrinks the
+   request by exactly that history; appended hook content is overhead, budgeted like any other content, and an
+   overflow that only that overhead causes goes to (d) with the `transient` part, dropping no history.
+2. **One tool pipeline** in a checkpoint turn: the turn's budget (once closed, `BUDGET_USED` with no hook
+   consulted), then the user's `before_tool` (`Deny`, `AlterArgs`), then the checkpoint table on the final arguments,
+   then execution pinned to the path the table authorized, then the bound on every result that enters the turn,
+   denials included. Conversation artifacts are recorded from the final arguments after execution (§7).
 3. **One commit for C-9 state.** A transition (its `context_edit` rows, its `context_compaction` row, the guard and
    pause, and the hook state of that commit point in `AgentState`) is written in one transaction
    (`append_payloads`), before any event announces it; a failed commit leaves nothing. Nothing else writes

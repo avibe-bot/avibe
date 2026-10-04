@@ -64,7 +64,10 @@ Hooks run in registration order. The first `deny` or `end` wins; rewrites compos
 | `after_run` | outcome | nothing |
 
 A `before_model` rewrite changes only that request and is not persisted by design: a rewritten request is not
-reconstructible from the rows, and A10 is stated for requests without a transient rewrite. Anything that must survive a
+reconstructible from the rows, and A10 is stated for requests without a transient rewrite. With context management
+on (C-9), the rewrite is limited: it may append messages and change the system prompt or tool definitions, but may
+not change the model route (the endpoint's protocol, base URL, provider, or model) or remove, reorder, prepend to,
+or rewrite the projected messages. A violation ends the run with a `HookContractError` (`context.md` §10). Anything that must survive a
 restart, or that context management must see, goes through C-5 rows (`context_edit`, `context_compaction`). `end` finishes the run after the current step commits.
 
 ## 4. Steer, follow-up, abort

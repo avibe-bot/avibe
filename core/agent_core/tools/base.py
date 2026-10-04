@@ -34,6 +34,9 @@ class ToolContext:
     env: Mapping[str, str]
     cancel: CancelToken
     on_progress: Optional[Callable[[str], None]] = None
+    #: A resolved path the caller authorized (C-9's checkpoint turn): ``write`` and ``edit`` publish only
+    #: while the path still resolves to it. ``None`` everywhere else, where nothing changes.
+    pinned_target: Optional[str] = None
 
 
 @dataclass(frozen=True)
