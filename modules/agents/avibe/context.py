@@ -32,8 +32,9 @@ _SKILL_TAG = re.compile(r'<skill_content name="([^"]*)"[^>]*>|</skill_content>')
 #: How many forks up the lookup follows a Session's ancestry.
 _FORK_DEPTH = 16
 #: The lookup: the Session and its fork sources, each up to the least fork bound below it (``chain``), then what the
-#: model read of their ``messages`` rows (the text of each model message, else the display text). One size whatever
-#: the ancestry; ``{session}`` and ``{through}`` are filled in, ``KEYWORD`` is the model's.
+#: model read of their ``messages`` rows: each block of the model message in order, its text or the decoded string
+#: values of a tool call's arguments (a path it read or wrote), else the display text. One size whatever the
+#: ancestry; ``{session}`` and ``{through}`` are filled in, ``KEYWORD`` is the model's.
 _LOOKUP = (
     "with recursive chain(id, bound, depth) as (select '{session}', {through}, 0"
     " union all select json_extract(s.metadata_json, '$.fork_source_session_id'),"
@@ -42,9 +43,11 @@ _LOOKUP = (
     f" where c.depth < {_FORK_DEPTH} and json_extract(s.metadata_json, '$.fork_source_session_id') is not null"
     " and json_extract(s.metadata_json, '$.fork_source_context_seq') is not null)"
     " select context_seq, type, text from (select m.context_seq, m.type, coalesce((select"
-    " group_concat(json_extract(value, '$.text'), char(10)) from json_each(m.content_json,"
-    " '$.model.message.content')), m.content_text) as text from messages m join chain c on m.session_id = c.id"
-    " and m.context_seq <= c.bound) where text like '%KEYWORD%' order by context_seq"
+    " group_concat(coalesce(json_extract(b.value, '$.text'), (select group_concat(t.atom, ' ')"
+    " from json_tree(b.value, '$.arguments') t where t.type = 'text')), char(10))"
+    " from json_each(m.content_json, '$.model.message.content') b), m.content_text) as text"
+    " from messages m join chain c on m.session_id = c.id and m.context_seq <= c.bound)"
+    " where text like '%KEYWORD%' order by context_seq"
 )
 
 

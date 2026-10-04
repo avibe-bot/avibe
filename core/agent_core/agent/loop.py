@@ -1579,6 +1579,7 @@ class Agent:
             earlier_record=earlier,
             tokens_before=plan.est,
             threshold=plan.threshold,
+            window=plan.window,
             summarizer=summarizer,
             usage=usage,
         )

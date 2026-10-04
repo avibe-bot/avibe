@@ -201,10 +201,10 @@ is written, so projection stays a pure function of the rows:
 
   <artifacts>
   Read:
-  - <path, cumulative across checkpoints, most recently touched first, at most 50>
+  - <path, cumulative across checkpoints, most recently touched first, the route's share of them>
   - and <N> more
   Modified:
-  - <path, cumulative across checkpoints, most recently touched first, at most 50>
+  - <path, cumulative across checkpoints, most recently touched first, the route's share of them>
   - and <N> more
   </artifacts>
   <skills-loaded>
@@ -224,14 +224,16 @@ is written, so projection stays a pure function of the rows:
   `Read` lists paths of successful `read` calls that no `write` or `edit` touched; `Modified` lists paths of
   successful `write` or `edit` calls; `(none)` when a list is empty. Each path is cut in the middle to 160 UTF-8 bytes
   on a character boundary (its head and its file name stay), at most about 40 tokens whatever the script. Each list
-  keeps its 50 most recently touched paths and counts the ones pushed out (`files_read_more`, `files_modified_more`),
-  in the row and in the text; the full history stays reachable through `<earlier-record>`. This is an Avibe deviation
-  from Pi, which keeps every path: Avibe Sessions are long-lived (IM threads and Workbench Sessions that run for
-  weeks), so an unbounded list would turn a working Session into a forced `/new`. `<skills-loaded>` lists the skills
-  the summarized rows loaded (§4's marks, minus those whose load result the kept rows still hold), by name only: each
-  name cut to 160 UTF-8 bytes, the most recently loaded first, at most 20, cumulative; it is left out when there are
-  none. A skill's instructions are never injected: the model loads the skill again, and `vibe skill load` checks the
-  name against the catalog. `<earlier-record>` is left out when the adapter supplies no command, and
+  keeps its 50 most recently touched paths in the row and counts the ones pushed out (`files_read_more`,
+  `files_modified_more`); the text shows the route's share of them, `clamp(floor(W / 4,000), 5, 50)` for the route the
+  conversation's next request goes to (5 on 8K, 8 on 32K, 50 from 200K), and counts the rest in "and N more". The full
+  history stays reachable through `<earlier-record>`, which searches the paths in tool-call arguments too. This is an
+  Avibe deviation from Pi, which keeps every path: Avibe Sessions are long-lived (IM threads and Workbench Sessions
+  that run for weeks), so an unbounded list would turn a working Session into a forced `/new`. `<skills-loaded>` lists
+  the skills the summarized rows loaded (§4's marks, minus those whose load result the kept rows still hold), by name
+  only: each name cut to 160 UTF-8 bytes, the most recently loaded first, at most 20, cumulative; it is left out when
+  there are none. A skill's instructions are never injected: the model loads the skill again, and `vibe skill load`
+  checks the name against the catalog. `<earlier-record>` is left out when the adapter supplies no command, and
   `<current-request>` when the cut did not split a turn.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment's core
   fields (C-7 §8: cwd, os, shell, date, timezone; no Watches; each field cut in the middle to 160 UTF-8 bytes, so the
@@ -293,9 +295,10 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   up to its fork bound), through the last summarized `context_seq`, filtered by a `KEYWORD` the model replaces. The
   ancestry is followed in the SQL itself, a recursive CTE over the fork-source columns of `agent_sessions` capped at
   16 forks, so the command is one size whatever the depth. It
-  searches what the model read: the text of each row's model message (`content_json` at `$.model.message`, its
-  text blocks decoded), else the display text. It reads `messages` only, which every caller of `vibe data query`
-  may read; tool outputs can be run again.
+  searches what the model read: each block of a row's model message (`content_json` at `$.model.message`) in
+  order, its text or the decoded string values of a tool call's arguments (a path it read or wrote), else the
+  display text. It reads `messages` only, which every caller of `vibe data query` may read; tool outputs can be run
+  again.
 - `ContextHost.render_state(StateRequest)`: the `state` texts (§7): the environment's core fields.
 - Skill loads marked in their results: `vibe skill load` writes one `<skill_content name="...">` block per skill it
   loads, and every top-level block in a successful `bash` result is recorded in the result's `details.skills`

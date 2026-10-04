@@ -355,6 +355,20 @@ async def test_the_lookup_command_reads_the_summarized_rows_of_the_session_and_i
     assert found and all(row["type"] == "user" and "<environment>" in row["text"] for row in found)
 
 
+async def test_the_lookup_command_finds_a_path_the_model_wrote_in_a_tool_call(engine, session, tmp_path):
+    # A path that fell out of the bounded artifact lists is still in the call that wrote it: the lookup searches the
+    # decoded tool-call arguments too, whatever the script.
+    call = ToolCallBlock("w1", "write", {"path": "src/解析器/module.py", "content": "x"})
+    scripts = [[Done(assistant(calls=[call]))], [Done(assistant("written"))]]
+    harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[FakeTool("write")])
+    await _turn(harness, "write the module")
+    rows = await harness.context_rows()
+    command = AvibeContextHost(environment=lambda _: {}).earlier_record(SESSION, rows[-1].context_seq)
+    sql = command[len('vibe data query --limit 100 --sql "') : -1].replace("KEYWORD", "src/解析器/module.py")
+    found = run_read_only_query(sql, page_request=None).rows
+    assert len(found) == 1 and "src/解析器/module.py" in found[0]["text"]
+
+
 async def test_the_lookup_command_is_one_size_whatever_the_fork_ancestry_and_reaches_16_forks_up(
     engine, session, tmp_path
 ):

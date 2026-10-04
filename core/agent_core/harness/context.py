@@ -50,8 +50,11 @@ THRESHOLD_RATIO = 0.9
 KEEP_MAX = 20_000
 KEEP_RATIO = 0.25
 IMAGE_TOKENS = 1_600
-#: Each artifact list a checkpoint carries keeps this many paths, most recently touched first, then a count (section 7).
+#: Each artifact list a checkpoint row keeps this many paths, most recently touched first, then a count; what the
+#: model reads shows a 4,000th of the route's window of them, between ``ARTIFACTS_SHOWN_MIN`` and this (section 7).
 ARTIFACTS_LISTED = 50
+ARTIFACTS_SHOWN_MIN = 5
+ARTIFACTS_SHOWN_RATIO = 4_000
 #: Every path an artifact list carries, and every field of the state's environment block, is cut in the middle to this
 #: many UTF-8 bytes: at most about 40 tokens each under the estimate, whatever the script (section 7).
 ITEM_BYTES = 160
@@ -615,6 +618,11 @@ def summarized_to_seq(view: ContextView, cut: int) -> int:
     return max([previous, *seqs])
 
 
+def artifacts_shown(window: int) -> int:
+    """How many paths of each artifact list the model reads on a route with ``window`` tokens (section 7)."""
+    return min(ARTIFACTS_LISTED, max(ARTIFACTS_SHOWN_MIN, window // ARTIFACTS_SHOWN_RATIO))
+
+
 def render_summary(
     *,
     checkpoint: str,
@@ -622,6 +630,7 @@ def render_summary(
     files_read_more: int,
     files_modified: Sequence[str],
     files_modified_more: int,
+    shown: int,
     skills: Sequence[str],
     earlier_record: Optional[str],
     current_request: Optional[str],
@@ -632,7 +641,9 @@ def render_summary(
     lines.append("<artifacts>")
     lists = (("Read", files_read, files_read_more), ("Modified", files_modified, files_modified_more))
     for label, paths, more in lists:
-        listed = [*(f"- {path}" for path in paths), *([f"- and {more} more"] if more else [])]
+        # The row keeps up to ``ARTIFACTS_LISTED``; the model reads the route's share of them (``shown``).
+        more += max(0, len(paths) - shown)
+        listed = [*(f"- {path}" for path in paths[:shown]), *([f"- and {more} more"] if more else [])]
         lines += [f"{label}:", *listed] if listed else [f"{label}: (none)"]
     lines.append("</artifacts>")
     if skills:
@@ -658,10 +669,14 @@ def compaction_payload(
     earlier_record: Optional[str],
     tokens_before: int,
     threshold: int,
+    window: int,
     summarizer: Optional[Mapping[str, Any]],
     usage: Optional[Usage],
 ) -> dict[str, Any]:
-    """The ``Compaction`` row for a cut before ``view.units[cut]``; ``tokens_after_estimate`` is the caller's."""
+    """The ``Compaction`` row for a cut before ``view.units[cut]``; ``tokens_after_estimate`` is the caller's.
+
+    ``window`` is that of the route the conversation's next request goes to, which reads the summary.
+    """
     previous_row = view.compaction
     previous = previous_row.payload if previous_row is not None else {}
     head = view.units[:cut]
@@ -684,6 +699,7 @@ def compaction_payload(
             files_modified=files.modified,
             files_read_more=files.read_more,
             files_modified_more=files.modified_more,
+            shown=artifacts_shown(window),
             skills=skills,
             earlier_record=earlier_record,
             current_request=request,

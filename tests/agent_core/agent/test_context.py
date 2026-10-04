@@ -221,7 +221,7 @@ def test_an_edit_or_checkpoint_before_the_anchor_or_another_route_invalidates_it
     cut = next(index for index, unit in enumerate(view.units) if unit.seq == anchored.context_seq)
     payload = compaction_payload(
         view, cut, mode="normal", reason="threshold", checkpoint="checkpoint", skills=(), state=(),
-        earlier_record=None, tokens_before=0, threshold=0, summarizer=None, usage=None,
+        earlier_record=None, tokens_before=0, threshold=0, window=200_000, summarizer=None, usage=None,
     )
     rows.add("compaction", payload=payload)
     assert context_view(rows.rows).units[0].seq == anchored.context_seq
@@ -301,6 +301,7 @@ def test_a_cut_never_separates_a_tool_call_from_its_result(seed):
             earlier_record=None,
             tokens_before=0,
             threshold=0,
+            window=200_000,
             summarizer=None,
             usage=None,
         )
@@ -386,6 +387,7 @@ def test_each_artifact_list_keeps_its_50_most_recent_paths_across_checkpoints():
             earlier_record=None,
             tokens_before=1,
             threshold=2,
+            window=200_000,
             summarizer=None,
             usage=None,
         )
@@ -419,6 +421,7 @@ def test_an_artifact_path_is_middle_truncated_so_a_list_stays_small(segment):
         earlier_record=None,
         tokens_before=1,
         threshold=2,
+        window=200_000,
         summarizer=None,
         usage=None,
     )
@@ -429,6 +432,37 @@ def test_an_artifact_path_is_middle_truncated_so_a_list_stays_small(segment):
     assert listed[0].endswith("file-59.py")
     artifacts = payload["summary"].split("<artifacts>\n", 1)[1].split("</artifacts>", 1)[0]
     assert text_tokens(artifacts) <= 50 * 41 + 20  # a line: "- ", at most 160 bytes, a newline
+
+
+@pytest.mark.parametrize("window,shown", [(8_000, 5), (200_000, 50)], ids=["8K", "200K"])
+def test_the_rendered_artifact_lists_scale_with_the_route_window(window, shown):
+    # The row keeps at most 50 paths a list; what the model reads is cut to the route's share: a 4,000th of its
+    # window, between 5 and 50.
+    rows = Rows()
+    rows.input("touch many files")
+    for index in range(60):
+        rows.tool("read", "r", call_id=f"r{index}", path=f"read/{index:02}.py")
+    rows.input("next")
+    view = context_view(rows.rows)
+    payload = compaction_payload(
+        view,
+        len(view.units) - 1,
+        mode="dropped",
+        reason="overflow",
+        checkpoint="",
+        skills=(),
+        state=(),
+        earlier_record=None,
+        tokens_before=1,
+        threshold=2,
+        window=window,
+        summarizer=None,
+        usage=None,
+    )
+    assert len(payload["files_read"]) == 50 and payload["files_read_more"] == 10
+    artifacts = payload["summary"].split("<artifacts>\n", 1)[1].split("</artifacts>", 1)[0]
+    assert artifacts.count("- read/") == shown and f"- and {60 - shown} more\n" in artifacts
+    assert "- read/59.py" in artifacts  # the most recently touched first
 
 
 def test_a_path_with_undecodable_bytes_is_cut_like_any_other():
@@ -465,6 +499,7 @@ def test_distinct_long_paths_stay_distinct_files_after_their_display_is_cut():
         earlier_record=None,
         tokens_before=1,
         threshold=2,
+        window=200_000,
         summarizer=None,
         usage=None,
     )
@@ -505,6 +540,7 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
         earlier_record="vibe data query --sql '...'",
         tokens_before=1,
         threshold=2,
+        window=200_000,
         summarizer=None,
         usage=None,
     )
@@ -557,6 +593,7 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
         earlier_record=None,
         tokens_before=1,
         threshold=2,
+        window=200_000,
         summarizer=None,
         usage=None,
     )
