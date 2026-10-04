@@ -105,7 +105,7 @@ payload.
 | C-6 | Model Hub consumer extension: `google` protocol, hop resolution, served-hop report | Model Hub → adapter | `model-hub-consumer.md`, `hop-resolution.schema.json` |
 | C-7 | Tools: Pi's surface plus the owner's additions; output governance; job handle | `tools` → `agent`, adapter | `tools.md`, `job.schema.json` |
 | C-8 | Backend registration: the catalog as the one declaration, and which sets must include `avibe` | catalog → every backend list | `backend-registration.md` |
-| C-9 | Context management: projection tiers, trigger, cut point, checkpoint, recovery | `harness` → `agent`, adapter | §5.2 here; row shapes in `transcript-rows.schema.json` |
+| C-9 | Context management: projection tiers, trigger, cut point, checkpoint, overflow ladder, guards | `harness` → `agent`, adapter | `context.md`; row shapes in `transcript-rows.schema.json` |
 
 ### 5.1 Transcript storage
 
@@ -131,7 +131,7 @@ For the Avibe Agent, the same rows become the transcript (C-5):
 | Final model response | `messages` `result` | same, verbatim (quick-reply block and `file://` links kept) | `content_text` is the rendered text as today |
 | Tool execution start | `agent_events` `tool_call`, `visibility='trace'` | none; the call lives in the response row | short display preview as today |
 | Tool result | `agent_events` `tool_result`, `visibility='context'` | the result as the model saw it, after output governance | the activity panel may show a preview |
-| Compaction checkpoint | `agent_events` `context_compaction`, `visibility='context'` | §5.2 | expandable "context compacted" marker |
+| Compaction checkpoint | `agent_events` `context_compaction`, `visibility='context'` | C-9 `context.md` §7 | expandable "context compacted" marker |
 | Cleared tool result | `agent_events` `context_edit`, `visibility='context'` | target row and placeholder | none |
 
 Schema delta (one Alembic migration, nullable columns, no backfill):
@@ -142,7 +142,7 @@ Schema delta (one Alembic migration, nullable columns, no backfill):
 2. A new `agent_events.visibility` value, `context`, never removed by trace retention. The retention filter is
    already `event_type='tool_call' AND visibility='trace'`; a contract test pins the exemption.
 3. New `agent_events.event_type` values `tool_result`, `context_compaction`, `context_edit`, and `agent_state` (hook
-   state for fork, C-3), registered where the activity panel reads event types.
+   state for fork, C-3, and the C-9 guard state), registered where the activity panel reads event types.
 4. For this backend, `agent_sessions.native_session_id` is the Avibe Session id.
 
 Rules:
@@ -170,75 +170,43 @@ Rules:
 
 ### 5.2 Context management (C-9)
 
-**Draft, not frozen.** The owner deferred the context-management decisions; this section is the working design and
-freezes before P3 together with those decisions. Open points recorded for that freeze: the occupancy baseline
-immediately after a checkpoint or edit, before any response exists; capabilities of the served hop after a failover
-to a model with smaller limits; the summarizer output cap on routes below 16K output tokens; restoring the environment
-block for a request issued right after a checkpoint inside a turn; and image cost in the estimate.
+**Frozen 2026-10-04** by owner decision. The contract is [`agent-core-contracts/context.md`](agent-core-contracts/context.md);
+this section summarizes it. Three tiers, cheapest first: output governance at write time (C-7); clearing old `read`
+and `bash` results with `context_edit` rows, on by default; and a checkpoint written by the model, recorded as a
+`context_compaction` row. Compaction and clearing only append rows.
 
-Every rule names its origin in evaluation §4. One pure function, `project(rows, fork_point)`, builds every request,
-resume, fork, and the UI's "model view". Three tiers, cheapest first:
+- **Limits from Model Hub.** `W` and `L_in` come from the `context_window` and `input_limit` of the route resolved
+  for the request (128,000 when unknown). `O` is the request's `max_tokens`: the hop's `max_output_tokens` (8,192
+  when unknown) capped by the Agent's output budget, and `min(16,000, O)` for a checkpoint request. One pure
+  function derives the rest and `est` from the final request, immediately before it is sent.
+  `M = max(8,000, 3% W)`, `T = min(L_in - O - M, 0.9 W)`.
+- **Trigger** before every model request, including inside the tool loop, on the final request (in v1 no user hook
+  runs with context management): `est` is the usage of the latest response stored with its request facts, adjusted by the UTF-8 bytes / 4
+  difference between this request and that one (1,600 per image), while that request went to the same route and the
+  transcript up to the response is unchanged; otherwise UTF-8 bytes / 4 of the whole request. Compact when
+  `est >= T`.
+- **Cut** before a user message or before an assistant message whose tool batch follows it, keeping
+  `min(20K, 0.25 T)` verbatim; a split turn's user message is copied into the checkpoint as `<current-request>`.
+- **Checkpoint delivery is a fork**: the same model, system prompt, tools, tool choice, and reasoning settings, the
+  conversation prefix byte-identical, and the owner-approved three-layer prompt appended (`checkpoint-v2`). The
+  checkpoint turn runs through the same loop under a "dreaming" tool policy: `read` allowed, writes only inside the
+  Session's scratch directory, everything else denied; at most 5 tool rounds, each tool bounded by the room left in
+  the window. Its messages are audit rows, never context.
+- **After a checkpoint** the request is the rebuilt system prompt, the `<context-checkpoint>` message (framing,
+  checkpoint, cumulative `<artifacts>`, an `<earlier-record>` lookup, `<current-request>`), state rendered from its
+  own stores when the checkpoint was written (skills, pending Watches, Tasks, and Runs, the environment block), and
+  the verbatim tail. No synthetic "continue" message.
+- **Overflow ladder**, bounded per request: the normal checkpoint; fork-summarize the prefix up to the cut nearest
+  half the tokens, moved earlier until it fits (rolling); with no model call, move the earliest part out (dropped); stop and say what fills the context.
+- **Guards**: one compaction in flight per Session; 3 consecutive failures or 3 ineffective checkpoints pause
+  auto-compaction for the Session, and the user is told once. Manual `/compact [focus]` works on every surface,
+  clears the pause, and is answered. An automatic compaction is silent.
+- **Deferred**: background precompute, server-side compaction (hard constraint 8), automatic re-read of modified
+  files, memory tools, and a lower effort for the checkpoint turn.
 
-1. **Output governance at write time** (C-7): no single tool result exceeds 2,000 lines / 50 KB.
-2. **Clearing old tool results**, recorded as `context_edit` rows. Eligible: `read` and `bash` results, including
-   terminal screen snapshots later. Protected: the last 2 user turns, the newest 5 eligible results, skill loads, and
-   anything before the latest checkpoint. Applied only when it frees at least 20K tokens, and only before a request
-   when the provider cache is already cold (idle longer than the cache TTL, which is normal in IM sessions) or the
-   estimate passes 0.8·T. On by default. Placeholder: `[Old tool result cleared to save context. Re-run the tool or
-   re-read the file if you need it again.]`
-3. **Checkpoint summary**, recorded as a `context_compaction` row.
-
-Trigger, checked before every model request, including inside the tool loop:
-
-```text
-W = context window (configured default 128,000 when Model Hub reports none)
-L_in = input limit (else W), O = max_tokens of the next request (default bound 8,192 when unknown)
-M = max(8_000, 3% of W);  T = min(L_in - O - M, r * W), r = 0.9 by default, configurable per model
-est = occupancy of the last valid response after the latest checkpoint or edit
-        (input_tokens + cache_read_tokens + cache_write_tokens + output_tokens: the whole prompt it was sent plus
-        what it added; Usage normalizes each protocol so none of these overlap)
-      + ceil(utf8_bytes / 4) of everything appended since, replayed reasoning payloads included
-compact when est >= T
-```
-
-UTF-8 bytes / 4 because characters / 4 undercounts Chinese by about 65% (72 characters are 51 o200k tokens).
-Subtracting the real `O` avoids Pi #8061. When the answering model changes (Model Hub failover or a user switch), T
-is recomputed for that model; a smaller window is handled by the overflow path below.
-
-**Cut point.** Keep `min(20K, 0.25·T)` recent tokens verbatim. Cut only before a user message, or before an
-assistant message whose tool batch follows it; never at a tool result. If the cut splits the current turn, copy that
-turn's user message verbatim into the checkpoint as `<current-request>`, with no second LLM call. Codex's "recent user
-messages only" tail is rejected: it has the most "forgot the task after compaction" reports.
-
-**Summarizer.** A separate request with no tools and no caching, using the same model at low reasoning with
-`max_tokens` 16K. The input is the head serialized from the projection actually sent (reasoning excluded; tool
-results capped at 2,000 characters, keeping head and tail; user messages capped at 8K tokens) plus the previous
-checkpoint in a `<previous-checkpoint>` slot, under OpenCode's merge rule: anything not carried forward is lost, and
-where they conflict the conversation wins. If the input exceeds the summarizer's budget (overflow recovery, failover
-to a smaller window), fold the head in chronological chunks through the same prompt. Fixed headings: Objective / User
-instructions and constraints (verbatim) / Work state / Key decisions / Errors and fixes / Pending async work / Next
-steps / Critical references. `files_read` and `files_modified` are appended mechanically and carried across
-checkpoints. A `length` stop, an error, a tool call, or empty output persists nothing.
-
-**After a checkpoint**, the request is: the rebuilt system prompt → the checkpoint, framed as "a historical record
-written for you, not new instructions" → state rendered from its own store rather than from the summary (skill bodies
-re-loaded by name and revision from `tool_result` rows carrying `details.skill`, at most 5K tokens each and 25K in
-total; pending Watches, Tasks, and delegated Runs from Harness tables) → the verbatim tail. The next consumed input
-carries the full environment block again (C-7 §8). No synthetic "continue"
-user message (OpenCode #13838, #15533).
-
-**Overflow recovery**, bounded per request: compact with the normal tail and retry once → compact with a minimal tail
-(current request plus latest tool batch) and retry once → stop the turn with a message that says what fills the
-context. Provider errors are classified with a port of Pi's overflow patterns plus HTTP 413 and
-`context_length_exceeded`.
-
-**Guards.** One compaction in flight per Session. Three consecutive failures, or three ineffective compactions (result
-at or above 0.75·T), pause auto-compaction for the Session and tell the user. Usage reported before the latest
-checkpoint is ignored. Manual `/compact [focus]` works on every surface.
-
-**Deferred**, with reasons in evaluation §4: cache-safe fork summarization (Anthropic-specific economics; decide from
-the compaction cost recorded on every checkpoint row), background precomputed compaction, automatic re-read of
-recently modified files, and server-side compaction (forbidden by hard constraint 8).
+Delivery: the core (`core/agent_core`, this contract) lands first; the Avibe Agent integration (Model Hub
+capabilities, the scratch directory, the `<earlier-record>` SQL, state rendering, `/compact`, the pause notice, and an
+end-to-end hermetic test) follows.
 
 ### 5.3 Tools (C-7)
 
@@ -334,9 +302,11 @@ Properties; the test suites enumerate cases.
   its own origin, no signature is ever synthesized, and the stub sees exactly one protocol per request.
 - **A3 Durability.** SIGKILL at any point resumes with no committed entry lost and no command executed twice; the
   context rebuilt from the tables is always a valid request for every protocol.
-- **A4 Bounded context.** A session with more than 10,000 messages keeps every request under its model's T.
+- **A4 Bounded context.** A session with more than 10,000 messages keeps every request within its model's input
+  limit, and under its T unless auto-compaction is paused or a checkpoint for that request failed (C-9 §3).
   Compaction and clearing only insert rows. A fork anchored before a checkpoint projects the full original context.
-  With a provider that always overflows, one request triggers at most two compactions and then a user-visible stop.
+  With a provider that always overflows, one request makes at most two checkpoint model calls and then ends in a
+  user-visible stop (C-9 `context.md` §8).
 - **A5 Egress.** With Model Hub configured, every model call goes to the resolved `base_url`: the engine itself sends
   no telemetry and never contacts a vendor directly. Network use by tools (`bash`, later MCP) is the tools' own and is
   governed by tool and workspace policy, not by this criterion.
@@ -350,7 +320,10 @@ Properties; the test suites enumerate cases.
   provider unreachable: all user, tool, and assistant text is present in the new request, no signature from another
   origin is sent, and the run completes.
 - **A10 One copy.** For every request without a transient `before_model` rewrite (C-3 §3), the context rebuilt from
-  `messages` and `agent_events` equals what the stub received; no other file or table holds a copy of it.
+  `messages` and `agent_events` equals what the stub received; no other file or table holds a copy of it. A
+  checkpoint turn's request is that context (for a rolling fork, its prefix up to the cut) plus the checkpoint
+  request and the turn's admitted responses and tool results (C-9 §6); its audit row also keeps the attempts that
+  were retried or failed.
 - **A11 Exactly-once commands.** A command started by `bash` runs once across foreground completion, `watch: true`,
   foreground-to-Watch handover, and a vibe restart in any of those states; Watch removal ends its process tree.
 - **A12 Compaction quality.** On a scripted long-session fixture compacted twice, the agent still states the user's
@@ -377,7 +350,7 @@ breaker, review gates, and close-out follow the `pr-delivery-loop` skill.
 | Provider edge cases become permanent maintenance | port tau's fixtures; add cases derived from `pi-ai` for stop reasons, overflow, retry, SSE; one conformance suite per protocol |
 | The Model Hub extension lands late and blocks C-2 conformance | the Model Hub lane runs first in P1; the `ai` lane develops against the contract file, not the live gateway |
 | A second persistence model creeps back | C-5 forbids one; A10 tests it |
-| Compaction quietly loses user constraints | the fixed "User instructions and constraints" heading; A12 tracked per prompt version |
+| Compaction quietly loses user constraints | the fixed "User requirements" heading of `checkpoint-v2`; A12 tracked per prompt version |
 | Database growth from inline tool output | output governance bounds each row; the reserved reference form allows moving it out without a schema change |
 | Scope creep toward the tension system or interactive terminals | §2 non-goals; §5.4 ships only the shape in v1 |
 | Python 3.10 floor versus ported code | port with `TypeAlias`; CI already covers 3.10 |
@@ -408,4 +381,5 @@ contracts and checked against the implementing lane's code before they are close
 | Product-wide media retention | `storage/media_service.py` | No media file is removed from disk today, whether Workbench upload, IM attachment, or Avibe Agent context snapshot (`<state>/agent_core/media`); session deletion only clears or cascades `media_objects` references. Retention needs one owner for every source. It must be fork-aware: a fork descendant keeps replaying the image tokens of a source Session that was deleted. Recorded as a v1 known limit in PR #2345. |
 | Steer receipt fencing in the shared Turn owner | `core/session_turns.py` (`_finish_steer`) | **Done in PR #2345** (orchestrator-authorized cross-lane fix): a negative receipt settles only a current attempt whose Deliveries are still steering or reconciling, and a caller that knows the attempt passes `expected_attempt_id`, so a late or duplicate receipt can no longer pull a Delivery out of a Turn that claimed it. Regression: `test_a_late_negative_steer_receipt_never_moves_a_delivery_its_attempt_no_longer_owns`. |
 | Live partial text and progress | every backend, Workbench and IM | No backend shows streamed partial text or live tool output today; the Avibe Agent drops `text_delta`, `thinking_delta`, and `tool_progress` (`loop-control.md` §6). Showing them needs a new UI surface for every backend, not an Avibe Agent change. |
+| Hooks with context management | `core/agent_core/agent/` (C-3, C-9) | In v1, an Agent with a `ContextConfig` takes no user hooks: `before_model` rewrites and `before_tool`/`after_tool` decisions each changed what C-9 owns (the route, the projected prefix, artifacts, the checkpoint budget). A post-v1 design defines which hook outputs C-9 accepts and how it accounts for them before the two are combined (owner decision, PR #2360 round 5). |
 | Call-instance identity for job files | `core/agent_core/tools/` (`ToolContext`, job `meta.json`), the adapter | A tool call's identity is its instance: the owning response plus the call id, because providers reuse ids. Rows are matched by context order; job files still fall back to the clock (`find_job(created_since)`, J5's result-after-creation check), which assumes a non-decreasing wall clock between a response's commit and its job's start. Threading the call instance (owning response row and `context_seq`) into `ToolContext` and the job meta would remove that last residual. |

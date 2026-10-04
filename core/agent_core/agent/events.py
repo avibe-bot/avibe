@@ -13,6 +13,7 @@ from typing import Literal, Optional, Union
 
 RunEndReason = Literal["completed", "aborted", "error", "ended_by_hook", "context_exhausted"]
 CompactionReason = Literal["manual", "threshold", "overflow"]
+CompactionMode = Literal["normal", "rolling", "dropped"]
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,7 @@ class CompactionFinished:
     seq: int
     event_id: str
     reason: CompactionReason
+    mode: CompactionMode
     tokens_before: int
     tokens_after_estimate: int
 
@@ -102,6 +104,40 @@ class CompactionFailed:
     seq: int
     reason: CompactionReason
     error: str
+
+
+@dataclass(frozen=True)
+class CompactionSkipped:
+    """A manual compaction found nothing older than the kept tail to summarize (C-9 section 10)."""
+
+    turn_id: str
+    seq: int
+    reason: CompactionReason
+
+
+@dataclass(frozen=True)
+class CompactionPaused:
+    """Auto-compaction paused for the Session (C-9 section 10); emitted once, at the transition."""
+
+    turn_id: str
+    seq: int
+    cause: Literal["failures", "ineffective"]
+
+
+@dataclass(frozen=True)
+class ContextPart:
+    name: Literal["system", "tools", "history", "current_request", "latest_tool_batch", "output"]
+    tokens: int
+
+
+@dataclass(frozen=True)
+class ContextExhausted:
+    """What fills a context the overflow ladder could not make fit (C-9 section 8 d)."""
+
+    turn_id: str
+    seq: int
+    limit: int
+    parts: tuple[ContextPart, ...]
 
 
 @dataclass(frozen=True)
@@ -131,6 +167,9 @@ AgentEvent = Union[
     CompactionStarted,
     CompactionFinished,
     CompactionFailed,
+    CompactionSkipped,
+    CompactionPaused,
+    ContextExhausted,
     RunEnded,
     AgentError,
 ]

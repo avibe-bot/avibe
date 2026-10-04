@@ -8,9 +8,11 @@ The loop in `core/agent_core/agent/`. Semantics are the ones the bare-loop spike
 ```python
 class Agent:
     def __init__(self, *, models: ModelRouter, tools: Sequence[Tool], hooks: Sequence[Hooks],
-                 store: TranscriptStore, jobs: JobHost) -> None: ...
+                 store: TranscriptStore, jobs: JobHost,
+                 context: ContextConfig | None = None) -> None: ...   # C-9; excludes hooks in v1 (§3)
 
     def run(self, input: Input, *, turn_id: str) -> AsyncIterator[AgentEvent]: ...   # one Avibe Turn
+    def compact(self, *, turn_id: str, focus: str | None = None) -> AsyncIterator[AgentEvent]: ...   # /compact (C-9)
     def steer(self, input: Input) -> bool: ...       # False: not accepted, the adapter keeps ownership
     def follow_up(self, input: Input) -> bool: ...
     def abort(self, reason: str) -> None: ...
@@ -27,7 +29,8 @@ wrapper.
 
 ```text
 commit input → loop:
-    before_model hooks → provider stream (events out)
+    projection → before_model hooks (without a ContextConfig) or budget and the C-9 stage (with one; C-9 §10)
+        → provider stream (events out) → admission of the response
     if the response has tool calls:
         commit it as `assistant`
         for each call, in order: before_tool → execute → after_tool → commit tool result
@@ -63,8 +66,13 @@ Hooks run in registration order. The first `deny` or `end` wins; rewrites compos
 | `after_run` | outcome | nothing |
 
 A `before_model` rewrite changes only that request and is not persisted by design: a rewritten request is not
-reconstructible from the rows, and A10 is stated for requests without a transient rewrite. Anything that must survive a
-restart, or that context management must see, goes through C-5 rows (`context_edit`, `context_compaction`). `end` finishes the run after the current step commits.
+reconstructible from the rows, and A10 is stated for requests without a transient rewrite. Anything that must survive
+a restart, or that context management must see, goes through C-5 rows (`context_edit`, `context_compaction`). `end`
+finishes the run after the current step commits.
+
+In v1 an Agent with a C-9 `ContextConfig` takes no user hooks: passing both is a configuration error, because C-9
+owns the request and the checkpoint turn's tools. Hooks with context management are a post-v1 design item
+(`context.md` §10, plan §10).
 
 ## 4. Steer, follow-up, abort
 
@@ -96,7 +104,10 @@ sent with that request gets the error result `Tool <name> is not available.`
 | `tool_progress` | dropped in v1: no backend shows live tool output, so a running tool shows its `tool_started` line, as for the other backends (live tool output joins the live partial text and progress follow-up, `avibe-agent-core.md` §10) |
 | `tool_finished` | the committed `tool_result` row; a handed-over job names its Watch |
 | `steer_applied` | the steer delivery is accepted into the running Turn |
-| `compaction_started`, `compaction_finished`, `compaction_failed` | optional status line; failures always reported |
+| `compaction_started`, `compaction_finished`, `compaction_failed` | none for an automatic compaction (C-9 `context.md` §10); a manual `/compact` reports its outcome |
+| `compaction_skipped` | a manual `/compact` had nothing to compact yet: a brief localized reply |
+| `compaction_paused` | the pause notice, once per pause, localized through `vibe/i18n` |
+| `context_exhausted` | what fills the context, in the run's stop message (C-9 `context.md` §8 d) |
 | `run_ended` | `MessageOutput` settles the Turn |
 | `error` | `notify` / `error` row; the text shown is the adapter's localized copy for the event's `kind` (`vibe/i18n`), and `message` is diagnostic detail, never display copy |
 

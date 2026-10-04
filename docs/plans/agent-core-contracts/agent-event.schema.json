@@ -23,6 +23,9 @@
         "compaction_started",
         "compaction_finished",
         "compaction_failed",
+        "compaction_skipped",
+        "compaction_paused",
+        "context_exhausted",
         "run_ended",
         "error"
       ]
@@ -208,6 +211,7 @@
         "required": [
           "event_id",
           "reason",
+          "mode",
           "tokens_before",
           "tokens_after_estimate"
         ],
@@ -220,6 +224,13 @@
               "manual",
               "threshold",
               "overflow"
+            ]
+          },
+          "mode": {
+            "enum": [
+              "normal",
+              "rolling",
+              "dropped"
             ]
           },
           "tokens_before": {
@@ -280,6 +291,101 @@
               "threshold",
               "overflow"
             ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "compaction_skipped"
+          }
+        }
+      },
+      "then": {
+        "description": "A manual compaction found nothing older than the kept tail to summarize (context.md section 10). The adapter replies that there is nothing to compact yet; the run ends `completed`.",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "enum": [
+              "manual"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "compaction_paused"
+          }
+        }
+      },
+      "then": {
+        "description": "Auto-compaction paused for the Session (context.md section 10); emitted once, at the transition. The adapter tells the user.",
+        "required": [
+          "cause"
+        ],
+        "properties": {
+          "cause": {
+            "enum": [
+              "failures",
+              "ineffective"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "context_exhausted"
+          }
+        }
+      },
+      "then": {
+        "description": "The overflow ladder could not make the request fit (context.md section 8 d): what fills the context, for the adapter's stop message. The run then ends `context_exhausted`.",
+        "required": [
+          "limit",
+          "parts"
+        ],
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "description": "L_in of the hop."
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "tokens"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "enum": [
+                    "system",
+                    "tools",
+                    "history",
+                    "current_request",
+                    "latest_tool_batch",
+                    "output"
+                  ]
+                },
+                "tokens": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            },
+            "description": "Estimated tokens of the request's parts: `history` is everything before the last unit (the checkpoint included), the last unit is `current_request` (an input) or `latest_tool_batch` (a response and its results), and `output` is the reserved max_tokens plus the margin M."
           }
         }
       }

@@ -1,8 +1,11 @@
 """C-5 transcript store interface (``agent-core-contracts/transcript.md``).
 
-The loop is the single writer of a Session's context. Each method commits one
-context entry and returns it with its ``context_seq``; the adapter implements
-this over the ``messages`` and ``agent_events`` tables.
+The loop is the single writer of a Session's context. ``load`` reads it; the
+other writes commit one context entry and return it with its ``context_seq``,
+except ``append_payloads`` (several entries in one transaction) and
+``append_audit`` (a non-context row; its id). The SQLite store implements this
+over the ``messages`` and ``agent_events`` tables, and one contract suite runs
+the same tests on it and on the in-memory store (C-5 ``transcript.md`` §2).
 """
 
 from __future__ import annotations
@@ -21,7 +24,10 @@ class ContextEntry:
 
     ``row_id`` is ``messages.id`` for inputs and responses, ``agent_events.id``
     otherwise. ``message`` is set for inputs, responses, and tool results;
-    ``payload`` carries the versioned shape of the other kinds.
+    ``payload`` carries the versioned shape of the other kinds. ``created_at``
+    is the row's commit time in epoch seconds; every store sets it, as written
+    and as loaded, and C-9 reads a response's to tell whether the provider
+    cache has gone cold.
     """
 
     session_id: str
@@ -30,6 +36,7 @@ class ContextEntry:
     row_id: str
     message: Optional[Message] = None
     payload: Mapping[str, Any] = field(default_factory=dict)
+    created_at: Optional[float] = None
 
 
 class TranscriptStore(Protocol):
@@ -41,7 +48,14 @@ class TranscriptStore(Protocol):
         """Admit an already stored input row into the context as rendered for the model."""
         ...
 
-    async def append_response(self, session_id: str, message: AssistantMessage, *, final: bool) -> ContextEntry: ...
+    async def append_response(
+        self, session_id: str, message: AssistantMessage, *, final: bool, request: Optional[Mapping[str, Any]] = None
+    ) -> ContextEntry:
+        """Commit a response; ``request`` (C-9 ``ModelResponse.request``) is stored with it and read back in ``payload``.
+
+        The loop passes ``request`` only when context management is on.
+        """
+        ...
 
     async def append_tool_result(
         self, session_id: str, message: ToolResultMessage, *, details: Mapping[str, Any]
@@ -50,3 +64,15 @@ class TranscriptStore(Protocol):
     async def append_payload(
         self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state"], payload: Mapping[str, Any]
     ) -> ContextEntry: ...
+
+    async def append_payloads(
+        self, session_id: str, entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state"], Mapping[str, Any]]]
+    ) -> Sequence[ContextEntry]:
+        """Commit several payload entries in order, in one transaction: all of them or none (C-9 section 10)."""
+        ...
+
+    async def append_audit(
+        self, session_id: str, kind: Literal["checkpoint_turn", "attempt"], payload: Mapping[str, Any]
+    ) -> str:
+        """An audit row outside the context (C-9 ``CheckpointTurn`` or ``ModelAttempt``); its id."""
+        ...

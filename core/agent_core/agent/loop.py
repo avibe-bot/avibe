@@ -2,6 +2,9 @@
 
 Queue semantics informed by Pi (MIT), packages/agent/src/agent-loop.ts, and the
 bare-loop control experiment. This is an Avibe implementation, not a port.
+With a ``ContextConfig`` the loop also applies C-9 before every model request:
+clearing, the forked checkpoint turn, and the overflow ladder
+(``agent-core-contracts/context.md``).
 """
 
 from __future__ import annotations
@@ -13,14 +16,22 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
-from dataclasses import replace
-from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional, Sequence, TypeVar
+from dataclasses import dataclass, replace
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
+from core.agent_core.agent.checkpoint import BUDGET_USED, DENIED, CheckpointPolicy, Decision
 from core.agent_core.agent.events import (
     AgentError,
     AgentEvent,
     AssistantTextDelta,
     AssistantThinkingDelta,
+    CompactionFailed,
+    CompactionFinished,
+    CompactionPaused,
+    CompactionSkipped,
+    CompactionStarted,
+    ContextExhausted,
+    ContextPart,
     MessageCommitted,
     RunEnded,
     RunEndReason,
@@ -44,7 +55,7 @@ from core.agent_core.agent.hooks import (
 )
 from core.agent_core.agent.jobs import TrackingJobHost
 from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
-from core.agent_core.agent.models import DEFAULT_MAX_OUTPUT_TOKENS, ModelRouter, ModelSelection, RetryPolicy
+from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
 from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
 from core.agent_core.ai.provider import (
@@ -55,10 +66,67 @@ from core.agent_core.ai.provider import (
     ThinkingDelta,
 )
 from core.agent_core.cancel import CancelToken
-from core.agent_core.harness.projection import ProjectionError, project, validate_message_append
-from core.agent_core.harness.store import ContextEntry, TranscriptStore
-from core.agent_core.messages import AssistantMessage, Message, TextBlock, ToolCallBlock, ToolResultMessage, text
+from core.agent_core.harness.context import (
+    CHECKPOINT_TOOL_FLOOR,
+    CHECKPOINT_TOOL_ROUNDS,
+    CHECKPOINT_TOOL_SLACK,
+    CLEAR_SOFT_RATIO,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    INEFFECTIVE_RATIO,
+    MAX_OVERFLOWS,
+    MAX_ROLLS,
+    PAUSE_AFTER,
+    PROMPT_VERSION,
+    Anchor,
+    Budget,
+    ContextConfig,
+    StateRequest,
+    add_usage,
+    budget,
+    carried_skills,
+    checkpoint_max_tokens,
+    checkpoint_request,
+    checkpoint_text,
+    clear_edit,
+    clearable_results,
+    compaction_payload,
+    fit_result,
+    half_cut,
+    last_anchor,
+    message_tokens,
+    messages_tokens,
+    normal_cut,
+    output_tokens,
+    request_facts,
+    request_tokens,
+    rolling_cut,
+    sent_tokens,
+    summarized_to_seq,
+    text_tokens,
+    unit_tokens,
+)
+from core.agent_core.harness.projection import (
+    ContextView,
+    ProjectionError,
+    context_view,
+    project,
+    validate_message_append,
+)
+from core.agent_core.harness.store import ContextEntry, EntryKind, TranscriptStore
+from core.agent_core.messages import (
+    AssistantMessage,
+    Message,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultMessage,
+    Usage,
+    UserMessage,
+    message_to_dict,
+    text,
+    usage_to_dict,
+)
 from core.agent_core.tools.base import JobHost, Tool, ToolContext, ToolResult
+from core.agent_core.tools.paths import to_thread_joined
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -74,6 +142,65 @@ class ProviderProtocolViolation(ValueError):
 
 class UnsupportedModelRoute(ValueError):
     """The selected model cannot provide the tools required by the agent."""
+
+
+class _Exhausted(Exception):
+    """C-9 section 8 (d): the run stops ``context_exhausted``, saying what fills the context."""
+
+    def __init__(self, limit: int, parts: tuple[ContextPart, ...]) -> None:
+        self.limit, self.parts = limit, parts
+        sizes = ", ".join(f"{part.name} ~{part.tokens}" for part in parts)
+        super().__init__(f"The context does not fit the model's input limit of {limit} tokens: {sizes}.")
+
+
+#: C-9 guard state (``AgentState.context``) before anything happened.
+_GUARD_DEFAULT: dict[str, Any] = {"failures": 0, "ineffective": 0, "paused": False}
+#: The checkpoint request without a focus, as the fit checks measure it.
+_CHECKPOINT_REQUEST = checkpoint_request()
+#: The most a checkpoint-turn call that does not run adds: one of the policy's two fixed texts (never cut).
+_FIXED_RESULT_TOKENS = max(text_tokens(DENIED), text_tokens(BUDGET_USED))
+
+
+async def _silent(*_: Any, **__: Any) -> None:
+    """The checkpoint turn's emit: it shows nothing (C-9 section 6)."""
+
+
+@dataclass
+class _Ladder:
+    """One model request's progress through C-9 sections 3 and 8."""
+
+    compacted: bool = False
+    summary_failed: bool = False
+    rolls: int = 0
+    overflows: int = 0
+    #: The provider refused the request as overflow: the next stage takes a ladder step whatever it measures.
+    refused: bool = False
+
+
+@dataclass
+class _Attempt:
+    """One model attempt of the run: the C-9 attempt ledger's entry (context.md section 10).
+
+    ``message`` is the response, or the partial a failed attempt carried. ``committed``: it became a response
+    row; ``audited``: its usage went to a ``ModelAttempt`` audit row (context.md section 10, invariant 4).
+    """
+
+    purpose: Literal["conversation", "checkpoint"]
+    request: ModelRequest
+    message: Optional[AssistantMessage]
+    error: Optional[ProviderError] = None
+    committed: bool = False
+    audited: bool = False
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    ok: bool
+    overflow: bool = False
+
+
+class _ForkTooLarge(Exception):
+    """A checkpoint request that cannot fit the window; it is never sent."""
 
 
 class Agent:
@@ -101,6 +228,7 @@ class Agent:
         reasoning_effort: Optional[str] = None,
         retry: RetryPolicy = RetryPolicy(),
         rehydrate: Optional[Callable[[Mapping[str, Any]], Sequence[Message]]] = None,
+        context: Optional[ContextConfig] = None,
     ) -> None:
         self.session_id = session_id
         self.models = models
@@ -114,6 +242,10 @@ class Agent:
         self.max_tokens, self.reasoning_effort = max_tokens, reasoning_effort
         self.retry = retry
         self.rehydrate = rehydrate
+        if context is not None and self.hooks:
+            # Hooks with context management are a post-v1 design item (plan section 10).
+            raise ValueError("ContextConfig and user hooks are mutually exclusive in v1")
+        self.context = context
         self._tools: dict[str, Tool] = {}
         self._run_tools: Optional[dict[str, Tool]] = None
         self.set_tools(tools)
@@ -129,6 +261,11 @@ class Agent:
         self._rows: list[ContextEntry] = []
         self._committed_state: dict[str, Any] = {}
         self._committed_state_json = "{}"
+        self._guard: dict[str, Any] = dict(_GUARD_DEFAULT)
+        self._committed_guard: dict[str, Any] = dict(_GUARD_DEFAULT)
+        # The run's attempt ledger (C-9): every model attempt, in order.
+        self._attempts: list[_Attempt] = []
+        self._last_model_at: Optional[float] = None
         self._seq = 0
 
     def set_tools(self, tools: Sequence[Tool]) -> None:
@@ -180,13 +317,31 @@ class Agent:
         seq = self._rows[-1].context_seq if self._rows else 0
         return Snapshot(self.session_id, seq, deepcopy(self._committed_state))
 
-    async def run(self, input: AgentInput, *, turn_id: str) -> AsyncIterator[AgentEvent]:
+    def run(self, input: AgentInput, *, turn_id: str) -> AsyncIterator[AgentEvent]:
+        input = deepcopy(input)
+        return self._pump(turn_id, lambda emit: self._drive(emit, input=input), admit=True)
+
+    def compact(self, *, turn_id: str, focus: Optional[str] = None) -> AsyncIterator[AgentEvent]:
+        """Manual ``/compact [focus]`` (C-9 section 10): clear the pause, then write a normal checkpoint.
+
+        Runs like a run without an input: it refuses while a run (or another
+        compaction) is active, admits no steer, and ends ``completed`` when the
+        checkpoint was written.
+        """
+        if self.context is None:
+            raise RuntimeError("context management is not configured for this Agent")
+        return self._pump(turn_id, lambda emit: self._drive(emit, focus=focus), admit=False)
+
+    async def _pump(
+        self, turn_id: str, drive: Callable[[Callable[..., Awaitable[None]]], Awaitable[None]], *, admit: bool
+    ) -> AsyncIterator[AgentEvent]:
         async with self._lock:
             if self._running:
                 raise RuntimeError("this Agent already has an active run")
             if self._steers or self._follow_ups:
                 raise RuntimeError("return unconsumed inputs with take_pending_inputs() before starting another run")
-            self._running = self._open = True
+            self._running = True
+            self._open = admit
             self._consumer_closed = False
             self._ctx = RunContext(self.session_id, turn_id, CancelToken())
             self._scope = RunScope(self._ctx.cancel)
@@ -204,7 +359,7 @@ class Agent:
             self._seq += 1
             await events.put(event)
 
-        worker = asyncio.create_task(self._drive(deepcopy(input), emit))
+        worker = asyncio.create_task(drive(emit))
         receive: Optional[asyncio.Task] = None
         try:
             while True:
@@ -244,6 +399,7 @@ class Agent:
                     self._run_tools = None
 
     async def _save_state(self, *, cleanup: bool = False) -> None:
+        """Hook state at a commit point. C-9 guard state is written only by ``_commit_context``."""
         representation = state_representation(self._ctx.state)
         if representation == self._committed_state_json:
             return
@@ -273,23 +429,48 @@ class Agent:
         )
         self._rows.append(row)
 
-    def _validate_response(self, message: AssistantMessage) -> None:
+    def _validate_response(self, message: AssistantMessage, *, after: Sequence[Message] = ()) -> None:
+        """A response is valid after the committed rows and then ``after`` (a checkpoint turn's own messages)."""
+        entries = list(self._rows)
+        seq = max((entry.context_seq for entry in entries), default=0)
+        for item in after:
+            seq += 1
+            kind: EntryKind = (
+                "input"
+                if isinstance(item, UserMessage)
+                else "response"
+                if isinstance(item, AssistantMessage)
+                else "tool_result"
+            )
+            entries.append(ContextEntry(self.session_id, seq, kind, f"uncommitted-{seq}", item))
         try:
-            validate_message_append(self._rows, session_id=self.session_id, kind="response", message=message)
+            validate_message_append(entries, session_id=self.session_id, kind="response", message=message)
         except ProjectionError as error:
             raise ProviderProtocolViolation(f"Provider protocol violation: {error}") from error
 
     async def _response(self, message: AssistantMessage, *, final: bool) -> ContextEntry:
         self._validate_response(message)
         await self._save_state()
+        # The attempt this response answered: the ledger's latest conversation attempt (the C-9 anchor).
+        attempt = next((item for item in reversed(self._attempts) if item.purpose == "conversation"), None)
+        facts = {"request": request_facts(attempt.request)} if self.context is not None and attempt else {}
         row = await self._scope.call(
-            lambda: self.store.append_response(self.session_id, deepcopy(message), final=final),
+            lambda: self.store.append_response(self.session_id, deepcopy(message), final=final, **facts),
             interruptible=False,
         )
+        if attempt is not None:
+            attempt.committed = True
         self._rows.append(row)
         return row
 
-    async def _drive(self, input: AgentInput, emit: Callable[..., Awaitable[None]]) -> None:
+    async def _drive(
+        self,
+        emit: Callable[..., Awaitable[None]],
+        *,
+        input: Optional[AgentInput] = None,
+        focus: Optional[str] = None,
+    ) -> None:
+        """One run of ``input``, or, without one, a manual compaction with ``focus``."""
         loaded = False
         try:
             try:
@@ -303,23 +484,33 @@ class Agent:
                 self._ctx.state = deepcopy(dict(projection.state))
                 self._committed_state_json = state_representation(self._ctx.state)
                 self._committed_state = deepcopy(self._ctx.state)
+                self._guard = {**_GUARD_DEFAULT, **deepcopy(dict(projection.context_state))}
+                self._committed_guard = dict(self._guard)
+                self._attempts = []
                 loaded = True
                 system = self.system
                 self._run_tools = dict(self._tools)
-                for hook in self.hooks:
-                    setup = await self._hook(lambda: hook.before_run(deepcopy(input), self._ctx))
-                    if setup is not None:
-                        if setup.system is not None:
-                            system = setup.system
-                        if setup.tools is not None:
-                            names = [tool.spec.name for tool in setup.tools]
-                            if len(names) != len(set(names)):
-                                raise ValueError("tool names must be unique")
-                            self._run_tools = dict(zip(names, setup.tools))
-                await self._consume(input)
-                self._outcome.primary(await self._loop(system, emit, selected))
+                if input is None:
+                    self._outcome.primary(await self._manual_compaction(system, selected, focus, emit))
+                else:
+                    for hook in self.hooks:
+                        setup = await self._hook(lambda: hook.before_run(deepcopy(input), self._ctx))
+                        if setup is not None:
+                            if setup.system is not None:
+                                system = setup.system
+                            if setup.tools is not None:
+                                names = [tool.spec.name for tool in setup.tools]
+                                if len(names) != len(set(names)):
+                                    raise ValueError("tool names must be unique")
+                                self._run_tools = dict(zip(names, setup.tools))
+                    await self._consume(input)
+                    self._outcome.primary(await self._loop(system, emit, selected))
             except _Ended:
                 self._outcome.primary("ended_by_hook")
+            except _Exhausted as error:
+                self._outcome.primary("context_exhausted")
+                await emit(ContextExhausted, limit=error.limit, parts=error.parts)
+                await emit(AgentError, kind="context_exhausted", message=str(error))
             except _Aborted:
                 self._outcome.primary("aborted")
             except asyncio.CancelledError:
@@ -339,7 +530,7 @@ class Agent:
             self._scope.stop()
             # Cleanup is a separate joined task, outside cancelled admission.
             # Consumer closure cannot interrupt commit/job ownership release.
-            cleanup = asyncio.create_task(self._finish(loaded, emit))
+            cleanup = asyncio.create_task(self._finish(loaded, emit, run_hooks=input is not None))
             try:
                 await asyncio.shield(cleanup)
             except asyncio.CancelledError:
@@ -367,7 +558,7 @@ class Agent:
             )
             self._outcome.diagnostic(kind, f"Cleanup failed: {type(error).__name__}: {error}")
 
-    async def _finish(self, loaded: bool, emit: Callable[..., Awaitable[None]]) -> None:
+    async def _finish(self, loaded: bool, emit: Callable[..., Awaitable[None]], *, run_hooks: bool) -> None:
         async with self._lock:
             self._open = False
         await self._scope.close()
@@ -375,10 +566,13 @@ class Agent:
         try:
             if loaded:
                 await self._cleanup(lambda: self._save_state(cleanup=True))
-                outcome = RunOutcome(self._ctx.turn_id, self._outcome.reason, self.snapshot())
-                for hook in self.hooks:
-                    await self._cleanup(lambda: self._hook(lambda: hook.after_run(outcome, self._ctx), cleanup=True))
-                await self._cleanup(lambda: self._save_state(cleanup=True))
+                if run_hooks:
+                    outcome = RunOutcome(self._ctx.turn_id, self._outcome.reason, self.snapshot())
+                    for hook in self.hooks:
+                        await self._cleanup(
+                            lambda: self._hook(lambda: hook.after_run(outcome, self._ctx), cleanup=True)
+                        )
+                    await self._cleanup(lambda: self._save_state(cleanup=True))
         finally:
             # Sweep on every terminal path, including failed tool cleanup and
             # cleanup hooks. Handed-over handles are no longer foreground.
@@ -397,28 +591,19 @@ class Agent:
         if selected.capabilities.supports_tools is False:
             raise UnsupportedModelRoute("The selected model does not support tools; the agent requires tool support.")
 
-    async def _request(self, system: str, selected: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
-        self._check_model_route(selected)
-        capabilities = selected.capabilities
-        tools = dict(self._run_tools if self._run_tools is not None else self._tools)
-        context = project(
-            self._rows,
-            system=system,
-            rehydrated=self.rehydrate(deepcopy(self._ctx.state)) if self.rehydrate else (),
-        )
-        request = ModelRequest(
-            endpoint=deepcopy(selected.endpoint),
-            system=context.system,
-            messages=context.messages,
-            tools=tuple(deepcopy(tool.spec) for tool in tools.values()),
-            max_tokens=min(self.max_tokens, selected.max_output_tokens),
-            reasoning_effort=(
-                self.reasoning_effort
-                if capabilities.supports_reasoning is True and self.reasoning_effort in capabilities.reasoning_efforts
-                else None
-            ),
-            supports_images=capabilities.supports_images is True,
-        )
+    def _rehydrated(self) -> tuple[Message, ...]:
+        return tuple(self.rehydrate(deepcopy(self._ctx.state))) if self.rehydrate else ()
+
+    async def _request(
+        self,
+        system: str,
+        selected: ModelSelection,
+        *,
+        messages: Sequence[Message],
+        max_tokens: Optional[int] = None,
+    ) -> tuple[ModelRequest, dict[str, Tool]]:
+        """A request carrying ``messages``, after the user's ``before_model`` hooks: the first pipeline stage."""
+        request, tools = self._built(system, selected, messages=messages, max_tokens=max_tokens)
         for hook in self.hooks:
             decision = await self._hook(lambda: hook.before_model(request, self._ctx))
             if isinstance(decision, End):
@@ -429,81 +614,201 @@ class Agent:
         allowed = {spec.name for spec in request.tools}
         return request, {name: tool for name, tool in tools.items() if name in allowed}
 
+    def _built(
+        self,
+        system: str,
+        selected: ModelSelection,
+        *,
+        messages: Sequence[Message],
+        max_tokens: Optional[int] = None,
+    ) -> tuple[ModelRequest, dict[str, Tool]]:
+        """The request carrying ``messages`` on ``selected``, before any hook. C-9 composes its forks and the stop
+        check's minimal request from this alone, which holds because v1 takes no user hooks with a ContextConfig."""
+        self._check_model_route(selected)
+        capabilities = selected.capabilities
+        tools = dict(self._run_tools if self._run_tools is not None else self._tools)
+        request = ModelRequest(
+            endpoint=deepcopy(selected.endpoint),
+            system=system,
+            messages=tuple(deepcopy(messages)),
+            tools=tuple(deepcopy(tool.spec) for tool in tools.values()),
+            max_tokens=output_tokens(capabilities, self.max_tokens) if max_tokens is None else max_tokens,
+            reasoning_effort=(
+                self.reasoning_effort
+                if capabilities.supports_reasoning is True and self.reasoning_effort in capabilities.reasoning_efforts
+                else None
+            ),
+            supports_images=capabilities.supports_images is True,
+        )
+        return request, tools
+
     @asynccontextmanager
     async def _model(
-        self, system: str, emit: Callable[..., Awaitable[None]], selected: Optional[ModelSelection] = None
+        self,
+        system: str,
+        emit: Callable[..., Awaitable[None]],
+        selected: Optional[ModelSelection] = None,
+        *,
+        compose: Optional[Callable[[ModelSelection], Awaitable[tuple[ModelRequest, dict[str, Tool]]]]] = None,
+        purpose: Literal["conversation", "checkpoint"] = "conversation",
+        after: Sequence[Message] = (),
     ) -> AsyncIterator[tuple[Done | ProviderError, dict[str, Tool]]]:
-        retries = 0
-        started = time.monotonic()
-        retry_error: Optional[ProviderError] = None
-        while True:
-            self._scope.check()
-            if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
-                yield retry_error, {}
-                return
-            if selected is None:
-                selected = await self._scope.call(self.models.resolve)
-            # Resolution is the last async stage before request admission.
-            # Expiry wins before route validation, projection, rehydration or
-            # hooks can replace the original error or persist new side effects.
-            if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
-                yield retry_error, {}
-                return
-            request, tools = await self._request(system, selected)
-            selected = None
-            if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
-                yield retry_error, tools
-                return
-            self._scope.check()
-            stream = self.models.provider_for(request.endpoint.protocol).stream(request, self._ctx.cancel)
-            streamed = False
-            terminal = None
-            try:
-                while True:
-                    try:
-                        event = await self._scope.call(lambda: anext(stream))
-                    except StopAsyncIteration:
-                        break
-                    if isinstance(event, (Done, ProviderError)):
-                        terminal = event
-                        break
-                    streamed = True
-                    if isinstance(event, TextDelta):
-                        await emit(AssistantTextDelta, delta=event.delta)
-                    elif isinstance(event, ThinkingDelta):
-                        await emit(AssistantThinkingDelta, delta=event.delta)
-                if terminal is None:
-                    terminal = ProviderError("unknown", "Provider stream ended without a terminal event.", False)
-                delay = (
-                    self.retry.delay(terminal, retries=retries, streamed=streamed, elapsed_s=time.monotonic() - started)
-                    if isinstance(terminal, ProviderError)
-                    else None
-                )
-                if delay is None:
-                    # The caller admits and commits this terminal inside the
-                    # scope, BEFORE aclose. Never retry an accepted terminal.
-                    yield terminal, tools
+        """One model request with its transient retries.
+
+        ``compose(selection)`` is the request pipeline: it returns the final request, which is sent unchanged.
+        A conversation request's pipeline is ``_compose``. Every attempt enters the run's attempt ledger. A
+        conversation request the provider rejects as overflow goes back through the pipeline with the ladder
+        told to shrink (C-9 section 8). A checkpoint attempt is never context.
+
+        Admission is here, for every purpose: the response the caller receives (or a partial with content) is
+        valid after the committed rows and ``after``, the messages the request carried beyond them (a checkpoint
+        turn's request and its own turn), or ``ProviderProtocolViolation`` is raised before anyone acts on it.
+        """
+        ladder = _Ladder()
+        if compose is None:
+
+            async def compose(selection: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
+                return await self._compose(system, selection, emit, ladder)
+
+        first = len(self._attempts)
+        failure: Optional[BaseException] = None
+        aborted = False
+        try:
+            retries = 0
+            started = time.monotonic()
+            retry_error: Optional[ProviderError] = None
+            while True:
+                self._scope.check()
+                if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
+                    yield retry_error, {}
                     return
-            finally:
-                close = getattr(stream, "aclose", None)
-                if close is not None:
-                    await self._cleanup(close, stream=True)
-            if terminal.partial is not None and terminal.partial.usage is not None and not terminal.partial.content:
-                row = await self._response(terminal.partial, final=False)
-                if not self._consumer_closed:
-                    await emit(
-                        MessageCommitted,
-                        message_id=row.row_id,
-                        context_seq=row.context_seq,
-                        final=False,
+                if selected is None:
+                    selected = await self._scope.call(self.models.resolve)
+                # Resolution is the last async stage before request admission.
+                # Expiry wins before route validation, projection, rehydration or
+                # hooks can replace the original error or persist new side effects.
+                if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
+                    yield retry_error, {}
+                    return
+                route = selected
+                request, tools = await compose(selected)
+                selected = None
+                if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
+                    yield retry_error, tools
+                    return
+                self._scope.check()
+                stream = self.models.provider_for(request.endpoint.protocol).stream(request, self._ctx.cancel)
+                streamed = False
+                terminal = None
+                relieve = False
+                try:
+                    while True:
+                        try:
+                            event = await self._scope.call(lambda: anext(stream))
+                        except StopAsyncIteration:
+                            break
+                        if isinstance(event, (Done, ProviderError)):
+                            terminal = event
+                            break
+                        streamed = True
+                        if isinstance(event, TextDelta):
+                            await emit(AssistantTextDelta, delta=event.delta)
+                        elif isinstance(event, ThinkingDelta):
+                            await emit(AssistantThinkingDelta, delta=event.delta)
+                    if self.context is not None:
+                        self._last_model_at = self.context.clock()
+                    if terminal is None:
+                        terminal = ProviderError("unknown", "Provider stream ended without a terminal event.", False)
+                    self._attempts.append(
+                        _Attempt(
+                            purpose,
+                            request,
+                            terminal.message if isinstance(terminal, Done) else terminal.partial,
+                            None if isinstance(terminal, Done) else terminal,
+                        )
                     )
-                # This attempt has already been durably announced. Keep the
-                # retry decision, but do not carry the same partial through a
-                # later expiry path where _loop would commit it again.
+                    relieve = (
+                        purpose == "conversation"
+                        and self.context is not None
+                        and isinstance(terminal, ProviderError)
+                        and terminal.kind == "overflow"
+                        # Only an overflow before any output: once something was streamed, the user saw it.
+                        and not streamed
+                        and (terminal.partial is None or not terminal.partial.content)
+                    )
+                    delay = (
+                        self.retry.delay(terminal, retries=retries, streamed=streamed, elapsed_s=time.monotonic() - started)
+                        if isinstance(terminal, ProviderError) and not relieve
+                        else None
+                    )
+                    if delay is None and not relieve:
+                        # Admitted here; the caller commits it inside the scope,
+                        # BEFORE aclose. Never retry an accepted terminal.
+                        admitted = terminal.message if isinstance(terminal, Done) else terminal.partial
+                        if isinstance(terminal, Done) or (admitted is not None and admitted.content):
+                            self._validate_response(admitted, after=after)
+                        yield terminal, tools
+                        return
+                finally:
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        await self._cleanup(close, stream=True)
+                # The attempt is not the run's answer and is never context (invariant 4): it stays in the ledger and
+                # the audit. A retried request goes out again unchanged; one refused as overflow is rebuilt after a
+                # ladder step (section 8).
+                await self._settle_attempts(first)
                 terminal = replace(terminal, partial=None)
-            retry_error = terminal
-            retries += 1
-            await self._scope.call(lambda: asyncio.sleep(delay))
+                if relieve:
+                    ladder.overflows += 1
+                    ladder.refused = True
+                    if ladder.overflows >= MAX_OVERFLOWS:
+                        view = context_view(self._rows)
+                        plan = budget(
+                            request, route.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view)
+                        )
+                        raise self._exhausted(request, view, plan)
+                    retries, started, retry_error = 0, time.monotonic(), None
+                    continue
+                retry_error = terminal
+                retries += 1
+                await self._scope.call(lambda: asyncio.sleep(delay))
+        except (_Aborted, asyncio.CancelledError, GeneratorExit):
+            aborted = True  # the cancelled run scope admits no further store write
+            raise
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            if not aborted:
+                # Invariant 4: the ledger, not each exit path, keeps the usage of attempts that did not become a
+                # response row: a retry, a relief, a usage-only terminal, a refusal at admission, a failed commit.
+                try:
+                    await self._settle_attempts(first, error=failure)
+                except _Aborted:
+                    if failure is None:
+                        raise
+
+    async def _settle_attempts(self, first: int, *, error: Optional[BaseException] = None) -> None:
+        """Every conversation attempt since ``first`` that reported usage and did not become a response row:
+        exactly one non-context ``ModelAttempt`` audit row, in every mode, with or without ``ContextConfig``.
+
+        It is the one place that usage is kept. ``error`` is why the model call ended, for an attempt that
+        carries no provider error of its own (a response refused at admission, a failed commit).
+        """
+        for attempt in self._attempts[first:]:
+            message = attempt.message
+            if attempt.purpose != "conversation" or attempt.committed or attempt.audited:
+                continue
+            if message is None or message.usage is None:
+                continue
+            attempt.audited = True
+            cause = attempt.error
+            payload: dict[str, Any] = {
+                "version": 1,
+                "usage": usage_to_dict(message.usage),
+                "error": f"{cause.kind}: {cause.message}" if cause is not None else str(error) if error else None,
+            }
+            await self._audit("attempt", payload)
 
     async def _commit_model_message(self, message: AssistantMessage, emit: Callable[..., Awaitable[None]]) -> bool:
         """Finality and queued-input admission share one lock with the commit."""
@@ -540,8 +845,9 @@ class Agent:
             async with self._model(system, emit, first_selection) as (terminal, tools):
                 first_selection = None
                 if isinstance(terminal, ProviderError):
-                    if terminal.partial is not None:
-                        self._validate_response(terminal.partial)
+                    if terminal.partial is not None and not terminal.partial.content:
+                        # A usage-only partial is attempt data, never context; the ledger audits it.
+                        terminal = replace(terminal, partial=None)
                     reason = (
                         "context_exhausted"
                         if terminal.kind == "overflow"
@@ -556,7 +862,6 @@ class Agent:
                         await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
                     return reason
                 message = terminal.message
-                self._validate_response(message)
                 failed = message.stop_reason in {"error", "aborted"}
                 if not (message.tool_calls and message.stop_reason == "length"):
                     length_tool_retries = 0
@@ -668,6 +973,20 @@ class Agent:
                 for item in applied:
                     await emit(SteerApplied, message_id=item.message_id)
 
+    async def _gate(
+        self, call: ToolCallBlock, hooks: Sequence[Hooks]
+    ) -> tuple[ToolCallBlock, Optional[ToolResult], bool]:
+        """``before_tool``: the call as altered, the result when a hook denied or ended it, and whether one ended."""
+        for hook in hooks:
+            decision = await self._hook(lambda: hook.before_tool(call, self._ctx))
+            if isinstance(decision, Deny):
+                return call, ToolResult((text(decision.reason),), is_error=True), False
+            if isinstance(decision, End):
+                return call, ToolResult((text("[skipped by policy]"),), is_error=True), True
+            if isinstance(decision, AlterArgs):
+                call = replace(call, arguments=deepcopy(decision.arguments))
+        return call, None, False
+
     async def _tool(
         self,
         original: ToolCallBlock,
@@ -683,17 +1002,7 @@ class Agent:
         if skip:
             result = ToolResult((text(skip_reason or "[skipped by policy]"),), is_error=True)
         else:
-            for hook in self.hooks:
-                decision = await self._hook(lambda: hook.before_tool(call, self._ctx))
-                if isinstance(decision, Deny):
-                    result = ToolResult((text(decision.reason),), is_error=True)
-                    break
-                if isinstance(decision, End):
-                    result = ToolResult((text("[skipped by policy]"),), is_error=True)
-                    end = True
-                    break
-                if isinstance(decision, AlterArgs):
-                    call = replace(call, arguments=deepcopy(decision.arguments))
+            call, result, end = await self._gate(call, self.hooks)
         await emit(
             ToolStarted,
             tool_call_id=call.id,
@@ -780,3 +1089,572 @@ class Agent:
             await self._cleanup(
                 lambda: self.jobs.kill_foreground(self.session_id, tool_call_id=call.id, reason=release_reason)
             )
+
+    # --- C-9 context management (agent-core-contracts/context.md) ---------------
+    #
+    # The ordering and ownership invariants are context.md section 10 (1-6), the one statement of them. Their
+    # owners here: ``_compose``, ``_fork``, and ``_minimal`` (1, requests composed and budgeted; ``_compaction`` is
+    # the one builder of checkpoint rows), ``_checkpoint_tool`` (2), ``_commit_context`` (3), ``self._attempts``
+    # with ``_settle_attempts`` and ``_checkpoint``'s one audit (4), ``harness.context.budget`` (5), and ``_model``
+    # (6, admission).
+
+    def _cache_cold(self) -> bool:
+        """No model request for longer than the provider cache TTL (section 3)."""
+        last = self._last_model_at
+        for row in reversed(self._rows):
+            if row.kind == "response" and row.created_at is not None:
+                last = row.created_at if last is None else max(last, row.created_at)
+                break
+        return last is not None and self.context.clock() - last > self.context.cache_ttl_s
+
+    async def _compose(
+        self, system: str, selected: ModelSelection, emit: Callable[..., Awaitable[None]], ladder: _Ladder
+    ) -> tuple[ModelRequest, dict[str, Tool]]:
+        """The conversation request pipeline (invariant 1)."""
+        while True:
+            view = context_view(self._rows)
+            request, tools = await self._request(system, selected, messages=self._carried(view))
+            if self.context is None:
+                return request, tools
+            plan = budget(request, selected.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view))
+            if not await self._stage(system, selected, request, view, plan, emit, ladder):
+                return request, tools
+
+    async def _stage(
+        self,
+        system: str,
+        selected: ModelSelection,
+        request: ModelRequest,
+        view: ContextView,
+        plan: Budget,
+        emit: Callable[..., Awaitable[None]],
+        ladder: _Ladder,
+    ) -> bool:
+        """C-9 on the final request (sections 3 and 8); True when it changed the context."""
+        if not plan.can_fit and not (await self._minimal(system, selected, request, view, plan))[1].can_fit:
+            # (d): not even the request the drop would leave (its row and the last unit) can fit. The provider
+            # never sees it.
+            raise self._exhausted(request, view, plan)
+        shrink, ladder.refused = ladder.refused, False
+        if not shrink:
+            if self.context.clear_tool_results and (
+                plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold()
+            ):
+                targets = clearable_results(view)
+                if targets:
+                    await self._commit_context([("context_edit", clear_edit(target)) for target in targets], self._guard)
+                    return True
+            if plan.est >= plan.threshold and not ladder.compacted and not self._guard["paused"]:
+                cut = normal_cut(view.units, plan.keep)
+                if cut is not None:
+                    ladder.compacted = True
+                    if not self._fork_fits(system, selected, view, "normal", cut):
+                        shrink = True  # no fork can take the whole context: the ladder from (b)
+                    else:
+                        outcome = await self._checkpoint(
+                            system, selected, request, view, plan, cut, mode="normal", reason="threshold", emit=emit
+                        )
+                        if outcome.ok:
+                            return True
+                        # A checkpoint request that overflowed means the whole context cannot fit a fork (b).
+                        shrink, ladder.summary_failed = outcome.overflow, not outcome.overflow
+            if not shrink and plan.fits:
+                return False
+            # With no checkpoint request left to try, a request that can fit at all is sent; the provider judges.
+            if not shrink and (ladder.summary_failed or self._guard["paused"]) and plan.can_fit:
+                return False
+        return await self._shrink(system, selected, request, view, plan, emit, ladder)
+
+    async def _minimal(
+        self, system: str, selected: ModelSelection, request: ModelRequest, view: ContextView, plan: Budget
+    ) -> tuple[ModelRequest, Budget]:
+        """Section 8 (d): the request that would remain with everything but the last unit moved out, and its budget.
+
+        The drop's own row for that cut (its ``<current-request>`` and state included), uncommitted, projected and
+        composed like the conversation's next request (invariant 1); budgeted with no anchor, whose history is gone.
+        """
+        if len(view.units) < 2:
+            return request, plan  # nothing can move out
+        payload, after = await self._compaction(request, view, plan, len(view.units) - 1, **self._dropped(view))
+        minimal, _ = self._built(system, selected, messages=self._carried(after))
+        return minimal, budget(minimal, selected.capabilities, transcript=after.messages)
+
+    def _carried(self, view: ContextView) -> tuple[Message, ...]:
+        """What a conversation request carries for ``view``: the rehydrated state, then the projected context."""
+        return (*self._rehydrated(), *view.messages)
+
+    @staticmethod
+    def _dropped(view: ContextView) -> dict[str, Any]:
+        """A dropped row's fields (section 8 c): no model call, the previous checkpoint's text kept."""
+        previous = view.compaction
+        return {
+            "mode": "dropped",
+            "reason": "overflow",
+            "focus": None,
+            "checkpoint": previous.payload.get("checkpoint", "") if previous is not None else "",
+            "summarizer": None,
+            "usage": None,
+            "mid_turn": True,
+        }
+
+    def _fork_base(self, view: ContextView, mode: str, cut: int) -> tuple[Message, ...]:
+        """What a fork carries before the checkpoint request: the whole context, or for a rolling fork its prefix."""
+        if mode == "normal":
+            return tuple(view.messages)
+        head = (view.checkpoint,) if view.checkpoint is not None else ()
+        return (*head, *(message for unit in view.units[:cut] for message in unit.messages))
+
+    def _fork(
+        self,
+        system: str,
+        route: ModelSelection,
+        base: Sequence[Message],
+        prompt: UserMessage,
+        turn: Sequence[Message],
+        anchor: Optional[Anchor],
+    ) -> tuple[ModelRequest, dict[str, Tool], Budget]:
+        """A checkpoint turn's request on ``route`` (section 6) and its budget: ``base``, the checkpoint request,
+        and the turn so far. The stage's dry run and the turn itself compose it here, so they cannot differ."""
+        transcript = (*base, prompt, *turn)
+        request, tools = self._built(
+            system,
+            route,
+            messages=(*self._rehydrated(), *transcript),
+            max_tokens=checkpoint_max_tokens(route.capabilities, self.max_tokens),
+        )
+        return request, tools, budget(request, route.capabilities, transcript=transcript, anchor=anchor)
+
+    def _fork_fits(self, system: str, selected: ModelSelection, view: ContextView, mode: str, cut: int) -> bool:
+        """A dry compose of the first request the checkpoint turn would send, budgeted: a choice, not admission."""
+        fork = self._fork(
+            system, selected, self._fork_base(view, mode, cut), _CHECKPOINT_REQUEST, (), last_anchor(self._rows, view)
+        )
+        return fork[2].can_fit
+
+    async def _shrink(
+        self,
+        system: str,
+        selected: ModelSelection,
+        request: ModelRequest,
+        view: ContextView,
+        plan: Budget,
+        emit: Callable[..., Awaitable[None]],
+        ladder: _Ladder,
+    ) -> bool:
+        """One step of the overflow ladder (section 8); False when nothing can move and the provider judges."""
+        units = view.units
+        if not ladder.summary_failed and not self._guard["paused"] and not ladder.compacted:
+            ladder.compacted = True
+            cut = normal_cut(units, plan.keep)
+            if cut is not None and self._fork_fits(system, selected, view, "normal", cut):
+                outcome = await self._checkpoint(
+                    system, selected, request, view, plan, cut, mode="normal", reason="overflow", emit=emit
+                )
+                if outcome.ok:
+                    return True
+                ladder.summary_failed = not outcome.overflow
+        if not ladder.summary_failed and not self._guard["paused"] and ladder.rolls < MAX_ROLLS:
+            cut = rolling_cut(units, lambda cut: self._fork_fits(system, selected, view, "rolling", cut))
+            if cut is not None:
+                ladder.rolls += 1
+                outcome = await self._checkpoint(
+                    system, selected, request, view, plan, cut, mode="rolling", reason="overflow", emit=emit
+                )
+                if outcome.ok:
+                    return True
+                ladder.summary_failed = True
+            else:
+                ladder.rolls = MAX_ROLLS
+        cut = half_cut(units)
+        if cut is not None:
+            await self._drop(request, view, plan, cut, emit)
+            return True
+        if ladder.overflows or not plan.can_fit:
+            raise self._exhausted(request, view, plan)
+        return False
+
+    def _exhausted(self, request: ModelRequest, view: ContextView, plan: Budget) -> _Exhausted:
+        """Section 8 (d): what fills the request, for the user's stop message."""
+        last = view.units[-1] if view.units else None
+        last_tokens = unit_tokens(last) if last is not None else 0
+        parts = [
+            ContextPart("system", text_tokens(request.system)),
+            ContextPart("tools", request_tokens("", request.tools, ())),
+            ContextPart("history", max(0, messages_tokens(request.messages) - last_tokens)),
+        ]
+        if last is not None:
+            name = "current_request" if last.lead.kind == "input" else "latest_tool_batch"
+            parts.append(ContextPart(name, last_tokens))
+        parts.append(ContextPart("output", plan.output + plan.margin))
+        return _Exhausted(plan.input_limit, tuple(parts))
+
+    async def _manual_compaction(
+        self, system: str, selected: ModelSelection, focus: Optional[str], emit: Callable[..., Awaitable[None]]
+    ) -> RunEndReason:
+        """Section 10: clear the pause and both counters, then a normal checkpoint between runs."""
+        view = context_view(self._rows)
+        # Measured for the cut only; it is never sent.
+        request, _ = await self._request(system, selected, messages=self._carried(view))
+        plan = budget(request, selected.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view))
+        cut = normal_cut(view.units, plan.keep)
+        if cut is None:
+            # Everything is within the kept tail: the adapter tells the user there is nothing to compact yet.
+            await self._commit_context([], dict(_GUARD_DEFAULT))
+            await emit(CompactionSkipped, reason="manual")
+            return "completed"
+        self._guard = dict(_GUARD_DEFAULT)  # the checkpoint's transition starts from a cleared pause
+        outcome = await self._checkpoint(
+            system, selected, request, view, plan, cut, mode="normal", reason="manual", emit=emit, focus=focus,
+            mid_turn=False,
+        )
+        return "completed" if outcome.ok else "error"
+
+    async def _checkpoint(
+        self,
+        system: str,
+        selected: ModelSelection,
+        request: ModelRequest,
+        view: ContextView,
+        plan: Budget,
+        cut: int,
+        *,
+        mode: str,
+        reason: str,
+        emit: Callable[..., Awaitable[None]],
+        focus: Optional[str] = None,
+        mid_turn: bool = True,
+    ) -> _Outcome:
+        """Sections 6 and 7: a forked checkpoint turn; on success its row joins the context."""
+        await emit(CompactionStarted, reason=reason)
+        prompt = checkpoint_request(focus)
+        base = self._fork_base(view, mode, cut)
+        anchor = last_anchor(self._rows, view)
+        policy = CheckpointPolicy(cwd=self.cwd, scratch_dir=self.context.scratch_dir)
+        turn: list[Message] = []  # what the turn's next request carries after the checkpoint request
+        produced: list[Message] = []  # the audit: every attempt's message from the ledger, and the tool results
+        start = mark = len(self._attempts)
+        measured: list[Budget] = []  # the budget of the turn's latest request, as sent
+        rounds = 0
+        error: Optional[str] = None
+        overflow = False
+        checkpoint = ""
+        origin = None
+        selection: Optional[ModelSelection] = selected
+
+        async def compose(route: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
+            fork, tools, fork_plan = self._fork(system, route, base, prompt, turn, anchor)
+            if not fork_plan.can_fit:
+                raise _ForkTooLarge()
+            measured[:] = [fork_plan]
+            return fork, tools
+
+        finished: dict[str, Any] = {"outcome": "failed", "error": None, "compaction_event_id": None}
+        aborted = False
+        try:
+            try:
+                while True:
+                    try:
+                        async with self._model(
+                            system, _silent, selection, compose=compose, purpose="checkpoint", after=(prompt, *turn)
+                        ) as (terminal, tools):
+                            selection = None
+                    except _ForkTooLarge:
+                        overflow, error = True, "overflow: the checkpoint request does not fit the model's input limit."
+                        break
+                    except ProviderProtocolViolation as violation:
+                        # Not admitted: a failed checkpoint, and none of its calls runs.
+                        error = str(violation)
+                        break
+                    finally:
+                        produced.extend(item.message for item in self._attempts[mark:] if item.message is not None)
+                        mark = len(self._attempts)
+                    if isinstance(terminal, ProviderError):
+                        overflow = terminal.kind == "overflow"
+                        error = f"{terminal.kind}: {terminal.message}"
+                        break
+                    message = terminal.message
+                    self._scope.check()
+                    turn.append(message)
+                    origin = message.origin
+                    if message.stop_reason == "stop" and not message.tool_calls:
+                        checkpoint = checkpoint_text(message)
+                        if not checkpoint:
+                            error = "The checkpoint turn ended without checkpoint text."
+                        break
+                    if message.stop_reason != "tool_use" or not message.tool_calls:
+                        # Only a stop with text and no call is a checkpoint, and only a tool-use stop carries calls.
+                        error = f"The checkpoint turn stopped with {message.stop_reason} and no usable checkpoint."
+                        break
+                    if not policy.open:
+                        # Its earlier calls were already answered with BUDGET_USED.
+                        error = "The checkpoint turn kept calling tools after its tool budget was used up."
+                        break
+                    rounds += 1
+                    sent = measured[0]
+                    grown = sent.est + message_tokens(message)
+                    calls = message.tool_calls
+                    for index, call in enumerate(calls):
+                        self._scope.check()
+                        # The bound is the window of the turn's route: a tool runs only while the next request can
+                        # still grow by the floor, after the fixed-text results every later call of the batch may
+                        # need are reserved (section 6).
+                        reserved = (len(calls) - index - 1) * _FIXED_RESULT_TOKENS
+                        room = sent.input_limit - grown - sent.output - reserved
+                        policy.open = policy.open and rounds <= CHECKPOINT_TOOL_ROUNDS and room >= CHECKPOINT_TOOL_FLOOR
+                        result = await self._checkpoint_tool(call, tools, policy, limit=room - CHECKPOINT_TOOL_SLACK)
+                        turn.append(result)
+                        produced.append(result)
+                        grown += message_tokens(result)
+            finally:
+                policy.close()  # the scratch root's descriptor lives for this turn only
+            payload = None
+            if checkpoint:
+                summarizer = {
+                    "origin": {"provider": origin.provider, "api": origin.api, "model": origin.model},
+                    "prompt_version": PROMPT_VERSION,
+                    "rounds": rounds,
+                }
+                try:
+                    hosted = await self._hosted(view, cut, mid_turn)
+                except (_Aborted, asyncio.CancelledError):
+                    raise
+                except Exception as failure:
+                    # Only the host's part after the model answered (state, lookup) is a failed checkpoint,
+                    # counted; an error building the row itself ends the run, like any engine error.
+                    error = f"The checkpoint row could not be built: the host failed: {type(failure).__name__}: {failure}"
+                else:
+                    payload, _ = await self._compaction(
+                        request,
+                        view,
+                        plan,
+                        cut,
+                        mode=mode,
+                        reason=reason,
+                        focus=focus,
+                        checkpoint=checkpoint,
+                        summarizer=summarizer,
+                        usage=self._turn_usage(start),
+                        mid_turn=mid_turn,
+                        hosted=hosted,
+                    )
+            if payload is None:
+                finished["error"] = error
+                guard, paused = self._counted(ok=False)
+                await self._commit_context([], guard)
+                await emit(CompactionFailed, reason=reason, error=error)
+                if paused:
+                    await emit(CompactionPaused, cause=paused)
+                return _Outcome(False, overflow)
+            row, paused = await self._commit_compaction(payload)
+            finished.update(outcome="completed", compaction_event_id=row.row_id)
+            await emit(
+                CompactionFinished,
+                event_id=row.row_id,
+                reason=reason,
+                mode=mode,
+                tokens_before=row.payload["tokens_before"],
+                tokens_after_estimate=row.payload["tokens_after_estimate"],
+            )
+            if paused:
+                await emit(CompactionPaused, cause=paused)
+            return _Outcome(True)
+        except (_Aborted, asyncio.CancelledError):
+            aborted = True  # the cancelled run scope admits no further store write
+            raise
+        except BaseException as failure:
+            if finished["outcome"] != "completed" and finished["error"] is None:
+                finished["error"] = f"{type(failure).__name__}: {failure}"  # a failed commit, or a failed compose
+            raise
+        finally:
+            if not aborted:
+                # Invariant 4 for checkpoint turns: one audit, from the ledger, on every exit but an abort.
+                await self._record_turn(self._turn_record(reason, mode, produced, start, finished))
+
+    def _turn_usage(self, start: int) -> Optional[Usage]:
+        """The usage every attempt of a checkpoint turn reported, from the ledger."""
+        usage = None
+        for item in self._attempts[start:]:
+            usage = add_usage(usage, item.message.usage if item.message is not None else None)
+        return usage
+
+    def _turn_record(
+        self, reason: str, mode: str, produced: Sequence[Message], start: int, finished: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """A checkpoint turn's audit (``CheckpointTurn``, section 6): its messages, usage, and outcome."""
+        messages = []
+        for message in produced:
+            try:
+                messages.append(message_to_dict(message))
+            except (ValueError, RecursionError) as invalid:
+                # Arguments a provider sent that are not JSON: refused at admission (the turn's error names
+                # them), and no JSON row can hold them either.
+                self._outcome.diagnostic(type(invalid).__name__, f"Checkpoint audit left out a message: {invalid}")
+        record: dict[str, Any] = {"version": 1, "reason": reason, "mode": mode, "messages": messages}
+        usage = self._turn_usage(start)
+        if usage is not None:
+            record["usage"] = usage_to_dict(usage)
+        return {**record, **finished}
+
+    def _counted(self, *, ok: bool, ineffective: Optional[bool] = None) -> tuple[dict[str, Any], Optional[str]]:
+        """The guard after one checkpoint attempt (section 10), and the pause cause when it pauses now."""
+        guard = dict(self._guard)
+        cause = None
+        if not ok:
+            guard["failures"] += 1
+            cause = "failures" if guard["failures"] >= PAUSE_AFTER else None
+        else:
+            guard["failures"] = 0
+            if ineffective is not None:
+                guard["ineffective"] = guard["ineffective"] + 1 if ineffective else 0
+                cause = "ineffective" if guard["ineffective"] >= PAUSE_AFTER else None
+        if cause is None or guard["paused"]:
+            return guard, None
+        guard["paused"] = True
+        return guard, cause
+
+    async def _checkpoint_tool(
+        self, original: ToolCallBlock, tools: Mapping[str, Tool], policy: CheckpointPolicy, *, limit: int
+    ) -> ToolResultMessage:
+        """The checkpoint turn's tool pipeline (invariant 2); nothing it produces is committed.
+
+        The budget first, then the table, then execution (a scratch write or edit through the root's
+        descriptor), then the bound on whatever result came out. No user hook runs under C-9 (v1).
+        """
+        call = deepcopy(original)
+        decision = policy.decide(call) if policy.open else Decision(denial=BUDGET_USED)
+        if decision.denial is not None:
+            # The policy's fixed texts are short and never cut: a truncation note would invite another call.
+            return ToolResultMessage(call.id, call.name, (text(decision.denial),), True)
+        if decision.scratch is not None:
+            # Relative to the scratch root's descriptor: no pathname is resolved again. Joined, never interrupted:
+            # the worker thread outlives a cancelled await, and the root closes only after it is done (section 6).
+            result = await self._scope.call(
+                lambda: to_thread_joined(policy.run, call, decision.scratch), interruptible=False
+            )
+        elif (tool := tools.get(call.name)) is None:
+            result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
+        else:
+            result = await self._execute(tool, call, _silent)
+        # Every other result that enters the turn is bounded to the room the window leaves (section 6).
+        return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
+
+    async def _drop(
+        self, request: ModelRequest, view: ContextView, plan: Budget, cut: int, emit: Callable[..., Awaitable[None]]
+    ) -> None:
+        """Section 8 (c): the earliest part moves out with no model call; the previous checkpoint stays."""
+        await emit(CompactionStarted, reason="overflow")
+        payload, _ = await self._compaction(request, view, plan, cut, **self._dropped(view))
+        row, _ = await self._commit_compaction(payload)
+        await emit(
+            CompactionFinished,
+            event_id=row.row_id,
+            reason="overflow",
+            mode="dropped",
+            tokens_before=row.payload["tokens_before"],
+            tokens_after_estimate=row.payload["tokens_after_estimate"],
+        )
+
+    async def _compaction(
+        self,
+        request: ModelRequest,
+        view: ContextView,
+        plan: Budget,
+        cut: int,
+        *,
+        mode: str,
+        reason: str,
+        focus: Optional[str],
+        checkpoint: str,
+        summarizer: Optional[Mapping[str, Any]],
+        usage: Optional[Usage],
+        mid_turn: bool,
+        hosted: Optional[tuple[tuple[str, ...], Optional[str]]] = None,
+    ) -> tuple[dict[str, Any], ContextView]:
+        """The checkpoint row for ``cut`` (section 7), uncommitted, and the context it would leave.
+
+        The one builder of a ``Compaction`` row: the drop, the checkpoint turn, and the stop check's dry run.
+        ``hosted`` is the host's part (``_hosted``) when the caller already has it.
+        """
+        skills = carried_skills(view, cut)
+        state, earlier = hosted if hosted is not None else await self._hosted(view, cut, mid_turn)
+        payload = compaction_payload(
+            view,
+            cut,
+            mode=mode,
+            reason=reason,
+            focus=focus,
+            checkpoint=checkpoint,
+            skills=skills,
+            state=state,
+            earlier_record=earlier,
+            tokens_before=plan.est,
+            threshold=plan.threshold,
+            summarizer=summarizer,
+            usage=usage,
+        )
+        seq = max((row.context_seq for row in self._rows), default=0) + 1
+        candidate = ContextEntry(self.session_id, seq, "compaction", "uncommitted-compaction", payload=payload)
+        after = context_view([*self._rows, candidate])
+        # What the next request would carry; it is budgeted for real when it is built.
+        payload["tokens_after_estimate"] = request_tokens(request.system, request.tools, self._carried(after))
+        return payload, after
+
+    async def _hosted(self, view: ContextView, cut: int, mid_turn: bool) -> tuple[tuple[str, ...], Optional[str]]:
+        """The host's part of a checkpoint row for ``cut``: the rendered ``state`` and the earlier-record lookup."""
+        host = self.context.host
+        if host is None:
+            return (), None
+        needed = StateRequest(self.session_id, carried_skills(view, cut), mid_turn)
+        state = tuple(await self._scope.call(lambda: host.render_state(needed)))
+        if not all(isinstance(item, str) for item in state):
+            raise TypeError("ContextHost.render_state must return strings")
+        return state, host.earlier_record(self.session_id, summarized_to_seq(view, cut))
+
+    async def _commit_compaction(self, payload: Mapping[str, Any]) -> tuple[ContextEntry, Optional[str]]:
+        """A built checkpoint row and, for a checkpoint request, the guard it moves, in one ``_commit_context``."""
+        guard, paused = self._guard, None
+        if payload["summarizer"] is not None:
+            ineffective = payload["tokens_after_estimate"] >= INEFFECTIVE_RATIO * payload["threshold"]
+            guard, paused = self._counted(ok=True, ineffective=ineffective if payload["mode"] == "normal" else None)
+        (row,) = await self._commit_context([("compaction", payload)], guard)
+        return row, paused
+
+    async def _commit_context(
+        self, rows: Sequence[tuple[Literal["compaction", "context_edit"], Mapping[str, Any]]], guard: Mapping[str, Any]
+    ) -> tuple[ContextEntry, ...]:
+        """The one writer of C-9 state (invariant 3).
+
+        Edits, a checkpoint, and the guard, with the hook state of this commit point, go in one transaction,
+        before any event announces the transition. A failed commit changes nothing, in memory or on disk.
+        """
+        entries: list[tuple[str, Mapping[str, Any]]] = []
+        representation = state_representation(self._ctx.state)
+        state = deepcopy(self._ctx.state)
+        if dict(guard) != self._committed_guard or representation != self._committed_state_json:
+            entries.append(("agent_state", {"version": 1, "state": state, "context": dict(guard)}))
+        entries.extend(rows)
+        if not entries:
+            return ()
+        committed = await self._scope.call(
+            lambda: self.store.append_payloads(self.session_id, deepcopy(entries)), interruptible=False
+        )
+        self._rows.extend(committed)
+        self._guard, self._committed_guard = dict(guard), dict(guard)
+        self._committed_state, self._committed_state_json = state, representation
+        return tuple(row for row in committed if row.kind != "agent_state")
+
+    async def _record_turn(self, payload: Mapping[str, Any]) -> None:
+        """The checkpoint turn's audit row (section 6)."""
+        await self._audit("checkpoint_turn", payload)
+
+    async def _audit(self, kind: Literal["checkpoint_turn", "attempt"], payload: Mapping[str, Any]) -> None:
+        """A non-context audit row; never context, so losing it never fails the run."""
+        try:
+            await self._scope.call(
+                lambda: self.store.append_audit(self.session_id, kind, deepcopy(dict(payload))),
+                interruptible=False,
+            )
+        except _Aborted:
+            raise
+        except Exception as error:
+            self._outcome.diagnostic(type(error).__name__, f"Audit write failed ({kind}): {error}")

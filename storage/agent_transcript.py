@@ -8,9 +8,17 @@ context exactly when its ``context_seq`` is non-null:
   ``agent_initiated``, ``annotation``); consuming one sets its ``context_seq``
   and ``content_json.model`` once;
 * responses are new ``assistant`` / ``result`` / ``error`` rows with
-  ``content_json.model`` and a rendered ``content_text``;
-* tool results, checkpoints, context edits, and hook state are new
-  ``agent_events`` rows with ``visibility='context'``.
+  ``content_json.model`` (with the C-9 request facts when the loop gives them)
+  and a rendered ``content_text``;
+* tool results, checkpoints, context edits, and hook and guard state are new
+  ``agent_events`` rows with ``visibility='context'``;
+* audit rows (C-9: a conversation attempt's usage, a checkpoint turn with its
+  own attempts) are ``agent_events`` rows with ``visibility='audit'`` and no
+  ``context_seq``: never context.
+
+Every entry carries its row's ``created_at`` as epoch seconds, as written and
+as loaded (C-9 reads a response's to tell a cold provider cache after a
+restart). ``append_payloads`` commits several payload rows in one transaction.
 
 Allocation. Every write takes SQLite's writer lock before its first read
 (``reserve_write_lock``) and runs under a per-Session lock, so
@@ -82,6 +90,9 @@ INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 FINAL_TYPES = ("result", "error")
 RESPONSE_TYPES = ("assistant", *FINAL_TYPES)
 CONTEXT_VISIBILITY = "context"
+AUDIT_VISIBILITY = "audit"
+AuditKind = Literal["attempt", "checkpoint_turn"]
+_AUDIT_EVENT_TYPE: dict[str, str] = {"attempt": "model_attempt", "checkpoint_turn": "context_checkpoint_turn"}
 # Only the Avibe Agent writes context rows; the Session's routed backend may change mid-Turn.
 CONTEXT_WRITER = "avibe"
 PAYLOAD_VERSION = 1
@@ -171,9 +182,13 @@ class SQLiteTranscriptStore:
 
         def work(conn: Connection) -> ContextEntry:
             row = conn.execute(
-                select(messages.c.session_id, messages.c.type, messages.c.context_seq, messages.c.content_json).where(
-                    messages.c.id == message_id
-                )
+                select(
+                    messages.c.session_id,
+                    messages.c.type,
+                    messages.c.context_seq,
+                    messages.c.content_json,
+                    messages.c.created_at,
+                ).where(messages.c.id == message_id)
             ).mappings().first()
             if row is None or row["session_id"] != session_id:
                 raise TranscriptError(f"input {message_id} is not a message of Session {session_id}")
@@ -193,16 +208,27 @@ class SQLiteTranscriptStore:
                     .where(messages.c.id == message_id, messages.c.context_seq.is_(None))
                     .values(context_seq=seq, content_json=json.dumps({**content, "model": model}), updated_at=_utc_now())
                 )
-            return ContextEntry(session_id, seq, "input", message_id, message=message, payload=model)
+            return ContextEntry(
+                session_id, seq, "input", message_id, message=message, payload=model, created_at=_epoch(row["created_at"])
+            )
 
         return await self._write(session_id, work)
 
     async def append_response(
-        self, session_id: str, message: AssistantMessage, *, final: bool, agent_name: Optional[str] = None
+        self,
+        session_id: str,
+        message: AssistantMessage,
+        *,
+        final: bool,
+        request: Optional[Mapping[str, Any]] = None,
+        agent_name: Optional[str] = None,
     ) -> ContextEntry:
         if not isinstance(message, AssistantMessage):
             raise TypeError("append_response takes an AssistantMessage")
-        model = _canonical({"version": PAYLOAD_VERSION, "message": message_to_dict(message)}, "response")
+        response: dict[str, Any] = {"version": PAYLOAD_VERSION, "message": message_to_dict(message)}
+        if request is not None:
+            response["request"] = dict(request)  # C-9 ``ModelResponse.request``: the anchor's request facts
+        model = _canonical(response, "response")
         display_text = self._render(message, final=final)
 
         def work(conn: Connection) -> ContextEntry:
@@ -221,7 +247,9 @@ class SQLiteTranscriptStore:
                 content={"model": model},
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
-            return ContextEntry(session_id, seq, "response", row["id"], message=message, payload=model)
+            return ContextEntry(
+                session_id, seq, "response", row["id"], message=message, payload=model, created_at=_epoch(row["created_at"])
+            )
 
         return await self._write(session_id, work)
 
@@ -254,14 +282,49 @@ class SQLiteTranscriptStore:
     async def append_payload(
         self, session_id: str, kind: PayloadKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None
     ) -> ContextEntry:
-        if kind not in ("compaction", "context_edit", "agent_state"):
-            raise ValueError(f"not a payload entry kind: {kind!r}")
-        data = _canonical(dict(payload), f"{kind} payload")
-        if not _is_current_version(data):
-            raise ValueError(f"a {kind} payload needs version {PAYLOAD_VERSION}")
-        return await self._write(
-            session_id, lambda conn: self._append_event(conn, session_id, kind, data, None, agent_name)
-        )
+        return (await self.append_payloads(session_id, [(kind, payload)], agent_name=agent_name))[0]
+
+    async def append_payloads(
+        self,
+        session_id: str,
+        entries: Sequence[tuple[PayloadKind, Mapping[str, Any]]],
+        *,
+        agent_name: Optional[str] = None,
+    ) -> list[ContextEntry]:
+        """Several payload rows in order, in one transaction: all of them or none (C-9 section 10)."""
+        rows = [(kind, _payload(kind, payload)) for kind, payload in entries]
+
+        def work(conn: Connection) -> list[ContextEntry]:
+            return [self._append_event(conn, session_id, kind, data, None, agent_name) for kind, data in rows]
+
+        return await self._write(session_id, work)
+
+    async def append_audit(
+        self, session_id: str, kind: AuditKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None
+    ) -> str:
+        """A non-context audit row (C-9 ``ModelAttempt`` or ``CheckpointTurn``); its id. Never loaded as context."""
+        if kind not in _AUDIT_EVENT_TYPE:
+            raise ValueError(f"not an audit kind: {kind!r}")
+        data = _canonical(dict(payload), f"{kind} audit")
+
+        def work(conn: Connection) -> str:
+            origin = _turn_origin(conn, session_id, agent_name)
+            row = agent_events_service.append(
+                conn,
+                scope_id=origin.scope_id,
+                session_id=session_id,
+                platform=origin.platform,
+                event_type=_AUDIT_EVENT_TYPE[kind],
+                content=data,
+                agent_name=origin.agent_name,
+                backend=origin.backend,
+                turn_id=origin.turn_id,
+                visibility=AUDIT_VISIBILITY,
+                source="agent",
+            )
+            return row["id"]
+
+        return await self._write(session_id, work)
 
     # --- implementation -------------------------------------------------------
 
@@ -305,7 +368,9 @@ class SQLiteTranscriptStore:
             source="agent",
             context_seq=seq,
         )
-        return ContextEntry(session_id, seq, kind, row["id"], message=message, payload=payload)
+        return ContextEntry(
+            session_id, seq, kind, row["id"], message=message, payload=payload, created_at=_epoch(row["created_at"])
+        )
 
     def _load(self, session_id: str) -> list[ContextEntry]:
         with self._engine.begin() as conn:
@@ -513,6 +578,7 @@ def _settled_result(conn: Connection, session_id: str, tool_call_id: str) -> Opt
                     agent_events.c.session_id,
                     agent_events.c.context_seq,
                     agent_events.c.content_json,
+                    agent_events.c.created_at,
                     agent_events.c.event_type,
                     agent_events.c.visibility,
                 )
@@ -549,6 +615,7 @@ def source_tool_result(
                 agent_events.c.session_id,
                 agent_events.c.context_seq,
                 agent_events.c.content_json,
+                agent_events.c.created_at,
                 agent_events.c.event_type,
                 agent_events.c.visibility,
             )
@@ -617,7 +684,9 @@ def _context_rows(conn: Connection, session_id: str, bound: Optional[int]) -> li
         if bound is not None:
             conditions.append(table.c.context_seq <= bound)
         rows = conn.execute(
-            select(table.c.id, table.c.context_seq, table.c.content_json, *columns).where(*conditions)
+            select(table.c.id, table.c.context_seq, table.c.content_json, table.c.created_at, *columns).where(
+                *conditions
+            )
         ).mappings()
         entries.extend(to_entry(session_id, row) for row in rows)
     return entries
@@ -634,7 +703,9 @@ def _message_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
         raise TranscriptError(f"context row {row_id} has message type {row['type']!r}")
     payload = _versioned(_json_object(row["content_json"], row_id).get("model"), row_id)
     message = _message(payload.get("message"), expected, row_id)
-    return ContextEntry(session_id, row["context_seq"], kind, row_id, message=message, payload=payload)
+    return ContextEntry(
+        session_id, row["context_seq"], kind, row_id, message=message, payload=payload, created_at=_epoch(row["created_at"])
+    )
 
 
 def _event_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
@@ -644,7 +715,9 @@ def _event_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
         raise TranscriptError(f"context row {row_id} is a {row['visibility']} {row['event_type']!r} event")
     payload = _versioned(_json_object(row["content_json"], row_id), row_id)
     message = _message(payload.get("message"), ToolResultMessage, row_id) if kind == "tool_result" else None
-    return ContextEntry(session_id, row["context_seq"], kind, row_id, message=message, payload=payload)
+    return ContextEntry(
+        session_id, row["context_seq"], kind, row_id, message=message, payload=payload, created_at=_epoch(row["created_at"])
+    )
 
 
 def _message(value: Any, expected: type, row_id: str) -> Any:
@@ -686,6 +759,29 @@ def _canonical(value: dict[str, Any], what: str) -> dict[str, Any]:
     """
     require_json_value(value, what)
     return json.loads(json.dumps(value))
+
+
+def _payload(kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    if kind not in ("compaction", "context_edit", "agent_state"):
+        raise ValueError(f"not a payload entry kind: {kind!r}")
+    data = _canonical(dict(payload), f"{kind} payload")
+    if not _is_current_version(data):
+        raise ValueError(f"a {kind} payload needs version {PAYLOAD_VERSION}")
+    return data
+
+
+def _epoch(value: Any) -> Optional[float]:
+    """A row's ``created_at`` (ISO 8601, UTC when it names no zone) as epoch seconds; None if it is not a time."""
+    text_value = str(value or "").strip()
+    if text_value.endswith("Z"):
+        text_value = text_value[:-1] + "+00:00"
+    try:
+        instant = datetime.fromisoformat(text_value)
+    except ValueError:
+        return None
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant.timestamp()
 
 
 def _utc_now() -> str:

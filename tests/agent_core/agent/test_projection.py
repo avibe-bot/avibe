@@ -43,10 +43,146 @@ def test_projection_sorts_rows_cuts_at_fork_restores_state_and_places_results_in
     assert rows[3].payload["state"] == {"counter": [1]}
 
 
-@pytest.mark.parametrize("kind", ["compaction", "context_edit"])
-def test_P3_context_rows_fail_explicitly_instead_of_silently_replaying_old_context(kind):
-    with pytest.raises(ProjectionError, match=f"{kind} requires P3"):
-        project([ContextEntry("session", 1, kind, "unsupported", payload={})])
+def _edit(seq, row_id, target, replacement):
+    payload = {
+        "version": 1,
+        "target_event_id": target,
+        "replacement": {"text": replacement},
+        "reason": "clear_old_tool_result",
+    }
+    return ContextEntry("session", seq, "context_edit", row_id, payload=payload)
+
+
+def _checkpoint_payload(first_kept_seq, *, summary="SUMMARY", state=("STATE",), **fields):
+    payload = {
+        "version": 1,
+        "mode": "normal",
+        "reason": "threshold",
+        "focus": None,
+        "summary": summary,
+        "checkpoint": "checkpoint",
+        "state": list(state),
+        "first_kept_seq": first_kept_seq,
+        "summarized_to_seq": first_kept_seq - 1,
+        "previous_compaction_id": None,
+        "current_request": None,
+        "current_request_message_id": None,
+        "files_read": ["a.py"],
+        "files_modified": [],
+        "skills": [{"name": "s", "revision": "1"}],
+        "tokens_before": 10,
+        "tokens_after_estimate": 5,
+        "threshold": 8,
+        "summarizer": {"origin": {"provider": "p", "api": "anthropic", "model": "m"}, "prompt_version": "v", "rounds": 0},
+        "usage": {"input_tokens": 1, "output_tokens": 2, "cache_read_tokens": 0, "cache_write_tokens": 0},
+    }
+    payload.update(fields)
+    return payload
+
+
+def _checkpoint_row(seq, first_kept_seq, *, summary="SUMMARY", state=("STATE",), **fields):
+    payload = _checkpoint_payload(first_kept_seq, summary=summary, state=state, **fields)
+    return ContextEntry("session", seq, "compaction", f"checkpoint-{seq}", payload=payload)
+
+
+def _checkpointed_rows():
+    read, bash = ToolCallBlock("a", "read", {"path": "x"}), ToolCallBlock("b", "bash", {"command": "ls"})
+    return [
+        ContextEntry("session", 1, "input", "in-1", user("start")),
+        ContextEntry("session", 2, "response", "r-1", assistant(calls=[read])),
+        ContextEntry("session", 3, "input", "in-2", user("next")),
+        ContextEntry("session", 4, "response", "r-2", assistant(calls=[bash])),
+        # A late recovery result of a call the checkpoint summarizes.
+        ContextEntry("session", 5, "tool_result", "res-a", ToolResultMessage("a", "read", (text("A"),))),
+        ContextEntry("session", 6, "tool_result", "res-b", ToolResultMessage("b", "bash", (text("B"),), True)),
+        _edit(7, "edit-1", "res-b", "first placeholder"),
+        _edit(8, "edit-2", "res-b", "latest placeholder"),
+        _checkpoint_row(9, 3, state=("STATE-1", "STATE-2")),
+        ContextEntry("session", 10, "input", "in-3", user("after")),
+    ]
+
+
+def test_checkpoints_and_edits_project_purely_and_deterministically():
+    rows = _checkpointed_rows()
+    before = deepcopy(rows)
+    projected = project(list(reversed(rows)), system="system", rehydrated=[user("rehydrated")])
+    assert projected == project(rows, system="system", rehydrated=[user("rehydrated")])
+    assert rows == before
+    checkpoint, *rest = projected.messages[1:]
+    assert [block.text for block in checkpoint.content] == ["SUMMARY", "STATE-1", "STATE-2"]
+    assert [type(message).__name__ for message in rest] == [
+        "UserMessage",
+        "AssistantMessage",
+        "ToolResultMessage",
+        "UserMessage",
+    ]
+    cleared = rest[2]
+    assert (cleared.tool_call_id, cleared.tool_name, cleared.is_error) == ("b", "bash", True)
+    assert cleared.content[0].text == "latest placeholder"
+    # The summarized call's late result left with it: no orphan reaches a provider.
+    assert all(getattr(message, "tool_call_id", None) != "a" for message in projected.messages)
+
+
+@pytest.mark.parametrize(
+    "fork_point,result_b",
+    [(8, "latest placeholder"), (7, "first placeholder"), (6, "B")],
+)
+def test_a_fork_before_a_checkpoint_or_edit_projects_the_original_context(fork_point, result_b):
+    projected = project(_checkpointed_rows(), fork_point=fork_point)
+    assert [getattr(message, "tool_call_id", None) for message in projected.messages] == [
+        None,
+        None,
+        "a",
+        None,
+        None,
+        "b",
+    ]
+    assert projected.messages[2].content[0].text == "A"
+    assert projected.messages[5].content[0].text == result_b
+
+
+def _state_row(context):
+    return ContextEntry("session", 2, "agent_state", "state", payload={"version": 1, "state": {}, "context": context})
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        _edit(2, "edit", "in-1", "x"),
+        _edit(2, "edit", "missing", "x"),
+        ContextEntry("session", 2, "context_edit", "edit", payload={"version": 1, "target_event_id": "in-1"}),
+        _checkpoint_row(2, 3),
+        ContextEntry("session", 2, "compaction", "checkpoint", payload={"version": 1, "first_kept_seq": 1}),
+        # Every field the C-9 rules read later is checked when the row loads, not when it is next used.
+        _checkpoint_row(2, 1, skills=[{}]),
+        _checkpoint_row(2, 1, files_read="a.py"),
+        _checkpoint_row(2, 1, files_modified=[1]),
+        _checkpoint_row(2, 1, mode="partial"),
+        _checkpoint_row(2, 1, current_request=["text"]),
+        _checkpoint_row(2, 1, summarized_to_seq="1"),
+        _checkpoint_row(2, 1, threshold=1.5),
+        _checkpoint_row(2, 1, summarizer={"origin": {}, "prompt_version": "v", "rounds": 0}),
+        _checkpoint_row(2, 1, usage={"input_tokens": -1}),
+        _checkpoint_row(2, 1, unexpected=True),
+        _state_row({"failures": "1", "ineffective": 0, "paused": False}),
+        _state_row({"failures": 0, "ineffective": 0}),
+        _state_row({"failures": 0, "ineffective": 0, "paused": 1}),
+    ],
+)
+def test_malformed_context_rows_fail_explicitly_instead_of_projecting_a_wrong_context(row):
+    with pytest.raises(ProjectionError):
+        project([ContextEntry("session", 1, "input", "in-1", user("start")), row])
+
+
+def test_a_complete_checkpoint_row_and_guard_state_load():
+    rows = [
+        ContextEntry("session", 1, "input", "in-1", user("start")),
+        _state_row({"failures": 1, "ineffective": 2, "paused": True}),
+        _checkpoint_row(3, 1, summarizer=None, current_request="go", current_request_message_id="in-1"),
+    ]
+    projected = project(rows)
+    assert projected.context_state == {"failures": 1, "ineffective": 2, "paused": True}
+    assert [block.text for block in projected.messages[0].content] == ["SUMMARY", "STATE"]
 
 
 def test_malformed_or_duplicate_results_are_not_silently_dropped():

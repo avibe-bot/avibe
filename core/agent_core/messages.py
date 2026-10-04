@@ -351,7 +351,7 @@ def _block_from_dict(data: Any, allowed_types: tuple[str, ...]) -> Any:
 _USAGE_REQUIRED = {"input_tokens": int, "output_tokens": int, "cache_read_tokens": int, "cache_write_tokens": int}
 
 
-def _usage_to_dict(usage: Usage) -> dict[str, Any]:
+def usage_to_dict(usage: Usage) -> dict[str, Any]:
     out: dict[str, Any] = {name: getattr(usage, name) for name in _USAGE_REQUIRED}
     _put(out, "reasoning_tokens", usage.reasoning_tokens)
     return out
@@ -376,7 +376,7 @@ def message_to_dict(message: Message) -> dict[str, Any]:
             "stop_reason": message.stop_reason,
         }
         if message.usage is not None:
-            out["usage"] = _usage_to_dict(message.usage)
+            out["usage"] = usage_to_dict(message.usage)
         _put(out, "error_message", message.error_message)
         return out
     if isinstance(message, ToolResultMessage):

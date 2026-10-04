@@ -169,22 +169,30 @@ def _tool_result(call_id: str, body: str) -> ToolResultMessage:
     return ToolResultMessage(tool_call_id=call_id, tool_name="bash", content=(text(body),))
 
 
-COMPACTION = {
+COMPACTION = {  # the current C-9 ``Compaction`` shape (transcript-rows.schema.json)
     "version": 1,
-    "summary": "## Objective\n修复路径测试",
-    "first_kept_seq": 3,
-    "summarized_from_seq": 1,
-    "summarized_to_seq": 2,
-    "previous_compaction_id": None,
+    "mode": "normal",
     "reason": "manual",
     "focus": None,
-    "tokens_before": 100,
-    "tokens_after_estimate": 40,
-    "summarizer": {"origin": {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5"},
-                   "prompt_version": "ckpt-v1", "chunks": 1},
+    "summary": "<context-checkpoint>\n## Objective\n修复路径测试\n</context-checkpoint>",
+    "checkpoint": "## Objective\n修复路径测试",
+    "state": [],
+    "first_kept_seq": 3,
+    "summarized_to_seq": 2,
+    "previous_compaction_id": None,
+    "current_request": None,
+    "current_request_message_id": None,
     "files_read": ["core/paths.py"],
     "files_modified": [],
-    "current_request_message_id": None,
+    "skills": [],
+    "tokens_before": 100,
+    "tokens_after_estimate": 40,
+    "threshold": 80,
+    "summarizer": {
+        "origin": {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5"},
+        "prompt_version": "checkpoint-v2",
+        "rounds": 0,
+    },
 }
 
 
@@ -266,6 +274,25 @@ async def test_rows_outside_the_context_never_load(engine) -> None:
     assert list(await store.load("ses_main")) == [entry]
     with engine.connect() as conn:
         assert conn.execute(select(messages.c.context_seq).where(messages.c.id == queued)).scalar() is None
+
+
+@pytest.mark.parametrize("kind,event_type", [("attempt", "model_attempt"), ("checkpoint_turn", "context_checkpoint_turn")])
+async def test_an_audit_row_is_kept_outside_the_context(engine, kind, event_type) -> None:
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "go")
+    store = SQLiteTranscriptStore(engine)
+    entry = await store.consume_input("ses_main", consumed, _user("go"))
+    payload = {"version": 1, "usage": {"input_tokens": 9, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}, "error": "rate_limit: busy"}
+
+    row_id = await store.append_audit("ses_main", kind, payload, agent_name="avibe")
+
+    assert list(await store.load("ses_main")) == [entry]
+    with engine.connect() as conn:
+        row = conn.execute(select(agent_events).where(agent_events.c.id == row_id)).mappings().one()
+    assert (row["event_type"], row["visibility"], row["context_seq"]) == (event_type, "audit", None)
+    assert json.loads(row["content_json"]) == payload
 
 
 async def test_an_input_enters_the_context_once(engine) -> None:

@@ -36,8 +36,17 @@ from core.agent_core.agent.hooks import (
 )
 from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import RetryPolicy
-from core.agent_core.ai.provider import Done, ModelCapabilities, ProviderError, TextDelta, ThinkingDelta, ToolCallStart
+from core.agent_core.ai.provider import (
+    Done,
+    ModelCapabilities,
+    ModelRequest,
+    ProviderError,
+    TextDelta,
+    ThinkingDelta,
+    ToolCallStart,
+)
 from core.agent_core.agent.models import ModelSelection
+from core.agent_core.harness.context import ContextConfig, budget
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import AssistantMessage, ThinkingBlock, ToolCallBlock, ToolResultMessage, Usage, UserMessage, text
 from core.agent_core.tools.base import ToolResult
@@ -606,14 +615,14 @@ async def test_retry_obeys_provider_flag_and_allows_usage_only_partial(streamed,
         assert events[-1].reason == "error"
         assert sleeps == []
     else:
-        # A usage-only partial is persisted as a non-final model response, not
-        # merged into the successful attempt. The provider owns retryability.
+        # A partial of a retried attempt is never context. The provider owns retryability.
         assert len(provider.requests) == agent.models.resolutions == 2
         assert sleeps == [3.0]
         assert events[-1].reason == "completed"
 
 
-async def test_retry_preserves_usage_only_partial_in_successful_response():
+async def test_retry_keeps_a_usage_only_partial_out_of_the_context():
+    # A usage-only partial is attempt data, never context: the retry resends the original request.
     store = InMemoryTranscriptStore()
     first_partial = AssistantMessage(
         content=(),
@@ -639,17 +648,53 @@ async def test_retry_preserves_usage_only_partial_in_successful_response():
     )
 
     assert events[-1].reason == "completed"
+    assert provider.requests[1].messages == provider.requests[0].messages
     responses = [row.message for row in await store.load("session") if row.kind == "response"]
-    assert len(responses) == 2
-    assert responses[0].usage == Usage(input_tokens=5, output_tokens=2, cache_write_tokens=1)
-    assert responses[1].usage == Usage(
-        input_tokens=7,
-        output_tokens=3,
-        cache_read_tokens=4,
-    )
+    assert [response.usage for response in responses] == [successful.usage]
+    # Without context management too, the attempt's usage is exactly one non-context audit row.
+    assert [attempt["usage"]["input_tokens"] for _, _, attempt in store.attempts] == [5]
 
 
-async def test_retry_usage_partial_is_not_committed_twice_when_budget_expires(monkeypatch):
+class _FailingResponses(InMemoryTranscriptStore):
+    async def append_response(self, session_id, message, *, final, request=None):
+        raise RuntimeError("disk full")
+
+
+def _billed(content, stop_reason="stop", input_tokens=9):
+    return AssistantMessage(tuple(content), assistant().origin, stop_reason, usage=Usage(input_tokens=input_tokens))
+
+
+_TWIN = (ToolCallBlock("same", "echo", {}), ToolCallBlock("same", "echo", {}))
+
+
+@pytest.mark.parametrize(
+    "scripts,context,store_type,audited,reason",
+    [
+        # Attempts that never became a response: each is exactly one audit row, whatever the exit.
+        pytest.param([[ProviderError("rate_limit", "busy", True, partial=_billed((), "error"))], [Done(assistant("ok"))]], False, InMemoryTranscriptStore, 1, "completed", id="retried"),
+        pytest.param([[ProviderError("overflow", "prompt is too long", False, partial=_billed((), "error"))]], True, InMemoryTranscriptStore, 1, "context_exhausted", id="relieved"),
+        pytest.param([[ProviderError("server", "down", False, partial=_billed((), "error"))]], False, InMemoryTranscriptStore, 1, "error", id="usage-only terminal"),
+        pytest.param([[Done(_billed(_TWIN, "tool_use"))]], False, InMemoryTranscriptStore, 1, "error", id="rejected response"),
+        pytest.param([[ProviderError("server", "down", False, partial=_billed(_TWIN, "error"))]], False, InMemoryTranscriptStore, 1, "error", id="rejected partial"),
+        pytest.param([[Done(_billed((text("ok"),)))]], False, _FailingResponses, 1, "error", id="commit failed"),
+        # Attempts that became a response keep their usage in its row: no audit row.
+        pytest.param([[Done(_billed((text("ok"),)))]], False, InMemoryTranscriptStore, 0, "completed", id="committed"),
+        pytest.param([[ProviderError("server", "down", False, partial=_billed((text("half"),), "error"))]], False, InMemoryTranscriptStore, 0, "error", id="committed partial"),
+    ],
+)
+async def test_the_ledger_audits_every_attempt_that_never_became_a_response(scripts, context, store_type, audited, reason):
+    # Invariant 4: the ledger owns the attempt audit on every exit of the model call, not each exit path.
+    store = store_type()
+    options = {"context": ContextConfig()} if context else {}
+    agent = make_agent(ScriptedProvider(scripts), store=store, retry=RetryPolicy(initial_delay_s=0), **options)
+    events = await collect(agent)
+    assert events[-1].reason == reason
+    assert [attempt["usage"]["input_tokens"] for _, _, attempt in store.attempts] == [9] * audited
+    committed = [row.message.usage for row in await store.load("session") if row.kind == "response"]
+    assert len(committed) + audited == sum(1 for script in scripts if script)  # every attempt counted once
+
+
+async def test_retry_usage_partial_never_enters_the_context_when_budget_expires(monkeypatch):
     real_sleep = asyncio.sleep
 
     async def slow_sleep(delay):
@@ -675,10 +720,8 @@ async def test_retry_usage_partial_is_not_committed_twice_when_budget_expires(mo
 
     events = await collect(agent)
 
-    responses = [row.message for row in await store.load("session") if row.kind == "response"]
     assert len(provider.requests) == 1
-    assert len(responses) == 1
-    assert responses[0].usage == Usage(input_tokens=5)
+    assert not [row for row in await store.load("session") if row.kind == "response"]
     assert events[-1].reason == "error"
 
 
@@ -907,9 +950,10 @@ async def test_output_budget_uses_configured_budget_and_known_or_default_provide
 
 
 @pytest.mark.parametrize("window,expected", [(None, 128000), (32000, 32000)])
-def test_router_selection_exposes_effective_context_budget_without_forging_capabilities(window, expected):
+def test_the_context_budget_defaults_an_unknown_window_without_forging_capabilities(window, expected):
     selection = ModelSelection(ENDPOINT, ModelCapabilities(context_window=window))
-    assert selection.context_window == expected
+    request = ModelRequest(ENDPOINT, "", (), (), 8192)
+    assert budget(request, selection.capabilities, transcript=()).window == expected
     assert selection.capabilities.context_window == window
 
 
