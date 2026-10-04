@@ -186,8 +186,8 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
 - **Checkpoint delivery is a fork**: the same model, system prompt, tools, tool choice, and reasoning settings, the
   conversation prefix byte-identical, and the owner-approved three-layer prompt appended (`checkpoint-v2`). The
   checkpoint turn runs through the same loop under a "dreaming" tool policy: `read` allowed, writes only inside the
-  Session's scratch directory, everything else denied; at most 5 tool rounds. Its messages are audit rows, never
-  context.
+  Session's scratch directory, everything else denied; at most 5 tool rounds, each tool bounded by the room left in
+  the window. Its messages are audit rows, never context.
 - **After a checkpoint** the request is the rebuilt system prompt, the `<context-checkpoint>` message (framing,
   checkpoint, cumulative `<artifacts>`, an `<earlier-record>` lookup, `<current-request>`), state rendered from its
   own stores when the checkpoint was written (skills, pending Watches, Tasks, and Runs, the environment block), and
@@ -195,8 +195,8 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
 - **Overflow ladder**, bounded per request: the normal checkpoint; fork-summarize the largest safe prefix that fits
   (rolling); with no model call, move the earliest part out (dropped); stop and say what fills the context.
 - **Guards**: one compaction in flight per Session; 3 consecutive failures or 3 ineffective checkpoints pause
-  auto-compaction for the Session, and the user is told once. Manual `/compact [focus]` works on every surface and
-  clears the pause. A successful compaction is silent.
+  auto-compaction for the Session, and the user is told once. Manual `/compact [focus]` works on every surface,
+  clears the pause, and is answered. An automatic compaction is silent.
 - **Deferred**: background precompute, server-side compaction (hard constraint 8), automatic re-read of modified
   files, memory tools, and a lower effort for the checkpoint turn.
 

@@ -23,6 +23,7 @@
         "compaction_started",
         "compaction_finished",
         "compaction_failed",
+        "compaction_skipped",
         "compaction_paused",
         "context_exhausted",
         "run_ended",
@@ -289,6 +290,28 @@
               "manual",
               "threshold",
               "overflow"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "compaction_skipped"
+          }
+        }
+      },
+      "then": {
+        "description": "A manual compaction found nothing older than the kept tail to summarize (context.md section 10). The adapter replies that there is nothing to compact yet; the run ends `completed`.",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "enum": [
+              "manual"
             ]
           }
         }

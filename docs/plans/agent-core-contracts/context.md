@@ -122,9 +122,15 @@ A checkpoint is written by a **fork** of the conversation, the only delivery pat
 
 - A denied call gets the error result `This is a checkpoint turn: tools that act outside your own scratch space are
   unavailable. Write the checkpoint now.`
-- At most 5 tool rounds. After them, or once the next request would reach `T` (the request carrying the response plus
-  the response itself), every call gets `This is a checkpoint turn and its tool budget is used up. Write the
-  checkpoint now.` A response that still calls tools after that ends the turn as failed.
+- The bound is the window, not `T`, the same way in threshold, manual, and rolling turns. Before each call,
+  `room = L_in - est - min(16,000, O)`, where `est` is the turn's next request (the checkpoint request and the turn's
+  messages so far included). A call runs only while `room >= 4,000` tokens, and its result is cut to
+  `room - 1,000` tokens, head kept, ending with `[Output truncated to fit this checkpoint turn: showing about
+  <shown> of <total> tokens. Read a smaller range if you need more.]`, so a single read cannot push the turn out of
+  the window.
+- At most 5 tool rounds. After them, or once `room` falls below the floor, every allowed call gets `This is a
+  checkpoint turn and its tool budget is used up. Write the checkpoint now.` A response that still calls tools after
+  that ends the turn as failed.
 - The final response's text is the checkpoint. A length stop, any stop other than `stop`, an error, or no text is a
   failure, and nothing enters the context.
 - The turn's messages are recorded once per attempt, outcome included, as an audit row
@@ -220,10 +226,12 @@ ends the run `context_exhausted`, as in P1. The adapter supplies:
   transition, and the adapter tells the user. The counters and the pause are durable loop state, stored beside the
   hook state in `agent_state` rows (`AgentState.context`), so they survive restarts and forks.
 - **Manual `/compact [focus]`** clears the pause and both counters, then runs a normal checkpoint with reason
-  `manual`; its own outcome counts as above.
+  `manual`; its own outcome counts as above. When everything is within the kept tail, it emits `compaction_skipped`
+  and ends `completed`, and the adapter replies briefly that there is nothing to compact yet.
 
-UX is silent: a successful compaction shows nothing, and the raw messages stay in history. The only user-visible
-text is the pause notice, and, after (d), the run's stop message.
+UX is silent: an automatic compaction shows nothing, and the raw messages stay in history. The only user-visible
+text is the pause notice, and, after (d), the run's stop message. A manual `/compact` is an explicit user action,
+so the adapter answers it.
 
 ## 11. Checkpoint request (prompt `checkpoint-v2`)
 

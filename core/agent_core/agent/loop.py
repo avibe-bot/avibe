@@ -28,6 +28,7 @@ from core.agent_core.agent.events import (
     CompactionFailed,
     CompactionFinished,
     CompactionPaused,
+    CompactionSkipped,
     CompactionStarted,
     ContextExhausted,
     ContextPart,
@@ -66,7 +67,9 @@ from core.agent_core.ai.provider import (
 )
 from core.agent_core.cancel import CancelToken
 from core.agent_core.harness.context import (
+    CHECKPOINT_TOOL_FLOOR,
     CHECKPOINT_TOOL_ROUNDS,
+    CHECKPOINT_TOOL_SLACK,
     CLEAR_SOFT_RATIO,
     INEFFECTIVE_RATIO,
     MAX_OVERFLOWS,
@@ -84,6 +87,7 @@ from core.agent_core.harness.context import (
     clear_edit,
     clearable_results,
     compaction_payload,
+    fit_result,
     half_cut,
     message_tokens,
     messages_tokens,
@@ -1136,9 +1140,9 @@ class Agent:
         sizing = self._sizing(system, selected)
         cut = normal_cut(sizing.view.units, sizing.budget.keep)
         if cut is None:
-            await emit(CompactionStarted, reason="manual")
-            await emit(CompactionFailed, reason="manual", error="Nothing to compact: the context is all recent.")
-            return "error"
+            # Everything is within the kept tail: the adapter tells the user there is nothing to compact yet.
+            await emit(CompactionSkipped, reason="manual")
+            return "completed"
         attempt = await self._checkpoint(
             sizing, cut, mode="normal", reason="manual", emit=emit, focus=focus, mid_turn=False
         )
@@ -1204,15 +1208,17 @@ class Agent:
                     error = "The checkpoint turn ended without checkpoint text."
                 break
             if not policy.open:
-                # Its previous calls were already answered with BUDGET_USED.
+                # Its earlier calls were already answered with BUDGET_USED.
                 error = "The checkpoint turn kept calling tools after its tool budget was used up."
                 break
             rounds += 1
-            policy.open = rounds <= CHECKPOINT_TOOL_ROUNDS and estimate + message_tokens(message) < plan.threshold
             estimate += message_tokens(message)
             for call in message.tool_calls:
                 self._scope.check()
-                result = await self._checkpoint_tool(call, tools, hooks)
+                # The bound is the window: a tool runs only while the request can still grow by the floor.
+                room = plan.fork_room(estimate)
+                policy.open = policy.open and rounds <= CHECKPOINT_TOOL_ROUNDS and room >= CHECKPOINT_TOOL_FLOOR
+                result = await self._checkpoint_tool(call, tools, hooks, limit=room - CHECKPOINT_TOOL_SLACK)
                 turn.append(result)
                 estimate += message_tokens(result)
         record: dict[str, Any] = {
@@ -1266,9 +1272,9 @@ class Agent:
         return _Attempt(True)
 
     async def _checkpoint_tool(
-        self, original: ToolCallBlock, tools: Mapping[str, Tool], hooks: Sequence[Hooks]
+        self, original: ToolCallBlock, tools: Mapping[str, Tool], hooks: Sequence[Hooks], *, limit: int
     ) -> ToolResultMessage:
-        """A checkpoint turn's call: gated by the policy, executed silently, never committed."""
+        """A checkpoint turn's call: gated by the policy, run silently, cut to ``limit`` tokens, never committed."""
         call, result, end = await self._gate(deepcopy(original), hooks)
         if end:
             raise _Ended()
@@ -1278,6 +1284,7 @@ class Agent:
                 result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
             else:
                 result = await self._execute(tool, call, _silent)
+                result = replace(result, content=fit_result(result.content, limit))
         return ToolResultMessage(call.id, call.name, result.content, result.is_error)
 
     async def _drop(self, sizing: _Sizing, cut: int, emit: Callable[..., Awaitable[None]]) -> None:

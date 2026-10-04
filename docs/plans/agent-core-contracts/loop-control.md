@@ -97,7 +97,8 @@ sent with that request gets the error result `Tool <name> is not available.`
 | `tool_progress` | dropped in v1: no backend shows live tool output, so a running tool shows its `tool_started` line, as for the other backends (live tool output joins the live partial text and progress follow-up, `avibe-agent-core.md` §10) |
 | `tool_finished` | the committed `tool_result` row; a handed-over job names its Watch |
 | `steer_applied` | the steer delivery is accepted into the running Turn |
-| `compaction_started`, `compaction_finished`, `compaction_failed` | none: a compaction is silent (C-9 `context.md` §10) |
+| `compaction_started`, `compaction_finished`, `compaction_failed` | none for an automatic compaction (C-9 `context.md` §10); a manual `/compact` reports its outcome |
+| `compaction_skipped` | a manual `/compact` had nothing to compact yet: a brief localized reply |
 | `compaction_paused` | the pause notice, once per pause, localized through `vibe/i18n` |
 | `context_exhausted` | what fills the context, in the run's stop message (C-9 `context.md` §8 d) |
 | `run_ended` | `MessageOutput` settles the Turn |

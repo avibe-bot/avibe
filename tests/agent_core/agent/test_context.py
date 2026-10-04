@@ -22,6 +22,7 @@ from core.agent_core.harness.context import (
     checkpoint_request,
     clearable_results,
     compaction_payload,
+    fit_result,
     half_cut,
     message_tokens,
     normal_cut,
@@ -362,3 +363,15 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
     # No model checkpoint and no lookup command: no framing text, no pointer.
     assert second["summary"].startswith("<context-checkpoint>\n<artifacts>\n")
     assert "<earlier-record>" not in second["summary"]
+
+
+@pytest.mark.parametrize("body", ["x" * 40_000, "上下文" * 5_000])
+def test_a_checkpoint_tool_result_is_cut_to_its_limit_keeping_the_head_and_saying_so(body):
+    image = ImageBlock("image/png", "media-token")
+    content = (text(body), image)
+    fitted = fit_result(content, 3_000)
+    assert message_tokens(ToolResultMessage("c", "read", fitted)) <= 3_000
+    assert body.startswith(fitted[0].text) and len(fitted[0].text) > 0
+    assert image not in fitted  # 1,600 tokens no longer fit after the head
+    assert fitted[-1].text.startswith("[Output truncated to fit this checkpoint turn: showing about 3000 of")
+    assert fit_result(content, 50_000) == content

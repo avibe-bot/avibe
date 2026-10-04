@@ -28,6 +28,7 @@ from core.agent_core.messages import (
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
+    UserContent,
     UserMessage,
     Usage,
     text,
@@ -55,6 +56,14 @@ CLEARED_PLACEHOLDER = (
 
 CHECKPOINT_MAX_TOKENS = 16_000
 CHECKPOINT_TOOL_ROUNDS = 5
+#: A checkpoint turn's tool runs only while the window leaves this much room (context.md section 6).
+CHECKPOINT_TOOL_FLOOR = 4_000
+#: Room a tool result leaves for the checkpoint request's growth.
+CHECKPOINT_TOOL_SLACK = 1_000
+CHECKPOINT_TRUNCATED = (
+    "[Output truncated to fit this checkpoint turn: showing about {shown} of {total} tokens. "
+    "Read a smaller range if you need more.]"
+)
 MAX_ROLLS = 2
 MAX_OVERFLOWS = 4
 PAUSE_AFTER = 3
@@ -258,6 +267,25 @@ def occupancy(view: ContextView, *, system: str, tools: Sequence[ToolSpec], rehy
 # --- limits (context.md section 1) ------------------------------------------------
 
 
+def fit_result(content: Sequence[UserContent], limit: int) -> tuple[UserContent, ...]:
+    """A checkpoint turn's tool result cut to ``limit`` tokens, head kept, saying what was cut (section 6)."""
+    total = message_tokens(ToolResultMessage("fit", "fit", tuple(content)))
+    if total <= limit:
+        return tuple(content)
+    note = CHECKPOINT_TRUNCATED.format(shown=limit, total=total)
+    room = max(0, limit - text_tokens(note) - 1) * 4
+    kept: list[UserContent] = []
+    for block in content:
+        if isinstance(block, TextBlock) and block.text is not None and room > 0:
+            data = block.text.encode("utf-8", "surrogatepass")[:room]
+            kept.append(TextBlock(text=data.decode("utf-8", "ignore")))
+            room -= len(data)
+        elif isinstance(block, ImageBlock) and room >= IMAGE_TOKENS * 4:
+            kept.append(block)
+            room -= IMAGE_TOKENS * 4
+    return (*kept, TextBlock(text=note))
+
+
 @dataclass(frozen=True)
 class Budget:
     window: int
@@ -278,6 +306,10 @@ class Budget:
     def fork_fits(self, tokens: int) -> bool:
         """Whether a checkpoint request of ``tokens`` can fit at all; the provider remains the judge."""
         return tokens + self.checkpoint_max_tokens <= self.input_limit
+
+    def fork_room(self, tokens: int) -> int:
+        """What the window leaves a checkpoint request of ``tokens`` (the request message included) to grow by."""
+        return self.input_limit - tokens - self.checkpoint_max_tokens
 
     @property
     def checkpoint_max_tokens(self) -> int:

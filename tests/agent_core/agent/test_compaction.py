@@ -41,6 +41,7 @@ from core.agent_core.harness.context import (
     CHECKPOINT_REQUEST,
     ContextConfig,
     StateRequest,
+    message_tokens,
     request_tokens,
 )
 from core.agent_core.harness.projection import project
@@ -340,20 +341,40 @@ async def test_the_checkpoint_turn_gets_five_tool_rounds_then_must_write():
     assert events[-1].reason == "error"
 
 
-async def test_at_the_threshold_the_checkpoint_turn_may_not_grow_the_context():
-    tools = [reader(tokens(6_000)), FakeTool("look")]
-    checkpoint_turn = [call("look", "look", path="f"), [Done(assistant(CHECKPOINT))]]
-    model = Model(growing(4), checkpoint_turn)
-    agent = make_agent(model, tools=tools)
+async def test_a_threshold_checkpoint_may_read_while_the_window_has_room_and_never_past_it():
+    # Crossing T at ~20,000 tokens leaves ~7,100 tokens of room in the 32,000 window: the read runs, cut to fit.
+    peek = [call("read", "peek", path="f"), [Done(assistant(CHECKPOINT))]]
+    model = Model(reads(4), peek)
+    tool = sized_reader(6_000, 6_000, 6_000, 2_000, 10_000)
+    agent = make_agent(model, tools=[tool])
     await run(agent)
-    assert not tools[1].calls
-    denied = model.checkpoint_requests[-1].messages[-1]
-    assert denied.content[0].text == DENIED  # not in the table at all
-    model = Model(growing(4), [call("read", "peek", path="f"), [Done(assistant(CHECKPOINT))]])
-    agent = make_agent(model, tools=[reader(tokens(6_000))])
+    assert [ctx.tool_call_id for _, ctx in tool.calls] == ["read-0", "read-1", "read-2", "read-3", "peek"]
+    first, second = model.checkpoint_requests
+    room = 32_000 - request_tokens(first.system, first.tools, first.messages) - 4_096
+    room -= message_tokens(second.messages[-2])  # the response carrying the call
+    result = second.messages[-1]
+    assert result.content[-1].text.startswith("[Output truncated to fit this checkpoint turn: showing about")
+    assert message_tokens(result) <= room - 1_000
+    assert request_tokens(second.system, second.tools, second.messages) + 4_096 <= 32_000
+
+    # Crossing T at ~24,000 tokens leaves under the 4,000-token floor: the read is denied and never runs.
+    model = Model(reads(4), [call("read", "peek", path="f"), [Done(assistant(CHECKPOINT))]])
+    tool = reader(tokens(6_000))
+    agent = make_agent(model, tools=[tool])
     await run(agent)
-    assert [ctx.tool_call_id for _, ctx in agent._tools["read"].calls] == [f"read-{index}" for index in range(4)]
+    assert [ctx.tool_call_id for _, ctx in tool.calls] == ["read-0", "read-1", "read-2", "read-3"]
     assert model.checkpoint_requests[-1].messages[-1].content[0].text == BUDGET_USED
+
+
+async def test_a_manual_compact_with_nothing_older_than_the_tail_is_skipped_without_a_model_call():
+    model = Model([[Done(assistant("short"))]])
+    agent = make_agent(model)
+    await run(agent)
+    before = await agent.store.load("session")
+    events = [event async for event in agent.compact(turn_id="compact")]
+    assert [type(event).__name__ for event in events] == ["RunStarted", "CompactionSkipped", "RunEnded"]
+    assert events[-1].reason == "completed"
+    assert len(model.requests) == 1 and await agent.store.load("session") == before
 
 
 FAILURES = [
