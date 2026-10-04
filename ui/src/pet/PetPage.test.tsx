@@ -609,11 +609,11 @@ describe('PetPage review fixes, round 6', () => {
     expect((screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement).value).toBe('');
   });
 
-  it('keeps a pick made while pet_ready is still answering', async () => {
+  it('accepts no pick until pet_ready has answered, so a pick never races it', async () => {
     const ready = deferred<unknown>();
     const invoke = vi.fn((command: string) => {
       if (command === 'pet_ready') return ready.promise;
-      if (command === 'pet_bind') return Promise.resolve({ shown: false });
+      if (command === 'pet_bind') return Promise.reject(new Error('disk full'));
       return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
     });
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
@@ -622,9 +622,9 @@ describe('PetPage review fixes, round 6', () => {
     render(<PetPage />);
     await userEvent.click(await screen.findByLabelText('pet.toggle'));
     await userEvent.click(await screen.findByText('Session B'));
+    expect(invoke).not.toHaveBeenCalledWith('pet_bind', expect.anything());
     await act(async () => ready.resolve({ binding: 'A', summon_pending: null }));
-    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('B'));
-    expect(api.getSessionResult).not.toHaveBeenCalledWith('A');
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('A'));
   });
 });
 

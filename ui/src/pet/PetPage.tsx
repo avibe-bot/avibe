@@ -79,7 +79,11 @@ const PetSurface: React.FC = () => {
   const api = useApi();
   const inbox = useWorkbenchInbox({ feed: false });
 
-  const binding = usePetBinding() ?? null;
+  const shellBinding = usePetBinding();
+  // Undefined until the shell has answered `pet_ready()`; until then nothing
+  // can be picked, so a local pick never races the shell's durable binding.
+  const bindingKnown = shellBinding !== undefined;
+  const binding = shellBinding ?? null;
   const bindingRef = useLatestRef(binding);
   const [expanded, setExpanded] = useState(false);
   const [layout, setLayout] = useState<PetLayout>({ panel_side: 'left', panel_edge: 'bottom' });
@@ -271,7 +275,9 @@ const PetSurface: React.FC = () => {
       title={data.session?.title ?? null}
       switcherOpen={switcherOpen || !binding}
       onToggleSwitcher={() => setSwitcherOpen((open) => !open)}
+      pickable={bindingKnown}
       onPick={(sessionId) => {
+        if (petShell.currentBinding() === undefined) return;
         setSwitcherOpen(false);
         // Optimistic, but the shell owns the durable binding: if it cannot
         // persist the pick, go back to the last binding it confirmed (never to
@@ -322,6 +328,8 @@ type PanelProps = {
   title: string | null;
   switcherOpen: boolean;
   onToggleSwitcher: () => void;
+  /** The shell's binding is known, so a pick cannot race it. */
+  pickable: boolean;
   onPick: (sessionId: string) => void;
   exchange: ReturnType<typeof latestExchange>;
   markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>;
@@ -366,7 +374,7 @@ const PetPanel: React.FC<PanelProps> = ({ inputRef, ...props }) => {
         )}
       </header>
       {props.switcherOpen ? (
-        <SessionSwitcher current={binding} onPick={props.onPick} />
+        <SessionSwitcher current={binding} pickable={props.pickable} onPick={props.onPick} />
       ) : binding ? (
         <>
           <ExchangeView
@@ -511,7 +519,11 @@ const NeedsInput: React.FC<{
   );
 };
 
-const SessionSwitcher: React.FC<{ current: string | null; onPick: (sessionId: string) => void }> = ({ current, onPick }) => {
+const SessionSwitcher: React.FC<{
+  current: string | null;
+  pickable: boolean;
+  onPick: (sessionId: string) => void;
+}> = ({ current, pickable, onPick }) => {
   const { t } = useTranslation();
   const { sessions, loading } = useSessionSwitcher(true);
   return (
@@ -527,6 +539,7 @@ const SessionSwitcher: React.FC<{ current: string | null; onPick: (sessionId: st
             'truncate px-3 py-1.5 text-left text-[13px] hover:bg-muted-soft',
             session.id === current && 'font-medium text-primary-ink',
           )}
+          disabled={!pickable}
           onClick={() => onPick(session.id)}
         >
           {session.title || t('pet.untitled')}
