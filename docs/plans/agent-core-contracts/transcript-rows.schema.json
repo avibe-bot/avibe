@@ -37,6 +37,21 @@
         "message": {
           "$ref": "message.schema.json#/definitions/AssistantMessage",
           "description": "Verbatim, including quick-reply blocks and file:// links that the display copy rewrites."
+        },
+        "request": {
+          "type": "object",
+          "description": "C-9 (context.md section 2): the request this response answered, as sent, for the estimate anchor. Written only when context management is on.",
+          "required": [
+            "tokens"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "UTF-8/4 tokens of the whole request: system prompt, tool definitions, and messages."
+            }
+          }
         }
       }
     },
@@ -96,6 +111,10 @@
                 }
               },
               "description": "Set when the command loaded a skill (`vibe skill load`); used for rehydration after compaction."
+            },
+            "path": {
+              "type": "string",
+              "description": "C-9 (context.md section 7): the path argument a read, write, or edit ran with and succeeded on, after before_tool rewrites. Written only when context management is on."
             }
           }
         }
@@ -322,7 +341,7 @@
         },
         "context": {
           "type": "object",
-          "description": "Context-management guard state, written only once it differs from its default.",
+          "description": "Context-management guard state (context.md section 10). Written only by C-9's own commits, together with the hook state of that commit point; projection takes it from the latest agent_state row that carries it.",
           "required": [
             "failures",
             "ineffective",

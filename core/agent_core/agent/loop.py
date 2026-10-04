@@ -17,7 +17,7 @@ from collections import deque
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional, Sequence, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
 from core.agent_core.agent.checkpoint import CheckpointPolicy
 from core.agent_core.agent.events import (
@@ -77,14 +77,13 @@ from core.agent_core.harness.context import (
     MAX_ROLLS,
     PAUSE_AFTER,
     PROMPT_VERSION,
-    Anchor,
     Budget,
     ContextConfig,
     StateRequest,
     add_usage,
-    anchor,
     budget,
     carried_skills,
+    checkpoint_max_tokens,
     checkpoint_request,
     checkpoint_text,
     clear_edit,
@@ -92,11 +91,15 @@ from core.agent_core.harness.context import (
     compaction_payload,
     fit_result,
     half_cut,
+    last_anchor,
+    message_tokens,
     messages_tokens,
     normal_cut,
     output_tokens,
+    request_facts,
     request_tokens,
     rolling_cut,
+    sent_tokens,
     summarized_to_seq,
     text_tokens,
     unit_tokens,
@@ -151,8 +154,6 @@ class _Exhausted(Exception):
 _GUARD_DEFAULT: dict[str, Any] = {"failures": 0, "ineffective": 0, "paused": False}
 #: The checkpoint request without a focus, as the fit checks measure it.
 _CHECKPOINT_REQUEST = checkpoint_request()
-#: Recent answered requests kept to anchor the estimate (section 2); older ones rarely still match.
-_ANCHORS_KEPT = 4
 
 
 async def _silent(*_: Any, **__: Any) -> None:
@@ -167,33 +168,35 @@ class _Ladder:
     summary_failed: bool = False
     rolls: int = 0
     overflows: int = 0
-
-
-@dataclass(frozen=True)
-class _Sizing:
-    """The next conversation request in units, with its budget on the route resolved for it."""
-
-    selected: ModelSelection
-    system: str
-    tools: tuple[ToolSpec, ...]
-    rehydrated: tuple[Message, ...]
-    view: ContextView
-    budget: Budget
-
-    @property
-    def messages(self) -> tuple[Message, ...]:
-        return (*self.rehydrated, *self.view.messages)
-
-    def prefix(self, cut: int) -> tuple[Message, ...]:
-        """The projected messages up to ``cut``: what a rolling checkpoint summarizes."""
-        head = (self.view.checkpoint,) if self.view.checkpoint is not None else ()
-        return (*self.rehydrated, *head, *(message for unit in self.view.units[:cut] for message in unit.messages))
+    #: The provider refused the request as overflow: the next stage takes a ladder step whatever it measures.
+    refused: bool = False
 
 
 @dataclass(frozen=True)
 class _Attempt:
+    """One model attempt of the run: the C-9 attempt ledger's entry (context.md section 10).
+
+    ``message`` is the response, or the partial a failed attempt carried.
+    """
+
+    purpose: Literal["conversation", "checkpoint"]
+    request: ModelRequest
+    message: Optional[AssistantMessage]
+    error: Optional[ProviderError] = None
+
+
+@dataclass(frozen=True)
+class _Outcome:
     ok: bool
     overflow: bool = False
+
+
+class _ForkTooLarge(Exception):
+    """A checkpoint request that cannot fit the window; it is never sent."""
+
+
+#: Tools whose path argument is a C-9 artifact.
+_ARTIFACT_TOOLS = frozenset({"read", "write", "edit"})
 
 
 class Agent:
@@ -252,9 +255,10 @@ class Agent:
         self._committed_state: dict[str, Any] = {}
         self._committed_state_json = "{}"
         self._guard: dict[str, Any] = dict(_GUARD_DEFAULT)
-        self._committed_guard: Optional[dict[str, Any]] = None
+        self._committed_guard: dict[str, Any] = dict(_GUARD_DEFAULT)
+        # The run's attempt ledger (C-9): every model attempt, in order.
+        self._attempts: list[_Attempt] = []
         self._last_model_at: Optional[float] = None
-        self._anchors: tuple[Anchor, ...] = ()
         self._seq = 0
 
     def set_tools(self, tools: Sequence[Tool]) -> None:
@@ -387,28 +391,20 @@ class Agent:
                     self._running = self._open = False
                     self._run_tools = None
 
-    def _guard_payload(self) -> Optional[dict[str, Any]]:
-        """``AgentState.context``: written only once the guard state differs from its default."""
-        return None if self._guard == _GUARD_DEFAULT else dict(self._guard)
-
     async def _save_state(self, *, cleanup: bool = False) -> None:
+        """Hook state at a commit point. C-9 guard state is written only by ``_commit_context``."""
         representation = state_representation(self._ctx.state)
-        guard = self._guard_payload()
-        if representation == self._committed_state_json and guard == self._committed_guard:
+        if representation == self._committed_state_json:
             return
         state = deepcopy(self._ctx.state)
-        payload: dict[str, Any] = {"version": 1, "state": state}
-        if guard is not None:
-            payload["context"] = guard
 
         async def persist() -> ContextEntry:
-            return await self.store.append_payload(self.session_id, "agent_state", payload)
+            return await self.store.append_payload(self.session_id, "agent_state", {"version": 1, "state": state})
 
         row = await persist() if cleanup else await self._scope.call(persist, interruptible=False)
         self._rows.append(row)
         self._committed_state = deepcopy(state)
         self._committed_state_json = representation
-        self._committed_guard = guard
 
     async def _hook(self, factory: Callable[[], Awaitable[T]], *, cleanup: bool = False) -> T:
         result = await factory() if cleanup else await self._scope.call(factory)
@@ -435,8 +431,14 @@ class Agent:
     async def _response(self, message: AssistantMessage, *, final: bool) -> ContextEntry:
         self._validate_response(message)
         await self._save_state()
+        facts = {}
+        if self.context is not None:
+            # The request this response answered: the ledger's latest conversation attempt (the C-9 anchor).
+            attempt = next((item for item in reversed(self._attempts) if item.purpose == "conversation"), None)
+            if attempt is not None:
+                facts = {"request": request_facts(attempt.request)}
         row = await self._scope.call(
-            lambda: self.store.append_response(self.session_id, deepcopy(message), final=final),
+            lambda: self.store.append_response(self.session_id, deepcopy(message), final=final, **facts),
             interruptible=False,
         )
         self._rows.append(row)
@@ -464,7 +466,8 @@ class Agent:
                 self._committed_state_json = state_representation(self._ctx.state)
                 self._committed_state = deepcopy(self._ctx.state)
                 self._guard = {**_GUARD_DEFAULT, **deepcopy(dict(projection.context_state))}
-                self._committed_guard = self._guard_payload()
+                self._committed_guard = dict(self._guard)
+                self._attempts = []
                 loaded = True
                 system = self.system
                 self._run_tools = dict(self._tools)
@@ -577,22 +580,18 @@ class Agent:
         system: str,
         selected: ModelSelection,
         *,
-        messages: Optional[Sequence[Message]] = None,
+        messages: Sequence[Message],
         max_tokens: Optional[int] = None,
         hooks: Optional[Sequence[Hooks]] = None,
     ) -> tuple[ModelRequest, dict[str, Tool]]:
-        """The next request: the projected context, or ``messages`` for a checkpoint turn."""
+        """A request carrying ``messages``, after the user's ``before_model`` hooks: the first pipeline stage."""
         self._check_model_route(selected)
         capabilities = selected.capabilities
         tools = dict(self._run_tools if self._run_tools is not None else self._tools)
-        if messages is None:
-            messages = project(self._rows, system=system, rehydrated=self._rehydrated()).messages
-        else:
-            messages = tuple(deepcopy(messages))
         request = ModelRequest(
             endpoint=deepcopy(selected.endpoint),
             system=system,
-            messages=messages,
+            messages=tuple(deepcopy(messages)),
             tools=tuple(deepcopy(tool.spec) for tool in tools.values()),
             max_tokens=output_tokens(capabilities, self.max_tokens) if max_tokens is None else max_tokens,
             reasoning_effort=(
@@ -619,20 +618,22 @@ class Agent:
         emit: Callable[..., Awaitable[None]],
         selected: Optional[ModelSelection] = None,
         *,
-        build: Optional[Callable[[ModelSelection], Awaitable[tuple[ModelRequest, dict[str, Tool]]]]] = None,
-        partials: Optional[list[AssistantMessage]] = None,
+        compose: Optional[Callable[[ModelSelection], Awaitable[tuple[ModelRequest, dict[str, Tool]]]]] = None,
+        purpose: Literal["conversation", "checkpoint"] = "conversation",
     ) -> AsyncIterator[tuple[Done | ProviderError, dict[str, Tool]]]:
         """One model request with its transient retries.
 
-        A conversation request first applies C-9 (``_manage_context``) and enters
-        the overflow ladder when the provider rejects it as overflow. ``build``
-        makes a checkpoint turn's request instead: no context management, and
-        nothing it streams is committed; a retried attempt's partial goes to
-        ``partials`` for the turn's audit. Every answered request with valid
-        usage becomes an estimate anchor (C-9 section 2).
+        ``compose(selection)`` is the request pipeline: it returns the final request, which is sent unchanged.
+        A conversation request's pipeline is ``_compose``. Every attempt enters the run's attempt ledger. A
+        conversation request the provider rejects as overflow goes back through the pipeline with the ladder
+        told to shrink (C-9 section 8). A checkpoint attempt is never context.
         """
-        checkpoint = build is not None
         ladder = _Ladder()
+        if compose is None:
+
+            async def compose(selection: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
+                return await self._compose(system, selection, emit, ladder)
+
         retries = 0
         started = time.monotonic()
         retry_error: Optional[ProviderError] = None
@@ -649,12 +650,8 @@ class Agent:
             if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
                 yield retry_error, {}
                 return
-            attempt = selected
-            if build is not None:
-                request, tools = await build(selected)
-            else:
-                await self._manage_context(system, selected, emit, ladder)
-                request, tools = await self._request(system, selected)
+            route = selected
+            request, tools = await compose(selected)
             selected = None
             if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
                 yield retry_error, tools
@@ -682,8 +679,16 @@ class Agent:
                     self._last_model_at = self.context.clock()
                 if terminal is None:
                     terminal = ProviderError("unknown", "Provider stream ended without a terminal event.", False)
+                self._attempts.append(
+                    _Attempt(
+                        purpose,
+                        request,
+                        terminal.message if isinstance(terminal, Done) else terminal.partial,
+                        None if isinstance(terminal, Done) else terminal,
+                    )
+                )
                 relieve = (
-                    not checkpoint
+                    purpose == "conversation"
                     and self.context is not None
                     and isinstance(terminal, ProviderError)
                     and terminal.kind == "overflow"
@@ -695,10 +700,6 @@ class Agent:
                     else None
                 )
                 if delay is None and not relieve:
-                    if isinstance(terminal, Done):
-                        made = anchor(request.system, request.tools, request.messages, terminal.message)
-                        if made is not None:
-                            self._anchors = (*self._anchors[1 - _ANCHORS_KEPT :], made)
                     # The caller admits and commits this terminal inside the
                     # scope, BEFORE aclose. Never retry an accepted terminal.
                     yield terminal, tools
@@ -707,35 +708,32 @@ class Agent:
                 close = getattr(stream, "aclose", None)
                 if close is not None:
                     await self._cleanup(close, stream=True)
+            # The attempt is not the run's answer: its partial stays in the ledger, and a conversation
+            # attempt's billed usage is kept as a non-final row before the request is tried again.
+            if await self._keep_usage(self._attempts[-1], emit) or purpose == "checkpoint":
+                # Kept once, or never context: a later expiry must not commit it again.
+                terminal = replace(terminal, partial=None)
             if relieve:
-                # C-9 section 8: the request is retried once the ladder has made it smaller.
                 ladder.overflows += 1
+                ladder.refused = True
                 if ladder.overflows >= MAX_OVERFLOWS:
-                    raise self._exhausted(self._sizing(system, attempt))
-                await self._relieve(system, attempt, emit, ladder)
+                    view = context_view(self._rows)
+                    raise self._exhausted(request, view, budget(request, route.capabilities, transcript=view.messages))
                 retries, started, retry_error = 0, time.monotonic(), None
                 continue
-            if checkpoint:
-                # A checkpoint turn's attempt is never context; its partial is kept for the audit.
-                if partials is not None and terminal.partial is not None:
-                    partials.append(terminal.partial)
-                terminal = replace(terminal, partial=None)
-            if terminal.partial is not None and terminal.partial.usage is not None and not terminal.partial.content:
-                row = await self._response(terminal.partial, final=False)
-                if not self._consumer_closed:
-                    await emit(
-                        MessageCommitted,
-                        message_id=row.row_id,
-                        context_seq=row.context_seq,
-                        final=False,
-                    )
-                # This attempt has already been durably announced. Keep the
-                # retry decision, but do not carry the same partial through a
-                # later expiry path where _loop would commit it again.
-                terminal = replace(terminal, partial=None)
             retry_error = terminal
             retries += 1
             await self._scope.call(lambda: asyncio.sleep(delay))
+
+    async def _keep_usage(self, attempt: _Attempt, emit: Callable[..., Awaitable[None]]) -> bool:
+        """Commit a retried or relieved conversation attempt's usage-only partial; whether it did."""
+        partial = attempt.message
+        if attempt.purpose != "conversation" or partial is None or partial.usage is None or partial.content:
+            return False
+        row = await self._response(partial, final=False)
+        if not self._consumer_closed:
+            await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
+        return True
 
     async def _commit_model_message(self, message: AssistantMessage, emit: Callable[..., Awaitable[None]]) -> bool:
         """Finality and queued-input admission share one lock with the commit."""
@@ -936,12 +934,14 @@ class Agent:
             name=call.name,
             preview=json.dumps(call.arguments, ensure_ascii=False)[:500],
         )
+        executed = False
         if result is None:
             tool = tools.get(call.name)
             if tool is None:
                 result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
             else:
                 result = await self._execute(tool, call, emit)
+                executed = True
         if not end and not skip:
             for hook in self.hooks:
                 decision = await self._hook(lambda: hook.after_tool(call, result, self._ctx))
@@ -952,9 +952,15 @@ class Agent:
                     result = decision.result
         message = ToolResultMessage(call.id, call.name, result.content, result.is_error)
         validate_message_append(self._rows, session_id=self.session_id, kind="tool_result", message=message)
+        details = deepcopy(dict(result.details))
+        path = call.arguments.get("path")
+        if self.context is not None and executed and not result.is_error and call.name in _ARTIFACT_TOOLS:
+            if isinstance(path, str) and path:
+                # C-9 artifacts: the path the tool ran with, after every before_tool rewrite (invariant 2).
+                details["path"] = path
         await self._save_state()
         row = await self._scope.call(
-            lambda: self.store.append_tool_result(self.session_id, deepcopy(message), details=deepcopy(result.details)),
+            lambda: self.store.append_tool_result(self.session_id, deepcopy(message), details=details),
             interruptible=False,
         )
         self._rows.append(row)
@@ -1018,6 +1024,16 @@ class Agent:
             )
 
     # --- C-9 context management (agent-core-contracts/context.md) ---------------
+    #
+    # Invariants (context.md section 10):
+    # 1. Request pipeline: projection -> user before_model -> budget() on that final request -> C-9 stage
+    #    -> send. A stage that changes the context rebuilds the request from the top; nothing changes a
+    #    request after it is budgeted.
+    # 2. Tool pipeline: user before_tool -> checkpoint policy on the final arguments -> execute -> bound
+    #    every result; artifacts are recorded from the final arguments after execution.
+    # 3. ``_commit_context`` is the one writer of C-9 state: one transaction per transition, before any event.
+    # 4. ``self._attempts`` is the one record of model attempts; the audit and the anchor read from it.
+    # 5. An anchor holds only for the route that answered it (``harness.context.budget``).
 
     def _cache_cold(self) -> bool:
         """No model request for longer than the provider cache TTL (section 3)."""
@@ -1028,150 +1044,161 @@ class Agent:
                 break
         return last is not None and self.context.clock() - last > self.context.cache_ttl_s
 
-    def _tool_specs(self) -> tuple[ToolSpec, ...]:
-        return tuple(tool.spec for tool in (self._run_tools if self._run_tools is not None else self._tools).values())
-
-    def _budget(self, system: str, selected: ModelSelection, messages: Sequence[Message]) -> Budget:
-        """C-9 accounting for a request about to go out on ``selected``: evaluated afresh, never kept."""
-        return budget(
-            system=system,
-            tools=self._tool_specs(),
-            messages=messages,
-            capabilities=selected.capabilities,
-            max_tokens=self.max_tokens,
-            anchors=self._anchors,
-        )
-
-    def _sizing(self, system: str, selected: ModelSelection) -> _Sizing:
-        """The next conversation request, in units, with its budget on ``selected``."""
-        rehydrated = self._rehydrated()
-        view = context_view(self._rows)
-        plan = self._budget(system, selected, (*rehydrated, *view.messages))
-        return _Sizing(selected, system, self._tool_specs(), rehydrated, view, plan)
-
-    async def _manage_context(
+    async def _compose(
         self, system: str, selected: ModelSelection, emit: Callable[..., Awaitable[None]], ladder: _Ladder
-    ) -> None:
-        """Section 3: clear, then at T a normal checkpoint, or the ladder when no fork can take the context."""
-        if self.context is None:
-            return
-        self._check_model_route(selected)
-        sizing = self._sizing(system, selected)
-        if self.context.clear_tool_results and (
-            sizing.budget.est >= CLEAR_SOFT_RATIO * sizing.budget.threshold or self._cache_cold()
-        ):
-            targets = clearable_results(sizing.view)
-            if targets:
-                await self._save_state()
-                for target in targets:
-                    payload = clear_edit(target)
-                    row = await self._scope.call(
-                        lambda: self.store.append_payload(self.session_id, "context_edit", payload),
-                        interruptible=False,
-                    )
-                    self._rows.append(row)
-                sizing = self._sizing(system, selected)
-        if sizing.budget.est < sizing.budget.threshold or ladder.compacted or self._guard["paused"]:
-            return
-        cut = normal_cut(sizing.view.units, sizing.budget.keep)
-        if cut is None:
-            return
-        ladder.compacted = True
-        if not self._budget(system, selected, (*sizing.messages, _CHECKPOINT_REQUEST)).fork_fits:
-            await self._relieve(system, selected, emit, ladder)
-            return
-        attempt = await self._checkpoint(sizing, cut, mode="normal", reason="threshold", emit=emit)
-        if attempt.overflow:
-            # The whole context does not fit a fork after all (section 8 b).
-            await self._relieve(system, selected, emit, ladder)
-        elif not attempt.ok:
-            # The context stays as it is and the request is sent; an overflow then skips to (c).
-            ladder.summary_failed = True
-        elif not self._sizing(system, selected).budget.fits:
-            # The request right after a checkpoint is measured like any other.
-            await self._relieve(system, selected, emit, ladder)
-
-    async def _relieve(
-        self, system: str, selected: ModelSelection, emit: Callable[..., Awaitable[None]], ladder: _Ladder
-    ) -> None:
-        """Section 8: step by step until the request fits, at least one step; raises ``_Exhausted`` at (d)."""
+    ) -> tuple[ModelRequest, dict[str, Tool]]:
+        """The conversation request pipeline (invariant 1)."""
         while True:
-            sizing = self._sizing(system, selected)
-            units = sizing.view.units
-            least = (*sizing.prefix(0), *(units[-1].messages if units else ()))
-            if not self._budget(system, selected, least).can_fit:
-                # (d) already: even the current request and the latest tool batch alone cannot fit.
-                raise self._exhausted(sizing)
-            models = not ladder.summary_failed and not self._guard["paused"]
-            if models and not ladder.compacted:
-                ladder.compacted = True
-                cut = normal_cut(units, sizing.budget.keep)
-                if cut is not None and self._budget(system, selected, (*sizing.messages, _CHECKPOINT_REQUEST)).fork_fits:
-                    attempt = await self._checkpoint(sizing, cut, mode="normal", reason="overflow", emit=emit)
-                    if attempt.ok and self._sizing(system, selected).budget.fits:
-                        return
-                    ladder.summary_failed = not attempt.ok and not attempt.overflow
-                    continue
-            if models and ladder.rolls < MAX_ROLLS:
+            view = context_view(self._rows)
+            request, tools = await self._request(system, selected, messages=(*self._rehydrated(), *view.messages))
+            if self.context is None:
+                return request, tools
+            plan = budget(request, selected.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view))
+            if not await self._stage(system, selected, request, view, plan, emit, ladder):
+                return request, tools
 
-                def fork_fits(cut: int) -> bool:
-                    return self._budget(system, selected, (*sizing.prefix(cut), _CHECKPOINT_REQUEST)).fork_fits
-
-                cut = rolling_cut(units, fork_fits)
+    async def _stage(
+        self,
+        system: str,
+        selected: ModelSelection,
+        request: ModelRequest,
+        view: ContextView,
+        plan: Budget,
+        emit: Callable[..., Awaitable[None]],
+        ladder: _Ladder,
+    ) -> bool:
+        """C-9 on the final request (sections 3 and 8); True when it changed the context."""
+        head = [message for unit in view.units[:-1] for message in unit.messages]
+        if max(0, plan.est - messages_tokens(head)) + plan.output > plan.input_limit:
+            # (d): even the checkpoint and the last unit alone cannot fit. The provider never sees it.
+            raise self._exhausted(request, view, plan)
+        shrink, ladder.refused = ladder.refused, False
+        if not shrink:
+            if self.context.clear_tool_results and (
+                plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold()
+            ):
+                targets = clearable_results(view)
+                if targets:
+                    await self._commit_context([("context_edit", clear_edit(target)) for target in targets], self._guard)
+                    return True
+            if plan.est >= plan.threshold and not ladder.compacted and not self._guard["paused"]:
+                cut = normal_cut(view.units, plan.keep)
                 if cut is not None:
-                    ladder.rolls += 1
-                    attempt = await self._checkpoint(sizing, cut, mode="rolling", reason="overflow", emit=emit)
-                    if not attempt.ok:
-                        ladder.summary_failed = True
-                    elif self._sizing(system, selected).budget.fits:
-                        return
-                    continue
-                ladder.rolls = MAX_ROLLS
-            cut = half_cut(units)
-            if cut is None:
-                if ladder.overflows or not sizing.budget.can_fit:
-                    raise self._exhausted(sizing)
-                return  # nothing more can move out, and the provider has not refused it yet
-            await self._drop(sizing, cut, emit)
-            if self._sizing(system, selected).budget.fits:
-                return
+                    ladder.compacted = True
+                    if not self._fork_can_fit(selected, plan, plan.est):
+                        shrink = True  # no fork can take the whole context: the ladder from (b)
+                    else:
+                        outcome = await self._checkpoint(
+                            system, selected, request, view, plan, cut, mode="normal", reason="threshold", emit=emit
+                        )
+                        if outcome.ok:
+                            return True
+                        # A checkpoint request that overflowed means the whole context cannot fit a fork (b).
+                        shrink, ladder.summary_failed = outcome.overflow, not outcome.overflow
+            if not shrink and plan.fits:
+                return False
+            # With no checkpoint request left to try, a request that can fit at all is sent; the provider judges.
+            if not shrink and (ladder.summary_failed or self._guard["paused"]) and plan.can_fit:
+                return False
+        return await self._shrink(system, selected, request, view, plan, emit, ladder)
 
-    def _exhausted(self, sizing: _Sizing) -> _Exhausted:
-        """Section 8 (d): what fills the context, for the user's stop message."""
-        units = sizing.view.units
-        last = units[-1] if units else None
-        history = sizing.prefix(len(units) - 1 if units else 0)
+    def _fork_can_fit(self, selected: ModelSelection, plan: Budget, est: int) -> bool:
+        """Whether a fork carrying ``est`` tokens and the checkpoint request can fit: a choice, not admission.
+
+        The fork itself goes through the request pipeline and is budgeted there.
+        """
+        cap = checkpoint_max_tokens(selected.capabilities, self.max_tokens)
+        return est + message_tokens(_CHECKPOINT_REQUEST) + cap <= plan.input_limit
+
+    async def _shrink(
+        self,
+        system: str,
+        selected: ModelSelection,
+        request: ModelRequest,
+        view: ContextView,
+        plan: Budget,
+        emit: Callable[..., Awaitable[None]],
+        ladder: _Ladder,
+    ) -> bool:
+        """One step of the overflow ladder (section 8); False when nothing can move and the provider judges."""
+        units = view.units
+        if not ladder.summary_failed and not self._guard["paused"] and not ladder.compacted:
+            ladder.compacted = True
+            cut = normal_cut(units, plan.keep)
+            if cut is not None and self._fork_can_fit(selected, plan, plan.est):
+                outcome = await self._checkpoint(
+                    system, selected, request, view, plan, cut, mode="normal", reason="overflow", emit=emit
+                )
+                if outcome.ok:
+                    return True
+                ladder.summary_failed = not outcome.overflow
+        if not ladder.summary_failed and not self._guard["paused"] and ladder.rolls < MAX_ROLLS:
+            tails = [0] * (len(units) + 1)
+            for index in range(len(units) - 1, -1, -1):
+                tails[index] = tails[index + 1] + unit_tokens(units[index])
+            whole = sent_tokens(request)
+            cut = rolling_cut(units, lambda cut: self._fork_can_fit(selected, plan, whole - tails[cut]))
+            if cut is not None:
+                ladder.rolls += 1
+                outcome = await self._checkpoint(
+                    system, selected, request, view, plan, cut, mode="rolling", reason="overflow", emit=emit
+                )
+                if outcome.ok:
+                    return True
+                ladder.summary_failed = True
+            else:
+                ladder.rolls = MAX_ROLLS
+        cut = half_cut(units)
+        if cut is not None:
+            await self._drop(request, view, plan, cut, emit)
+            return True
+        if ladder.overflows or not plan.can_fit:
+            raise self._exhausted(request, view, plan)
+        return False
+
+    def _exhausted(self, request: ModelRequest, view: ContextView, plan: Budget) -> _Exhausted:
+        """Section 8 (d): what fills the request, for the user's stop message."""
+        last = view.units[-1] if view.units else None
+        last_tokens = unit_tokens(last) if last is not None else 0
         parts = [
-            ContextPart("system", text_tokens(sizing.system)),
-            ContextPart("tools", request_tokens("", sizing.tools, ())),
-            ContextPart("history", messages_tokens(history)),
+            ContextPart("system", text_tokens(request.system)),
+            ContextPart("tools", request_tokens("", request.tools, ())),
+            ContextPart("history", max(0, messages_tokens(request.messages) - last_tokens)),
         ]
         if last is not None:
             name = "current_request" if last.lead.kind == "input" else "latest_tool_batch"
-            parts.append(ContextPart(name, unit_tokens(last)))
-        parts.append(ContextPart("output", sizing.budget.output + sizing.budget.margin))
-        return _Exhausted(sizing.budget.input_limit, tuple(parts))
+            parts.append(ContextPart(name, last_tokens))
+        parts.append(ContextPart("output", plan.output + plan.margin))
+        return _Exhausted(plan.input_limit, tuple(parts))
 
     async def _manual_compaction(
         self, system: str, selected: ModelSelection, focus: Optional[str], emit: Callable[..., Awaitable[None]]
     ) -> RunEndReason:
         """Section 10: clear the pause and both counters, then a normal checkpoint between runs."""
-        self._guard = dict(_GUARD_DEFAULT)
-        sizing = self._sizing(system, selected)
-        cut = normal_cut(sizing.view.units, sizing.budget.keep)
+        view = context_view(self._rows)
+        # Measured for the cut only; it is never sent, so the user's before_model hooks do not see it.
+        request, _ = await self._request(system, selected, messages=(*self._rehydrated(), *view.messages), hooks=())
+        plan = budget(request, selected.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view))
+        cut = normal_cut(view.units, plan.keep)
         if cut is None:
             # Everything is within the kept tail: the adapter tells the user there is nothing to compact yet.
-            await self._save_state()
+            await self._commit_context([], dict(_GUARD_DEFAULT))
             await emit(CompactionSkipped, reason="manual")
             return "completed"
-        attempt = await self._checkpoint(
-            sizing, cut, mode="normal", reason="manual", emit=emit, focus=focus, mid_turn=False
+        self._guard = dict(_GUARD_DEFAULT)  # the checkpoint's transition starts from a cleared pause
+        outcome = await self._checkpoint(
+            system, selected, request, view, plan, cut, mode="normal", reason="manual", emit=emit, focus=focus,
+            mid_turn=False,
         )
-        return "completed" if attempt.ok else "error"
+        return "completed" if outcome.ok else "error"
 
     async def _checkpoint(
         self,
-        sizing: _Sizing,
+        system: str,
+        selected: ModelSelection,
+        request: ModelRequest,
+        view: ContextView,
+        plan: Budget,
         cut: int,
         *,
         mode: str,
@@ -1179,46 +1206,53 @@ class Agent:
         emit: Callable[..., Awaitable[None]],
         focus: Optional[str] = None,
         mid_turn: bool = True,
-    ) -> _Attempt:
+    ) -> _Outcome:
         """Sections 6 and 7: a forked checkpoint turn; on success its row joins the context."""
         await emit(CompactionStarted, reason=reason)
         prompt = checkpoint_request(focus)
-        base = sizing.messages if mode == "normal" else sizing.prefix(cut)
+        rehydrated = self._rehydrated()
+        head = (view.checkpoint,) if view.checkpoint is not None else ()
+        base = view.messages if mode == "normal" else (*head, *(m for unit in view.units[:cut] for m in unit.messages))
+        anchor = last_anchor(self._rows, view)
         policy = CheckpointPolicy(cwd=self.cwd, scratch_dir=self.context.scratch_dir)
-        hooks = (*self.hooks, policy)
         turn: list[Message] = []  # what the turn's next request carries after the checkpoint request
-        produced: list[Message] = []  # what the turn produced, failed attempts' partials included
-        partials: list[AssistantMessage] = []
-        usage: Optional[Usage] = None
-        origin = None
+        produced: list[Message] = []  # the audit: every attempt's message from the ledger, and the tool results
+        start = mark = len(self._attempts)
+        measured: list[Budget] = []  # the budget of the turn's latest request, as sent
         rounds = 0
         error: Optional[str] = None
         overflow = False
         checkpoint = ""
-        selected: Optional[ModelSelection] = sizing.selected
-        route = sizing.selected  # the route the turn's latest request went out on
+        origin = None
+        selection: Optional[ModelSelection] = selected
 
-        async def build(selection: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
-            nonlocal route
-            route = selection
-            messages = (*base, prompt, *turn)
-            plan = self._budget(sizing.system, selection, messages)
-            return await self._request(
-                sizing.system, selection, messages=messages, max_tokens=plan.checkpoint_max_tokens, hooks=hooks
+        async def compose(route: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
+            transcript = (*base, prompt, *turn)
+            fork, tools = await self._request(
+                system,
+                route,
+                messages=(*rehydrated, *transcript),
+                max_tokens=checkpoint_max_tokens(route.capabilities, self.max_tokens),
             )
+            fork_plan = budget(fork, route.capabilities, transcript=transcript, anchor=anchor)
+            if not fork_plan.can_fit:
+                raise _ForkTooLarge()
+            measured[:] = [fork_plan]
+            return fork, tools
 
         while True:
-            async with self._model(sizing.system, _silent, selected, build=build, partials=partials) as (
-                terminal,
-                tools,
-            ):
-                selected = None
-            if isinstance(terminal, ProviderError) and terminal.partial is not None:
-                partials.append(terminal.partial)
-            for partial in partials:
-                produced.append(partial)
-                usage = add_usage(usage, partial.usage)
-            partials.clear()
+            try:
+                async with self._model(system, _silent, selection, compose=compose, purpose="checkpoint") as (
+                    terminal,
+                    tools,
+                ):
+                    selection = None
+            except _ForkTooLarge:
+                overflow, error = True, "overflow: the checkpoint request does not fit the model's input limit."
+                break
+            finally:
+                produced.extend(item.message for item in self._attempts[mark:] if item.message is not None)
+                mark = len(self._attempts)
             if isinstance(terminal, ProviderError):
                 overflow = terminal.kind == "overflow"
                 error = f"{terminal.kind}: {terminal.message}"
@@ -1226,8 +1260,6 @@ class Agent:
             message = terminal.message
             self._scope.check()
             turn.append(message)
-            produced.append(message)
-            usage = add_usage(usage, message.usage)
             origin = message.origin
             if message.stop_reason == "stop" and not message.tool_calls:
                 checkpoint = checkpoint_text(message)
@@ -1243,15 +1275,21 @@ class Agent:
                 error = "The checkpoint turn kept calling tools after its tool budget was used up."
                 break
             rounds += 1
+            sent = measured[0]
+            grown = sent.est + message_tokens(message)
             for call in message.tool_calls:
                 self._scope.check()
-                # The bound is the window of the route the turn is on: a tool runs only while its next
-                # request can still grow by the floor (section 6).
-                room = self._budget(sizing.system, route, (*base, prompt, *turn)).fork_room
+                # The bound is the window of the turn's route: a tool runs only while the next request can
+                # still grow by the floor (section 6).
+                room = sent.input_limit - grown - sent.output
                 policy.open = policy.open and rounds <= CHECKPOINT_TOOL_ROUNDS and room >= CHECKPOINT_TOOL_FLOOR
-                result = await self._checkpoint_tool(call, tools, hooks, limit=room - CHECKPOINT_TOOL_SLACK)
+                result = await self._checkpoint_tool(call, tools, policy, limit=room - CHECKPOINT_TOOL_SLACK)
                 turn.append(result)
                 produced.append(result)
+                grown += message_tokens(result)
+        usage = None
+        for item in self._attempts[start:]:
+            usage = add_usage(usage, item.message.usage if item.message is not None else None)
         record: dict[str, Any] = {
             "version": 1,
             "reason": reason,
@@ -1261,21 +1299,22 @@ class Agent:
         if usage is not None:
             record["usage"] = usage_to_dict(usage)
         if not checkpoint:
-            # The guard is durable before anyone hears of the outcome (section 10).
-            paused = self._count(ok=False)
-            await self._save_state()
+            guard, paused = self._counted(ok=False)
+            await self._commit_context([], guard)
             await self._record_turn({**record, "outcome": "failed", "error": error, "compaction_event_id": None})
             await emit(CompactionFailed, reason=reason, error=error)
             if paused:
                 await emit(CompactionPaused, cause=paused)
-            return _Attempt(False, overflow)
+            return _Outcome(False, overflow)
         summarizer = {
             "origin": {"provider": origin.provider, "api": origin.api, "model": origin.model},
             "prompt_version": PROMPT_VERSION,
             "rounds": rounds,
         }
         row, paused = await self._commit_compaction(
-            sizing,
+            request,
+            view,
+            plan,
             cut,
             mode=mode,
             reason=reason,
@@ -1296,46 +1335,55 @@ class Agent:
         )
         if paused:
             await emit(CompactionPaused, cause=paused)
-        return _Attempt(True)
+        return _Outcome(True)
 
-    def _count(self, *, ok: bool, ineffective: Optional[bool] = None) -> Optional[str]:
-        """Count one checkpoint attempt (section 10); the pause cause when it paused auto-compaction."""
+    def _counted(self, *, ok: bool, ineffective: Optional[bool] = None) -> tuple[dict[str, Any], Optional[str]]:
+        """The guard after one checkpoint attempt (section 10), and the pause cause when it pauses now."""
+        guard = dict(self._guard)
         cause = None
         if not ok:
-            self._guard["failures"] += 1
-            cause = "failures" if self._guard["failures"] >= PAUSE_AFTER else None
+            guard["failures"] += 1
+            cause = "failures" if guard["failures"] >= PAUSE_AFTER else None
         else:
-            self._guard["failures"] = 0
+            guard["failures"] = 0
             if ineffective is not None:
-                self._guard["ineffective"] = self._guard["ineffective"] + 1 if ineffective else 0
-                cause = "ineffective" if self._guard["ineffective"] >= PAUSE_AFTER else None
-        if cause is None or self._guard["paused"]:
-            return None
-        self._guard["paused"] = True
-        return cause
+                guard["ineffective"] = guard["ineffective"] + 1 if ineffective else 0
+                cause = "ineffective" if guard["ineffective"] >= PAUSE_AFTER else None
+        if cause is None or guard["paused"]:
+            return guard, None
+        guard["paused"] = True
+        return guard, cause
 
     async def _checkpoint_tool(
-        self, original: ToolCallBlock, tools: Mapping[str, Tool], hooks: Sequence[Hooks], *, limit: int
+        self, original: ToolCallBlock, tools: Mapping[str, Tool], policy: CheckpointPolicy, *, limit: int
     ) -> ToolResultMessage:
-        """A checkpoint turn's call: gated by the policy, run silently, cut to ``limit`` tokens, never committed."""
-        call, result, end = await self._gate(deepcopy(original), hooks)
+        """The checkpoint turn's tool pipeline (invariant 2); nothing it produces is committed."""
+        call, result, end = await self._gate(deepcopy(original), self.hooks)
         if end:
             raise _Ended()
+        if result is None:
+            denial = await policy.before_tool(call, self._ctx)  # judged on the final arguments
+            if denial is not None:
+                result = ToolResult((text(denial.reason),), is_error=True)
         if result is None:
             tool = tools.get(call.name)
             if tool is None:
                 result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
             else:
                 result = await self._execute(tool, call, _silent)
-                result = replace(result, content=fit_result(result.content, limit))
-        return ToolResultMessage(call.id, call.name, result.content, result.is_error)
+        # Every result that enters the turn is bounded, a hook's denial included.
+        return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
 
-    async def _drop(self, sizing: _Sizing, cut: int, emit: Callable[..., Awaitable[None]]) -> None:
+    async def _drop(
+        self, request: ModelRequest, view: ContextView, plan: Budget, cut: int, emit: Callable[..., Awaitable[None]]
+    ) -> None:
         """Section 8 (c): the earliest part moves out with no model call; the previous checkpoint stays."""
         await emit(CompactionStarted, reason="overflow")
-        previous = sizing.view.compaction
+        previous = view.compaction
         row, _ = await self._commit_compaction(
-            sizing,
+            request,
+            view,
+            plan,
             cut,
             mode="dropped",
             reason="overflow",
@@ -1356,7 +1404,9 @@ class Agent:
 
     async def _commit_compaction(
         self,
-        sizing: _Sizing,
+        request: ModelRequest,
+        view: ContextView,
+        plan: Budget,
         cut: int,
         *,
         mode: str,
@@ -1367,15 +1417,14 @@ class Agent:
         usage: Optional[Usage],
         mid_turn: bool,
     ) -> tuple[ContextEntry, Optional[str]]:
-        """Write the row, counting a checkpoint request's success first so the guard commits with it."""
-        view = sizing.view
+        """The checkpoint row and, for a checkpoint request, the guard it moves, in one ``_commit_context``."""
         host = self.context.host
         skills = carried_skills(view, cut)
         state: tuple[str, ...] = ()
         earlier = None
         if host is not None:
-            request = StateRequest(self.session_id, skills, mid_turn)
-            state = tuple(await self._scope.call(lambda: host.render_state(request)))
+            needed = StateRequest(self.session_id, skills, mid_turn)
+            state = tuple(await self._scope.call(lambda: host.render_state(needed)))
             if not all(isinstance(item, str) for item in state):
                 raise TypeError("ContextHost.render_state must return strings")
             earlier = host.earlier_record(self.session_id, summarized_to_seq(view, cut))
@@ -1389,27 +1438,48 @@ class Agent:
             skills=skills,
             state=state,
             earlier_record=earlier,
-            tokens_before=sizing.budget.est,
-            threshold=sizing.budget.threshold,
+            tokens_before=plan.est,
+            threshold=plan.threshold,
             summarizer=summarizer,
             usage=usage,
         )
         seq = max((row.context_seq for row in self._rows), default=0) + 1
         candidate = ContextEntry(self.session_id, seq, "compaction", "uncommitted-compaction", payload=payload)
         after = context_view([*self._rows, candidate])
-        payload["tokens_after_estimate"] = self._budget(
-            sizing.system, sizing.selected, (*sizing.rehydrated, *after.messages)
-        ).est
-        paused = None
+        # What the next request would carry; it is budgeted for real when it is built.
+        payload["tokens_after_estimate"] = request_tokens(
+            request.system, request.tools, (*self._rehydrated(), *after.messages)
+        )
+        guard, paused = self._guard, None
         if summarizer is not None:
             ineffective = payload["tokens_after_estimate"] >= INEFFECTIVE_RATIO * payload["threshold"]
-            paused = self._count(ok=True, ineffective=ineffective if mode == "normal" else None)
-        await self._save_state()
-        row = await self._scope.call(
-            lambda: self.store.append_payload(self.session_id, "compaction", payload), interruptible=False
-        )
-        self._rows.append(row)
+            guard, paused = self._counted(ok=True, ineffective=ineffective if mode == "normal" else None)
+        (row,) = await self._commit_context([("compaction", payload)], guard)
         return row, paused
+
+    async def _commit_context(
+        self, rows: Sequence[tuple[Literal["compaction", "context_edit"], Mapping[str, Any]]], guard: Mapping[str, Any]
+    ) -> tuple[ContextEntry, ...]:
+        """The one writer of C-9 state (invariant 3).
+
+        Edits, a checkpoint, and the guard, with the hook state of this commit point, go in one transaction,
+        before any event announces the transition. A failed commit changes nothing, in memory or on disk.
+        """
+        entries: list[tuple[str, Mapping[str, Any]]] = []
+        representation = state_representation(self._ctx.state)
+        state = deepcopy(self._ctx.state)
+        if dict(guard) != self._committed_guard or representation != self._committed_state_json:
+            entries.append(("agent_state", {"version": 1, "state": state, "context": dict(guard)}))
+        entries.extend(rows)
+        if not entries:
+            return ()
+        committed = await self._scope.call(
+            lambda: self.store.append_payloads(self.session_id, deepcopy(entries)), interruptible=False
+        )
+        self._rows.extend(committed)
+        self._guard, self._committed_guard = dict(guard), dict(guard)
+        self._committed_state, self._committed_state_json = state, representation
+        return tuple(row for row in committed if row.kind != "agent_state")
 
     async def _record_turn(self, payload: Mapping[str, Any]) -> None:
         """The checkpoint turn's audit row (section 6); never context, so losing it never fails the run."""

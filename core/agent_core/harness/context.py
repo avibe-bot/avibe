@@ -18,8 +18,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
-from core.agent_core.ai.provider import ModelCapabilities
-from core.agent_core.harness.projection import ContextView, Unit
+from core.agent_core.ai._common import endpoint_origin
+from core.agent_core.ai.provider import ModelCapabilities, ModelRequest
+from core.agent_core.harness.projection import ContextView, Unit, context_view
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
     AssistantMessage,
@@ -247,51 +248,80 @@ def add_usage(total: Optional[Usage], usage: Optional[Usage]) -> Optional[Usage]
 
 @dataclass(frozen=True)
 class Anchor:
-    """A request the provider answered with valid usage, with the response it answered (section 2)."""
+    """The latest response in the context with valid usage and request facts on its row (section 2).
 
-    system: str
-    tools: tuple[ToolSpec, ...]
-    messages: tuple[Message, ...]
+    Rebuilt from the rows, so it holds across a new Agent and a new Turn.
+    """
+
+    #: What its request carried from the transcript, before the response.
+    transcript: tuple[Message, ...]
     response: AssistantMessage
+    #: UTF-8/4 of the whole request it answered, as sent (``ModelResponse.request.tokens``).
+    request_tokens: int
 
 
-def anchor(system: str, tools: Sequence[ToolSpec], messages: Sequence[Message], response: Message) -> Optional[Anchor]:
-    """The anchor a response makes, or None: a failed or aborted response, or no usage, never anchors."""
-    if (
-        isinstance(response, AssistantMessage)
-        and response.stop_reason not in {"error", "aborted"}
-        and response.usage is not None
-        and usage_total(response.usage) > 0
-    ):
-        return Anchor(system, tuple(tools), tuple(messages), response)
+def _valid_usage(message: Optional[Message]) -> bool:
+    return (
+        isinstance(message, AssistantMessage)
+        and message.stop_reason not in {"error", "aborted"}
+        and message.usage is not None
+        and usage_total(message.usage) > 0
+    )
+
+
+def sent_tokens(request: ModelRequest) -> int:
+    """UTF-8/4 of a whole request: system prompt, tool definitions, and messages."""
+    return request_tokens(request.system, request.tools, request.messages)
+
+
+def request_facts(request: ModelRequest) -> dict[str, int]:
+    """``ModelResponse.request``: what a response's row records about the request it answered."""
+    return {"tokens": sent_tokens(request)}
+
+
+def last_anchor(rows: Sequence[ContextEntry], view: ContextView) -> Optional[Anchor]:
+    """The anchor the rows hold: their latest response in the context with valid usage and request facts."""
+    for unit in reversed(view.units):
+        lead = unit.lead
+        facts = lead.payload.get("request") if lead.kind == "response" else None
+        if facts is None or not _valid_usage(lead.message):
+            continue
+        # Projection is pure: the rows before the response give exactly the transcript its request carried.
+        before = context_view([row for row in rows if row.context_seq < lead.context_seq]).messages
+        return Anchor(before, lead.message, facts["tokens"])
     return None
 
 
 def output_tokens(capabilities: ModelCapabilities, configured: int) -> int:
-    """``O``: the hop's ``max_output_tokens`` (8,192 when unknown), capped by the Agent's output budget."""
+    """``O`` of a conversation request: the hop's ``max_output_tokens`` (8,192 when unknown), capped by the
+    Agent's output budget."""
     hop = capabilities.max_output_tokens
     return min(configured, DEFAULT_MAX_OUTPUT_TOKENS if hop is None else hop)
 
 
-def _estimate(
-    system: str, tools: Sequence[ToolSpec], messages: Sequence[Message], anchors: Sequence[Anchor]
-) -> int:
-    """Usage of the latest request whose prefix is still this one's, plus what follows its response.
+def checkpoint_max_tokens(capabilities: ModelCapabilities, configured: int) -> int:
+    """A checkpoint request's ``max_tokens``: ``min(16,000, O)`` (section 6)."""
+    return min(CHECKPOINT_MAX_TOKENS, output_tokens(capabilities, configured))
 
-    With no such request, UTF-8 bytes / 4 of the whole request.
+
+def _estimate(request: ModelRequest, transcript: Sequence[Message], anchor: Optional[Anchor]) -> int:
+    """The anchored usage while it holds, adjusted by the UTF-8/4 delta of everything else; else UTF-8/4.
+
+    The anchor holds while the request goes to the route that answered it and the transcript up to its response
+    is unchanged. A changed system prompt, tool set, rehydrated state, or hook rewrite does not invalidate it:
+    the request's own UTF-8/4 size carries the delta.
     """
-    tools = tuple(tools)
-    for item in reversed(anchors):
-        sent = len(item.messages)
+    whole = sent_tokens(request)
+    if anchor is not None and anchor.response.origin == endpoint_origin(request.endpoint):
+        sent = len(anchor.transcript)
         if (
-            item.system == system
-            and item.tools == tools
-            and len(messages) > sent
-            and tuple(messages[:sent]) == item.messages
-            and messages[sent] == item.response
+            len(transcript) > sent
+            and transcript[sent] == anchor.response
+            and tuple(transcript[:sent]) == anchor.transcript
         ):
-            return usage_total(item.response.usage) + messages_tokens(messages[sent + 1 :])
-    return request_tokens(system, tools, messages)
+            usage = usage_total(anchor.response.usage)
+            return max(0, usage + whole - anchor.request_tokens - message_tokens(anchor.response))
+    return whole
 
 
 def fit_result(content: Sequence[UserContent], limit: int) -> tuple[UserContent, ...]:
@@ -299,7 +329,7 @@ def fit_result(content: Sequence[UserContent], limit: int) -> tuple[UserContent,
     total = message_tokens(ToolResultMessage("fit", "fit", tuple(content)))
     if total <= limit:
         return tuple(content)
-    note = CHECKPOINT_TRUNCATED.format(shown=limit, total=total)
+    note = CHECKPOINT_TRUNCATED.format(shown=max(0, limit), total=total)
     room = max(0, limit - text_tokens(note) - 1) * 4
     kept: list[UserContent] = []
     for block in content:
@@ -315,10 +345,11 @@ def fit_result(content: Sequence[UserContent], limit: int) -> tuple[UserContent,
 
 @dataclass(frozen=True)
 class Budget:
-    """One request measured against the route resolved for it; evaluated afresh before every model request."""
+    """One request, as it will be sent, measured against the route resolved for it (sections 1 and 2)."""
 
     window: int
     input_limit: int
+    #: ``O``: the request's own ``max_tokens``.
     output: int
     margin: int
     threshold: int
@@ -326,50 +357,40 @@ class Budget:
     est: int
 
     @property
-    def checkpoint_max_tokens(self) -> int:
-        return min(CHECKPOINT_MAX_TOKENS, self.output)
-
-    @property
     def fits(self) -> bool:
-        """A conversation request asking for ``O`` stays inside ``L_in`` with the margin."""
+        """A conversation request stays inside ``L_in`` with the margin."""
         return self.est + self.output + self.margin <= self.input_limit
 
     @property
     def can_fit(self) -> bool:
-        """A conversation request asking for ``O`` can fit at all, without the margin."""
+        """The request can fit at all, without the margin (a checkpoint request's admission test)."""
         return self.est + self.output <= self.input_limit
 
     @property
-    def fork_room(self) -> int:
-        """What the window leaves a checkpoint request (its request message included) to grow by."""
-        return self.input_limit - self.est - self.checkpoint_max_tokens
-
-    @property
-    def fork_fits(self) -> bool:
-        """A checkpoint request can fit at all; the provider remains the judge."""
-        return self.fork_room >= 0
+    def room(self) -> int:
+        """What the window leaves this request to grow by before its output."""
+        return self.input_limit - self.est - self.output
 
 
 def budget(
-    *,
-    system: str,
-    tools: Sequence[ToolSpec],
-    messages: Sequence[Message],
+    request: ModelRequest,
     capabilities: ModelCapabilities,
-    max_tokens: int,
-    anchors: Sequence[Anchor] = (),
+    *,
+    transcript: Sequence[Message],
+    anchor: Optional[Anchor] = None,
 ) -> Budget:
-    """``W, L_in, O, M, T`` from the capabilities of the route resolved for this request, and its ``est``.
+    """``W, L_in, O, M, T, keep`` and ``est`` of the final ``request`` on the route resolved for it.
 
-    The one place these values are computed (sections 1 and 2); ``max_tokens`` is the Agent's output budget.
+    The one place these values are computed (sections 1 and 2). ``transcript`` is the part of the request's
+    messages that comes from the rows, which is what an anchor is checked against.
     """
     window = DEFAULT_CONTEXT_WINDOW if capabilities.context_window is None else capabilities.context_window
     limit = window if capabilities.input_limit is None else capabilities.input_limit
-    output = output_tokens(capabilities, max_tokens)
+    output = request.max_tokens
     margin = max(MARGIN_MIN, math.ceil(MARGIN_RATIO * window))
     threshold = min(limit - output - margin, math.floor(THRESHOLD_RATIO * window))
     keep = max(0, min(KEEP_MAX, math.floor(KEEP_RATIO * threshold)))
-    return Budget(window, limit, output, margin, threshold, keep, _estimate(system, tools, messages, anchors))
+    return Budget(window, limit, output, margin, threshold, keep, _estimate(request, transcript, anchor))
 
 
 # --- clearing (context.md section 4) ------------------------------------------------
@@ -492,14 +513,19 @@ def _unique(items: Sequence[str]) -> list[str]:
 
 
 def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> tuple[list[str], list[str]]:
+    """Cumulative artifacts: the path each executed call ran with (``details.path``, after ``before_tool``)."""
     read: list[str] = list(previous.get("files_read", ()))
     modified: list[str] = list(previous.get("files_modified", ()))
     for unit in head:
         message = unit.lead.message
         if not isinstance(message, AssistantMessage):
             continue
-        for call in message.tool_calls:
-            path = call.arguments.get("path")
+        for call, (entry, result) in zip(message.tool_calls, unit.entries[1:]):
+            details = entry.payload.get("details") if entry is not None else None
+            path = details.get("path") if isinstance(details, Mapping) else None
+            if path is None and entry is not None and not result.is_error:
+                # A row written before artifacts were recorded: the call's own argument.
+                path = call.arguments.get("path")
             if not isinstance(path, str) or not path:
                 continue
             if call.name == "read":

@@ -26,13 +26,16 @@ pending = await agent.take_pending_inputs()
 ```
 
 C-9 is on when the adapter passes `context=ContextConfig(host=..., scratch_dir=...)`
-(`harness/context.py`). Before every model request the loop then clears old
-tool results, writes a forked checkpoint at T, and walks the overflow ladder;
-`agent.compact(turn_id=..., focus=...)` is `/compact`, refused while a run is
-active. Without a config nothing changes and an overflow ends the run
-`context_exhausted`. The `ContextHost` renders the `<earlier-record>` lookup and
-the state a checkpoint carries; the store adds `append_checkpoint_turn` for the
-checkpoint turn's audit row.
+(`harness/context.py`). Every conversation request then goes through one pipeline:
+projection, the user's `before_model` hooks, `budget()` on that final request,
+the C-9 stage (stop, clear, checkpoint at T, overflow ladder), and the provider;
+a stage step that changes the context rebuilds the request. `agent.compact(turn_id=...,
+focus=...)` is `/compact`, refused while a run is active. Without a config nothing
+changes and an overflow ends the run `context_exhausted`. The `ContextHost` renders
+the `<earlier-record>` lookup and the state a checkpoint carries; the store adds
+`append_checkpoint_turn` (audit), `append_payloads` (one transaction per C-9
+transition), and `append_response(request=...)` (the estimate anchor). The ordering
+and ownership invariants are in `context.md` section 10.
 
 `steer` and `follow_up` are async and return whether the active run accepted the
 input. `False` means the adapter keeps the persisted input in the P3 queue.

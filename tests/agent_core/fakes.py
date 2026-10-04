@@ -89,6 +89,9 @@ class InMemoryTranscriptStore:
         self.final: dict[str, bool] = {}
         # C-9 checkpoint-turn audit rows: (session_id, row id, payload), never context.
         self.audits: list[tuple[str, str, dict]] = []
+        # Kinds committed by each ``append_payloads`` transaction, and how many to fail next.
+        self.transactions: list[list[str]] = []
+        self.fail_transactions = 0
         self._clock = clock
         self._next_id = 0
 
@@ -120,8 +123,10 @@ class InMemoryTranscriptStore:
     async def consume_input(self, session_id, message_id, message: UserMessage) -> ContextEntry:
         return await self._append(session_id, "input", row_id=message_id, message=message)
 
-    async def append_response(self, session_id, message: AssistantMessage, *, final: bool) -> ContextEntry:
-        row = await self._append(session_id, "response", message=message)
+    async def append_response(self, session_id, message: AssistantMessage, *, final: bool, request=None) -> ContextEntry:
+        row = await self._append(
+            session_id, "response", message=message, payload={"request": dict(request)} if request is not None else None
+        )
         self.final[row.row_id] = final
         return row
 
@@ -130,6 +135,16 @@ class InMemoryTranscriptStore:
 
     async def append_payload(self, session_id, kind, payload: Mapping) -> ContextEntry:
         return await self._append(session_id, kind, payload=payload)
+
+    async def append_payloads(self, session_id, entries) -> list[ContextEntry]:
+        # One transaction: validated whole before any row lands, recorded for the tests that inspect it.
+        entries = [(kind, deepcopy(dict(payload))) for kind, payload in entries]
+        if self.fail_transactions:
+            self.fail_transactions -= 1
+            raise RuntimeError("transaction failed")
+        committed = [await self._append(session_id, kind, payload=payload) for kind, payload in entries]
+        self.transactions.append([row.kind for row in committed])
+        return committed
 
     async def append_checkpoint_turn(self, session_id, payload: Mapping) -> str:
         self._next_id += 1

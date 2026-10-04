@@ -110,6 +110,8 @@ def _ordered(entries: Sequence[ContextEntry], fork_point: Optional[int] = None) 
                 raise ProjectionError(f"unsupported {row.kind} payload (row {row.row_id})")
         elif row.message is None:
             raise ProjectionError(f"{row.kind} has no message (row {row.row_id})")
+        elif row.kind == "response" and "request" in row.payload and not _REQUEST_FACTS(row.payload["request"]):
+            raise ProjectionError(f"unsupported response request facts (row {row.row_id})")
         if row.message is not None and any(
             isinstance(block, TextBlock) and block.ref is not None for block in row.message.content
         ):
@@ -182,6 +184,8 @@ def _count(value: Any) -> bool:
     return type(value) is int and value >= 0
 
 
+#: ``ModelResponse.request``: what C-9 records about the request a response answered.
+_REQUEST_FACTS = _object({"tokens": _count})
 _PAYLOAD_SHAPES: dict[str, Check] = {
     "compaction": _object(
         {
@@ -278,7 +282,8 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
     for row in rows:
         if row.kind == "agent_state":
             state = row.payload["state"]
-            context_state = row.payload.get("context", {})
+            # Only C-9's own commits carry the guard state; a hook-state row leaves it as it was.
+            context_state = row.payload.get("context", context_state)
         elif row.kind == "compaction":
             compaction = row
         elif row.kind == "context_edit":

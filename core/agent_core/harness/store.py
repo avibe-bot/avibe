@@ -44,7 +44,14 @@ class TranscriptStore(Protocol):
         """Admit an already stored input row into the context as rendered for the model."""
         ...
 
-    async def append_response(self, session_id: str, message: AssistantMessage, *, final: bool) -> ContextEntry: ...
+    async def append_response(
+        self, session_id: str, message: AssistantMessage, *, final: bool, request: Optional[Mapping[str, Any]] = None
+    ) -> ContextEntry:
+        """Commit a response; ``request`` (C-9 ``ModelResponse.request``) is stored with it and read back in ``payload``.
+
+        The loop passes ``request`` only when context management is on.
+        """
+        ...
 
     async def append_tool_result(
         self, session_id: str, message: ToolResultMessage, *, details: Mapping[str, Any]
@@ -53,6 +60,12 @@ class TranscriptStore(Protocol):
     async def append_payload(
         self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state"], payload: Mapping[str, Any]
     ) -> ContextEntry: ...
+
+    async def append_payloads(
+        self, session_id: str, entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state"], Mapping[str, Any]]]
+    ) -> Sequence[ContextEntry]:
+        """Commit several payload entries in order, in one transaction: all of them or none (C-9 section 10)."""
+        ...
 
     async def append_checkpoint_turn(self, session_id: str, payload: Mapping[str, Any]) -> str:
         """Record one checkpoint attempt (C-9 ``CheckpointTurn``) as an audit row outside the context; its id."""

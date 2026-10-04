@@ -29,7 +29,7 @@ from core.agent_core.agent.events import (
     RunEnded,
     ToolStarted,
 )
-from core.agent_core.agent.hooks import Deny, Hooks
+from core.agent_core.agent.hooks import AlterArgs, Deny, Hooks
 from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import RetryPolicy
 from core.agent_core.ai._common import endpoint_origin, prepare_messages
@@ -479,7 +479,8 @@ async def test_failed_checkpoints_leave_the_context_and_three_pause_auto_compact
         "CompactionFinished",
     ]
     state = [row for row in await store.load("session") if row.kind == "agent_state"][-1]
-    assert "context" not in state.payload  # back to the default: not paused, no failures
+    assert state.payload["context"] == {"failures": 0, "ineffective": 0, "paused": False}
+    assert store.transactions[-1] == ["agent_state", "compaction"]  # the cleared pause commits with the checkpoint
 
 
 async def test_the_guard_is_durable_before_its_outcome_is_announced():
@@ -534,9 +535,19 @@ async def test_a_checkpoint_turn_measures_each_request_on_the_route_resolved_for
     assert third.messages[-1].content[0].text == BUDGET_USED
 
 
-async def test_usage_anchors_the_estimate_only_while_its_request_is_still_the_prefix():
-    # Every response reports a tiny usage. After the third read, hook state makes rehydration put 10,000
-    # tokens before the transcript: the anchored usage no longer describes the request's prefix.
+def billed(message: AssistantMessage, ratio: float = 1.0):
+    """A script answering with ``message``, billed ``ratio`` x the request's UTF-8/4 size (a tokenizer)."""
+
+    def script(request):
+        size = request_tokens(request.system, request.tools, request.messages)
+        return [Done(replace(message, usage=Usage(input_tokens=int(size * ratio), output_tokens=10)))]
+
+    return script
+
+
+async def test_a_change_outside_the_transcript_is_counted_by_its_delta():
+    # After the third read, hook state makes rehydration put 10,000 tokens before the transcript. The anchor
+    # still holds (the transcript is unchanged); the rehydrated block is counted by its UTF-8/4 delta.
     class Count(Hooks):
         async def after_tool(self, call, result, ctx):
             ctx.state["reads"] = ctx.state.get("reads", 0) + 1
@@ -544,14 +555,55 @@ async def test_usage_anchors_the_estimate_only_while_its_request_is_still_the_pr
     def rehydrate(state):
         return (UserMessage((text(tokens(10_000)),)),) if state.get("reads", 0) >= 3 else ()
 
-    tiny = Usage(input_tokens=100, output_tokens=10)
-    reads_ = [[Done(replace(assistant(calls=[ToolCallBlock(f"r{i}", "read", {"path": "f"})]), usage=tiny))] for i in range(3)]
-    model = Model([*reads_, [Done(replace(assistant("done"), usage=tiny))]], [[Done(assistant(CHECKPOINT))]])
+    script = [billed(assistant(calls=[ToolCallBlock(f"r{index}", "read", {"path": "f"})])) for index in range(3)]
+    model = Model([*script, billed(assistant("done"))], [[Done(assistant(CHECKPOINT))]])
     agent = make_agent(model, tools=[reader(tokens(4_000))], hooks=[Count()], rehydrate=rehydrate)
     await run(agent)
-    # Requests 2 and 3 are anchored (110 + the newest result); request 4 has a new prefix, so its est is its
-    # UTF-8 size, about 22,000 tokens, and crosses T.
+    # Request 4 is about 12,000 tokens of transcript plus the 10,000 rehydrated: it crosses T.
     assert [is_checkpoint(request) for request in model.requests] == [False, False, False, True, False]
+
+
+ENGLISH = "The quick brown fox jumps over the lazy dog. " * 4
+
+
+def english(count: int) -> str:
+    """About ``count`` UTF-8/4 tokens of English, which a real tokenizer counts about 20% lower."""
+    return (ENGLISH * (count * 4 // len(ENGLISH) + 1))[: count * 4]
+
+
+async def _english_turn(store, *, context=True):
+    read = billed(assistant(calls=[ToolCallBlock("r", "read", {"path": "notes.md"})]), 0.8)
+    model = Model([read, billed(assistant("Summary of the notes."), 0.8)])
+    agent = Agent(
+        session_id="session",
+        models=FakeModelRouter(model),
+        tools=[reader(english(18_000))],
+        hooks=(),
+        store=store,
+        jobs=FakeJobHost(),
+        cwd="/test-owned",
+        context=ContextConfig() if context else None,
+    )
+    await run(agent, english(100), row="first")
+
+
+async def test_a_new_turn_on_a_large_english_conversation_uses_the_stored_anchor_and_does_not_compact_early():
+    # The second Turn's request is about 20,300 UTF-8/4 tokens, past T, but the last response's real usage
+    # (80% of the bytes) plus what came after it is about 16,900: no checkpoint.
+    store = InMemoryTranscriptStore()
+    await _english_turn(store)
+    model = Model([[Done(assistant("ok"))]], [[Done(assistant(CHECKPOINT))]])
+    events = await run(make_agent(model, store=store), english(2_000), row="second")
+    assert not model.checkpoint_requests and events[-1].reason == "completed"
+    request = model.conversation_requests[0]
+    assert request_tokens(request.system, request.tools, request.messages) >= THRESHOLD
+
+    # The same conversation written without request facts has no anchor: the bytes say compact.
+    store = InMemoryTranscriptStore()
+    await _english_turn(store, context=False)
+    model = Model([[Done(assistant("ok"))]], [[Done(assistant(CHECKPOINT))]])
+    await run(make_agent(model, store=store), english(2_000), row="second")
+    assert len(model.checkpoint_requests) == 1
 
 
 async def test_the_request_right_after_a_checkpoint_is_measured_and_rolls_when_it_does_not_fit():
@@ -673,6 +725,7 @@ async def test_the_ladder_stops_with_what_fills_the_context_when_nothing_more_ca
     assert [(e.kind) for e in events if isinstance(e, AgentError)] == ["context_exhausted"]
     assert events[-1].reason == "context_exhausted"
     assert not model.checkpoint_requests  # nothing to summarize, so no model call
+    assert len(model.requests) == 1  # the oversized request never reached the provider
 
 
 async def test_a_provider_that_always_overflows_stops_after_two_checkpoint_calls():
@@ -748,6 +801,7 @@ async def test_clearing_runs_when_the_cache_is_cold_and_spares_recent_turns():
     sent = [m for m in model.requests[-1].messages if isinstance(m, ToolResultMessage)]
     assert [m.content[0].text.startswith("[Old tool result cleared") for m in sent] == [True] * 4 + [False] * 5
     assert model.requests[-1].messages == project(rows[:-1]).messages
+    assert store.transactions == [["context_edit"] * 4]  # one transition, one transaction
 
 
 async def test_chinese_output_reaches_the_threshold_by_its_utf8_size():
@@ -782,3 +836,122 @@ async def test_a_long_session_keeps_every_conversation_request_under_T():
     # A fork anchored before the first checkpoint projects the original context.
     original = project(rows, fork_point=compactions[0].context_seq - 1).messages
     assert len(original) > len(project(rows).messages)
+
+
+# --- C-9 ordering and ownership invariants (context.md section 10) -----------------------------
+
+
+def fits_the_window(request) -> bool:
+    return request_tokens(request.system, request.tools, request.messages) + 4_096 + 8_000 <= 32_000
+
+
+async def test_invariant_1_every_request_is_budgeted_after_the_user_hooks_and_sent_unchanged():
+    # A user before_model hook appends 15,000 tokens to every request, checkpoint requests included. Budgeting
+    # the projection before the hook would see about 6,000 tokens at the third request and send 21,000.
+    padding = UserMessage((text(tokens(15_000)),))
+
+    class Pad(Hooks):
+        async def before_model(self, request, ctx):
+            return replace(request, messages=(*request.messages, padding))
+
+    model = Model(reads(2), [[Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, tools=[reader(tokens(3_000))], hooks=[Pad()])
+    events = await run(agent)
+    assert events[-1].reason == "completed"
+    assert len(model.checkpoint_requests) == 1
+    assert model.checkpoint_requests[0].messages[-1] == padding  # the fork went through the hooks too
+    assert all(request.messages[-1] == padding for request in model.requests)
+    assert all(fits_the_window(request) for request in model.conversation_requests)
+
+
+async def test_invariant_2_the_policy_judges_the_final_arguments_and_every_checkpoint_result_is_bounded(tmp_path):
+    scratch = tmp_path / "scratch" / "session"
+    scratch.mkdir(parents=True)
+
+    class Redirect(Hooks):
+        async def before_tool(self, call, ctx):
+            path = call.arguments.get("path")
+            if call.name == "bash":
+                return Deny("no shell: " + tokens(50_000))  # a user denial far larger than the turn's room
+            if path == "into-scratch":
+                return AlterArgs({**call.arguments, "path": str(scratch / "plan.md")})
+            if path == "scratch/session/out":
+                return AlterArgs({**call.arguments, "path": str(tmp_path / "outside.md")})
+            return None
+
+    tools = {name: FakeTool(name) for name in ("write", "bash")}
+    tools["read"] = reader(tokens(3_000))
+    calls = (
+        ToolCallBlock("in", "write", {"path": "into-scratch", "content": "ok"}),
+        ToolCallBlock("out", "write", {"path": "scratch/session/out", "content": "no"}),
+        ToolCallBlock("sh", "bash", {"command": "ls"}),
+    )
+    model = Model(
+        history(),
+        [[Done(AssistantMessage(calls, assistant().origin, "tool_use"))], [Done(assistant(CHECKPOINT))]],
+    )
+    context = ContextConfig(scratch_dir=str(scratch))
+    agent = make_agent(model, tools=list(tools.values()), hooks=[Redirect()], context=context, cwd=str(tmp_path))
+    await run(agent)
+    assert [event async for event in agent.compact(turn_id="compact")][-1].reason == "completed"
+    # The policy judged the arguments the user's hook left: one redirect allowed, one denied, never run.
+    assert [(ctx.tool_call_id, args["path"]) for args, ctx in tools["write"].calls] == [("in", str(scratch / "plan.md"))]
+    results = {m.tool_call_id: m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)}
+    assert results["out"].content[0].text == DENIED
+    # The user's denial entered the turn bounded like any result.
+    denial = results["sh"]
+    assert denial.content[-1].text.startswith("[Output truncated to fit this checkpoint turn")
+    assert message_tokens(denial) < 25_000 and not tools["bash"].calls
+
+
+async def test_invariant_2_artifacts_record_the_path_each_tool_ran_with():
+    class Rewrite(Hooks):
+        async def before_tool(self, call, ctx):
+            if call.arguments.get("path") == "asked.md":
+                return AlterArgs({**call.arguments, "path": "actual.md"})
+            return None
+
+    model = Model(
+        [call("read", "r0", path="asked.md"), call("read", "r1", path="other.md"), [Done(assistant("done"))]],
+        [[Done(assistant(CHECKPOINT))]],
+    )
+    agent = make_agent(model, tools=[reader(tokens(3_000))], hooks=[Rewrite()])
+    await run(agent)
+    assert [event async for event in agent.compact(turn_id="compact")][-1].reason == "completed"
+    compaction = next(row for row in await agent.store.load("session") if row.kind == "compaction")
+    assert compaction.payload["files_read"] == ["actual.md"]
+
+
+async def test_invariant_3_a_c9_transition_commits_in_one_transaction_or_not_at_all():
+    # A checkpoint that comes out ineffective moves the guard; its guard and its row share one transaction.
+    store = InMemoryTranscriptStore()
+    model = Model(reads(4), [[Done(assistant(tokens(15_000)))]])
+    agent = make_agent(model, store=store, tools=[sized_reader(6_000, 6_000, 6_000, 6_000)])
+    store.fail_transactions = 1
+    events = await run(agent)
+    rows = await store.load("session")
+    # Nothing of the failed transition is anywhere: no checkpoint, no guard state, no announcement.
+    assert not [row for row in rows if row.kind == "compaction" or "context" in row.payload]
+    assert [type(event).__name__ for event in events if "Compaction" in type(event).__name__] == ["CompactionStarted"]
+    assert events[-1].reason == "error"
+    model = Model(reads(1), [[Done(assistant(tokens(15_000)))]])
+    agent = make_agent(model, store=store, tools=[sized_reader(1)])
+    await run(agent, row="again")
+    assert store.transactions[-1] == ["agent_state", "compaction"]
+
+
+async def test_invariant_4_a_relieved_overflow_keeps_its_billed_usage_once():
+    billed_partial = replace(assistant("", stop_reason="error"), usage=Usage(input_tokens=31_000, output_tokens=0))
+    overflow = ProviderError("overflow", "prompt is too long", False, status=400, partial=billed_partial)
+    model = Model(
+        [call("read", "r0", path="f"), call("read", "r1", path="f"), [overflow], [Done(assistant("done"))]],
+        [[Done(assistant(CHECKPOINT))]],
+    )
+    agent = make_agent(model, tools=[reader(tokens(4_000))])
+    events = await run(agent)
+    assert events[-1].reason == "completed"
+    rows = await agent.store.load("session")
+    kept = [row for row in rows if row.kind == "response" and row.message.usage == billed_partial.usage]
+    assert len(kept) == 1 and not kept[0].message.content
+    compaction = next(row for row in rows if row.kind == "compaction")
+    assert kept[0].context_seq < compaction.context_seq  # kept before the ladder ran

@@ -15,10 +15,10 @@ from pathlib import Path
 
 import pytest
 
-from core.agent_core.ai.provider import ModelCapabilities
+from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelRequest
 from core.agent_core.harness.context import (
+    CLEARED_PLACEHOLDER,
     SkillRef,
-    anchor,
     budget,
     carried_skills,
     checkpoint_request,
@@ -26,8 +26,12 @@ from core.agent_core.harness.context import (
     compaction_payload,
     fit_result,
     half_cut,
+    checkpoint_max_tokens,
+    last_anchor,
     message_tokens,
     normal_cut,
+    output_tokens,
+    request_facts,
     request_tokens,
     rolling_cut,
     text_tokens,
@@ -47,7 +51,7 @@ from core.agent_core.messages import (
     UserMessage,
     text,
 )
-from tests.agent_core.fakes import ORIGIN, assistant, user
+from tests.agent_core.fakes import ENDPOINT, ORIGIN, assistant, user
 
 CONTRACT = Path(__file__).resolve().parents[3] / "docs/plans/agent-core-contracts/context.md"
 
@@ -99,6 +103,10 @@ def test_the_estimate_counts_utf8_bytes_so_chinese_is_not_undercounted():
     assert message_tokens(reply) == math.ceil(replayed / 4)
 
 
+def make_request(messages=(), *, system="system", tools=(), endpoint=ENDPOINT, max_tokens=4_096) -> ModelRequest:
+    return ModelRequest(endpoint, system, tuple(messages), tuple(tools), max_tokens)
+
+
 @pytest.mark.parametrize(
     "window,input_limit,hop_output,configured,output,margin,threshold,keep",
     [
@@ -113,17 +121,12 @@ def test_limits_follow_the_frozen_formula_from_the_route_capabilities(
     window, input_limit, hop_output, configured, output, margin, threshold, keep
 ):
     capabilities = ModelCapabilities(context_window=window, input_limit=input_limit, max_output_tokens=hop_output)
-    plan = budget(system="", tools=(), messages=(), capabilities=capabilities, max_tokens=configured)
+    assert output_tokens(capabilities, configured) == output
+    assert checkpoint_max_tokens(capabilities, configured) == min(16_000, output)
+    plan = budget(make_request(system="", max_tokens=output), capabilities, transcript=())
     assert (plan.output, plan.margin, plan.threshold, plan.keep) == (output, margin, threshold, keep)
-    assert plan.checkpoint_max_tokens == min(16_000, output)
     limit = input_limit or window or 128_000
-    at_limit = budget(
-        system="x" * 4 * (limit - output - margin),
-        tools=(),
-        messages=(),
-        capabilities=capabilities,
-        max_tokens=configured,
-    )
+    at_limit = budget(make_request(system="x" * 4 * (limit - output - margin), max_tokens=output), capabilities, transcript=())
     assert at_limit.fits and not replace(at_limit, est=at_limit.est + 1).fits
 
 
@@ -134,36 +137,93 @@ def _usage(total: int) -> Usage:
 CAPABILITIES = ModelCapabilities(context_window=32_000, max_output_tokens=4_096)
 
 
-def test_usage_anchors_the_estimate_only_while_its_request_is_still_the_prefix():
+def _anchored_rows():
+    """A read, then a response R billed 5,000 whose row records its request, R's result, and a later reply."""
+    rows = Rows()
+    rows.input("x" * 400)
+    rows.tool("read", "w" * 4_000, call_id="before", path="a")
     read = ToolCallBlock("r", "read", {"path": "f"})
-    sent = (user("x" * 400),)
-    response = AssistantMessage((read,), ORIGIN, "tool_use", usage=_usage(5_000))
-    result = ToolResultMessage("r", "read", (text("y" * 4_000),))
-    later = assistant("z" * 40)
-    current = (*sent, response, result, later)
-    made = anchor("system", (), sent, response)
-    anchored = budget(system="system", tools=(), messages=current, capabilities=CAPABILITIES, max_tokens=4_096, anchors=(made,))
-    assert anchored.est == 5_000 + message_tokens(result) + message_tokens(later)
-    full = request_tokens("system", (), current)
-    changed = [
-        ("other system", (), current),  # the system prompt changed
-        ("system", (ToolSpec("t", "d", {}),), current),  # the tool definitions changed
-        ("system", (), (user("rehydrated"), *current)),  # something now comes before the transcript
-        ("system", (), (user("x" * 399 + "!"), response, result, later)),  # an edit inside the anchored prefix
-        ("system", (), sent),  # the response is not in this request
-    ]
-    for system, tools, messages in changed:
-        plan = budget(system=system, tools=tools, messages=messages, capabilities=CAPABILITIES, max_tokens=4_096, anchors=(made,))
-        assert plan.est == request_tokens(system, tools, messages)
-    assert budget(system="system", tools=(), messages=current, capabilities=CAPABILITIES, max_tokens=4_096).est == full
-    # A change after the anchored response is not a prefix change: it is counted by its bytes.
-    cleared = (*sent, response, ToolResultMessage("r", "read", (text("cleared"),)), later)
-    plan = budget(system="system", tools=(), messages=cleared, capabilities=CAPABILITIES, max_tokens=4_096, anchors=(made,))
-    assert plan.est == 5_000 + message_tokens(cleared[2]) + message_tokens(later)
-    # A failed or aborted response, or one without usage, never anchors.
-    assert anchor("system", (), sent, AssistantMessage((read,), ORIGIN, "error", usage=_usage(9_999))) is None
-    assert anchor("system", (), sent, AssistantMessage((read,), ORIGIN, "tool_use", usage=Usage())) is None
-    assert anchor("system", (), sent, AssistantMessage((read,), ORIGIN, "tool_use")) is None
+    sent = make_request(context_view(rows.rows).messages)
+    anchored = rows.add(
+        "response",
+        AssistantMessage((read,), ORIGIN, "tool_use", usage=_usage(5_000)),
+        payload={"request": request_facts(sent)},
+    )
+    result = rows.result(read, "y" * 4_000)
+    rows.response(value="z" * 40)
+    return rows, anchored, result
+
+
+def _est(rows, request=None):
+    view = context_view(rows.rows)
+    request = request or make_request(view.messages)
+    return budget(request, CAPABILITIES, transcript=view.messages, anchor=last_anchor(rows.rows, view)).est
+
+
+def _edit_of(entry):
+    return {
+        "version": 1,
+        "target_event_id": entry.row_id,
+        "replacement": {"text": CLEARED_PLACEHOLDER},
+        "reason": "clear_old_tool_result",
+    }
+
+
+def test_the_anchor_holds_while_the_transcript_up_to_its_response_is_unchanged():
+    rows, anchored, result = _anchored_rows()
+    messages = context_view(rows.rows).messages
+    after = message_tokens(result.message) + message_tokens(messages[-1])
+    assert _est(rows) == 5_000 + after
+    # Outside the transcript, a change adjusts the anchored usage by its UTF-8/4 delta.
+    longer = "system " * 100
+    delta = request_tokens(longer, (), ()) - request_tokens("system", (), ())
+    assert _est(rows, make_request(messages, system=longer)) == 5_000 + after + delta
+    tool = ToolSpec("t", "d" * 400, {})
+    tool_delta = request_tokens("system", (tool,), ()) - request_tokens("system", (), ())
+    assert _est(rows, make_request(messages, tools=(tool,))) == 5_000 + after + tool_delta
+    rehydrated = user("state " * 50)
+    assert _est(rows, make_request((rehydrated, *messages))) == 5_000 + after + message_tokens(rehydrated)
+    # An edit after the anchored response is counted by its bytes.
+    rows.add("context_edit", payload=_edit_of(result))
+    cleared = context_view(rows.rows).messages
+    assert _est(rows) == 5_000 + message_tokens(cleared[-2]) + message_tokens(cleared[-1])
+
+
+def test_an_edit_or_checkpoint_before_the_anchor_or_another_route_invalidates_it():
+    def whole(rows, request=None):
+        request = request or make_request(context_view(rows.rows).messages)
+        return request_tokens(request.system, request.tools, request.messages)
+
+    rows, anchored, result = _anchored_rows()
+    other_route = ModelEndpoint("anthropic", "http://model.invalid", "other-model", "", provider="test-provider")
+    request = make_request(context_view(rows.rows).messages, endpoint=other_route)
+    assert _est(rows, request) == whole(rows, request)  # another model's tokenizer
+    # A context_edit of a result before the anchored response changes what its usage measured.
+    before = next(row for row in rows.rows if row.kind == "tool_result")
+    rows.add("context_edit", payload=_edit_of(before))
+    assert _est(rows) == whole(rows)
+    # A checkpoint that keeps the anchored response verbatim still replaces what came before it.
+    rows, anchored, result = _anchored_rows()
+    view = context_view(rows.rows)
+    cut = next(index for index, unit in enumerate(view.units) if unit.seq == anchored.context_seq)
+    payload = compaction_payload(
+        view, cut, mode="normal", reason="threshold", focus=None, checkpoint="checkpoint", skills=(), state=(),
+        earlier_record=None, tokens_before=0, threshold=0, summarizer=None, usage=None,
+    )
+    rows.add("compaction", payload=payload)
+    assert context_view(rows.rows).units[0].seq == anchored.context_seq
+    assert _est(rows) == whole(rows)
+    # A failed or aborted response, or one without usage or request facts, never anchors.
+    for message, facts in [
+        (AssistantMessage((), ORIGIN, "error", usage=_usage(9_999)), True),
+        (AssistantMessage((), ORIGIN, "aborted", usage=_usage(9_999)), True),
+        (AssistantMessage((text("a"),), ORIGIN, "stop", usage=Usage()), True),
+        (AssistantMessage((text("a"),), ORIGIN, "stop", usage=_usage(9_999)), False),
+    ]:
+        only = Rows()
+        only.input("x")
+        only.add("response", message, payload={"request": {"tokens": 1}} if facts else {})
+        assert last_anchor(only.rows, context_view(only.rows)) is None
 
 
 def _random_rows(seed: int) -> list[ContextEntry]:
