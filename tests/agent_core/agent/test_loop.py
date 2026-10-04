@@ -651,6 +651,8 @@ async def test_retry_keeps_a_usage_only_partial_out_of_the_context():
     assert provider.requests[1].messages == provider.requests[0].messages
     responses = [row.message for row in await store.load("session") if row.kind == "response"]
     assert [response.usage for response in responses] == [successful.usage]
+    # Without context management too, the attempt's usage is exactly one non-context audit row.
+    assert [attempt["usage"]["input_tokens"] for _, _, attempt in store.attempts] == [5]
 
 
 async def test_retry_usage_partial_never_enters_the_context_when_budget_expires(monkeypatch):

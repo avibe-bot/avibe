@@ -193,10 +193,11 @@ is a later layer.
 - No provider transport here. Checkpoint rows are projected from the text and
   state fixed when they were written; a malformed `context_compaction` or
   `context_edit` row raises `ProjectionError` and is never silently ignored.
-- A checkpoint turn runs through `before_model` and `before_tool` only (the
-  checkpoint policy last). Its responses and results are never committed, so
-  `after_model` and `after_tool` do not see them, and it emits nothing but the
-  compaction events.
+- An Agent with a `ContextConfig` takes no user hooks in v1 (`Agent(...)`
+  raises a configuration error), so no hook runs in a checkpoint turn: its
+  tool calls go through the budget, the checkpoint policy, and the scratch root's
+  directory descriptor. Its responses and results are never committed, and it
+  emits nothing but the compaction events.
 - Store operations remain separate transactions under the queue lock (approved
   for v1 by the orchestrator). A crash between a non-final response and input
   consumption leaves that input queued for adapter recovery.

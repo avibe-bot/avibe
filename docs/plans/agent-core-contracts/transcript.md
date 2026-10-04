@@ -26,8 +26,10 @@ the commit) types it `error`. Context loading accepts all three.
 
 Display-only rows keep `context_seq` null: `interim`, `notify`, an `error` that reports a run failure, `vault`,
 `output`, queued or removed inputs, and the `tool_call` trace row written at tool start (its `metadata_json` carries
-`tool_call_id` and `job_id` so the activity panel can pair it with the result). A checkpoint turn's audit row
-(`context_checkpoint_turn`, `visibility = 'audit'`, `CheckpointTurn`) is never context either (C-9 `context.md` §6).
+`tool_call_id` and `job_id` so the activity panel can pair it with the result). Audit rows are never context
+either: `agent_events` with `visibility = 'audit'` and no `context_seq`, written by `append_audit`, as
+`context_checkpoint_turn` (`CheckpointTurn`, C-9 `context.md` §6) or `model_attempt` (`ModelAttempt`, the usage of a
+model attempt that did not become a response, in every mode). The activity panel does not read them.
 
 ## 2. Writing
 

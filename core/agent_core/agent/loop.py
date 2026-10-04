@@ -725,9 +725,12 @@ class Agent:
             await self._scope.call(lambda: asyncio.sleep(delay))
 
     async def _record_attempt(self, attempt: _Attempt) -> None:
-        """A conversation attempt that never became context: its billed usage as a non-context audit row."""
+        """A conversation attempt that never became context: its billed usage as a non-context audit row.
+
+        Written in every mode, with or without ``ContextConfig``: it is the one place this usage is kept.
+        """
         partial = attempt.message
-        if self.context is None or attempt.purpose != "conversation" or partial is None or partial.usage is None:
+        if attempt.purpose != "conversation" or partial is None or partial.usage is None:
             return
         payload: dict[str, Any] = {
             "version": 1,
@@ -970,9 +973,7 @@ class Agent:
         )
         return result, end
 
-    async def _execute(
-        self, tool: Tool, call: ToolCallBlock, emit: Callable[..., Awaitable[None]], *, pinned: Optional[str] = None
-    ) -> ToolResult:
+    async def _execute(self, tool: Tool, call: ToolCallBlock, emit: Callable[..., Awaitable[None]]) -> ToolResult:
         # Progress is a latest-tail value, not an unbounded buffer of tool output.
         updates: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
 
@@ -988,7 +989,6 @@ class Agent:
             dict(self.env),
             self._ctx.cancel,
             on_progress=progress,
-            pinned_target=pinned,
         )
         execution = asyncio.create_task(self._scope.call(lambda: tool.execute(call.arguments, ctx)))
         update = None
@@ -1240,53 +1240,56 @@ class Agent:
             measured[:] = [fork_plan]
             return fork, tools
 
-        while True:
-            try:
-                async with self._model(system, _silent, selection, compose=compose, purpose="checkpoint") as (
-                    terminal,
-                    tools,
-                ):
-                    selection = None
-            except _ForkTooLarge:
-                overflow, error = True, "overflow: the checkpoint request does not fit the model's input limit."
-                break
-            finally:
-                produced.extend(item.message for item in self._attempts[mark:] if item.message is not None)
-                mark = len(self._attempts)
-            if isinstance(terminal, ProviderError):
-                overflow = terminal.kind == "overflow"
-                error = f"{terminal.kind}: {terminal.message}"
-                break
-            message = terminal.message
-            self._scope.check()
-            turn.append(message)
-            origin = message.origin
-            if message.stop_reason == "stop" and not message.tool_calls:
-                checkpoint = checkpoint_text(message)
-                if not checkpoint:
-                    error = "The checkpoint turn ended without checkpoint text."
-                break
-            if message.stop_reason != "tool_use" or not message.tool_calls:
-                # Only a stop with text and no call is a checkpoint, and only a tool-use stop carries calls.
-                error = f"The checkpoint turn stopped with {message.stop_reason} and no usable checkpoint."
-                break
-            if not policy.open:
-                # Its earlier calls were already answered with BUDGET_USED.
-                error = "The checkpoint turn kept calling tools after its tool budget was used up."
-                break
-            rounds += 1
-            sent = measured[0]
-            grown = sent.est + message_tokens(message)
-            for call in message.tool_calls:
+        try:
+            while True:
+                try:
+                    async with self._model(system, _silent, selection, compose=compose, purpose="checkpoint") as (
+                        terminal,
+                        tools,
+                    ):
+                        selection = None
+                except _ForkTooLarge:
+                    overflow, error = True, "overflow: the checkpoint request does not fit the model's input limit."
+                    break
+                finally:
+                    produced.extend(item.message for item in self._attempts[mark:] if item.message is not None)
+                    mark = len(self._attempts)
+                if isinstance(terminal, ProviderError):
+                    overflow = terminal.kind == "overflow"
+                    error = f"{terminal.kind}: {terminal.message}"
+                    break
+                message = terminal.message
                 self._scope.check()
-                # The bound is the window of the turn's route: a tool runs only while the next request can
-                # still grow by the floor (section 6).
-                room = sent.input_limit - grown - sent.output
-                policy.open = policy.open and rounds <= CHECKPOINT_TOOL_ROUNDS and room >= CHECKPOINT_TOOL_FLOOR
-                result = await self._checkpoint_tool(call, tools, policy, limit=room - CHECKPOINT_TOOL_SLACK)
-                turn.append(result)
-                produced.append(result)
-                grown += message_tokens(result)
+                turn.append(message)
+                origin = message.origin
+                if message.stop_reason == "stop" and not message.tool_calls:
+                    checkpoint = checkpoint_text(message)
+                    if not checkpoint:
+                        error = "The checkpoint turn ended without checkpoint text."
+                    break
+                if message.stop_reason != "tool_use" or not message.tool_calls:
+                    # Only a stop with text and no call is a checkpoint, and only a tool-use stop carries calls.
+                    error = f"The checkpoint turn stopped with {message.stop_reason} and no usable checkpoint."
+                    break
+                if not policy.open:
+                    # Its earlier calls were already answered with BUDGET_USED.
+                    error = "The checkpoint turn kept calling tools after its tool budget was used up."
+                    break
+                rounds += 1
+                sent = measured[0]
+                grown = sent.est + message_tokens(message)
+                for call in message.tool_calls:
+                    self._scope.check()
+                    # The bound is the window of the turn's route: a tool runs only while the next request can
+                    # still grow by the floor (section 6).
+                    room = sent.input_limit - grown - sent.output
+                    policy.open = policy.open and rounds <= CHECKPOINT_TOOL_ROUNDS and room >= CHECKPOINT_TOOL_FLOOR
+                    result = await self._checkpoint_tool(call, tools, policy, limit=room - CHECKPOINT_TOOL_SLACK)
+                    turn.append(result)
+                    produced.append(result)
+                    grown += message_tokens(result)
+        finally:
+            policy.close()  # the scratch root's descriptor lives for this turn only
         usage = None
         for item in self._attempts[start:]:
             usage = add_usage(usage, item.message.usage if item.message is not None else None)
@@ -1359,28 +1362,23 @@ class Agent:
     ) -> ToolResultMessage:
         """The checkpoint turn's tool pipeline (invariant 2); nothing it produces is committed.
 
-        The budget first, then the table, then execution pinned to the path the table authorized, then the
-        bound on whatever result came out. No user hook runs under C-9 (v1: ``ContextConfig`` excludes hooks).
+        The budget first, then the table, then execution (a scratch write or edit through the root's
+        descriptor), then the bound on whatever result came out. No user hook runs under C-9 (v1).
         """
         call = deepcopy(original)
-        result: Optional[ToolResult] = None
         if not policy.open:
             result = ToolResult((text(BUDGET_USED),), is_error=True)
-        pinned = None
-        if result is None:
+        else:
             decision = policy.decide(call)
             if decision.denial is not None:
                 result = ToolResult((text(decision.denial),), is_error=True)
-            elif decision.pinned is not None:
-                # The tool runs against the real path authorized, and publishes only while it still resolves there.
-                pinned = decision.pinned
-                call = replace(call, arguments={**call.arguments, "path": pinned})
-        if result is None:
-            tool = tools.get(call.name)
-            if tool is None:
+            elif decision.scratch is not None:
+                # Relative to the scratch root's descriptor: no pathname is resolved again.
+                result = await self._scope.call(lambda: asyncio.to_thread(policy.run, call, decision.scratch))
+            elif (tool := tools.get(call.name)) is None:
                 result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
             else:
-                result = await self._execute(tool, call, _silent, pinned=pinned)
+                result = await self._execute(tool, call, _silent)
         # Every result that enters the turn is bounded, a hook's denial included.
         return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
 

@@ -290,7 +290,7 @@ async def test_the_checkpoint_policy_allows_reads_and_scratch_writes_and_never_r
     calls = [
         ToolCallBlock("bash", "bash", {"command": "rm -rf /"}),
         ToolCallBlock("read", "read", {"path": "notes.md"}),
-        ToolCallBlock("write-in", "write", {"path": "scratch/session/plan.md", "content": "ok"}),
+        ToolCallBlock("write-in", "write", {"path": "scratch/session/plan.md", "content": "a\n"}),
         ToolCallBlock("edit-in", "edit", {"path": str(scratch / "plan.md"), "oldText": "a", "newText": "b"}),
         ToolCallBlock("write-out", "write", {"path": str(outside / "f"), "content": "no"}),
         ToolCallBlock("write-up", "write", {"path": "scratch/session/../../outside/f", "content": "no"}),
@@ -309,13 +309,9 @@ async def test_the_checkpoint_policy_allows_reads_and_scratch_writes_and_never_r
     events = [event async for event in agent.compact(turn_id="compact")]
 
     executed = {name: [ctx.tool_call_id for _, ctx in tool.calls] for name, tool in tools.items()}
-    assert executed == {
-        "read": ["h0", "h1", "read"],
-        "write": ["write-in"],
-        "edit": ["edit-in"],
-        "bash": [],
-        "other": [],
-    }
+    # Scratch writes and edits go through the root's descriptor, never through a tool or a pathname.
+    assert executed == {"read": ["h0", "h1", "read"], "write": [], "edit": [], "bash": [], "other": []}
+    assert (scratch / "plan.md").read_text() == "b\n" and not os.listdir(outside)
     results = {message.tool_call_id: message for message in model.requests[-1].messages[-len(calls) :]}
     denied = {key for key, message in results.items() if message.content[0].text == DENIED}
     assert denied == {"bash", "write-out", "write-up", "write-link", "edit-out", "other"}
@@ -878,9 +874,8 @@ async def test_a_usage_only_partial_never_enters_the_context_and_the_retry_resen
     assert second.messages == first.messages  # the original request, unchanged
     responses = [row.message for row in await store.load("session") if row.kind == "response"]
     assert all(response.content for response in responses)
-    if context:
-        # The attempt's billed usage is audit data, outside the context.
-        assert [attempt["usage"]["input_tokens"] for _, _, attempt in store.attempts] == [900]
+    # In every mode, the attempt's billed usage is exactly one audit row, outside the context.
+    assert [attempt["usage"]["input_tokens"] for _, _, attempt in store.attempts] == [900]
 
 
 def flat_scratch(tmp_path):
@@ -929,24 +924,58 @@ async def test_a_scratch_root_that_is_a_symlink_authorizes_nothing(tmp_path):
 
 
 @pytest.mark.parametrize("swap", ["root", "target"])
-async def test_a_scratch_write_never_lands_outside_after_a_swap_between_policy_and_execution(tmp_path, swap):
+async def test_a_scratch_write_never_lands_outside_after_a_swap_between_policy_and_execution(tmp_path, monkeypatch, swap):
     scratch, outside = flat_scratch(tmp_path)
-    elsewhere = outside / "not-yet"  # a directory that does not exist: nothing may create it
+    decide = CheckpointPolicy.decide
 
-    class SwappingWrite:
-        """The real write tool, with the swap landing after the policy authorized the call."""
+    def decide_then_swap(policy, call):
+        decision = decide(policy, call)
+        if swap == "root":
+            # The root renamed and its pathname pointed at an outside directory, after the policy opened it.
+            scratch.rename(scratch.parent / "moved")
+            scratch.symlink_to(outside, target_is_directory=True)
+        else:
+            (scratch / "plan.md").symlink_to(outside / "plan.md")
+        return decision
 
-        spec = WriteTool().spec
-
-        async def execute(self, arguments, ctx):
-            if swap == "root":
-                scratch.rename(scratch.parent / "moved")
-                scratch.symlink_to(elsewhere, target_is_directory=True)
-            else:
-                (scratch / "plan.md").symlink_to(outside / "plan.md")
-            return await WriteTool().execute(arguments, ctx)
-
+    monkeypatch.setattr(CheckpointPolicy, "decide", decide_then_swap)
     calls = [ToolCallBlock("w", "write", {"path": "state/scratch/session/plan.md", "content": "plan"})]
-    results = await _scratch_compact(tmp_path, scratch, calls, [SwappingWrite()])
-    assert results["w"].is_error and "no longer resolves to the authorized location" in results["w"].content[0].text
-    assert not os.listdir(outside)  # neither content nor a created directory
+    results = await _scratch_compact(tmp_path, scratch, calls, [WriteTool()])
+    assert not os.listdir(outside)  # nothing outside: no content, no temp file, no directory
+    if swap == "root":
+        # The opened directory still receives it, under its new name; its old pathname is never resolved.
+        assert not results["w"].is_error and (scratch.parent / "moved" / "plan.md").read_text() == "plan"
+    else:
+        # A name that became a symlink is never followed and never replaced.
+        assert results["w"].content[0].text.endswith("it is not a regular file.")
+        assert (scratch / "plan.md").is_symlink()
+
+
+async def test_scratch_edit_reads_and_publishes_through_the_root_descriptor(tmp_path):
+    scratch, outside = flat_scratch(tmp_path)
+    scratch.mkdir(parents=True)
+    (scratch / "plan.md").write_bytes("\ufeffa\r\nb\r\n".encode())
+    (scratch / "link.md").symlink_to(outside / "secret.md")
+    (outside / "secret.md").write_text("a\n")
+    calls = [
+        ToolCallBlock("e", "edit", {"path": "state/scratch/session/plan.md", "edits": [{"oldText": "b", "newText": "c"}]}),
+        ToolCallBlock("l", "edit", {"path": "state/scratch/session/link.md", "edits": [{"oldText": "a", "newText": "x"}]}),
+        ToolCallBlock("d", "write", {"path": "state/scratch/session/..", "content": "no"}),
+    ]
+    results = await _scratch_compact(tmp_path, scratch, calls, [])
+    assert results["e"].content[0].text == "Successfully replaced 1 block(s) in state/scratch/session/plan.md."
+    assert (scratch / "plan.md").read_bytes() == "\ufeffa\r\nc\r\n".encode()  # BOM and CRLF kept
+    assert results["l"].is_error and (outside / "secret.md").read_text() == "a\n"  # a symlink is never followed
+    assert results["d"].content[0].text == DENIED
+
+
+async def test_without_descriptor_relative_rename_scratch_writes_are_denied_and_reads_stay(tmp_path, monkeypatch):
+    scratch, outside = flat_scratch(tmp_path)
+    monkeypatch.setattr(os, "supports_dir_fd", frozenset(os.supports_dir_fd) - {os.rename})  # as on Windows
+    calls = [
+        ToolCallBlock("w", "write", {"path": "state/scratch/session/plan.md", "content": "no"}),
+        ToolCallBlock("r", "read", {"path": "notes.md"}),
+    ]
+    results = await _scratch_compact(tmp_path, scratch, calls, [])
+    assert results["w"].content[0].text == DENIED and not (scratch / "plan.md").exists()
+    assert not results["r"].is_error

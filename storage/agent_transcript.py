@@ -10,7 +10,10 @@ context exactly when its ``context_seq`` is non-null:
 * responses are new ``assistant`` / ``result`` / ``error`` rows with
   ``content_json.model`` and a rendered ``content_text``;
 * tool results, checkpoints, context edits, and hook state are new
-  ``agent_events`` rows with ``visibility='context'``.
+  ``agent_events`` rows with ``visibility='context'``;
+* audit rows (C-9: a model attempt's usage, a checkpoint turn) are
+  ``agent_events`` rows with ``visibility='audit'`` and no ``context_seq``:
+  never context.
 
 Allocation. Every write takes SQLite's writer lock before its first read
 (``reserve_write_lock``) and runs under a per-Session lock, so
@@ -82,6 +85,9 @@ INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 FINAL_TYPES = ("result", "error")
 RESPONSE_TYPES = ("assistant", *FINAL_TYPES)
 CONTEXT_VISIBILITY = "context"
+AUDIT_VISIBILITY = "audit"
+AuditKind = Literal["attempt", "checkpoint_turn"]
+_AUDIT_EVENT_TYPE: dict[str, str] = {"attempt": "model_attempt", "checkpoint_turn": "context_checkpoint_turn"}
 # Only the Avibe Agent writes context rows; the Session's routed backend may change mid-Turn.
 CONTEXT_WRITER = "avibe"
 PAYLOAD_VERSION = 1
@@ -262,6 +268,33 @@ class SQLiteTranscriptStore:
         return await self._write(
             session_id, lambda conn: self._append_event(conn, session_id, kind, data, None, agent_name)
         )
+
+    async def append_audit(
+        self, session_id: str, kind: AuditKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None
+    ) -> str:
+        """A non-context audit row (C-9 ``ModelAttempt`` or ``CheckpointTurn``); its id. Never loaded as context."""
+        if kind not in _AUDIT_EVENT_TYPE:
+            raise ValueError(f"not an audit kind: {kind!r}")
+        data = _canonical(dict(payload), f"{kind} audit")
+
+        def work(conn: Connection) -> str:
+            origin = _turn_origin(conn, session_id, agent_name)
+            row = agent_events_service.append(
+                conn,
+                scope_id=origin.scope_id,
+                session_id=session_id,
+                platform=origin.platform,
+                event_type=_AUDIT_EVENT_TYPE[kind],
+                content=data,
+                agent_name=origin.agent_name,
+                backend=origin.backend,
+                turn_id=origin.turn_id,
+                visibility=AUDIT_VISIBILITY,
+                source="agent",
+            )
+            return row["id"]
+
+        return await self._write(session_id, work)
 
     # --- implementation -------------------------------------------------------
 

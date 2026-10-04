@@ -56,16 +56,15 @@ usage(R) = input_tokens + cache_read_tokens + cache_write_tokens + output_tokens
 The anchor holds while (a) this request goes to the route that answered it (`R.origin` equals the request
 endpoint's origin, because tokenizers differ), and (b) the transcript up to `R` is unchanged: the messages the rows
 put before `R` now are the ones they put before it when `R`'s request was built, and `R` follows them. A checkpoint,
-or an edit of a result before `R`, breaks (b). A changed system prompt, tool set, rehydrated state, or hook rewrite
+or an edit of a result before `R`, breaks (b). A changed system prompt, tool set, or rehydrated state
 does not invalidate the anchor: the difference between this request's `tokens()` and `R.request.tokens` carries it.
 So does anything after `R`, an edit there included.
 
 ## 3. Before every model request
 
-Every conversation request goes through one pipeline (§10, invariant 1): the projection, then the user's
-`before_model` hooks, then `budget()` on that final request, then the C-9 stage below, then the provider. A stage
-step that changes the context rebuilds the request from the top, hooks included; the request sent is exactly the one
-last budgeted. The stage, inside the tool loop and before a retry alike:
+Every conversation request goes through one pipeline (§10, invariant 1): the projection, then `budget()` on that
+request, then the C-9 stage below, then the provider. A stage step that changes the context rebuilds the request from
+the top; the request sent is exactly the one last budgeted. In v1 no user hook runs with context management (§10). The stage, inside the tool loop and before a retry alike:
 
 1. **Stop** (§8 d) when even the checkpoint and the last unit cannot fit: `est` minus the rest of the transcript,
    plus `O`, exceeds `L_in`. The provider never sees the request.
@@ -133,7 +132,7 @@ budget (invariant 2):
 | Tool | Rule |
 | --- | --- |
 | `read` | allowed |
-| `write`, `edit` | allowed only for a file directly inside this Session's scratch root, `<state>/agent_core/scratch/<session_id>/`: the target's real path must have that root as its parent. Scratch is flat, so no parent is ever created and no parent component can race. The turn creates the root, which must be a real directory (a symlink authorizes nothing). An allowed call runs against that real path and is pinned to it: `write` and `edit` publish only while the path still resolves there, and a pinned write creates no directory (`ToolContext.pinned_target`) |
+| `write`, `edit` | allowed only for a single file name directly inside this Session's scratch root, `<state>/agent_core/scratch/<session_id>/` (the path's directory is the root; a name with a separator, `.`, or `..` is denied). Scratch is flat and is reached only through a directory descriptor: when the turn starts, it creates the root and opens it once (`O_DIRECTORY \| O_NOFOLLOW`, `fstat` a real directory; a symlink authorizes nothing). Every read, temporary file (`O_CREAT \| O_EXCL \| O_NOFOLLOW`), and publication (`os.replace` with `src_dir_fd`/`dst_dir_fd`) is relative to that descriptor, so renaming or swapping the root, or a name in it, after it was opened redirects nothing; a name that is a symlink is never followed or replaced. Where the platform cannot open and rename relative to a descriptor (Windows), scratch writes are denied and `read` stays allowed |
 | memory-read tools | reserved: allowed once they exist |
 | `bash` and every other tool | denied, never executed |
 
@@ -144,17 +143,14 @@ budget (invariant 2):
 - The bound is the window, not `T`, the same way in threshold, manual, and rolling turns. Before each call,
   `room = L_in - est - min(16,000, O)`, where `est` is the budget of the turn's latest request plus the tokens of
   the response and results since. A call runs only while `room >= 4,000` tokens, and every result that enters the
-  turn, a hook's or the policy's denial included, is cut to `room - 1,000` tokens, head kept, ending with
+  turn, the policy's denial included, is cut to `room - 1,000` tokens, head kept, ending with
   `[Output truncated to fit this checkpoint turn: showing about <shown> of <total> tokens. Read a smaller range if
   you need more.]`, so a single result cannot push the turn out of the window.
 - At most 5 tool rounds. After them, or once `room` falls below the floor, the budget is closed: every call gets
   `This is a checkpoint turn and its tool budget is used up. Write the checkpoint now.` before the table is
   consulted. A response that still calls tools after that ends the turn as failed.
-- A pinned write cannot be redirected by a symlink swapped after the table authorized it: the tool resolves the
-  authorized real path itself, creates no directory, and refuses when the path resolves elsewhere at its start or
-  right before the rename.
-  The window between that last check and `rename(2)` remains, as for every write: tools audit ledger (PR #2346)
-  rows B4 and B7.
+- `write` and `edit` in a checkpoint turn keep the tools' arguments and result texts (C-7); `edit` reuses the tools'
+  matching (`edit_diff`), BOM, and line-ending handling. The C-7 tools themselves are unchanged.
 - The checkpoint is the text of a final response that stops with `stop` and calls no tool; only a `tool_use` stop
   with calls continues the turn. Anything else (a length stop, a `tool_use` stop without calls, calls under any other
   stop, an error, or no text) is a failure, and nothing enters the context.
@@ -245,7 +241,7 @@ ends the run `context_exhausted`, as in P1. The adapter supplies:
 - `ContextHost.render_state(StateRequest)`: the `state` texts (§7) for the skills the summarized rows loaded and
   whether the checkpoint happened inside a run.
 - `TranscriptStore.append_audit(session_id, kind, payload)`: a non-context audit row, `checkpoint_turn` (§6) or
-  `attempt` (invariant 4);
+  `attempt` (invariant 4); the SQLite store implements it in this PR, because attempts are audited in every mode;
   `append_payloads(session_id, entries)`: several payload rows in one transaction (invariant 3);
   `append_response(..., request=...)`: `ModelResponse.request` for the anchor (§2).
 - `Agent.compact(turn_id=..., focus=...)` behind `/compact [focus]` on every surface, and the pause notice (§10)
@@ -276,8 +272,8 @@ ends the run `context_exhausted`, as in P1. The adapter supplies:
    configuration error), so nothing else can rewrite a request C-9 owns; hooks with context management are a post-v1
    design item (plan §10).
 2. **One tool pipeline** in a checkpoint turn: the turn's budget (once closed, `BUDGET_USED`), then the checkpoint
-   table, then execution pinned to the path the table authorized, then the bound on every result that enters the
-   turn, denials included.
+   table, then execution (a scratch `write` or `edit` relative to the root's descriptor), then the bound on every
+   result that enters the turn, denials included.
 3. **One commit for C-9 state.** A transition (its `context_edit` rows, its `context_compaction` row, the guard and
    pause, and the hook state of that commit point in `AgentState`) is written in one transaction
    (`append_payloads`), before any event announces it; a failed commit leaves nothing. Nothing else writes
@@ -286,7 +282,8 @@ ends the run `context_exhausted`, as in P1. The adapter supplies:
    request, its response or partial, and so its usage, in one place. The checkpoint audit and the request facts of a
    committed response (the anchor) read only from it. An attempt that does not become the run's response is never
    context: a retried or relieved request goes out again unchanged, and a usage-only partial is a non-context
-   `ModelAttempt` audit row, never a response row.
+   `ModelAttempt` audit row, never a response row. The attempt audit is written in every mode, with or without
+   `ContextConfig`: it is the one place that usage is kept.
 5. **Route-scoped anchors.** An anchor answered by another origin (provider, api, model) is invalid (§2).
 
 UX is silent: an automatic compaction shows nothing, and the raw messages stay in history. The only user-visible

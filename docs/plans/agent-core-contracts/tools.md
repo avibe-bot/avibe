@@ -62,13 +62,6 @@ creates parent directories.`
 
 Result: `Successfully wrote to {path}`. Writes are serialized per canonical path with `edit`.
 
-`ToolContext.pinned_target` (Avibe, set only by C-9's checkpoint turn, `context.md` §6): a real path the caller
-authorized. `write` and `edit` then create no directory and refuse unless the path resolves to it at their start and
-right before the rename:
-`Cannot write {path}: it no longer resolves to the authorized location.` /
-`Could not edit file: {path}. It no longer resolves to the authorized location.` Unset everywhere else, where
-nothing changes.
-
 ## 4. `edit`
 
 Description: `Edit a single file using exact text replacement. Every edits[].oldText must match a unique,

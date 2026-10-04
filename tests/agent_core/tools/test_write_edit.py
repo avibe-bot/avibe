@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import errno
-from dataclasses import replace
 import os
 import random
 import re
@@ -360,54 +359,6 @@ async def test_a_path_retargeted_during_the_write_is_not_written(tmp_path, make_
 
     assert (result.is_error, result_text(result)) == (True, expected)
     assert ((tmp_path / "a.txt").read_text(), (tmp_path / "b.txt").read_text()) == ("alpha\n", "beta\n")
-
-
-@pytest.mark.parametrize("tool", ["write", "edit"])
-@pytest.mark.parametrize("when", ["before", "during"])
-async def test_a_pinned_target_is_published_only_while_the_path_resolves_to_it(tmp_path, make_ctx, monkeypatch, tool, when):
-    """A caller that authorized a resolved path (C-9's checkpoint turn) pins it; a swapped component never redirects
-    the write. ``before``: the swap lands between authorization and the call; ``during``: before the rename."""
-    inside = tmp_path / "scratch" / "notes"
-    inside.mkdir(parents=True)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (inside / "f.txt").write_text("alpha\n")
-    (outside / "f.txt").write_text("alpha\n")
-    pinned = os.path.realpath(inside / "f.txt")
-
-    def swap():
-        (inside).rename(tmp_path / "scratch" / "moved")
-        (tmp_path / "scratch" / "notes").symlink_to(outside, target_is_directory=True)
-
-    if when == "before":
-        swap()
-    else:
-        real_fsync = write_module.os.fsync
-
-        def fsync_then_swap(fd):
-            real_fsync(fd)
-            swap()
-
-        monkeypatch.setattr(write_module.os, "fsync", fsync_then_swap)
-    ctx = replace(make_ctx(), pinned_target=pinned)
-    if tool == "write":
-        result = await WriteTool().execute({"path": pinned, "content": "new\n"}, ctx)
-    else:
-        result = await EditTool().execute({"path": pinned, "edits": [{"oldText": "alpha", "newText": "new"}]}, ctx)
-
-    assert result.is_error
-    assert "no longer resolves to the authorized" in result_text(result) or "changed while" in result_text(result)
-    assert (outside / "f.txt").read_text() == "alpha\n"  # never written outside the pinned target
-    assert not [name for name in os.listdir(outside) if name.startswith(".avibe-")]
-
-
-async def test_a_pinned_target_that_still_resolves_is_written(tmp_path, make_ctx):
-    (tmp_path / "f.txt").write_text("alpha\n")
-    pinned = os.path.realpath(tmp_path / "f.txt")
-    ctx = replace(make_ctx(), pinned_target=pinned)
-    assert not (await WriteTool().execute({"path": pinned, "content": "w\n"}, ctx)).is_error
-    assert not (await EditTool().execute({"path": pinned, "edits": [{"oldText": "w", "newText": "e"}]}, ctx)).is_error
-    assert (tmp_path / "f.txt").read_text() == "e\n"
 
 
 async def test_new_files_keep_the_umask_default(tmp_path, make_ctx):
@@ -996,11 +947,3 @@ def test_file_urls_follow_node_file_url_to_path(monkeypatch, windows, url, expec
         assert str(raised.value) == str(expected)
     else:
         assert paths_module.expand_path(url) == expected
-
-
-async def test_a_pinned_write_never_creates_a_directory(tmp_path, make_ctx):
-    """A pinned target's parent must exist: a pinned write creates no directory, so no parent component can race."""
-    pinned = str(tmp_path / "missing" / "f.txt")
-    ctx = replace(make_ctx(), pinned_target=pinned)
-    result = await WriteTool().execute({"path": pinned, "content": "x"}, ctx)
-    assert result.is_error and not (tmp_path / "missing").exists()

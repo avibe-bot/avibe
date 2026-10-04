@@ -419,7 +419,7 @@
       }
     },
     "ModelAttempt": {
-      "description": "`agent_events.content_json` of a `model_attempt` audit row (`TranscriptStore.append_audit(kind='attempt')`, `visibility = 'audit'`, no `context_seq`): a conversation attempt that did not become the run's response (retried, relieved, or failed) and reported usage without content. Never context (context.md section 10, invariant 4).",
+      "description": "`agent_events.content_json` of a `model_attempt` audit row (`TranscriptStore.append_audit(kind='attempt')`, `visibility = 'audit'`, no `context_seq`): a conversation attempt that did not become the run's response (retried, relieved, or failed) and reported usage. Written in every mode, with or without context management. Never context (context.md section 10, invariant 4).",
       "type": "object",
       "required": [
         "version",

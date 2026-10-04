@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
@@ -28,7 +28,7 @@ from core.agent_core.tools.paths import (
 )
 from core.agent_core.tools.text import decode_file, encode_file, model_text
 from core.agent_core.tools.truncate import format_size
-from core.agent_core.tools.write import FileChanged, FileIdentity, NotPinned, NotReplaceable, write_bytes
+from core.agent_core.tools.write import FileChanged, FileIdentity, NotReplaceable, write_bytes
 
 #: Avibe: larger files are refused rather than loaded whole; the display diff stops at a smaller size.
 MAX_EDIT_BYTES = 10 * 1024 * 1024
@@ -144,9 +144,7 @@ def _line_count(text: str) -> int:
     return text.count("\n") + text.count("\r") - text.count("\r\n") + 1
 
 
-def _plan_edits(
-    absolute: str, edits: list[Edit], path: str, pinned: Optional[str] = None
-) -> tuple[int, bytes, str, str, FileIdentity]:
+def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[int, bytes, str, str, FileIdentity]:
     """Read the file and compute its new bytes: ``(size, data, view_before, view_after, identity)``.
 
     One descriptor gives the size and the contents, read up to the limit, so a file that grew after an
@@ -155,8 +153,6 @@ def _plan_edits(
     result is published only over it.
     """
     real = os.path.realpath(absolute)
-    if pinned is not None and real != pinned:
-        raise NotPinned()
     fd = open_regular(real)
     try:
         st = os.fstat(fd)
@@ -208,14 +204,12 @@ class EditTool:
             if not os.access(absolute, os.R_OK | os.W_OK):
                 return error_result(f"Could not edit file: {path}. Error code: EACCES.")
             try:
-                size, data, base, new_content, identity = await to_thread_joined(
-                    _plan_edits, absolute, edits, path, ctx.pinned_target
-                )
+                size, data, base, new_content, identity = await to_thread_joined(_plan_edits, absolute, edits, path)
                 if len(data) > MAX_EDIT_BYTES:
                     raise ResultTooLarge()
                 if ctx.cancel.cancelled:
                     return error_result("Operation aborted")
-                await to_thread_joined(write_bytes, absolute, data, identity, ctx.pinned_target)
+                await to_thread_joined(write_bytes, absolute, data, identity)
             except _TooLarge as exc:
                 # The whole file and several copies would sit in the process every Session shares.
                 return error_result(
@@ -238,8 +232,6 @@ class EditTool:
                 )
             except EditError as exc:
                 return error_result(str(exc))
-            except NotPinned:
-                return error_result(f"Could not edit file: {path}. It no longer resolves to the authorized location.")
             except FileChanged:
                 # Another writer (bash, an editor) changed it after it was read: the edit would overwrite that.
                 return error_result(

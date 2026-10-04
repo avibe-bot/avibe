@@ -120,6 +120,11 @@ class AdapterTranscriptStore:
     ) -> ContextEntry:
         return await self._store.append_payload(session_id, kind, payload, agent_name=self._agents.get(session_id))
 
+    async def append_audit(
+        self, session_id: str, kind: Literal["attempt", "checkpoint_turn"], payload: Mapping[str, Any]
+    ) -> str:
+        return await self._store.append_audit(session_id, kind, payload, agent_name=self._agents.get(session_id))
+
     # --- implementation ------------------------------------------------------
 
     async def _await_input_row(self, session_id: str, message_id: str) -> None:
