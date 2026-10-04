@@ -362,7 +362,7 @@
       }
     },
     "CheckpointTurn": {
-      "description": "`agent_events.content_json` of a `context_checkpoint_turn` audit row (`TranscriptStore.append_audit(kind='checkpoint_turn')`, `visibility = 'audit'`, no `context_seq`): one checkpoint attempt and the messages its turn produced, from the attempt ledger (context.md section 6). Never context.",
+      "description": "`agent_events.content_json` of a `context_checkpoint_turn` audit row (`TranscriptStore.append_audit(kind='checkpoint_turn')`, `visibility = 'audit'`, no `context_seq`): one checkpoint turn and the messages it produced, from the attempt ledger (context.md section 6). Never context.",
       "type": "object",
       "required": [
         "version",
@@ -409,7 +409,7 @@
         },
         "messages": {
           "type": "array",
-          "description": "The turn's responses and tool results, in order.",
+          "description": "Every attempt's response or partial (failed and retried ones included) and the turn's tool results, in order; a refused response that JSON cannot hold is left out (context.md section 10, invariant 6).",
           "items": {
             "$ref": "message.schema.json"
           }
@@ -420,7 +420,7 @@
       }
     },
     "ModelAttempt": {
-      "description": "`agent_events.content_json` of a `model_attempt` audit row (`TranscriptStore.append_audit(kind='attempt')`, `visibility = 'audit'`, no `context_seq`): a conversation attempt that did not become the run's response (retried, relieved, or failed) and reported usage. Written in every mode, with or without context management. Never context (context.md section 10, invariant 4).",
+      "description": "`agent_events.content_json` of a `model_attempt` audit row (`TranscriptStore.append_audit(kind='attempt')`, `visibility = 'audit'`, no `context_seq`): a conversation attempt that reported usage and did not become a response row (retried, relieved, a usage-only terminal, refused at admission, or a failed commit), written by the attempt ledger in every mode, with or without context management (context.md section 10, invariant 4). Never context.",
       "type": "object",
       "required": [
         "version",
@@ -440,7 +440,7 @@
             "string",
             "null"
           ],
-          "description": "The provider error that ended the attempt: `<kind>: <message>`."
+          "description": "Why the attempt did not become a response: the provider error that ended it (`<kind>: <message>`), or, without one, why the model call ended (a refusal at admission, a failed commit)."
         }
       }
     }

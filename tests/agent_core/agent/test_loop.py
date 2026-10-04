@@ -46,7 +46,7 @@ from core.agent_core.ai.provider import (
     ToolCallStart,
 )
 from core.agent_core.agent.models import ModelSelection
-from core.agent_core.harness.context import budget
+from core.agent_core.harness.context import ContextConfig, budget
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import AssistantMessage, ThinkingBlock, ToolCallBlock, ToolResultMessage, Usage, UserMessage, text
 from core.agent_core.tools.base import ToolResult
@@ -653,6 +653,45 @@ async def test_retry_keeps_a_usage_only_partial_out_of_the_context():
     assert [response.usage for response in responses] == [successful.usage]
     # Without context management too, the attempt's usage is exactly one non-context audit row.
     assert [attempt["usage"]["input_tokens"] for _, _, attempt in store.attempts] == [5]
+
+
+class _FailingResponses(InMemoryTranscriptStore):
+    async def append_response(self, session_id, message, *, final, request=None):
+        raise RuntimeError("disk full")
+
+
+def _billed(content, stop_reason="stop", input_tokens=9):
+    return AssistantMessage(tuple(content), assistant().origin, stop_reason, usage=Usage(input_tokens=input_tokens))
+
+
+_TWIN = (ToolCallBlock("same", "echo", {}), ToolCallBlock("same", "echo", {}))
+
+
+@pytest.mark.parametrize(
+    "scripts,context,store_type,audited,reason",
+    [
+        # Attempts that never became a response: each is exactly one audit row, whatever the exit.
+        pytest.param([[ProviderError("rate_limit", "busy", True, partial=_billed((), "error"))], [Done(assistant("ok"))]], False, InMemoryTranscriptStore, 1, "completed", id="retried"),
+        pytest.param([[ProviderError("overflow", "prompt is too long", False, partial=_billed((), "error"))]], True, InMemoryTranscriptStore, 1, "context_exhausted", id="relieved"),
+        pytest.param([[ProviderError("server", "down", False, partial=_billed((), "error"))]], False, InMemoryTranscriptStore, 1, "error", id="usage-only terminal"),
+        pytest.param([[Done(_billed(_TWIN, "tool_use"))]], False, InMemoryTranscriptStore, 1, "error", id="rejected response"),
+        pytest.param([[ProviderError("server", "down", False, partial=_billed(_TWIN, "error"))]], False, InMemoryTranscriptStore, 1, "error", id="rejected partial"),
+        pytest.param([[Done(_billed((text("ok"),)))]], False, _FailingResponses, 1, "error", id="commit failed"),
+        # Attempts that became a response keep their usage in its row: no audit row.
+        pytest.param([[Done(_billed((text("ok"),)))]], False, InMemoryTranscriptStore, 0, "completed", id="committed"),
+        pytest.param([[ProviderError("server", "down", False, partial=_billed((text("half"),), "error"))]], False, InMemoryTranscriptStore, 0, "error", id="committed partial"),
+    ],
+)
+async def test_the_ledger_audits_every_attempt_that_never_became_a_response(scripts, context, store_type, audited, reason):
+    # Invariant 4: the ledger owns the attempt audit on every exit of the model call, not each exit path.
+    store = store_type()
+    options = {"context": ContextConfig()} if context else {}
+    agent = make_agent(ScriptedProvider(scripts), store=store, retry=RetryPolicy(initial_delay_s=0), **options)
+    events = await collect(agent)
+    assert events[-1].reason == reason
+    assert [attempt["usage"]["input_tokens"] for _, _, attempt in store.attempts] == [9] * audited
+    committed = [row.message.usage for row in await store.load("session") if row.kind == "response"]
+    assert len(committed) + audited == sum(1 for script in scripts if script)  # every attempt counted once
 
 
 async def test_retry_usage_partial_never_enters_the_context_when_budget_expires(monkeypatch):

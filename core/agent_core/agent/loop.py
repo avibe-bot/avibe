@@ -19,7 +19,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
-from core.agent_core.agent.checkpoint import BUDGET_USED, CheckpointPolicy, Decision
+from core.agent_core.agent.checkpoint import BUDGET_USED, DENIED, CheckpointPolicy, Decision
 from core.agent_core.agent.events import (
     AgentError,
     AgentEvent,
@@ -77,6 +77,7 @@ from core.agent_core.harness.context import (
     MAX_ROLLS,
     PAUSE_AFTER,
     PROMPT_VERSION,
+    Anchor,
     Budget,
     ContextConfig,
     StateRequest,
@@ -155,6 +156,8 @@ class _Exhausted(Exception):
 _GUARD_DEFAULT: dict[str, Any] = {"failures": 0, "ineffective": 0, "paused": False}
 #: The checkpoint request without a focus, as the fit checks measure it.
 _CHECKPOINT_REQUEST = checkpoint_request()
+#: The most a checkpoint-turn call that does not run adds: one of the policy's two fixed texts (never cut).
+_FIXED_RESULT_TOKENS = max(text_tokens(DENIED), text_tokens(BUDGET_USED))
 
 
 async def _silent(*_: Any, **__: Any) -> None:
@@ -173,17 +176,20 @@ class _Ladder:
     refused: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Attempt:
     """One model attempt of the run: the C-9 attempt ledger's entry (context.md section 10).
 
-    ``message`` is the response, or the partial a failed attempt carried.
+    ``message`` is the response, or the partial a failed attempt carried. ``committed``: it became a response
+    row; ``audited``: its usage went to a ``ModelAttempt`` audit row (context.md section 10, invariant 4).
     """
 
     purpose: Literal["conversation", "checkpoint"]
     request: ModelRequest
     message: Optional[AssistantMessage]
     error: Optional[ProviderError] = None
+    committed: bool = False
+    audited: bool = False
 
 
 @dataclass(frozen=True)
@@ -444,16 +450,15 @@ class Agent:
     async def _response(self, message: AssistantMessage, *, final: bool) -> ContextEntry:
         self._validate_response(message)
         await self._save_state()
-        facts = {}
-        if self.context is not None:
-            # The request this response answered: the ledger's latest conversation attempt (the C-9 anchor).
-            attempt = next((item for item in reversed(self._attempts) if item.purpose == "conversation"), None)
-            if attempt is not None:
-                facts = {"request": request_facts(attempt.request)}
+        # The attempt this response answered: the ledger's latest conversation attempt (the C-9 anchor).
+        attempt = next((item for item in reversed(self._attempts) if item.purpose == "conversation"), None)
+        facts = {"request": request_facts(attempt.request)} if self.context is not None and attempt else {}
         row = await self._scope.call(
             lambda: self.store.append_response(self.session_id, deepcopy(message), final=final, **facts),
             interruptible=False,
         )
+        if attempt is not None:
+            attempt.committed = True
         self._rows.append(row)
         return row
 
@@ -597,6 +602,27 @@ class Agent:
         max_tokens: Optional[int] = None,
     ) -> tuple[ModelRequest, dict[str, Tool]]:
         """A request carrying ``messages``, after the user's ``before_model`` hooks: the first pipeline stage."""
+        request, tools = self._built(system, selected, messages=messages, max_tokens=max_tokens)
+        for hook in self.hooks:
+            decision = await self._hook(lambda: hook.before_model(request, self._ctx))
+            if isinstance(decision, End):
+                await self._save_state()
+                raise _Ended()
+            if decision is not None:
+                request = decision
+        allowed = {spec.name for spec in request.tools}
+        return request, {name: tool for name, tool in tools.items() if name in allowed}
+
+    def _built(
+        self,
+        system: str,
+        selected: ModelSelection,
+        *,
+        messages: Sequence[Message],
+        max_tokens: Optional[int] = None,
+    ) -> tuple[ModelRequest, dict[str, Tool]]:
+        """The request carrying ``messages`` on ``selected``, before any hook. C-9 composes its forks and the stop
+        check's minimal request from this alone, which holds because v1 takes no user hooks with a ContextConfig."""
         self._check_model_route(selected)
         capabilities = selected.capabilities
         tools = dict(self._run_tools if self._run_tools is not None else self._tools)
@@ -613,15 +639,7 @@ class Agent:
             ),
             supports_images=capabilities.supports_images is True,
         )
-        for hook in self.hooks:
-            decision = await self._hook(lambda: hook.before_model(request, self._ctx))
-            if isinstance(decision, End):
-                await self._save_state()
-                raise _Ended()
-            if decision is not None:
-                request = decision
-        allowed = {spec.name for spec in request.tools}
-        return request, {name: tool for name, tool in tools.items() if name in allowed}
+        return request, tools
 
     @asynccontextmanager
     async def _model(
@@ -651,117 +669,145 @@ class Agent:
             async def compose(selection: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
                 return await self._compose(system, selection, emit, ladder)
 
-        retries = 0
-        started = time.monotonic()
-        retry_error: Optional[ProviderError] = None
-        while True:
-            self._scope.check()
-            if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
-                yield retry_error, {}
-                return
-            if selected is None:
-                selected = await self._scope.call(self.models.resolve)
-            # Resolution is the last async stage before request admission.
-            # Expiry wins before route validation, projection, rehydration or
-            # hooks can replace the original error or persist new side effects.
-            if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
-                yield retry_error, {}
-                return
-            route = selected
-            request, tools = await compose(selected)
-            selected = None
-            if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
-                yield retry_error, tools
-                return
-            self._scope.check()
-            stream = self.models.provider_for(request.endpoint.protocol).stream(request, self._ctx.cancel)
-            streamed = False
-            terminal = None
-            relieve = False
-            try:
-                while True:
-                    try:
-                        event = await self._scope.call(lambda: anext(stream))
-                    except StopAsyncIteration:
-                        break
-                    if isinstance(event, (Done, ProviderError)):
-                        terminal = event
-                        break
-                    streamed = True
-                    if isinstance(event, TextDelta):
-                        await emit(AssistantTextDelta, delta=event.delta)
-                    elif isinstance(event, ThinkingDelta):
-                        await emit(AssistantThinkingDelta, delta=event.delta)
-                if self.context is not None:
-                    self._last_model_at = self.context.clock()
-                if terminal is None:
-                    terminal = ProviderError("unknown", "Provider stream ended without a terminal event.", False)
-                self._attempts.append(
-                    _Attempt(
-                        purpose,
-                        request,
-                        terminal.message if isinstance(terminal, Done) else terminal.partial,
-                        None if isinstance(terminal, Done) else terminal,
-                    )
-                )
-                relieve = (
-                    purpose == "conversation"
-                    and self.context is not None
-                    and isinstance(terminal, ProviderError)
-                    and terminal.kind == "overflow"
-                    and (terminal.partial is None or not terminal.partial.content)
-                )
-                delay = (
-                    self.retry.delay(terminal, retries=retries, streamed=streamed, elapsed_s=time.monotonic() - started)
-                    if isinstance(terminal, ProviderError) and not relieve
-                    else None
-                )
-                if delay is None and not relieve:
-                    # Admitted here; the caller commits it inside the scope,
-                    # BEFORE aclose. Never retry an accepted terminal.
-                    admitted = terminal.message if isinstance(terminal, Done) else terminal.partial
-                    if isinstance(terminal, Done) or (admitted is not None and admitted.content):
-                        self._validate_response(admitted, after=after)
-                    yield terminal, tools
+        first = len(self._attempts)
+        failure: Optional[BaseException] = None
+        aborted = False
+        try:
+            retries = 0
+            started = time.monotonic()
+            retry_error: Optional[ProviderError] = None
+            while True:
+                self._scope.check()
+                if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
+                    yield retry_error, {}
                     return
-            finally:
-                close = getattr(stream, "aclose", None)
-                if close is not None:
-                    await self._cleanup(close, stream=True)
-            # The attempt is not the run's answer and is never context (invariant 4): it stays in the ledger and
-            # the audit. A retried request goes out again unchanged; one refused as overflow is rebuilt after a
-            # ladder step (section 8).
-            await self._record_attempt(self._attempts[-1])
-            terminal = replace(terminal, partial=None)
-            if relieve:
-                ladder.overflows += 1
-                ladder.refused = True
-                if ladder.overflows >= MAX_OVERFLOWS:
-                    view = context_view(self._rows)
-                    plan = budget(
-                        request, route.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view)
+                if selected is None:
+                    selected = await self._scope.call(self.models.resolve)
+                # Resolution is the last async stage before request admission.
+                # Expiry wins before route validation, projection, rehydration or
+                # hooks can replace the original error or persist new side effects.
+                if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
+                    yield retry_error, {}
+                    return
+                route = selected
+                request, tools = await compose(selected)
+                selected = None
+                if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
+                    yield retry_error, tools
+                    return
+                self._scope.check()
+                stream = self.models.provider_for(request.endpoint.protocol).stream(request, self._ctx.cancel)
+                streamed = False
+                terminal = None
+                relieve = False
+                try:
+                    while True:
+                        try:
+                            event = await self._scope.call(lambda: anext(stream))
+                        except StopAsyncIteration:
+                            break
+                        if isinstance(event, (Done, ProviderError)):
+                            terminal = event
+                            break
+                        streamed = True
+                        if isinstance(event, TextDelta):
+                            await emit(AssistantTextDelta, delta=event.delta)
+                        elif isinstance(event, ThinkingDelta):
+                            await emit(AssistantThinkingDelta, delta=event.delta)
+                    if self.context is not None:
+                        self._last_model_at = self.context.clock()
+                    if terminal is None:
+                        terminal = ProviderError("unknown", "Provider stream ended without a terminal event.", False)
+                    self._attempts.append(
+                        _Attempt(
+                            purpose,
+                            request,
+                            terminal.message if isinstance(terminal, Done) else terminal.partial,
+                            None if isinstance(terminal, Done) else terminal,
+                        )
                     )
-                    raise self._exhausted(request, view, plan)
-                retries, started, retry_error = 0, time.monotonic(), None
-                continue
-            retry_error = terminal
-            retries += 1
-            await self._scope.call(lambda: asyncio.sleep(delay))
+                    relieve = (
+                        purpose == "conversation"
+                        and self.context is not None
+                        and isinstance(terminal, ProviderError)
+                        and terminal.kind == "overflow"
+                        # Only an overflow before any output: once something was streamed, the user saw it.
+                        and not streamed
+                        and (terminal.partial is None or not terminal.partial.content)
+                    )
+                    delay = (
+                        self.retry.delay(terminal, retries=retries, streamed=streamed, elapsed_s=time.monotonic() - started)
+                        if isinstance(terminal, ProviderError) and not relieve
+                        else None
+                    )
+                    if delay is None and not relieve:
+                        # Admitted here; the caller commits it inside the scope,
+                        # BEFORE aclose. Never retry an accepted terminal.
+                        admitted = terminal.message if isinstance(terminal, Done) else terminal.partial
+                        if isinstance(terminal, Done) or (admitted is not None and admitted.content):
+                            self._validate_response(admitted, after=after)
+                        yield terminal, tools
+                        return
+                finally:
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        await self._cleanup(close, stream=True)
+                # The attempt is not the run's answer and is never context (invariant 4): it stays in the ledger and
+                # the audit. A retried request goes out again unchanged; one refused as overflow is rebuilt after a
+                # ladder step (section 8).
+                await self._settle_attempts(first)
+                terminal = replace(terminal, partial=None)
+                if relieve:
+                    ladder.overflows += 1
+                    ladder.refused = True
+                    if ladder.overflows >= MAX_OVERFLOWS:
+                        view = context_view(self._rows)
+                        plan = budget(
+                            request, route.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view)
+                        )
+                        raise self._exhausted(request, view, plan)
+                    retries, started, retry_error = 0, time.monotonic(), None
+                    continue
+                retry_error = terminal
+                retries += 1
+                await self._scope.call(lambda: asyncio.sleep(delay))
+        except (_Aborted, asyncio.CancelledError, GeneratorExit):
+            aborted = True  # the cancelled run scope admits no further store write
+            raise
+        except BaseException as error:
+            failure = error
+            raise
+        finally:
+            if not aborted:
+                # Invariant 4: the ledger, not each exit path, keeps the usage of attempts that did not become a
+                # response row: a retry, a relief, a usage-only terminal, a refusal at admission, a failed commit.
+                try:
+                    await self._settle_attempts(first, error=failure)
+                except _Aborted:
+                    if failure is None:
+                        raise
 
-    async def _record_attempt(self, attempt: _Attempt) -> None:
-        """A conversation attempt that never became context: its billed usage as a non-context audit row.
+    async def _settle_attempts(self, first: int, *, error: Optional[BaseException] = None) -> None:
+        """Every conversation attempt since ``first`` that reported usage and did not become a response row:
+        exactly one non-context ``ModelAttempt`` audit row, in every mode, with or without ``ContextConfig``.
 
-        Written in every mode, with or without ``ContextConfig``: it is the one place this usage is kept.
+        It is the one place that usage is kept. ``error`` is why the model call ended, for an attempt that
+        carries no provider error of its own (a response refused at admission, a failed commit).
         """
-        partial = attempt.message
-        if attempt.purpose != "conversation" or partial is None or partial.usage is None:
-            return
-        payload: dict[str, Any] = {
-            "version": 1,
-            "usage": usage_to_dict(partial.usage),
-            "error": f"{attempt.error.kind}: {attempt.error.message}" if attempt.error is not None else None,
-        }
-        await self._audit("attempt", payload)
+        for attempt in self._attempts[first:]:
+            message = attempt.message
+            if attempt.purpose != "conversation" or attempt.committed or attempt.audited:
+                continue
+            if message is None or message.usage is None:
+                continue
+            attempt.audited = True
+            cause = attempt.error
+            payload: dict[str, Any] = {
+                "version": 1,
+                "usage": usage_to_dict(message.usage),
+                "error": f"{cause.kind}: {cause.message}" if cause is not None else str(error) if error else None,
+            }
+            await self._audit("attempt", payload)
 
     async def _commit_model_message(self, message: AssistantMessage, emit: Callable[..., Awaitable[None]]) -> bool:
         """Finality and queued-input admission share one lock with the commit."""
@@ -799,8 +845,7 @@ class Agent:
                 first_selection = None
                 if isinstance(terminal, ProviderError):
                     if terminal.partial is not None and not terminal.partial.content:
-                        # A usage-only partial is attempt data, never context.
-                        await self._record_attempt(self._attempts[-1])
+                        # A usage-only partial is attempt data, never context; the ledger audits it.
                         terminal = replace(terminal, partial=None)
                     reason = (
                         "context_exhausted"
@@ -1047,8 +1092,9 @@ class Agent:
     # --- C-9 context management (agent-core-contracts/context.md) ---------------
     #
     # The ordering and ownership invariants are context.md section 10 (1-6), the one statement of them. Their
-    # owners here: ``_compose`` (1, the request pipeline), ``_checkpoint_tool`` (2), ``_commit_context`` (3),
-    # ``self._attempts`` (4), ``harness.context.budget`` (5), and ``_model`` (6, admission).
+    # owners here: ``_compose``, ``_fork``, and ``_minimal`` (1, requests composed and budgeted),
+    # ``_checkpoint_tool`` (2), ``_commit_context`` (3), ``self._attempts`` and ``_settle_attempts`` (4),
+    # ``harness.context.budget`` (5), and ``_model`` (6, admission).
 
     def _cache_cold(self) -> bool:
         """No model request for longer than the provider cache TTL (section 3)."""
@@ -1083,8 +1129,7 @@ class Agent:
         ladder: _Ladder,
     ) -> bool:
         """C-9 on the final request (sections 3 and 8); True when it changed the context."""
-        head = [message for unit in view.units[:-1] for message in unit.messages]
-        if max(0, plan.est - messages_tokens(head)) + plan.output > plan.input_limit:
+        if not plan.can_fit and not self._minimal(system, selected, view).can_fit:
             # (d): even the checkpoint and the last unit alone cannot fit. The provider never sees it.
             raise self._exhausted(request, view, plan)
         shrink, ladder.refused = ladder.refused, False
@@ -1100,7 +1145,7 @@ class Agent:
                 cut = normal_cut(view.units, plan.keep)
                 if cut is not None:
                     ladder.compacted = True
-                    if not self._fork_can_fit(selected, plan, plan.est):
+                    if not self._fork_fits(system, selected, view, "normal", cut):
                         shrink = True  # no fork can take the whole context: the ladder from (b)
                     else:
                         outcome = await self._checkpoint(
@@ -1117,13 +1162,49 @@ class Agent:
                 return False
         return await self._shrink(system, selected, request, view, plan, emit, ladder)
 
-    def _fork_can_fit(self, selected: ModelSelection, plan: Budget, est: int) -> bool:
-        """Whether a fork carrying ``est`` tokens and the checkpoint request can fit: a choice, not admission.
+    def _minimal(self, system: str, selected: ModelSelection, view: ContextView) -> Budget:
+        """Section 8 (d): the budget of the request that would remain with everything but the last unit moved out.
 
-        The fork itself goes through the request pipeline and is budgeted there.
+        Composed and budgeted like any request (invariant 1), with no anchor: the anchor's history is gone.
         """
-        cap = checkpoint_max_tokens(selected.capabilities, self.max_tokens)
-        return est + message_tokens(_CHECKPOINT_REQUEST) + cap <= plan.input_limit
+        head = (view.checkpoint,) if view.checkpoint is not None else ()
+        transcript = (*head, *(view.units[-1].messages if view.units else ()))
+        minimal, _ = self._built(system, selected, messages=(*self._rehydrated(), *transcript))
+        return budget(minimal, selected.capabilities, transcript=transcript)
+
+    def _fork_base(self, view: ContextView, mode: str, cut: int) -> tuple[Message, ...]:
+        """What a fork carries before the checkpoint request: the whole context, or for a rolling fork its prefix."""
+        if mode == "normal":
+            return tuple(view.messages)
+        head = (view.checkpoint,) if view.checkpoint is not None else ()
+        return (*head, *(message for unit in view.units[:cut] for message in unit.messages))
+
+    def _fork(
+        self,
+        system: str,
+        route: ModelSelection,
+        base: Sequence[Message],
+        prompt: UserMessage,
+        turn: Sequence[Message],
+        anchor: Optional[Anchor],
+    ) -> tuple[ModelRequest, dict[str, Tool], Budget]:
+        """A checkpoint turn's request on ``route`` (section 6) and its budget: ``base``, the checkpoint request,
+        and the turn so far. The stage's dry run and the turn itself compose it here, so they cannot differ."""
+        transcript = (*base, prompt, *turn)
+        request, tools = self._built(
+            system,
+            route,
+            messages=(*self._rehydrated(), *transcript),
+            max_tokens=checkpoint_max_tokens(route.capabilities, self.max_tokens),
+        )
+        return request, tools, budget(request, route.capabilities, transcript=transcript, anchor=anchor)
+
+    def _fork_fits(self, system: str, selected: ModelSelection, view: ContextView, mode: str, cut: int) -> bool:
+        """A dry compose of the first request the checkpoint turn would send, budgeted: a choice, not admission."""
+        fork = self._fork(
+            system, selected, self._fork_base(view, mode, cut), _CHECKPOINT_REQUEST, (), last_anchor(self._rows, view)
+        )
+        return fork[2].can_fit
 
     async def _shrink(
         self,
@@ -1140,7 +1221,7 @@ class Agent:
         if not ladder.summary_failed and not self._guard["paused"] and not ladder.compacted:
             ladder.compacted = True
             cut = normal_cut(units, plan.keep)
-            if cut is not None and self._fork_can_fit(selected, plan, plan.est):
+            if cut is not None and self._fork_fits(system, selected, view, "normal", cut):
                 outcome = await self._checkpoint(
                     system, selected, request, view, plan, cut, mode="normal", reason="overflow", emit=emit
                 )
@@ -1148,11 +1229,7 @@ class Agent:
                     return True
                 ladder.summary_failed = not outcome.overflow
         if not ladder.summary_failed and not self._guard["paused"] and ladder.rolls < MAX_ROLLS:
-            tails = [0] * (len(units) + 1)
-            for index in range(len(units) - 1, -1, -1):
-                tails[index] = tails[index + 1] + unit_tokens(units[index])
-            whole = sent_tokens(request)
-            cut = rolling_cut(units, lambda cut: self._fork_can_fit(selected, plan, whole - tails[cut]))
+            cut = rolling_cut(units, lambda cut: self._fork_fits(system, selected, view, "rolling", cut))
             if cut is not None:
                 ladder.rolls += 1
                 outcome = await self._checkpoint(
@@ -1225,9 +1302,7 @@ class Agent:
         """Sections 6 and 7: a forked checkpoint turn; on success its row joins the context."""
         await emit(CompactionStarted, reason=reason)
         prompt = checkpoint_request(focus)
-        rehydrated = self._rehydrated()
-        head = (view.checkpoint,) if view.checkpoint is not None else ()
-        base = view.messages if mode == "normal" else (*head, *(m for unit in view.units[:cut] for m in unit.messages))
+        base = self._fork_base(view, mode, cut)
         anchor = last_anchor(self._rows, view)
         policy = CheckpointPolicy(cwd=self.cwd, scratch_dir=self.context.scratch_dir)
         turn: list[Message] = []  # what the turn's next request carries after the checkpoint request
@@ -1242,14 +1317,7 @@ class Agent:
         selection: Optional[ModelSelection] = selected
 
         async def compose(route: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
-            transcript = (*base, prompt, *turn)
-            fork, tools = await self._request(
-                system,
-                route,
-                messages=(*rehydrated, *transcript),
-                max_tokens=checkpoint_max_tokens(route.capabilities, self.max_tokens),
-            )
-            fork_plan = budget(fork, route.capabilities, transcript=transcript, anchor=anchor)
+            fork, tools, fork_plan = self._fork(system, route, base, prompt, turn, anchor)
             if not fork_plan.can_fit:
                 raise _ForkTooLarge()
             measured[:] = [fork_plan]
@@ -1296,11 +1364,14 @@ class Agent:
                 rounds += 1
                 sent = measured[0]
                 grown = sent.est + message_tokens(message)
-                for call in message.tool_calls:
+                calls = message.tool_calls
+                for index, call in enumerate(calls):
                     self._scope.check()
                     # The bound is the window of the turn's route: a tool runs only while the next request can
-                    # still grow by the floor (section 6).
-                    room = sent.input_limit - grown - sent.output
+                    # still grow by the floor, after the fixed-text results every later call of the batch may
+                    # need are reserved (section 6).
+                    reserved = (len(calls) - index - 1) * _FIXED_RESULT_TOKENS
+                    room = sent.input_limit - grown - sent.output - reserved
                     policy.open = policy.open and rounds <= CHECKPOINT_TOOL_ROUNDS and room >= CHECKPOINT_TOOL_FLOOR
                     result = await self._checkpoint_tool(call, tools, policy, limit=room - CHECKPOINT_TOOL_SLACK)
                     turn.append(result)

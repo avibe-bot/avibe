@@ -155,11 +155,12 @@ localize that error rather than deliver a silent success.
   budget ends with the original error, including when delay or route resolution
   crosses the deadline. Route resolution precedes request admission: expiry is
   checked before route validation, projection, rehydration or hooks can run.
-  Whether to retry is `ProviderError.retryable`, the provider boundary's decision;
-  a retried attempt's usage-only partial is audited, never context. Without a
+  Whether to retry is `ProviderError.retryable`, the provider boundary's decision.
+  An attempt that did not become a response row is never context; its usage is
+  one `ModelAttempt` audit row (`context.md` §10, invariant 4). Without a
   `ContextConfig`, overflow emits an error and ends as `context_exhausted`; with
-  one, an overflow before any streamed content enters the C-9 overflow ladder,
-  which stops as `context.md` §8 (d) says.
+  one, an overflow before anything was streamed and with no content in its
+  partial enters the C-9 overflow ladder, which stops as `context.md` §8 (d) says.
 - Projection consumes store-resolved ancestry, sorts by sequence, restores hook
   and guard state, applies the latest checkpoint and every context edit, and
   answers orphans with deterministic interrupted text. It has no job host or

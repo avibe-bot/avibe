@@ -29,7 +29,8 @@ Display-only rows keep `context_seq` null: `interim`, `notify`, an `error` that 
 `tool_call_id` and `job_id` so the activity panel can pair it with the result). Audit rows are never context
 either: `agent_events` with `visibility = 'audit'` and no `context_seq`, written by `append_audit`, as
 `context_checkpoint_turn` (`CheckpointTurn`, C-9 `context.md` §6, with its own attempts' partials and usage) or
-`model_attempt` (`ModelAttempt`, the usage of a conversation attempt that did not become a response, in every mode). The activity panel does not read them.
+`model_attempt` (`ModelAttempt`: the usage of a conversation attempt that did not become a response row, C-9
+`context.md` §10, invariant 4). The activity panel does not read them.
 
 ## 2. Writing
 

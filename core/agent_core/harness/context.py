@@ -345,7 +345,8 @@ def fit_result(content: Sequence[UserContent], limit: int) -> tuple[UserContent,
 
 @dataclass(frozen=True)
 class Budget:
-    """One request, as it will be sent, measured against the route resolved for it (sections 1 and 2)."""
+    """One composed request measured against the route resolved for it (sections 1 and 2): the request to send,
+    or one the stage only considers (a dry fork, the stop check's minimal request)."""
 
     window: int
     input_limit: int
@@ -366,11 +367,6 @@ class Budget:
         """The request can fit at all, without the margin (a checkpoint request's admission test)."""
         return self.est + self.output <= self.input_limit
 
-    @property
-    def room(self) -> int:
-        """What the window leaves this request to grow by before its output."""
-        return self.input_limit - self.est - self.output
-
 
 def budget(
     request: ModelRequest,
@@ -379,7 +375,7 @@ def budget(
     transcript: Sequence[Message],
     anchor: Optional[Anchor] = None,
 ) -> Budget:
-    """``W, L_in, O, M, T, keep`` and ``est`` of the final ``request`` on the route resolved for it.
+    """``W, L_in, O, M, T, keep`` and ``est`` of a composed ``request`` on the route resolved for it.
 
     Sections 1 and 2: it derives ``W, L_in, M, T, keep`` and ``est`` and reads ``O`` from ``request.max_tokens``,
     which ``output_tokens`` or ``checkpoint_max_tokens`` set when the request was built. ``transcript`` is the part

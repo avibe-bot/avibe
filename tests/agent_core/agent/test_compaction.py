@@ -428,6 +428,23 @@ async def test_a_threshold_checkpoint_may_read_while_the_window_has_room_and_nev
     assert [event.mode for event in events if isinstance(event, CompactionFinished)] == ["normal"]
 
 
+async def test_a_checkpoint_turn_reserves_room_for_every_result_of_its_batch():
+    # Sixty parallel reads at a threshold checkpoint: the first runs, the rest get the fixed text. Room for all of
+    # those results is reserved before any call runs, so the next checkpoint request still fits and succeeds.
+    calls = tuple(ToolCallBlock(f"c{index}", "read", {"path": f"f{index}"}) for index in range(60))
+    batch = AssistantMessage(calls, assistant().origin, "tool_use")
+    model = Model(reads(4), [[Done(batch)], [Done(assistant(CHECKPOINT))]])
+    tool = sized_reader(6_000, 6_000, 6_000, 2_000, 9_000)
+    agent = make_agent(model, tools=[tool])
+    events = await run(agent)
+    assert [event.mode for event in events if isinstance(event, CompactionFinished)] == ["normal"]
+    second = model.checkpoint_requests[-1]
+    results = [message for message in second.messages if isinstance(message, ToolResultMessage)][-60:]
+    assert [message.tool_call_id for message in results] == [call.id for call in calls]
+    assert sum(message.content[0].text == BUDGET_USED for message in results) >= 59
+    assert request_tokens(second.system, second.tools, second.messages) + 4_096 <= 32_000
+
+
 async def test_a_manual_compact_with_nothing_older_than_the_tail_is_skipped_without_a_model_call():
     model = Model([[Done(assistant("short"))]])
     agent = make_agent(model)
@@ -747,6 +764,48 @@ async def test_the_ladder_stops_with_what_fills_the_context_when_nothing_more_ca
     assert events[-1].reason == "context_exhausted"
     assert not model.checkpoint_requests  # nothing to summarize, so no model call
     assert len(model.requests) == 1  # the oversized request never reached the provider
+
+
+async def test_the_single_unit_stop_budgets_the_request_that_would_remain():
+    # The last response was billed far above its bytes (many short messages, protocol framing), so the anchored
+    # estimate is past the window. Dropping the old units leaves a small request: the ladder moves on, no stop.
+    store = InMemoryTranscriptStore()
+
+    def billed_high(request):
+        return [Done(replace(assistant("noted"), usage=Usage(input_tokens=30_000, output_tokens=10)))]
+
+    first = Model([call("read", "r0", path="f"), call("read", "r1", path="f"), billed_high])
+    await run(make_agent(first, store=store, tools=[reader(tokens(1_000))]), row="first")
+    model = Model([[Done(assistant("done"))]], [[Done(assistant(CHECKPOINT))]])
+    events = await run(make_agent(model, store=store), tokens(1_000), row="second")
+    assert not [event for event in events if isinstance(event, ContextExhausted)]
+    assert events[-1].reason == "completed"
+    assert [event.mode for event in events if isinstance(event, CompactionFinished)] == ["rolling"]
+    request = model.conversation_requests[0]  # the only one sent, after the checkpoint
+    assert request_tokens(request.system, request.tools, request.messages) + 4_096 <= 32_000
+
+
+async def test_the_stage_judges_the_fork_it_would_send_exactly_as_the_turn_composes_it():
+    # Rehydrated state rides in every request, the fork's included: the stage's dry run counts it, so it never starts
+    # a normal checkpoint whose first request the turn would then refuse; it goes straight to the rolling step.
+    state = UserMessage((text(tokens(4_000)),))
+    model = Model([*growing(3)[:2], call("read", "big", path="f"), [Done(assistant("done"))]], [[Done(assistant(CHECKPOINT))]] * 3)
+    agent = make_agent(model, tools=[sized_reader(6_000, 6_000, 12_000)], rehydrate=lambda _: [state])
+    events = await run(agent)
+    assert not [event for event in events if isinstance(event, CompactionFailed)]
+    assert [event.mode for event in events if isinstance(event, CompactionFinished)][0] == "rolling"
+    assert events[-1].reason == "completed"
+    assert all(request.messages[0] == state for request in model.requests)
+
+
+async def test_an_overflow_after_streamed_output_is_never_retried():
+    # The adapter streamed text, then reported overflow without a partial: the user saw output, so no retry.
+    model = Model([*history(), [TextDelta(0, "partial answer"), OVERFLOW]], [[Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, tools=[reader(tokens(3_000))])
+    await run(agent)
+    events = await run(agent, row="second")
+    assert events[-1].reason == "context_exhausted"
+    assert not model.checkpoint_requests and len(model.conversation_requests) == 4
 
 
 async def test_a_provider_that_always_overflows_stops_after_two_checkpoint_calls():

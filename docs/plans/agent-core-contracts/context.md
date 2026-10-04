@@ -21,9 +21,8 @@ when the request is built, as its `max_tokens` (`output_tokens()`, `checkpoint_m
 `harness/context.budget(request, capabilities, transcript, anchor)`, derives `W, L_in, M, T, keep` and the request's
 `est` (§2) and reads `O` from the request, once per request (§10, invariant 1). No state keeps these values between
 requests, so a route change is picked up at once; a smaller window than expected is handled by the overflow path
-(§8). Before composing a fork, the stage asks whether one carrying a given `est` could fit
-(`est + tokens(checkpoint request) + min(16,000, O) <= L_in`); that only chooses the step, and the fork itself is
-budgeted.
+(§8). Every fit decision is `budget()` on a request actually composed (§10, invariant 1), including the two the
+stage only considers: the fork it would send first, and the minimal request of the stop check.
 
 ```text
 W    = context_window                              (128,000 when unknown)
@@ -67,23 +66,25 @@ So does anything after `R`, an edit there included.
 Every conversation request takes the request pipeline (§10, invariant 1). Its C-9 stage, inside the tool loop and
 before a retry alike:
 
-1. **Stop** (§8 d) when even the checkpoint and the last unit cannot fit: `est` minus the rest of the transcript,
-   plus `O`, exceeds `L_in`. The provider never sees the request.
+1. **Stop** (§8 d) when the request cannot fit and neither can the request composed from the checkpoint and the
+   last unit alone, budgeted without the anchor (its history would be gone). The provider never sees the request.
 2. **Clear** (§4) when the provider cache is cold (no model request for longer than the cache TTL, 300 s by
    default; after a restart, measured from the latest response row's `created_at`) or `est >= 0.8 * T`.
 3. **Checkpoint** when `est >= T`, auto-compaction is not paused (§10), and there is something to summarize, at most
-   once per model request: a normal checkpoint (§6, reason `threshold`) when the forked request can fit, otherwise
-   the overflow ladder from (b) (§8, reason `overflow`). A checkpoint request that overflows continues at (b).
+   once per model request: a normal checkpoint (§6, reason `threshold`) when the fork it would send can fit,
+   otherwise the overflow ladder from (b) (§8, reason `overflow`). A checkpoint request that overflows continues at
+   (b).
 4. **Ladder** (§8) when the request does not fit. With no checkpoint request left to try (one failed for this
    request other than by overflow, or auto-compaction is paused), a request that can fit is sent and the provider
    judges.
 
 A request the provider rejects as overflow (`ProviderError.kind == "overflow"`, classified by
-`ai/errors.is_overflow_message`, HTTP 413, and `context_length_exceeded`) before streaming any content enters the
-overflow ladder (§8) and is rebuilt and sent again. An overflow after streamed content cannot be retried: the partial
-is committed as a non-final response and the run ends `context_exhausted`. A checkpoint turn's own requests (§6)
-never run this stage (no clearing, checkpoint, or ladder; one compaction is in flight per Session); each is sent only
-when it can fit.
+`ai/errors.is_overflow_message`, HTTP 413, and `context_length_exceeded`) before anything was streamed, and with no
+content in its partial, enters the overflow ladder (§8) and is rebuilt and sent again. Any other overflow is never
+retried, even when the adapter reports no partial, since the user may have seen what was streamed: a partial with
+content is committed as a non-final response, and the run ends `context_exhausted`. A checkpoint turn's own
+requests (§6) never run this stage (no clearing, checkpoint, or ladder; one compaction is in flight per Session);
+each is sent only when it can fit.
 
 ## 4. Clearing old tool results
 
@@ -106,8 +107,8 @@ whose tool batch follows it; never at a tool result, so no call is separated fro
 - **Normal** (threshold, manual, and the first overflow step): the tail is the longest run of whole units at the end
   whose tokens total at most `keep`, and at least the last unit. Everything before it is the head. An empty head
   means there is nothing to summarize.
-- **Rolling** (§8 b): the cut nearest to half the tokens, moved earlier until the forked request over the head fits;
-  never past the last unit.
+- **Rolling** (§8 b): the cut nearest to half the tokens, moved earlier until the forked request over the head can fit
+  (§1); never past the last unit.
 - **Dropped** (§8 c): the cut nearest to half the tokens; never past the last unit.
 
 `first_kept_seq` is the `context_seq` of the first kept unit. If that unit is not an input, the cut split a turn: the
@@ -145,9 +146,12 @@ budget (invariant 2):
 - Every request of the turn is budgeted on the route resolved for it (§1): its `max_tokens` is that route's
   `min(16,000, O)`.
 - The bound is the window, not `T`, the same way in threshold, manual, and rolling turns. Before each call,
-  `room = L_in - est - min(16,000, O)`, where `est` is the budget of the turn's latest request plus the tokens of
-  the response and results since. A call runs only while `room >= 4,000` tokens, and the result of every call that
-  runs (an unknown tool's error included) is cut to `room - 1,000` tokens, head kept, ending with
+  `room = L_in - est - min(16,000, O) - reserved`, where `est` is the budget of the turn's latest request plus the
+  tokens of the response and results since, and `reserved` is one fixed-text result (the longer of the two below)
+  for each later call of the same response, so every result of the batch is accounted for before it exists. This is
+  the one bound that extends the latest request's budget by arithmetic (§10, invariant 1). A call runs only while
+  `room >= 4,000` tokens, and the result of every call that runs (an unknown tool's error included) is cut to
+  `room - 1,000` tokens, head kept, ending with
   `[Output truncated to fit this checkpoint turn: showing about <shown> of <total> tokens. Read a smaller range if
   you need more.]`, so a single result cannot push the turn out of the window. The policy's two fixed texts (the
   denial and the used-up budget) are a few dozen tokens and are never cut: a truncation note would invite another
@@ -227,9 +231,10 @@ once the request fits:
   the earliest part (§5) moves out of the context. The row keeps the previous checkpoint's text and the
   `<earlier-record>` pointer; `checkpoint` is empty when there was none, and the message then has no framing text.
   Repeated while the request still does not fit.
-- (d) **Stop**: when even the last unit (the current request, carried as `<current-request>`, plus the latest tool
-  batch) with the checkpoint cannot fit (checked in the stage, §3, before provider admission), when nothing more can
-  move out of a request the provider refused, or after 4 provider overflows of one request, the run ends
+- (d) **Stop**: when the request and its minimal request (the checkpoint and the last unit: the current request,
+  carried as `<current-request>`, plus the latest tool batch) both cannot fit (checked in the stage, §3, before
+  provider admission), when nothing more can move out of a request that cannot fit or that the provider refused, or
+  after 4 provider overflows of one request, the run ends
   `context_exhausted` and the `context_exhausted` event says what fills the context. No model is called for a
   context that cannot fit.
 
@@ -275,15 +280,19 @@ ends the run `context_exhausted`, as in P1. The adapter supplies:
   and ends `completed`, and the adapter replies briefly that there is nothing to compact yet.
 
 **Ordering and ownership invariants.** This list is the one normative statement of these rules; the other sections
-refer to it. Each has a test in `tests/agent_core/agent/test_compaction.py` (route: `test_context.py`) that fails when
-its order or owner is broken.
+refer to it. Each has a test in `tests/agent_core/agent/test_compaction.py` (route: `test_context.py`; the ledger's
+every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
 
-1. **One request pipeline.** Projection, then `budget()` exactly once on that final request, then the C-9 stage,
-   then the provider. Nothing changes a request after it is budgeted; a stage step that changes the context
-   rebuilds the request from the top. The single-unit stop (§8 d) is in the stage, before provider admission.
-   Checkpoint requests take the same pipeline. In v1 an Agent with a `ContextConfig` takes no user hooks (a
-   configuration error), so nothing else can rewrite a request C-9 owns; hooks with context management are a post-v1
-   design item (plan §10).
+1. **One request pipeline.** Projection, then `budget()` on that final request, once per composed request, then
+   the C-9 stage, then the provider. Nothing changes a request after it is budgeted; a stage step that changes the
+   context rebuilds the request from the top. Whether a request fits is always `budget()` on a request actually
+   composed: the request to send, the fork the stage would send first (the checkpoint turn composes its requests the
+   same way, so the dry run and the turn cannot differ), and the stop check's minimal request (§3). The one bound
+   that extends a budget by arithmetic is the checkpoint turn's tool room, from its latest request's budget (§6);
+   the stop message after the fourth overflow re-measures the refused request. The single-unit stop (§8 d) is in
+   the stage, before provider admission. Checkpoint requests take the same pipeline. In v1 an Agent with a
+   `ContextConfig` takes no user hooks (a configuration error), so nothing else can rewrite a request C-9 owns;
+   hooks with context management are a post-v1 design item (plan §10).
 2. **One tool pipeline** in a checkpoint turn: the turn's budget (once closed, `BUDGET_USED`), then the checkpoint
    table (a denial is its fixed text), then execution (a scratch `write` or `edit` relative to the root's
    descriptor), then the bound on the result of every call that ran (§6). The two fixed texts are never cut.
@@ -295,9 +304,13 @@ its order or owner is broken.
    request, its response or partial, and so its usage, in one place. The checkpoint audit and the request facts of a
    committed response (the anchor) read only from it. An attempt that does not become the run's response is never
    context, and its partial is not carried: a retried request goes out again unchanged, and one the provider refused
-   as overflow is rebuilt after a ladder step (§8). A conversation attempt's usage-only partial is a non-context
-   `ModelAttempt` audit row, never a response row, written in every mode, with or without `ContextConfig`: it is the
-   one place that usage is kept. A checkpoint attempt's partials and usage are kept in its `CheckpointTurn` row (§6).
+   as overflow is rebuilt after a ladder step (§8). The ledger, not each exit path, keeps the usage of a
+   conversation attempt that did not become a response row (retried, relieved, a usage-only terminal, refused at
+   admission, or a failed commit): one non-context `ModelAttempt` audit row, never a response row, written in every
+   mode, with or without `ContextConfig`, on every exit of the model call but an abort; a failed audit write is a
+   diagnostic and is not retried. The cancelled run scope admits no further store write, so an aborted call's
+   unaudited attempts are not kept. It is the one place that usage is kept. A checkpoint attempt's partials and usage are kept in
+   its `CheckpointTurn` row (§6).
 5. **Route-scoped anchors.** An anchor answered by another origin (provider, api, model) is invalid (§2).
 6. **One admission path.** Every response, of every purpose (conversation, checkpoint), and every partial with
    content is admitted in one place, the model call, before anything acts on it: it must be valid after the
