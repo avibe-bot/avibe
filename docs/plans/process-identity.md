@@ -82,6 +82,13 @@ meant to be the authority and the birth time only a hint:
   is proof on its own, since a clock step can make a replacement's birth time
   equal the recorded one. This is a change to a shared predicate, made once in
   the first rollout step for all its callers.
+- `process_group_identity_status` judges a recorded process group the same way
+  and needs the same change. Today it compares each member's birth time with
+  the recorded leader's, so after a clock step a group that reused the pgid is
+  "unknown" instead of "another tree", and recovery records for watches,
+  scheduled tasks, the Model Hub engine, and the desktop installer stay
+  blocked until that unrelated group exits. Members are judged by their
+  markers alone.
 
 Command workers (`core/command_runner.py`), the Model Hub engine supervisor,
 and the desktop backends use it today.
@@ -170,7 +177,8 @@ signal path, before it changes it.
      Its docstring currently promises that `(pid, create_time)` identifies the
      original process, which would invite the next consumer to repeat the
      problem. Its value does not change.
-   - `process_identity_recycled` no longer requires a birth-time mismatch.
+   - `process_identity_recycled` no longer requires a birth-time mismatch, and
+     `process_group_identity_status` judges group members by marker alone.
    - `independent_process_env` removes the marker.
 2. **Then one PR per consumer**, in this order: OpenCode adopted servers, the
    Claude registry with Running Agents and the reaper's signal primitive, the
