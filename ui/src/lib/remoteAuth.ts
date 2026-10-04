@@ -8,6 +8,9 @@ const SETUP_CHECK_BYPASS_PATHS = new Set([
   '/settings/diagnostics/logs',
   '/admin/logs',
   '/admin/settings/diagnostics',
+  // The desktop pet keeps the login and authorization gates but owns its setup
+  // state: it shows "finish setting up in Avibe" instead of a pet-sized wizard.
+  '/pet',
 ]);
 
 type PwaContext = {

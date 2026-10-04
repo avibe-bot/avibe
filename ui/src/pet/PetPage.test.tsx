@@ -116,6 +116,10 @@ const api = {
 };
 
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
+let canChat = true;
+vi.mock('@/context/InstanceAuthorizationContext', () => ({
+  useInstanceAuthorization: () => ({ capabilities: { can_chat: canChat } }),
+}));
 vi.mock('@/context/WorkbenchInboxContext', async () => {
   const { useSyncExternalStore } = await import('react');
   return {
@@ -169,6 +173,7 @@ beforeEach(async () => {
   ({ PetPage } = await import('./PetPage'));
   setupDone = true;
   windowFocused = true;
+  canChat = true;
   sessionReads = {};
   tails = {};
   switcherSessions = [];
@@ -784,5 +789,44 @@ describe('PetPage review fixes, round 12', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     await waitFor(() => expect(screen.queryByLabelText('pet.panel')).toBeNull());
     expect(screen.getByLabelText('pet.toggle').getAttribute('aria-expanded')).toBe('false');
+  });
+});
+
+describe('PetPage review fixes, round 13', () => {
+  it('offers no composer or quick replies without the chat capability', async () => {
+    canChat = false;
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S', { content: { quick_replies: ['Yes'] } })];
+    devBind('S');
+    render(<PetPage />);
+    summon('listen');
+    await screen.findByLabelText('pet.panel');
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
+    expect(screen.queryByText('Yes')).toBeNull();
+  });
+
+  it('ends the post-send Running grace on an authoritative turn.end', async () => {
+    devBind('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('S'));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    await userEvent.type(input, 'quick{Enter}');
+    await waitFor(() => expect(pose()).toBe('running'));
+    await emit((h) => h.onTurnEnd?.({ session_id: 'S' }));
+    await waitFor(() => expect(pose()).toBe('idle'));
+  });
+
+  it('drops what it read and unbinds when authorization to the session is lost', async () => {
+    tails.S = [message('r1', 'S', { text: 'private reply' })];
+    devBind('S');
+    render(<PetPage />);
+    summon('show');
+    await screen.findByText('private reply');
+    sessionReads.S = async () => ({ status: 403, session: null });
+    await emit((h) => h.onAuthorizationChanged?.({}));
+    await waitFor(() => expect(screen.queryByText('private reply')).toBeNull());
+    await waitFor(() => expect(window.localStorage.getItem('avibe.pet.devBinding')).toBeNull());
   });
 });

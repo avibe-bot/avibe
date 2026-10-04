@@ -643,11 +643,13 @@ The code and its tests are the contract; this section records why.
   state, panel, poses and i18n; (c) the shell: window, IPC, shortcut, tray,
   `pet.json`, and "Show in pet". The pet stays invisible until (c) lands, so
   (a) and (b) ship nothing a user can see.
-- **`/pet` sits outside `AuthGuard`, not inside it with an exemption.** It is
-  a sibling route with its own setup gate (`usePetSetup`), which applies the
-  same rule as `AuthGuard` through the shared `isSetupComplete`. This keeps
-  the guard unchanged and the pet out of the Workbench chrome. The setup
-  re-read bypasses the config cache (`getConfig({ cache: false })`).
+- **`/pet` sits inside `AuthGuard` with a setup-redirect exemption only.** It
+  keeps the login and authorization gates, and `SETUP_CHECK_BYPASS_PATHS`
+  exempts it from the wizard redirect: its own setup gate (`usePetSetup`)
+  applies the same rule through the shared `isSetupComplete` and shows
+  "finish setting up in Avibe" instead of a pet-sized wizard. The route stays
+  outside the Workbench chrome. The setup re-read bypasses the config cache
+  (`getConfig({ cache: false })`). Composing is shown only with `can_chat`.
 - **Shell → page events are DOM events.** The shell dispatches
   `avibe:pet-summon` and `avibe:pet-bound` on `window` through a
   shell-evaluated script, the channel the Settings… menu already uses, so the

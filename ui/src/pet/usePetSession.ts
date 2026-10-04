@@ -93,7 +93,8 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
       apply: (key, { status, session: row }) => {
         // A binding is valid only while S is writable: missing, archived and
         // Runtime-owned sessions all clear it.
-        if (status === 404 || (row && isSessionReadOnly(row))) {
+        // 403: this principal lost access to the session (or its project).
+        if (status === 404 || status === 403 || (row && isSessionReadOnly(row))) {
           setInvalid(key);
           return;
         }
@@ -164,7 +165,22 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
         if (mine(session_id)) sources.turn.refresh();
       },
       onTurnEnd: ({ session_id }) => {
-        if (mine(session_id)) sources.turn.refresh();
+        if (!mine(session_id)) return;
+        // An authoritative end: the post-send grace only guards idle reads that
+        // race turn registration, so it ends here too.
+        setInGrace(false);
+        sources.turn.refresh();
+      },
+      // Access changed: drop everything read under the old authorization at
+      // once, then re-read; a lost session reads 403 and clears the binding.
+      onAuthorizationChanged: () => {
+        sources.session.noteLiveMerge();
+        sources.tail.noteLiveMerge();
+        sources.turn.noteLiveMerge();
+        setSession(null);
+        setTail(EMPTY_TAIL);
+        setTurn(null);
+        refreshAll();
       },
       onQueueUpdated: ({ session_id }) => {
         if (mine(session_id)) sources.turn.refresh();

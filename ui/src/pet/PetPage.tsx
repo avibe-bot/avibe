@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import { Activity, ArrowUp, ExternalLink, KeyRound, Shuffle } from 'lucide-react';
 
 import { useApi, type SessionActivityState, type WorkbenchMessage } from '@/context/ApiContext';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useWorkbenchInbox } from '@/context/WorkbenchInboxContext';
 import { Button } from '@/components/ui/button';
 import { Markdown } from '@/components/ui/markdown';
@@ -84,6 +85,10 @@ const PetSurface: React.FC = () => {
   // can be picked, so a local pick never races the shell's durable binding.
   const bindingKnown = shellBinding !== undefined;
   const binding = shellBinding ?? null;
+  // Sending is a chat capability, as in the chat page: a principal without it
+  // sees the pet's state but gets no composer or quick replies.
+  const { capabilities } = useInstanceAuthorization();
+  const canChat = capabilities.can_chat;
   const bindingRef = useLatestRef(binding);
   const [expanded, setExpanded] = useState(false);
   const [layout, setLayout] = useState<PetLayout>({ panel_side: 'left', panel_edge: 'bottom' });
@@ -202,7 +207,7 @@ const PetSurface: React.FC = () => {
   const send = useCallback(async (text: string, metadata?: Record<string, unknown>) => {
     // Only a session this page has validated as writable accepts input; a
     // restored or just-picked binding waits for its first successful read.
-    if (!binding || data.session?.id !== binding || !text.trim()) return false;
+    if (!canChat || !binding || data.session?.id !== binding || !text.trim()) return false;
     if (sendingRef.current) return false;
     sendingRef.current = true;
     setSending(true);
@@ -220,7 +225,7 @@ const PetSurface: React.FC = () => {
       sendingRef.current = false;
       setSending(false);
     }
-  }, [api, binding, data]);
+  }, [api, binding, canChat, data]);
 
   // A completed send clears the draft only if it is still the same text in
   // the same session it was submitted from. A binding change already empties
@@ -306,7 +311,8 @@ const PetSurface: React.FC = () => {
       onDraft={setDraft}
       onSubmit={() => void submit()}
       sending={sending}
-      canSend={Boolean(binding) && data.session?.id === binding}
+      canChat={canChat}
+      canSend={canChat && Boolean(binding) && data.session?.id === binding}
       inputRef={inputRef}
     />
   ) : null;
@@ -350,6 +356,8 @@ type PanelProps = {
   sending: boolean;
   /** The bound session has been read and is writable. */
   canSend: boolean;
+  /** The principal may chat at all (instance capability). */
+  canChat: boolean;
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
 };
 
@@ -390,9 +398,10 @@ const PetPanel: React.FC<PanelProps> = ({ inputRef, ...props }) => {
           <ActivityLine activities={props.activities} />
           <NeedsInput
             vaultRequestIds={props.vaultRequestIds}
-            quickReplies={props.quickReplies}
+            quickReplies={props.canChat ? props.quickReplies : null}
             onChoose={props.onChoose}
           />
+          {props.canChat && (
           <form
             className="flex items-end gap-1.5 border-t border-border p-2"
             onSubmit={(event) => {
@@ -419,6 +428,7 @@ const PetPanel: React.FC<PanelProps> = ({ inputRef, ...props }) => {
               <ArrowUp className="size-4" />
             </Button>
           </form>
+          )}
           {props.queued && <p className="px-3 pb-2 text-[11px] text-muted">{t('pet.queued')}</p>}
         </>
       ) : null}

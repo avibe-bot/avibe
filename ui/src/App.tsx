@@ -79,7 +79,8 @@ const AppsEditorPage = lazy(() =>
   import('./components/workbench/AppsEditorPage').then((m) => ({ default: m.AppsEditorPage })),
 );
 // The desktop pet window's page: its own small surface, outside the Workbench
-// shell and the setup redirect (docs/plans/2026-10-01-desktop-pet.md).
+// shell. It sits behind AuthGuard's login and authorization gates, and is
+// exempt only from the setup redirect (docs/plans/2026-10-01-desktop-pet.md).
 const PetPage = lazy(() => import('./pet/PetPage').then((m) => ({ default: m.PetPage })));
 const LibraryAppBody = lazy(() => import('./apps/LibraryApp').then((m) => ({ default: m.LibraryApp })));
 // The mobile full-screen Show Page route body. Lazy so the iframe frame + session
@@ -818,7 +819,13 @@ const router = createBrowserRouter(
     <>
     <Route
       path="/pet"
-      element={<ErrorBoundary variant="page"><Suspense fallback={null}><PetPage /></Suspense></ErrorBoundary>}
+      element={(
+        <ErrorBoundary variant="page">
+          <AuthGuard>
+            <Suspense fallback={null}><PetPage /></Suspense>
+          </AuthGuard>
+        </ErrorBoundary>
+      )}
     />
     <Route element={<ErrorBoundary variant="page"><RouterRoot /></ErrorBoundary>}>
       <Route element={<AuthGuard><AppShell /></AuthGuard>}>

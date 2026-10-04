@@ -58,6 +58,7 @@ describe('remote auth navigation', () => {
     '/settings/diagnostics/logs',
     '/admin/logs',
     '/admin/settings/diagnostics',
+    '/pet',
   ])(
     'keeps remote session authentication enabled while bypassing setup checks for %s',
     async (path) => {
