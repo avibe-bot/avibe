@@ -357,3 +357,53 @@ describe('PetPage review fixes', () => {
     expect(api.listSessions).not.toHaveBeenCalled();
   });
 });
+
+describe('PetPage review fixes, round 2', () => {
+  it('does not mark replies read while the switcher hides them', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
+    unreadBySession = { S: 1 };
+    switcherSessions = [session('S'), session('T')];
+    devBind('S');
+    render(<PetPage />);
+    summon('show');
+    await screen.findByText('reply r1');
+    await waitFor(() => expect(markRead).toHaveBeenCalledTimes(1));
+    // A newer reply arrives while the user is looking at the switcher.
+    await userEvent.click(screen.getByLabelText('pet.switchSession'));
+    await screen.findByText('Session T');
+    await emit((h) => h.onMessageNew?.(message('r2', 'S', { read_at: null })));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(markRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a failed mark-read the next time the reply is shown', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
+    unreadBySession = { S: 1 };
+    markRead.mockImplementationOnce(async () => {
+      throw new Error('offline');
+    });
+    devBind('S');
+    render(<PetPage />);
+    summon('show');
+    await waitFor(() => expect(markRead).toHaveBeenCalledTimes(1));
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    summon('show');
+    await waitFor(() => expect(markRead).toHaveBeenCalledTimes(2));
+    expect(markRead).toHaveBeenLastCalledWith('S', 'r1');
+  });
+
+  it('keeps a draft typed after submitting when the send completes', async () => {
+    const pending = deferred<WorkbenchMessage>();
+    api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
+    devBind('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    await userEvent.type(input, 'first{Enter}');
+    await userEvent.type(input, ' and more');
+    await act(async () => pending.resolve(message('sent', 'S', { author: 'user', type: 'user' })));
+    expect(input.value).toBe('first and more');
+  });
+});

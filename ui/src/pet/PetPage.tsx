@@ -105,10 +105,15 @@ const PetSurface: React.FC = () => {
     unreadCount,
   });
 
+  // Only the latest open/close request's layout applies: a quick toggle must
+  // not leave the open layout on a collapsed pet.
+  const layoutRequestRef = useRef(0);
   const setPanel = useCallback(async (next: boolean) => {
     setExpanded(next);
+    const request = ++layoutRequestRef.current;
     try {
-      setLayout(await petBridge.setExpanded(next));
+      const applied = await petBridge.setExpanded(next);
+      if (request === layoutRequestRef.current) setLayout(applied);
     } catch {
       /* the shell keeps its current frame */
     }
@@ -168,23 +173,7 @@ const PetSurface: React.FC = () => {
   const exchange = useMemo(() => latestExchange(data.messages, data.hasOlder), [data.messages, data.hasOlder]);
   const quickReplies = openQuickReplies(data.messages);
 
-  // Mark read only what the panel rendered, and only when every unread result
-  // is in the loaded tail; otherwise reading is left to the Workbench.
-  const lastRenderedUnread = exchange.results.length > 0 && exchange.results[exchange.results.length - 1].read_at === null
-    ? exchange.results[exchange.results.length - 1].id
-    : null;
-  // Each row is marked once: the tail keeps `read_at: null` until its next
-  // read, so the marker, not the row, says it was already sent.
   const { markRead } = inbox;
-  const markedRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!expanded || !binding || !lastRenderedUnread || !exchange.unreadComplete) return;
-    if (document.visibilityState !== 'visible') return;
-    const marker = `${binding}\u0000${lastRenderedUnread}`;
-    if (markedRef.current === marker) return;
-    markedRef.current = marker;
-    void markRead(binding, lastRenderedUnread).catch(() => undefined);
-  }, [expanded, binding, lastRenderedUnread, exchange.unreadComplete, markRead]);
 
   const send = useCallback(async (text: string, metadata?: Record<string, unknown>) => {
     if (!binding || !text.trim()) return false;
@@ -204,10 +193,17 @@ const PetSurface: React.FC = () => {
     }
   }, [api, binding, data]);
 
+  // A completed send clears the draft only if it is still the one submitted,
+  // for the session it was submitted to: an edit or a session switch while the
+  // POST was pending keeps what is on screen.
   const submit = async () => {
-    const text = draft.trim();
+    const submitted = draft;
+    const text = submitted.trim();
+    const submittedFor = binding;
     if (!text) return;
-    if (await send(text)) setDraft('');
+    if (!(await send(text))) return;
+    if (petShell.currentBinding() !== submittedFor) return;
+    setDraft((current) => (current === submitted ? '' : current));
   };
 
   // QuickReplies locks the group locally; the Runtime's message.updated for the
@@ -255,6 +251,7 @@ const PetSurface: React.FC = () => {
         void petBridge.bind(sessionId).catch(() => undefined);
       }}
       exchange={exchange}
+      markRead={markRead}
       running={data.running}
       queued={(data.turn?.pending_input_count ?? 0) > 0}
       activities={data.turn?.background_activities ?? []}
@@ -291,6 +288,7 @@ type PanelProps = {
   onToggleSwitcher: () => void;
   onPick: (sessionId: string) => void;
   exchange: ReturnType<typeof latestExchange>;
+  markRead: (sessionId: string, untilMessageId?: string) => Promise<void>;
   running: boolean;
   queued: boolean;
   activities: SessionActivityState[];
@@ -331,7 +329,7 @@ const PetPanel: React.FC<PanelProps> = ({ inputRef, ...props }) => {
         <SessionSwitcher current={binding} onPick={props.onPick} />
       ) : binding ? (
         <>
-          <ExchangeView exchange={props.exchange} running={props.running} binding={binding} />
+          <ExchangeView exchange={props.exchange} running={props.running} binding={binding} markRead={props.markRead} />
           <ActivityLine activities={props.activities} />
           <NeedsInput
             vaultRequestIds={props.vaultRequestIds}
@@ -371,12 +369,19 @@ const PetPanel: React.FC<PanelProps> = ({ inputRef, ...props }) => {
   );
 };
 
+/**
+ * The latest exchange, and the one place the pet marks replies read: this view
+ * is mounted only while the user can see it (panel open, switcher closed), so
+ * "rendered" is decided by what is on screen rather than by panel flags.
+ */
 const ExchangeView: React.FC<{
   exchange: ReturnType<typeof latestExchange>;
   running: boolean;
   binding: string;
-}> = ({ exchange, running, binding }) => {
+  markRead: (sessionId: string, untilMessageId?: string) => Promise<void>;
+}> = ({ exchange, running, binding, markRead }) => {
   const { t } = useTranslation();
+  usePetMarkRead(binding, exchange, markRead);
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 py-2 text-[13px]">
       {exchange.user && (
@@ -483,3 +488,30 @@ const SessionSwitcher: React.FC<{ current: string | null; onPick: (sessionId: st
     </div>
   );
 };
+
+/**
+ * Mark read through the last rendered unread result, once per row, and only
+ * when every unread result is in the loaded tail (otherwise reading is left to
+ * the Workbench). The tail keeps `read_at: null` until its next read, so a
+ * marker records what was sent. A failed request clears it, so the next
+ * chance to read (reopening the panel, the window coming back, a new tail)
+ * retries, without a retry loop against a failing server.
+ */
+function usePetMarkRead(
+  binding: string,
+  exchange: ReturnType<typeof latestExchange>,
+  markRead: (sessionId: string, untilMessageId?: string) => Promise<void>,
+): void {
+  const last = exchange.results[exchange.results.length - 1];
+  const unreadId = last && last.read_at === null ? last.id : null;
+  const markedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!unreadId || !exchange.unreadComplete || document.visibilityState !== 'visible') return;
+    const marker = `${binding}\u0000${unreadId}`;
+    if (markedRef.current === marker) return;
+    markedRef.current = marker;
+    markRead(binding, unreadId).catch(() => {
+      if (markedRef.current === marker) markedRef.current = null;
+    });
+  }, [binding, unreadId, exchange.unreadComplete, markRead]);
+}
