@@ -115,7 +115,8 @@ def make_request(messages=(), *, system="system", tools=(), endpoint=ENDPOINT, m
         (1_000_000, None, 32_000, 32_000, 32_000, 30_000, 900_000, 20_000),
         (None, None, None, 8_192, 8_192, 8_000, 111_808, 20_000),  # unknown: W = 128,000, O = 8,192
         (400_000, 272_000, 128_000, 128_000, 128_000, 12_000, 132_000, 20_000),
-        (32_000, None, 64_000, 4_096, 4_096, 8_000, 19_904, 4_976),  # O is the request's, capped by the Agent
+        (32_000, None, 64_000, 4_096, 4_096, 4_000, 23_904, 5_976),  # O is the request's, capped by the Agent
+        (8_000, None, 2_000, 2_000, 2_000, 1_000, 5_000, 1_250),  # M is at most W / 8
     ],
 )
 def test_limits_follow_the_frozen_formula_from_the_route_capabilities(
@@ -129,6 +130,16 @@ def test_limits_follow_the_frozen_formula_from_the_route_capabilities(
     limit = input_limit or window or 128_000
     at_limit = budget(make_request(system="x" * 4 * (limit - output - margin), max_tokens=output), capabilities, transcript=())
     assert at_limit.fits and not replace(at_limit, est=at_limit.est + 1).fits
+
+
+@pytest.mark.parametrize("window", [4_000, 8_000, 12_000, 32_000, 128_000, 1_000_000])
+def test_the_threshold_stays_positive_on_every_window(window):
+    # With the Agent's output at most a quarter of the window and the margin at most an eighth, T >= 0.625 * W.
+    capabilities = ModelCapabilities(context_window=window, max_output_tokens=window // 4)
+    plan = budget(make_request(system="", max_tokens=window // 4), capabilities, transcript=())
+    assert plan.margin <= window // 8 and plan.threshold >= math.floor(0.625 * window) > 0
+    if window >= 64_000:  # large windows are unchanged
+        assert plan.margin == max(8_000, math.ceil(0.03 * window))
 
 
 def _usage(total: int) -> Usage:
@@ -392,10 +403,11 @@ def test_each_artifact_list_keeps_its_50_most_recent_paths_across_checkpoints():
     assert artifacts.count("- and 450 more\n") == 2
 
 
-def test_an_artifact_path_is_middle_truncated_so_a_list_stays_small():
+@pytest.mark.parametrize("segment", ["deep/", "目录/"], ids=["ascii", "cjk"])
+def test_an_artifact_path_is_middle_truncated_so_a_list_stays_small(segment):
     rows = Rows()
     rows.input("deep paths")
-    paths = [f"{'deep/' * 800}file-{index:02}.py" for index in range(60)]  # near PATH_MAX: 4,011 characters each
+    paths = [f"{segment * 800}file-{index:02}.py" for index in range(60)]  # near PATH_MAX, whatever the script
     for index, path in enumerate(paths):
         rows.tool("read", "r", call_id=f"r{index}", path=path)
     rows.input("next")
@@ -416,11 +428,11 @@ def test_an_artifact_path_is_middle_truncated_so_a_list_stays_small():
     )
     listed = payload["files_read"]
     assert len(listed) == 50 and payload["files_read_more"] == 10
-    # Each path keeps its head and its file name, cut in the middle to 160 characters.
-    assert all(len(path) == 160 and "…" in path and path.startswith("deep/") for path in listed)
+    # Each path keeps its head and its file name, cut in the middle to 160 UTF-8 bytes on a character boundary.
+    assert all(len(path.encode()) <= 160 and "…" in path and path.startswith(segment) for path in listed)
     assert listed[0].endswith("file-59.py")
     artifacts = payload["summary"].split("<artifacts>\n", 1)[1].split("</artifacts>", 1)[0]
-    assert text_tokens(artifacts) <= 50 * 42 + 20  # a line: "- ", 160 characters (the ellipsis 3 bytes), a newline
+    assert text_tokens(artifacts) <= 50 * 41 + 20  # a line: "- ", at most 160 bytes, a newline
 
 
 def test_the_checkpoint_request_is_the_owner_approved_prompt_verbatim():

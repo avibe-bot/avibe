@@ -94,7 +94,7 @@ async def test_a_threshold_checkpoint_carries_the_lookup_and_the_state_and_shows
     scripts = [[Done(assistant("noted"))], [Done(assistant(CHECKPOINT))], [Done(assistant("done"))]]
     harness = _Harness(engine, tmp_path, "avibe", scripts)
     await _turn(harness, tokens(11_000))
-    await _turn(harness, tokens(9_000))
+    await _turn(harness, tokens(12_000))
     assert is_checkpoint(harness.provider.requests[1])
     compaction = [row for row in await harness.context_rows() if row.kind == "compaction"][0]
     through = compaction.payload["summarized_to_seq"]
@@ -103,6 +103,20 @@ async def test_a_threshold_checkpoint_carries_the_lookup_and_the_state_and_shows
     assert any(item.startswith("<environment>") for item in compaction.payload["state"])
     # Silent: the user sees the two replies and nothing about the compaction.
     assert _texts(harness, "result") == ["noted", "done"] and not harness.rows("notify")
+
+
+async def test_an_8k_route_compacts_instead_of_exhausting(engine, session, tmp_path):
+    # T stays positive on every window (the margin is at most W / 8): on an 8,000-token route with no output maximum,
+    # O = 2,000 and M = 1,000, so T = 5,000. Three small Turns cross it once, and a normal checkpoint makes room.
+    replies = ("one", "two", CHECKPOINT, "three")  # the third Turn's request is the checkpoint request first
+    scripts = [[Done(assistant(reply))] for reply in replies]
+    harness = _Harness(engine, tmp_path, "avibe", scripts)
+    harness.controller.hub_limits = {"context_window": 8_000, "max_output_tokens": None}
+    for _ in range(3):
+        await _turn(harness, tokens(1_000))
+    compactions = [row for row in await harness.context_rows() if row.kind == "compaction"]
+    assert [row.payload["mode"] for row in compactions] == ["normal"]
+    assert _texts(harness, "result") == ["one", "two", "three"] and not harness.rows("notify")
 
 
 async def test_the_environment_survives_a_checkpoint_that_splits_the_turn(engine, session, tmp_path):
@@ -131,7 +145,7 @@ async def test_the_first_input_after_a_checkpoint_carries_every_field_the_contex
     ]
     harness = _Harness(engine, tmp_path, "avibe", scripts)
     await _turn(harness, tokens(11_000))
-    await _turn(harness, tokens(9_000))
+    await _turn(harness, tokens(12_000))
     await _turn(harness, "next")
     inputs = [row.message for row in await harness.context_rows() if row.kind == "input"]
     second, third = inputs[-2], inputs[-1]
@@ -162,7 +176,7 @@ async def test_a_compaction_refreshes_the_session_token_snapshot(engine, session
     noted: list[int] = []
     harness.controller.note_session_tokens = lambda context, *, total: noted.append(total)
     await _turn(harness, tokens(11_000))
-    await _turn(harness, tokens(9_000))
+    await _turn(harness, tokens(12_000))
     compaction = [row for row in await harness.context_rows() if row.kind == "compaction"][0]
     assert noted == [compaction.payload["tokens_after_estimate"]]
 
@@ -275,7 +289,7 @@ async def test_model_hub_hears_only_of_failures_the_served_source_produced(engin
     if case == "store failure after a good checkpoint":
         await _turn(harness, tokens(11_000))
         await _failing_commit(harness)
-        await _turn(harness, tokens(9_000))
+        await _turn(harness, tokens(12_000))
     else:
         await _turn(harness, "hello")
     assert len(reported) == recorded and harness.controller.terminals[-1]["is_error"] is True
@@ -296,7 +310,7 @@ async def test_a_pause_is_silent_and_a_context_that_then_cannot_fit_ends_with_th
         [Done(assistant("four"))],
     ]
     harness = _Harness(engine, tmp_path, "avibe", scripts, language="zh")
-    for body in (tokens(10_000), tokens(10_000), "a", "b"):
+    for body in (tokens(11_000), tokens(12_000), "a", "b"):
         await _turn(harness, body)
     # Three failed checkpoints pause auto-compaction, and the user is told nothing.
     assert _texts(harness, "result") == ["one", "two", "three", "four"] and not harness.rows("notify")
@@ -404,10 +418,29 @@ async def test_the_state_fits_the_state_cap_of_the_route(engine, session, window
     environment = state[0]
     assert all(f"\n{field}: " in environment for field in ("cwd", "os", "shell")) and text_tokens(environment) <= 100
     cwd = next(line for line in environment.splitlines() if line.startswith("cwd: "))
-    assert len(cwd) == len("cwd: ") + 160 and "…" in cwd
+    assert len(cwd.encode()) <= len("cwd: ") + 160 and "…" in cwd
     skills_left_out = state[-1]
     assert skills_left_out.startswith('<left-out of="skills">') and skills_left_out.count("skill-") == 20
     assert re.search(r", and \d+ more\.", skills_left_out)
+
+
+async def test_every_environment_field_the_state_carries_is_bounded_in_bytes(engine, session):
+    # Every core field is cut in the middle to 160 UTF-8 bytes, whatever the script, so the block is at most about
+    # 5 x 40 tokens by construction and never consults the cap.
+    fields = {
+        "cwd": "/工作/" + "目录/" * 1_000,
+        "os": "macOS " + "x" * 5_000,
+        "shell": "/bin/" + "s" * 5_000,
+        "date": "2026-10-05",
+        "timezone": "Zone/" + "時" * 2_000,
+        "watches": 'wd_1 "CI" command running',
+    }
+    host = AvibeContextHost(engine, environment=lambda _: fields, skills=lambda _: None)
+    (environment,) = await host.render_state(StateRequest(SESSION, (), 800))
+    lines = environment.splitlines()[1:-1]
+    assert [line.split(": ", 1)[0] for line in lines] == ["cwd", "os", "shell", "date", "timezone"]
+    assert all(len(line.split(": ", 1)[1].encode()) <= 160 for line in lines)
+    assert text_tokens(environment) <= 5 * 42 + 10
 
 
 async def test_every_skill_a_successful_bash_result_loaded_is_recorded():
@@ -491,7 +524,7 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         harness = _Harness(engine, tmp_path, "avibe", [], providers=registry_providers(media_loader=None, client=client))
-        for turn, body in ((1, tokens(11_000)), (2, tokens(9_000)), (3, "and now?")):
+        for turn, body in ((1, tokens(11_000)), (2, tokens(12_000)), (3, "and now?")):
             phase["turn"] = turn
             await _turn(harness, body)
 

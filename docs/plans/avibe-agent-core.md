@@ -179,7 +179,7 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
   for the request (128,000 when unknown). `O` is the request's `max_tokens`: the hop's `max_output_tokens` (8,192
   when unknown) capped by the Agent's output budget, and `min(16,000, O)` for a checkpoint request. One pure
   function derives the rest and `est` from the final request, immediately before it is sent.
-  `M = max(8,000, 3% W)`, `T = min(L_in - O - M, 0.9 W)`.
+  `M = min(max(8,000, 3% W), W / 8)`, `T = min(L_in - O - M, 0.9 W)`.
 - **Trigger** before every model request, including inside the tool loop, on the final request (in v1 no user hook
   runs with context management): `est` is the usage of the latest response stored with its request facts, adjusted by the UTF-8 bytes / 4
   difference between this request and that one (1,600 per image), while that request went to the same route and the

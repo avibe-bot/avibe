@@ -64,7 +64,7 @@ from core.agent_core.tools.base import ToolResult
 from core.agent_core.tools.write import WriteTool
 from tests.agent_core.fakes import (
     ENDPOINT,
-    SELECTION,
+    SELECTION as FAKE_SELECTION,
     FakeJobHost,
     FakeModelRouter,
     FakeTool,
@@ -73,6 +73,9 @@ from tests.agent_core.fakes import (
     input_row,
 )
 
+#: The engine tests' route: a 64,000-token window read through a 32,000-token input limit, so M = 8,000 and
+#: T = 19,904 (section 1), the numbers every test here is sized against.
+SELECTION = ModelSelection(ENDPOINT, replace(FAKE_SELECTION.capabilities, context_window=64_000, input_limit=32_000))
 THRESHOLD = 19_904
 CHECKPOINT = "# 1. Self and method\n- the checkpoint"
 
@@ -183,7 +186,7 @@ def history():
 
 #: A route whose input limit is well above ``0.9 * W``, so ``T`` is ``0.9 * W`` = 28,800 and a threshold
 #: checkpoint there still leaves its turn ~67,000 tokens of room for tools (section 6).
-ROOMY = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, input_limit=100_000))
+ROOMY = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=32_000, input_limit=100_000))
 
 
 def after_checkpoint():
@@ -529,7 +532,7 @@ async def test_a_checkpoint_turn_is_finalized_once_whatever_step_fails(step, mon
 async def test_a_checkpoint_request_that_cannot_fit_a_new_route_is_audited_and_the_ladder_rolls():
     # The turn's second request resolves to an 8,000-token window, where its fork cannot fit: it is never sent, the
     # checkpoint fails as an overflow and is audited, and the ladder rolls on the conversation's own route.
-    small = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=8_000))
+    small = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=8_000, input_limit=None))
     store = InMemoryTranscriptStore()
     await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY))
     model = Model([[Done(assistant("after"))]], [call("read", "first", path="f"), [Done(assistant(CHECKPOINT))]])
@@ -789,7 +792,9 @@ async def test_a_failed_checkpoint_attempt_keeps_every_partial_in_its_audit():
 async def test_a_checkpoint_turn_measures_each_request_on_the_route_resolved_for_it():
     # The route resolves again for the turn's second request and lands on a 35,000-token window with 2,048 output:
     # the fork still fits there, but with under 4,000 tokens of room.
-    small = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=35_000, max_output_tokens=2_048))
+    small = ModelSelection(
+        ENDPOINT, replace(SELECTION.capabilities, context_window=35_000, input_limit=None, max_output_tokens=2_048)
+    )
     store = InMemoryTranscriptStore()
     await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY))
     tool = reader("small")
@@ -901,7 +906,7 @@ def _long_context(count: int):
 
 
 #: A 200,000-token window, where 45,000 tokens of history are well below T.
-LARGE = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=200_000))
+LARGE = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=200_000, input_limit=None))
 
 
 async def _history_on_a_large_window(store, sizes, *, row="before"):
@@ -941,7 +946,7 @@ async def test_the_ladder_drops_mechanically_once_a_checkpoint_request_fails():
     store = InMemoryTranscriptStore()
     await _history_on_a_large_window(store, [5_000] * 12)
     # On a 70,000-token window the 12 results cross T: a normal checkpoint, the one the drops later keep.
-    medium = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=70_000))
+    medium = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=70_000, input_limit=None))
     first = make_agent(Model([[Done(assistant("noted"))]], [[Done(assistant(CHECKPOINT))]]), store=store, selection=medium)
     assert (await run(first, row="first"))[-1].reason == "completed"
     await _history_on_a_large_window(store, [5_000] * 4, row="more")

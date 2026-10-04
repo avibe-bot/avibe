@@ -27,7 +27,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from sqlalchemy.engine import Engine
 
-from core.agent_core.harness.context import PATH_CHARS, SkillRef, StateRequest, text_tokens, truncate_middle
+from core.agent_core.harness.context import ITEM_BYTES, SkillRef, StateRequest, text_tokens, truncate_middle_bytes
 from core.agent_core.tools.base import Tool, ToolContext, ToolResult, ToolSpec
 from modules.agents.avibe.prompt import render_environment
 
@@ -142,11 +142,11 @@ class AvibeContextHost:
 
 
 def _environment(fields: Mapping[str, str]) -> str:
-    """The environment's core fields, bounded by construction: no Watches, the cwd cut in the middle (section 7)."""
-    core = {name: value for name, value in fields.items() if name != "watches"}
-    if "cwd" in core:
-        core["cwd"] = truncate_middle(core["cwd"], PATH_CHARS)
-    return render_environment(core)
+    """The environment's core fields, bounded by construction (section 7): no Watches, each field cut in the middle
+    to ``ITEM_BYTES``, so the block never consults the cap."""
+    return render_environment(
+        {name: truncate_middle_bytes(value, ITEM_BYTES) for name, value in fields.items() if name != "watches"}
+    )
 
 
 def _left_out(names: Sequence[str]) -> str:

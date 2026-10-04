@@ -29,7 +29,7 @@ W    = context_window                              (128,000 when unknown)
 L_in = input_limit                                 (W when unknown)
 O    = the request's max_tokens: for a conversation request max_output_tokens (8,192 when unknown), capped by the
        Agent's output budget; for a checkpoint request min(16,000, that)
-M    = max(8,000, ceil(0.03 * W))
+M    = min(max(8,000, ceil(0.03 * W)), floor(W / 8))
 T    = min(L_in - O - M, floor(0.9 * W))           the compaction threshold
 keep = min(20,000, floor(0.25 * T))                the verbatim tail of a normal checkpoint
 ```
@@ -40,8 +40,9 @@ models.dev, where many models list an output maximum as large as the window: in 
 be sent), and 296 more would leave `T < 0.25 * W`. The adapter therefore asks for
 `min(max_output_tokens, floor(W / 4))` on every hop it resolves (a retry's fallback included), the maximum 8,192 when
 unknown, so the output never takes more than a quarter of any window; the limits themselves still come from Model
-Hub. Below a window of about 12,000 tokens `T <= 0` (the fixed `M`), so C-9 checkpoints on every request until the
-pause (§10), as Pi's fixed reserve does.
+Hub. `M` is at most an eighth of the window, so with `O <= W / 4` the threshold stays positive on every window:
+`T >= 0.625 * W` (with `L_in = W`). Windows of 64,000 tokens and more are unchanged (`M = max(8,000, 3% W)`); on an
+8,000-token route `O = 2,000`, `M = 1,000`, and `T = 5,000`.
 
 A conversation request **fits** when `est + O + M <= L_in`, where `est` is its estimate (§2); `M` absorbs the
 estimate's error. A request **can fit** when `est + O <= L_in`. A checkpoint request (§6) is sent only when it can
@@ -217,20 +218,20 @@ is written, so projection stays a pure function of the rows:
   ```
 
   `Read` lists paths of successful `read` calls that no `write` or `edit` touched; `Modified` lists paths of
-  successful `write` or `edit` calls; `(none)` when a list is empty. Each path is cut in the middle to 160
-  characters (its head and its file name stay). Each list keeps its 50 most recently touched paths and counts the
-  ones pushed out (`files_read_more`, `files_modified_more`), in the row and in the text; the
-  full history stays reachable through `<earlier-record>`. This is an Avibe deviation from Pi, which keeps every
-  path: Avibe Sessions are long-lived (IM threads and Workbench Sessions that run for weeks), so an unbounded list
-  would turn a working Session into a forced `/new`. `<earlier-record>` is left out when the adapter supplies no
-  command, and `<current-request>` when the cut did not split a turn.
+  successful `write` or `edit` calls; `(none)` when a list is empty. Each path is cut in the middle to 160 UTF-8 bytes
+  on a character boundary (its head and its file name stay), at most about 40 tokens whatever the script. Each list
+  keeps its 50 most recently touched paths and counts the ones pushed out (`files_read_more`, `files_modified_more`),
+  in the row and in the text; the full history stays reachable through `<earlier-record>`. This is an Avibe deviation
+  from Pi, which keeps every path: Avibe Sessions are long-lived (IM threads and Workbench Sessions that run for
+  weeks), so an unbounded list would turn a working Session into a forced `/new`. `<earlier-record>` is left out when
+  the adapter supplies no command, and `<current-request>` when the cut did not split a turn.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment's core
-  fields (C-7 §8: cwd, os, shell, date, timezone; no Watches, the cwd cut in the middle to 160 characters, so it is
-  bounded by construction; a checkpoint always happens inside a run, and a Turn's own input carries only the fields
-  that changed), then skill bodies by name (at most 5,000 tokens each) within the cap of the route the next request
-  goes to: `state_cap = min(25,000, floor(0.1 * W))`, passed in `StateRequest.cap`. Nothing else is rehydrated in v1:
-  pending work is the checkpoint's own "Waiting on", and the split turn's model-facing input, environment block
-  included, is in `<current-request>`.
+  fields (C-7 §8: cwd, os, shell, date, timezone; no Watches; each field cut in the middle to 160 UTF-8 bytes, so the
+  block is at most about 5 x 40 tokens by construction and never consults the cap; a checkpoint always happens inside
+  a run, and a Turn's own input carries only the fields that changed), then skill bodies by name (at most 5,000 tokens
+  each) within the cap of the route the next request goes to: `state_cap = min(25,000, floor(0.1 * W))`, passed in
+  `StateRequest.cap`. Nothing else is rehydrated in v1: pending work is the checkpoint's own "Waiting on", and the
+  split turn's model-facing input, environment block included, is in `<current-request>`.
 - Projection (C-5 §3): the system prompt, hook-rehydrated messages, one user message holding `summary` and then each
   `state` text as its own text block, then the rows from `first_kept_seq` on, with edits applied. A tool result whose
   call was summarized is left out with it. No synthetic "continue" message follows.

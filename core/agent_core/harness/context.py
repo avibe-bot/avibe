@@ -44,14 +44,17 @@ DEFAULT_CONTEXT_WINDOW = 128_000
 DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 MARGIN_MIN = 8_000
 MARGIN_RATIO = 0.03
+#: The margin is at most an eighth of the window: with ``O <= W / 4`` (the Avibe Agent's budget), ``T >= 0.625 * W``.
+MARGIN_CAP_RATIO = 0.125
 THRESHOLD_RATIO = 0.9
 KEEP_MAX = 20_000
 KEEP_RATIO = 0.25
 IMAGE_TOKENS = 1_600
-#: Each artifact list a checkpoint carries keeps this many paths, most recently touched first, then a count, and each
-#: path is cut in the middle to ``PATH_CHARS`` (section 7).
+#: Each artifact list a checkpoint carries keeps this many paths, most recently touched first, then a count (section 7).
 ARTIFACTS_LISTED = 50
-PATH_CHARS = 160
+#: Every path an artifact list carries, and every field of the state's environment block, is cut in the middle to this
+#: many UTF-8 bytes: at most about 40 tokens each under the estimate, whatever the script (section 7).
+ITEM_BYTES = 160
 #: Everything a checkpoint rehydrates (section 7): a tenth of the route's window, at most this many tokens.
 STATE_TOKENS = 25_000
 STATE_RATIO = 0.1
@@ -397,7 +400,7 @@ def budget(
     window = DEFAULT_CONTEXT_WINDOW if capabilities.context_window is None else capabilities.context_window
     limit = window if capabilities.input_limit is None else capabilities.input_limit
     output = request.max_tokens
-    margin = max(MARGIN_MIN, math.ceil(MARGIN_RATIO * window))
+    margin = min(max(MARGIN_MIN, math.ceil(MARGIN_RATIO * window)), math.floor(MARGIN_CAP_RATIO * window))
     threshold = min(limit - output - margin, math.floor(THRESHOLD_RATIO * window))
     keep = max(0, min(KEEP_MAX, math.floor(KEEP_RATIO * threshold)))
     return Budget(window, limit, output, margin, threshold, keep, _estimate(request, transcript, anchor))
@@ -521,12 +524,19 @@ def _unique(items: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-def truncate_middle(text: str, limit: int) -> str:
-    """``text`` cut in the middle to ``limit`` characters with an ellipsis: its head and its tail (a file name) stay."""
-    if len(text) <= limit:
+def truncate_middle_bytes(text: str, limit: int) -> str:
+    """``text`` cut in the middle to at most ``limit`` UTF-8 bytes with an ellipsis, on character boundaries.
+
+    Its head and its tail (a file name) stay. The estimate counts UTF-8 bytes (section 2), so a byte bound is a
+    token bound whatever the script.
+    """
+    data = text.encode("utf-8")
+    if len(data) <= limit:
         return text
-    tail = (limit - 1) // 2
-    return f"{text[: limit - 1 - tail]}…{text[-tail:]}"
+    room = limit - len("…".encode("utf-8"))
+    tail = room // 2
+    head = data[: room - tail].decode("utf-8", "ignore")
+    return f"{head}…{data[len(data) - tail :].decode('utf-8', 'ignore')}"
 
 
 @dataclass(frozen=True)
@@ -560,7 +570,7 @@ def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> _Artifacts:
             path = call.arguments.get("path")
             if entry is None or result.is_error or not isinstance(path, str) or not path:
                 continue
-            path = truncate_middle(path, PATH_CHARS)
+            path = truncate_middle_bytes(path, ITEM_BYTES)
             if call.name == "read":
                 read.append(path)
             elif call.name in {"write", "edit"}:
