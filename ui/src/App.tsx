@@ -78,6 +78,9 @@ const AppsTerminalPage = lazy(() =>
 const AppsEditorPage = lazy(() =>
   import('./components/workbench/AppsEditorPage').then((m) => ({ default: m.AppsEditorPage })),
 );
+// The desktop pet window's page: its own small surface, outside the Workbench
+// shell and the setup redirect (docs/plans/2026-10-01-desktop-pet.md).
+const PetPage = lazy(() => import('./pet/PetPage').then((m) => ({ default: m.PetPage })));
 const LibraryAppBody = lazy(() => import('./apps/LibraryApp').then((m) => ({ default: m.LibraryApp })));
 // The mobile full-screen Show Page route body. Lazy so the iframe frame + session
 // lookup load only when a pinned page is opened, not into the main entry.
@@ -93,7 +96,7 @@ const SettingsModelsPage = lazy(() =>
 import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCapabilityGate';
 import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRoutes';
 import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './lib/settingsOverlay';
-import { hasConfiguredPlatformCredentials } from './lib/platforms';
+import { isSetupComplete } from './lib/setupState';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import {
   readLastPwaPath,
@@ -420,11 +423,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 // setup repair route. Unlike Diagnostics it is not a bypass.
                 setSetupModelHubAllowed(Boolean(config?.mode
                     && 'capabilities' in session && session.capabilities?.can_manage_instance));
-                const setupState = config?.setup_state;
-                const setupReady = typeof setupState?.needs_setup === 'boolean'
-                    ? setupState.needs_setup === false
-                    : hasConfiguredPlatformCredentials(config);
-                if (!config || !config.mode || !setupReady) {
+                if (!isSetupComplete(config)) {
                     setGuardStatus('needs-setup');
                     return;
                 }
@@ -816,11 +815,17 @@ function RouterRoot() {
 
 const router = createBrowserRouter(
   createRoutesFromElements(
+    <>
+    <Route
+      path="/pet"
+      element={<ErrorBoundary variant="page"><Suspense fallback={null}><PetPage /></Suspense></ErrorBoundary>}
+    />
     <Route element={<ErrorBoundary variant="page"><RouterRoot /></ErrorBoundary>}>
       <Route element={<AuthGuard><AppShell /></AuthGuard>}>
         <Route path="*" element={<WorkbenchRouteSurface />} />
       </Route>
-    </Route>,
+    </Route>
+    </>,
   ),
 );
 

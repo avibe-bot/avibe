@@ -5439,5 +5439,33 @@
       "gatewayRequired": "设置流程需要启用模型网关。已有配置未改变，请通过现有配置管理恢复后重试。",
       "completionUnconfirmed": "无法确认设置已完成，请重试"
     }
+  },
+  "pet": {
+    "state": {
+      "idle": "云团子空闲中",
+      "sleeping": "云团子睡着了",
+      "listening": "正在听",
+      "running": "正在处理…",
+      "ready": "有新回复",
+      "needs_input": "需要你回应",
+      "blocked": "出了点问题"
+    },
+    "unreadBadge_one": "{{count}} 条未读回复",
+    "unreadBadge_other": "{{count}} 条未读回复",
+    "setupPending": "先在 Avibe 里完成设置，就可以在这里和 agent 对话了。",
+    "openAvibe": "打开 Avibe",
+    "toggle": "展开或收起宠物面板",
+    "panel": "宠物面板",
+    "untitled": "未命名会话",
+    "chooseSession": "选择一个会话",
+    "switchSession": "切换会话",
+    "openInAvibe": "在 Avibe 中打开",
+    "inputPlaceholder": "给 agent 发消息…",
+    "send": "发送",
+    "queued": "已排队，当前这轮结束后执行。",
+    "moreInAvibe": "更多回复请在 Avibe 中查看",
+    "empty": "还没有消息，说点什么开始吧。",
+    "vaultRequest": "需要授权，在 Avibe 中打开",
+    "noSessions": "还没有进行中的会话，先在 Avibe 里新建一个。"
   }
 }

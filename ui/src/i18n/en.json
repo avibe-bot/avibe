@@ -5439,5 +5439,33 @@
       "gatewayRequired": "Setup requires Model Hub to be enabled. Your saved configuration is unchanged. Restore it through your existing configuration controls, then retry.",
       "completionUnconfirmed": "Setup completion could not be confirmed. Try again."
     }
+  },
+  "pet": {
+    "state": {
+      "idle": "Vibey is idle",
+      "sleeping": "Vibey is asleep",
+      "listening": "Listening",
+      "running": "Working…",
+      "ready": "Reply ready",
+      "needs_input": "Needs your input",
+      "blocked": "Something went wrong"
+    },
+    "unreadBadge_one": "{{count}} unread reply",
+    "unreadBadge_other": "{{count}} unread replies",
+    "setupPending": "Finish setting up in Avibe to talk to your agent here.",
+    "openAvibe": "Open Avibe",
+    "toggle": "Show or hide the pet panel",
+    "panel": "Pet panel",
+    "untitled": "Untitled session",
+    "chooseSession": "Choose a session",
+    "switchSession": "Switch session",
+    "openInAvibe": "Open in Avibe",
+    "inputPlaceholder": "Message the agent…",
+    "send": "Send",
+    "queued": "Queued — it will run after the current turn.",
+    "moreInAvibe": "More replies in Avibe",
+    "empty": "No messages yet. Say something to get started.",
+    "vaultRequest": "Approval needed — open in Avibe",
+    "noSessions": "No active sessions yet. Start one in Avibe."
   }
 }

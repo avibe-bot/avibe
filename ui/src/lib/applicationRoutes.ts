@@ -13,6 +13,7 @@ export const APPLICATION_ROUTE_PATHS = [
   '/vaults',
   '/projects',
   '/more',
+  '/pet',
   '/apps',
   '/apps/files',
   '/apps/terminal',

@@ -1,6 +1,7 @@
 # Desktop Pet
 
-Status: proposed (2026-10-01)
+Status: in progress (2026-10-04). Delivery is split into three PRs; see
+"Implementation notes".
 
 ## Background
 
@@ -632,6 +633,43 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 - **Focus.** Summoning focuses the pet so that typing works. Confirm that the
   previously active app gets focus back when the panel collapses.
 
+## Implementation notes
+
+Decisions made while building, where the code is simpler than the text above.
+The code and its tests are the contract; this section records why.
+
+- **Three PRs instead of one for delivery 1.** (a) the Runtime
+  `message.updated` for quick-reply choices (#2357); (b) the `/pet` route,
+  state, panel, poses and i18n; (c) the shell: window, IPC, shortcut, tray,
+  `pet.json`, and "Show in pet". The pet stays invisible until (c) lands, so
+  (a) and (b) ship nothing a user can see.
+- **`/pet` sits outside `AuthGuard`, not inside it with an exemption.** It is
+  a sibling route with its own setup gate (`usePetSetup`), which applies the
+  same rule as `AuthGuard` through the shared `isSetupComplete`. This keeps
+  the guard unchanged and the pet out of the Workbench chrome. The setup
+  re-read bypasses the config cache (`getConfig({ cache: false })`).
+- **Shell → page events are DOM events.** The shell dispatches
+  `avibe:pet-summon` and `avibe:pet-bound` on `window` through a
+  shell-evaluated script, the channel the Settings… menu already uses, so the
+  pet needs no Tauri event permission. Page → shell stays Tauri commands. The
+  contract lives in `ui/src/pet/petBridge.ts`.
+- **One summon store per document.** `petShell.ts` installs the listeners
+  from the first frame, before setup is known, and keeps the latest summon
+  until the pet surface takes it. A summon during setup-pending re-reads
+  setup and is then acted on, so a hotkey is never lost to loading order.
+- **`PetLayout` has no `pet_offset`.** The route places the pet and panel from
+  `panel_side` and `panel_edge` alone; the shell owns the offset.
+- **No `useSessionTurnState` extraction.** The chat page's turn logic is
+  interleaved with its Agent Activity buffer, so extracting it would be a
+  risky refactor of the chat page for a consumer that needs less. The pet
+  keeps the same rules in `usePetSession`: the authoritative
+  `GET /turn-state`, the same reconcile cadences, and the 4 s post-send grace.
+- **Generation fencing** is one class, `FencedSource`, used by every source
+  including the switcher list. A key change frees the in-flight slot at once,
+  so switching sessions never waits on the old session's read.
+- **`design.pen` frames are deferred.** The panel reuses existing tokens and
+  primitives; frames follow once the shell PR makes the pet visible.
+
 ## Follow-ups
 
 - Bind to the main-agent session when the session type lands, and remove the
@@ -648,11 +686,12 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 - [x] Update G8 and G10 in `desktop-product-gaps.md` to point here.
 - [ ] Pet window, lifecycle invariants, capability file, and IPC.
 - [ ] Global shortcut, tray toggle and presets, `pet.json`.
-- [ ] `/pet` route, session binding, "Show in pet".
-- [ ] `derivePetState` with Vitest coverage.
-- [ ] Panel: latest exchange, activity strip, needs input, text send.
-- [ ] Input-freshness table for the pet route; extract `useSessionTurnState` from the chat page.
+- [x] `/pet` route and session binding ("Show in pet" ships with the shell PR).
+- [x] `derivePetState` with Vitest coverage.
+- [x] Panel: latest exchange, activity strip, needs input, text send.
+- [x] Input-freshness table for the pet route (`usePetSession`, `FencedSource`).
 - [ ] Shared dictation hook; cross-window voice claim; pet listening flow.
-- [ ] Vibey pose assets, CSS motion, and panel design in `design.pen`; i18n strings.
+- [x] Vibey pose assets, CSS motion, i18n strings.
+- [ ] Panel frames in `design.pen`.
 - [ ] Rust boundary tests; manual checks on macOS and Windows.
 - [ ] User docs: `desktop/README.md` pet section.

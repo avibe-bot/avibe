@@ -888,6 +888,7 @@ const NON_KEY_LITERALS = [
   'avibe.agents.tab.v1',
   'avibe.editor.fontSize.v1',
   'avibe.editor.recents.v1',
+  'avibe.pet.devBinding',
   'avibe.terminal.fontSize.v1',
   'avibe.terminal.sessionId',
   'avibe.vault.crypto',
