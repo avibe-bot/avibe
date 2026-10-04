@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { Activity, ArrowUp, ExternalLink, KeyRound, Shuffle } from 'lucide-react';
@@ -121,10 +121,10 @@ const PetSurface: React.FC = () => {
 
   const summon = useCallback((intent: PetIntent, bound: string | null) => {
     void setPanel(true);
-    if (!bound) {
-      setSwitcherOpen(true);
-      return;
-    }
+    // An unbound pet shows the switcher by itself (`switcherOpen || !binding`);
+    // a bound summon always lands on the session, never on a list left open.
+    if (!bound) return;
+    setSwitcherOpen(false);
     // Voice ships in a later PR; until then a `listen` summon focuses the text
     // input, and a `show` summon only shows the panel.
     if (intent === 'listen') window.setTimeout(() => inputRef.current?.focus(), 0);
@@ -193,17 +193,23 @@ const PetSurface: React.FC = () => {
     }
   }, [api, binding, data]);
 
-  // A completed send clears the draft only if it is still the one submitted,
-  // for the session it was submitted to: an edit or a session switch while the
-  // POST was pending keeps what is on screen.
+  // A completed send clears the draft only if it is still exactly the text
+  // submitted: an edit while the POST was pending keeps what is on screen,
+  // and text that was sent never lingers to be sent again elsewhere.
+  // One text submission at a time: Enter while a POST is pending must not send
+  // the same draft again. A ref, so two Enters in one tick are also one send.
+  const submittingRef = useRef(false);
   const submit = async () => {
     const submitted = draft;
     const text = submitted.trim();
-    const submittedFor = binding;
-    if (!text) return;
-    if (!(await send(text))) return;
-    if (petShell.currentBinding() !== submittedFor) return;
-    setDraft((current) => (current === submitted ? '' : current));
+    if (!text || submittingRef.current) return;
+    submittingRef.current = true;
+    try {
+      if (!(await send(text))) return;
+      setDraft((current) => (current === submitted ? '' : current));
+    } finally {
+      submittingRef.current = false;
+    }
   };
 
   // QuickReplies locks the group locally; the Runtime's message.updated for the
@@ -231,7 +237,6 @@ const PetSurface: React.FC = () => {
         const dragged = pressRef.current?.dragged;
         pressRef.current = null;
         if (dragged) return;
-        if (!binding && !expanded) setSwitcherOpen(true);
         void setPanel(!expanded);
       }}
     >
@@ -288,7 +293,7 @@ type PanelProps = {
   onToggleSwitcher: () => void;
   onPick: (sessionId: string) => void;
   exchange: ReturnType<typeof latestExchange>;
-  markRead: (sessionId: string, untilMessageId?: string) => Promise<void>;
+  markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>;
   running: boolean;
   queued: boolean;
   activities: SessionActivityState[];
@@ -378,7 +383,7 @@ const ExchangeView: React.FC<{
   exchange: ReturnType<typeof latestExchange>;
   running: boolean;
   binding: string;
-  markRead: (sessionId: string, untilMessageId?: string) => Promise<void>;
+  markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>;
 }> = ({ exchange, running, binding, markRead }) => {
   const { t } = useTranslation();
   usePetMarkRead(binding, exchange, markRead);
@@ -493,25 +498,41 @@ const SessionSwitcher: React.FC<{ current: string | null; onPick: (sessionId: st
  * Mark read through the last rendered unread result, once per row, and only
  * when every unread result is in the loaded tail (otherwise reading is left to
  * the Workbench). The tail keeps `read_at: null` until its next read, so a
- * marker records what was sent. A failed request clears it, so the next
- * chance to read (reopening the panel, the window coming back, a new tail)
- * retries, without a retry loop against a failing server.
+ * marker records what was sent. A request the server did not apply (an error
+ * status or a network failure) clears it, so the next chance to read
+ * (reopening the panel, the window coming back, a new tail) retries, without
+ * a retry loop against a failing server.
  */
 function usePetMarkRead(
   binding: string,
   exchange: ReturnType<typeof latestExchange>,
-  markRead: (sessionId: string, untilMessageId?: string) => Promise<void>,
+  markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>,
 ): void {
   const last = exchange.results[exchange.results.length - 1];
   const unreadId = last && last.read_at === null ? last.id : null;
+  const visible = useDocumentVisible();
   const markedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!unreadId || !exchange.unreadComplete || document.visibilityState !== 'visible') return;
+    if (!unreadId || !exchange.unreadComplete || !visible) return;
     const marker = `${binding}\u0000${unreadId}`;
     if (markedRef.current === marker) return;
     markedRef.current = marker;
-    markRead(binding, unreadId).catch(() => {
+    const forget = () => {
       if (markedRef.current === marker) markedRef.current = null;
-    });
-  }, [binding, unreadId, exchange.unreadComplete, markRead]);
+    };
+    markRead(binding, unreadId).then((applied) => {
+      if (!applied) forget();
+    }, forget);
+  }, [binding, unreadId, exchange.unreadComplete, visible, markRead]);
+}
+
+const subscribeVisibility = (listener: () => void) => {
+  document.addEventListener('visibilitychange', listener);
+  return () => document.removeEventListener('visibilitychange', listener);
+};
+
+/** Whether the document is visible, as render state, so effects re-run when
+ *  a hidden pet window is shown again. */
+function useDocumentVisible(): boolean {
+  return useSyncExternalStore(subscribeVisibility, () => document.visibilityState === 'visible');
 }

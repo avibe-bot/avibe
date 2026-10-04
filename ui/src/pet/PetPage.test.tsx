@@ -89,9 +89,10 @@ let unreadBySession: Record<string, number> = {};
 // consumer re-renders with a new inbox object.
 let inboxVersion = 0;
 const inboxListeners = new Set<() => void>();
-const markRead = vi.fn(async () => {
+const markRead = vi.fn(async (): Promise<boolean> => {
   inboxVersion += 1;
   inboxListeners.forEach((listener) => listener());
+  return true;
 });
 
 const api = {
@@ -379,7 +380,7 @@ describe('PetPage review fixes, round 2', () => {
   it('retries a failed mark-read the next time the reply is shown', async () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
     unreadBySession = { S: 1 };
-    markRead.mockImplementationOnce(async () => {
+    markRead.mockImplementationOnce(async (): Promise<boolean> => {
       throw new Error('offline');
     });
     devBind('S');
@@ -405,5 +406,130 @@ describe('PetPage review fixes, round 2', () => {
     await userEvent.type(input, ' and more');
     await act(async () => pending.resolve(message('sent', 'S', { author: 'user', type: 'user' })));
     expect(input.value).toBe('first and more');
+  });
+});
+
+describe('PetPage review fixes, round 3', () => {
+  it('sends a draft once however often Enter is pressed while the POST is pending', async () => {
+    const pending = deferred<WorkbenchMessage>();
+    api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
+    devBind('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await userEvent.type(input, 'once{Enter}{Enter}{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
+    await act(async () => pending.resolve(message('sent', 'S', { author: 'user', type: 'user' })));
+  });
+
+  it('marks a reply read when a hidden, still-open pet is shown again', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
+    unreadBySession = { S: 1 };
+    let visibility: DocumentVisibilityState = 'hidden';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+    try {
+      devBind('S');
+      render(<PetPage />);
+      summon('show');
+      await screen.findByText('reply r1');
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(markRead).not.toHaveBeenCalled();
+      visibility = 'visible';
+      act(() => {
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r1'));
+    } finally {
+      delete (document as { visibilityState?: unknown }).visibilityState;
+    }
+  });
+
+  it('keeps a bind that lands while pet_ready is still answering', async () => {
+    const ready = deferred<unknown>();
+    const invoke = vi.fn((command: string) => (command === 'pet_ready'
+      ? ready.promise
+      : Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' })));
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />);
+    await screen.findByLabelText('pet.toggle');
+    act(() => {
+      window.dispatchEvent(new CustomEvent(PET_BOUND_EVENT, { detail: { session_id: 'B' } }));
+    });
+    await act(async () => ready.resolve({ binding: 'A', summon_pending: null }));
+    summon('show');
+    expect(await screen.findByText('Session B')).toBeTruthy();
+  });
+});
+
+describe('PetPage independent sweep', () => {
+  it('retries mark-read the server did not apply, without a network error', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
+    unreadBySession = { S: 1 };
+    markRead.mockImplementationOnce(async () => false);
+    let visibility: DocumentVisibilityState = 'visible';
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+    try {
+      devBind('S');
+      render(<PetPage />);
+      summon('show');
+      await waitFor(() => expect(markRead).toHaveBeenCalledTimes(1));
+      // The panel stays open; the window is hidden and shown again.
+      visibility = 'hidden';
+      act(() => {
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      visibility = 'visible';
+      act(() => {
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await waitFor(() => expect(markRead).toHaveBeenCalledTimes(2));
+    } finally {
+      delete (document as { visibilityState?: unknown }).visibilityState;
+    }
+  });
+
+  it('lands a bound summon on the session even if the switcher was left open', async () => {
+    switcherSessions = [session('S')];
+    render(<PetPage />);
+    summon('show');
+    expect(await screen.findByText('Session S')).toBeTruthy();
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    await bound('S');
+    summon('listen');
+    expect(await screen.findByLabelText('pet.inputPlaceholder')).toBeTruthy();
+  });
+
+  it('clears sent text even when the session changed while it was sending', async () => {
+    const pending = deferred<WorkbenchMessage>();
+    api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
+    devBind('A');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    await userEvent.type(input, 'deploy{Enter}');
+    await bound('B');
+    await act(async () => pending.resolve(message('a-sent', 'A', { author: 'user', type: 'user' })));
+    expect((screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('does not mark read through rows trimmed from a long live tail', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
+    unreadBySession = { S: 2 };
+    devBind('S');
+    render(<PetPage />);
+    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalled());
+    // A long turn: many transcript rows arrive live, pushing r1 out of the tail.
+    await emit((h) => {
+      for (let index = 0; index < 70; index += 1) {
+        h.onMessageNew?.(message(`n${index}`, 'S', { author: 'user', type: 'user', text: `note ${index}` }));
+      }
+      h.onMessageNew?.(message('r2', 'S', { read_at: null, text: 'reply r2' }));
+    });
+    summon('show');
+    expect(await screen.findByText('pet.moreInAvibe')).toBeTruthy();
+    expect(markRead).not.toHaveBeenCalled();
   });
 });

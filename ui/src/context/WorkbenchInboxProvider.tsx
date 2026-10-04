@@ -452,10 +452,14 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       // independent capabilities.
       const operation = readOwnershipRef.current.beginRead(`inbox-mark-read:${sessionId}`);
       const result = await api.markSessionRead(sessionId, untilMessageId, { handleError: false });
+      // With handleError off, a 4xx/5xx resolves with the error body rather
+      // than throwing; only the endpoint's success shape is an applied write.
+      const applied = typeof result?.updated === 'number' || Boolean(result?.unread_by_session);
       if (
-        !readOwnershipRef.current.isMutationCurrent(operation, `inbox-session:${sessionId}`)
+        !applied
+        || !readOwnershipRef.current.isMutationCurrent(operation, `inbox-session:${sessionId}`)
       ) {
-        return;
+        return applied;
       }
       // A successful write commits after every read that was already in flight,
       // even when one of those reads started later and returns last. The endpoint
@@ -468,8 +472,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       // The unread map is authoritative for badges; the card's unread styling
       // derives from it, so clearing here clears the dot without touching the
       // feed order (a read doesn't change last activity).
-      if (!result?.unread_by_session) return;
-      applyUnreadMap(result.unread_by_session);
+      if (result.unread_by_session) applyUnreadMap(result.unread_by_session);
+      return true;
     },
     [api, applyUnreadMap],
   );

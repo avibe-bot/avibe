@@ -8,6 +8,7 @@ import {
   type WorkbenchSessionReadResult,
 } from '@/context/ApiContext';
 import { isSessionReadOnly } from '@/components/workbench/sessionArchived';
+import { isTranscriptMessage } from '@/lib/chatMessageTypes';
 import { onPageReactivated } from '@/lib/pageActivity';
 
 import { FencedSource } from './fencedSource';
@@ -32,10 +33,25 @@ export type PetSessionData = {
   noteSent: (message: WorkbenchMessage | null) => void;
 };
 
-const mergeRow = (rows: WorkbenchMessage[], row: WorkbenchMessage): WorkbenchMessage[] => {
-  const index = rows.findIndex((existing) => existing.id === row.id);
-  if (index >= 0) return rows.map((existing, at) => (at === index ? row : existing));
-  return [...rows, row].slice(-PET_TAIL_LIMIT * 2);
+type Tail = { messages: WorkbenchMessage[]; hasOlder: boolean };
+const EMPTY_TAIL: Tail = { messages: [], hasOlder: false };
+const TAIL_CAP = PET_TAIL_LIMIT * 2;
+
+/**
+ * Merge a live row into the tail. Only transcript rows are kept (process rows
+ * such as tool calls stream in by the hundred and the pet never shows them),
+ * and the tail is capped; trimming means it no longer starts at the session's
+ * first row, so `hasOlder` turns true and unread rows past it are not marked.
+ */
+const mergeRow = (tail: Tail, row: WorkbenchMessage): Tail => {
+  const index = tail.messages.findIndex((existing) => existing.id === row.id);
+  if (index >= 0) {
+    return { ...tail, messages: tail.messages.map((existing, at) => (at === index ? row : existing)) };
+  }
+  if (!isTranscriptMessage(row)) return tail;
+  const messages = [...tail.messages, row];
+  if (messages.length <= TAIL_CAP) return { ...tail, messages };
+  return { messages: messages.slice(-TAIL_CAP), hasOlder: true };
 };
 
 /**
@@ -50,8 +66,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
   const api = useApi();
 
   const [session, setSession] = useState<WorkbenchSession | null>(null);
-  const [messages, setMessages] = useState<WorkbenchMessage[]>([]);
-  const [hasOlder, setHasOlder] = useState(false);
+  const [tail, setTail] = useState<Tail>(EMPTY_TAIL);
   const [turn, setTurn] = useState<SessionRuntimeState | null>(null);
   // The session a fresh read found missing or read-only.
   const [invalid, setInvalid] = useState<string | null>(null);
@@ -64,8 +79,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
   if (displayed !== sessionId) {
     setDisplayed(sessionId);
     setSession(null);
-    setMessages([]);
-    setHasOlder(false);
+    setTail(EMPTY_TAIL);
     setTurn(null);
     setInGrace(false);
     setInvalid(null);
@@ -87,8 +101,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
     tail: new FencedSource<string, { messages: WorkbenchMessage[]; next_before_id?: string | null }>({
       read: (key) => api.listSessionMessages(key, { tail: true, cache: false, limit: PET_TAIL_LIMIT }),
       apply: (_key, value) => {
-        setMessages(value.messages);
-        setHasOlder(Boolean(value.next_before_id));
+        setTail({ messages: value.messages, hasOlder: Boolean(value.next_before_id) });
       },
     }),
     turn: new FencedSource<string, SessionRuntimeState>({
@@ -127,12 +140,15 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
       onMessageNew: (row) => {
         if (!mine(row.session_id)) return;
         sources.tail.noteLiveMerge();
-        setMessages((rows) => mergeRow(rows, row));
+        setTail((current) => mergeRow(current, row));
       },
       onMessageUpdated: (row) => {
         if (!mine(row.session_id)) return;
         sources.tail.noteLiveMerge();
-        setMessages((rows) => rows.map((existing) => (existing.id === row.id ? row : existing)));
+        setTail((current) => ({
+          ...current,
+          messages: current.messages.map((existing) => (existing.id === row.id ? row : existing)),
+        }));
       },
       onSessionStatus: ({ session_id, agent_status }) => {
         if (!mine(session_id)) return;
@@ -193,11 +209,11 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
     setSendCount((count) => count + 1);
     if (row && row.session_id === sessionId && row.id) {
       sources.tail.noteLiveMerge();
-      setMessages((rows) => mergeRow(rows, row));
+      setTail((current) => mergeRow(current, row));
     }
     sources.tail.refresh();
     sources.turn.refresh();
   }, [sources, sessionId]);
 
-  return { session, messages, hasOlder, turn, running: working, noteSent };
+  return { session, messages: tail.messages, hasOlder: tail.hasOlder, turn, running: working, noteSent };
 }

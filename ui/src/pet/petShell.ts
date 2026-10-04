@@ -19,6 +19,9 @@ type Snapshot = { binding: string | null | undefined };
 let snapshot: Snapshot = { binding: undefined };
 let pendingSummon: PetIntent | null = null;
 let started = false;
+// Bumped by every `pet:bound` event, so a `pet_ready()` answer captured before
+// a newer bind cannot overwrite it.
+let boundEvents = 0;
 const storeListeners = new Set<() => void>();
 const summonListeners = new Set<() => void>();
 
@@ -38,12 +41,19 @@ const start = () => {
   started = true;
   onPetEvents({
     summon: noteSummon,
-    bound: (sessionId) => setBindingState(sessionId),
+    bound: (sessionId) => {
+      boundEvents += 1;
+      setBindingState(sessionId);
+    },
   });
+  const boundEventsAtRequest = boundEvents;
+  const readyApplies = () => boundEvents === boundEventsAtRequest;
   void petBridge.ready().then((ready) => {
-    setBindingState(ready.binding);
+    if (readyApplies()) setBindingState(ready.binding);
     if (ready.summon_pending) noteSummon(ready.summon_pending.intent);
-  }).catch(() => setBindingState(null));
+  }).catch(() => {
+    if (readyApplies()) setBindingState(null);
+  });
 };
 
 export const petShell = {
@@ -56,7 +66,6 @@ export const petShell = {
     pendingSummon = null;
     return intent;
   },
-
 
   /** The binding now, for callbacks that must not read a stale render. */
   currentBinding: (): string | null | undefined => snapshot.binding,
