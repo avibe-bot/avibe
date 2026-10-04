@@ -123,7 +123,7 @@ from core.agent_core.messages import (
     text,
     usage_to_dict,
 )
-from core.agent_core.tools.base import JobHost, Tool, ToolContext, ToolResult, ToolSpec
+from core.agent_core.tools.base import JobHost, Tool, ToolContext, ToolResult
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -139,10 +139,6 @@ class ProviderProtocolViolation(ValueError):
 
 class UnsupportedModelRoute(ValueError):
     """The selected model cannot provide the tools required by the agent."""
-
-
-class HookContractError(ValueError):
-    """A ``before_model`` hook broke what context management owns (loop-control.md section 3, context.md section 10)."""
 
 
 class _Exhausted(Exception):
@@ -199,10 +195,6 @@ class _ForkTooLarge(Exception):
     """A checkpoint request that cannot fit the window; it is never sent."""
 
 
-#: Tools whose path argument is a C-9 artifact.
-_ARTIFACT_TOOLS = frozenset({"read", "write", "edit"})
-
-
 class Agent:
     """One Session's single writer. All methods run on the same asyncio loop.
 
@@ -242,6 +234,9 @@ class Agent:
         self.max_tokens, self.reasoning_effort = max_tokens, reasoning_effort
         self.retry = retry
         self.rehydrate = rehydrate
+        if context is not None and self.hooks:
+            # Hooks with context management are a post-v1 design item (plan section 10).
+            raise ValueError("ContextConfig and user hooks are mutually exclusive in v1")
         self.context = context
         self._tools: dict[str, Tool] = {}
         self._run_tools: Optional[dict[str, Tool]] = None
@@ -586,7 +581,6 @@ class Agent:
         *,
         messages: Sequence[Message],
         max_tokens: Optional[int] = None,
-        hooks: Optional[Sequence[Hooks]] = None,
     ) -> tuple[ModelRequest, dict[str, Tool]]:
         """A request carrying ``messages``, after the user's ``before_model`` hooks: the first pipeline stage."""
         self._check_model_route(selected)
@@ -605,16 +599,13 @@ class Agent:
             ),
             supports_images=capabilities.supports_images is True,
         )
-        given = request
-        for hook in self.hooks if hooks is None else hooks:
+        for hook in self.hooks:
             decision = await self._hook(lambda: hook.before_model(request, self._ctx))
             if isinstance(decision, End):
                 await self._save_state()
                 raise _Ended()
             if decision is not None:
                 request = decision
-        if self.context is not None:
-            self._require_hook_contract(given, request)
         allowed = {spec.name for spec in request.tools}
         return request, {name: tool for name, tool in tools.items() if name in allowed}
 
@@ -717,36 +708,33 @@ class Agent:
                     await self._cleanup(close, stream=True)
             # The attempt is not the run's answer: its partial stays in the ledger, and a conversation
             # attempt's billed usage is kept as a non-final row before the request is tried again.
-            if await self._keep_usage(self._attempts[-1], emit) or purpose == "checkpoint":
-                # Kept once, or never context: a later expiry must not commit it again.
-                terminal = replace(terminal, partial=None)
+            # A retried or relieved attempt is never context: it stays in the ledger (and the audit), and the
+            # request goes out again unchanged.
+            await self._record_attempt(self._attempts[-1])
+            terminal = replace(terminal, partial=None)
             if relieve:
                 ladder.overflows += 1
                 ladder.refused = True
                 if ladder.overflows >= MAX_OVERFLOWS:
                     view = context_view(self._rows)
-                    projected = len(self._rehydrated()) + len(view.messages)
-                    raise self._exhausted(
-                        request,
-                        view,
-                        budget(request, route.capabilities, transcript=view.messages),
-                        messages_tokens(request.messages[projected:]),
-                    )
+                    raise self._exhausted(request, view, budget(request, route.capabilities, transcript=view.messages))
                 retries, started, retry_error = 0, time.monotonic(), None
                 continue
             retry_error = terminal
             retries += 1
             await self._scope.call(lambda: asyncio.sleep(delay))
 
-    async def _keep_usage(self, attempt: _Attempt, emit: Callable[..., Awaitable[None]]) -> bool:
-        """Commit a retried or relieved conversation attempt's usage-only partial; whether it did."""
+    async def _record_attempt(self, attempt: _Attempt) -> None:
+        """A conversation attempt that never became context: its billed usage as a non-context audit row."""
         partial = attempt.message
-        if attempt.purpose != "conversation" or partial is None or partial.usage is None or partial.content:
-            return False
-        row = await self._response(partial, final=False)
-        if not self._consumer_closed:
-            await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
-        return True
+        if self.context is None or attempt.purpose != "conversation" or partial is None or partial.usage is None:
+            return
+        payload: dict[str, Any] = {
+            "version": 1,
+            "usage": usage_to_dict(partial.usage),
+            "error": f"{attempt.error.kind}: {attempt.error.message}" if attempt.error is not None else None,
+        }
+        await self._audit("attempt", payload)
 
     async def _commit_model_message(self, message: AssistantMessage, emit: Callable[..., Awaitable[None]]) -> bool:
         """Finality and queued-input admission share one lock with the commit."""
@@ -783,6 +771,10 @@ class Agent:
             async with self._model(system, emit, first_selection) as (terminal, tools):
                 first_selection = None
                 if isinstance(terminal, ProviderError):
+                    if terminal.partial is not None and not terminal.partial.content:
+                        # A usage-only partial is attempt data, never context.
+                        await self._record_attempt(self._attempts[-1])
+                        terminal = replace(terminal, partial=None)
                     if terminal.partial is not None:
                         self._validate_response(terminal.partial)
                     reason = (
@@ -947,14 +939,12 @@ class Agent:
             name=call.name,
             preview=json.dumps(call.arguments, ensure_ascii=False)[:500],
         )
-        executed = False
         if result is None:
             tool = tools.get(call.name)
             if tool is None:
                 result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
             else:
                 result = await self._execute(tool, call, emit)
-                executed = True
         if not end and not skip:
             for hook in self.hooks:
                 decision = await self._hook(lambda: hook.after_tool(call, result, self._ctx))
@@ -965,15 +955,9 @@ class Agent:
                     result = decision.result
         message = ToolResultMessage(call.id, call.name, result.content, result.is_error)
         validate_message_append(self._rows, session_id=self.session_id, kind="tool_result", message=message)
-        details = deepcopy(dict(result.details))
-        path = call.arguments.get("path")
-        if self.context is not None and executed and not result.is_error and call.name in _ARTIFACT_TOOLS:
-            if isinstance(path, str) and path:
-                # C-9 artifacts: the path the tool ran with, after every before_tool rewrite (invariant 2).
-                details["path"] = path
         await self._save_state()
         row = await self._scope.call(
-            lambda: self.store.append_tool_result(self.session_id, deepcopy(message), details=details),
+            lambda: self.store.append_tool_result(self.session_id, deepcopy(message), details=deepcopy(result.details)),
             interruptible=False,
         )
         self._rows.append(row)
@@ -1060,33 +1044,17 @@ class Agent:
                 break
         return last is not None and self.context.clock() - last > self.context.cache_ttl_s
 
-    @staticmethod
-    def _require_hook_contract(given: ModelRequest, final: ModelRequest) -> None:
-        """Under C-9, routing owns the model and the projected messages are an immutable prefix (section 10)."""
-        route = ("protocol", "base_url", "model_id", "provider")
-        if any(getattr(given.endpoint, name) != getattr(final.endpoint, name) for name in route):
-            raise HookContractError(
-                "A before_model hook changed the model route; with context management on, routing owns the model."
-            )
-        if tuple(final.messages[: len(given.messages)]) != tuple(given.messages):
-            raise HookContractError(
-                "A before_model hook removed, reordered, or rewrote projected messages; it may only append."
-            )
-
     async def _compose(
         self, system: str, selected: ModelSelection, emit: Callable[..., Awaitable[None]], ladder: _Ladder
     ) -> tuple[ModelRequest, dict[str, Tool]]:
         """The conversation request pipeline (invariant 1)."""
         while True:
             view = context_view(self._rows)
-            projected = (*self._rehydrated(), *view.messages)
-            request, tools = await self._request(system, selected, messages=projected)
+            request, tools = await self._request(system, selected, messages=(*self._rehydrated(), *view.messages))
             if self.context is None:
                 return request, tools
             plan = budget(request, selected.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view))
-            # What hooks appended after the projected prefix: fixed overhead, like the system prompt.
-            transient = messages_tokens(request.messages[len(projected) :])
-            if not await self._stage(system, selected, request, view, plan, transient, emit, ladder):
+            if not await self._stage(system, selected, request, view, plan, emit, ladder):
                 return request, tools
 
     async def _stage(
@@ -1096,19 +1064,14 @@ class Agent:
         request: ModelRequest,
         view: ContextView,
         plan: Budget,
-        transient: int,
         emit: Callable[..., Awaitable[None]],
         ladder: _Ladder,
     ) -> bool:
-        """C-9 on the final request (sections 3 and 8); True when it changed the context.
-
-        The projected messages are the request's prefix (``_require_hook_contract``), so moving history out
-        shrinks it by exactly that history; ``transient`` hook content is overhead no step can remove.
-        """
+        """C-9 on the final request (sections 3 and 8); True when it changed the context."""
         head = [message for unit in view.units[:-1] for message in unit.messages]
         if max(0, plan.est - messages_tokens(head)) + plan.output > plan.input_limit:
-            # (d): even the checkpoint and the last unit, with the overhead, cannot fit. No history is dropped.
-            raise self._exhausted(request, view, plan, transient)
+            # (d): even the checkpoint and the last unit alone cannot fit. The provider never sees it.
+            raise self._exhausted(request, view, plan)
         shrink, ladder.refused = ladder.refused, False
         if not shrink:
             if self.context.clear_tool_results and (
@@ -1137,7 +1100,7 @@ class Agent:
             # With no checkpoint request left to try, a request that can fit at all is sent; the provider judges.
             if not shrink and (ladder.summary_failed or self._guard["paused"]) and plan.can_fit:
                 return False
-        return await self._shrink(system, selected, request, view, plan, transient, emit, ladder)
+        return await self._shrink(system, selected, request, view, plan, emit, ladder)
 
     def _fork_can_fit(self, selected: ModelSelection, plan: Budget, est: int) -> bool:
         """Whether a fork carrying ``est`` tokens and the checkpoint request can fit: a choice, not admission.
@@ -1154,7 +1117,6 @@ class Agent:
         request: ModelRequest,
         view: ContextView,
         plan: Budget,
-        transient: int,
         emit: Callable[..., Awaitable[None]],
         ladder: _Ladder,
     ) -> bool:
@@ -1191,23 +1153,21 @@ class Agent:
             await self._drop(request, view, plan, cut, emit)
             return True
         if ladder.overflows or not plan.can_fit:
-            raise self._exhausted(request, view, plan, transient)
+            raise self._exhausted(request, view, plan)
         return False
 
-    def _exhausted(self, request: ModelRequest, view: ContextView, plan: Budget, transient: int = 0) -> _Exhausted:
+    def _exhausted(self, request: ModelRequest, view: ContextView, plan: Budget) -> _Exhausted:
         """Section 8 (d): what fills the request, for the user's stop message."""
         last = view.units[-1] if view.units else None
         last_tokens = unit_tokens(last) if last is not None else 0
         parts = [
             ContextPart("system", text_tokens(request.system)),
             ContextPart("tools", request_tokens("", request.tools, ())),
-            ContextPart("history", max(0, messages_tokens(request.messages) - last_tokens - transient)),
+            ContextPart("history", max(0, messages_tokens(request.messages) - last_tokens)),
         ]
         if last is not None:
             name = "current_request" if last.lead.kind == "input" else "latest_tool_batch"
             parts.append(ContextPart(name, last_tokens))
-        if transient:
-            parts.append(ContextPart("transient", transient))
         parts.append(ContextPart("output", plan.output + plan.margin))
         return _Exhausted(plan.input_limit, tuple(parts))
 
@@ -1216,8 +1176,8 @@ class Agent:
     ) -> RunEndReason:
         """Section 10: clear the pause and both counters, then a normal checkpoint between runs."""
         view = context_view(self._rows)
-        # Measured for the cut only; it is never sent, so the user's before_model hooks do not see it.
-        request, _ = await self._request(system, selected, messages=(*self._rehydrated(), *view.messages), hooks=())
+        # Measured for the cut only; it is never sent.
+        request, _ = await self._request(system, selected, messages=(*self._rehydrated(), *view.messages))
         plan = budget(request, selected.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view))
         cut = normal_cut(view.units, plan.keep)
         if cut is None:
@@ -1399,17 +1359,13 @@ class Agent:
     ) -> ToolResultMessage:
         """The checkpoint turn's tool pipeline (invariant 2); nothing it produces is committed.
 
-        The budget first, then the user's ``before_tool``, then the table on the final arguments, then
-        execution pinned to the path the table authorized, then the bound on whatever result came out.
+        The budget first, then the table, then execution pinned to the path the table authorized, then the
+        bound on whatever result came out. No user hook runs under C-9 (v1: ``ContextConfig`` excludes hooks).
         """
         call = deepcopy(original)
+        result: Optional[ToolResult] = None
         if not policy.open:
-            # A closed budget answers every call; no hook is consulted.
-            result: Optional[ToolResult] = ToolResult((text(BUDGET_USED),), is_error=True)
-        else:
-            call, result, end = await self._gate(call, self.hooks)
-            if end:
-                raise _Ended()
+            result = ToolResult((text(BUDGET_USED),), is_error=True)
         pinned = None
         if result is None:
             decision = policy.decide(call)
@@ -1536,10 +1492,14 @@ class Agent:
         return tuple(row for row in committed if row.kind != "agent_state")
 
     async def _record_turn(self, payload: Mapping[str, Any]) -> None:
-        """The checkpoint turn's audit row (section 6); never context, so losing it never fails the run."""
+        """The checkpoint turn's audit row (section 6)."""
+        await self._audit("checkpoint_turn", payload)
+
+    async def _audit(self, kind: Literal["checkpoint_turn", "attempt"], payload: Mapping[str, Any]) -> None:
+        """A non-context audit row; never context, so losing it never fails the run."""
         try:
             await self._scope.call(
-                lambda: self.store.append_checkpoint_turn(self.session_id, deepcopy(dict(payload))),
+                lambda: self.store.append_audit(self.session_id, kind, deepcopy(dict(payload))),
                 interruptible=False,
             )
         except _Aborted:

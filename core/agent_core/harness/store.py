@@ -67,6 +67,8 @@ class TranscriptStore(Protocol):
         """Commit several payload entries in order, in one transaction: all of them or none (C-9 section 10)."""
         ...
 
-    async def append_checkpoint_turn(self, session_id: str, payload: Mapping[str, Any]) -> str:
-        """Record one checkpoint attempt (C-9 ``CheckpointTurn``) as an audit row outside the context; its id."""
+    async def append_audit(
+        self, session_id: str, kind: Literal["checkpoint_turn", "attempt"], payload: Mapping[str, Any]
+    ) -> str:
+        """An audit row outside the context (C-9 ``CheckpointTurn`` or ``ModelAttempt``); its id."""
         ...

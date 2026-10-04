@@ -122,18 +122,18 @@ A checkpoint is written by a **fork** of the conversation, the only delivery pat
   the cut, which is a prefix of the original request.
 - One user message is appended: the checkpoint request (§11), with `Additional focus from the user: <focus>` for
   `/compact <focus>`.
-- The turn runs through the same loop and the same request pipeline: transient retries, the user's `before_model`
-  hooks, then `budget()` on the final request; a request that cannot fit is never sent and fails the attempt as an
-  overflow. Its tool calls go through the tool pipeline (§10, invariant 2). Its responses and results are never
+- The turn runs through the same loop and the same request pipeline: transient retries, then `budget()` on the
+  final request; a request that cannot fit is never sent and fails the attempt as an overflow. Its tool calls go
+  through the tool pipeline (§10, invariant 2). Its responses and results are never
   committed to the context, so `after_model` and `after_tool` do not run and nothing is shown to the user.
 
 **Tool policy** ("dreaming": cognition allowed, actuation blocked), a declarative table judged after the turn's
-budget and the user's `before_tool` hooks, on the arguments they leave (invariant 2):
+budget (invariant 2):
 
 | Tool | Rule |
 | --- | --- |
 | `read` | allowed |
-| `write`, `edit` | allowed only when the target's real path is inside this Session's scratch directory, `<state>/agent_core/scratch/<session_id>/`; a path that cannot be compared with it (another Windows drive, an invalid path) is outside. An allowed call runs against that real path and is pinned to it: `write` and `edit` publish only while the path still resolves there (`ToolContext.pinned_target`) |
+| `write`, `edit` | allowed only for a file directly inside this Session's scratch root, `<state>/agent_core/scratch/<session_id>/`: the target's real path must have that root as its parent. Scratch is flat, so no parent is ever created and no parent component can race. The turn creates the root, which must be a real directory (a symlink authorizes nothing). An allowed call runs against that real path and is pinned to it: `write` and `edit` publish only while the path still resolves there, and a pinned write creates no directory (`ToolContext.pinned_target`) |
 | memory-read tools | reserved: allowed once they exist |
 | `bash` and every other tool | denied, never executed |
 
@@ -148,10 +148,11 @@ budget and the user's `before_tool` hooks, on the arguments they leave (invarian
   `[Output truncated to fit this checkpoint turn: showing about <shown> of <total> tokens. Read a smaller range if
   you need more.]`, so a single result cannot push the turn out of the window.
 - At most 5 tool rounds. After them, or once `room` falls below the floor, the budget is closed: every call gets
-  `This is a checkpoint turn and its tool budget is used up. Write the checkpoint now.` before any user hook or the
-  table is consulted. A response that still calls tools after that ends the turn as failed.
+  `This is a checkpoint turn and its tool budget is used up. Write the checkpoint now.` before the table is
+  consulted. A response that still calls tools after that ends the turn as failed.
 - A pinned write cannot be redirected by a symlink swapped after the table authorized it: the tool resolves the
-  authorized real path itself, and refuses when the path resolves elsewhere at its start or right before the rename.
+  authorized real path itself, creates no directory, and refuses when the path resolves elsewhere at its start or
+  right before the rename.
   The window between that last check and `rename(2)` remains, as for every write: tools audit ledger (PR #2346)
   rows B4 and B7.
 - The checkpoint is the text of a final response that stops with `stop` and calls no tool; only a `tool_use` stop
@@ -192,10 +193,8 @@ is written, so projection stays a pure function of the rows:
   </context-checkpoint>
   ```
 
-  `Read` lists paths `read` ran with and `write` or `edit` never did; `Modified` lists paths `write` or `edit` ran
-  with; `(none)` when a list is empty. The path is the one the tool ran with, after the user's `before_tool` hooks,
-  recorded on its result as `details.path` when it succeeded (a row without it falls back to the call's argument
-  unless the result is an error). `<earlier-record>` is left out when the adapter supplies no command, and
+  `Read` lists paths of successful `read` calls that no `write` or `edit` touched; `Modified` lists paths of
+  successful `write` or `edit` calls; `(none)` when a list is empty. `<earlier-record>` is left out when the adapter supplies no command, and
   `<current-request>` when the cut did not split a turn.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: skill bodies by name and
   revision (at most 5,000 tokens each and 25,000 in total), pending Watches, Tasks, and delegated Runs from the Harness
@@ -245,7 +244,8 @@ ends the run `context_exhausted`, as in P1. The adapter supplies:
   Session whose rows the context holds and the last summarized `context_seq`.
 - `ContextHost.render_state(StateRequest)`: the `state` texts (§7) for the skills the summarized rows loaded and
   whether the checkpoint happened inside a run.
-- `TranscriptStore.append_checkpoint_turn(session_id, payload)`: the audit row (§6);
+- `TranscriptStore.append_audit(session_id, kind, payload)`: a non-context audit row, `checkpoint_turn` (§6) or
+  `attempt` (invariant 4);
   `append_payloads(session_id, entries)`: several payload rows in one transaction (invariant 3);
   `append_response(..., request=...)`: `ModelResponse.request` for the anchor (§2).
 - `Agent.compact(turn_id=..., focus=...)` behind `/compact [focus]` on every surface, and the pause notice (§10)
@@ -269,27 +269,24 @@ ends the run `context_exhausted`, as in P1. The adapter supplies:
 **Ordering and ownership invariants.** Each has one test in `tests/agent_core/agent/test_compaction.py` (route:
 `test_context.py`) that fails when its order or owner is broken.
 
-1. **One request pipeline.** Projection, then the user's `before_model` hooks, then `budget()` exactly once on that
-   final request, then the C-9 stage, then the provider. Nothing changes a request after it is budgeted; a stage step
-   that changes the context rebuilds the request from the top. The single-unit stop (§8 d) is in the stage, before
-   provider admission. Checkpoint requests take the same pipeline. Under C-9 a `before_model` hook (C-3 §3) may
-   append messages and change the system prompt or tool definitions, and nothing else: routing owns the model (the
-   endpoint's protocol, base URL, provider, and model stay as resolved), and the projected messages are an immutable
-   prefix (no prepend, removal, reorder, or rewrite, which would also break the provider cache prefix and the fork's
-   byte-identical prefix). A violation ends the run with a `HookContractError`. So moving history out shrinks the
-   request by exactly that history; appended hook content is overhead, budgeted like any other content, and an
-   overflow that only that overhead causes goes to (d) with the `transient` part, dropping no history.
-2. **One tool pipeline** in a checkpoint turn: the turn's budget (once closed, `BUDGET_USED` with no hook
-   consulted), then the user's `before_tool` (`Deny`, `AlterArgs`), then the checkpoint table on the final arguments,
-   then execution pinned to the path the table authorized, then the bound on every result that enters the turn,
-   denials included. Conversation artifacts are recorded from the final arguments after execution (§7).
+1. **One request pipeline.** Projection, then `budget()` exactly once on that final request, then the C-9 stage,
+   then the provider. Nothing changes a request after it is budgeted; a stage step that changes the context
+   rebuilds the request from the top. The single-unit stop (§8 d) is in the stage, before provider admission.
+   Checkpoint requests take the same pipeline. In v1 an Agent with a `ContextConfig` takes no user hooks (a
+   configuration error), so nothing else can rewrite a request C-9 owns; hooks with context management are a post-v1
+   design item (plan §10).
+2. **One tool pipeline** in a checkpoint turn: the turn's budget (once closed, `BUDGET_USED`), then the checkpoint
+   table, then execution pinned to the path the table authorized, then the bound on every result that enters the
+   turn, denials included.
 3. **One commit for C-9 state.** A transition (its `context_edit` rows, its `context_compaction` row, the guard and
    pause, and the hook state of that commit point in `AgentState`) is written in one transaction
    (`append_payloads`), before any event announces it; a failed commit leaves nothing. Nothing else writes
    `AgentState.context`.
 4. **One attempt ledger.** Every model attempt of a run (success, overflow, error, retry, checkpoint) records its
    request, its response or partial, and so its usage, in one place. The checkpoint audit and the request facts of a
-   committed response (the anchor) read only from it.
+   committed response (the anchor) read only from it. An attempt that does not become the run's response is never
+   context: a retried or relieved request goes out again unchanged, and a usage-only partial is a non-context
+   `ModelAttempt` audit row, never a response row.
 5. **Route-scoped anchors.** An anchor answered by another origin (provider, api, model) is invalid (§2).
 
 UX is silent: an automatic compaction shows nothing, and the raw messages stay in history. The only user-visible

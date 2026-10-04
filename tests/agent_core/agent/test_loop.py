@@ -615,14 +615,14 @@ async def test_retry_obeys_provider_flag_and_allows_usage_only_partial(streamed,
         assert events[-1].reason == "error"
         assert sleeps == []
     else:
-        # A usage-only partial is persisted as a non-final model response, not
-        # merged into the successful attempt. The provider owns retryability.
+        # A partial of a retried attempt is never context. The provider owns retryability.
         assert len(provider.requests) == agent.models.resolutions == 2
         assert sleeps == [3.0]
         assert events[-1].reason == "completed"
 
 
-async def test_retry_preserves_usage_only_partial_in_successful_response():
+async def test_retry_keeps_a_usage_only_partial_out_of_the_context():
+    # A usage-only partial is attempt data, never context: the retry resends the original request.
     store = InMemoryTranscriptStore()
     first_partial = AssistantMessage(
         content=(),
@@ -648,17 +648,12 @@ async def test_retry_preserves_usage_only_partial_in_successful_response():
     )
 
     assert events[-1].reason == "completed"
+    assert provider.requests[1].messages == provider.requests[0].messages
     responses = [row.message for row in await store.load("session") if row.kind == "response"]
-    assert len(responses) == 2
-    assert responses[0].usage == Usage(input_tokens=5, output_tokens=2, cache_write_tokens=1)
-    assert responses[1].usage == Usage(
-        input_tokens=7,
-        output_tokens=3,
-        cache_read_tokens=4,
-    )
+    assert [response.usage for response in responses] == [successful.usage]
 
 
-async def test_retry_usage_partial_is_not_committed_twice_when_budget_expires(monkeypatch):
+async def test_retry_usage_partial_never_enters_the_context_when_budget_expires(monkeypatch):
     real_sleep = asyncio.sleep
 
     async def slow_sleep(delay):
@@ -684,10 +679,8 @@ async def test_retry_usage_partial_is_not_committed_twice_when_budget_expires(mo
 
     events = await collect(agent)
 
-    responses = [row.message for row in await store.load("session") if row.kind == "response"]
     assert len(provider.requests) == 1
-    assert len(responses) == 1
-    assert responses[0].usage == Usage(input_tokens=5)
+    assert not [row for row in await store.load("session") if row.kind == "response"]
     assert events[-1].reason == "error"
 
 

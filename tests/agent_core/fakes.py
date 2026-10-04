@@ -89,6 +89,8 @@ class InMemoryTranscriptStore:
         self.final: dict[str, bool] = {}
         # C-9 checkpoint-turn audit rows: (session_id, row id, payload), never context.
         self.audits: list[tuple[str, str, dict]] = []
+        # C-9 model-attempt audit rows (usage of attempts that never became context).
+        self.attempts: list[tuple[str, str, dict]] = []
         # Kinds committed by each ``append_payloads`` transaction, and how many to fail next.
         self.transactions: list[list[str]] = []
         self.fail_transactions = 0
@@ -146,10 +148,11 @@ class InMemoryTranscriptStore:
         self.transactions.append([row.kind for row in committed])
         return committed
 
-    async def append_checkpoint_turn(self, session_id, payload: Mapping) -> str:
+    async def append_audit(self, session_id, kind, payload: Mapping) -> str:
         self._next_id += 1
         row_id = f"audit_{self._next_id}"
-        self.audits.append((session_id, row_id, deepcopy(dict(payload))))
+        record = (session_id, row_id, deepcopy(dict(payload)))
+        (self.audits if kind == "checkpoint_turn" else self.attempts).append(record)
         return row_id
 
 

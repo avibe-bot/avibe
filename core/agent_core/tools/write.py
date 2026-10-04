@@ -63,10 +63,11 @@ class WriteTool:
             if ctx.cancel.cancelled:
                 return error_result("Operation aborted")
             try:
-                if pinned is not None:
-                    # Before any parent directory is created; write_bytes binds it again up to the rename.
-                    await to_thread_joined(_require_pinned_path, absolute, pinned)
-                refusal = await to_thread_joined(_prepare_target, absolute)
+                if pinned is None:
+                    refusal = await to_thread_joined(_prepare_target, absolute)
+                else:
+                    # One step that creates nothing: write_bytes binds the pin again up to the rename.
+                    refusal = await to_thread_joined(_prepare_pinned, absolute, pinned)
                 if refusal:
                     return error_result(f"Cannot write {path}: {refusal}.")
                 if ctx.cancel.cancelled:
@@ -126,8 +127,19 @@ def _require_pinned(resolved: str, pinned: Optional[str]) -> None:
         raise NotPinned()
 
 
-def _require_pinned_path(path: str, pinned: str) -> None:
-    _require_pinned(os.path.realpath(path), pinned)
+def _prepare_pinned(absolute: str, pinned: str) -> Optional[str]:
+    """``_prepare_target`` for a pinned target: it must resolve to ``pinned``, and no directory is created."""
+    target = os.path.realpath(absolute)
+    _require_pinned(target, pinned)
+    try:
+        kind = target_kind(target)
+    except FileNotFoundError:
+        return None if os.path.isdir(os.path.dirname(target)) else "its directory does not exist"
+    if kind != "regular":
+        return KIND_REASON[kind]
+    if not os.access(target, os.W_OK):
+        return "permission denied"
+    return None
 
 
 class NotReplaceable(Exception):

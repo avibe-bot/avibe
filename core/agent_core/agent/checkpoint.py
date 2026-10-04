@@ -3,15 +3,18 @@
 "Dreaming": a checkpoint turn may think with the tools that only look, and
 write only into its own scratch space; anything that acts on the world is
 denied and never executed. The loop's checkpoint tool pipeline asks it once
-per call, in a fixed order: the turn's budget first (``open``), then the
-user's ``before_tool`` hooks, then this declarative table on the arguments
-they leave. An allowed scratch write is pinned to the real path the table
-authorized, which the ``write`` and ``edit`` mutation boundary enforces.
+per call, after the turn's budget (``open``). Scratch is flat: the turn
+creates the Session's scratch root, which must be a real directory, and a
+write or edit is authorized only for a file directly inside it, so no parent
+is ever created and no parent component can race. The call is pinned to the
+real path authorized, which the ``write`` and ``edit`` mutation boundary
+enforces.
 """
 
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, Mapping, Optional
@@ -55,12 +58,12 @@ class CheckpointPolicy:
         self, *, cwd: str, scratch_dir: Optional[str], table: Mapping[str, Rule] = CHECKPOINT_TOOL_POLICY
     ) -> None:
         self._cwd = cwd
-        self._scratch = os.path.realpath(scratch_dir) if scratch_dir else None
+        self._scratch = _scratch_root(scratch_dir) if scratch_dir else None
         self._table = table
         self.open = True
 
     def decide(self, call: ToolCallBlock) -> Decision:
-        """The table on ``call``'s final arguments (the budget is the pipeline's first check, not this)."""
+        """The table on ``call``'s arguments (the budget is the pipeline's first check, not this)."""
         rule = self._table.get(call.name)
         if rule == "allow":
             return Decision()
@@ -68,14 +71,24 @@ class CheckpointPolicy:
         return Decision(pinned=target) if target is not None else Decision(denial=DENIED)
 
     def _scratch_target(self, call: ToolCallBlock) -> Optional[str]:
-        """The target's real path, resolved as the tool resolves it, when it lies inside the scratch directory."""
+        """The target's real path, resolved as the tool resolves it, when its parent IS the scratch root."""
         if self._scratch is None:
             return None
         try:
             arguments = prepare_edit_arguments(call.arguments) if call.name == "edit" else call.arguments
             target = os.path.realpath(resolve_to_cwd(str_arg(arguments, "path"), self._cwd))
-            # commonpath raises ValueError for paths on different Windows drives: outside, so denied.
-            inside = target != self._scratch and os.path.commonpath((target, self._scratch)) == self._scratch
         except (ToolInputError, OSError, ValueError):
             return None
-        return target if inside else None
+        return target if os.path.dirname(target) == self._scratch and target != self._scratch else None
+
+
+def _scratch_root(scratch_dir: str) -> Optional[str]:
+    """Create the Session's scratch root; its real path, or None when it is not a real directory (a symlink)."""
+    try:
+        os.makedirs(scratch_dir, exist_ok=True)
+        info = os.lstat(scratch_dir)
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return None
+    return os.path.realpath(scratch_dir)

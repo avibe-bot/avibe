@@ -126,7 +126,7 @@ class CompactionPaused:
 
 @dataclass(frozen=True)
 class ContextPart:
-    name: Literal["system", "tools", "history", "current_request", "latest_tool_batch", "transient", "output"]
+    name: Literal["system", "tools", "history", "current_request", "latest_tool_batch", "output"]
     tokens: int
 
 

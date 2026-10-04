@@ -996,3 +996,11 @@ def test_file_urls_follow_node_file_url_to_path(monkeypatch, windows, url, expec
         assert str(raised.value) == str(expected)
     else:
         assert paths_module.expand_path(url) == expected
+
+
+async def test_a_pinned_write_never_creates_a_directory(tmp_path, make_ctx):
+    """A pinned target's parent must exist: a pinned write creates no directory, so no parent component can race."""
+    pinned = str(tmp_path / "missing" / "f.txt")
+    ctx = replace(make_ctx(), pinned_target=pinned)
+    result = await WriteTool().execute({"path": pinned, "content": "x"}, ctx)
+    assert result.is_error and not (tmp_path / "missing").exists()

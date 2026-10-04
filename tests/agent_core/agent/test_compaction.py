@@ -24,20 +24,19 @@ from core.agent_core.agent.events import (
     CompactionFailed,
     CompactionFinished,
     CompactionPaused,
-    CompactionStarted,
     ContextExhausted,
     MessageCommitted,
     RunEnded,
     ToolStarted,
 )
-from core.agent_core.agent.hooks import AlterArgs, Deny, Hooks
+from core.agent_core.agent.hooks import Hooks
 from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import RetryPolicy
 from core.agent_core.ai._common import endpoint_origin, prepare_messages
 from core.agent_core.ai.anthropic import build_messages_payload
 from core.agent_core.ai.openai_chat import build_chat_payload
 from core.agent_core.ai.openai_responses import build_responses_payload
-from core.agent_core.ai.provider import Done, ModelCapabilities, ModelEndpoint, ProviderError, TextDelta
+from core.agent_core.ai.provider import Done, ModelEndpoint, ProviderError, TextDelta
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.cancel import CancelToken
 from core.agent_core.harness.context import (
@@ -547,24 +546,6 @@ def billed(message: AssistantMessage, ratio: float = 1.0):
     return script
 
 
-async def test_a_change_outside_the_transcript_is_counted_by_its_delta():
-    # After the third read, hook state makes rehydration put 10,000 tokens before the transcript. The anchor
-    # still holds (the transcript is unchanged); the rehydrated block is counted by its UTF-8/4 delta.
-    class Count(Hooks):
-        async def after_tool(self, call, result, ctx):
-            ctx.state["reads"] = ctx.state.get("reads", 0) + 1
-
-    def rehydrate(state):
-        return (UserMessage((text(tokens(10_000)),)),) if state.get("reads", 0) >= 3 else ()
-
-    script = [billed(assistant(calls=[ToolCallBlock(f"r{index}", "read", {"path": "f"})])) for index in range(3)]
-    model = Model([*script, billed(assistant("done"))], [[Done(assistant(CHECKPOINT))]])
-    agent = make_agent(model, tools=[reader(tokens(4_000))], hooks=[Count()], rehydrate=rehydrate)
-    await run(agent)
-    # Request 4 is about 12,000 tokens of transcript plus the 10,000 rehydrated: it crosses T.
-    assert [is_checkpoint(request) for request in model.requests] == [False, False, False, True, False]
-
-
 ENGLISH = "The quick brown fox jumps over the lazy dog. " * 4
 
 
@@ -847,83 +828,6 @@ def fits_the_window(request) -> bool:
     return request_tokens(request.system, request.tools, request.messages) + 4_096 + 8_000 <= 32_000
 
 
-async def test_invariant_1_every_request_is_budgeted_after_the_user_hooks_and_sent_unchanged():
-    # A user before_model hook appends 15,000 tokens to every request, checkpoint requests included. Budgeting
-    # the projection before the hook would see about 6,000 tokens at the third request and send 21,000.
-    padding = UserMessage((text(tokens(15_000)),))
-
-    class Pad(Hooks):
-        async def before_model(self, request, ctx):
-            return replace(request, messages=(*request.messages, padding))
-
-    model = Model(reads(2), [[Done(assistant(CHECKPOINT))]])
-    agent = make_agent(model, tools=[reader(tokens(3_000))], hooks=[Pad()])
-    events = await run(agent)
-    assert events[-1].reason == "completed"
-    assert len(model.checkpoint_requests) == 1
-    assert model.checkpoint_requests[0].messages[-1] == padding  # the fork went through the hooks too
-    assert all(request.messages[-1] == padding for request in model.requests)
-    assert all(fits_the_window(request) for request in model.conversation_requests)
-
-
-async def test_invariant_2_the_policy_judges_the_final_arguments_and_every_checkpoint_result_is_bounded(tmp_path):
-    scratch = tmp_path / "scratch" / "session"
-    scratch.mkdir(parents=True)
-
-    class Redirect(Hooks):
-        async def before_tool(self, call, ctx):
-            path = call.arguments.get("path")
-            if call.name == "bash":
-                return Deny("no shell: " + tokens(50_000))  # a user denial far larger than the turn's room
-            if path == "into-scratch":
-                return AlterArgs({**call.arguments, "path": str(scratch / "plan.md")})
-            if path == "scratch/session/out":
-                return AlterArgs({**call.arguments, "path": str(tmp_path / "outside.md")})
-            return None
-
-    tools = {name: FakeTool(name) for name in ("write", "bash")}
-    tools["read"] = reader(tokens(3_000))
-    calls = (
-        ToolCallBlock("in", "write", {"path": "into-scratch", "content": "ok"}),
-        ToolCallBlock("out", "write", {"path": "scratch/session/out", "content": "no"}),
-        ToolCallBlock("sh", "bash", {"command": "ls"}),
-    )
-    model = Model(
-        history(),
-        [[Done(AssistantMessage(calls, assistant().origin, "tool_use"))], [Done(assistant(CHECKPOINT))]],
-    )
-    context = ContextConfig(scratch_dir=str(scratch))
-    agent = make_agent(model, tools=list(tools.values()), hooks=[Redirect()], context=context, cwd=str(tmp_path))
-    await run(agent)
-    assert [event async for event in agent.compact(turn_id="compact")][-1].reason == "completed"
-    # The policy judged the arguments the user's hook left: one redirect allowed, one denied, never run.
-    assert [(ctx.tool_call_id, args["path"]) for args, ctx in tools["write"].calls] == [("in", str(scratch / "plan.md"))]
-    results = {m.tool_call_id: m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)}
-    assert results["out"].content[0].text == DENIED
-    # The user's denial entered the turn bounded like any result.
-    denial = results["sh"]
-    assert denial.content[-1].text.startswith("[Output truncated to fit this checkpoint turn")
-    assert message_tokens(denial) < 25_000 and not tools["bash"].calls
-
-
-async def test_invariant_2_artifacts_record_the_path_each_tool_ran_with():
-    class Rewrite(Hooks):
-        async def before_tool(self, call, ctx):
-            if call.arguments.get("path") == "asked.md":
-                return AlterArgs({**call.arguments, "path": "actual.md"})
-            return None
-
-    model = Model(
-        [call("read", "r0", path="asked.md"), call("read", "r1", path="other.md"), [Done(assistant("done"))]],
-        [[Done(assistant(CHECKPOINT))]],
-    )
-    agent = make_agent(model, tools=[reader(tokens(3_000))], hooks=[Rewrite()])
-    await run(agent)
-    assert [event async for event in agent.compact(turn_id="compact")][-1].reason == "completed"
-    compaction = next(row for row in await agent.store.load("session") if row.kind == "compaction")
-    assert compaction.payload["files_read"] == ["actual.md"]
-
-
 async def test_invariant_3_a_c9_transition_commits_in_one_transaction_or_not_at_all():
     # A checkpoint that comes out ineffective moves the guard; its guard and its row share one transaction.
     store = InMemoryTranscriptStore()
@@ -942,116 +846,92 @@ async def test_invariant_3_a_c9_transition_commits_in_one_transaction_or_not_at_
     assert store.transactions[-1] == ["agent_state", "compaction"]
 
 
-async def test_invariant_4_a_relieved_overflow_keeps_its_billed_usage_once():
-    billed_partial = replace(assistant("", stop_reason="error"), usage=Usage(input_tokens=31_000, output_tokens=0))
-    overflow = ProviderError("overflow", "prompt is too long", False, status=400, partial=billed_partial)
-    model = Model(
-        [call("read", "r0", path="f"), call("read", "r1", path="f"), [overflow], [Done(assistant("done"))]],
-        [[Done(assistant(CHECKPOINT))]],
+
+
+# --- round 5 decisions -------------------------------------------------------------------------------
+
+
+def test_context_management_and_user_hooks_are_mutually_exclusive_in_v1():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        make_agent(Model(), hooks=[Hooks()])
+
+
+@pytest.mark.parametrize("context", [True, False])
+async def test_a_usage_only_partial_never_enters_the_context_and_the_retry_resends_the_request(context):
+    billed = replace(assistant("", stop_reason="error"), usage=Usage(input_tokens=900, output_tokens=0))
+    model = Model([[ProviderError("rate_limit", "busy", True, partial=billed)], [Done(assistant("done"))]])
+    store = InMemoryTranscriptStore()
+    agent = Agent(
+        session_id="session",
+        models=FakeModelRouter(model),
+        tools=(),
+        hooks=(),
+        store=store,
+        jobs=FakeJobHost(),
+        cwd="/test-owned",
+        retry=RetryPolicy(initial_delay_s=0),
+        context=ContextConfig() if context else None,
     )
-    agent = make_agent(model, tools=[reader(tokens(4_000))])
     events = await run(agent)
     assert events[-1].reason == "completed"
-    rows = await agent.store.load("session")
-    kept = [row for row in rows if row.kind == "response" and row.message.usage == billed_partial.usage]
-    assert len(kept) == 1 and not kept[0].message.content
-    compaction = next(row for row in rows if row.kind == "compaction")
-    assert kept[0].context_seq < compaction.context_seq  # kept before the ladder ran
+    first, second = model.requests
+    assert second.messages == first.messages  # the original request, unchanged
+    responses = [row.message for row in await store.load("session") if row.kind == "response"]
+    assert all(response.content for response in responses)
+    if context:
+        # The attempt's billed usage is audit data, outside the context.
+        assert [attempt["usage"]["input_tokens"] for _, _, attempt in store.attempts] == [900]
 
 
-# --- the hook contract under C-9 (context.md section 10; loop-control.md section 3) ------------------
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        lambda endpoint: replace(endpoint, model_id="another-model"),
-        lambda endpoint: replace(endpoint, base_url="http://elsewhere.invalid"),
-        lambda endpoint: replace(endpoint, provider="another-provider"),
-        lambda endpoint: replace(endpoint, protocol="openai_chat"),
-    ],
-)
-async def test_a_hook_may_not_change_the_route_under_context_management(change):
-    class Reroute(Hooks):
-        async def before_model(self, request, ctx):
-            return replace(request, endpoint=change(request.endpoint))
-
-    model = Model([[Done(assistant("never"))]])
-    events = await run(make_agent(model, hooks=[Reroute()]))
-    assert not model.requests  # refused at the pipeline boundary, before admission
-    assert [event.kind for event in events if isinstance(event, AgentError)] == ["HookContractError"]
-    assert events[-1].reason == "error"
-
-
-@pytest.mark.parametrize(
-    "rewrite",
-    [
-        lambda messages: (UserMessage((text("prepended"),)), *messages),  # prepend
-        lambda messages: messages[1:],  # remove
-        lambda messages: (*messages[:-1], UserMessage((text("rewritten"),))),  # rewrite
-        lambda messages: tuple(reversed(messages)),  # reorder
-    ],
-)
-async def test_a_hook_may_only_append_to_the_projected_messages(rewrite):
-    class Rewrite(Hooks):
-        async def before_model(self, request, ctx):
-            if len(request.messages) < 3:
-                return None
-            return replace(request, messages=rewrite(request.messages))
-
-    model = Model([call("read", "r0", path="f"), [Done(assistant("never"))]])
-    events = await run(make_agent(model, tools=[reader("ok")], hooks=[Rewrite()]))
-    assert len(model.requests) == 1
-    assert [event.kind for event in events if isinstance(event, AgentError)] == ["HookContractError"]
-
-
-async def test_an_overflow_from_hook_content_alone_stops_without_dropping_history():
-    class Bloat(Hooks):
-        async def before_model(self, request, ctx):
-            return replace(request, messages=(*request.messages, UserMessage((text(tokens(30_000)),))))
-
-    store = InMemoryTranscriptStore()
-    await _history_on_a_large_window(store, [3_000] * 4)
-    before = await store.load("session")
-    model = Model([[Done(assistant("never"))]], [[Done(assistant(CHECKPOINT))]])
-    events = await run(make_agent(model, store=store, hooks=[Bloat()]))
-    exhausted = next(event for event in events if isinstance(event, ContextExhausted))
-    parts = {part.name: part.tokens for part in exhausted.parts}
-    assert parts["transient"] == 30_000
-    assert not model.requests
-    after = await store.load("session")
-    assert not [row for row in after if row.kind in {"compaction", "context_edit"}]
-    assert after[: len(before)] == before
-
-
-async def test_a_closed_budget_answers_before_any_user_hook_is_consulted():
-    seen = []
-
-    class Refuse(Hooks):
-        async def before_tool(self, call, ctx):
-            seen.append(call.id)
-            return Deny("a user policy says no")
-
-    rounds = [call("read", f"r{index}", path="f") for index in range(6)]
-    model = Model(history(), [*rounds, [Done(assistant(CHECKPOINT))]])
-    agent = make_agent(model, tools=[reader(tokens(3_000))], hooks=[Refuse()])
-    agent.hooks = ()
-    await run(agent)
-    agent.hooks = (Refuse(),)
-    events = [event async for event in agent.compact(turn_id="compact")]
-    assert events[-1].reason == "completed"
-    assert seen == ["r0", "r1", "r2", "r3", "r4"]  # the sixth round never reached the hook
-    sixth = [m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)][-1]
-    assert (sixth.tool_call_id, sixth.content[0].text) == ("r5", BUDGET_USED)
-
-
-@pytest.mark.parametrize("swap", ["link", "directory"])
-async def test_a_scratch_write_never_lands_outside_after_a_swap_between_policy_and_execution(tmp_path, swap):
-    scratch = tmp_path / "scratch" / "session"
-    (scratch / "notes").mkdir(parents=True)
-    (scratch / "link").symlink_to(scratch / "notes", target_is_directory=True)
+def flat_scratch(tmp_path):
+    scratch = tmp_path / "state" / "scratch" / "session"
     outside = tmp_path / "outside"
     outside.mkdir()
+    return scratch, outside
+
+
+async def _scratch_compact(tmp_path, scratch, calls, tools):
+    model = Model(
+        history(),
+        [[Done(AssistantMessage(tuple(calls), assistant().origin, "tool_use"))], [Done(assistant(CHECKPOINT))]],
+    )
+    agent = make_agent(
+        model, tools=[reader(tokens(3_000)), *tools], context=ContextConfig(scratch_dir=str(scratch)), cwd=str(tmp_path)
+    )
+    await run(agent)
+    events = [event async for event in agent.compact(turn_id="compact")]
+    assert events[-1].reason == "completed"
+    results = {m.tool_call_id: m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)}
+    return results
+
+
+async def test_scratch_writes_are_flat_inside_a_root_the_turn_creates(tmp_path):
+    scratch, outside = flat_scratch(tmp_path)
+    assert not scratch.exists()
+    write = WriteTool()
+    calls = [
+        ToolCallBlock("flat", "write", {"path": "state/scratch/session/plan.md", "content": "plan"}),
+        ToolCallBlock("nested", "write", {"path": "state/scratch/session/sub/plan.md", "content": "no"}),
+    ]
+    results = await _scratch_compact(tmp_path, scratch, calls, [write])
+    assert not results["flat"].is_error and (scratch / "plan.md").read_text() == "plan"
+    # A subdirectory is never authorized, so no parent is ever created and no parent component can race.
+    assert results["nested"].content[0].text == DENIED and not (scratch / "sub").exists()
+
+
+async def test_a_scratch_root_that_is_a_symlink_authorizes_nothing(tmp_path):
+    scratch, outside = flat_scratch(tmp_path)
+    scratch.parent.mkdir(parents=True)
+    scratch.symlink_to(outside, target_is_directory=True)
+    calls = [ToolCallBlock("w", "write", {"path": "state/scratch/session/plan.md", "content": "no"})]
+    results = await _scratch_compact(tmp_path, scratch, calls, [WriteTool()])
+    assert results["w"].content[0].text == DENIED and not os.listdir(outside)
+
+
+@pytest.mark.parametrize("swap", ["root", "target"])
+async def test_a_scratch_write_never_lands_outside_after_a_swap_between_policy_and_execution(tmp_path, swap):
+    scratch, outside = flat_scratch(tmp_path)
+    elsewhere = outside / "not-yet"  # a directory that does not exist: nothing may create it
 
     class SwappingWrite:
         """The real write tool, with the swap landing after the policy authorized the call."""
@@ -1059,27 +939,14 @@ async def test_a_scratch_write_never_lands_outside_after_a_swap_between_policy_a
         spec = WriteTool().spec
 
         async def execute(self, arguments, ctx):
-            if swap == "link":
-                (scratch / "link").unlink()
-                (scratch / "link").symlink_to(outside, target_is_directory=True)
+            if swap == "root":
+                scratch.rename(scratch.parent / "moved")
+                scratch.symlink_to(elsewhere, target_is_directory=True)
             else:
-                (scratch / "notes").rename(scratch / "moved")
-                (scratch / "notes").symlink_to(outside, target_is_directory=True)
+                (scratch / "plan.md").symlink_to(outside / "plan.md")
             return await WriteTool().execute(arguments, ctx)
 
-    write = ToolCallBlock("w", "write", {"path": "scratch/session/link/plan.md", "content": "plan"})
-    model = Model(
-        history(),
-        [[Done(AssistantMessage((write,), assistant().origin, "tool_use"))], [Done(assistant(CHECKPOINT))]],
-    )
-    tools = [reader(tokens(3_000)), SwappingWrite()]
-    agent = make_agent(model, tools=tools, context=ContextConfig(scratch_dir=str(scratch)), cwd=str(tmp_path))
-    await run(agent)
-    assert [event async for event in agent.compact(turn_id="compact")][-1].reason == "completed"
-    assert not os.listdir(outside)  # nothing outside, not even a temp file
-    result = [m for m in model.checkpoint_requests[-1].messages if isinstance(m, ToolResultMessage)][-1]
-    if swap == "link":
-        # The call ran against the path the policy authorized, not the link it was spelled with.
-        assert (scratch / "notes" / "plan.md").read_text() == "plan" and not result.is_error
-    else:
-        assert result.is_error and "no longer resolves to the authorized location" in result.content[0].text
+    calls = [ToolCallBlock("w", "write", {"path": "state/scratch/session/plan.md", "content": "plan"})]
+    results = await _scratch_compact(tmp_path, scratch, calls, [SwappingWrite()])
+    assert results["w"].is_error and "no longer resolves to the authorized location" in results["w"].content[0].text
+    assert not os.listdir(outside)  # neither content nor a created directory

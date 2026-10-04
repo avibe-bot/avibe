@@ -513,7 +513,7 @@ def _unique(items: Sequence[str]) -> list[str]:
 
 
 def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> tuple[list[str], list[str]]:
-    """Cumulative artifacts: the path each executed call ran with (``details.path``, after ``before_tool``)."""
+    """Cumulative artifacts: the path of each call that succeeded (no hook rewrites arguments under C-9)."""
     read: list[str] = list(previous.get("files_read", ()))
     modified: list[str] = list(previous.get("files_modified", ()))
     for unit in head:
@@ -521,12 +521,8 @@ def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> tuple[list[str]
         if not isinstance(message, AssistantMessage):
             continue
         for call, (entry, result) in zip(message.tool_calls, unit.entries[1:]):
-            details = entry.payload.get("details") if entry is not None else None
-            path = details.get("path") if isinstance(details, Mapping) else None
-            if path is None and entry is not None and not result.is_error:
-                # A row written before artifacts were recorded: the call's own argument.
-                path = call.arguments.get("path")
-            if not isinstance(path, str) or not path:
+            path = call.arguments.get("path")
+            if entry is None or result.is_error or not isinstance(path, str) or not path:
                 continue
             if call.name == "read":
                 read.append(path)

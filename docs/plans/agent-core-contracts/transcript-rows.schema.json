@@ -111,10 +111,6 @@
                 }
               },
               "description": "Set when the command loaded a skill (`vibe skill load`); used for rehydration after compaction."
-            },
-            "path": {
-              "type": "string",
-              "description": "C-9 (context.md section 7): the path argument a read, write, or edit ran with and succeeded on, after before_tool rewrites. Written only when context management is on."
             }
           }
         }
@@ -365,7 +361,7 @@
       }
     },
     "CheckpointTurn": {
-      "description": "`agent_events.content_json` of a `context_checkpoint_turn` row (`visibility = 'audit'`, no `context_seq`): one checkpoint attempt and the messages its turn produced (context.md section 6). Never context.",
+      "description": "`agent_events.content_json` of a `context_checkpoint_turn` audit row (`TranscriptStore.append_audit(kind='checkpoint_turn')`, `visibility = 'audit'`, no `context_seq`): one checkpoint attempt and the messages its turn produced, from the attempt ledger (context.md section 6). Never context.",
       "type": "object",
       "required": [
         "version",
@@ -419,6 +415,31 @@
         },
         "usage": {
           "$ref": "message.schema.json#/definitions/Usage"
+        }
+      }
+    },
+    "ModelAttempt": {
+      "description": "`agent_events.content_json` of a `model_attempt` audit row (`TranscriptStore.append_audit(kind='attempt')`, `visibility = 'audit'`, no `context_seq`): a conversation attempt that did not become the run's response (retried, relieved, or failed) and reported usage without content. Never context (context.md section 10, invariant 4).",
+      "type": "object",
+      "required": [
+        "version",
+        "usage",
+        "error"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "usage": {
+          "$ref": "message.schema.json#/definitions/Usage"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The provider error that ended the attempt: `<kind>: <message>`."
         }
       }
     }
