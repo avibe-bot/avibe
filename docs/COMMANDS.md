@@ -114,7 +114,20 @@ Notes:
 - `/resume` uses a text-first flow instead of modals.
 - `/resume 1`, `/resume more`, `/resume latest ...`, and manual resume syntax are especially relevant on WeChat.
 
-### 2.4 Parser normalization and aliases
+### 2.4 Avibe Agent: `/compact [focus]`
+
+In a session on the Avibe Agent backend, `/compact` compacts the conversation now: the model writes a checkpoint of
+the older part, and the recent part stays word for word. An optional focus tells the checkpoint what to keep in
+detail, for example `/compact the parser refactor`. The reply says how much smaller the context became, or that
+there is nothing to compact yet. `/compact` also resumes automatic compaction after it paused.
+
+- It is not a controller command: the Avibe Agent backend handles it as the session's message, so it works on the
+  Workbench and every IM platform (on Slack, as `@Avibe /compact`). Other backends receive the text unchanged.
+- Sent while a reply is running, it waits and runs right after that reply. Send it as its own message: messages
+  queued together while a reply runs are delivered as one.
+- The command itself never becomes part of the conversation the model sees.
+
+### 2.5 Parser normalization and aliases
 
 The shared parser in `modules/im/base.py` applies these rules:
 

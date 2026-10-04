@@ -1542,7 +1542,24 @@
       "modelError": "The model stopped with an error.",
       "toolsUnsupported": "The selected model does not support tools, which the Avibe Agent needs. Choose another model.",
       "providerProtocol": "The model provider sent a reply the Avibe Agent cannot use.",
-      "generic": "The Avibe Agent run failed."
+      "generic": "The Avibe Agent run failed.",
+      "contextExhaustedParts": "This conversation no longer fits in the model's context window ({limit} tokens): {parts}. Start a new session, or fork from an earlier message."
+    },
+    "compact": {
+      "done": "Compacted this conversation: about {before} tokens are now about {after}.",
+      "skipped": "Nothing to compact yet: the whole conversation is still within the recent part kept word for word.",
+      "failed": "This conversation could not be compacted this time. Try /compact again later (on Slack, mention the bot first).",
+      "pausedFailures": "Automatic compaction of this conversation is paused after repeated failures. Send /compact (on Slack, mention the bot first) to compact it yourself; that also resumes automatic compaction.",
+      "pausedIneffective": "Automatic compaction of this conversation is paused: the last compactions could not make it much smaller. Send /compact (on Slack, mention the bot first) to compact it yourself, optionally with a focus such as /compact the parser; that also resumes automatic compaction."
+    },
+    "contextPart": {
+      "system": "system prompt",
+      "tools": "tool definitions",
+      "history": "earlier conversation",
+      "current_request": "current request",
+      "latest_tool_batch": "latest tool results",
+      "output": "reserved for the reply",
+      "separator": ", "
     }
   }
 }

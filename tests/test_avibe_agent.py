@@ -173,6 +173,8 @@ class _Controller:
         self.started: list[Optional[str]] = []
         self.hub_calls: list[str] = []
         self.hub_protocol = "anthropic"
+        # The Model Hub model definition's limits (C-9 takes W, L_in, and O from them).
+        self.hub_limits = {"context_window": 32000, "max_output_tokens": 4096}
         self.agent: Optional[AvibeAgent] = None
         self.agent_service = SimpleNamespace(
             mark_runtime_turn_started=self._native_start,
@@ -221,8 +223,7 @@ class _Controller:
             source_id="src_test",
             gateway_base_url="http://hub.invalid/avibe",
             gateway_token="hub-token",
-            context_window=32000,
-            max_output_tokens=4096,
+            **self.hub_limits,
             supports_tools=True,
             protocol=self.hub_protocol,
             provider="test-provider",

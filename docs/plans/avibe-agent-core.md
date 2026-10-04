@@ -204,9 +204,9 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
 - **Deferred**: background precompute, server-side compaction (hard constraint 8), automatic re-read of modified
   files, memory tools, and a lower effort for the checkpoint turn.
 
-Delivery: the core (`core/agent_core`, this contract) lands first; the Avibe Agent integration (Model Hub
+Delivery: the core (`core/agent_core`, this contract) landed in PR #2360; the Avibe Agent integration (Model Hub
 capabilities, the scratch directory, the `<earlier-record>` SQL, state rendering, `/compact`, the pause notice, and an
-end-to-end hermetic test) follows.
+end-to-end hermetic test) is the second PR (`context.md` §9).
 
 ### 5.3 Tools (C-7)
 

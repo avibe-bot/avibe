@@ -192,8 +192,8 @@ durably settled; handover creates at most one Watch per job.
 
 Changing facts do not go into the system prompt, which stays stable and cacheable. When the loop consumes an input
 (C-5 `ModelInput`), it renders an environment block into that message with the fields that changed since the previous
-input (all fields on the first input), so the stored transcript still equals what the model saw. The first input after a checkpoint carries all fields
-again, because the inputs that carried the earlier values may be summarized away:
+input (all fields on the first input), so the stored transcript still equals what the model saw. The first input after a checkpoint carries every field
+the projected context no longer shows, because the inputs that carried the earlier values may be summarized away:
 
 ```text
 <environment>

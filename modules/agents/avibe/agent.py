@@ -1,6 +1,7 @@
 """``AvibeAgent``: the Avibe Agent engine (``core.agent_core``) as an Avibe backend.
 
-One Turn is one ``Agent.run`` (plan section 4). The adapter
+One Turn is one ``Agent.run`` (plan section 4), or one ``Agent.compact`` for a
+``/compact [focus]`` command (C-9 ``context.md`` section 9). The adapter
 
 * resolves the model through Model Hub (``resolve_hop``) before the input is
   written, so a refused route fails like any backend that never started;
@@ -11,9 +12,12 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
   of persisting a second row (``MessageOutput.persisted_row_id``);
 * steers the running loop with P1 deliveries and lets a refused steer fall back
   to the P3 queue; Stop aborts the run;
+* runs every Turn with C-9 context management (``AvibeContextHost``), within
+  the route's Model Hub limits;
 * before any run of a Session in this process, under the Session writer lock,
   settles open tool calls (T2) and admits accepted inputs that were never
-  consumed (T3); at startup it settles every Session's open calls eagerly. The
+  consumed (T3), a ``/compact`` command never among them; at startup it settles
+  every Session's open calls eagerly. The
   Turn a restart interrupted is settled by the Turn owner (T4; ``avibe`` is a
   process-bound runtime).
 """
@@ -39,6 +43,11 @@ from config import paths
 from core.agent_core.agent.events import (
     AgentError,
     AgentEvent,
+    CompactionFailed,
+    CompactionFinished,
+    CompactionPaused,
+    CompactionSkipped,
+    ContextExhausted,
     MessageCommitted,
     RunEnded,
     ToolStarted,
@@ -47,6 +56,7 @@ from core.agent_core.agent.hooks import AgentInput
 from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
+from core.agent_core.harness.context import ContextConfig
 from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.tools.jobs import instant
@@ -72,7 +82,8 @@ from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 from core.skill_observability import accept_catalog
-from modules.agents.avibe.errors import error_text
+from modules.agents.avibe.context import AvibeContextHost, SkillScope, compact_focus, mark_skill_loads, output_budget
+from modules.agents.avibe.errors import compact_text, context_exhausted_text, error_text
 from modules.agents.avibe.media import MediaSnapshots
 from modules.agents.avibe.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
 from modules.agents.avibe.prompt import current_environment, system_prompt
@@ -138,6 +149,11 @@ class _Run:
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
     stop_requested: bool = False
+    # The output the Agent asks for within the route's maximum (C-9's O, ``output_budget``), from preflight.
+    max_output: int = 8192
+    # C-9: what fills a context that cannot fit, and a manual compaction's outcome event.
+    exhausted: Optional[ContextExhausted] = None
+    compaction: Optional[AgentEvent] = None
 
     @property
     def native_turn_id(self) -> str:
@@ -154,6 +170,8 @@ class _SessionRuntime:
     run: Optional[_Run] = None
     cwd: str = ""
     holders: int = 0
+    # Where the Session's skills resolve, as its latest Turn's ``vibe skill`` calls resolved them.
+    skills: Optional[SkillScope] = None
 
 
 class AvibeAgent(BaseAgent):
@@ -182,6 +200,8 @@ class AvibeAgent(BaseAgent):
             on_response=self._on_response,
         )
         self._providers = providers or registry_providers(media_loader=self.media)
+        # C-9: the Session parts a checkpoint carries (context.md section 9).
+        self.context_host = AvibeContextHost(self._engine, environment=self._environment, skills=self._skill_scope)
         self._tool_suite = tool_suite
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.
@@ -256,8 +276,13 @@ class AvibeAgent(BaseAgent):
             return await self._settle_stopped(turn)
         sections, skill_catalog = await self._avibe_sections(request, cwd)
         environment = await asyncio.to_thread(self._turn_environment, request, cwd)
+        runtime.skills = self._turn_skill_scope(request, cwd)
         self._start_agent(turn, cwd, sections, environment)
         runtime.cwd = cwd
+        # A ``/compact`` carrying files is an ordinary message: nothing of it may be dropped.
+        focus = None if request.files else compact_focus(request.user_message or request.message)
+        if focus is not None:
+            return await self._compact(turn, focus)
         # Prepared before anything is dispatched (``core.native_dispatch_phase``).
         message = await self._render_input(session_id, request.message, request.files, request.input_metadata)
         if turn.stop_requested:
@@ -283,6 +308,63 @@ class AvibeAgent(BaseAgent):
             agent_input = await self._continuing_input(turn)
         await self._settle(turn)
         self._maybe_backfill_session_title(request, session_id)
+
+    async def _compact(self, turn: _Run, focus: str) -> None:
+        """``/compact [focus]``: a manual checkpoint between runs, answered (C-9 section 10).
+
+        The command is an action, not a message: its input row is accepted for the Turn but never consumed into
+        the context, and recovery never admits it (``_unconsumed_inputs``).
+        """
+        request, context = turn.request, turn.request.context
+        if turn.stop_requested:
+            return await self._settle_stopped(turn)
+        self.bind_agent_session_id(request, turn.session_id)
+        mark_backend_dispatch_attempted(context)
+        self.mark_runtime_turn_started(context)
+        indicator = getattr(self.controller, "processing_indicator", None)
+        if indicator is not None:
+            await indicator.delete_ack_message(request)
+        if turn.stop_requested:
+            # A Stop acknowledged while it prepared: no checkpoint starts (``handle_message``: any phase).
+            return await self._settle_stopped(turn)
+        async for event in turn.agent.compact(turn_id=turn.turn_id, focus=focus or None):
+            await self._on_event(turn, event)
+        outcome, lang = turn.compaction, self._language()
+        if outcome is None:
+            # The run ended before any compaction outcome (a Stop, a route failure): settled as any run.
+            return await self._settle(turn)
+        turn.settled = True
+        if isinstance(outcome, CompactionFinished):
+            before, after = f"{outcome.tokens_before:,}", f"{outcome.tokens_after_estimate:,}"
+            answer, failed = compact_text("done", lang, before=before, after=after), False
+        elif isinstance(outcome, CompactionSkipped):
+            answer, failed = compact_text("skipped", lang), False
+        else:
+            answer, failed = compact_text("failed", lang), True
+            # The served attempt failed, as a failed run reports it (``_settle``).
+            await self.record_model_hub_native_failure(context, f"manual compaction failed: {outcome.error}")
+        await self.emit_result_message(
+            context,
+            answer,
+            subtype="error" if failed else "success",
+            started_at=request.started_at,
+            request=request,
+            output=terminal_output_for(request),
+        )
+
+    def _skill_scope(self, session_id: str) -> Optional[SkillScope]:
+        runtime = self._runtimes.get(session_id)
+        return runtime.skills if runtime is not None else None
+
+    def _turn_skill_scope(self, request: AgentRequest, cwd: str) -> SkillScope:
+        """Where this Turn's ``vibe skill`` calls resolve skills (``_turn_environment``'s managed-skill bindings)."""
+        from core.managed_skills import managed_skill_claude_cli_path, managed_skill_project_base
+
+        return SkillScope(
+            cwd or None,
+            project_base=managed_skill_project_base(request.context),
+            claude_cli_path=managed_skill_claude_cli_path(self.config),
+        )
 
     async def _settle_stopped(self, turn: _Run) -> None:
         """A Stop before the loop started: the Turn settles as stopped, nothing dispatched."""
@@ -446,6 +528,9 @@ class AvibeAgent(BaseAgent):
             self._steering.discard(request.attempt_id)
 
     async def _steer(self, run: _Run, request: SteerRequest) -> SteerResult:
+        if compact_focus(request.text) is not None:
+            # A command, not a message: it never joins a running loop; it runs as its own Turn next.
+            return steer_result(SteerOutcome.REFUSED, reason="command")
         try:
             message_id = await asyncio.to_thread(self._attempt_leader_id, request.attempt_id)
             if message_id is None:
@@ -522,7 +607,9 @@ class AvibeAgent(BaseAgent):
             bind_launch(context, launch)
             return selection_from_hop(launch.to_hop_resolution(), gateway_base_url=launch.gateway_base_url)
 
-        return HubModelRouter(resolve, self._providers, first=await resolve())
+        first = await resolve()
+        turn.max_output = output_budget(first.capabilities)
+        return HubModelRouter(resolve, self._providers, first=first)
 
     def _start_agent(self, turn: _Run, cwd: str, sections: str, environment: Mapping[str, str]) -> None:
         """The Turn's loop, over its router, tools, system prompt, and the environment its commands run in."""
@@ -538,9 +625,15 @@ class AvibeAgent(BaseAgent):
             cwd=cwd,
             env=environment,
             reasoning_effort=request.subagent_reasoning_effort or request.vibe_agent_reasoning_effort,
+            # C-9's O: what the Agent asks for within the route's own maximum (``output_budget``).
+            max_tokens=turn.max_output,
+            context=ContextConfig(host=self.context_host, scratch_dir=str(self._state_dir / "scratch" / session_id)),
         )
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
         tools = tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id)))
+        scope = self._skill_scope(session_id)
+        if scope is not None:
+            tools = mark_skill_loads(tools, scope.revision)
         agent.set_tools(tools)
         agent.system = system_prompt([tool.spec.name for tool in tools], sections)
         turn.agent, turn.cwd = agent, cwd
@@ -558,6 +651,16 @@ class AvibeAgent(BaseAgent):
             run.errors.append((event.kind, event.message))
         elif isinstance(event, RunEnded):
             run.reason = event.reason
+        elif isinstance(event, ContextExhausted):
+            run.exhausted = event
+        elif isinstance(event, CompactionPaused):
+            # The one user-visible text of automatic compaction (C-9 section 10), told once, at the transition.
+            key = "pausedFailures" if event.cause == "failures" else "pausedIneffective"
+            await self.controller.emit_agent_message(
+                run.request.context, "notify", compact_text(key, self._language())
+            )
+        elif isinstance(event, (CompactionFinished, CompactionFailed, CompactionSkipped)):
+            run.compaction = event  # automatic ones are silent; a manual one is answered (``_compact``)
 
     async def _settle(self, run: _Run) -> None:
         """Settle the Turn from the run's outcome (loop-control.md section 6).
@@ -616,7 +719,10 @@ class AvibeAgent(BaseAgent):
                 context, "result", "", level="silent", output=terminal_output_for(request)
             )
             return
-        await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal)
+        exhausted = None
+        if run.exhausted is not None:
+            exhausted = context_exhausted_text(run.exhausted.limit, run.exhausted.parts, self._language())
+        await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal or exhausted)
 
     async def _continuing_input(self, run: _Run) -> Optional[AgentInput]:
         """The input that continues a Turn whose run ended by design with inputs it accepted.
@@ -898,6 +1004,8 @@ class AvibeAgent(BaseAgent):
                     if row["turn_role"] == "initial" and row["turn_dispatch_text"]
                     else row["content_text"] or ""
                 )
+                if compact_focus(row["content_text"] or "") is not None:
+                    continue  # a ``/compact`` command is an action, never a context input
                 inputs.append((row["id"], text_value, list(file_attachments_from_specs(specs) or ()), delivery))
         return inputs
 
@@ -1117,7 +1225,8 @@ class AvibeAgent(BaseAgent):
         cause: Optional[BaseException] = None,
         refusal: Optional[str] = None,
     ) -> None:
-        """A failed Turn's notice; a Model Hub ``refusal`` copy takes precedence, as at preflight."""
+        """A failed Turn's notice. ``refusal`` is copy shown instead of the error kind's: Model Hub's for a route it
+        refused (as at preflight), or what fills a context that cannot fit (C-9 section 8 d)."""
         # A failure after Model Hub served the route replaces that served attempt, as for the other backends.
         await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
         await emit_backend_failure(
@@ -1265,26 +1374,25 @@ class AvibeAgent(BaseAgent):
         return sorted(candidates)
 
     def _sessions_with_unconsumed_inputs(self) -> list[str]:
-        """Sessions with inputs accepted into an ``avibe`` Turn that no run consumed (T3)."""
+        """Sessions with inputs accepted into an ``avibe`` Turn that no run consumed (T3); a ``/compact`` is none."""
         with self._engine.connect() as conn:
-            return sorted(
-                conn.execute(
-                    select(messages.c.session_id)
-                    .select_from(
-                        messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
-                            session_turns, session_turns.c.id == message_deliveries.c.turn_id
-                        )
+            rows = conn.execute(
+                select(messages.c.session_id, messages.c.content_text)
+                .select_from(
+                    messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
+                        session_turns, session_turns.c.id == message_deliveries.c.turn_id
                     )
-                    .where(
-                        messages.c.session_id.is_not(None),
-                        messages.c.context_seq.is_(None),
-                        messages.c.type.in_(INPUT_TYPES),
-                        message_deliveries.c.state == "accepted",
-                        session_turns.c.backend == BACKEND,
-                    )
-                    .distinct()
-                ).scalars()
-            )
+                )
+                .where(
+                    messages.c.session_id.is_not(None),
+                    messages.c.context_seq.is_(None),
+                    messages.c.type.in_(INPUT_TYPES),
+                    message_deliveries.c.state == "accepted",
+                    session_turns.c.backend == BACKEND,
+                )
+            ).all()
+        # The same rule as ``_unconsumed_inputs``: a ``/compact`` command is an action, never an input to admit.
+        return sorted({session_id for session_id, body in rows if compact_focus(body or "") is None})
 
     def _session_workdir(self, session_id: str) -> str:
         with self._engine.connect() as conn:

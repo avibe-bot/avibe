@@ -34,6 +34,13 @@ T    = min(L_in - O - M, floor(0.9 * W))           the compaction threshold
 keep = min(20,000, floor(0.25 * T))                the verbatim tail of a normal checkpoint
 ```
 
+`O` is what the request asks for, not the most the route could produce. Model Hub model definitions are seeded from
+models.dev, where many models list an output maximum as large as the window: in the snapshot checked on 2026-10-04,
+1,337 of 8,150 entries with both limits have `max_output_tokens + M >= context_window` (so `T <= 0` and nothing could
+be sent), and 296 more would leave `T < 0.25 * W`. The adapter therefore asks for
+`min(max_output_tokens, max(8,192, floor(W / 4)))`, 8,192 when the maximum is unknown; the limits themselves still
+come from Model Hub.
+
 A conversation request **fits** when `est + O + M <= L_in`, where `est` is its estimate (§2); `M` absorbs the
 estimate's error. A request **can fit** when `est + O <= L_in`. A checkpoint request (§6) is sent only when it can
 fit: at `est = T` it uses a few hundred tokens of `M` for the checkpoint request, and the provider remains the judge.
@@ -250,13 +257,25 @@ mechanically, and stops after its fourth overflow.
 ## 9. What the adapter supplies
 
 The loop takes a `ContextConfig` (`harness/context.py`); without one, no context management runs and an overflow
-ends the run `context_exhausted`, as in P1. The adapter supplies:
+ends the run `context_exhausted`, as in P1. The adapter supplies the following; the Avibe Agent's are in
+`modules/agents/avibe` (`agent.py`, `context.py`, `store.py`), and every Turn of it runs with a `ContextConfig`.
 
-- `scratch_dir`: this Session's scratch directory; without it, the policy denies every write.
-- `ContextHost.earlier_record(session_id, through_seq)`: the lookup command, a `vibe data query` SQL naming every
-  Session whose rows the context holds and the last summarized `context_seq`.
-- `ContextHost.render_state(StateRequest)`: the `state` texts (§7) for the skills the summarized rows loaded and
-  whether the checkpoint happened inside a run.
+- The limits (§1): the route's capabilities come from the Model Hub model definition the user edits
+  (`context_window`, `max_output_tokens`; `input_limit` stays unknown until Model Hub stores one, so `L_in = W`), and
+  the Agent asks for `min(max_output_tokens, max(8,192, floor(W / 4)))` (8,192 when unknown), which is `O`.
+- `scratch_dir`: this Session's scratch directory, `<state>/agent_core/scratch/<session_id>/`; without it, the
+  policy denies every write.
+- `ContextHost.earlier_record(session_id, through_seq)`: the lookup command, one `vibe data query` over the inputs
+  and replies in `messages` of every Session whose rows the context holds (the Session and its fork ancestry, each
+  up to its fork bound), through the last summarized `context_seq`, filtered by a `KEYWORD` the model replaces. It
+  reads `messages` only, which every caller of `vibe data query` may read; tool outputs can be run again.
+- `ContextHost.render_state(StateRequest)`: the `state` texts (§7), rendered from their own stores: each skill the
+  summarized rows loaded, by name and its current revision (`<skill_content name revision>`, cut to 5,000 tokens with
+  a note saying how to load all of it; 25,000 in total, the rest named; a skill that no longer loads is named); the
+  Session's pending Watches, Tasks, and delegated Runs (`<pending-work>`, by kind, id, and label, from the Harness
+  tables, never a command); and the full environment block (C-7 §8) when the checkpoint happened inside a run.
+- Skill loads marked in their results: a successful `vibe skill load` through `bash` records the skill's name and
+  revision in the result's `details.skill`, so clearing spares it (§4) and a checkpoint carries it (§7).
 - A `TranscriptStore` (C-5 §2) implementing the whole protocol C-9 uses: `append_response(..., request=...)` keeps
   `ModelResponse.request` for the anchor (§2); `append_payloads(session_id, entries)` writes several payload rows in
   one transaction (invariant 3); `append_audit(session_id, kind, payload)` writes a non-context audit row,
@@ -264,9 +283,15 @@ ends the run `context_exhausted`, as in P1. The adapter supplies:
   The SQLite store and the adapter's implement it, and one contract suite runs the same tests on them and on the
   in-memory store the engine tests use (`tests/test_transcript_store_contract.py`).
 - The full environment block (C-7 §8) on the first input after a checkpoint: the summarized inputs that carried it
-  are gone, and a checkpoint's `state` carries it only when it happened inside a run.
-- `Agent.compact(turn_id=..., focus=...)` behind `/compact [focus]` on every surface, and the pause notice (§10)
-  through `vibe/i18n`.
+  are gone, and a checkpoint's `state` carries it only when it happened inside a run. The Avibe Agent works out an
+  input's environment delta against the inputs the projected context keeps, so the input carries every field the
+  context no longer shows, and forgets what it sent when a checkpoint commits.
+- `Agent.compact(turn_id=..., focus=...)` behind `/compact [focus]` on every surface. The Avibe Agent takes the
+  command as a Turn's input text (on Slack, `@Avibe /compact`), compacts instead of running, and answers it (done,
+  nothing to compact yet, or failed); the command is an action, never a context input: a running Turn refuses it as
+  a steer, so it runs as its own Turn, and recovery never admits it. Other backends receive the text unchanged.
+- The pause notice (§10) through `vibe/i18n`, once, as a `notify` message; and, after (d), a stop message that lists
+  what fills the context (`ContextExhausted`'s parts).
 
 ## 10. Guards
 
