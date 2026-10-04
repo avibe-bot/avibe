@@ -93,17 +93,28 @@ One rule decides identity, in this order:
    compares `os.getppid()` with the recorded parent pid on POSIX. Windows never
    re-parents, so `os.getppid()` keeps the old pid after the parent exits; the
    child opens a handle to the parent at start (rule 1) and waits on it.
-4. **The birth time, only for records with none of 1–3**, such as those written
-   by released builds. It gives three answers, never two:
-   - *the same process*: the birth time matches;
-   - *another process*: the birth time differs and a second, readable proof
-     agrees, such as a command line, port, or role that no longer matches;
-   - *unknown*: anything else. The record is kept, nothing adopts or signals
-     its process, and a later pass asks again.
+4. **Independent evidence, only for records with none of 1–3**, such as those
+   written by released builds. The birth time proves nothing in either
+   direction: a clock step shifts it for the same process, and a step back can
+   give a replacement process exactly the recorded value. The check gives
+   three answers, never two:
+   - *the same process*: a readable, independent proof matches, such as the
+     command line, port, or role, and the birth time agrees;
+   - *another process*: a readable, independent proof no longer matches;
+   - *unknown*: anything else, including a matching birth time alone. The
+     record is kept, nothing adopts or signals its process, and a later pass
+     asks again.
 
    A boolean check cannot express the third answer, so each consumer still
    using rule 4 needs one. This is the existing `process_identity_recycled`
    and `_installer_owner_gone` stance.
+
+A marker identifies one managed process tree and never crosses a role
+boundary. A process that starts a different long-lived role (for example, the
+restart supervisor starting the next service and UI) removes or replaces its
+own marker in the child's environment. Otherwise, after the supervisor exits,
+a descendant that later receives the supervisor's recycled pid would carry
+its fingerprint and pass for it.
 
 Ages keep the wall-clock birth time and are out of scope, for example
 `vibe.runtime._pid_reservation_is_fresh`. Ordering a process's birth against a
@@ -125,14 +136,19 @@ age.
 | --- | --- | --- | --- | --- |
 | OpenCode adopted servers | `modules/agents/opencode/server.py`: `_record_proves_process`, `OpenCodeGeneration.process_alive` with no handle, `_owned_here` pid fallback, `_stop_unrecorded_process_sync` for a non-child | Adopt, stop, `vibe stop`, and liveness of a server from a previous controller | Exact birth time, then command and port; a boolean that deletes the record when false | Spawn with a marker and store its fingerprint in the generation record, then prove by marker. A legacy record gets rule 4's three answers: `adopt_recorded_generations` and `forget_dead_records` delete only *another process* and keep an *unknown* record without adopting or stopping it |
 | Claude CLI registry | `modules/agents/claude_process_reaper.py`: `register_claude_owned_process`, `_process_identity_matches`; `core/services/running_agents.py`: `_collect_orphans` (the Running Agents list) and `_end_orphan_pid` (End, right before it signals) | Which leftover CLI processes are shown, reaped, or ended | `ps -o lstart` within 1 s, repeated in each consumer | Add a marker to the CLI environment beside `AVIBE_CLAUDE_PROCESS_OWNER` and store its fingerprint in the registry. All four consumers prove by it through one shared check |
-| Restart supervisor | `vibe/restart_supervisor.py` writes `supervisor_started_at`; `vibe/ui_server.py` (restart in flight), `vibe/upgrade.py` (seed retention), and `scripts/incus_regression_supervisor.py::_restart_in_progress` compare it | Whether a restart job is still running | Exact birth time, or within 1 s | Spawn the supervisor with a marker, have the status carry its fingerprint, and migrate all three readers |
-| Deferred upgrade activation (Windows) | `vibe/upgrade.py` passes `--parent-started-at`; `vibe/cli.py` waits on it | When the launching parent has exited | Pid alive and birth time unchanged | Rule 3: the helper opens a handle to the parent at start and waits on it. The candidate keeps accepting and ignoring `--parent-started-at` indefinitely: an older installed release runs the newer candidate's parser, so a user who skips releases would otherwise fail to upgrade |
+| Restart supervisor | `vibe/restart_supervisor.py` writes `supervisor_started_at`; `vibe/ui_server.py` (restart in flight), `vibe/upgrade.py` (seed retention), and `scripts/incus_regression_supervisor.py::_restart_in_progress` compare it | Whether a restart job is still running | Exact birth time, or within 1 s | Spawn the supervisor with a marker, have the status carry its fingerprint, and migrate all three readers. `_start_runtime_processes` strips the marker from the service and UI it starts |
+| Deferred upgrade activation (Windows) | `vibe/upgrade.py` passes `--parent-started-at`; `vibe/cli.py` waits on it | When the launching parent has exited | Pid alive and birth time unchanged | Rule 3: before spawning the helper, the launcher opens an inheritable handle to itself and passes it. A handle the helper opened later could already name a process that reused the pid; the helper waits on the inherited one. The candidate keeps accepting and ignoring `--parent-started-at` indefinitely: an older installed release runs the newer candidate's parser, so a user who skips releases would otherwise fail to upgrade |
 | Install generations | `vibe/install_generations.py::_installer_is_live` | Whether the installer that wrote a generation's marker still runs, before collection may retire unselected generations | Installer birth time no later than the marker's mtime | Rule 4 with the installer's command line as the second proof. An *unknown* installer counts as live, so collection never deletes a candidate during a handoff |
 | Desktop installer owner | `vibe/desktop_backends.py::_installer_owner_gone` | Whether a Runtime's installer owner exited | Birth time, then a readable second proof | No change: it already follows rule 4 |
 | Legacy watch entries | `core/watches.py::_legacy_pid_was_reused`, with blocked entries kept by `_unreaped_runtime_entries` | Recovery of watch workers recorded before `process_identity` existed; a `--forever` worker can outlive an upgrade | Birth time later than `updated_at` | Rule 4: *another process* only when the process holding the pid is readable and is not that watch's worker by its command line; *the same process* when it is; otherwise *unknown*, kept blocked and never signalled. Current entries already use the marker |
 
 ## Rollout
 
+- First, make `vibe.runtime.process_create_time` say what it is: a wall-clock
+  observation for ages and for reading released records, not an identity.
+  Its docstring currently promises that `(pid, create_time)` identifies the
+  original process, which would invite the next consumer to repeat the
+  problem. Its value does not change.
 - One PR per consumer, in this order: OpenCode adopted servers, the Claude
   registry and Running Agents, the restart supervisor (all three readers),
   install generations with the deferred upgrade activation, and legacy watch
