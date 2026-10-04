@@ -129,8 +129,10 @@ const PetSurface: React.FC = () => {
   // mounted (while setup was pending or the page was loading).
   const onSummon = useCallback(() => {
     const intent = petShell.takeSummon();
-    if (intent) summon(intent, bindingRef.current);
-  }, [summon, bindingRef]);
+    // Read the store, not the render: `pet_ready` may have set the binding in
+    // the same tick that delivered this summon.
+    if (intent) summon(intent, petShell.currentBinding() ?? null);
+  }, [summon]);
   useOnSummon(onSummon);
 
   // Esc collapses.
@@ -171,18 +173,29 @@ const PetSurface: React.FC = () => {
   const lastRenderedUnread = exchange.results.length > 0 && exchange.results[exchange.results.length - 1].read_at === null
     ? exchange.results[exchange.results.length - 1].id
     : null;
+  // Each row is marked once: the tail keeps `read_at: null` until its next
+  // read, so the marker, not the row, says it was already sent.
+  const { markRead } = inbox;
+  const markedRef = useRef<string | null>(null);
   useEffect(() => {
     if (!expanded || !binding || !lastRenderedUnread || !exchange.unreadComplete) return;
     if (document.visibilityState !== 'visible') return;
-    void inbox.markRead(binding, lastRenderedUnread).catch(() => undefined);
-  }, [expanded, binding, lastRenderedUnread, exchange.unreadComplete, inbox]);
+    const marker = `${binding}\u0000${lastRenderedUnread}`;
+    if (markedRef.current === marker) return;
+    markedRef.current = marker;
+    void markRead(binding, lastRenderedUnread).catch(() => undefined);
+  }, [expanded, binding, lastRenderedUnread, exchange.unreadComplete, markRead]);
 
   const send = useCallback(async (text: string, metadata?: Record<string, unknown>) => {
     if (!binding || !text.trim()) return false;
     setSending(true);
     try {
       const row = await api.sendSessionMessage(binding, { text, ...(metadata ? { metadata } : {}) });
-      data.noteSent(row && typeof row === 'object' && 'id' in row ? row : null);
+      // The binding may have changed while the POST was pending: the reply
+      // belongs to the session it was sent to, never to the current one.
+      if (petShell.currentBinding() === binding) {
+        data.noteSent(row && typeof row === 'object' && 'id' in row ? row : null);
+      }
       return true;
     } catch {
       return false;

@@ -7,8 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { WorkbenchEventHandlers, WorkbenchMessage, WorkbenchSession } from '@/context/ApiContext';
 
 import { PET_BOUND_EVENT, PET_SUMMON_EVENT } from './petBridge';
-import { PetPage } from './PetPage';
-import { resetPetShellForTests } from './petShell';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -86,8 +84,15 @@ let setupDone = true;
 let sessionReads: Record<string, () => Promise<{ status: number; session: WorkbenchSession | null }>> = {};
 let tails: Record<string, WorkbenchMessage[]> = {};
 let switcherSessions: WorkbenchSession[] = [];
-const markRead = vi.fn(async () => undefined);
 let unreadBySession: Record<string, number> = {};
+// Like the provider, a mark-read response installs a new unread map, so every
+// consumer re-renders with a new inbox object.
+let inboxVersion = 0;
+const inboxListeners = new Set<() => void>();
+const markRead = vi.fn(async () => {
+  inboxVersion += 1;
+  inboxListeners.forEach((listener) => listener());
+});
 
 const api = {
   getConfig: vi.fn(async () => (setupDone
@@ -108,9 +113,18 @@ const api = {
 };
 
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
-vi.mock('@/context/WorkbenchInboxContext', () => ({
-  useWorkbenchInbox: () => ({ unreadBySession, markRead }),
-}));
+vi.mock('@/context/WorkbenchInboxContext', async () => {
+  const { useSyncExternalStore } = await import('react');
+  return {
+    useWorkbenchInbox: () => {
+      useSyncExternalStore((listener) => {
+        inboxListeners.add(listener);
+        return () => inboxListeners.delete(listener);
+      }, () => inboxVersion);
+      return { unreadBySession: { ...unreadBySession }, markRead };
+    },
+  };
+});
 
 // An in-memory Storage, so the test does not depend on the runtime's own
 // localStorage (Node 25+ shadows jsdom's without a backing file).
@@ -140,21 +154,31 @@ const summon = (intent: 'listen' | 'show') => act(() => {
 });
 const pose = () => document.querySelector('.pet-avatar')?.getAttribute('data-pose');
 
-beforeEach(() => {
+// The shell store lives for one document, so each test loads a fresh module
+// graph instead of resetting it.
+let PetPage: typeof import('./PetPage').PetPage;
+
+beforeEach(async () => {
+  vi.resetModules();
+  ({ PetPage } = await import('./PetPage'));
   setupDone = true;
   sessionReads = {};
   tails = {};
   switcherSessions = [];
   unreadBySession = {};
   markRead.mockClear();
+  inboxVersion = 0;
   api.getSessionResult.mockClear();
+  api.listSessions.mockClear();
   window.localStorage.clear();
 });
 
 afterEach(() => {
   cleanup();
   handlers.clear();
-  resetPetShellForTests();
+  api.sendSessionMessage.mockClear();
+  delete (window as { __AVIBE_DESKTOP_SHELL__?: unknown }).__AVIBE_DESKTOP_SHELL__;
+  delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 });
 
 describe('PetPage setup', () => {
@@ -283,5 +307,53 @@ describe('PetPage state', () => {
     summon('show');
     expect(await screen.findByText('pet.moreInAvibe')).toBeTruthy();
     expect(markRead).not.toHaveBeenCalled();
+  });
+});
+
+describe('PetPage review fixes', () => {
+  it('marks a rendered row read once, however often the inbox state changes', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null })];
+    unreadBySession = { S: 1 };
+    devBind('S');
+    render(<PetPage />);
+    summon('show');
+    await screen.findByText('reply r1');
+    await waitFor(() => expect(markRead).toHaveBeenCalled());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(markRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not put a reply for A into B when the binding changes mid-send', async () => {
+    const pending = deferred<WorkbenchMessage>();
+    api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
+    tails.B = [message('b1', 'B', { text: 'B only' })];
+    devBind('A');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await userEvent.type(input, 'hello{Enter}');
+    await bound('B');
+    await screen.findByText('B only');
+    await act(async () => pending.resolve(message('a-sent', 'A', { author: 'user', type: 'user', text: 'sent to A' })));
+    // B neither shows A's row nor enters A's post-send Running grace.
+    expect(screen.queryByText('sent to A')).toBeNull();
+    expect(screen.queryByText('pet.state.running')).toBeNull();
+    expect(pose()).toBe('idle');
+  });
+
+  it('acts on the binding pet_ready returns together with a pending summon', async () => {
+    const ready = deferred<unknown>();
+    const invoke = vi.fn((command: string) => (command === 'pet_ready'
+      ? ready.promise
+      : Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' })));
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />);
+    // The surface is mounted and subscribed before the shell answers.
+    await screen.findByLabelText('pet.toggle');
+    await act(async () => ready.resolve({ binding: 'S', summon_pending: { intent: 'listen' } }));
+    // The summon opens the bound session's input, not the switcher.
+    expect(await screen.findByLabelText('pet.inputPlaceholder')).toBeTruthy();
+    expect(api.listSessions).not.toHaveBeenCalled();
   });
 });

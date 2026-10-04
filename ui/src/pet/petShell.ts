@@ -19,7 +19,6 @@ type Snapshot = { binding: string | null | undefined };
 let snapshot: Snapshot = { binding: undefined };
 let pendingSummon: PetIntent | null = null;
 let started = false;
-let stopEvents: (() => void) | null = null;
 const storeListeners = new Set<() => void>();
 const summonListeners = new Set<() => void>();
 
@@ -37,7 +36,7 @@ const noteSummon = (intent: PetIntent) => {
 const start = () => {
   if (started) return;
   started = true;
-  stopEvents = onPetEvents({
+  onPetEvents({
     summon: noteSummon,
     bound: (sessionId) => setBindingState(sessionId),
   });
@@ -58,7 +57,9 @@ export const petShell = {
     return intent;
   },
 
-  hasSummon: (): boolean => pendingSummon !== null,
+
+  /** The binding now, for callbacks that must not read a stale render. */
+  currentBinding: (): string | null | undefined => snapshot.binding,
 };
 
 export function usePetBinding(): string | null | undefined {
@@ -89,14 +90,3 @@ export function useOnSummon(listener: () => void): void {
     };
   }, [listener]);
 }
-
-/** Test seam: forget everything this document heard. */
-export const resetPetShellForTests = () => {
-  snapshot = { binding: undefined };
-  pendingSummon = null;
-  started = false;
-  stopEvents?.();
-  stopEvents = null;
-  storeListeners.clear();
-  summonListeners.clear();
-};
