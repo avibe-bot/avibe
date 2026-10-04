@@ -621,3 +621,30 @@ describe('PetPage review fixes, round 6', () => {
     expect(api.getSessionResult).not.toHaveBeenCalledWith('A');
   });
 });
+
+describe('PetPage review fixes, round 7', () => {
+  it('keeps a live summon that lands before the pet_ready answer', async () => {
+    const ready = deferred<unknown>();
+    const invoke = vi.fn((command: string) => (command === 'pet_ready'
+      ? ready.promise
+      : Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' })));
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    tails.S = [];
+    render(<PetPage />);
+    await screen.findByLabelText('pet.toggle');
+    // The live summon is newer than the pending one pet_ready still carries.
+    act(() => {
+      window.dispatchEvent(new CustomEvent(PET_BOUND_EVENT, { detail: { session_id: 'S' } }));
+    });
+    summon('show');
+    await screen.findByText('Session S');
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    await act(async () => ready.resolve({ binding: 'S', summon_pending: { intent: 'listen' } }));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    // The stale pending summon did not reopen the panel.
+    expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
+  });
+});

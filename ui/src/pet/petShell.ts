@@ -23,6 +23,9 @@ let started = false;
 // page's own pick or clear), so a `pet_ready()` answer captured before it
 // cannot overwrite it.
 let boundEvents = 0;
+// Likewise for summons: the shell may deliver a live summon before this page
+// has read the `pet_ready()` answer, and the older pending one must not win.
+let liveSummons = 0;
 const storeListeners = new Set<() => void>();
 const summonListeners = new Set<() => void>();
 
@@ -41,17 +44,21 @@ const start = () => {
   if (started) return;
   started = true;
   onPetEvents({
-    summon: noteSummon,
+    summon: (intent) => {
+      liveSummons += 1;
+      noteSummon(intent);
+    },
     bound: (sessionId) => {
       boundEvents += 1;
       setBindingState(sessionId);
     },
   });
   const boundEventsAtRequest = boundEvents;
+  const liveSummonsAtRequest = liveSummons;
   const readyApplies = () => boundEvents === boundEventsAtRequest;
   void petBridge.ready().then((ready) => {
     if (readyApplies()) setBindingState(ready.binding);
-    if (ready.summon_pending) noteSummon(ready.summon_pending.intent);
+    if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
   }).catch(() => {
     if (readyApplies()) setBindingState(null);
   });
