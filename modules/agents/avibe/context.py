@@ -7,10 +7,9 @@
   context holds (the Session and its fork ancestry), up to the last summarized
   ``context_seq``;
 * ``render_state`` renders, from their own stores, the state a checkpoint
-  carries within the cap of the route the next request goes to: the environment
-  block (its core fields always; a checkpoint always happens inside a run), the
-  Session's pending Watches, Tasks, and delegated Runs, and the bodies of the
-  skills the summarized rows loaded.
+  carries: the environment's core fields (a checkpoint always happens inside a
+  run; bounded by construction), then the bodies of the skills the summarized
+  rows loaded, within the cap of the route the next request goes to.
 
 A skill load is a ``bash`` call to ``vibe skill load``, which writes one
 ``<skill_content name="...">`` block per skill into the result; ``mark_skill_loads``
@@ -24,26 +23,30 @@ import asyncio
 import html
 import re
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from sqlalchemy.engine import Engine
 
-from core.agent_core.harness.context import SkillRef, StateRequest, text_tokens
+from core.agent_core.harness.context import PATH_CHARS, SkillRef, StateRequest, text_tokens, truncate_middle
 from core.agent_core.tools.base import Tool, ToolContext, ToolResult, ToolSpec
-from modules.agents.avibe.prompt import WATCHES_LISTED, render_environment
+from modules.agents.avibe.prompt import render_environment
 
-#: Each skill body a checkpoint carries, in tokens (section 7); all the state shares the route's cap (``state_cap``).
+#: Each skill body a checkpoint carries, in tokens (section 7); the skills share the route's cap (``state_cap``).
 SKILL_TOKENS = 5_000
-#: Below this much of the room left, no further item can carry anything useful.
+#: Below this much of the room left, no further skill can carry anything useful.
 _FLOOR = 200
-#: What a section leaves out is named, at most this many, then "and N more".
+#: The skills left out are named, at most this many, then "and N more".
 _LISTED = 20
 _NAME_CHARS = 64
-_LABEL_CHARS = 200
 
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
-#: The block ``vibe skill load`` writes for each skill it loads (``render_skill_content``).
-_SKILL_CONTENT = re.compile(r'<skill_content name="([^"]*)"')
+#: The tags of the block ``vibe skill load`` writes for each skill it loads (``render_skill_content``).
+_SKILL_TAG = re.compile(r'<skill_content name="([^"]*)"[^>]*>|</skill_content>')
+#: What the model read of a ``messages`` row: the text of its model message, else the display text.
+_MODEL_TEXT = (
+    "coalesce((select group_concat(json_extract(value, '$.text'), char(10))"
+    " from json_each(content_json, '$.model.message.content')), content_text)"
+)
 
 
 def output_budget(capabilities: Any) -> int:
@@ -95,21 +98,6 @@ class SkillScope:
         return load_skill(name, self.cwd or None, resolved_skills=self.catalog() if catalog is None else catalog)
 
 
-#: One item of rehydrated state: its name, and its text within a token limit (None when it cannot fit at all).
-_Item = Tuple[str, Callable[[int], Optional[str]]]
-
-
-@dataclass(frozen=True)
-class _Section:
-    """One kind of rehydrated state: its items in order, how its kept texts join (None: each is its own text), and
-    the hint its left-out notice ends with."""
-
-    name: str
-    items: Sequence[_Item]
-    join: Optional[Callable[[list[str]], str]]
-    hint: str
-
-
 class AvibeContextHost:
     """The loop's ``ContextHost`` for the Avibe Agent."""
 
@@ -118,18 +106,17 @@ class AvibeContextHost:
         engine: Engine,
         *,
         environment: Callable[[str], Mapping[str, str]],
-        watches: Callable[[str], Sequence[str]],
         skills: Callable[[str], Optional[SkillScope]],
     ) -> None:
         self._engine = engine
         self._environment = environment
-        self._watches = watches
         self._skills = skills
 
     def earlier_record(self, session_id: str, through_seq: int) -> Optional[str]:
         """``vibe data query`` over the inputs and replies the checkpoint summarized; the model replaces ``KEYWORD``.
 
-        It reads ``messages`` only, which every caller of ``vibe data query`` may read; tool outputs can be run again.
+        It searches what the model read (each row's model message, else its display text), from ``messages`` only,
+        which every caller of ``vibe data query`` may read; tool outputs can be run again.
         """
         from storage.agent_transcript import context_members
 
@@ -142,140 +129,71 @@ class AvibeContextHost:
             limit = through_seq if bound is None else min(bound, through_seq)
             bounds.append(f"(session_id = '{member}' and context_seq <= {int(limit)})")
         sql = (
-            "select context_seq, type, content_text from messages"
-            f" where ({' or '.join(bounds)}) and content_text like '%KEYWORD%' order by context_seq"
+            f"select context_seq, type, text from (select context_seq, type, {_MODEL_TEXT} as text from messages"
+            f" where {' or '.join(bounds)}) where text like '%KEYWORD%' order by context_seq"
         )
         return f'vibe data query --limit 100 --sql "{sql}"'
 
     async def render_state(self, request: StateRequest) -> list[str]:
-        fields, watches = self._environment(request.session_id), self._watches(request.session_id)
+        environment = _environment(self._environment(request.session_id))
         scope = self._skills(request.session_id)
-        return await asyncio.to_thread(self._state, request, fields, watches, scope)
-
-    def _state(
-        self, request: StateRequest, fields: Mapping[str, str], watches: Sequence[str], scope: Optional[SkillScope]
-    ) -> list[str]:
-        """The environment block first, then every other section, all within ``request.cap``."""
-        sections = (
-            _Section(
-                "pending work",
-                self._pending_work(request.session_id),
-                lambda lines: "<pending-work>\n" + "".join(lines) + "</pending-work>",
-                "Each is still pending; `vibe watch list`, `vibe task list`, and `vibe runs list` show them.",
-            ),
-            _Section(
-                "skills",
-                _skill_items(scope, request.skills),
-                None,
-                "Run `vibe skill load -- <name>` for any you still need.",
-            ),
-        )
-        reserved = sum(_reserve(section) for section in sections)
-        environment = _environment(fields, watches, request.cap - reserved)
-        return [environment, *_render(sections, request.cap - text_tokens(environment))]
-
-    def _pending_work(self, session_id: str) -> tuple[_Item, ...]:
-        from storage.workbench_sessions_service import derive_session_harness_activities
-
-        with self._engine.connect() as conn:
-            items = derive_session_harness_activities(conn, session_id)
-        rendered = []
-        for item in items:
-            kind = item.get("item_kind") or "item"
-            label = " ".join(str(item.get("label") or "").split())[:_LABEL_CHARS]
-            name = f"{kind} {str(item.get('id') or '').split(':', 1)[-1]}"
-            line = f'- {name} "{label}": {item.get("status")} since {item.get("since")}\n'
-            rendered.append((name, lambda limit, line=line: line))
-        return tuple(rendered)
+        skills = await asyncio.to_thread(_skill_texts, scope, request.skills, request.cap - text_tokens(environment))
+        return [environment, *skills]
 
 
-def _environment(fields: Mapping[str, str], watches: Sequence[str], room: int) -> str:
-    """The environment block within ``room``: its core fields always, then the Watches the room still holds.
-
-    At most ``WATCHES_LISTED`` Watches, then how many more, as on every input (C-7). Core fields that do not fit are
-    a bug in the cap, never something to drop: it raises.
-    """
+def _environment(fields: Mapping[str, str]) -> str:
+    """The environment's core fields, bounded by construction: no Watches, the cwd cut in the middle (section 7)."""
     core = {name: value for name, value in fields.items() if name != "watches"}
-
-    def block(listed: int) -> str:
-        more = len(watches) - listed
-        names = [*watches[:listed], *([f"and {more} more"] if more else [])]
-        return render_environment({**core, "watches": "; ".join(names) or "none"})
-
-    listed = 0
-    while listed < min(len(watches), WATCHES_LISTED) and text_tokens(block(listed + 1)) <= room:
-        listed += 1
-    text = block(listed)
-    if text_tokens(text) > room:
-        raise ValueError(f"The state cap leaves {room} tokens, too few for the environment's core fields.")
-    return text
+    if "cwd" in core:
+        core["cwd"] = truncate_middle(core["cwd"], PATH_CHARS)
+    return render_environment(core)
 
 
-def _left_out(section: _Section, names: Sequence[str]) -> str:
+def _left_out(names: Sequence[str]) -> str:
     listed = ", ".join(name[:_NAME_CHARS] for name in names[:_LISTED])
     more = f", and {len(names) - _LISTED} more" if len(names) > _LISTED else ""
     return (
-        f'<left-out of="{section.name}">Left out to keep the carried state within its cap: {listed}{more}. '
-        f"{section.hint}</left-out>"
+        f'<left-out of="skills">Left out to keep the carried state within its cap: {listed}{more}. Run '
+        "`vibe skill load -- <name>` for any you still need.</left-out>"
     )
 
 
-def _reserve(section: _Section) -> int:
-    """The most a section's wrapper and left-out notice can take: the notice naming its longest names, all counted."""
-    if not section.items:
-        return 0
-    wrapper = text_tokens(section.join([])) if section.join is not None else 0
-    names = sorted((name[:_NAME_CHARS] for name, _ in section.items), key=lambda name: len(name.encode()), reverse=True)
-    return wrapper + text_tokens(_left_out(section, names))
+def _skill_texts(scope: Optional[SkillScope], skills: Sequence[SkillRef], budget: int) -> list[str]:
+    """The carried skills within ``budget`` tokens, in order, each loaded only when there is room for it.
 
-
-def _render(sections: Sequence[_Section], budget: int) -> list[str]:
-    """The one renderer of rehydrated state: every section's texts, in order, within ``budget`` tokens in all.
-
-    Each section's wrapper and left-out notice are paid from room held back for the most they can take
-    (``_reserve``); the items of every section share the rest, in order. An item is rendered only when there is
-    room for it; what does not fit is left out and named, up to ``_LISTED`` names and then "and N more".
+    The room for the left-out notice is held back first (the most it can take: the longest names, all counted);
+    what does not fit is named, up to ``_LISTED`` names and then "and N more". One catalog per checkpoint.
     """
-    texts: list[str] = []
-    room = budget - sum(_reserve(section) for section in sections)
-    for section in sections:
-        kept: list[str] = []
-        left_out: list[str] = []
-        for name, render in section.items:
-            text = render(room) if room >= _FLOOR else None
-            if text is None or text_tokens(text) > room:
-                left_out.append(name)
-                continue
-            kept.append(text)
-            room -= text_tokens(text)
-        if kept:
-            texts.extend([section.join(kept)] if section.join is not None else kept)
-        if left_out:
-            texts.append(_left_out(section, left_out))
-    return texts
-
-
-def _skill_items(scope: Optional[SkillScope], skills: Sequence[SkillRef]) -> tuple[_Item, ...]:
-    """The carried skills as items: each loaded only when it is rendered, from one catalog per checkpoint."""
+    if not skills:
+        return []
     from core.skill_observability import skill_revision
 
+    longest = sorted((ref.name[:_NAME_CHARS] for ref in skills), key=lambda name: len(name.encode()), reverse=True)
+    room = budget - text_tokens(_left_out(longest))
     catalog: list[Any] = []
-
-    def item(ref: SkillRef) -> _Item:
-        def render(limit: int) -> Optional[str]:
+    texts: list[str] = []
+    left_out: list[str] = []
+    for ref in skills:
+        text: Optional[str] = None
+        if room >= _FLOOR:
             if scope is not None and not catalog:
                 catalog.append(scope.catalog())
             skill = scope.load(ref.name, catalog[0]) if scope is not None else None
             if skill is None or skill.body is None:
-                return (
+                text = (
                     f'<skill-unavailable name="{_attr(ref.name)}">This skill no longer loads. Run '
                     f"`vibe skill load -- {ref.name}` if you still need it.</skill-unavailable>"
                 )
-            return _skill_text(ref.name, skill_revision(skill) or "", skill.body, min(SKILL_TOKENS, limit))
-
-        return ref.name, render
-
-    return tuple(item(ref) for ref in skills)
+            else:
+                text = _skill_text(ref.name, skill_revision(skill) or "", skill.body, min(SKILL_TOKENS, room))
+        if text is None or text_tokens(text) > room:
+            left_out.append(ref.name)
+            continue
+        texts.append(text)
+        room -= text_tokens(text)
+    if left_out:
+        texts.append(_left_out(left_out))
+    return texts
 
 
 def _skill_text(name: str, revision: str, body: str, limit: int) -> Optional[str]:
@@ -314,9 +232,19 @@ class _SkillLoadMarking:
         result = await self._tool.execute(arguments, ctx)
         if result.is_error:
             return result
-        # The record is the result itself: each block names one skill it loaded, whatever the command looked like.
+        # The record is the result itself: each top-level block names one skill it loaded, whatever the command
+        # looked like. Blocks are balanced, so an example tag inside a skill's body is never taken for a load.
         output = "".join(getattr(block, "text", None) or "" for block in result.content)
-        names = list(dict.fromkeys(html.unescape(name) for name in _SKILL_CONTENT.findall(output)))
+        names: list[str] = []
+        depth = 0
+        for tag in _SKILL_TAG.finditer(output):
+            if tag.group(1) is None:
+                depth = max(0, depth - 1)
+                continue
+            if depth == 0:
+                names.append(html.unescape(tag.group(1)))
+            depth += 1
+        names = list(dict.fromkeys(names))
         if not names:
             return result
         details = {**dict(result.details or {}), "skills": [{"name": name} for name in names]}

@@ -392,6 +392,37 @@ def test_each_artifact_list_keeps_its_50_most_recent_paths_across_checkpoints():
     assert artifacts.count("- and 450 more\n") == 2
 
 
+def test_an_artifact_path_is_middle_truncated_so_a_list_stays_small():
+    rows = Rows()
+    rows.input("deep paths")
+    paths = [f"{'deep/' * 800}file-{index:02}.py" for index in range(60)]  # near PATH_MAX: 4,011 characters each
+    for index, path in enumerate(paths):
+        rows.tool("read", "r", call_id=f"r{index}", path=path)
+    rows.input("next")
+    view = context_view(rows.rows)
+    payload = compaction_payload(
+        view,
+        len(view.units) - 1,
+        mode="dropped",
+        reason="overflow",
+        checkpoint="",
+        skills=(),
+        state=(),
+        earlier_record=None,
+        tokens_before=1,
+        threshold=2,
+        summarizer=None,
+        usage=None,
+    )
+    listed = payload["files_read"]
+    assert len(listed) == 50 and payload["files_read_more"] == 10
+    # Each path keeps its head and its file name, cut in the middle to 160 characters.
+    assert all(len(path) == 160 and "…" in path and path.startswith("deep/") for path in listed)
+    assert listed[0].endswith("file-59.py")
+    artifacts = payload["summary"].split("<artifacts>\n", 1)[1].split("</artifacts>", 1)[0]
+    assert text_tokens(artifacts) <= 50 * 42 + 20  # a line: "- ", 160 characters (the ellipsis 3 bytes), a newline
+
+
 def test_the_checkpoint_request_is_the_owner_approved_prompt_verbatim():
     contract = CONTRACT.read_text()
     section = contract[contract.index("## 11. Checkpoint request") :]

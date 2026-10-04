@@ -105,7 +105,7 @@ def local_timezone() -> str:
 
 
 #: The environment block names at most this many Watches, each name cut to ``WATCH_NAME_CHARS`` (tools.md section 8).
-WATCHES_LISTED = 20
+_WATCHES_LISTED = 20
 WATCH_NAME_CHARS = 80
 
 
@@ -121,9 +121,9 @@ def current_environment(
     if include_time:
         fields.update(date=(now or datetime.now()).date().isoformat(), timezone=local_timezone())
     # Bounded on every input, and so in every checkpoint: the first ones, then how many more (tools.md section 8).
-    listed = list(watches[:WATCHES_LISTED])
-    if len(watches) > WATCHES_LISTED:
-        listed.append(f"and {len(watches) - WATCHES_LISTED} more")
+    listed = list(watches[:_WATCHES_LISTED])
+    if len(watches) > _WATCHES_LISTED:
+        listed.append(f"and {len(watches) - _WATCHES_LISTED} more")
     fields["watches"] = "; ".join(listed) if listed else "none"
     # One line per field: a value never carries the block's own line structure.
     return {name: " ".join(value.split()) if "\n" in value else value for name, value in fields.items()}

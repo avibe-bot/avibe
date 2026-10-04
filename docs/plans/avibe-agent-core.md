@@ -194,9 +194,8 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
   the window. Its messages are audit rows, never context.
 - **After a checkpoint** the request is the rebuilt system prompt, the `<context-checkpoint>` message (framing,
   checkpoint, cumulative `<artifacts>`, an `<earlier-record>` lookup, `<current-request>`), state rendered from its
-  own stores when the checkpoint was written (the environment block, pending Watches, Tasks, and Runs, skills, within
-  the state cap of the route, a tenth of its window up to 25,000 tokens), and the verbatim tail. No synthetic
-  "continue" message.
+  own stores when the checkpoint was written (the environment's core fields, then skills within the state cap of the
+  route, a tenth of its window up to 25,000 tokens), and the verbatim tail. No synthetic "continue" message.
 - **Overflow ladder**, bounded per request: the normal checkpoint; fork-summarize the prefix up to the cut nearest
   half the tokens, moved earlier until it fits (rolling); with no model call, move the earliest part out (dropped); stop and say what fills the context.
 - **Guards**: one compaction in flight per Session; 3 consecutive failures or 3 ineffective checkpoints pause

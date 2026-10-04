@@ -48,8 +48,10 @@ THRESHOLD_RATIO = 0.9
 KEEP_MAX = 20_000
 KEEP_RATIO = 0.25
 IMAGE_TOKENS = 1_600
-#: Each artifact list a checkpoint carries keeps this many paths, most recently touched first, then a count (section 7).
+#: Each artifact list a checkpoint carries keeps this many paths, most recently touched first, then a count, and each
+#: path is cut in the middle to ``PATH_CHARS`` (section 7).
 ARTIFACTS_LISTED = 50
+PATH_CHARS = 160
 #: Everything a checkpoint rehydrates (section 7): a tenth of the route's window, at most this many tokens.
 STATE_TOKENS = 25_000
 STATE_RATIO = 0.1
@@ -519,6 +521,14 @@ def _unique(items: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
+def truncate_middle(text: str, limit: int) -> str:
+    """``text`` cut in the middle to ``limit`` characters with an ellipsis: its head and its tail (a file name) stay."""
+    if len(text) <= limit:
+        return text
+    tail = (limit - 1) // 2
+    return f"{text[: limit - 1 - tail]}…{text[-tail:]}"
+
+
 @dataclass(frozen=True)
 class _Artifacts:
     """Each list most recently touched first, ``ARTIFACTS_LISTED`` kept; ``*_more`` counts the paths pushed out."""
@@ -550,6 +560,7 @@ def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> _Artifacts:
             path = call.arguments.get("path")
             if entry is None or result.is_error or not isinstance(path, str) or not path:
                 continue
+            path = truncate_middle(path, PATH_CHARS)
             if call.name == "read":
                 read.append(path)
             elif call.name in {"write", "edit"}:
