@@ -206,6 +206,8 @@ watches: wch_8f2k "nightly sync" command running; wch_3c1d job running
 </environment>
 ```
 
-`watches` names the Session's enabled Watches by id, name, and kind, never a command: each name cut to 80
-characters, at most 20, then `and N more`, so the block stays bounded on every input and in every checkpoint (C-9
-`context.md` §9).
+`watches` names the Session's enabled Watches by id, name, and kind, never a command: at most 20, then `and N more`.
+Every value in the block, each Watch id and name included, is free text and goes through the one display helper
+(`display`, C-9 `context.md` §7): one line of plain text, control characters and `<`, `>` escaped, cut in the middle
+to 160 UTF-8 bytes. So the block stays bounded on every input whatever the script, and no value can add a line,
+forge a field, or close the block.

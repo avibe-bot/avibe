@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Optional, Sequence
 
+from core.agent_core.harness.context import display
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import TextBlock, UserMessage
 
@@ -104,15 +105,18 @@ def local_timezone() -> str:
     return time.tzname[0] if time.tzname else "UTC"
 
 
-#: The environment block names at most this many Watches, each name cut to ``WATCH_NAME_CHARS`` (tools.md section 8).
+#: The environment block names at most this many Watches (tools.md section 8).
 _WATCHES_LISTED = 20
-WATCH_NAME_CHARS = 80
 
 
 def current_environment(
     cwd: str, watches: Sequence[str], *, include_time: bool = True, now: Optional[datetime] = None
 ) -> dict[str, str]:
-    """The environment fields; the clock ones follow ``include_time_info``, as every input prefix does."""
+    """The environment fields; the clock ones follow ``include_time_info``, as every input prefix does.
+
+    Every value is free text in a model-facing block, so each is one line of plain text cut to 160 bytes
+    (``display``); ``watches`` are displayed one by one by their caller.
+    """
     fields = {
         "cwd": str(Path(cwd).resolve()) if cwd else "",
         "os": operating_system(),
@@ -125,8 +129,7 @@ def current_environment(
     if len(watches) > _WATCHES_LISTED:
         listed.append(f"and {len(watches) - _WATCHES_LISTED} more")
     fields["watches"] = "; ".join(listed) if listed else "none"
-    # One line per field: a value never carries the block's own line structure.
-    return {name: " ".join(value.split()) if "\n" in value else value for name, value in fields.items()}
+    return {name: value if name == "watches" else display(value) for name, value in fields.items()}
 
 
 def render_environment(fields: Mapping[str, str]) -> str:
