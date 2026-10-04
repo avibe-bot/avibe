@@ -82,7 +82,21 @@ describe('FencedSource', () => {
     pending[1].reply.resolve('second');
     await flush();
     expect(pending).toHaveLength(2);
-    expect(applied.map(([, value]) => value)).toEqual(['first', 'second']);
+    // The read in flight when a refresh was asked for is superseded by it.
+    expect(applied.map(([, value]) => value)).toEqual(['second']);
+  });
+
+  it('drops a read superseded by a refresh, even if the trailing read fails', async () => {
+    const { source, pending, applied } = harness();
+    source.setKey('S');
+    source.refresh();
+    source.refresh();
+    pending[0].reply.resolve('running');
+    await flush();
+    expect(applied).toEqual([]);
+    pending[1].reply.reject(new Error('offline'));
+    await flush();
+    expect(applied).toEqual([]);
   });
 
   it('reads nothing without a key', () => {

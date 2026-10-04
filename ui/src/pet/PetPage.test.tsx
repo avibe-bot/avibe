@@ -533,3 +533,24 @@ describe('PetPage independent sweep', () => {
     expect(markRead).not.toHaveBeenCalled();
   });
 });
+
+describe('PetPage review fixes, round 4', () => {
+  it('goes back to the binding the shell still holds when a pick cannot be persisted', async () => {
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', summon_pending: null });
+      if (command === 'pet_bind') return Promise.reject(new Error('disk full'));
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    switcherSessions = [session('A'), session('B')];
+    render(<PetPage />);
+    summon('show');
+    expect(await screen.findByText('Session A')).toBeTruthy();
+    await userEvent.click(screen.getByLabelText('pet.switchSession'));
+    await userEvent.click(await screen.findByText('Session B'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_bind', { sessionId: 'B' }));
+    // The header shows the session the shell still holds.
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenLastCalledWith('A'));
+  });
+});

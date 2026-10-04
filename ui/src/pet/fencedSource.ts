@@ -10,7 +10,10 @@
  *   source since it started. A merge that overtakes an in-flight read schedules
  *   one trailing read, so the source still converges on the server's state.
  *
- * Reads coalesce to at most one in flight plus one trailing.
+ * A refresh asked for while a read is in flight means that read may already
+ * be stale (the trigger is newer than it), so it is dropped like a merged
+ * event, and the trailing read answers instead. Reads coalesce to at most one
+ * in flight plus one trailing.
  */
 export type FencedSourceOptions<K, T> = {
   read: (key: K) => Promise<T>;
@@ -35,6 +38,7 @@ export class FencedSource<K, T> {
   /** Re-read from the server, coalesced. */
   refresh(): void {
     if (this.inFlight !== 0) {
+      this.generation += 1;
       this.trailing = true;
       return;
     }

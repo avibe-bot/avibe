@@ -252,8 +252,13 @@ const PetSurface: React.FC = () => {
       onToggleSwitcher={() => setSwitcherOpen((open) => !open)}
       onPick={(sessionId) => {
         setSwitcherOpen(false);
+        // Optimistic, but the shell owns the durable binding: if it cannot
+        // persist the pick, go back to what it still holds.
+        const previous = petShell.currentBinding() ?? null;
         petShell.setBinding(sessionId);
-        void petBridge.bind(sessionId).catch(() => undefined);
+        petBridge.bind(sessionId).catch(() => {
+          if (petShell.currentBinding() === sessionId) petShell.setBinding(previous);
+        });
       }}
       exchange={exchange}
       markRead={markRead}
