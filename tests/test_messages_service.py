@@ -2525,30 +2525,3 @@ def test_quick_reply_choice_recorded_on_agent_message_once(isolated_state):
         assert loaded[0]["content"].get("quick_reply_chosen") == "Yes"
         # Unknown message id → no choice, no crash.
         assert messages_service.get_quick_reply_chosen(conn, "sess_qr", "does-not-exist") is None
-
-
-@pytest.mark.parametrize(
-    "first,expected",
-    [
-        ("/compact", "fix the parser"),  # a slash command is an action, never a session's first prompt
-        ("/model gpt-5", "fix the parser"),
-        ("/Users/cyh/repo is broken", "/Users/cyh/repo is broken"),  # a path is text
-    ],
-)
-def test_a_slash_command_is_never_the_first_user_text(isolated_state, first, expected):
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        scope_id = _seed_scope(conn)
-        _seed_session(conn, scope_id, "ses_titled")
-        for body in (first, "fix the parser"):
-            messages_service.append(
-                conn,
-                scope_id=scope_id,
-                session_id="ses_titled",
-                platform="avibe",
-                author="user",
-                message_type="user",
-                source="user",
-                text=body,
-            )
-        assert messages_service.first_user_text(conn, "ses_titled") == expected

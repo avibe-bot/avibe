@@ -58,7 +58,6 @@ def _checkpoint_payload(first_kept_seq, *, summary="SUMMARY", state=("STATE",), 
         "version": 1,
         "mode": "normal",
         "reason": "threshold",
-        "focus": None,
         "summary": summary,
         "checkpoint": "checkpoint",
         "state": list(state),
@@ -167,6 +166,8 @@ def _state_row(context):
         _state_row({"failures": "1", "ineffective": 0, "paused": False}),
         _state_row({"failures": 0, "ineffective": 0}),
         _state_row({"failures": 0, "ineffective": 0, "paused": 1}),
+        _state_row({"failures": 0, "ineffective": 0, "paused": True, "paused_at": "now"}),
+        _state_row({"failures": 0, "ineffective": 0, "paused": True, "paused_route": {"provider": "p"}}),
     ],
 )
 def test_malformed_context_rows_fail_explicitly_instead_of_projecting_a_wrong_context(row):
@@ -174,14 +175,24 @@ def test_malformed_context_rows_fail_explicitly_instead_of_projecting_a_wrong_co
         project([ContextEntry("session", 1, "input", "in-1", user("start")), row])
 
 
+#: A pause records when it began and on which route (C-9 section 10).
+PAUSED = {
+    "failures": 3,
+    "ineffective": 0,
+    "paused": True,
+    "paused_at": 1_000.5,
+    "paused_route": {"provider": "p", "api": "anthropic", "model": "m"},
+}
+
+
 def test_a_complete_checkpoint_row_and_guard_state_load():
     rows = [
         ContextEntry("session", 1, "input", "in-1", user("start")),
-        _state_row({"failures": 1, "ineffective": 2, "paused": True}),
+        _state_row(PAUSED),
         _checkpoint_row(3, 1, summarizer=None, current_request="go", current_request_message_id="in-1"),
     ]
     projected = project(rows)
-    assert projected.context_state == {"failures": 1, "ineffective": 2, "paused": True}
+    assert projected.context_state == PAUSED
     assert [block.text for block in projected.messages[0].content] == ["SUMMARY", "STATE"]
 
 

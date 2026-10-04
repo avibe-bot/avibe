@@ -86,7 +86,8 @@ before a retry alike:
    (b).
 4. **Ladder** (§8) when the request does not fit. With no checkpoint request left to try (one failed for this
    request other than by overflow, or auto-compaction is paused), a request that can fit is sent and the provider
-   judges.
+   judges. While auto-compaction is paused nothing is compacted at all: a request that cannot fit, or that the
+   provider refuses as overflow, ends the run `context_exhausted` (§10).
 
 A request the provider rejects as overflow (`ProviderError.kind == "overflow"`, classified by
 `ai/errors.is_overflow_message`, HTTP 413, and `context_length_exceeded`) before anything was streamed, and with no
@@ -114,7 +115,7 @@ The projected context after the latest checkpoint is a list of **units**: an inp
 results of its tool calls. A cut falls only before a unit: before a user message, or before an assistant message
 whose tool batch follows it; never at a tool result, so no call is separated from its result.
 
-- **Normal** (threshold, manual, and the first overflow step): the tail is the longest run of whole units at the end
+- **Normal** (threshold, and the first overflow step): the tail is the longest run of whole units at the end
   whose tokens total at most `keep`, and at least the last unit. Everything before it is the head. An empty head
   means there is nothing to summarize.
 - **Rolling** (§8 b): the cut nearest to half the tokens, moved earlier until the forked request over the head can fit
@@ -135,8 +136,7 @@ A checkpoint is written by a **fork** of the conversation, the only delivery pat
   effort are never changed: Anthropic renders them into the prompt. `max_tokens = min(16,000, O)`.
 - **Normal**: the prefix is the whole projected conversation. **Rolling**: the prefix is the projected context up to
   the cut, which is a prefix of the original request.
-- One user message is appended: the checkpoint request (§11), with `Additional focus from the user: <focus>` for
-  `/compact <focus>`.
+- One user message is appended: the checkpoint request (§11).
 - The turn's requests take the request pipeline (§10, invariant 1; a request that cannot fit is never sent and
   fails the attempt as an overflow), its responses the admission (invariant 6), and its tool calls the tool pipeline
   (invariant 2). Its responses and results are never committed to the context, and nothing is shown to the user.
@@ -155,7 +155,7 @@ budget (invariant 2):
   unavailable. Write the checkpoint now.`
 - Every request of the turn is budgeted on the route resolved for it (§1): its `max_tokens` is that route's
   `min(16,000, O)`.
-- The bound is the window, not `T`, the same way in threshold, manual, and rolling turns. Before each call,
+- The bound is the window, not `T`, the same way in threshold and rolling turns. Before each call,
   `room = L_in - est - min(16,000, O) - reserved`, where `est` is the budget of the turn's latest request plus the
   tokens of the response and results since, and `reserved` is one fixed-text result (the longer of the two below)
   for each later call of the same response, so every result of the batch is accounted for before it exists. This is
@@ -217,7 +217,7 @@ is written, so projection stays a pure function of the rows:
   `<current-request>` when the cut did not split a turn.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: skill bodies by name and
   revision (at most 5,000 tokens each and 25,000 in total), pending Watches, Tasks, and delegated Runs from the Harness
-  tables, and the full environment block when the checkpoint happened inside a run (C-7 §8).
+  tables, and the full environment block (C-7 §8); a checkpoint always happens inside a run.
 - Projection (C-5 §3): the system prompt, hook-rehydrated messages, one user message holding `summary` and then each
   `state` text as its own text block, then the rows from `first_kept_seq` on, with edits applied. A tool result whose
   call was summarized is left out with it. No synthetic "continue" message follows.
@@ -238,7 +238,7 @@ once the request fits:
   fit (§5), so the context becomes checkpoint + the rest verbatim; roll again while the request still does not fit,
   at most 2 rolls per request.
 - (c) **Dropped**: when no checkpoint request can help (one failed for this request other than by overflow, a rolling
-  one failed, no rolling prefix can fit, the rolls are used up, or auto-compaction is paused), no model is called:
+  one failed, no rolling prefix can fit, or the rolls are used up), no model is called:
   the earliest part (§5) moves out of the context. Built like any checkpoint row (§7: fresh `state`, and
   `<current-request>` when the cut splits a turn), the row keeps the previous checkpoint's text and the
   `<earlier-record>` pointer; `checkpoint` is empty when there was none, and the message then has no framing text.
@@ -246,8 +246,9 @@ once the request fits:
 - (d) **Stop**: when the request and its minimal request (what the drop would leave of it: the drop's own row, §8 c,
   plus the last unit; §3) both cannot fit (checked in the stage, §3,
   before provider admission), when nothing more can move out of a request that cannot fit or that the provider
-  refused, or after 4 provider overflows of one request, the run ends `context_exhausted` and the
-  `context_exhausted` event says what fills the context. No model is called for a context that cannot fit.
+  refused, after 4 provider overflows of one request, or while auto-compaction is paused (§10), the run ends
+  `context_exhausted` and the `context_exhausted` event says what fills the context. No model is called for a
+  context that cannot fit.
 
 An attempt the provider refused, or that is retried, is never context (§10, invariant 4).
 
@@ -274,7 +275,7 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   summarized rows loaded, by name and its current revision (`<skill_content name revision>`, cut to 5,000 tokens with
   a note saying how to load all of it; 25,000 in total, the rest named; a skill that no longer loads is named); the
   Session's pending Watches, Tasks, and delegated Runs (`<pending-work>`, by kind, id, and label, from the Harness
-  tables, never a command); and the full environment block (C-7 §8) when the checkpoint happened inside a run.
+  tables, never a command); and the full environment block (C-7 §8).
 - Skill loads marked in their results: a successful `vibe skill load` through `bash` records the skill's name and
   revision in the result's `details.skill`, so clearing spares it (§4) and a checkpoint carries it (§7).
 - A `TranscriptStore` (C-5 §2) implementing the whole protocol C-9 uses: `append_response(..., request=...)` keeps
@@ -284,33 +285,31 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   The SQLite store and the adapter's implement it, and one contract suite runs the same tests on them and on the
   in-memory store the engine tests use (`tests/test_transcript_store_contract.py`).
 - The full environment block (C-7 §8) on the first input after a checkpoint: the summarized inputs that carried it
-  are gone, and a checkpoint's `state` carries it only when it happened inside a run. The Avibe Agent works out an
+  are gone. The Avibe Agent works out an
   input's environment delta against the inputs the projected context keeps, so the input carries every field the
   context no longer shows, and forgets what it sent when a checkpoint commits.
-- `Agent.compact(turn_id=..., focus=...)` behind `/compact [focus]` on every surface. The Avibe Agent takes the
-  command as a Turn's input text (on Slack, `@Avibe /compact`), compacts instead of running, and answers it (done,
-  nothing to compact yet, or failed); the command is an action, never a context input: a running Turn refuses it as
-  a steer, so it runs as its own Turn, and recovery never admits it. One rule decides what is the command, live, as
-  a steer, and in recovery: a `/compact` carrying files is an ordinary message. Other backends receive the text
-  unchanged.
-- The pause notice (§10) through `vibe/i18n`, once, as a `notify` message; and, after (d), a stop message that lists
-  what fills the context (`ContextExhausted`'s parts). A failure is recorded against the Model Hub route only when
-  the served source produced it: never for a context that cannot fit, a Stop, or a checkpoint that failed locally.
+- The one user-visible text of context management, through `vibe/i18n`: when a run ends `context_exhausted`, the
+  stop message says the conversation has grown too long to continue reliably and suggests starting a new session
+  with `/new`. Compaction itself, the pause included, shows nothing. A failure is recorded against the Model Hub route
+  only when the served source produced it (a C-2 provider error, the model's own failed answer, or a reply the
+  transcript cannot hold): never for a context that cannot fit, a Stop, or a local or store error.
 
 ## 10. Guards
 
-- **One compaction in flight per Session.** A checkpoint turn never starts another; `compact()` and `run()` refuse
-  each other on one Agent; across Agent instances the adapter's Session writer lock serializes them.
+- **One compaction in flight per Session.** A checkpoint turn never starts another; it runs inside a run, and an
+  Agent refuses a second run while one is active; across Agent instances the adapter's Session writer lock
+  serializes them.
 - **Pause.** Each failed checkpoint counts as a failure; a successful one resets the count. A successful
   normal checkpoint whose result is still at least `0.75 * T` counts as ineffective; an effective one resets that
-  count. After 3 consecutive failures or 3 ineffective checkpoints, auto-compaction pauses for the Session: threshold
-  checkpoints stop, and the overflow ladder skips straight to (c). The `compaction_paused` event fires once, at the
-  transition, and the adapter tells the user. The counters and the pause are durable loop state, stored beside the
-  hook state in `agent_state` rows (`AgentState.context`), so they survive restarts and forks; projection takes them
-  from the latest `agent_state` row that carries them.
-- **Manual `/compact [focus]`** clears the pause and both counters, then runs a normal checkpoint with reason
-  `manual`; its own outcome counts as above. When everything is within the kept tail, it emits `compaction_skipped`
-  and ends `completed`, and the adapter replies briefly that there is nothing to compact yet.
+  count. After 3 consecutive failures or 3 ineffective checkpoints, auto-compaction pauses for the Session: nothing
+  is compacted (no checkpoint, no mechanical drop), a request that can fit is still sent, and one that cannot fit or
+  that the provider refuses as overflow ends the run `context_exhausted` (§8 d). The `compaction_paused` event fires
+  once, at the transition; the adapter shows nothing for it. The pause clears by itself after 30 minutes
+  (`PAUSE_SECONDS`), or as soon as a request goes to another route (provider, api, model) than the one it began on,
+  whichever comes first; both counters clear with it, and the next threshold tries again. The counters and the
+  pause (`paused_at`, `paused_route`) are durable loop state, stored beside the hook state in `agent_state` rows
+  (`AgentState.context`), so they survive restarts and forks; projection takes them from the latest `agent_state`
+  row that carries them, and a cleared pause commits with the next C-9 transition.
 
 **Ordering and ownership invariants.** This list is the one normative statement of these rules; the other sections
 refer to it. Each has a test in `tests/agent_core/agent/test_compaction.py` (route: `test_context.py`; the ledger's
@@ -358,9 +357,8 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    protocol violation; a checkpoint response that fails is a failed checkpoint, and none of its calls runs. Its
    audit keeps the response when JSON can hold it.
 
-UX is silent: an automatic compaction shows nothing, and the raw messages stay in history. The only user-visible
-text is the pause notice, and, after (d), the run's stop message. A manual `/compact` is an explicit user action,
-so the adapter answers it.
+UX is silent: compaction is invisible, the user never needs to think about it, and the raw messages stay in
+history. The only user-visible text is the stop message after (d) (§9).
 
 ## 11. Checkpoint request (prompt `checkpoint-v2`)
 
@@ -415,7 +413,6 @@ Write in three layers, from the broad to the specific. Use exactly these heading
 - Exact paths, identifiers, commands, links, ids, and values needed to continue.
 
 Rules: terse bullets, not paragraphs. Preserve exact paths, identifiers, commands, error strings, and numbers. Do not invent anything that is not above. Never write out secrets, tokens, or credentials; refer to them by name. Write in the language the user writes in.
-Additional focus from the user: <focus, only for /compact <focus>>
 </context-checkpoint-request>
 ```
 

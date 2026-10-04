@@ -28,7 +28,6 @@ from core.agent_core.agent.events import (
     CompactionFailed,
     CompactionFinished,
     CompactionPaused,
-    CompactionSkipped,
     CompactionStarted,
     ContextExhausted,
     ContextPart,
@@ -58,6 +57,7 @@ from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
 from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
+from core.agent_core.ai._common import endpoint_origin
 from core.agent_core.ai.provider import (
     Done,
     ModelRequest,
@@ -76,6 +76,7 @@ from core.agent_core.harness.context import (
     MAX_OVERFLOWS,
     MAX_ROLLS,
     PAUSE_AFTER,
+    PAUSE_SECONDS,
     PROMPT_VERSION,
     Anchor,
     Budget,
@@ -100,7 +101,6 @@ from core.agent_core.harness.context import (
     request_facts,
     request_tokens,
     rolling_cut,
-    sent_tokens,
     summarized_to_seq,
     text_tokens,
     unit_tokens,
@@ -155,8 +155,16 @@ class _Exhausted(Exception):
 
 #: C-9 guard state (``AgentState.context``) before anything happened.
 _GUARD_DEFAULT: dict[str, Any] = {"failures": 0, "ineffective": 0, "paused": False}
-#: The checkpoint request without a focus, as the fit checks measure it.
+#: The checkpoint request (C-9 section 11); every checkpoint turn and the fit checks send exactly this.
 _CHECKPOINT_REQUEST = checkpoint_request()
+
+
+def _route(selection: ModelSelection) -> dict[str, str]:
+    """The route a pause is bound to: the provider, protocol, and model a request goes to (C-9 section 10)."""
+    origin = endpoint_origin(selection.endpoint)
+    return {"provider": origin.provider, "api": origin.api, "model": origin.model}
+
+
 #: The most a checkpoint-turn call that does not run adds: one of the policy's two fixed texts (never cut).
 _FIXED_RESULT_TOKENS = max(text_tokens(DENIED), text_tokens(BUDGET_USED))
 
@@ -319,21 +327,10 @@ class Agent:
 
     def run(self, input: AgentInput, *, turn_id: str) -> AsyncIterator[AgentEvent]:
         input = deepcopy(input)
-        return self._pump(turn_id, lambda emit: self._drive(emit, input=input), admit=True)
-
-    def compact(self, *, turn_id: str, focus: Optional[str] = None) -> AsyncIterator[AgentEvent]:
-        """Manual ``/compact [focus]`` (C-9 section 10): clear the pause, then write a normal checkpoint.
-
-        Runs like a run without an input: it refuses while a run (or another
-        compaction) is active, admits no steer, and ends ``completed`` when the
-        checkpoint was written.
-        """
-        if self.context is None:
-            raise RuntimeError("context management is not configured for this Agent")
-        return self._pump(turn_id, lambda emit: self._drive(emit, focus=focus), admit=False)
+        return self._pump(turn_id, lambda emit: self._drive(emit, input))
 
     async def _pump(
-        self, turn_id: str, drive: Callable[[Callable[..., Awaitable[None]]], Awaitable[None]], *, admit: bool
+        self, turn_id: str, drive: Callable[[Callable[..., Awaitable[None]]], Awaitable[None]]
     ) -> AsyncIterator[AgentEvent]:
         async with self._lock:
             if self._running:
@@ -341,7 +338,7 @@ class Agent:
             if self._steers or self._follow_ups:
                 raise RuntimeError("return unconsumed inputs with take_pending_inputs() before starting another run")
             self._running = True
-            self._open = admit
+            self._open = True
             self._consumer_closed = False
             self._ctx = RunContext(self.session_id, turn_id, CancelToken())
             self._scope = RunScope(self._ctx.cancel)
@@ -463,14 +460,8 @@ class Agent:
         self._rows.append(row)
         return row
 
-    async def _drive(
-        self,
-        emit: Callable[..., Awaitable[None]],
-        *,
-        input: Optional[AgentInput] = None,
-        focus: Optional[str] = None,
-    ) -> None:
-        """One run of ``input``, or, without one, a manual compaction with ``focus``."""
+    async def _drive(self, emit: Callable[..., Awaitable[None]], input: AgentInput) -> None:
+        """One run of ``input``."""
         loaded = False
         try:
             try:
@@ -490,21 +481,18 @@ class Agent:
                 loaded = True
                 system = self.system
                 self._run_tools = dict(self._tools)
-                if input is None:
-                    self._outcome.primary(await self._manual_compaction(system, selected, focus, emit))
-                else:
-                    for hook in self.hooks:
-                        setup = await self._hook(lambda: hook.before_run(deepcopy(input), self._ctx))
-                        if setup is not None:
-                            if setup.system is not None:
-                                system = setup.system
-                            if setup.tools is not None:
-                                names = [tool.spec.name for tool in setup.tools]
-                                if len(names) != len(set(names)):
-                                    raise ValueError("tool names must be unique")
-                                self._run_tools = dict(zip(names, setup.tools))
-                    await self._consume(input)
-                    self._outcome.primary(await self._loop(system, emit, selected))
+                for hook in self.hooks:
+                    setup = await self._hook(lambda: hook.before_run(deepcopy(input), self._ctx))
+                    if setup is not None:
+                        if setup.system is not None:
+                            system = setup.system
+                        if setup.tools is not None:
+                            names = [tool.spec.name for tool in setup.tools]
+                            if len(names) != len(set(names)):
+                                raise ValueError("tool names must be unique")
+                            self._run_tools = dict(zip(names, setup.tools))
+                await self._consume(input)
+                self._outcome.primary(await self._loop(system, emit, selected))
             except _Ended:
                 self._outcome.primary("ended_by_hook")
             except _Exhausted as error:
@@ -1136,6 +1124,7 @@ class Agent:
             # never sees it.
             raise self._exhausted(request, view, plan)
         shrink, ladder.refused = ladder.refused, False
+        paused = self._paused(selected)
         if not shrink:
             if self.context.clear_tool_results and (
                 plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold()
@@ -1144,7 +1133,7 @@ class Agent:
                 if targets:
                     await self._commit_context([("context_edit", clear_edit(target)) for target in targets], self._guard)
                     return True
-            if plan.est >= plan.threshold and not ladder.compacted and not self._guard["paused"]:
+            if plan.est >= plan.threshold and not ladder.compacted and not paused:
                 cut = normal_cut(view.units, plan.keep)
                 if cut is not None:
                     ladder.compacted = True
@@ -1161,9 +1150,28 @@ class Agent:
             if not shrink and plan.fits:
                 return False
             # With no checkpoint request left to try, a request that can fit at all is sent; the provider judges.
-            if not shrink and (ladder.summary_failed or self._guard["paused"]) and plan.can_fit:
+            if not shrink and (ladder.summary_failed or paused) and plan.can_fit:
                 return False
+        if paused:
+            # Paused, nothing is compacted (section 10): a request that cannot be sent ends the turn.
+            raise self._exhausted(request, view, plan)
         return await self._shrink(system, selected, request, view, plan, emit, ladder)
+
+    def _paused(self, selected: ModelSelection) -> bool:
+        """Whether auto-compaction is paused for this request (section 10).
+
+        A pause holds for ``PAUSE_SECONDS`` on the route it began on; after that, or on another route, it clears
+        by itself, with both counters, and the next threshold tries again. The cleared guard commits with the next
+        C-9 transition, and until then the rule gives the same answer from the rows.
+        """
+        guard = self._guard
+        if not guard["paused"]:
+            return False
+        route = _route(selected)
+        if guard.get("paused_route") == route and self.context.clock() - guard.get("paused_at", 0) < PAUSE_SECONDS:
+            return True
+        self._guard = dict(_GUARD_DEFAULT)
+        return False
 
     async def _minimal(
         self, system: str, selected: ModelSelection, request: ModelRequest, view: ContextView, plan: Budget
@@ -1190,11 +1198,9 @@ class Agent:
         return {
             "mode": "dropped",
             "reason": "overflow",
-            "focus": None,
             "checkpoint": previous.payload.get("checkpoint", "") if previous is not None else "",
             "summarizer": None,
             "usage": None,
-            "mid_turn": True,
         }
 
     def _fork_base(self, view: ContextView, mode: str, cut: int) -> tuple[Message, ...]:
@@ -1243,7 +1249,7 @@ class Agent:
     ) -> bool:
         """One step of the overflow ladder (section 8); False when nothing can move and the provider judges."""
         units = view.units
-        if not ladder.summary_failed and not self._guard["paused"] and not ladder.compacted:
+        if not ladder.summary_failed and not ladder.compacted:
             ladder.compacted = True
             cut = normal_cut(units, plan.keep)
             if cut is not None and self._fork_fits(system, selected, view, "normal", cut):
@@ -1253,7 +1259,7 @@ class Agent:
                 if outcome.ok:
                     return True
                 ladder.summary_failed = not outcome.overflow
-        if not ladder.summary_failed and not self._guard["paused"] and ladder.rolls < MAX_ROLLS:
+        if not ladder.summary_failed and ladder.rolls < MAX_ROLLS:
             cut = rolling_cut(units, lambda cut: self._fork_fits(system, selected, view, "rolling", cut))
             if cut is not None:
                 ladder.rolls += 1
@@ -1288,27 +1294,6 @@ class Agent:
         parts.append(ContextPart("output", plan.output + plan.margin))
         return _Exhausted(plan.input_limit, tuple(parts))
 
-    async def _manual_compaction(
-        self, system: str, selected: ModelSelection, focus: Optional[str], emit: Callable[..., Awaitable[None]]
-    ) -> RunEndReason:
-        """Section 10: clear the pause and both counters, then a normal checkpoint between runs."""
-        view = context_view(self._rows)
-        # Measured for the cut only; it is never sent.
-        request, _ = await self._request(system, selected, messages=self._carried(view))
-        plan = budget(request, selected.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view))
-        cut = normal_cut(view.units, plan.keep)
-        if cut is None:
-            # Everything is within the kept tail: the adapter tells the user there is nothing to compact yet.
-            await self._commit_context([], dict(_GUARD_DEFAULT))
-            await emit(CompactionSkipped, reason="manual")
-            return "completed"
-        self._guard = dict(_GUARD_DEFAULT)  # the checkpoint's transition starts from a cleared pause
-        outcome = await self._checkpoint(
-            system, selected, request, view, plan, cut, mode="normal", reason="manual", emit=emit, focus=focus,
-            mid_turn=False,
-        )
-        return "completed" if outcome.ok else "error"
-
     async def _checkpoint(
         self,
         system: str,
@@ -1321,12 +1306,10 @@ class Agent:
         mode: str,
         reason: str,
         emit: Callable[..., Awaitable[None]],
-        focus: Optional[str] = None,
-        mid_turn: bool = True,
     ) -> _Outcome:
         """Sections 6 and 7: a forked checkpoint turn; on success its row joins the context."""
         await emit(CompactionStarted, reason=reason)
-        prompt = checkpoint_request(focus)
+        prompt = _CHECKPOINT_REQUEST
         base = self._fork_base(view, mode, cut)
         anchor = last_anchor(self._rows, view)
         policy = CheckpointPolicy(cwd=self.cwd, scratch_dir=self.context.scratch_dir)
@@ -1415,7 +1398,7 @@ class Agent:
                     "rounds": rounds,
                 }
                 try:
-                    hosted = await self._hosted(view, cut, mid_turn)
+                    hosted = await self._hosted(view, cut)
                 except (_Aborted, asyncio.CancelledError):
                     raise
                 except Exception as failure:
@@ -1430,22 +1413,20 @@ class Agent:
                         cut,
                         mode=mode,
                         reason=reason,
-                        focus=focus,
                         checkpoint=checkpoint,
                         summarizer=summarizer,
                         usage=self._turn_usage(start),
-                        mid_turn=mid_turn,
                         hosted=hosted,
                     )
             if payload is None:
                 finished["error"] = error
-                guard, paused = self._counted(ok=False)
+                guard, paused = self._counted(selected, ok=False)
                 await self._commit_context([], guard)
                 await emit(CompactionFailed, reason=reason, error=error)
                 if paused:
                     await emit(CompactionPaused, cause=paused)
                 return _Outcome(False, overflow)
-            row, paused = await self._commit_compaction(payload)
+            row, paused = await self._commit_compaction(payload, selected)
             finished.update(outcome="completed", compaction_event_id=row.row_id)
             await emit(
                 CompactionFinished,
@@ -1495,8 +1476,10 @@ class Agent:
             record["usage"] = usage_to_dict(usage)
         return {**record, **finished}
 
-    def _counted(self, *, ok: bool, ineffective: Optional[bool] = None) -> tuple[dict[str, Any], Optional[str]]:
-        """The guard after one checkpoint attempt (section 10), and the pause cause when it pauses now."""
+    def _counted(
+        self, route: ModelSelection, *, ok: bool, ineffective: Optional[bool] = None
+    ) -> tuple[dict[str, Any], Optional[str]]:
+        """The guard after one checkpoint attempt on ``route`` (section 10), and the pause cause when it pauses now."""
         guard = dict(self._guard)
         cause = None
         if not ok:
@@ -1509,7 +1492,7 @@ class Agent:
                 cause = "ineffective" if guard["ineffective"] >= PAUSE_AFTER else None
         if cause is None or guard["paused"]:
             return guard, None
-        guard["paused"] = True
+        guard.update(paused=True, paused_at=self.context.clock(), paused_route=_route(route))
         return guard, cause
 
     async def _checkpoint_tool(
@@ -1544,7 +1527,7 @@ class Agent:
         """Section 8 (c): the earliest part moves out with no model call; the previous checkpoint stays."""
         await emit(CompactionStarted, reason="overflow")
         payload, _ = await self._compaction(request, view, plan, cut, **self._dropped(view))
-        row, _ = await self._commit_compaction(payload)
+        row, _ = await self._commit_compaction(payload, None)
         await emit(
             CompactionFinished,
             event_id=row.row_id,
@@ -1563,11 +1546,9 @@ class Agent:
         *,
         mode: str,
         reason: str,
-        focus: Optional[str],
         checkpoint: str,
         summarizer: Optional[Mapping[str, Any]],
         usage: Optional[Usage],
-        mid_turn: bool,
         hosted: Optional[tuple[tuple[str, ...], Optional[str]]] = None,
     ) -> tuple[dict[str, Any], ContextView]:
         """The checkpoint row for ``cut`` (section 7), uncommitted, and the context it would leave.
@@ -1576,13 +1557,12 @@ class Agent:
         ``hosted`` is the host's part (``_hosted``) when the caller already has it.
         """
         skills = carried_skills(view, cut)
-        state, earlier = hosted if hosted is not None else await self._hosted(view, cut, mid_turn)
+        state, earlier = hosted if hosted is not None else await self._hosted(view, cut)
         payload = compaction_payload(
             view,
             cut,
             mode=mode,
             reason=reason,
-            focus=focus,
             checkpoint=checkpoint,
             skills=skills,
             state=state,
@@ -1599,23 +1579,25 @@ class Agent:
         payload["tokens_after_estimate"] = request_tokens(request.system, request.tools, self._carried(after))
         return payload, after
 
-    async def _hosted(self, view: ContextView, cut: int, mid_turn: bool) -> tuple[tuple[str, ...], Optional[str]]:
+    async def _hosted(self, view: ContextView, cut: int) -> tuple[tuple[str, ...], Optional[str]]:
         """The host's part of a checkpoint row for ``cut``: the rendered ``state`` and the earlier-record lookup."""
         host = self.context.host
         if host is None:
             return (), None
-        needed = StateRequest(self.session_id, carried_skills(view, cut), mid_turn)
+        needed = StateRequest(self.session_id, carried_skills(view, cut))
         state = tuple(await self._scope.call(lambda: host.render_state(needed)))
         if not all(isinstance(item, str) for item in state):
             raise TypeError("ContextHost.render_state must return strings")
         return state, host.earlier_record(self.session_id, summarized_to_seq(view, cut))
 
-    async def _commit_compaction(self, payload: Mapping[str, Any]) -> tuple[ContextEntry, Optional[str]]:
-        """A built checkpoint row and, for a checkpoint request, the guard it moves, in one ``_commit_context``."""
+    async def _commit_compaction(
+        self, payload: Mapping[str, Any], route: Optional[ModelSelection]
+    ) -> tuple[ContextEntry, Optional[str]]:
+        """A built checkpoint row and, for a checkpoint request on ``route``, the guard it moves, in one commit."""
         guard, paused = self._guard, None
-        if payload["summarizer"] is not None:
+        if route is not None:
             ineffective = payload["tokens_after_estimate"] >= INEFFECTIVE_RATIO * payload["threshold"]
-            guard, paused = self._counted(ok=True, ineffective=ineffective if payload["mode"] == "normal" else None)
+            guard, paused = self._counted(route, ok=True, ineffective=ineffective if payload["mode"] == "normal" else None)
         (row,) = await self._commit_context([("compaction", payload)], guard)
         return row, paused
 

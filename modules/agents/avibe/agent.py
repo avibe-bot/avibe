@@ -1,7 +1,6 @@
 """``AvibeAgent``: the Avibe Agent engine (``core.agent_core``) as an Avibe backend.
 
-One Turn is one ``Agent.run`` (plan section 4), or one ``Agent.compact`` for a
-``/compact [focus]`` command (C-9 ``context.md`` section 9). The adapter
+One Turn is one ``Agent.run`` (plan section 4). The adapter
 
 * resolves the model through Model Hub (``resolve_hop``) before the input is
   written, so a refused route fails like any backend that never started;
@@ -16,8 +15,7 @@ One Turn is one ``Agent.run`` (plan section 4), or one ``Agent.compact`` for a
   the route's Model Hub limits;
 * before any run of a Session in this process, under the Session writer lock,
   settles open tool calls (T2) and admits accepted inputs that were never
-  consumed (T3), a ``/compact`` command never among them; at startup it settles
-  every Session's open calls eagerly. The
+  consumed (T3); at startup it settles every Session's open calls eagerly. The
   Turn a restart interrupted is settled by the Turn owner (T4; ``avibe`` is a
   process-bound runtime).
 """
@@ -43,11 +41,8 @@ from config import paths
 from core.agent_core.agent.events import (
     AgentError,
     AgentEvent,
-    CompactionFailed,
     CompactionFinished,
     CompactionPaused,
-    CompactionSkipped,
-    ContextExhausted,
     MessageCommitted,
     RunEnded,
     ToolStarted,
@@ -86,10 +81,9 @@ from modules.agents.avibe.context import (
     AvibeContextHost,
     SkillScope,
     budgeted,
-    compact_command,
     mark_skill_loads,
 )
-from modules.agents.avibe.errors import compaction_failure_kind, compact_text, context_exhausted_text, error_text
+from modules.agents.avibe.errors import error_text
 from modules.agents.avibe.media import MediaSnapshots
 from modules.agents.avibe.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
 from modules.agents.avibe.prompt import current_environment, system_prompt
@@ -132,13 +126,30 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
     return relative
 
 
-#: Failures no served source produced: Model Hub's record of the route stays as it is (``_source_failed``).
-_LOCAL_FAILURES = frozenset({"context_exhausted", "overflow", "aborted", "dependency_cancelled", "local"})
+#: Failures the served source produced (positive provenance): the C-2 provider error kinds, the model's own failed
+#: answers, and a reply the transcript cannot hold. Nothing else (context exhaustion, a Stop, a local or store
+#: error) is recorded against the Model Hub route.
+_SOURCE_FAILURES = frozenset(
+    {
+        "rate_limit",
+        "overloaded",
+        "network",
+        "server",
+        "auth",
+        "invalid_request",
+        "unknown",
+        "error",
+        "refusal",
+        "safety",
+        "empty_response",
+        "ProviderProtocolViolation",
+    }
+)
 
 
 def _source_failed(kind: Optional[str]) -> bool:
     """Whether a failure is the served source's, so Model Hub records it against the route (C-6)."""
-    return kind not in _LOCAL_FAILURES
+    return kind in _SOURCE_FAILURES
 
 
 #: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
@@ -168,9 +179,6 @@ class _Run:
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
     stop_requested: bool = False
-    # C-9: what fills a context that cannot fit, and a manual compaction's outcome event.
-    exhausted: Optional[ContextExhausted] = None
-    compaction: Optional[AgentEvent] = None
 
     @property
     def native_turn_id(self) -> str:
@@ -296,9 +304,6 @@ class AvibeAgent(BaseAgent):
         runtime.skills = self._turn_skill_scope(request, cwd)
         self._start_agent(turn, cwd, sections, environment)
         runtime.cwd = cwd
-        focus = compact_command(request.user_message or request.message, attachments=request.files)
-        if focus is not None:
-            return await self._compact(turn, focus)
         # Prepared before anything is dispatched (``core.native_dispatch_phase``).
         message = await self._render_input(session_id, request.message, request.files, request.input_metadata)
         if turn.stop_requested:
@@ -324,49 +329,6 @@ class AvibeAgent(BaseAgent):
             agent_input = await self._continuing_input(turn)
         await self._settle(turn)
         self._maybe_backfill_session_title(request, session_id)
-
-    async def _compact(self, turn: _Run, focus: str) -> None:
-        """``/compact [focus]``: a manual checkpoint between runs, answered (C-9 section 10).
-
-        The command is an action, not a message: its input row is accepted for the Turn but never consumed into
-        the context, and recovery never admits it (``_unconsumed_inputs``).
-        """
-        request, context = turn.request, turn.request.context
-        if turn.stop_requested:
-            return await self._settle_stopped(turn)
-        self.bind_agent_session_id(request, turn.session_id)
-        mark_backend_dispatch_attempted(context)
-        self.mark_runtime_turn_started(context)
-        indicator = getattr(self.controller, "processing_indicator", None)
-        if indicator is not None:
-            await indicator.delete_ack_message(request)
-        if turn.stop_requested:
-            # A Stop acknowledged while it prepared: no checkpoint starts (``handle_message``: any phase).
-            return await self._settle_stopped(turn)
-        async for event in turn.agent.compact(turn_id=turn.turn_id, focus=focus or None):
-            await self._on_event(turn, event)
-        outcome, lang = turn.compaction, self._language()
-        if outcome is None:
-            # The run ended before any compaction outcome (a Stop, a route failure): settled as any run.
-            return await self._settle(turn)
-        turn.settled = True
-        if isinstance(outcome, CompactionFinished):
-            before, after = f"{outcome.tokens_before:,}", f"{outcome.tokens_after_estimate:,}"
-            answer, failed = compact_text("done", lang, before=before, after=after), False
-        elif isinstance(outcome, CompactionSkipped):
-            answer, failed = compact_text("skipped", lang), False
-        else:
-            answer, failed = compact_text("failed", lang), True
-            if _source_failed(compaction_failure_kind(outcome.error)):
-                await self.record_model_hub_native_failure(context, f"manual compaction failed: {outcome.error}")
-        await self.emit_result_message(
-            context,
-            answer,
-            subtype="error" if failed else "success",
-            started_at=request.started_at,
-            request=request,
-            output=terminal_output_for(request),
-        )
 
     def _skill_scope(self, session_id: str) -> Optional[SkillScope]:
         runtime = self._runtimes.get(session_id)
@@ -544,9 +506,6 @@ class AvibeAgent(BaseAgent):
             self._steering.discard(request.attempt_id)
 
     async def _steer(self, run: _Run, request: SteerRequest) -> SteerResult:
-        if compact_command(request.text, attachments=request.files) is not None:
-            # A command, not a message: it never joins a running loop; it runs as its own Turn next.
-            return steer_result(SteerOutcome.REFUSED, reason="command")
         try:
             message_id = await asyncio.to_thread(self._attempt_leader_id, request.attempt_id)
             if message_id is None:
@@ -666,23 +625,12 @@ class AvibeAgent(BaseAgent):
             run.errors.append((event.kind, event.message))
         elif isinstance(event, RunEnded):
             run.reason = event.reason
-        elif isinstance(event, ContextExhausted):
-            run.exhausted = event
+        elif isinstance(event, CompactionFinished):
+            # Silent (C-9 section 10); the session's occupancy snapshot drops with the context.
+            self._note_total(run, event.tokens_after_estimate)
         elif isinstance(event, CompactionPaused):
-            # The one user-visible text of automatic compaction (C-9 section 10), told once, at the transition.
-            key = "pausedFailures" if event.cause == "failures" else "pausedIneffective"
-            try:
-                await self.controller.emit_agent_message(
-                    run.request.context, "notify", compact_text(key, self._language())
-                )
-            except Exception:
-                # Advisory, like narration: the pause is already committed, and the run goes on.
-                logger.exception("Avibe Agent could not tell Session %s that auto-compaction paused", run.session_id)
-        elif isinstance(event, (CompactionFinished, CompactionFailed, CompactionSkipped)):
-            run.compaction = event  # automatic ones are silent; a manual one is answered (``_compact``)
-            if isinstance(event, CompactionFinished):
-                # The session's occupancy snapshot drops with the context, before anything shows it.
-                self._note_total(run, event.tokens_after_estimate)
+            # Silent too: the pause clears by itself; a context that then cannot fit ends the Turn with the one notice.
+            logger.info("Avibe Agent auto-compaction paused for Session %s (%s)", run.session_id, event.cause)
 
     async def _settle(self, run: _Run) -> None:
         """Settle the Turn from the run's outcome (loop-control.md section 6).
@@ -741,10 +689,7 @@ class AvibeAgent(BaseAgent):
                 context, "result", "", level="silent", output=terminal_output_for(request)
             )
             return
-        exhausted = None
-        if run.exhausted is not None:
-            exhausted = context_exhausted_text(run.exhausted.limit, run.exhausted.parts, self._language())
-        await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal or exhausted)
+        await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal)
 
     async def _continuing_input(self, run: _Run) -> Optional[AgentInput]:
         """The input that continues a Turn whose run ended by design with inputs it accepted.
@@ -1026,8 +971,6 @@ class AvibeAgent(BaseAgent):
                     if row["turn_role"] == "initial" and row["turn_dispatch_text"]
                     else row["content_text"] or ""
                 )
-                if compact_command(row["content_text"], attachments=content.get("attachments")) is not None:
-                    continue  # a ``/compact`` command is an action, never a context input
                 inputs.append((row["id"], text_value, list(file_attachments_from_specs(specs) or ()), delivery))
         return inputs
 
@@ -1252,11 +1195,10 @@ class AvibeAgent(BaseAgent):
         cause: Optional[BaseException] = None,
         refusal: Optional[str] = None,
     ) -> None:
-        """A failed Turn's notice. ``refusal`` is copy shown instead of the error kind's: Model Hub's for a route it
-        refused (as at preflight), or what fills a context that cannot fit (C-9 section 8 d)."""
-        # A failure the served source produced replaces that served attempt, as for the other backends; a local
-        # one (a context that cannot fit, a Stop) leaves Model Hub's record as it is.
-        if _source_failed(kind or reason):
+        """A failed Turn's notice; a Model Hub ``refusal`` copy takes precedence, as at preflight."""
+        # A failure the served source produced replaces that served attempt, as for the other backends; any other
+        # (a context that cannot fit, a Stop, a local error) leaves Model Hub's record as it is.
+        if _source_failed(kind):
             await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
         await emit_backend_failure(
             self.controller,
@@ -1403,31 +1345,26 @@ class AvibeAgent(BaseAgent):
         return sorted(candidates)
 
     def _sessions_with_unconsumed_inputs(self) -> list[str]:
-        """Sessions with inputs accepted into an ``avibe`` Turn that no run consumed (T3); a ``/compact`` is none."""
+        """Sessions with inputs accepted into an ``avibe`` Turn that no run consumed (T3)."""
         with self._engine.connect() as conn:
-            rows = conn.execute(
-                select(messages.c.session_id, messages.c.content_text, messages.c.content_json)
-                .select_from(
-                    messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
-                        session_turns, session_turns.c.id == message_deliveries.c.turn_id
+            return sorted(
+                conn.execute(
+                    select(messages.c.session_id)
+                    .select_from(
+                        messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
+                            session_turns, session_turns.c.id == message_deliveries.c.turn_id
+                        )
                     )
-                )
-                .where(
-                    messages.c.session_id.is_not(None),
-                    messages.c.context_seq.is_(None),
-                    messages.c.type.in_(INPUT_TYPES),
-                    message_deliveries.c.state == "accepted",
-                    session_turns.c.backend == BACKEND,
-                )
-            ).all()
-        # The same rule as ``_unconsumed_inputs``: a ``/compact`` command is an action, never an input to admit.
-        return sorted(
-            {
-                session_id
-                for session_id, body, content in rows
-                if compact_command(body, attachments=_json_object(content).get("attachments")) is None
-            }
-        )
+                    .where(
+                        messages.c.session_id.is_not(None),
+                        messages.c.context_seq.is_(None),
+                        messages.c.type.in_(INPUT_TYPES),
+                        message_deliveries.c.state == "accepted",
+                        session_turns.c.backend == BACKEND,
+                    )
+                    .distinct()
+                ).scalars()
+            )
 
     def _session_workdir(self, session_id: str) -> str:
         with self._engine.connect() as conn:

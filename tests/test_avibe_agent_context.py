@@ -2,29 +2,28 @@
 
 Through the adapter's real boundaries (the transcript store on a temporary SQLite database, the Delivery rows, and
 the shared dispatcher), with a scripted provider: the limits come from the Model Hub model definition; a checkpoint
-carries the adapter's lookup command and state; ``/compact`` works as a Turn on every surface without entering the
-context; the pause and a context that cannot fit are told to the user; the first input after a checkpoint carries
-the full environment block. The host's parts are checked against real rows and the real read-only query guard.
+carries the adapter's lookup command and state, and the user sees nothing of it; the pause is silent, and a context
+that cannot fit ends the Turn with the one notice; Model Hub hears only of failures the served source produced; the
+first input after a checkpoint carries every environment field the context no longer shows. The host's parts are
+checked against real rows and the real read-only query guard.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
+import re
 from pathlib import Path
 
 import pytest
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert
 
 from core.agent_core.ai.provider import Done, ProviderError
 from core.agent_core.harness.context import SkillRef, StateRequest, text_tokens
 from core.agent_core.messages import ToolCallBlock, UserMessage, text
 from core.agent_core.tools.base import ToolResult
 from core.managed_skills import ManagedSkill
-from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
-from modules.agents.avibe.context import AvibeContextHost, SkillScope, compact_focus, mark_skill_loads
-from modules.im.base import FileAttachment
-from storage.models import agent_runs, agent_sessions, messages, run_definitions
+from modules.agents.avibe.context import AvibeContextHost, SkillScope, mark_skill_loads
+from storage.models import agent_runs, run_definitions
 from storage.read_only_query import run_read_only_query
 from tests.agent_core.fakes import FakeTool, assistant
 from tests.test_avibe_agent import (  # noqa: F401 (fixtures)
@@ -33,7 +32,6 @@ from tests.test_avibe_agent import (  # noqa: F401 (fixtures)
     _SCOPES,
     _Harness,
     _insert_session,
-    _until,
     engine,
     published,
     session,
@@ -122,76 +120,30 @@ async def test_the_first_input_after_a_checkpoint_carries_every_field_the_contex
     assert block.startswith("<environment>") and "\ncwd: " in block and "\nos: " in block
 
 
-# --- /compact --------------------------------------------------------------------------------------------
+async def test_each_resolved_hop_gets_its_own_output_budget(engine, session, tmp_path):
+    harness = None
 
+    async def busy_then_fallback(request, cancel):
+        # The retry resolves again, to a fallback whose output maximum equals its 62,000-token window.
+        harness.controller.hub_limits = {"context_window": 62_000, "max_output_tokens": 62_000}
+        yield ProviderError("rate_limit", "busy", True)
 
-async def test_compact_with_nothing_older_than_the_tail_answers_and_never_enters_the_context(
-    engine, session, tmp_path
-):
-    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("short"))], [Done(assistant("later"))]])
+    harness = _Harness(engine, tmp_path, "avibe", [busy_then_fallback, [Done(assistant("ok"))]])
+    harness.controller.hub_limits = {"context_window": 200_000, "max_output_tokens": 16_000}
     await _turn(harness, "hello")
-    await _turn(harness, "/compact")
-    assert len(harness.provider.requests) == 1  # no model call
-    assert _texts(harness, "result")[-1] == i18n_t("avibeAgent.compact.skipped", "en")
-    # The command is an action, not a message: it never reaches the model, now or after a restart.
-    harness.new_agent()
-    await _turn(harness, "next")
-    sent = harness.provider.requests[-1].messages
-    assert not any("/compact" in (block.text or "") for message in sent for block in message.content if hasattr(block, "text"))
+    assert [request.max_tokens for request in harness.provider.requests] == [16_000, 15_500]
+    assert _texts(harness, "result") == ["ok"]
 
 
-async def test_compact_with_a_focus_writes_a_checkpoint_and_says_so(engine, session, tmp_path):
-    scripts = [[Done(assistant("noted"))], [Done(assistant("ok"))], [Done(assistant(CHECKPOINT))]]
+async def test_a_compaction_refreshes_the_session_token_snapshot(engine, session, tmp_path):
+    scripts = [[Done(assistant("noted"))], [Done(assistant(CHECKPOINT))], [Done(assistant("done"))]]
     harness = _Harness(engine, tmp_path, "avibe", scripts)
-    await _turn(harness, tokens(3_000))
-    await _turn(harness, tokens(3_000))
-    await _turn(harness, "/compact the parser")
-    checkpoint = harness.provider.requests[-1]
-    assert is_checkpoint(checkpoint)
-    assert checkpoint.messages[-1].content[0].text.endswith(
-        "Additional focus from the user: the parser\n</context-checkpoint-request>"
-    )
+    noted: list[int] = []
+    harness.controller.note_session_tokens = lambda context, *, total: noted.append(total)
+    await _turn(harness, tokens(11_000))
+    await _turn(harness, tokens(9_000))
     compaction = [row for row in await harness.context_rows() if row.kind == "compaction"][0]
-    assert compaction.payload["reason"] == "manual" and compaction.payload["focus"] == "the parser"
-    reply = _texts(harness, "result")[-1]
-    assert reply == i18n_t(
-        "avibeAgent.compact.done",
-        "en",
-        before=f"{compaction.payload['tokens_before']:,}",
-        after=f"{compaction.payload['tokens_after_estimate']:,}",
-    )
-
-
-async def test_compact_sent_during_a_run_is_refused_as_a_steer_and_runs_as_its_own_turn(
-    engine, session, tmp_path, published
-):
-    started, release = asyncio.Event(), asyncio.Event()
-
-    async def slow(arguments, ctx):
-        started.set()
-        await release.wait()
-        return ToolResult((text("a.py"),))
-
-    call = ToolCallBlock(id="call_1", name="echo", arguments={})
-    scripts = [[Done(assistant("Listing.", calls=(call,)))], [Done(assistant("done"))]]
-    harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[FakeTool("echo", execute=slow)])
-    request = harness.request("list files")
-    turn_id = request.context.platform_specific["turn_token"]
-    running = asyncio.create_task(harness.agent.handle_message(request))
-    await started.wait()
-    native = harness.controller.started[0]
-    _, attempt_id = harness.open_steer("/compact", turn_id, native)
-    receipt = await harness.agent.steer_active_turn(
-        SteerRequest(SESSION, turn_id, native, "/compact", attempt_id=attempt_id),
-        ActiveSteerTarget("runtime", turn_id, request.context, request, harness.agent),
-    )
-    release.set()
-    await running
-    # Refused, so it falls back to the queue and runs as its own Turn after this one.
-    assert receipt.outcome is SteerOutcome.REFUSED
-    await _turn(harness, "/compact")
-    assert _texts(harness, "result")[-1] == i18n_t("avibeAgent.compact.skipped", "en")
-    assert not any("/compact" in str(row.message) for row in await harness.context_rows())
+    assert noted == [compaction.payload["tokens_after_estimate"]]
 
 
 async def test_a_skill_load_through_bash_is_marked_in_its_context_row(engine, session, tmp_path, published):
@@ -207,95 +159,6 @@ async def test_a_skill_load_through_bash_is_marked_in_its_context_row(engine, se
     assert result.payload["details"]["skill"] == {"name": "parser", "revision": ""}
 
 
-@pytest.mark.parametrize(
-    "typed,focus",
-    [
-        ("/compact", ""),
-        ("  /compact   the parser  ", "the parser"),
-        ("<@UBOT123> /compact", ""),  # Slack keeps the raw mention in a steer's text
-        ("<@!42> /compact the parser", "the parser"),
-        ("@Avibe /compact", ""),
-        ("/compact\nkeep the plan", "keep the plan"),
-        ("/compactify", None),
-        ("please /compact", None),
-        ("/compact@other", None),
-    ],
-)
-def test_the_command_is_recognized_however_the_surface_delivers_it(typed, focus):
-    assert compact_focus(typed) == focus
-
-
-async def test_a_stop_while_compact_prepares_settles_stopped_without_a_checkpoint(engine, session, tmp_path):
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    class Indicator:
-        async def delete_ack_message(self, request):
-            entered.set()
-            await release.wait()
-
-        def __getattr__(self, name):
-            async def ignored(*args, **kwargs):
-                return None
-
-            return ignored
-
-    scripts = [[Done(assistant("noted"))], [Done(assistant(CHECKPOINT))]]
-    harness = _Harness(engine, tmp_path, "avibe", scripts)
-    await _turn(harness, tokens(3_000))
-    harness.controller.processing_indicator = Indicator()
-    request = harness.request("/compact")
-    running = asyncio.create_task(harness.agent.handle_message(request))
-    await entered.wait()
-    assert await harness.agent.handle_stop(request)
-    release.set()
-    await running
-    assert len(harness.provider.requests) == 1  # no checkpoint call
-    assert not [row for row in await harness.context_rows() if row.kind == "compaction"]
-    assert harness.controller.terminals[-1]["is_error"] is False and _texts(harness, "result") == ["noted"]
-
-
-async def test_a_compact_turn_never_makes_its_session_a_recovery_candidate(engine, session, tmp_path):
-    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("short"))]])
-    await _turn(harness, "hello")
-    await _turn(harness, "/compact")
-    assert SESSION not in harness.new_agent()._sessions_with_unconsumed_inputs()
-
-
-async def test_compact_with_an_attachment_is_an_ordinary_message(engine, session, tmp_path):
-    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("looked"))]])
-    request = harness.request("/compact")
-    request.files = [FileAttachment(name="notes.txt", mimetype="text/plain", content=b"notes")]
-    await harness.agent.handle_message(request)
-    assert len(harness.provider.requests) == 1 and _texts(harness, "result") == ["looked"]
-
-
-@pytest.mark.parametrize(
-    "checkpoint,recorded",
-    [
-        ([ProviderError("server", "upstream failed", False)], 1),  # the served source failed
-        ([Done(assistant(CHECKPOINT, stop_reason="length"))], 0),  # the source answered; the checkpoint failed locally
-    ],
-    ids=["source failure", "local failure"],
-)
-async def test_a_failed_manual_compaction_is_reported_to_model_hub_only_when_the_source_failed(
-    engine, session, tmp_path, checkpoint, recorded
-):
-    reported: list[str] = []
-
-    async def record_native_failure(context, diagnostic) -> bool:
-        reported.append(diagnostic)
-        return False
-
-    scripts = [[Done(assistant("noted"))], [Done(assistant("ok"))], checkpoint]
-    harness = _Harness(engine, tmp_path, "avibe", scripts)
-    harness.controller.model_hub_runtime.record_native_failure = record_native_failure
-    await _turn(harness, tokens(3_000))
-    await _turn(harness, tokens(3_000))
-    await _turn(harness, "/compact")
-    assert _texts(harness, "error") == [i18n_t("avibeAgent.compact.failed", "en")]  # answered as a failure
-    assert len(reported) == recorded and harness.controller.terminals[-1]["is_error"] is True
-
-
 async def test_a_context_that_cannot_fit_locally_is_never_reported_as_a_source_failure(engine, session, tmp_path):
     reported: list[str] = []
 
@@ -308,37 +171,49 @@ async def test_a_context_that_cannot_fit_locally_is_never_reported_as_a_source_f
     await _turn(harness, tokens(30_000))
     assert not harness.provider.requests and not reported  # stopped before the provider: no source was involved
     assert harness.controller.terminals[-1]["is_error"] is True
+    # The one user-visible compaction text: the conversation has grown too long; start a new session.
+    assert _texts(harness, "notify") == [f"❌ {i18n_t('avibeAgent.error.contextExhausted', 'en')}"]
 
 
-async def test_compact_refreshes_the_session_token_snapshot(engine, session, tmp_path):
-    scripts = [[Done(assistant("noted"))], [Done(assistant("ok"))], [Done(assistant(CHECKPOINT))]]
+async def _failing_commit(harness: _Harness) -> None:
+    async def append_payloads(session_id, entries):
+        raise RuntimeError("database is locked")
+
+    harness.agent.store.append_payloads = append_payloads
+
+
+@pytest.mark.parametrize(
+    "case,recorded",
+    [("provider server error", 1), ("store failure after a good checkpoint", 0), ("provider refused", 1)],
+)
+async def test_model_hub_hears_only_of_failures_the_served_source_produced(engine, session, tmp_path, case, recorded):
+    reported: list[str] = []
+
+    async def record_native_failure(context, diagnostic) -> bool:
+        reported.append(diagnostic)
+        return False
+
+    if case == "provider server error":
+        scripts = [[ProviderError("server", "upstream failed", False)]]
+    elif case == "provider refused":
+        scripts = [[Done(assistant("", stop_reason="refusal"))]]
+    else:
+        scripts = [[Done(assistant("noted"))], [Done(assistant(CHECKPOINT))]]
     harness = _Harness(engine, tmp_path, "avibe", scripts)
-    noted: list[int] = []
-    harness.controller.note_session_tokens = lambda context, *, total: noted.append(total)
-    await _turn(harness, tokens(3_000))
-    await _turn(harness, tokens(3_000))
-    await _turn(harness, "/compact")
-    compaction = [row for row in await harness.context_rows() if row.kind == "compaction"][0]
-    assert noted[-1] == compaction.payload["tokens_after_estimate"]
-
-
-async def test_compact_as_the_first_message_never_titles_the_session(engine, session, tmp_path, published):
-    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("done"))]])
-    await _turn(harness, "/compact")
-    await _turn(harness, "Refactor the parser")
-
-    def title():
-        with engine.connect() as conn:
-            return conn.execute(select(agent_sessions.c.title).where(agent_sessions.c.id == SESSION)).scalar()
-
-    await _until(lambda: bool(title()), "the Session was never titled")
-    assert title().startswith("Refactor")
+    harness.controller.model_hub_runtime.record_native_failure = record_native_failure
+    if case == "store failure after a good checkpoint":
+        await _turn(harness, tokens(11_000))
+        await _failing_commit(harness)
+        await _turn(harness, tokens(9_000))
+    else:
+        await _turn(harness, "hello")
+    assert len(reported) == recorded and harness.controller.terminals[-1]["is_error"] is True
 
 
 # --- what the user is told -------------------------------------------------------------------------------
 
 
-async def test_the_pause_is_told_once_in_the_users_language(engine, session, tmp_path):
+async def test_a_pause_is_silent_and_a_context_that_then_cannot_fit_ends_with_the_one_notice(engine, session, tmp_path):
     failing = [Done(assistant(CHECKPOINT, stop_reason="length"))]
     scripts = [
         [Done(assistant("one"))],
@@ -348,22 +223,18 @@ async def test_the_pause_is_told_once_in_the_users_language(engine, session, tmp
         [Done(assistant("three"))],
         failing,
         [Done(assistant("four"))],
-        [Done(assistant("five"))],
     ]
     harness = _Harness(engine, tmp_path, "avibe", scripts, language="zh")
-    for body in (tokens(10_000), tokens(10_000), "a", "b", "c"):
+    for body in (tokens(10_000), tokens(10_000), "a", "b"):
         await _turn(harness, body)
-    assert _texts(harness, "notify") == [i18n_t("avibeAgent.compact.pausedFailures", "zh")]
-    assert _texts(harness, "result") == ["one", "two", "three", "four", "five"]
-
-
-async def test_a_context_that_cannot_fit_says_what_fills_it(engine, session, tmp_path):
-    harness = _Harness(engine, tmp_path, "avibe", [])
-    await _turn(harness, tokens(30_000))
-    assert not harness.provider.requests  # the provider never sees it
-    shown = _texts(harness, "notify")[-1]  # the backend failure notice
-    assert i18n_t("avibeAgent.contextPart.current_request", "en") in shown
-    assert "32,000" in shown
+    # Three failed checkpoints pause auto-compaction, and the user is told nothing.
+    assert _texts(harness, "result") == ["one", "two", "three", "four"] and not harness.rows("notify")
+    sent = len(harness.provider.requests)
+    await _turn(harness, tokens(8_000))
+    # Paused, nothing compacts: a request that cannot be sent ends the Turn with the one notice.
+    assert len(harness.provider.requests) == sent
+    assert not [row for row in await harness.context_rows() if row.kind == "compaction"]
+    assert _texts(harness, "notify") == [f"❌ {i18n_t('avibeAgent.error.contextExhausted', 'zh')}"]
 
 
 # --- the host's parts ------------------------------------------------------------------------------------
@@ -429,7 +300,6 @@ def _insert_definition(engine, **values) -> None:
 
 async def test_the_state_carries_skills_pending_work_and_the_environment(engine, session):
     many = {f"big{index}": _skill(f"big{index}", tokens(6_000)) for index in range(6)}
-    before = None
     skills = _Skills({"parser": _skill("parser", "Parse it.\n"), "huge": _skill("huge", tokens(9_000)), **many})
     _insert_definition(engine, id="wd_1", definition_type="watch", name="CI for #12", session_id=SESSION)
     with engine.begin() as conn:
@@ -442,7 +312,7 @@ async def test_the_state_carries_skills_pending_work_and_the_environment(engine,
         )
     host = AvibeContextHost(engine, environment=lambda _: {"cwd": "/work", "os": "macOS"}, skills=lambda _: skills)
     refs = (SkillRef("parser", "r1"), SkillRef("huge", "r2"), SkillRef("gone", "r3"))
-    state = await host.render_state(StateRequest(SESSION, refs, True))
+    state = await host.render_state(StateRequest(SESSION, refs))
     parser, huge, gone, pending, environment = state
     assert parser.startswith('<skill_content name="parser" revision="') and "Parse it." in parser
     assert text_tokens(huge) <= 5_000 and "vibe skill load -- huge" in huge  # cut, saying how to get all of it
@@ -451,16 +321,30 @@ async def test_the_state_carries_skills_pending_work_and_the_environment(engine,
     assert environment.startswith("<environment>") and "\ncwd: /work" in environment
     # Past the 25,000-token total, the remaining skills are named, not carried, and not even loaded; the catalog
     # is resolved once per checkpoint, however many skills it carries.
-    before, skills.loads.clear()
-    capped = await host.render_state(StateRequest(SESSION, tuple(SkillRef(name, "r") for name in many), False))
+    skills.loads.clear()
+    capped = await host.render_state(StateRequest(SESSION, tuple(SkillRef(name, "r") for name in many)))
     assert sum(text_tokens(item) for item in capped[:-2]) <= 25_000
-    assert capped[-2].startswith("<skills-left-out>") and "big5" in capped[-2]
+    assert capped[-3].startswith("<skills-left-out>") and "big5" in capped[-3]
     assert skills.snapshots == 2 and "big5" not in skills.loads
-    # Outside a run there is no environment block, and no pending work means no section.
+    # No pending work means no section; the environment block is always carried.
     with engine.begin() as conn:
         conn.execute(run_definitions.delete())
         conn.execute(agent_runs.delete())
-    assert await host.render_state(StateRequest(SESSION, (), False)) == []
+    (only,) = await host.render_state(StateRequest(SESSION, ()))
+    assert only.startswith("<environment>")
+
+
+async def test_every_skill_text_counts_against_the_one_total(engine, session):
+    # A long Session can carry hundreds of skills: bodies, unavailable notices, and the names left out all fit
+    # inside the 25,000-token total, the names listed up to 20 and then counted.
+    found = {f"skill-{index:03}": _skill(f"skill-{index:03}", tokens(3_000)) for index in range(0, 400, 2)}
+    host = AvibeContextHost(engine, environment=lambda _: {}, skills=lambda _: _Skills(found))
+    refs = tuple(SkillRef(f"skill-{index:03}", "r") for index in range(400))
+    *skill_texts, environment = await host.render_state(StateRequest(SESSION, refs))
+    assert sum(text_tokens(item) for item in skill_texts) <= 25_000
+    left_out = skill_texts[-1]
+    assert left_out.startswith("<skills-left-out>") and left_out.count("skill-") == 20
+    assert re.search(r", and \d+ more\.", left_out)
 
 
 async def test_a_successful_skill_load_is_recorded_in_the_bash_result():
@@ -484,23 +368,6 @@ async def test_a_successful_skill_load_is_recorded_in_the_bash_result():
         assert result.details["skill"] == {"name": "parser", "revision": "rev-parser"}, command
     for command in ("vibe skill load -- missing", "ls"):
         assert "skill" not in (await marked.execute({"command": command}, None)).details
-
-
-def test_every_compact_and_context_copy_has_english_and_chinese():
-    keys = [
-        "avibeAgent.compact.done",
-        "avibeAgent.compact.skipped",
-        "avibeAgent.compact.failed",
-        "avibeAgent.compact.pausedFailures",
-        "avibeAgent.compact.pausedIneffective",
-        "avibeAgent.error.contextExhaustedParts",
-        *[f"avibeAgent.contextPart.{name}" for name in (
-            "system", "tools", "history", "current_request", "latest_tool_batch", "output"
-        )],
-    ]
-    for key in keys:
-        english, chinese = i18n_t(key, "en"), i18n_t(key, "zh")
-        assert english != key and chinese != key and english != chinese, key
 
 
 # --- end to end, through the real provider adapter ------------------------------------------------------------

@@ -72,6 +72,8 @@ CHECKPOINT_TRUNCATED = (
 MAX_ROLLS = 2
 MAX_OVERFLOWS = 4
 PAUSE_AFTER = 3
+#: How long auto-compaction stays paused on one route; it clears by itself after this (section 10).
+PAUSE_SECONDS = 30 * 60
 INEFFECTIVE_RATIO = 0.75
 
 PROMPT_VERSION = "checkpoint-v2"
@@ -125,7 +127,6 @@ Write in three layers, from the broad to the specific. Use exactly these heading
 - Exact paths, identifiers, commands, links, ids, and values needed to continue.
 
 Rules: terse bullets, not paragraphs. Preserve exact paths, identifiers, commands, error strings, and numbers. Do not invent anything that is not above. Never write out secrets, tokens, or credentials; refer to them by name. Write in the language the user writes in."""
-CHECKPOINT_FOCUS = "Additional focus from the user: {focus}"
 CHECKPOINT_REQUEST_END = "</context-checkpoint-request>"
 
 CHECKPOINT_FRAMING = (
@@ -152,8 +153,6 @@ class StateRequest:
     session_id: str
     #: Skills the summarized rows loaded, latest load last, minus those still loaded in the kept rows.
     skills: tuple[SkillRef, ...]
-    #: True inside a run: the input that carried the environment may be summarized away.
-    mid_turn: bool
 
 
 class ContextHost(Protocol):
@@ -481,12 +480,8 @@ def rolling_cut(units: Sequence[Unit], fits: Callable[[int], bool]) -> Optional[
 # --- the checkpoint (context.md sections 6 and 7) ----------------------------------
 
 
-def checkpoint_request(focus: Optional[str] = None) -> UserMessage:
-    parts = [CHECKPOINT_REQUEST]
-    if focus and focus.strip():
-        parts.append(CHECKPOINT_FOCUS.format(focus=focus.strip()))
-    parts.append(CHECKPOINT_REQUEST_END)
-    return UserMessage((text("\n".join(parts)),))
+def checkpoint_request() -> UserMessage:
+    return UserMessage((text(f"{CHECKPOINT_REQUEST}\n{CHECKPOINT_REQUEST_END}"),))
 
 
 def checkpoint_text(message: AssistantMessage) -> str:
@@ -586,7 +581,6 @@ def compaction_payload(
     *,
     mode: str,
     reason: str,
-    focus: Optional[str],
     checkpoint: str,
     skills: Sequence[SkillRef],
     state: Sequence[str],
@@ -613,7 +607,6 @@ def compaction_payload(
         "version": 1,
         "mode": mode,
         "reason": reason,
-        "focus": focus,
         "summary": render_summary(
             checkpoint=checkpoint,
             files_read=read,

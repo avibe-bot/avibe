@@ -207,7 +207,7 @@ def test_an_edit_or_checkpoint_before_the_anchor_or_another_route_invalidates_it
     view = context_view(rows.rows)
     cut = next(index for index, unit in enumerate(view.units) if unit.seq == anchored.context_seq)
     payload = compaction_payload(
-        view, cut, mode="normal", reason="threshold", focus=None, checkpoint="checkpoint", skills=(), state=(),
+        view, cut, mode="normal", reason="threshold", checkpoint="checkpoint", skills=(), state=(),
         earlier_record=None, tokens_before=0, threshold=0, summarizer=None, usage=None,
     )
     rows.add("compaction", payload=payload)
@@ -282,7 +282,6 @@ def test_a_cut_never_separates_a_tool_call_from_its_result(seed):
             cut,
             mode="normal",
             reason="threshold",
-            focus=None,
             checkpoint="SUMMARY",
             skills=(),
             state=(),
@@ -358,11 +357,7 @@ def test_the_checkpoint_request_is_the_owner_approved_prompt_verbatim():
     contract = CONTRACT.read_text()
     section = contract[contract.index("## 11. Checkpoint request") :]
     block = re.search(r"```text\n(.*?)\n```", section, re.S).group(1)
-    focus_line = "Additional focus from the user: <focus, only for /compact <focus>>\n"
-    assert focus_line in block
-    assert checkpoint_request().content[0].text == block.replace(focus_line, "")
-    focused = checkpoint_request("  keep the migration plan  ").content[0].text
-    assert focused == block.replace(focus_line, "Additional focus from the user: keep the migration plan\n")
+    assert checkpoint_request().content[0].text == block
 
 
 def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_checkpoints():
@@ -384,7 +379,6 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
         cut,
         mode="normal",
         reason="threshold",
-        focus=None,
         checkpoint="# 1. Self and method\n- terse",
         skills=carried_skills(view, cut),
         state=("SKILLS",),
@@ -432,7 +426,6 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
         len(view.units) - 1,
         mode="dropped",
         reason="overflow",
-        focus=None,
         checkpoint="",
         skills=carried_skills(view, len(view.units) - 1),
         state=(),

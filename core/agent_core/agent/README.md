@@ -30,9 +30,9 @@ C-9 is on when the adapter passes `context=ContextConfig(host=..., scratch_dir=.
 error). Every conversation request then goes through one pipeline: projection,
 `budget()` on that request, the C-9 stage (stop, clear, checkpoint at T, overflow
 ladder), and the provider;
-a stage step that changes the context rebuilds the request. `agent.compact(turn_id=...,
-focus=...)` is `/compact`, refused while a run is active. Without a config nothing
-changes and an overflow ends the run `context_exhausted`. The `ContextHost` renders
+a stage step that changes the context rebuilds the request. Compaction is automatic
+and invisible; there is no manual entry point. Without a config nothing changes and
+an overflow ends the run `context_exhausted`. The `ContextHost` renders
 the `<earlier-record>` lookup and the state a checkpoint carries; the store adds
 `append_audit` (non-context audit rows), `append_payloads` (one transaction per C-9
 transition), `append_response(request=...)` (the estimate anchor), and each row's

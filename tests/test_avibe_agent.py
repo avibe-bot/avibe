@@ -515,7 +515,7 @@ async def test_a_stop_before_dispatch_settles_the_turn_as_stopped(engine, sessio
     ]
 
 
-async def test_a_setup_failure_after_the_route_resolved_fails_the_hub_attempt(
+async def test_a_setup_failure_after_the_route_resolved_fails_the_turn_and_not_the_source(
     engine, session, tmp_path, published, monkeypatch
 ) -> None:
     import core.system_prompt_injection as injection
@@ -535,8 +535,9 @@ async def test_a_setup_failure_after_the_route_resolved_fails_the_hub_attempt(
 
     await harness.agent.handle_message(harness.request("hello"))
 
-    # Through the same Hub-aware failure path as any other run failure, before any dispatch.
-    assert len(reported) == 1 and harness.controller.started == []
+    # A local failure before any dispatch: the Turn fails, and Model Hub, whose source never failed, hears nothing
+    # (only a failure the served source produced is recorded against the route).
+    assert reported == [] and harness.controller.started == []
     assert harness.controller.terminals[-1]["is_error"] is True
 
 

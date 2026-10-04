@@ -199,14 +199,16 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
 - **Overflow ladder**, bounded per request: the normal checkpoint; fork-summarize the prefix up to the cut nearest
   half the tokens, moved earlier until it fits (rolling); with no model call, move the earliest part out (dropped); stop and say what fills the context.
 - **Guards**: one compaction in flight per Session; 3 consecutive failures or 3 ineffective checkpoints pause
-  auto-compaction for the Session, and the user is told once. Manual `/compact [focus]` works on every surface,
-  clears the pause, and is answered. An automatic compaction is silent.
+  auto-compaction for the Session, silently; the pause clears by itself after 30 minutes or on another route, and
+  while it holds a request that cannot fit ends the turn. Compaction is invisible: there is no manual `/compact`
+  (owner decision, 2026-10-05), and the only user-visible text is the stop message of a context that cannot fit,
+  which suggests starting a new session with `/new`.
 - **Deferred**: background precompute, server-side compaction (hard constraint 8), automatic re-read of modified
   files, memory tools, and a lower effort for the checkpoint turn.
 
 Delivery: the core (`core/agent_core`, this contract) landed in PR #2360; the Avibe Agent integration (Model Hub
-capabilities, the scratch directory, the `<earlier-record>` SQL, state rendering, `/compact`, the pause notice, and an
-end-to-end hermetic test) is the second PR (`context.md` §9).
+capabilities, the scratch directory, the `<earlier-record>` SQL, state rendering, the stop message, and an end-to-end
+hermetic test) is the second PR (`context.md` §9).
 
 ### 5.3 Tools (C-7)
 
@@ -381,5 +383,6 @@ contracts and checked against the implementing lane's code before they are close
 | Product-wide media retention | `storage/media_service.py` | No media file is removed from disk today, whether Workbench upload, IM attachment, or Avibe Agent context snapshot (`<state>/agent_core/media`); session deletion only clears or cascades `media_objects` references. Retention needs one owner for every source. It must be fork-aware: a fork descendant keeps replaying the image tokens of a source Session that was deleted. Recorded as a v1 known limit in PR #2345. |
 | Steer receipt fencing in the shared Turn owner | `core/session_turns.py` (`_finish_steer`) | **Done in PR #2345** (orchestrator-authorized cross-lane fix): a negative receipt settles only a current attempt whose Deliveries are still steering or reconciling, and a caller that knows the attempt passes `expected_attempt_id`, so a late or duplicate receipt can no longer pull a Delivery out of a Turn that claimed it. Regression: `test_a_late_negative_steer_receipt_never_moves_a_delivery_its_attempt_no_longer_owns`. |
 | Live partial text and progress | every backend, Workbench and IM | No backend shows streamed partial text or live tool output today; the Avibe Agent drops `text_delta`, `thinking_delta`, and `tool_progress` (`loop-control.md` §6). Showing them needs a new UI surface for every backend, not an Avibe Agent change. |
+| Slash commands are actions | `core/session_turns.py`, `storage/message_deliveries.py`, `storage/messages_service.py` (every backend) | A user message that is a slash command (`/model`, `/memory`, … for the native backends) is an ordinary user row today, so each consumer re-parses text: Delivery segmentation can merge it with neighbouring queued messages, and title backfill can take it as the first prompt. Classify once at ingestion (a `metadata.command` marker, one helper as the legacy fallback); a command delivery never merges; titles skip command rows by the marker. Not part of the C-9 wave: the Avibe Agent has no slash command of its own (owner decision, 2026-10-05). |
 | Hooks with context management | `core/agent_core/agent/` (C-3, C-9) | In v1, an Agent with a `ContextConfig` takes no user hooks: `before_model` rewrites and `before_tool`/`after_tool` decisions each changed what C-9 owns (the route, the projected prefix, artifacts, the checkpoint budget). A post-v1 design defines which hook outputs C-9 accepts and how it accounts for them before the two are combined (owner decision, PR #2360 round 5). |
 | Call-instance identity for job files | `core/agent_core/tools/` (`ToolContext`, job `meta.json`), the adapter | A tool call's identity is its instance: the owning response plus the call id, because providers reuse ids. Rows are matched by context order; job files still fall back to the clock (`find_job(created_since)`, J5's result-after-creation check), which assumes a non-decreasing wall clock between a response's commit and its job's start. Threading the call instance (owning response row and `context_seq`) into `ToolContext` and the job meta would remove that last residual. |

@@ -9,7 +9,7 @@
 * ``render_state`` renders, from their own stores, the state a checkpoint
   carries: the bodies of the skills the summarized rows loaded, the Session's
   pending Watches, Tasks, and delegated Runs, and the full environment block
-  when the checkpoint happened inside a run.
+  (a checkpoint always happens inside a run).
 
 A skill load is a ``bash`` call to ``vibe skill load``; ``mark_skill_loads``
 records the skill's name and revision in that call's result details, which is
@@ -35,10 +35,12 @@ SKILL_TOKENS = 5_000
 SKILLS_TOKENS = 25_000
 #: Below this much of the total left, no further skill can carry anything useful.
 _SKILL_FLOOR = 200
+#: The skills left out are named, at most this many, then "and N more"; that notice is kept inside the total.
+_LISTED = 20
+_NAME_CHARS = 64
+_NOTICE_TOKENS = 600
 
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
-# ``/compact [focus]``, after any leading mentions a surface keeps in the text (Slack's ``<@U…>``, ``@name``).
-_COMPACT = re.compile(r"\s*(?:(?:<@!?[A-Za-z0-9_]+>|@[^\s/]+)\s+)*/compact(?:\s+(?P<focus>.*?))?\s*", re.DOTALL)
 _SKILL_LOAD = re.compile(
     r"(?:^|[\s;&|(/])vibe\s+skill\s+load\s+(?:--\s+)?(?P<quote>['\"]?)(?P<name>[A-Za-z0-9][A-Za-z0-9._:-]*)(?P=quote)"
 )
@@ -57,20 +59,6 @@ def output_budget(capabilities: Any) -> int:
         return DEFAULT_MAX_OUTPUT_TOKENS
     window = capabilities.context_window or DEFAULT_CONTEXT_WINDOW
     return min(maximum, max(DEFAULT_MAX_OUTPUT_TOKENS, window // 4))
-
-
-def compact_focus(text: Optional[str]) -> Optional[str]:
-    """``/compact [focus]``'s focus ("" without one), or None when ``text`` is not that command."""
-    match = _COMPACT.fullmatch(text or "")
-    return (match.group("focus") or "").strip() if match is not None else None
-
-
-def compact_command(text: Optional[str], *, attachments: Any = None) -> Optional[str]:
-    """The one rule for what is a ``/compact`` command, live, as a steer, and in recovery: its focus, or None.
-
-    A ``/compact`` carrying files is an ordinary message, so nothing of it is ever dropped.
-    """
-    return None if attachments else compact_focus(text)
 
 
 def budgeted(selection: Any) -> Any:
@@ -155,8 +143,7 @@ class AvibeContextHost:
         pending = await asyncio.to_thread(self._pending_work, request.session_id)
         if pending:
             texts.append(pending)
-        if request.mid_turn:
-            texts.append(render_environment(self._environment(request.session_id)))
+        texts.append(render_environment(self._environment(request.session_id)))
         return texts
 
     async def _skill_texts(self, session_id: str, skills: Sequence[SkillRef]) -> list[str]:
@@ -164,8 +151,11 @@ class AvibeContextHost:
             return []
         scope = self._skills(session_id)
         catalog = await asyncio.to_thread(scope.catalog) if scope is not None else None
+        from core.skill_observability import skill_revision
+
         texts: list[str] = []
-        budget = SKILLS_TOKENS
+        # Every skill text counts against the one total, the left-out notice's room reserved first.
+        budget = SKILLS_TOKENS - _NOTICE_TOKENS
         left_out: list[str] = []
         for ref in skills:
             if budget < _SKILL_FLOOR:
@@ -173,23 +163,23 @@ class AvibeContextHost:
                 continue
             skill = await asyncio.to_thread(scope.load, ref.name, catalog) if scope is not None else None
             if skill is None or skill.body is None:
-                texts.append(
+                text: Optional[str] = (
                     f'<skill-unavailable name="{_attr(ref.name)}">This skill no longer loads. Run '
                     f"`vibe skill load -- {ref.name}` if you still need it.</skill-unavailable>"
                 )
-                continue
-            from core.skill_observability import skill_revision
-
-            text = _skill_text(ref.name, skill_revision(skill) or ref.revision, skill.body, min(SKILL_TOKENS, budget))
-            if text is None:
+            else:
+                limit = min(SKILL_TOKENS, budget)
+                text = _skill_text(ref.name, skill_revision(skill) or ref.revision, skill.body, limit)
+            if text is None or text_tokens(text) > budget:
                 left_out.append(ref.name)
                 continue
             budget -= text_tokens(text)
             texts.append(text)
         if left_out:
-            names = ", ".join(left_out)
+            listed = ", ".join(name[:_NAME_CHARS] for name in left_out[:_LISTED])
+            more = f", and {len(left_out) - _LISTED} more" if len(left_out) > _LISTED else ""
             texts.append(
-                f"<skills-left-out>Over the {SKILLS_TOKENS:,}-token budget for skills: {names}. Run "
+                f"<skills-left-out>Over the {SKILLS_TOKENS:,}-token budget for skills: {listed}{more}. Run "
                 "`vibe skill load -- <name>` for any you still need.</skills-left-out>"
             )
         return texts

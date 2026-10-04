@@ -184,6 +184,14 @@ def _count(value: Any) -> bool:
     return type(value) is int and value >= 0
 
 
+#: ``AgentState.context``: the guard; a pause records when and on which route it began (C-9 section 10).
+_CONTEXT_STATE = _object(
+    {"failures": _count, "ineffective": _count, "paused": lambda value: type(value) is bool},
+    {
+        "paused_at": lambda value: type(value) in (int, float) and value >= 0,
+        "paused_route": _reads(origin_from_dict),
+    },
+)
 #: ``ModelResponse.request``: what C-9 records about the request a response answered.
 _REQUEST_FACTS = _object({"tokens": _count})
 _PAYLOAD_SHAPES: dict[str, Check] = {
@@ -191,7 +199,7 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
         {
             "version": _one_of(1),
             "mode": _one_of("normal", "rolling", "dropped"),
-            "reason": _one_of("manual", "threshold", "overflow"),
+            "reason": _one_of("threshold", "overflow"),
             "summary": _string,
             "checkpoint": _string,
             "state": _list(_string),
@@ -205,7 +213,6 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
             "threshold": _integer,
         },
         {
-            "focus": _nullable(_string),
             "previous_compaction_id": _nullable(_string),
             "current_request": _nullable(_string),
             "current_request_message_id": _nullable(_string),
@@ -225,7 +232,7 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
     ),
     "agent_state": _object(
         {"version": _one_of(1), "state": lambda value: isinstance(value, dict)},
-        {"context": _object({"failures": _count, "ineffective": _count, "paused": lambda value: type(value) is bool})},
+        {"context": _CONTEXT_STATE},
     ),
 }
 

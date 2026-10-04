@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Literal, Optional, Union
 
 RunEndReason = Literal["completed", "aborted", "error", "ended_by_hook", "context_exhausted"]
-CompactionReason = Literal["manual", "threshold", "overflow"]
+CompactionReason = Literal["threshold", "overflow"]
 CompactionMode = Literal["normal", "rolling", "dropped"]
 
 
@@ -107,15 +107,6 @@ class CompactionFailed:
 
 
 @dataclass(frozen=True)
-class CompactionSkipped:
-    """A manual compaction found nothing older than the kept tail to summarize (C-9 section 10)."""
-
-    turn_id: str
-    seq: int
-    reason: CompactionReason
-
-
-@dataclass(frozen=True)
 class CompactionPaused:
     """Auto-compaction paused for the Session (C-9 section 10); emitted once, at the transition."""
 
@@ -167,7 +158,6 @@ AgentEvent = Union[
     CompactionStarted,
     CompactionFinished,
     CompactionFailed,
-    CompactionSkipped,
     CompactionPaused,
     ContextExhausted,
     RunEnded,
