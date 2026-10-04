@@ -178,7 +178,7 @@
         "summarized_to_seq": {
           "type": "integer",
           "minimum": 0,
-          "description": "The last `context_seq` moved out of the context; the `<earlier-record>` lookup reads through it."
+          "description": "The last `context_seq` moved out of the context; the `<earlier-record>` hint names it."
         },
         "previous_compaction_id": {
           "type": [
@@ -205,7 +205,7 @@
             "type": "string"
           },
           "maxItems": 50,
-          "description": "Paths given to `read` and never to `write` or `edit`, cumulative, most recently touched first, at most 50."
+          "description": "Paths given to `read` and never to `write` or `edit`, cumulative, most recently touched first as the calls gave them, at most 50; only the summary's display is cut."
         },
         "files_read_more": {
           "type": "integer",
@@ -218,7 +218,7 @@
             "type": "string"
           },
           "maxItems": 50,
-          "description": "Paths given to `write` or `edit`, cumulative, most recently touched first, at most 50."
+          "description": "Paths given to `write` or `edit`, cumulative, most recently touched first as the calls gave them, at most 50; only the summary's display is cut."
         },
         "files_modified_more": {
           "type": "integer",
@@ -227,7 +227,7 @@
         },
         "skills": {
           "type": "array",
-          "description": "Names of the skills the summarized rows loaded, cumulative, minus those whose load result is still in the context: the most recently loaded first, at most 20, each cut to 160 UTF-8 bytes. Listed by name in `summary` (`<skills-loaded>`); never their bodies.",
+          "description": "Names of the skills the summarized rows loaded, cumulative, minus those whose load result is still in the context: the most recently loaded first, at most 20, as loaded. Listed by name in `summary` (`<skills-loaded>`, each displayed as one line of plain text); never their bodies.",
           "items": {
             "type": "object",
             "required": [

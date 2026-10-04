@@ -198,7 +198,7 @@ class AvibeAgent(BaseAgent):
         )
         self._providers = providers or registry_providers(media_loader=self.media)
         # C-9: the Session parts a checkpoint carries (context.md section 9).
-        self.context_host = AvibeContextHost(environment=self._environment)
+        self.context_host = AvibeContextHost(self._engine, environment=self._environment)
         self._tool_suite = tool_suite
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.

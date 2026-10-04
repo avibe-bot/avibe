@@ -2,10 +2,9 @@
 
 ``AvibeContextHost`` is the loop's ``ContextHost``:
 
-* ``earlier_record`` is the lookup command a checkpoint carries in
-  ``<earlier-record>``: one ``vibe data query`` over the Session and its fork
-  ancestry (followed in the SQL itself, up to ``_FORK_DEPTH`` forks), up to the
-  last summarized ``context_seq``;
+* ``earlier_record`` is the short hint a checkpoint carries in ``<earlier-record>``:
+  where the earlier conversation is stored and how far it goes, and the Session's
+  fork source when it is a fork. The model writes its own ``vibe data query``;
 * ``render_state`` renders the state a checkpoint carries: the environment's core
   fields (a checkpoint always happens inside a run), bounded by construction.
 
@@ -22,33 +21,14 @@ import re
 from dataclasses import replace
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from core.agent_core.harness.context import ITEM_BYTES, StateRequest, truncate_middle_bytes
+from sqlalchemy.engine import Engine
+
+from core.agent_core.harness.context import StateRequest, display
 from core.agent_core.tools.base import Tool, ToolContext, ToolResult, ToolSpec
 from modules.agents.avibe.prompt import render_environment
 
-_SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
 #: The tags of the block ``vibe skill load`` writes for each skill it loads (``render_skill_content``).
 _SKILL_TAG = re.compile(r'<skill_content name="([^"]*)"[^>]*>|</skill_content>')
-#: How many forks up the lookup follows a Session's ancestry.
-_FORK_DEPTH = 16
-#: The lookup: the Session and its fork sources, each up to the least fork bound below it (``chain``), then what the
-#: model read of their ``messages`` rows: each block of the model message in order, its text or the decoded string
-#: values of a tool call's arguments (a path it read or wrote), else the display text. One size whatever the
-#: ancestry; ``{session}`` and ``{through}`` are filled in, ``KEYWORD`` is the model's.
-_LOOKUP = (
-    "with recursive chain(id, bound, depth) as (select '{session}', {through}, 0"
-    " union all select json_extract(s.metadata_json, '$.fork_source_session_id'),"
-    " min(c.bound, json_extract(s.metadata_json, '$.fork_source_context_seq')), c.depth + 1"
-    " from chain c join agent_sessions s on s.id = c.id"
-    f" where c.depth < {_FORK_DEPTH} and json_extract(s.metadata_json, '$.fork_source_session_id') is not null"
-    " and json_extract(s.metadata_json, '$.fork_source_context_seq') is not null)"
-    " select context_seq, type, text from (select m.context_seq, m.type, coalesce((select"
-    " group_concat(coalesce(json_extract(b.value, '$.text'), (select group_concat(t.atom, ' ')"
-    " from json_tree(b.value, '$.arguments') t where t.type = 'text')), char(10))"
-    " from json_each(m.content_json, '$.model.message.content') b), m.content_text) as text"
-    " from messages m join chain c on m.session_id = c.id and m.context_seq <= c.bound)"
-    " where text like '%KEYWORD%' order by context_seq"
-)
 
 
 def output_budget(capabilities: Any) -> int:
@@ -78,30 +58,37 @@ def budgeted(selection: Any) -> Any:
 class AvibeContextHost:
     """The loop's ``ContextHost`` for the Avibe Agent."""
 
-    def __init__(self, *, environment: Callable[[str], Mapping[str, str]]) -> None:
+    def __init__(self, engine: Engine, *, environment: Callable[[str], Mapping[str, str]]) -> None:
+        self._engine = engine
         self._environment = environment
 
     def earlier_record(self, session_id: str, through_seq: int) -> Optional[str]:
-        """``vibe data query`` over the inputs and replies the checkpoint summarized; the model replaces ``KEYWORD``.
+        """Where the earlier conversation is stored, for the model to search with its own ``vibe data query``.
 
-        It searches what the model read, from ``messages`` only, which every caller of ``vibe data query`` may read;
-        tool outputs can be run again.
+        Not a command: the system prompt already teaches ``vibe data query``, and the rows it names are in
+        ``messages``, which every caller may read.
         """
-        if not _SESSION_ID.fullmatch(session_id):
-            return None  # never quoted into a command
-        sql = _LOOKUP.replace("{session}", session_id).replace("{through}", str(int(through_seq)))
-        return f'vibe data query --limit 100 --sql "{sql}"'
+        from storage.agent_transcript import fork_link
+
+        with self._engine.connect() as conn:
+            link = fork_link(conn, session_id)
+        hint = (
+            "The full earlier conversation is stored in Avibe. Search it with `vibe data query` against table messages,"
+            f" session_id = '{display(session_id)}', context_seq <= {int(through_seq)}; the model-facing text is in"
+            " content_json.model.message."
+        )
+        if link is not None:
+            hint += f"\nThis Session was forked from {display(link[0])} at context_seq {int(link[1])}."
+        return hint
 
     async def render_state(self, request: StateRequest) -> list[str]:
         return [_environment(self._environment(request.session_id))]
 
 
 def _environment(fields: Mapping[str, str]) -> str:
-    """The environment's core fields, bounded by construction (section 7): no Watches, each field cut in the middle
-    to ``ITEM_BYTES``."""
-    return render_environment(
-        {name: truncate_middle_bytes(value, ITEM_BYTES) for name, value in fields.items() if name != "watches"}
-    )
+    """The environment's core fields, bounded by construction (section 7): no Watches, each field one line of plain
+    text cut to 160 bytes (``display``)."""
+    return render_environment({name: display(value) for name, value in fields.items() if name != "watches"})
 
 
 class _SkillLoadMarking:

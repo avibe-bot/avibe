@@ -21,7 +21,6 @@ from core.agent_core.harness.context import StateRequest, text_tokens
 from core.agent_core.messages import ToolCallBlock, UserMessage, text
 from core.agent_core.tools.base import ToolResult
 from modules.agents.avibe.context import AvibeContextHost, mark_skill_loads
-from storage.read_only_query import run_read_only_query
 from tests.agent_core.fakes import FakeTool, assistant
 from tests.test_avibe_agent import (  # noqa: F401 (fixtures)
     SESSION,
@@ -96,7 +95,7 @@ async def test_a_threshold_checkpoint_carries_the_lookup_and_the_state_and_shows
     assert is_checkpoint(harness.provider.requests[1])
     compaction = [row for row in await harness.context_rows() if row.kind == "compaction"][0]
     through = compaction.payload["summarized_to_seq"]
-    assert f"chain(id, bound, depth) as (select '{SESSION}', {through}, 0" in compaction.payload["summary"]
+    assert f"session_id = '{SESSION}', context_seq <= {through}" in compaction.payload["summary"]
     # Inside a run, the checkpoint carries the full environment block.
     assert any(item.startswith("<environment>") for item in compaction.payload["state"])
     # Silent: the user sees the two replies and nothing about the compaction.
@@ -321,87 +320,23 @@ async def test_failed_checkpoints_are_silent_and_a_context_that_then_cannot_fit_
 # --- the host's parts ------------------------------------------------------------------------------------
 
 
-async def test_the_lookup_command_reads_the_summarized_rows_of_the_session_and_its_fork_source(
-    engine, session, tmp_path
-):
-    scripts = [[Done(assistant("first reply"))], [Done(assistant("second reply"))], [Done(assistant("child reply"))]]
-    harness = _Harness(engine, tmp_path, "avibe", scripts)
-    await _turn(harness, "parser keyword one")
-    await _turn(harness, "parser keyword two")
-    rows = await harness.context_rows()
-    anchor = [row for row in rows if row.kind == "response"][0]  # the fork inherits through the first reply
+async def test_the_earlier_record_hint_names_the_session_its_bound_and_its_fork_source(engine, session):
+    # A short factual hint, not a command: the model writes its own query (the system prompt teaches it how).
     with engine.begin() as conn:
         metadata = {
             "created_via": "session_fork",
             "fork_source_session_id": SESSION,
-            "fork_source_message_id": anchor.row_id,
-            "fork_source_context_seq": anchor.context_seq,
+            "fork_source_message_id": "msg_anchor",
+            "fork_source_context_seq": 3,
         }
         _insert_session(conn, "ses_child", _SCOPES["avibe"], metadata)
-    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("child reply"))]], session_id="ses_child")
-    await _turn(child, "parser keyword child")
-    child_rows = await child.context_rows()
-    host = AvibeContextHost(environment=lambda _: {})
-    command = host.earlier_record("ses_child", child_rows[-1].context_seq)
-    assert command.startswith('vibe data query --limit 100 --sql "') and command.endswith('"')
-    sql = command[len('vibe data query --limit 100 --sql "') : -1]
-    found = run_read_only_query(sql.replace("KEYWORD", "parser keyword"), page_request=None).rows
-    texts = [row["text"] for row in found]
-    # The source's rows only through the fork anchor, then the child's own: never the source's later turn.
-    assert any("parser keyword one" in text for text in texts) and any("parser keyword child" in text for text in texts)
-    assert not any("parser keyword two" in text for text in texts)
-    # It searches what the model read, not the display text: the environment block lives only in the model input.
-    found = run_read_only_query(sql.replace("KEYWORD", "cwd: "), page_request=None).rows
-    assert found and all(row["type"] == "user" and "<environment>" in row["text"] for row in found)
-
-
-async def test_the_lookup_command_finds_a_path_the_model_wrote_in_a_tool_call(engine, session, tmp_path):
-    # A path that fell out of the bounded artifact lists is still in the call that wrote it: the lookup searches the
-    # decoded tool-call arguments too, whatever the script.
-    call = ToolCallBlock("w1", "write", {"path": "src/解析器/module.py", "content": "x"})
-    scripts = [[Done(assistant(calls=[call]))], [Done(assistant("written"))]]
-    harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[FakeTool("write")])
-    await _turn(harness, "write the module")
-    rows = await harness.context_rows()
-    command = AvibeContextHost(environment=lambda _: {}).earlier_record(SESSION, rows[-1].context_seq)
-    sql = command[len('vibe data query --limit 100 --sql "') : -1].replace("KEYWORD", "src/解析器/module.py")
-    found = run_read_only_query(sql, page_request=None).rows
-    assert len(found) == 1 and "src/解析器/module.py" in found[0]["text"]
-
-
-async def test_the_lookup_command_is_one_size_whatever_the_fork_ancestry_and_reaches_16_forks_up(
-    engine, session, tmp_path
-):
-    def fork(conn, child: str, source: str, anchor) -> None:
-        metadata = {
-            "created_via": "session_fork",
-            "fork_source_session_id": source,
-            "fork_source_message_id": anchor.row_id,
-            "fork_source_context_seq": anchor.context_seq,
-        }
-        _insert_session(conn, child, _SCOPES["avibe"], metadata)
-
-    root = _Harness(engine, tmp_path, "avibe", [[Done(assistant("root reply"))]])
-    await _turn(root, "deep keyword root")
-    anchor = [row for row in await root.context_rows() if row.kind == "response"][-1]
-    with engine.begin() as conn:
-        for level in range(1, 21):
-            fork(conn, f"ses_{level:02}", SESSION if level == 1 else f"ses_{level - 1:02}", anchor)
-    middle = _Harness(engine, tmp_path, "avibe", [[Done(assistant("middle reply"))]], session_id="ses_20")
-    await _turn(middle, "deep keyword middle")
-    anchor = [row for row in await middle.context_rows() if row.kind == "response"][-1]
-    with engine.begin() as conn:
-        for level in range(21, 31):
-            fork(conn, f"ses_{level:02}", f"ses_{level - 1:02}", anchor)
-    host = AvibeContextHost(environment=lambda _: {})
-    command = host.earlier_record("ses_30", anchor.context_seq)
-    # One size whatever the ancestry: thirty forks deep, it is the command of a Session with none.
-    assert command == host.earlier_record(SESSION, anchor.context_seq).replace(SESSION, "ses_30")
-    sql = command[len('vibe data query --limit 100 --sql "') : -1].replace("KEYWORD", "deep keyword")
-    texts = [row["text"] for row in run_read_only_query(sql, page_request=None).rows]
-    # Ten forks up is within the 16 the lookup follows; thirty is past it.
-    assert any("deep keyword middle" in text for text in texts)
-    assert not any("deep keyword root" in text for text in texts)
+    host = AvibeContextHost(engine, environment=lambda _: {})
+    hint = host.earlier_record("ses_child", 7)
+    assert "`vibe data query`" in hint and "table messages" in hint and "content_json.model.message" in hint
+    assert "session_id = 'ses_child', context_seq <= 7" in hint
+    assert hint.endswith(f"This Session was forked from {SESSION} at context_seq 3.")
+    # A Session that is no fork has no fork line.
+    assert "forked" not in host.earlier_record(SESSION, 7)
 
 
 async def test_the_state_is_the_environment_core_fields_each_bounded_in_bytes(engine, session):
@@ -415,7 +350,7 @@ async def test_the_state_is_the_environment_core_fields_each_bounded_in_bytes(en
         "timezone": "Zone/" + "時" * 2_000,
         "watches": 'wd_1 "CI" command running',
     }
-    host = AvibeContextHost(environment=lambda _: fields)
+    host = AvibeContextHost(engine, environment=lambda _: fields)
     (environment,) = await host.render_state(StateRequest(SESSION))
     lines = environment.splitlines()[1:-1]
     assert [line.split(": ", 1)[0] for line in lines] == ["cwd", "os", "shell", "date", "timezone"]

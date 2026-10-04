@@ -419,7 +419,7 @@ def _own_bound(conn: Connection, session_id: str) -> Optional[int]:
 def _next_context_seq(conn: Connection, session_id: str) -> int:
     top = _own_bound(conn, session_id)
     if top is None:
-        link = _fork_link(conn, session_id)
+        link = fork_link(conn, session_id)
         top = link[1] if link is not None else 0
     return top + 1
 
@@ -455,7 +455,7 @@ def _turn_origin(conn: Connection, session_id: str, agent_name: Optional[str] = 
                 .select_from(agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id))
                 .where(agent_sessions.c.id == session_id)
             ).first()
-            if _fork_link(conn, session_id) is not None
+            if fork_link(conn, session_id) is not None
             else None
         )
         if home is None:
@@ -495,7 +495,7 @@ def context_bound(conn: Connection, session_id: str) -> int:
     A fork of a Session with no running Turn inherits all of it: a Turn that ended
     silently or was stopped shows no row a message anchor could name.
     """
-    link = _fork_link(conn, session_id)
+    link = fork_link(conn, session_id)
     return max(value for value in (_own_bound(conn, session_id), link[1] if link else 0) if value is not None)
 
 
@@ -508,7 +508,7 @@ def resolve_fork_anchor_seq(conn: Connection, source_session_id: str, anchor_mes
     this in its own transaction and persists the result as the child's
     ``fork_source_context_seq``.
     """
-    link = _fork_link(conn, source_session_id)
+    link = fork_link(conn, source_session_id)
     inherited = link[1] if link is not None else 0
     if anchor_message_id is None:
         return inherited
@@ -635,7 +635,7 @@ def source_tool_result(
     return _event_entry(row["session_id"], row) if row is not None else None
 
 
-def _fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:
+def fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:
     """``(source_session_id, anchor_seq)`` when the Session inherits a context."""
     raw = conn.execute(
         select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == session_id)
@@ -660,7 +660,7 @@ def _ancestry(conn: Connection, session_id: str) -> list[tuple[str, Optional[int
     chain: list[tuple[str, Optional[int]]] = [(session_id, None)]
     seen = {session_id}
     member, bound = session_id, None
-    while (link := _fork_link(conn, member)) is not None:
+    while (link := fork_link(conn, member)) is not None:
         source_id, anchor_seq = link
         if source_id in seen:
             raise TranscriptError(f"fork ancestry of Session {session_id} loops back to {source_id}")

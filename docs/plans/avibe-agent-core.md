@@ -193,7 +193,7 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
   Session's scratch directory, everything else denied; at most 5 tool rounds, each tool bounded by the room left in
   the window. Its messages are audit rows, never context.
 - **After a checkpoint** the request is the rebuilt system prompt, the `<context-checkpoint>` message (framing,
-  checkpoint, cumulative `<artifacts>`, an `<earlier-record>` lookup, `<current-request>`), state rendered from its
+  checkpoint, cumulative `<artifacts>`, an `<earlier-record>` hint, `<current-request>`), state rendered from its
   own stores when the checkpoint was written (the environment's core fields; the skills it loaded are listed by name
   in the checkpoint, for the model to load again), and the verbatim tail. No synthetic "continue" message.
 - **Overflow ladder**, bounded per request: the normal checkpoint; fork-summarize the prefix up to the cut nearest
@@ -207,7 +207,7 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
   files, memory tools, and a lower effort for the checkpoint turn.
 
 Delivery: the core (`core/agent_core`, this contract) landed in PR #2360; the Avibe Agent integration (Model Hub
-capabilities, the scratch directory, the `<earlier-record>` SQL, state rendering, the stop message, and an end-to-end
+capabilities, the scratch directory, the `<earlier-record>` hint, state rendering, the stop message, and an end-to-end
 hermetic test) is the second PR (`context.md` §9).
 
 ### 5.3 Tools (C-7)

@@ -33,7 +33,7 @@ ladder), and the provider;
 a stage step that changes the context rebuilds the request. Compaction is automatic
 and invisible; there is no manual entry point. Without a config nothing changes and
 an overflow ends the run `context_exhausted`. The `ContextHost` renders
-the `<earlier-record>` lookup and the state a checkpoint carries; the store adds
+the `<earlier-record>` hint and the state a checkpoint carries; the store adds
 `append_audit` (non-context audit rows), `append_payloads` (one transaction per C-9
 transition), `append_response(request=...)` (the estimate anchor), and each row's
 `created_at`. The SQLite and adapter stores implement all of it, and
