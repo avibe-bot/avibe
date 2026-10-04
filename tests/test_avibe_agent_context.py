@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 
 import pytest
-from sqlalchemy import insert
+from sqlalchemy import insert, select, update
 
 from core.agent_core.ai.provider import Done
 from core.agent_core.harness.context import SkillRef, StateRequest, text_tokens
@@ -24,7 +24,7 @@ from core.managed_skills import ManagedSkill
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.avibe.context import AvibeContextHost, SkillScope, compact_focus, mark_skill_loads
 from modules.im.base import FileAttachment
-from storage.models import agent_runs, run_definitions
+from storage.models import agent_runs, messages, run_definitions
 from storage.read_only_query import run_read_only_query
 from tests.agent_core.fakes import FakeTool, assistant
 from tests.test_avibe_agent import (  # noqa: F401 (fixtures)
@@ -285,6 +285,66 @@ async def test_a_failed_manual_compaction_is_reported_to_model_hub(engine, sessi
     assert len(reported) == 1 and harness.controller.terminals[-1]["is_error"] is True
 
 
+async def test_compact_with_an_attachment_survives_a_restart_before_it_was_consumed(engine, session, tmp_path):
+    # An ordinary message live, so an ordinary message to recovery too: one rule decides what is a command.
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("first"))]])
+    await _turn(harness, "hello")
+    request = harness.request("/compact")
+    harness.controller._native_start(request.context)  # accepted, and then the process stopped
+    with engine.begin() as conn:
+        row = conn.execute(
+            select(messages.c.id, messages.c.content_json).where(messages.c.content_text == "/compact")
+        ).one()
+        content = {**json.loads(row.content_json or "{}"), "attachments": [{"name": "notes.txt"}]}
+        conn.execute(update(messages).where(messages.c.id == row.id).values(content_json=json.dumps(content)))
+    restarted = harness.new_agent()
+    assert SESSION in restarted._sessions_with_unconsumed_inputs()
+    assert [entry[0] for entry in restarted._unconsumed_inputs(SESSION)] == [row.id]
+
+
+async def test_each_resolved_hop_gets_its_own_output_budget(engine, session, tmp_path):
+    from core.agent_core.ai.provider import ProviderError
+
+    harness = None
+
+    async def busy_then_fallback(request, cancel):
+        # The retry resolves again, to a fallback whose output maximum equals its 62,000-token window.
+        harness.controller.hub_limits = {"context_window": 62_000, "max_output_tokens": 62_000}
+        yield ProviderError("rate_limit", "busy", True)
+
+    harness = _Harness(engine, tmp_path, "avibe", [busy_then_fallback, [Done(assistant("ok"))]])
+    harness.controller.hub_limits = {"context_window": 200_000, "max_output_tokens": 16_000}
+    await _turn(harness, "hello")
+    assert [request.max_tokens for request in harness.provider.requests] == [16_000, 15_500]
+    assert _texts(harness, "result") == ["ok"]
+
+
+async def test_a_pause_notice_that_cannot_be_delivered_never_fails_the_turn(engine, session, tmp_path):
+    failing = [Done(assistant(CHECKPOINT, stop_reason="length"))]
+    scripts = [
+        [Done(assistant("one"))],
+        failing,
+        [Done(assistant("two"))],
+        failing,
+        [Done(assistant("three"))],
+        failing,
+        [Done(assistant("four"))],
+    ]
+    harness = _Harness(engine, tmp_path, "avibe", scripts)
+    emit = harness.controller.emit_agent_message
+
+    async def notices_fail(context, message_type, text_value, *args, **kwargs):
+        if message_type == "notify":
+            raise RuntimeError("the surface is gone")
+        return await emit(context, message_type, text_value, *args, **kwargs)
+
+    harness.controller.emit_agent_message = notices_fail
+    for body in (tokens(10_000), tokens(10_000), "a", "b"):
+        await _turn(harness, body)
+    assert _texts(harness, "result") == ["one", "two", "three", "four"]
+    assert all(not terminal["is_error"] for terminal in harness.controller.terminals)
+
+
 # --- what the user is told -------------------------------------------------------------------------------
 
 
@@ -354,9 +414,16 @@ class _Skills(SkillScope):
     def __init__(self, skills: dict[str, ManagedSkill]) -> None:
         super().__init__(cwd=None)
         object.__setattr__(self, "_found", skills)
+        object.__setattr__(self, "snapshots", 0)
+        object.__setattr__(self, "loads", [])
 
-    def load(self, name):
-        return self._found.get(name)
+    def catalog(self):
+        object.__setattr__(self, "snapshots", self.snapshots + 1)
+        return self._found
+
+    def load(self, name, catalog=None):
+        self.loads.append(name)
+        return (catalog if catalog is not None else self._found).get(name)
 
 
 def _skill(name: str, body: str) -> ManagedSkill:
@@ -372,6 +439,7 @@ def _insert_definition(engine, **values) -> None:
 
 async def test_the_state_carries_skills_pending_work_and_the_environment(engine, session):
     many = {f"big{index}": _skill(f"big{index}", tokens(6_000)) for index in range(6)}
+    before = None
     skills = _Skills({"parser": _skill("parser", "Parse it.\n"), "huge": _skill("huge", tokens(9_000)), **many})
     _insert_definition(engine, id="wd_1", definition_type="watch", name="CI for #12", session_id=SESSION)
     with engine.begin() as conn:
@@ -391,10 +459,13 @@ async def test_the_state_carries_skills_pending_work_and_the_environment(engine,
     assert gone.startswith('<skill-unavailable name="gone">')
     assert "watch wd_1" in pending and "CI for #12" in pending and "agent_run run_1" in pending
     assert environment.startswith("<environment>") and "\ncwd: /work" in environment
-    # Past the 25,000-token total, the remaining skills are named, not carried.
+    # Past the 25,000-token total, the remaining skills are named, not carried, and not even loaded; the catalog
+    # is resolved once per checkpoint, however many skills it carries.
+    before, skills.loads.clear()
     capped = await host.render_state(StateRequest(SESSION, tuple(SkillRef(name, "r") for name in many), False))
     assert sum(text_tokens(item) for item in capped[:-2]) <= 25_000
     assert capped[-2].startswith("<skills-left-out>") and "big5" in capped[-2]
+    assert skills.snapshots == 2 and "big5" not in skills.loads
     # Outside a run there is no environment block, and no pending work means no section.
     with engine.begin() as conn:
         conn.execute(run_definitions.delete())

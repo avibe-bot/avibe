@@ -38,8 +38,8 @@ keep = min(20,000, floor(0.25 * T))                the verbatim tail of a normal
 models.dev, where many models list an output maximum as large as the window: in the snapshot checked on 2026-10-04,
 1,337 of 8,150 entries with both limits have `max_output_tokens + M >= context_window` (so `T <= 0` and nothing could
 be sent), and 296 more would leave `T < 0.25 * W`. The adapter therefore asks for
-`min(max_output_tokens, max(8,192, floor(W / 4)))`, 8,192 when the maximum is unknown; the limits themselves still
-come from Model Hub.
+`min(max_output_tokens, max(8,192, floor(W / 4)))` on every hop it resolves (a retry's fallback included), 8,192 when
+the maximum is unknown; the limits themselves still come from Model Hub.
 
 A conversation request **fits** when `est + O + M <= L_in`, where `est` is its estimate (§2); `M` absorbs the
 estimate's error. A request **can fit** when `est + O <= L_in`. A checkpoint request (§6) is sent only when it can
@@ -262,7 +262,8 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
 
 - The limits (§1): the route's capabilities come from the Model Hub model definition the user edits
   (`context_window`, `max_output_tokens`; `input_limit` stays unknown until Model Hub stores one, so `L_in = W`), and
-  the Agent asks for `min(max_output_tokens, max(8,192, floor(W / 4)))` (8,192 when unknown), which is `O`.
+  the Agent asks for `min(max_output_tokens, max(8,192, floor(W / 4)))` (8,192 when unknown) on every hop it resolves,
+  which is `O`.
 - `scratch_dir`: this Session's scratch directory, `<state>/agent_core/scratch/<session_id>/`; without it, the
   policy denies every write.
 - `ContextHost.earlier_record(session_id, through_seq)`: the lookup command, one `vibe data query` over the inputs
@@ -289,7 +290,9 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
 - `Agent.compact(turn_id=..., focus=...)` behind `/compact [focus]` on every surface. The Avibe Agent takes the
   command as a Turn's input text (on Slack, `@Avibe /compact`), compacts instead of running, and answers it (done,
   nothing to compact yet, or failed); the command is an action, never a context input: a running Turn refuses it as
-  a steer, so it runs as its own Turn, and recovery never admits it. Other backends receive the text unchanged.
+  a steer, so it runs as its own Turn, and recovery never admits it. One rule decides what is the command, live, as
+  a steer, and in recovery: a `/compact` carrying files is an ordinary message. Other backends receive the text
+  unchanged.
 - The pause notice (§10) through `vibe/i18n`, once, as a `notify` message; and, after (d), a stop message that lists
   what fills the context (`ContextExhausted`'s parts).
 

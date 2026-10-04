@@ -82,7 +82,13 @@ from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 from core.skill_observability import accept_catalog
-from modules.agents.avibe.context import AvibeContextHost, SkillScope, compact_focus, mark_skill_loads, output_budget
+from modules.agents.avibe.context import (
+    AvibeContextHost,
+    SkillScope,
+    budgeted,
+    compact_command,
+    mark_skill_loads,
+)
 from modules.agents.avibe.errors import compact_text, context_exhausted_text, error_text
 from modules.agents.avibe.media import MediaSnapshots
 from modules.agents.avibe.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
@@ -126,6 +132,10 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
     return relative
 
 
+#: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
+_NO_OUTPUT_CAP = 1 << 30
+
+
 @dataclass
 class _Run:
     """One Turn's state, published before its first await (``handle_message``)."""
@@ -149,8 +159,6 @@ class _Run:
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
     stop_requested: bool = False
-    # The output the Agent asks for within the route's maximum (C-9's O, ``output_budget``), from preflight.
-    max_output: int = 8192
     # C-9: what fills a context that cannot fit, and a manual compaction's outcome event.
     exhausted: Optional[ContextExhausted] = None
     compaction: Optional[AgentEvent] = None
@@ -279,8 +287,7 @@ class AvibeAgent(BaseAgent):
         runtime.skills = self._turn_skill_scope(request, cwd)
         self._start_agent(turn, cwd, sections, environment)
         runtime.cwd = cwd
-        # A ``/compact`` carrying files is an ordinary message: nothing of it may be dropped.
-        focus = None if request.files else compact_focus(request.user_message or request.message)
+        focus = compact_command(request.user_message or request.message, attachments=request.files)
         if focus is not None:
             return await self._compact(turn, focus)
         # Prepared before anything is dispatched (``core.native_dispatch_phase``).
@@ -528,7 +535,7 @@ class AvibeAgent(BaseAgent):
             self._steering.discard(request.attempt_id)
 
     async def _steer(self, run: _Run, request: SteerRequest) -> SteerResult:
-        if compact_focus(request.text) is not None:
+        if compact_command(request.text, attachments=request.files) is not None:
             # A command, not a message: it never joins a running loop; it runs as its own Turn next.
             return steer_result(SteerOutcome.REFUSED, reason="command")
         try:
@@ -605,11 +612,10 @@ class AvibeAgent(BaseAgent):
                 turn.refusal = launch_refusal_copy(self.controller, error)
                 raise
             bind_launch(context, launch)
-            return selection_from_hop(launch.to_hop_resolution(), gateway_base_url=launch.gateway_base_url)
+            # Every resolved hop, the first and each retry's, carries the output the Agent asks for on it.
+            return budgeted(selection_from_hop(launch.to_hop_resolution(), gateway_base_url=launch.gateway_base_url))
 
-        first = await resolve()
-        turn.max_output = output_budget(first.capabilities)
-        return HubModelRouter(resolve, self._providers, first=first)
+        return HubModelRouter(resolve, self._providers, first=await resolve())
 
     def _start_agent(self, turn: _Run, cwd: str, sections: str, environment: Mapping[str, str]) -> None:
         """The Turn's loop, over its router, tools, system prompt, and the environment its commands run in."""
@@ -625,8 +631,8 @@ class AvibeAgent(BaseAgent):
             cwd=cwd,
             env=environment,
             reasoning_effort=request.subagent_reasoning_effort or request.vibe_agent_reasoning_effort,
-            # C-9's O: what the Agent asks for within the route's own maximum (``output_budget``).
-            max_tokens=turn.max_output,
+            # The route decides the output (``budgeted``): no Agent-wide cap below it.
+            max_tokens=_NO_OUTPUT_CAP,
             context=ContextConfig(host=self.context_host, scratch_dir=str(self._state_dir / "scratch" / session_id)),
         )
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
@@ -656,9 +662,13 @@ class AvibeAgent(BaseAgent):
         elif isinstance(event, CompactionPaused):
             # The one user-visible text of automatic compaction (C-9 section 10), told once, at the transition.
             key = "pausedFailures" if event.cause == "failures" else "pausedIneffective"
-            await self.controller.emit_agent_message(
-                run.request.context, "notify", compact_text(key, self._language())
-            )
+            try:
+                await self.controller.emit_agent_message(
+                    run.request.context, "notify", compact_text(key, self._language())
+                )
+            except Exception:
+                # Advisory, like narration: the pause is already committed, and the run goes on.
+                logger.exception("Avibe Agent could not tell Session %s that auto-compaction paused", run.session_id)
         elif isinstance(event, (CompactionFinished, CompactionFailed, CompactionSkipped)):
             run.compaction = event  # automatic ones are silent; a manual one is answered (``_compact``)
 
@@ -1004,7 +1014,7 @@ class AvibeAgent(BaseAgent):
                     if row["turn_role"] == "initial" and row["turn_dispatch_text"]
                     else row["content_text"] or ""
                 )
-                if compact_focus(row["content_text"] or "") is not None:
+                if compact_command(row["content_text"], attachments=content.get("attachments")) is not None:
                     continue  # a ``/compact`` command is an action, never a context input
                 inputs.append((row["id"], text_value, list(file_attachments_from_specs(specs) or ()), delivery))
         return inputs
@@ -1377,7 +1387,7 @@ class AvibeAgent(BaseAgent):
         """Sessions with inputs accepted into an ``avibe`` Turn that no run consumed (T3); a ``/compact`` is none."""
         with self._engine.connect() as conn:
             rows = conn.execute(
-                select(messages.c.session_id, messages.c.content_text)
+                select(messages.c.session_id, messages.c.content_text, messages.c.content_json)
                 .select_from(
                     messages.join(message_deliveries, message_deliveries.c.message_id == messages.c.id).join(
                         session_turns, session_turns.c.id == message_deliveries.c.turn_id
@@ -1392,7 +1402,13 @@ class AvibeAgent(BaseAgent):
                 )
             ).all()
         # The same rule as ``_unconsumed_inputs``: a ``/compact`` command is an action, never an input to admit.
-        return sorted({session_id for session_id, body in rows if compact_focus(body or "") is None})
+        return sorted(
+            {
+                session_id
+                for session_id, body, content in rows
+                if compact_command(body, attachments=_json_object(content).get("attachments")) is None
+            }
+        )
 
     def _session_workdir(self, session_id: str) -> str:
         with self._engine.connect() as conn:

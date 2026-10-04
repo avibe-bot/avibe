@@ -33,6 +33,8 @@ from modules.agents.avibe.prompt import render_environment
 #: Each skill body a checkpoint carries, and all of them together, in tokens (section 7).
 SKILL_TOKENS = 5_000
 SKILLS_TOKENS = 25_000
+#: Below this much of the total left, no further skill can carry anything useful.
+_SKILL_FLOOR = 200
 
 _SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
 # ``/compact [focus]``, after any leading mentions a surface keeps in the text (Slack's ``<@U…>``, ``@name``).
@@ -63,6 +65,25 @@ def compact_focus(text: Optional[str]) -> Optional[str]:
     return (match.group("focus") or "").strip() if match is not None else None
 
 
+def compact_command(text: Optional[str], *, attachments: Any = None) -> Optional[str]:
+    """The one rule for what is a ``/compact`` command, live, as a steer, and in recovery: its focus, or None.
+
+    A ``/compact`` carrying files is an ordinary message, so nothing of it is ever dropped.
+    """
+    return None if attachments else compact_focus(text)
+
+
+def budgeted(selection: Any) -> Any:
+    """A resolved hop's selection with the output the Agent asks for on it (``output_budget``) as its maximum.
+
+    Applied to every hop the router resolves, the first and each retry, so the budget always fits that hop's window.
+    """
+    from dataclasses import replace as _replace
+
+    capabilities = selection.capabilities
+    return _replace(selection, capabilities=_replace(capabilities, max_output_tokens=output_budget(capabilities)))
+
+
 @dataclass(frozen=True)
 class SkillScope:
     """Where a Session's skills resolve: its latest Turn's working directory and managed-skill bindings.
@@ -75,12 +96,17 @@ class SkillScope:
     project_base: Optional[str] = None
     claude_cli_path: Optional[str] = None
 
-    def load(self, name: str) -> Any:
-        """The skill with its body, or None when it no longer resolves."""
-        from core.managed_skills import load_skill, resolve_skills
+    def catalog(self) -> Any:
+        """The resolved skill catalog, once per use: resolving scans every skill root (and may run ``claude``)."""
+        from core.managed_skills import resolve_skills
 
-        catalog = resolve_skills(self.cwd or None, project_base=self.project_base, claude_cli_path=self.claude_cli_path)
-        return load_skill(name, self.cwd or None, resolved_skills=catalog)
+        return resolve_skills(self.cwd or None, project_base=self.project_base, claude_cli_path=self.claude_cli_path)
+
+    def load(self, name: str, catalog: Any = None) -> Any:
+        """The skill with its body from ``catalog`` (resolved now when not given), or None when it does not resolve."""
+        from core.managed_skills import load_skill
+
+        return load_skill(name, self.cwd or None, resolved_skills=self.catalog() if catalog is None else catalog)
 
     def revision(self, name: str) -> Optional[str]:
         from core.skill_observability import skill_revision
@@ -137,11 +163,15 @@ class AvibeContextHost:
         if not skills:
             return []
         scope = self._skills(session_id)
+        catalog = await asyncio.to_thread(scope.catalog) if scope is not None else None
         texts: list[str] = []
         budget = SKILLS_TOKENS
         left_out: list[str] = []
         for ref in skills:
-            skill = await asyncio.to_thread(scope.load, ref.name) if scope is not None else None
+            if budget < _SKILL_FLOOR:
+                left_out.append(ref.name)  # no room left: named, and not loaded
+                continue
+            skill = await asyncio.to_thread(scope.load, ref.name, catalog) if scope is not None else None
             if skill is None or skill.body is None:
                 texts.append(
                     f'<skill-unavailable name="{_attr(ref.name)}">This skill no longer loads. Run '
