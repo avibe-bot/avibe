@@ -78,7 +78,6 @@ from core.reply_enhancer import strip_silent_blocks
 from core.skill_observability import accept_catalog
 from modules.agents.avibe.context import (
     AvibeContextHost,
-    SkillScope,
     budgeted,
     mark_skill_loads,
 )
@@ -170,8 +169,6 @@ class _SessionRuntime:
     run: Optional[_Run] = None
     cwd: str = ""
     holders: int = 0
-    # Where the Session's skills resolve, as its latest Turn's ``vibe skill`` calls resolved them.
-    skills: Optional[SkillScope] = None
 
 
 class AvibeAgent(BaseAgent):
@@ -201,7 +198,7 @@ class AvibeAgent(BaseAgent):
         )
         self._providers = providers or registry_providers(media_loader=self.media)
         # C-9: the Session parts a checkpoint carries (context.md section 9).
-        self.context_host = AvibeContextHost(self._engine, environment=self._environment, skills=self._skill_scope)
+        self.context_host = AvibeContextHost(environment=self._environment)
         self._tool_suite = tool_suite
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.
@@ -276,7 +273,6 @@ class AvibeAgent(BaseAgent):
             return await self._settle_stopped(turn)
         sections, skill_catalog = await self._avibe_sections(request, cwd)
         environment = await asyncio.to_thread(self._turn_environment, request, cwd)
-        runtime.skills = self._turn_skill_scope(request, cwd)
         self._start_agent(turn, cwd, sections, environment)
         runtime.cwd = cwd
         # Prepared before anything is dispatched (``core.native_dispatch_phase``).
@@ -304,20 +300,6 @@ class AvibeAgent(BaseAgent):
             agent_input = await self._continuing_input(turn)
         await self._settle(turn)
         self._maybe_backfill_session_title(request, session_id)
-
-    def _skill_scope(self, session_id: str) -> Optional[SkillScope]:
-        runtime = self._runtimes.get(session_id)
-        return runtime.skills if runtime is not None else None
-
-    def _turn_skill_scope(self, request: AgentRequest, cwd: str) -> SkillScope:
-        """Where this Turn's ``vibe skill`` calls resolve skills (``_turn_environment``'s managed-skill bindings)."""
-        from core.managed_skills import managed_skill_claude_cli_path, managed_skill_project_base
-
-        return SkillScope(
-            cwd or None,
-            project_base=managed_skill_project_base(request.context),
-            claude_cli_path=managed_skill_claude_cli_path(self.config),
-        )
 
     async def _settle_stopped(self, turn: _Run) -> None:
         """A Stop before the loop started: the Turn settles as stopped, nothing dispatched."""

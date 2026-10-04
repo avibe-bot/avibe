@@ -20,7 +20,6 @@ from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelR
 from core.agent_core.harness.context import (
     CLEARED_PLACEHOLDER,
     ITEM_BYTES,
-    SkillRef,
     budget,
     carried_skills,
     checkpoint_request,
@@ -36,7 +35,6 @@ from core.agent_core.harness.context import (
     request_facts,
     request_tokens,
     rolling_cut,
-    state_cap,
     text_tokens,
     truncate_middle_bytes,
     unit_tokens,
@@ -368,11 +366,6 @@ def test_clearing_spares_recent_turns_the_newest_results_and_skill_loads():
     assert clearable_results(context_view(too_small.rows)) == ()
 
 
-@pytest.mark.parametrize("window,cap", [(8_000, 800), (200_000, 20_000)], ids=["8K window", "200K window"])
-def test_the_state_cap_is_a_tenth_of_the_route_window_up_to_25000(window, cap):
-    assert state_cap(replace(CAPABILITIES, context_window=window)) == cap
-
-
 def test_each_artifact_list_keeps_its_50_most_recent_paths_across_checkpoints():
     rows, payload = Rows(), None
     rows.input("touch many files")
@@ -500,7 +493,7 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
     rows.tool("bash", "t again", call_id="s3", command="vibe skill load t", skills=("t",))
     view = context_view(rows.rows)
     cut = 7  # before the read of c.py: the cut splits the parser turn
-    assert carried_skills(view, cut) == (SkillRef("s"), SkillRef("u"))
+    assert carried_skills(view, cut) == ("u", "s")  # the most recently loaded first
     first = compaction_payload(
         view,
         cut,
@@ -532,6 +525,11 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
             "Modified:",
             "- b.py",
             "</artifacts>",
+            "<skills-loaded>",
+            "Skills you had loaded are listed by name; run `vibe skill load <name>` again before you rely on one.",
+            "- u",
+            "- s",
+            "</skills-loaded>",
             "<earlier-record>",
             "The full text of the earlier conversation is still stored. To look up a detail, run:",
             "vibe data query --sql '...'",
@@ -565,11 +563,24 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
     assert second["files_read"] == ["a.py"]
     assert second["files_modified"] == ["c.py", "b.py"]  # most recently touched first
     assert second["current_request"] == first["current_request"]
-    assert second["skills"] == [{"name": "s"}, {"name": "u"}, {"name": "t"}]
+    assert second["skills"] == [{"name": "t"}, {"name": "u"}, {"name": "s"}]
     assert second["summarized_to_seq"] > first["summarized_to_seq"]
     # No model checkpoint and no lookup command: no framing text, no pointer.
     assert second["summary"].startswith("<context-checkpoint>\n<artifacts>\n")
     assert "<earlier-record>" not in second["summary"]
+
+
+def test_a_checkpoint_lists_at_most_20_loaded_skills_by_name_most_recent_first():
+    rows = Rows()
+    rows.input("load many")
+    names = [f"skill-{index:02}" for index in range(24)] + ["x" * 300]
+    for index, name in enumerate(names):
+        rows.tool("bash", "body", call_id=f"s{index}", command="vibe skill load", skills=(name,))
+    rows.input("next")
+    view = context_view(rows.rows)
+    skills = carried_skills(view, len(view.units) - 1)
+    assert len(skills) == 20 and skills[1:] == tuple(f"skill-{index:02}" for index in range(23, 4, -1))
+    assert skills[0].startswith("x") and "…" in skills[0] and len(skills[0].encode()) <= 160
 
 
 @pytest.mark.parametrize("body", ["x" * 40_000, "上下文" * 5_000])

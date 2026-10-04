@@ -16,13 +16,11 @@ from pathlib import Path
 
 import pytest
 
-from core.agent_core.ai.provider import Done, ModelCapabilities, ProviderError
-from core.agent_core.harness.context import SkillRef, StateRequest, state_cap, text_tokens
+from core.agent_core.ai.provider import Done, ProviderError
+from core.agent_core.harness.context import StateRequest, text_tokens
 from core.agent_core.messages import ToolCallBlock, UserMessage, text
 from core.agent_core.tools.base import ToolResult
-from core.managed_skills import ManagedSkill
-from modules.agents.avibe.context import AvibeContextHost, SkillScope, mark_skill_loads
-from modules.agents.avibe.prompt import current_environment
+from modules.agents.avibe.context import AvibeContextHost, mark_skill_loads
 from storage.read_only_query import run_read_only_query
 from tests.agent_core.fakes import FakeTool, assistant
 from tests.test_avibe_agent import (  # noqa: F401 (fixtures)
@@ -98,7 +96,7 @@ async def test_a_threshold_checkpoint_carries_the_lookup_and_the_state_and_shows
     assert is_checkpoint(harness.provider.requests[1])
     compaction = [row for row in await harness.context_rows() if row.kind == "compaction"][0]
     through = compaction.payload["summarized_to_seq"]
-    assert f"session_id = '{SESSION}' and context_seq <= {through}" in compaction.payload["summary"]
+    assert f"chain(id, bound, depth) as (select '{SESSION}', {through}, 0" in compaction.payload["summary"]
     # Inside a run, the checkpoint carries the full environment block.
     assert any(item.startswith("<environment>") for item in compaction.payload["state"])
     # Silent: the user sees the two replies and nothing about the compaction.
@@ -189,7 +187,7 @@ async def test_a_skill_load_through_bash_is_marked_in_its_context_row(engine, se
     harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[bash])
     await _turn(harness, "load the parser skill")
     (result,) = [row for row in await harness.context_rows() if row.kind == "tool_result"]
-    # Clearing spares it and a checkpoint carries it (C-9 sections 4 and 7).
+    # Clearing spares it and a checkpoint lists it by name (C-9 sections 4 and 7).
     assert result.payload["details"]["skills"] == [{"name": "parser"}]
 
 
@@ -343,7 +341,7 @@ async def test_the_lookup_command_reads_the_summarized_rows_of_the_session_and_i
     child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("child reply"))]], session_id="ses_child")
     await _turn(child, "parser keyword child")
     child_rows = await child.context_rows()
-    host = AvibeContextHost(engine, environment=lambda _: {}, skills=lambda _: None)
+    host = AvibeContextHost(environment=lambda _: {})
     command = host.earlier_record("ses_child", child_rows[-1].context_seq)
     assert command.startswith('vibe data query --limit 100 --sql "') and command.endswith('"')
     sql = command[len('vibe data query --limit 100 --sql "') : -1]
@@ -357,74 +355,44 @@ async def test_the_lookup_command_reads_the_summarized_rows_of_the_session_and_i
     assert found and all(row["type"] == "user" and "<environment>" in row["text"] for row in found)
 
 
-class _Skills(SkillScope):
-    def __init__(self, skills: dict[str, ManagedSkill]) -> None:
-        super().__init__(cwd=None)
-        object.__setattr__(self, "_found", skills)
-        object.__setattr__(self, "snapshots", 0)
-        object.__setattr__(self, "loads", [])
+async def test_the_lookup_command_is_one_size_whatever_the_fork_ancestry_and_reaches_16_forks_up(
+    engine, session, tmp_path
+):
+    def fork(conn, child: str, source: str, anchor) -> None:
+        metadata = {
+            "created_via": "session_fork",
+            "fork_source_session_id": source,
+            "fork_source_message_id": anchor.row_id,
+            "fork_source_context_seq": anchor.context_seq,
+        }
+        _insert_session(conn, child, _SCOPES["avibe"], metadata)
 
-    def catalog(self):
-        object.__setattr__(self, "snapshots", self.snapshots + 1)
-        return self._found
-
-    def load(self, name, catalog=None):
-        self.loads.append(name)
-        return (catalog if catalog is not None else self._found).get(name)
-
-
-def _skill(name: str, body: str) -> ManagedSkill:
-    return ManagedSkill(name=name, description=f"{name} skill", directory=Path(f"/skills/{name}"), priority=(0,), body=body)
-
-
-async def test_the_state_carries_skills_and_the_core_environment_fields(engine, session):
-    many = {f"big{index}": _skill(f"big{index}", tokens(6_000)) for index in range(6)}
-    skills = _Skills({"parser": _skill("parser", "Parse it.\n"), "huge": _skill("huge", tokens(9_000)), **many})
-    fields = {"cwd": "/work", "os": "macOS", "watches": 'wd_1 "CI" command running'}
-    host = AvibeContextHost(engine, environment=lambda _: fields, skills=lambda _: skills)
-    refs = (SkillRef("parser"), SkillRef("huge"), SkillRef("gone"))
-    environment, parser, huge, gone = await host.render_state(StateRequest(SESSION, refs, 25_000))
-    # The environment's core fields only: pending work is the model's "Waiting on", not state.
-    assert environment.startswith("<environment>") and "\ncwd: /work" in environment and "watches" not in environment
-    assert parser.startswith('<skill_content name="parser" revision="') and "Parse it." in parser
-    assert text_tokens(huge) <= 5_000 and "vibe skill load -- huge" in huge  # cut, saying how to get all of it
-    assert gone.startswith('<skill-unavailable name="gone">')
-    # Past the cap, the remaining skills are named, not carried, and not even loaded; the catalog is resolved once
-    # per checkpoint, however many skills it carries.
-    skills.loads.clear()
-    capped = await host.render_state(StateRequest(SESSION, tuple(SkillRef(name) for name in many), 25_000))
-    assert sum(text_tokens(item) for item in capped) <= 25_000
-    assert capped[-1].startswith('<left-out of="skills">') and "big5" in capped[-1]
-    assert skills.snapshots == 2 and "big5" not in skills.loads
-    (only,) = await host.render_state(StateRequest(SESSION, (), 25_000))
-    assert only.startswith("<environment>")
+    root = _Harness(engine, tmp_path, "avibe", [[Done(assistant("root reply"))]])
+    await _turn(root, "deep keyword root")
+    anchor = [row for row in await root.context_rows() if row.kind == "response"][-1]
+    with engine.begin() as conn:
+        for level in range(1, 21):
+            fork(conn, f"ses_{level:02}", SESSION if level == 1 else f"ses_{level - 1:02}", anchor)
+    middle = _Harness(engine, tmp_path, "avibe", [[Done(assistant("middle reply"))]], session_id="ses_20")
+    await _turn(middle, "deep keyword middle")
+    anchor = [row for row in await middle.context_rows() if row.kind == "response"][-1]
+    with engine.begin() as conn:
+        for level in range(21, 31):
+            fork(conn, f"ses_{level:02}", f"ses_{level - 1:02}", anchor)
+    host = AvibeContextHost(environment=lambda _: {})
+    command = host.earlier_record("ses_30", anchor.context_seq)
+    # One size whatever the ancestry: thirty forks deep, it is the command of a Session with none.
+    assert command == host.earlier_record(SESSION, anchor.context_seq).replace(SESSION, "ses_30")
+    sql = command[len('vibe data query --limit 100 --sql "') : -1].replace("KEYWORD", "deep keyword")
+    texts = [row["text"] for row in run_read_only_query(sql, page_request=None).rows]
+    # Ten forks up is within the 16 the lookup follows; thirty is past it.
+    assert any("deep keyword middle" in text for text in texts)
+    assert not any("deep keyword root" in text for text in texts)
 
 
-@pytest.mark.parametrize("window", [8_000, 200_000], ids=["8K window", "200K window"])
-async def test_the_state_fits_the_state_cap_of_the_route(engine, session, window):
-    # A long Session can carry hundreds of skills and run in a deeply nested directory. On any route the
-    # environment's core fields are bounded by construction (the cwd cut in the middle to 160 characters), and the
-    # skill bodies, unavailable notices, and the names left out fit inside the route's cap.
-    found = {f"skill-{index:03}": _skill(f"skill-{index:03}", tokens(3_000)) for index in range(0, 400, 2)}
-    deep = "/work/" + "nested/" * 460  # about 3,200 characters
-    skills = _Skills(found)
-    host = AvibeContextHost(engine, environment=lambda _: current_environment(deep, []), skills=lambda _: skills)
-    refs = tuple(SkillRef(f"skill-{index:03}") for index in range(400))
-    cap = state_cap(ModelCapabilities(context_window=window))
-    state = await host.render_state(StateRequest(SESSION, refs, cap))
-    assert sum(text_tokens(item) for item in state) <= cap
-    environment = state[0]
-    assert all(f"\n{field}: " in environment for field in ("cwd", "os", "shell")) and text_tokens(environment) <= 100
-    cwd = next(line for line in environment.splitlines() if line.startswith("cwd: "))
-    assert len(cwd.encode()) <= len("cwd: ") + 160 and "…" in cwd
-    skills_left_out = state[-1]
-    assert skills_left_out.startswith('<left-out of="skills">') and skills_left_out.count("skill-") == 20
-    assert re.search(r", and \d+ more\.", skills_left_out)
-
-
-async def test_every_environment_field_the_state_carries_is_bounded_in_bytes(engine, session):
-    # Every core field is cut in the middle to 160 UTF-8 bytes, whatever the script, so the block is at most about
-    # 5 x 40 tokens by construction and never consults the cap.
+async def test_the_state_is_the_environment_core_fields_each_bounded_in_bytes(engine, session):
+    # The state is the environment's core fields only (no Watches, no skill bodies), each cut in the middle to 160
+    # UTF-8 bytes whatever the script, so the block is at most about 5 x 40 tokens by construction.
     fields = {
         "cwd": "/工作/" + "目录/" * 1_000,
         "os": "macOS " + "x" * 5_000,
@@ -433,8 +401,8 @@ async def test_every_environment_field_the_state_carries_is_bounded_in_bytes(eng
         "timezone": "Zone/" + "時" * 2_000,
         "watches": 'wd_1 "CI" command running',
     }
-    host = AvibeContextHost(engine, environment=lambda _: fields, skills=lambda _: None)
-    (environment,) = await host.render_state(StateRequest(SESSION, (), 800))
+    host = AvibeContextHost(environment=lambda _: fields)
+    (environment,) = await host.render_state(StateRequest(SESSION))
     lines = environment.splitlines()[1:-1]
     assert [line.split(": ", 1)[0] for line in lines] == ["cwd", "os", "shell", "date", "timezone"]
     assert all(len(line.split(": ", 1)[1].encode()) <= 160 for line in lines)

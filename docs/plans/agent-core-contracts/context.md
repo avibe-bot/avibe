@@ -207,6 +207,10 @@ is written, so projection stays a pure function of the rows:
   - <path, cumulative across checkpoints, most recently touched first, at most 50>
   - and <N> more
   </artifacts>
+  <skills-loaded>
+  Skills you had loaded are listed by name; run `vibe skill load <name>` again before you rely on one.
+  - <name, most recently loaded first, at most 20>
+  </skills-loaded>
   <earlier-record>
   The full text of the earlier conversation is still stored. To look up a detail, run:
   <the adapter's lookup command for this Session through summarized_to_seq>
@@ -223,15 +227,18 @@ is written, so projection stays a pure function of the rows:
   keeps its 50 most recently touched paths and counts the ones pushed out (`files_read_more`, `files_modified_more`),
   in the row and in the text; the full history stays reachable through `<earlier-record>`. This is an Avibe deviation
   from Pi, which keeps every path: Avibe Sessions are long-lived (IM threads and Workbench Sessions that run for
-  weeks), so an unbounded list would turn a working Session into a forced `/new`. `<earlier-record>` is left out when
-  the adapter supplies no command, and `<current-request>` when the cut did not split a turn.
+  weeks), so an unbounded list would turn a working Session into a forced `/new`. `<skills-loaded>` lists the skills
+  the summarized rows loaded (§4's marks, minus those whose load result the kept rows still hold), by name only: each
+  name cut to 160 UTF-8 bytes, the most recently loaded first, at most 20, cumulative; it is left out when there are
+  none. A skill's instructions are never injected: the model loads the skill again, and `vibe skill load` checks the
+  name against the catalog. `<earlier-record>` is left out when the adapter supplies no command, and
+  `<current-request>` when the cut did not split a turn.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment's core
   fields (C-7 §8: cwd, os, shell, date, timezone; no Watches; each field cut in the middle to 160 UTF-8 bytes, so the
   block is at most about 5 x 40 tokens by construction and never consults the cap; a checkpoint always happens inside
-  a run, and a Turn's own input carries only the fields that changed), then skill bodies by name (at most 5,000 tokens
-  each) within the cap of the route the next request goes to: `state_cap = min(25,000, floor(0.1 * W))`, passed in
-  `StateRequest.cap`. Nothing else is rehydrated in v1: pending work is the checkpoint's own "Waiting on", and the
-  split turn's model-facing input, environment block included, is in `<current-request>`.
+  a run, and a Turn's own input carries only the fields that changed). Nothing else is rehydrated in v1: skills are
+  listed by name in `<skills-loaded>`, pending work is the checkpoint's own "Waiting on", and the split turn's
+  model-facing input, environment block included, is in `<current-request>`.
 - Projection (C-5 §3): the system prompt, hook-rehydrated messages, one user message holding `summary` and then each
   `state` text as its own text block, then the rows from `first_kept_seq` on, with edits applied. A tool result whose
   call was summarized is left out with it. No synthetic "continue" message follows.
@@ -283,19 +290,19 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   policy denies every write.
 - `ContextHost.earlier_record(session_id, through_seq)`: the lookup command, one `vibe data query` over the inputs
   and replies in `messages` of every Session whose rows the context holds (the Session and its fork ancestry, each
-  up to its fork bound), through the last summarized `context_seq`, filtered by a `KEYWORD` the model replaces. It
+  up to its fork bound), through the last summarized `context_seq`, filtered by a `KEYWORD` the model replaces. The
+  ancestry is followed in the SQL itself, a recursive CTE over the fork-source columns of `agent_sessions` capped at
+  16 forks, so the command is one size whatever the depth. It
   searches what the model read: the text of each row's model message (`content_json` at `$.model.message`, its
   text blocks decoded), else the display text. It reads `messages` only, which every caller of `vibe data query`
   may read; tool outputs can be run again.
-- `ContextHost.render_state(StateRequest)`: the `state` texts (§7): the environment's core fields, then each skill
-  the summarized rows loaded, by name, with the revision of the body it renders now (`<skill_content name revision>`,
-  cut to 5,000 tokens with a note saying how to load all of it; a skill that no longer loads is named), within what
-  `StateRequest.cap` leaves; room for the left-out notice is held back first, a skill is loaded only when there is
-  room for it, and the skills left out are named (up to 20, then "and N more") with how to load them.
+- `ContextHost.render_state(StateRequest)`: the `state` texts (§7): the environment's core fields.
 - Skill loads marked in their results: `vibe skill load` writes one `<skill_content name="...">` block per skill it
   loads, and every top-level block in a successful `bash` result is recorded in the result's `details.skills`
   (`[{name}]`), whatever the command looked like; blocks are parsed as balanced, so an example tag inside a skill's
-  body is not a load. Clearing spares the result (§4) and a checkpoint carries the skills (§7).
+  body is not a load. Clearing spares the result (§4) and a checkpoint lists the names (§7). A command that only
+  prints such a block (a `cat` of a file) is marked too; that spares one result from clearing and lists a name the
+  model may reload, which `vibe skill load` checks, so it costs a few tokens and injects nothing.
 - A `TranscriptStore` (C-5 §2) implementing the whole protocol C-9 uses: `append_response(..., request=...)` keeps
   `ModelResponse.request` for the anchor (§2); `append_payloads(session_id, entries)` writes several payload rows in
   one transaction (invariant 3); `append_audit(session_id, kind, payload)` writes a non-context audit row,

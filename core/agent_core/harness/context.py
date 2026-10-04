@@ -55,9 +55,8 @@ ARTIFACTS_LISTED = 50
 #: Every path an artifact list carries, and every field of the state's environment block, is cut in the middle to this
 #: many UTF-8 bytes: at most about 40 tokens each under the estimate, whatever the script (section 7).
 ITEM_BYTES = 160
-#: Everything a checkpoint rehydrates (section 7): a tenth of the route's window, at most this many tokens.
-STATE_TOKENS = 25_000
-STATE_RATIO = 0.1
+#: A checkpoint lists the skills its summarized rows loaded by name, at most this many, the most recent first (§7).
+SKILLS_LISTED = 20
 
 CLEAR_SOFT_RATIO = 0.8
 CLEAR_MIN_TOKENS = 20_000
@@ -145,14 +144,10 @@ CHECKPOINT_FRAMING = (
     "record itself as a request."
 )
 EARLIER_RECORD_LEAD = "The full text of the earlier conversation is still stored. To look up a detail, run:"
+SKILLS_LEAD = "Skills you had loaded are listed by name; run `vibe skill load <name>` again before you rely on one."
 
 
 # --- what the adapter supplies ----------------------------------------------------
-
-
-@dataclass(frozen=True)
-class SkillRef:
-    name: str
 
 
 @dataclass(frozen=True)
@@ -160,16 +155,6 @@ class StateRequest:
     """What ``ContextHost.render_state`` renders for a new checkpoint (context.md section 7)."""
 
     session_id: str
-    #: Skills the summarized rows loaded, latest load last, minus those still loaded in the kept rows.
-    skills: tuple[SkillRef, ...]
-    #: The tokens the rendered state may take in all (``state_cap`` of the route the next request goes to).
-    cap: int
-
-
-def state_cap(capabilities: ModelCapabilities) -> int:
-    """What a checkpoint's rehydrated state may take on a route: a tenth of its window, at most ``STATE_TOKENS``."""
-    window = DEFAULT_CONTEXT_WINDOW if capabilities.context_window is None else capabilities.context_window
-    return min(STATE_TOKENS, math.floor(STATE_RATIO * window))
 
 
 class ContextHost(Protocol):
@@ -409,14 +394,14 @@ def budget(
 # --- clearing (context.md section 4) ------------------------------------------------
 
 
-def _skills(entry: ContextEntry) -> tuple[SkillRef, ...]:
-    """The skills a tool result loaded (``details.skills``, which the adapter marks), in load order."""
+def _skills(entry: ContextEntry) -> tuple[str, ...]:
+    """The names of the skills a tool result loaded (``details.skills``, which the adapter marks), in load order."""
     details = entry.payload.get("details")
     skills = details.get("skills") if isinstance(details, Mapping) else None
     if not isinstance(skills, list):
         return ()
     return tuple(
-        SkillRef(skill["name"]) for skill in skills if isinstance(skill, Mapping) and isinstance(skill.get("name"), str)
+        skill["name"] for skill in skills if isinstance(skill, Mapping) and isinstance(skill.get("name"), str)
     )
 
 
@@ -603,23 +588,25 @@ def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> _Artifacts:
     return _Artifacts(read_listed, read_more, modified_listed, modified_more)
 
 
-def carried_skills(view: ContextView, cut: int) -> tuple[SkillRef, ...]:
-    """Skills loaded before the cut (and carried by the previous checkpoint), minus those loaded after it."""
-    loaded: dict[str, None] = {}
+def carried_skills(view: ContextView, cut: int) -> tuple[str, ...]:
+    """The names of the skills loaded before the cut (and listed by the previous checkpoint), minus those loaded
+    after it: the most recently loaded first, at most ``SKILLS_LISTED``, each cut to ``ITEM_BYTES`` (section 7)."""
+    loaded: dict[str, None] = {}  # the latest load last
     previous = view.compaction.payload if view.compaction is not None else {}
-    for skill in previous.get("skills", ()):
+    for skill in reversed(previous.get("skills", ())):  # stored most recent first
         loaded.pop(skill["name"], None)
         loaded[skill["name"]] = None
     for unit in view.units[:cut]:
         for entry, _ in unit.entries[1:]:
-            for skill in _skills(entry) if entry is not None else ():
-                loaded.pop(skill.name, None)
-                loaded[skill.name] = None
+            for name in _skills(entry) if entry is not None else ():
+                loaded.pop(name, None)
+                loaded[name] = None
     for unit in view.units[cut:]:
         for entry, _ in unit.entries[1:]:
-            for skill in _skills(entry) if entry is not None else ():
-                loaded.pop(skill.name, None)
-    return tuple(SkillRef(name) for name in loaded)
+            for name in _skills(entry) if entry is not None else ():
+                loaded.pop(name, None)
+    recent = list(reversed(loaded))[:SKILLS_LISTED]
+    return tuple(_unique([truncate_middle_bytes(name, ITEM_BYTES) for name in recent]))
 
 
 def summarized_to_seq(view: ContextView, cut: int) -> int:
@@ -635,6 +622,7 @@ def render_summary(
     files_read_more: int,
     files_modified: Sequence[str],
     files_modified_more: int,
+    skills: Sequence[str],
     earlier_record: Optional[str],
     current_request: Optional[str],
 ) -> str:
@@ -647,6 +635,9 @@ def render_summary(
         listed = [*(f"- {path}" for path in paths), *([f"- and {more} more"] if more else [])]
         lines += [f"{label}:", *listed] if listed else [f"{label}: (none)"]
     lines.append("</artifacts>")
+    if skills:
+        # Names only: a skill's instructions are loaded again by the model, never injected (section 7).
+        lines += ["<skills-loaded>", SKILLS_LEAD, *(f"- {name}" for name in skills), "</skills-loaded>"]
     if earlier_record:
         lines += ["<earlier-record>", EARLIER_RECORD_LEAD, earlier_record, "</earlier-record>"]
     if current_request is not None:
@@ -662,7 +653,7 @@ def compaction_payload(
     mode: str,
     reason: str,
     checkpoint: str,
-    skills: Sequence[SkillRef],
+    skills: Sequence[str],
     state: Sequence[str],
     earlier_record: Optional[str],
     tokens_before: int,
@@ -693,6 +684,7 @@ def compaction_payload(
             files_modified=files.modified,
             files_read_more=files.read_more,
             files_modified_more=files.modified_more,
+            skills=skills,
             earlier_record=earlier_record,
             current_request=request,
         ),
@@ -707,7 +699,7 @@ def compaction_payload(
         "files_read_more": files.read_more,
         "files_modified": files.modified,
         "files_modified_more": files.modified_more,
-        "skills": [{"name": skill.name} for skill in skills],
+        "skills": [{"name": name} for name in skills],
         "tokens_before": tokens_before,
         "tokens_after_estimate": 0,
         "threshold": threshold,

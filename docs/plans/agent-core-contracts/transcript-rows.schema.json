@@ -109,7 +109,7 @@
                   }
                 }
               },
-              "description": "Set when the result carries skills `vibe skill load` loaded: one entry per `<skill_content name>` block, in load order; used for clearing protection and rehydration after compaction."
+              "description": "Set when the result carries skills `vibe skill load` loaded: one entry per top-level `<skill_content name>` block, in load order; used for clearing protection and for the names a checkpoint lists."
             }
           }
         }
@@ -168,7 +168,7 @@
           "items": {
             "type": "string"
           },
-          "description": "State the adapter rendered from its own stores when the checkpoint was written (skills, pending Harness work, the environment block); each is one text block after `summary`. Model-facing."
+          "description": "State the adapter rendered from its own stores when the checkpoint was written (the environment's core fields); each is one text block after `summary`. Model-facing."
         },
         "first_kept_seq": {
           "type": "integer",
@@ -227,7 +227,7 @@
         },
         "skills": {
           "type": "array",
-          "description": "Skills loaded by summarized rows, cumulative, minus those whose load result is still in the context; their bodies are in `state`.",
+          "description": "Names of the skills the summarized rows loaded, cumulative, minus those whose load result is still in the context: the most recently loaded first, at most 20, each cut to 160 UTF-8 bytes. Listed by name in `summary` (`<skills-loaded>`); never their bodies.",
           "items": {
             "type": "object",
             "required": [
@@ -239,7 +239,8 @@
                 "type": "string"
               }
             }
-          }
+          },
+          "maxItems": 20
         },
         "tokens_before": {
           "type": "integer",

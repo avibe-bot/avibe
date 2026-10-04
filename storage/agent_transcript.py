@@ -655,11 +655,6 @@ def _fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:
     return source, anchor
 
 
-def context_members(conn: Connection, session_id: str) -> list[tuple[str, Optional[int]]]:
-    """The Sessions whose rows a Session's context holds, own first, each with its ``context_seq`` bound."""
-    return _ancestry(conn, session_id)
-
-
 def _ancestry(conn: Connection, session_id: str) -> list[tuple[str, Optional[int]]]:
     """The Session and its fork sources, each with its ``context_seq`` upper bound."""
     chain: list[tuple[str, Optional[int]]] = [(session_id, None)]

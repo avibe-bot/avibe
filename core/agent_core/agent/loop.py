@@ -99,7 +99,6 @@ from core.agent_core.harness.context import (
     request_facts,
     request_tokens,
     rolling_cut,
-    state_cap,
     summarized_to_seq,
     text_tokens,
     unit_tokens,
@@ -1203,7 +1202,7 @@ class Agent:
         if len(view.units) < 2:
             return request, plan  # nothing can move out
         cut = len(view.units) - 1
-        hosted = await self._hosted(view, cut, selected)
+        hosted = await self._hosted(view, cut)
         payload, after = await self._compaction(request, view, plan, cut, **self._dropped(view), hosted=hosted)
         minimal, _ = self._built(system, selected, messages=self._carried(after))
         return minimal, budget(minimal, selected.capabilities, transcript=after.messages)
@@ -1305,7 +1304,7 @@ class Agent:
                 continue
             cut = half_cut(units)
             if cut is not None:
-                await self._drop(selected, request, view, plan, cut, emit)
+                await self._drop(request, view, plan, cut, emit)
                 return True
             if ladder.overflows or not plan.can_fit:
                 raise self._exhausted(request, view, plan)
@@ -1430,8 +1429,7 @@ class Agent:
                     "rounds": rounds,
                 }
                 try:
-                    # Capped for ``selected``, the stage's route, which composes the conversation's next request.
-                    hosted = await self._hosted(view, cut, selected)
+                    hosted = await self._hosted(view, cut)
                 except (_Aborted, asyncio.CancelledError):
                     raise
                 except Exception as failure:
@@ -1533,17 +1531,11 @@ class Agent:
         return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
 
     async def _drop(
-        self,
-        selected: ModelSelection,
-        request: ModelRequest,
-        view: ContextView,
-        plan: Budget,
-        cut: int,
-        emit: Callable[..., Awaitable[None]],
+        self, request: ModelRequest, view: ContextView, plan: Budget, cut: int, emit: Callable[..., Awaitable[None]]
     ) -> None:
         """Section 8 (c): the earliest part moves out with no model call; the previous checkpoint stays."""
         await emit(CompactionStarted, reason="overflow")
-        hosted = await self._hosted(view, cut, selected)
+        hosted = await self._hosted(view, cut)
         payload, _ = await self._compaction(request, view, plan, cut, **self._dropped(view), hosted=hosted)
         (row,) = await self._commit_context([("compaction", payload)])
         await emit(
@@ -1597,17 +1589,12 @@ class Agent:
         payload["tokens_after_estimate"] = request_tokens(request.system, request.tools, self._carried(after))
         return payload, after
 
-    async def _hosted(
-        self, view: ContextView, cut: int, route: ModelSelection
-    ) -> tuple[tuple[str, ...], Optional[str]]:
-        """The host's part of a checkpoint row for ``cut``: the rendered ``state`` and the earlier-record lookup.
-
-        ``route`` is the one the next request goes to; the state is capped for it (section 7).
-        """
+    async def _hosted(self, view: ContextView, cut: int) -> tuple[tuple[str, ...], Optional[str]]:
+        """The host's part of a checkpoint row for ``cut``: the rendered ``state`` and the earlier-record lookup."""
         host = self.context.host
         if host is None:
             return (), None
-        needed = StateRequest(self.session_id, carried_skills(view, cut), state_cap(route.capabilities))
+        needed = StateRequest(self.session_id)
         state = tuple(await self._scope.call(lambda: host.render_state(needed)))
         if not all(isinstance(item, str) for item in state):
             raise TypeError("ContextHost.render_state must return strings")

@@ -46,7 +46,6 @@ from core.agent_core.harness.context import (
     StateRequest,
     message_tokens,
     request_tokens,
-    state_cap,
 )
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import (
@@ -134,17 +133,16 @@ class Host:
 
     async def render_state(self, request):
         self.states.append(request)
-        return [f"<state skills={len(request.skills)}/>"]
+        return ["<state/>"]
 
 
 def make_agent(
-    model, *, store=None, tools=(), hooks=(), selection=SELECTION, context=None, cwd="/test-owned", models=None,
-    **options,
+    model, *, store=None, tools=(), hooks=(), selection=SELECTION, context=None, cwd="/test-owned", **options
 ):
     selections = selection if isinstance(selection, tuple) else (selection,)
     return Agent(
         session_id="session",
-        models=models or FakeModelRouter(model, selections),
+        models=FakeModelRouter(model, selections),
         tools=tools,
         hooks=hooks,
         store=store or InMemoryTranscriptStore(),
@@ -222,15 +220,14 @@ async def test_a_threshold_checkpoint_forks_the_exact_prefix_and_leaves_checkpoi
     assert fork.messages[:-1] == project(before).messages  # the whole conversation, then the request
     assert compaction.payload["mode"] == "normal" and compaction.payload["reason"] == "threshold"
     assert compaction.payload["checkpoint"] == CHECKPOINT
-    # The state is capped for the route the next request goes to.
-    assert host.states == [StateRequest("session", (), state_cap(SELECTION.capabilities))]
+    assert host.states == [StateRequest("session")]
     assert host.records == [("session", compaction.payload["summarized_to_seq"])]
 
     # The next request: the checkpoint message (summary, then state), then the kept tool batch.
     checkpoint, *tail = after.messages
     summary, state = (block.text for block in checkpoint.content)
     assert CHECKPOINT in summary and "<current-request>\ngo\n</current-request>" in summary
-    assert "lookup session through" in summary and state == "<state skills=0/>"
+    assert "lookup session through" in summary and state == "<state/>"
     assert [type(message).__name__ for message in tail] == ["AssistantMessage", "ToolResultMessage"]
     assert tail[0].tool_calls[0].id == "read-3"
     assert after.messages == project(rows[: len(rows) - 1]).messages
@@ -636,44 +633,6 @@ async def test_the_second_unproductive_checkpoint_of_a_run_ends_a_request_that_c
     assert len(model.checkpoint_requests) == 2
     assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
     assert events[-1].reason == "context_exhausted"
-
-
-async def test_a_checkpoint_on_a_fallback_renders_its_state_for_the_conversation_route():
-    # The checkpoint's first attempt is refused on the primary and retried on a fallback with a far larger window;
-    # its state is still capped for the route the conversation's next request is composed for.
-    other = ModelEndpoint("anthropic", "http://model.invalid", "other-model", "", provider="test-provider")
-    router = None
-
-    def busy(request):
-        router.retrying = True
-        return [ProviderError("rate_limit", "busy", True)]
-
-    def answers(request):
-        router.retrying = False
-        assert request.endpoint.model_id == "other-model"
-        return [Done(assistant(CHECKPOINT))]
-
-    host = Host()
-    model = Model(after_checkpoint(), [busy, answers])
-    fallback = ModelSelection(other, replace(ROOMY.capabilities, context_window=1_000_000))
-    router = _FallbackOnRetry(model, ROOMY, fallback)
-    agent = make_agent(model, models=router, context=ContextConfig(host=host), tools=[reader(tokens(3_000))],
-                       retry=RetryPolicy(initial_delay_s=0))
-    await run(agent)
-    assert (await cross(agent))[-1].reason == "completed"
-    assert [request.cap for request in host.states] == [state_cap(ROOMY.capabilities)]
-
-
-class _FallbackOnRetry(FakeModelRouter):
-    """The primary route; while ``retrying`` is set, a retry resolves to the fallback."""
-
-    def __init__(self, model, primary, fallback) -> None:
-        super().__init__(model, (primary,))
-        self.fallback, self.retrying = fallback, False
-
-    async def resolve(self):
-        self.resolutions += 1
-        return self.fallback if self.retrying else self.selections[0]
 
 
 async def test_a_failed_checkpoint_attempt_keeps_every_partial_in_its_audit():

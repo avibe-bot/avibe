@@ -28,13 +28,6 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def skill_revision(skill: ManagedSkill) -> str | None:
-    """The revision Skill observability records for a load (its name, description, flag, and body); None unloaded."""
-    if skill.body is None:
-        return None
-    return _digest([1, skill.name, skill.description, skill.disable_model_invocation, skill.body])
-
-
 def skill_descriptor(skill: ManagedSkill) -> dict[str, Any]:
     source = {0: "builtin", 1: "project", 2: "global"}[skill.priority[0]]
     identity = [1, "builtin", skill.name] if source == "builtin" else [1, source, str(skill.directory), skill.name]
@@ -78,7 +71,7 @@ def load_result(
     if skill is not None:
         descriptor = skill_descriptor(skill)
         if skill.body is not None:
-            revision = skill_revision(skill)
+            revision = _digest([1, skill.name, skill.description, skill.disable_model_invocation, skill.body])
             body_bytes = len(skill.body.encode("utf-8"))
     else:
         valid_name = isinstance(name, str) and len(name) <= 64 and store.NAME_RE.fullmatch(name)
