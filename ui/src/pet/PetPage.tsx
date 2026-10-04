@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { Activity, ArrowUp, ExternalLink, KeyRound, Shuffle } from 'lucide-react';
@@ -14,6 +14,7 @@ import {
   resolveActivityLabel,
   sortBackgroundActivities,
 } from '@/lib/backgroundActivity';
+import { usePageActive } from '@/lib/pageActivity';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { useLatestRef } from '@/lib/useLatestRef';
 
@@ -273,12 +274,15 @@ const PetSurface: React.FC = () => {
       onPick={(sessionId) => {
         setSwitcherOpen(false);
         // Optimistic, but the shell owns the durable binding: if it cannot
-        // persist the pick, go back to what it still holds.
-        const previous = petShell.currentBinding() ?? null;
+        // persist the pick, go back to the last binding it confirmed (never to
+        // an earlier pick that may itself be unconfirmed).
         petShell.setBinding(sessionId);
-        petBridge.bind(sessionId).catch(() => {
-          if (petShell.currentBinding() === sessionId) petShell.setBinding(previous);
-        });
+        petBridge.bind(sessionId).then(
+          () => petShell.confirm(sessionId),
+          () => {
+            if (petShell.currentBinding() === sessionId) petShell.setBinding(petShell.confirmedBinding());
+          },
+        );
       }}
       exchange={exchange}
       markRead={markRead}
@@ -549,10 +553,13 @@ function usePetMarkRead(
 ): void {
   const last = exchange.results[exchange.results.length - 1];
   const unreadId = last && last.read_at === null ? last.id : null;
-  const visible = useDocumentVisible();
+  // Seen means visible and focused: an open panel can stay up behind another
+  // app (it keeps an unsent draft), and a reply arriving then is not seen. The
+  // shared page-activity signal is the same one the chat page uses.
+  const active = usePageActive();
   const markedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!unreadId || !exchange.unreadComplete || !visible) return;
+    if (!unreadId || !exchange.unreadComplete || !active) return;
     const marker = `${binding}\u0000${unreadId}`;
     if (markedRef.current === marker) return;
     markedRef.current = marker;
@@ -565,16 +572,6 @@ function usePetMarkRead(
       if (applied) onRead();
       else forget();
     }, forget);
-  }, [binding, unreadId, exchange.unreadComplete, visible, markRead, onRead]);
+  }, [binding, unreadId, exchange.unreadComplete, active, markRead, onRead]);
 }
 
-const subscribeVisibility = (listener: () => void) => {
-  document.addEventListener('visibilitychange', listener);
-  return () => document.removeEventListener('visibilitychange', listener);
-};
-
-/** Whether the document is visible, as render state, so effects re-run when
- *  a hidden pet window is shown again. */
-function useDocumentVisible(): boolean {
-  return useSyncExternalStore(subscribeVisibility, () => document.visibilityState === 'visible');
-}

@@ -26,6 +26,10 @@ let boundEvents = 0;
 // Likewise for summons: the shell may deliver a live summon before this page
 // has read the `pet_ready()` answer, and the older pending one must not win.
 let liveSummons = 0;
+// The binding the shell is known to hold: from `pet_ready()`, `pet:bound`, or a
+// pick the shell acknowledged. A failed pick reverts to this, never to another
+// unconfirmed pick.
+let confirmed: string | null = null;
 const storeListeners = new Set<() => void>();
 const summonListeners = new Set<() => void>();
 
@@ -50,6 +54,7 @@ const start = () => {
     },
     bound: (sessionId) => {
       boundEvents += 1;
+      confirmed = sessionId;
       setBindingState(sessionId);
     },
   });
@@ -57,7 +62,10 @@ const start = () => {
   const liveSummonsAtRequest = liveSummons;
   const readyApplies = () => boundEvents === boundEventsAtRequest;
   void petBridge.ready().then((ready) => {
-    if (readyApplies()) setBindingState(ready.binding);
+    if (readyApplies()) {
+      confirmed = ready.binding;
+      setBindingState(ready.binding);
+    }
     if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
   }).catch(() => {
     if (readyApplies()) setBindingState(null);
@@ -70,6 +78,14 @@ export const petShell = {
     boundEvents += 1;
     setBindingState(binding);
   },
+
+  /** The shell acknowledged this binding. */
+  confirm: (binding: string | null) => {
+    confirmed = binding;
+  },
+
+  /** The last binding the shell is known to hold. */
+  confirmedBinding: (): string | null => confirmed,
 
   /** Take the waiting summon, if any. */
   takeSummon: (): PetIntent | null => {

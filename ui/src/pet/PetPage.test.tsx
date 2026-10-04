@@ -15,13 +15,15 @@ vi.mock('react-i18next', () => ({
 const handlers = new Set<WorkbenchEventHandlers>();
 const emit = (pick: (h: WorkbenchEventHandlers) => void) => act(() => handlers.forEach(pick));
 
-type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void };
+type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void };
 const deferred = <T,>(): Deferred<T> => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 };
 
 const session = (id: string, overrides: Partial<WorkbenchSession> = {}): WorkbenchSession => ({
@@ -141,6 +143,9 @@ const memoryStorage = (): Storage => {
   };
 };
 Object.defineProperty(window, 'localStorage', { value: memoryStorage(), configurable: true });
+// The window has focus unless a test says otherwise (jsdom reports none).
+let windowFocused = true;
+Object.defineProperty(document, 'hasFocus', { value: () => windowFocused, configurable: true });
 
 const devBind = (sessionId: string | null) => {
   if (sessionId) window.localStorage.setItem('avibe.pet.devBinding', sessionId);
@@ -163,6 +168,7 @@ beforeEach(async () => {
   vi.resetModules();
   ({ PetPage } = await import('./PetPage'));
   setupDone = true;
+  windowFocused = true;
   sessionReads = {};
   tails = {};
   switcherSessions = [];
@@ -720,5 +726,46 @@ describe('PetPage review fixes, round 9', () => {
     } finally {
       api.getTurnState.mockImplementation(async () => idleTurn);
     }
+  });
+});
+
+describe('PetPage review fixes, round 10', () => {
+  it('does not mark a reply read while another app has focus', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r1', 'S', { read_at: null, text: 'unseen' })];
+    unreadBySession = { S: 1 };
+    windowFocused = false;
+    devBind('S');
+    render(<PetPage />);
+    summon('show');
+    await screen.findByText('unseen');
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(markRead).not.toHaveBeenCalled();
+    windowFocused = true;
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r1'));
+  });
+
+  it('reverts a failed pick to the binding the shell confirmed, not an earlier pick', async () => {
+    const binds: Record<string, ReturnType<typeof deferred<unknown>>> = { B: deferred(), C: deferred() };
+    const invoke = vi.fn((command: string, args?: { sessionId?: string }) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', summon_pending: null });
+      if (command === 'pet_bind') return binds[args?.sessionId ?? ''].promise;
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    switcherSessions = [session('A'), session('B'), session('C')];
+    render(<PetPage />);
+    summon('show');
+    await screen.findByText('Session A');
+    await userEvent.click(screen.getByLabelText('pet.switchSession'));
+    await userEvent.click(await screen.findByText('Session B'));
+    await userEvent.click(await screen.findByLabelText('pet.switchSession'));
+    await userEvent.click(await screen.findByText('Session C'));
+    await act(async () => binds.B.reject(new Error('disk full')));
+    await act(async () => binds.C.reject(new Error('disk full')));
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenLastCalledWith('A'));
   });
 });
