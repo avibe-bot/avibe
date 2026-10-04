@@ -325,6 +325,33 @@ async def test_the_checkpoint_policy_allows_reads_and_scratch_writes_and_never_r
     assert events[-1].reason == "completed"
 
 
+@pytest.mark.parametrize("malformed", ["duplicate call ids", "arguments that are not JSON"])
+async def test_a_malformed_checkpoint_response_fails_the_checkpoint_before_any_call_runs(malformed):
+    # Admission is one path for every response (invariant 6): the checkpoint turn's are checked before any call.
+    if malformed == "duplicate call ids":
+        calls = (ToolCallBlock("same", "read", {"path": "a"}), ToolCallBlock("same", "read", {"path": "b"}))
+    else:
+        calls = (ToolCallBlock("odd", "read", {"path": "a"}),)
+        calls[0].arguments["path"] = float("nan")  # valid when built, changed after: the arguments are mutable
+    read = reader(tokens(3_000))
+    model = Model(history(), [[Done(AssistantMessage(calls, assistant().origin, "tool_use"))]])
+    agent = make_agent(model, tools=[read])
+    await run(agent)
+    before = await agent.store.load("session")
+    events = [event async for event in agent.compact(turn_id="compact")]
+
+    assert [ctx.tool_call_id for _, ctx in read.calls] == ["h0", "h1"]  # no call of the checkpoint turn ran
+    failed = [event for event in events if isinstance(event, CompactionFailed)]
+    assert len(failed) == 1 and failed[0].error.startswith("Provider protocol violation")
+    rows = await agent.store.load("session")
+    assert rows[: len(before)] == before and [row.kind for row in rows[len(before) :]] == ["agent_state"]
+    assert rows[-1].payload["context"]["failures"] == 1  # a failed checkpoint, counted by the guard
+    audit = agent.store.audits[-1][2]
+    assert audit["outcome"] == "failed" and audit["error"] == failed[0].error
+    # The audit keeps the refused response when JSON can hold it.
+    assert len(audit["messages"]) == (1 if malformed == "duplicate call ids" else 0)
+
+
 async def test_a_target_the_platform_cannot_compare_with_the_scratch_dir_is_denied(tmp_path, monkeypatch):
     # On Windows, commonpath raises ValueError for paths on different drives (D:\\notes.txt vs C:\\scratch).
     def other_drive(paths):
@@ -384,6 +411,21 @@ async def test_a_threshold_checkpoint_may_read_while_the_window_has_room_and_nev
     await run(agent)
     assert [ctx.tool_call_id for _, ctx in tool.calls] == ["read-0", "read-1", "read-2", "read-3"]
     assert model.checkpoint_requests[-1].messages[-1].content[0].text == BUDGET_USED
+
+    # A response that leaves under 1,000 tokens of room still gets the policy's fixed text, never a cut of it:
+    # a truncation note would tell the model to read again, and another call fails the turn.
+    long = AssistantMessage(
+        (ThinkingBlock(tokens(6_500)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
+    )
+    model = Model(reads(4), [[Done(long)], [Done(assistant(CHECKPOINT))]])
+    tool = sized_reader(6_000, 6_000, 6_000, 2_000)
+    agent = make_agent(model, tools=[tool])
+    events = await run(agent)
+    first, second = model.checkpoint_requests
+    room = 32_000 - request_tokens(first.system, first.tools, first.messages) - 4_096 - message_tokens(long)
+    assert room < 1_000 + message_tokens(second.messages[-1])  # the bound would have cut it
+    assert second.messages[-1].content == (text(BUDGET_USED),)
+    assert [event.mode for event in events if isinstance(event, CompactionFinished)] == ["normal"]
 
 
 async def test_a_manual_compact_with_nothing_older_than_the_tail_is_skipped_without_a_model_call():
@@ -824,12 +866,25 @@ def fits_the_window(request) -> bool:
     return request_tokens(request.system, request.tools, request.messages) + 4_096 + 8_000 <= 32_000
 
 
+class FailingTransactionStore(InMemoryTranscriptStore):
+    """Its next ``append_payloads`` transactions fail as a database would: nothing of them lands."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    async def append_payloads(self, session_id, entries):
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("transaction failed")
+        return await super().append_payloads(session_id, entries)
+
+
 async def test_invariant_3_a_c9_transition_commits_in_one_transaction_or_not_at_all():
     # A checkpoint that comes out ineffective moves the guard; its guard and its row share one transaction.
-    store = InMemoryTranscriptStore()
+    store = FailingTransactionStore(failures=1)
     model = Model(reads(4), [[Done(assistant(tokens(15_000)))]])
     agent = make_agent(model, store=store, tools=[sized_reader(6_000, 6_000, 6_000, 6_000)])
-    store.fail_transactions = 1
     events = await run(agent)
     rows = await store.load("session")
     # Nothing of the failed transition is anywhere: no checkpoint, no guard state, no announcement.

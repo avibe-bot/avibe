@@ -28,11 +28,18 @@ Display-only rows keep `context_seq` null: `interim`, `notify`, an `error` that 
 `output`, queued or removed inputs, and the `tool_call` trace row written at tool start (its `metadata_json` carries
 `tool_call_id` and `job_id` so the activity panel can pair it with the result). Audit rows are never context
 either: `agent_events` with `visibility = 'audit'` and no `context_seq`, written by `append_audit`, as
-`context_checkpoint_turn` (`CheckpointTurn`, C-9 `context.md` §6) or `model_attempt` (`ModelAttempt`, the usage of a
-model attempt that did not become a response, in every mode). The activity panel does not read them.
+`context_checkpoint_turn` (`CheckpointTurn`, C-9 `context.md` §6, with its own attempts' partials and usage) or
+`model_attempt` (`ModelAttempt`, the usage of a conversation attempt that did not become a response, in every mode). The activity panel does not read them.
 
 ## 2. Writing
 
+- Every store implements the whole `TranscriptStore` protocol (`harness/store.py`) with the same behavior: an append
+  returns exactly the entry `load` reads back, `created_at` (epoch seconds) included; a response keeps C-9's request
+  facts in `content_json.model.request`; a payload row needs a payload kind and version 1, and `append_payloads`
+  commits all of its rows or none; consuming the same input again returns its entry, and a different message for it
+  is refused; a call is settled once (a second result returns the first); audit rows never load. One contract suite,
+  `tests/test_transcript_store_contract.py`, runs the same tests on the SQLite store, the adapter's store over it,
+  and the in-memory store the engine tests use.
 - The loop is the only writer of a Session's `context_seq`, under a per-Session lock held across the transaction:
   `next = max(context_seq of the Session in both tables, fork_source_context_seq if the Session is a fork) + 1`, so a
   fork's first entry follows its inherited prefix.

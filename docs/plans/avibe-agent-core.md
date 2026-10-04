@@ -142,7 +142,7 @@ Schema delta (one Alembic migration, nullable columns, no backfill):
 2. A new `agent_events.visibility` value, `context`, never removed by trace retention. The retention filter is
    already `event_type='tool_call' AND visibility='trace'`; a contract test pins the exemption.
 3. New `agent_events.event_type` values `tool_result`, `context_compaction`, `context_edit`, and `agent_state` (hook
-   state for fork, C-3), registered where the activity panel reads event types.
+   state for fork, C-3, and the C-9 guard state), registered where the activity panel reads event types.
 4. For this backend, `agent_sessions.native_session_id` is the Avibe Session id.
 
 Rules:
@@ -175,12 +175,13 @@ this section summarizes it. Three tiers, cheapest first: output governance at wr
 and `bash` results with `context_edit` rows, on by default; and a checkpoint written by the model, recorded as a
 `context_compaction` row. Compaction and clearing only append rows.
 
-- **Limits from Model Hub.** `W`, `L_in`, and `O` come from the served hop's `context_window`, `input_limit`, and
-  `max_output_tokens` (128,000 and 8,192 when unknown); one pure function computes them and `est` immediately
-  before every model request.
+- **Limits from Model Hub.** `W` and `L_in` come from the `context_window` and `input_limit` of the route resolved
+  for the request (128,000 when unknown). `O` is the request's `max_tokens`: the hop's `max_output_tokens` (8,192
+  when unknown) capped by the Agent's output budget, and `min(16,000, O)` for a checkpoint request. One pure
+  function derives the rest and `est` from the final request, immediately before it is sent.
   `M = max(8,000, 3% W)`, `T = min(L_in - O - M, 0.9 W)`.
-- **Trigger** before every model request, including inside the tool loop, on the final request after the user's
-  hooks: `est` is the usage of the latest response stored with its request facts, adjusted by the UTF-8 bytes / 4
+- **Trigger** before every model request, including inside the tool loop, on the final request (in v1 no user hook
+  runs with context management): `est` is the usage of the latest response stored with its request facts, adjusted by the UTF-8 bytes / 4
   difference between this request and that one (1,600 per image), while that request went to the same route and the
   transcript up to the response is unchanged; otherwise UTF-8 bytes / 4 of the whole request. Compact when
   `est >= T`.
@@ -195,8 +196,8 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
   checkpoint, cumulative `<artifacts>`, an `<earlier-record>` lookup, `<current-request>`), state rendered from its
   own stores when the checkpoint was written (skills, pending Watches, Tasks, and Runs, the environment block), and
   the verbatim tail. No synthetic "continue" message.
-- **Overflow ladder**, bounded per request: the normal checkpoint; fork-summarize the largest safe prefix that fits
-  (rolling); with no model call, move the earliest part out (dropped); stop and say what fills the context.
+- **Overflow ladder**, bounded per request: the normal checkpoint; fork-summarize the prefix up to the cut nearest
+  half the tokens, moved earlier until it fits (rolling); with no model call, move the earliest part out (dropped); stop and say what fills the context.
 - **Guards**: one compaction in flight per Session; 3 consecutive failures or 3 ineffective checkpoints pause
   auto-compaction for the Session, and the user is told once. Manual `/compact [focus]` works on every surface,
   clears the pause, and is answered. An automatic compaction is silent.
@@ -301,7 +302,8 @@ Properties; the test suites enumerate cases.
   its own origin, no signature is ever synthesized, and the stub sees exactly one protocol per request.
 - **A3 Durability.** SIGKILL at any point resumes with no committed entry lost and no command executed twice; the
   context rebuilt from the tables is always a valid request for every protocol.
-- **A4 Bounded context.** A session with more than 10,000 messages keeps every request under its model's T.
+- **A4 Bounded context.** A session with more than 10,000 messages keeps every request within its model's input
+  limit, and under its T unless auto-compaction is paused or a checkpoint for that request failed (C-9 §3).
   Compaction and clearing only insert rows. A fork anchored before a checkpoint projects the full original context.
   With a provider that always overflows, one request makes at most two checkpoint model calls and then ends in a
   user-visible stop (C-9 `context.md` §8).
@@ -319,7 +321,9 @@ Properties; the test suites enumerate cases.
   origin is sent, and the run completes.
 - **A10 One copy.** For every request without a transient `before_model` rewrite (C-3 §3), the context rebuilt from
   `messages` and `agent_events` equals what the stub received; no other file or table holds a copy of it. A
-  checkpoint turn's request is that context plus the checkpoint request and the turn's own audit messages (C-9 §6).
+  checkpoint turn's request is that context (for a rolling fork, its prefix up to the cut) plus the checkpoint
+  request and the turn's admitted responses and tool results (C-9 §6); its audit row also keeps the attempts that
+  were retried or failed.
 - **A11 Exactly-once commands.** A command started by `bash` runs once across foreground completion, `watch: true`,
   foreground-to-Watch handover, and a vibe restart in any of those states; Watch removal ends its process tree.
 - **A12 Compaction quality.** On a scripted long-session fixture compacted twice, the agent still states the user's
@@ -346,7 +350,7 @@ breaker, review gates, and close-out follow the `pr-delivery-loop` skill.
 | Provider edge cases become permanent maintenance | port tau's fixtures; add cases derived from `pi-ai` for stop reasons, overflow, retry, SSE; one conformance suite per protocol |
 | The Model Hub extension lands late and blocks C-2 conformance | the Model Hub lane runs first in P1; the `ai` lane develops against the contract file, not the live gateway |
 | A second persistence model creeps back | C-5 forbids one; A10 tests it |
-| Compaction quietly loses user constraints | the fixed "User instructions and constraints" heading; A12 tracked per prompt version |
+| Compaction quietly loses user constraints | the fixed "User requirements" heading of `checkpoint-v2`; A12 tracked per prompt version |
 | Database growth from inline tool output | output governance bounds each row; the reserved reference form allows moving it out without a schema change |
 | Scope creep toward the tension system or interactive terminals | §2 non-goals; §5.4 ships only the shape in v1 |
 | Python 3.10 floor versus ported code | port with `TypeAlias`; CI already covers 3.10 |

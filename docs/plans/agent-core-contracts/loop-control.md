@@ -8,7 +8,8 @@ The loop in `core/agent_core/agent/`. Semantics are the ones the bare-loop spike
 ```python
 class Agent:
     def __init__(self, *, models: ModelRouter, tools: Sequence[Tool], hooks: Sequence[Hooks],
-                 store: TranscriptStore, jobs: JobHost) -> None: ...
+                 store: TranscriptStore, jobs: JobHost,
+                 context: ContextConfig | None = None) -> None: ...   # C-9; excludes hooks in v1 (§3)
 
     def run(self, input: Input, *, turn_id: str) -> AsyncIterator[AgentEvent]: ...   # one Avibe Turn
     def compact(self, *, turn_id: str, focus: str | None = None) -> AsyncIterator[AgentEvent]: ...   # /compact (C-9)
@@ -28,7 +29,8 @@ wrapper.
 
 ```text
 commit input → loop:
-    before_model hooks → provider stream (events out)
+    projection → before_model hooks (without a ContextConfig) or budget and the C-9 stage (with one; C-9 §10)
+        → provider stream (events out) → admission of the response
     if the response has tool calls:
         commit it as `assistant`
         for each call, in order: before_tool → execute → after_tool → commit tool result

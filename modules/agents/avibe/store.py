@@ -101,9 +101,11 @@ class AdapterTranscriptStore:
         self._env_state[session_id] = {**previous, **current}
         return entry
 
-    async def append_response(self, session_id: str, message: AssistantMessage, *, final: bool) -> ContextEntry:
+    async def append_response(
+        self, session_id: str, message: AssistantMessage, *, final: bool, request: Optional[Mapping[str, Any]] = None
+    ) -> ContextEntry:
         entry = await self._store.append_response(
-            session_id, message, final=final, agent_name=self._agents.get(session_id)
+            session_id, message, final=final, request=request, agent_name=self._agents.get(session_id)
         )
         self._on_response(session_id, entry.row_id, message)
         return entry
@@ -119,6 +121,13 @@ class AdapterTranscriptStore:
         self, session_id: str, kind: Literal["compaction", "context_edit", "agent_state"], payload: Mapping[str, Any]
     ) -> ContextEntry:
         return await self._store.append_payload(session_id, kind, payload, agent_name=self._agents.get(session_id))
+
+    async def append_payloads(
+        self,
+        session_id: str,
+        entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state"], Mapping[str, Any]]],
+    ) -> Sequence[ContextEntry]:
+        return await self._store.append_payloads(session_id, entries, agent_name=self._agents.get(session_id))
 
     async def append_audit(
         self, session_id: str, kind: Literal["attempt", "checkpoint_turn"], payload: Mapping[str, Any]

@@ -19,7 +19,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
-from core.agent_core.agent.checkpoint import BUDGET_USED, CheckpointPolicy
+from core.agent_core.agent.checkpoint import BUDGET_USED, CheckpointPolicy, Decision
 from core.agent_core.agent.events import (
     AgentError,
     AgentEvent,
@@ -111,7 +111,7 @@ from core.agent_core.harness.projection import (
     project,
     validate_message_append,
 )
-from core.agent_core.harness.store import ContextEntry, TranscriptStore
+from core.agent_core.harness.store import ContextEntry, EntryKind, TranscriptStore
 from core.agent_core.messages import (
     AssistantMessage,
     Message,
@@ -119,6 +119,7 @@ from core.agent_core.messages import (
     ToolCallBlock,
     ToolResultMessage,
     Usage,
+    UserMessage,
     message_to_dict,
     text,
     usage_to_dict,
@@ -142,7 +143,7 @@ class UnsupportedModelRoute(ValueError):
 
 
 class _Exhausted(Exception):
-    """C-9 section 8 (d): nothing more can move out and the request still does not fit."""
+    """C-9 section 8 (d): the run stops ``context_exhausted``, saying what fills the context."""
 
     def __init__(self, limit: int, parts: tuple[ContextPart, ...]) -> None:
         self.limit, self.parts = limit, parts
@@ -421,9 +422,22 @@ class Agent:
         )
         self._rows.append(row)
 
-    def _validate_response(self, message: AssistantMessage) -> None:
+    def _validate_response(self, message: AssistantMessage, *, after: Sequence[Message] = ()) -> None:
+        """A response is valid after the committed rows and then ``after`` (a checkpoint turn's own messages)."""
+        entries = list(self._rows)
+        seq = max((entry.context_seq for entry in entries), default=0)
+        for item in after:
+            seq += 1
+            kind: EntryKind = (
+                "input"
+                if isinstance(item, UserMessage)
+                else "response"
+                if isinstance(item, AssistantMessage)
+                else "tool_result"
+            )
+            entries.append(ContextEntry(self.session_id, seq, kind, f"uncommitted-{seq}", item))
         try:
-            validate_message_append(self._rows, session_id=self.session_id, kind="response", message=message)
+            validate_message_append(entries, session_id=self.session_id, kind="response", message=message)
         except ProjectionError as error:
             raise ProviderProtocolViolation(f"Provider protocol violation: {error}") from error
 
@@ -618,6 +632,7 @@ class Agent:
         *,
         compose: Optional[Callable[[ModelSelection], Awaitable[tuple[ModelRequest, dict[str, Tool]]]]] = None,
         purpose: Literal["conversation", "checkpoint"] = "conversation",
+        after: Sequence[Message] = (),
     ) -> AsyncIterator[tuple[Done | ProviderError, dict[str, Tool]]]:
         """One model request with its transient retries.
 
@@ -625,6 +640,10 @@ class Agent:
         A conversation request's pipeline is ``_compose``. Every attempt enters the run's attempt ledger. A
         conversation request the provider rejects as overflow goes back through the pipeline with the ladder
         told to shrink (C-9 section 8). A checkpoint attempt is never context.
+
+        Admission is here, for every purpose: the response the caller receives (or a partial with content) is
+        valid after the committed rows and ``after``, the messages the request carried beyond them (a checkpoint
+        turn's request and its own turn), or ``ProviderProtocolViolation`` is raised before anyone acts on it.
         """
         ladder = _Ladder()
         if compose is None:
@@ -698,18 +717,20 @@ class Agent:
                     else None
                 )
                 if delay is None and not relieve:
-                    # The caller admits and commits this terminal inside the
-                    # scope, BEFORE aclose. Never retry an accepted terminal.
+                    # Admitted here; the caller commits it inside the scope,
+                    # BEFORE aclose. Never retry an accepted terminal.
+                    admitted = terminal.message if isinstance(terminal, Done) else terminal.partial
+                    if isinstance(terminal, Done) or (admitted is not None and admitted.content):
+                        self._validate_response(admitted, after=after)
                     yield terminal, tools
                     return
             finally:
                 close = getattr(stream, "aclose", None)
                 if close is not None:
                     await self._cleanup(close, stream=True)
-            # The attempt is not the run's answer: its partial stays in the ledger, and a conversation
-            # attempt's billed usage is kept as a non-final row before the request is tried again.
-            # A retried or relieved attempt is never context: it stays in the ledger (and the audit), and the
-            # request goes out again unchanged.
+            # The attempt is not the run's answer and is never context (invariant 4): it stays in the ledger and
+            # the audit. A retried request goes out again unchanged; one refused as overflow is rebuilt after a
+            # ladder step (section 8).
             await self._record_attempt(self._attempts[-1])
             terminal = replace(terminal, partial=None)
             if relieve:
@@ -717,7 +738,10 @@ class Agent:
                 ladder.refused = True
                 if ladder.overflows >= MAX_OVERFLOWS:
                     view = context_view(self._rows)
-                    raise self._exhausted(request, view, budget(request, route.capabilities, transcript=view.messages))
+                    plan = budget(
+                        request, route.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view)
+                    )
+                    raise self._exhausted(request, view, plan)
                 retries, started, retry_error = 0, time.monotonic(), None
                 continue
             retry_error = terminal
@@ -778,8 +802,6 @@ class Agent:
                         # A usage-only partial is attempt data, never context.
                         await self._record_attempt(self._attempts[-1])
                         terminal = replace(terminal, partial=None)
-                    if terminal.partial is not None:
-                        self._validate_response(terminal.partial)
                     reason = (
                         "context_exhausted"
                         if terminal.kind == "overflow"
@@ -794,7 +816,6 @@ class Agent:
                         await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
                     return reason
                 message = terminal.message
-                self._validate_response(message)
                 failed = message.stop_reason in {"error", "aborted"}
                 if not (message.tool_calls and message.stop_reason == "length"):
                     length_tool_retries = 0
@@ -1025,15 +1046,9 @@ class Agent:
 
     # --- C-9 context management (agent-core-contracts/context.md) ---------------
     #
-    # Invariants (context.md section 10):
-    # 1. Request pipeline: projection -> user before_model -> budget() on that final request -> C-9 stage
-    #    -> send. A stage that changes the context rebuilds the request from the top; nothing changes a
-    #    request after it is budgeted.
-    # 2. Tool pipeline: user before_tool -> checkpoint policy on the final arguments -> execute -> bound
-    #    every result; artifacts are recorded from the final arguments after execution.
-    # 3. ``_commit_context`` is the one writer of C-9 state: one transaction per transition, before any event.
-    # 4. ``self._attempts`` is the one record of model attempts; the audit and the anchor read from it.
-    # 5. An anchor holds only for the route that answered it (``harness.context.budget``).
+    # The ordering and ownership invariants are context.md section 10 (1-6), the one statement of them. Their
+    # owners here: ``_compose`` (1, the request pipeline), ``_checkpoint_tool`` (2), ``_commit_context`` (3),
+    # ``self._attempts`` (4), ``harness.context.budget`` (5), and ``_model`` (6, admission).
 
     def _cache_cold(self) -> bool:
         """No model request for longer than the provider cache TTL (section 3)."""
@@ -1243,13 +1258,16 @@ class Agent:
         try:
             while True:
                 try:
-                    async with self._model(system, _silent, selection, compose=compose, purpose="checkpoint") as (
-                        terminal,
-                        tools,
-                    ):
+                    async with self._model(
+                        system, _silent, selection, compose=compose, purpose="checkpoint", after=(prompt, *turn)
+                    ) as (terminal, tools):
                         selection = None
                 except _ForkTooLarge:
                     overflow, error = True, "overflow: the checkpoint request does not fit the model's input limit."
+                    break
+                except ProviderProtocolViolation as violation:
+                    # Not admitted: a failed checkpoint, and none of its calls runs.
+                    error = str(violation)
                     break
                 finally:
                     produced.extend(item.message for item in self._attempts[mark:] if item.message is not None)
@@ -1293,12 +1311,15 @@ class Agent:
         usage = None
         for item in self._attempts[start:]:
             usage = add_usage(usage, item.message.usage if item.message is not None else None)
-        record: dict[str, Any] = {
-            "version": 1,
-            "reason": reason,
-            "mode": mode,
-            "messages": [message_to_dict(message) for message in produced],
-        }
+        messages = []
+        for message in produced:
+            try:
+                messages.append(message_to_dict(message))
+            except (ValueError, RecursionError) as invalid:
+                # Arguments a provider sent that are not JSON: refused at admission (the turn's error names
+                # them), and no JSON row can hold them either.
+                self._outcome.diagnostic(type(invalid).__name__, f"Checkpoint audit left out a message: {invalid}")
+        record: dict[str, Any] = {"version": 1, "reason": reason, "mode": mode, "messages": messages}
         if usage is not None:
             record["usage"] = usage_to_dict(usage)
         if not checkpoint:
@@ -1366,20 +1387,18 @@ class Agent:
         descriptor), then the bound on whatever result came out. No user hook runs under C-9 (v1).
         """
         call = deepcopy(original)
-        if not policy.open:
-            result = ToolResult((text(BUDGET_USED),), is_error=True)
+        decision = policy.decide(call) if policy.open else Decision(denial=BUDGET_USED)
+        if decision.denial is not None:
+            # The policy's fixed texts are short and never cut: a truncation note would invite another call.
+            return ToolResultMessage(call.id, call.name, (text(decision.denial),), True)
+        if decision.scratch is not None:
+            # Relative to the scratch root's descriptor: no pathname is resolved again.
+            result = await self._scope.call(lambda: asyncio.to_thread(policy.run, call, decision.scratch))
+        elif (tool := tools.get(call.name)) is None:
+            result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
         else:
-            decision = policy.decide(call)
-            if decision.denial is not None:
-                result = ToolResult((text(decision.denial),), is_error=True)
-            elif decision.scratch is not None:
-                # Relative to the scratch root's descriptor: no pathname is resolved again.
-                result = await self._scope.call(lambda: asyncio.to_thread(policy.run, call, decision.scratch))
-            elif (tool := tools.get(call.name)) is None:
-                result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
-            else:
-                result = await self._execute(tool, call, _silent)
-        # Every result that enters the turn is bounded, a hook's denial included.
+            result = await self._execute(tool, call, _silent)
+        # Every other result that enters the turn is bounded to the room the window leaves (section 6).
         return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
 
     async def _drop(
@@ -1503,4 +1522,4 @@ class Agent:
         except _Aborted:
             raise
         except Exception as error:
-            self._outcome.diagnostic(type(error).__name__, f"Checkpoint audit failed: {error}")
+            self._outcome.diagnostic(type(error).__name__, f"Audit write failed ({kind}): {error}")

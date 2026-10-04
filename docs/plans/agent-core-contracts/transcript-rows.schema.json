@@ -274,7 +274,7 @@
             "rounds": {
               "type": "integer",
               "minimum": 0,
-              "description": "Tool rounds the turn used."
+              "description": "Responses of the checkpoint turn that called tools: at most 5 rounds whose calls ran, plus one answered with the used-up budget text."
             }
           }
         },
@@ -311,7 +311,8 @@
             "text": {
               "type": "string"
             }
-          }
+          },
+          "additionalProperties": false
         },
         "reason": {
           "enum": [

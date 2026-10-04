@@ -1,13 +1,15 @@
 """Small hermetic C-2/C-5/C-7 fakes shared by agent-core lanes.
 
 The provider records detached requests before running each script. The store
-implements only committed entries and fork ancestry, not loop/projection logic.
+implements the ``TranscriptStore`` contract (committed entries and fork ancestry),
+not loop/projection logic; the contract suite runs it against the SQLite store.
 Jobs have explicit test-controlled state and never spawn processes.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from copy import deepcopy
 from typing import AsyncIterator, Callable, Mapping, Optional, Sequence
@@ -83,7 +85,14 @@ class FakeModelRouter:
 
 
 class InMemoryTranscriptStore:
-    def __init__(self, *, clock: Optional[Callable[[], float]] = None) -> None:
+    """The ``TranscriptStore`` contract in memory, and nothing more.
+
+    ``tests/test_transcript_store_contract.py`` runs the same contract tests on this store and on the SQLite one.
+    What tests read besides the protocol is observation only: ``final``, the audit rows (``audits``,
+    ``attempts``), and the kinds each ``append_payloads`` transaction committed (``transactions``).
+    """
+
+    def __init__(self, *, clock: Callable[[], float] = time.time) -> None:
         self.rows: dict[str, list[ContextEntry]] = {}
         self.forks: dict[str, Snapshot] = {}
         self.final: dict[str, bool] = {}
@@ -91,9 +100,8 @@ class InMemoryTranscriptStore:
         self.audits: list[tuple[str, str, dict]] = []
         # C-9 model-attempt audit rows (usage of attempts that never became context).
         self.attempts: list[tuple[str, str, dict]] = []
-        # Kinds committed by each ``append_payloads`` transaction, and how many to fail next.
+        # Kinds committed by each ``append_payloads`` transaction.
         self.transactions: list[list[str]] = []
-        self.fail_transactions = 0
         self._clock = clock
         self._next_id = 0
 
@@ -109,51 +117,90 @@ class InMemoryTranscriptStore:
             prefix = [row for row in await self.load(anchor.session_id) if row.context_seq <= anchor.context_seq]
         return deepcopy(prefix + self.rows.get(session_id, []))
 
-    async def _append(self, session_id, kind, *, message=None, payload=None, row_id=None) -> ContextEntry:
-        entries = await self.load(session_id)
-        seq = max((entry.context_seq for entry in entries), default=0) + 1
-        if row_id is None:
-            self._next_id += 1
-            row_id = f"row_{self._next_id}"
-        if any(entry.row_id == row_id for entry in entries):
-            raise ValueError(f"input already consumed: {row_id}")
-        created_at = self._clock() if self._clock is not None else None
-        row = ContextEntry(session_id, seq, kind, row_id, deepcopy(message), deepcopy(payload or {}), created_at)
-        self.rows.setdefault(session_id, []).append(row)
-        return deepcopy(row)
+    def _entries(self, session_id, items) -> list[ContextEntry]:
+        """Rows for ``(kind, message, payload, row_id)`` items, numbered after the Session's context."""
+        entries = self.rows.get(session_id, [])
+        anchor = self.forks.get(session_id)
+        seq = max([entry.context_seq for entry in entries] + [anchor.context_seq if anchor else 0])
+        rows = []
+        for kind, message, payload, row_id in items:
+            seq += 1
+            if row_id is None:
+                self._next_id += 1
+                row_id = f"row_{self._next_id}"
+            rows.append(ContextEntry(session_id, seq, kind, row_id, deepcopy(message), deepcopy(payload), self._clock()))
+        return rows
+
+    async def _append(self, session_id, items) -> list[ContextEntry]:
+        rows = self._entries(session_id, items)
+        self.rows.setdefault(session_id, []).extend(rows)  # all of them or none
+        return deepcopy(rows)
 
     async def consume_input(self, session_id, message_id, message: UserMessage) -> ContextEntry:
-        return await self._append(session_id, "input", row_id=message_id, message=message)
+        for entry in await self.load(session_id):
+            if entry.row_id == message_id:
+                # A retried commit of the same input is the committed entry; anything else would rewrite it.
+                if entry.message != message:
+                    raise ValueError(f"input {message_id} is already in the context")
+                return entry
+        return (await self._append(session_id, [("input", message, {}, message_id)]))[0]
 
     async def append_response(self, session_id, message: AssistantMessage, *, final: bool, request=None) -> ContextEntry:
-        row = await self._append(
-            session_id, "response", message=message, payload={"request": dict(request)} if request is not None else None
-        )
+        payload = {"request": dict(request)} if request is not None else {}
+        row = (await self._append(session_id, [("response", message, payload, None)]))[0]
         self.final[row.row_id] = final
         return row
 
     async def append_tool_result(self, session_id, message: ToolResultMessage, *, details: Mapping) -> ContextEntry:
-        return await self._append(session_id, "tool_result", message=message, payload={"details": dict(details)})
+        settled = _settled_result(await self.load(session_id), message.tool_call_id)
+        if settled is not None:
+            return settled  # a call instance is settled once, whoever writes
+        payload = {"details": dict(details)} if details else {}
+        return (await self._append(session_id, [("tool_result", message, payload, None)]))[0]
 
     async def append_payload(self, session_id, kind, payload: Mapping) -> ContextEntry:
-        return await self._append(session_id, kind, payload=payload)
+        return (await self._append(session_id, [(kind, None, _payload(kind, payload), None)]))[0]
 
     async def append_payloads(self, session_id, entries) -> list[ContextEntry]:
-        # One transaction: validated whole before any row lands, recorded for the tests that inspect it.
-        entries = [(kind, deepcopy(dict(payload))) for kind, payload in entries]
-        if self.fail_transactions:
-            self.fail_transactions -= 1
-            raise RuntimeError("transaction failed")
-        committed = [await self._append(session_id, kind, payload=payload) for kind, payload in entries]
+        committed = await self._append(session_id, [(kind, None, _payload(kind, payload), None) for kind, payload in entries])
         self.transactions.append([row.kind for row in committed])
         return committed
 
     async def append_audit(self, session_id, kind, payload: Mapping) -> str:
+        if kind not in ("attempt", "checkpoint_turn"):
+            raise ValueError(f"not an audit kind: {kind!r}")
         self._next_id += 1
         row_id = f"audit_{self._next_id}"
         record = (session_id, row_id, deepcopy(dict(payload)))
         (self.audits if kind == "checkpoint_turn" else self.attempts).append(record)
         return row_id
+
+
+def _payload(kind, payload: Mapping) -> dict:
+    """A payload row's content, as the contract admits it: a payload kind, at the current version."""
+    if kind not in ("compaction", "context_edit", "agent_state"):
+        raise ValueError(f"not a payload entry kind: {kind!r}")
+    if payload.get("version") != 1:
+        raise ValueError(f"a {kind} payload needs version 1")
+    return deepcopy(dict(payload))
+
+
+def _settled_result(entries: Sequence[ContextEntry], tool_call_id: str) -> Optional[ContextEntry]:
+    """The first result after the latest response carrying a call with this id, as the SQLite store finds it."""
+    owner = None
+    for index, entry in enumerate(entries):
+        if entry.kind == "response" and any(call.id == tool_call_id for call in entry.message.tool_calls):
+            owner = index
+    if owner is None:
+        return None
+    return next(
+        (
+            entry
+            for entry in entries[owner + 1 :]
+            if entry.kind == "tool_result" and entry.message.tool_call_id == tool_call_id
+        ),
+        None,
+    )
 
 
 class FakeTool:

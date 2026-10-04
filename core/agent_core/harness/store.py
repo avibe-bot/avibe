@@ -1,8 +1,11 @@
 """C-5 transcript store interface (``agent-core-contracts/transcript.md``).
 
-The loop is the single writer of a Session's context. Each method commits one
-context entry and returns it with its ``context_seq``; the adapter implements
-this over the ``messages`` and ``agent_events`` tables.
+The loop is the single writer of a Session's context. ``load`` reads it; the
+other writes commit one context entry and return it with its ``context_seq``,
+except ``append_payloads`` (several entries in one transaction) and
+``append_audit`` (a non-context row; its id). The SQLite store implements this
+over the ``messages`` and ``agent_events`` tables, and one contract suite runs
+the same tests on it and on the in-memory store (C-5 ``transcript.md`` §2).
 """
 
 from __future__ import annotations
@@ -22,8 +25,9 @@ class ContextEntry:
     ``row_id`` is ``messages.id`` for inputs and responses, ``agent_events.id``
     otherwise. ``message`` is set for inputs, responses, and tool results;
     ``payload`` carries the versioned shape of the other kinds. ``created_at``
-    is the commit time in epoch seconds when the store knows it; C-9 reads a
-    response's to tell whether the provider cache has gone cold.
+    is the row's commit time in epoch seconds; every store sets it, as written
+    and as loaded, and C-9 reads a response's to tell whether the provider
+    cache has gone cold.
     """
 
     session_id: str

@@ -169,22 +169,30 @@ def _tool_result(call_id: str, body: str) -> ToolResultMessage:
     return ToolResultMessage(tool_call_id=call_id, tool_name="bash", content=(text(body),))
 
 
-COMPACTION = {
+COMPACTION = {  # the current C-9 ``Compaction`` shape (transcript-rows.schema.json)
     "version": 1,
-    "summary": "## Objective\n修复路径测试",
-    "first_kept_seq": 3,
-    "summarized_from_seq": 1,
-    "summarized_to_seq": 2,
-    "previous_compaction_id": None,
+    "mode": "normal",
     "reason": "manual",
     "focus": None,
-    "tokens_before": 100,
-    "tokens_after_estimate": 40,
-    "summarizer": {"origin": {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5"},
-                   "prompt_version": "ckpt-v1", "chunks": 1},
+    "summary": "<context-checkpoint>\n## Objective\n修复路径测试\n</context-checkpoint>",
+    "checkpoint": "## Objective\n修复路径测试",
+    "state": [],
+    "first_kept_seq": 3,
+    "summarized_to_seq": 2,
+    "previous_compaction_id": None,
+    "current_request": None,
+    "current_request_message_id": None,
     "files_read": ["core/paths.py"],
     "files_modified": [],
-    "current_request_message_id": None,
+    "skills": [],
+    "tokens_before": 100,
+    "tokens_after_estimate": 40,
+    "threshold": 80,
+    "summarizer": {
+        "origin": {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5"},
+        "prompt_version": "checkpoint-v2",
+        "rounds": 0,
+    },
 }
 
 

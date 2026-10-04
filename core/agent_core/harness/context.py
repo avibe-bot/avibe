@@ -308,8 +308,8 @@ def _estimate(request: ModelRequest, transcript: Sequence[Message], anchor: Opti
     """The anchored usage while it holds, adjusted by the UTF-8/4 delta of everything else; else UTF-8/4.
 
     The anchor holds while the request goes to the route that answered it and the transcript up to its response
-    is unchanged. A changed system prompt, tool set, rehydrated state, or hook rewrite does not invalidate it:
-    the request's own UTF-8/4 size carries the delta.
+    is unchanged. A changed system prompt, tool set, or rehydrated state does not invalidate it: the request's
+    own UTF-8/4 size carries the delta.
     """
     whole = sent_tokens(request)
     if anchor is not None and anchor.response.origin == endpoint_origin(request.endpoint):
@@ -381,8 +381,9 @@ def budget(
 ) -> Budget:
     """``W, L_in, O, M, T, keep`` and ``est`` of the final ``request`` on the route resolved for it.
 
-    The one place these values are computed (sections 1 and 2). ``transcript`` is the part of the request's
-    messages that comes from the rows, which is what an anchor is checked against.
+    Sections 1 and 2: it derives ``W, L_in, M, T, keep`` and ``est`` and reads ``O`` from ``request.max_tokens``,
+    which ``output_tokens`` or ``checkpoint_max_tokens`` set when the request was built. ``transcript`` is the part
+    of the request's messages that comes from the rows, which is what an anchor is checked against.
     """
     window = DEFAULT_CONTEXT_WINDOW if capabilities.context_window is None else capabilities.context_window
     limit = window if capabilities.input_limit is None else capabilities.input_limit
