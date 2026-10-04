@@ -11805,7 +11805,23 @@ async def sessions_messages_create(session_id: str):
     # is set-once, so a rare double-dispatch still records one consistent answer.
     if status == 202 and quick_reply_for:
         with engine.begin() as conn:
-            messages_service.set_quick_reply_chosen(conn, session_id, quick_reply_for, dispatch_text)
+            chosen_recorded = messages_service.set_quick_reply_chosen(
+                conn, session_id, quick_reply_for, dispatch_text,
+            )
+        # Publish the answered agent row only after the write has committed, so
+        # every window (another tab, the desktop pet) locks the group and clears
+        # "needs input" from one ordered event. The user message's own
+        # ``message.new`` is published during dispatch, before this write, so it
+        # cannot carry the choice. Set-once: a repeat click publishes nothing.
+        if chosen_recorded:
+            with engine.connect() as conn:
+                answered = messages_service.get_message(
+                    conn, quick_reply_for, session_id=session_id, include_local_error_detail=True,
+                )
+            if answered is not None:
+                from vibe.sse_broker import broker
+
+                broker.publish("message.updated", answered)
     if status == 202:
         delivery_state = str(body.get("delivery_state") or "")
         current = _current_delivery_response()
