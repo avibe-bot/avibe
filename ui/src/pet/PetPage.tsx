@@ -132,7 +132,10 @@ const PetSurface: React.FC = () => {
       const applied = await petBridge.setExpanded(next);
       if (request === layoutRequestRef.current) setLayout(applied);
     } catch {
-      /* the shell keeps its current frame */
+      // The shell kept its current frame, so the page follows it: a panel in a
+      // collapsed frame would be clipped, and a collapsed pet in an expanded
+      // frame would leave a transparent area catching clicks.
+      if (request === layoutRequestRef.current) setExpanded(!next);
     }
   }, []);
 

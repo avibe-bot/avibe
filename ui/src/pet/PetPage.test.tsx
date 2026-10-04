@@ -769,3 +769,20 @@ describe('PetPage review fixes, round 10', () => {
     await waitFor(() => expect(api.getSessionResult).toHaveBeenLastCalledWith('A'));
   });
 });
+
+describe('PetPage review fixes, round 12', () => {
+  it('keeps the panel matching the native frame when a resize fails', async () => {
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', summon_pending: null });
+      if (command === 'pet_set_expanded') return Promise.reject(new Error('no monitor'));
+      return Promise.resolve(null);
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />);
+    await userEvent.click(await screen.findByLabelText('pet.toggle'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
+    await waitFor(() => expect(screen.queryByLabelText('pet.panel')).toBeNull());
+    expect(screen.getByLabelText('pet.toggle').getAttribute('aria-expanded')).toBe('false');
+  });
+});
