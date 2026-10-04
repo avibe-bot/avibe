@@ -87,7 +87,11 @@ const PetSurface: React.FC = () => {
   const [sending, setSending] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Compare-and-clear, in this page and in the shell.
+  // Compare-and-clear, in this page and in the shell. Unlike a failed pick,
+  // a failed clear is not reverted: the binding is invalid (archived, missing
+  // or read-only), so restoring it would only re-run validation and clear it
+  // again, in a loop. If the shell keeps it durably, the next load validates
+  // it the same way before the pet uses it, so it is never sent to.
   const unbind = useCallback((sessionId: string) => {
     if (bindingRef.current === sessionId) petShell.setBinding(null);
     void petBridge.unbind(sessionId).catch(() => undefined);

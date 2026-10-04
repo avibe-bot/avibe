@@ -554,3 +554,25 @@ describe('PetPage review fixes, round 4', () => {
     await waitFor(() => expect(api.getSessionResult).toHaveBeenLastCalledWith('A'));
   });
 });
+
+describe('PetPage review fixes, round 5', () => {
+  it('stays unbound, without a validation loop, when the shell cannot persist a clear', async () => {
+    sessionReads.A = async () => ({ status: 404, session: null });
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', summon_pending: null });
+      if (command === 'pet_unbind') return Promise.reject(new Error('disk full'));
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    switcherSessions = [session('B')];
+    render(<PetPage />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_unbind', { sessionId: 'A' }));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    summon('show');
+    // The invalid session is never offered as usable: the switcher shows.
+    expect(await screen.findByText('Session B')).toBeTruthy();
+    expect(api.getSessionResult.mock.calls.filter(([id]) => id === 'A')).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([command]) => command === 'pet_unbind')).toHaveLength(1);
+  });
+});
