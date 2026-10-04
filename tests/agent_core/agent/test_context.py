@@ -220,7 +220,7 @@ def test_an_edit_or_checkpoint_before_the_anchor_or_another_route_invalidates_it
     view = context_view(rows.rows)
     cut = next(index for index, unit in enumerate(view.units) if unit.seq == anchored.context_seq)
     payload = compaction_payload(
-        view, cut, mode="normal", reason="threshold", checkpoint="checkpoint", skills=(), state=(),
+        view, cut, mode="normal", reason="threshold", checkpoint="checkpoint", state=(),
         earlier_record=None, tokens_before=0, threshold=0, window=200_000, summarizer=None, usage=None,
     )
     rows.add("compaction", payload=payload)
@@ -296,7 +296,6 @@ def test_a_cut_never_separates_a_tool_call_from_its_result(seed):
             mode="normal",
             reason="threshold",
             checkpoint="SUMMARY",
-            skills=(),
             state=(),
             earlier_record=None,
             tokens_before=0,
@@ -382,7 +381,6 @@ def test_each_artifact_list_keeps_its_50_most_recent_paths_across_checkpoints():
             mode="dropped",
             reason="overflow",
             checkpoint="",
-            skills=(),
             state=(),
             earlier_record=None,
             tokens_before=1,
@@ -392,13 +390,55 @@ def test_each_artifact_list_keeps_its_50_most_recent_paths_across_checkpoints():
             usage=None,
         )
         rows.add("compaction", payload=payload)
-    # Most recently touched first, 50 kept, the rest counted, in the row and in what the model reads.
+    # Most recently touched first, 50 kept, and a mark that earlier ones were pushed out: no count, so none is false.
     assert payload["files_read"] == [f"read/{index:03}.py" for index in range(499, 449, -1)]
     assert payload["files_modified"] == [f"write/{index:03}.py" for index in range(499, 449, -1)]
-    assert (payload["files_read_more"], payload["files_modified_more"]) == (450, 450)
+    assert (payload["files_read_omitted"], payload["files_modified_omitted"]) == (True, True)
     artifacts = payload["summary"].split("<artifacts>\n", 1)[1].split("</artifacts>", 1)[0]
     assert artifacts.count("- read/") == 50 and artifacts.count("- write/") == 50
-    assert artifacts.count("- and 450 more\n") == 2
+    # Without an earlier record (no host), the line points nowhere.
+    assert artifacts.count("- and earlier ones\n") == 2 and "more" not in artifacts
+
+
+def test_paths_that_resurface_never_inflate_what_an_artifact_list_claims():
+    # 51 files read in turn, five times over: each pass brings back the path the last one pushed out and pushes out
+    # another. Nothing new exists after the first pass, so what the model reads must not grow with the passes.
+    rows, payload = Rows(), None
+    rows.input("cycle")
+    for cycle in range(5):
+        for index in range(51):
+            rows.tool("read", "r", call_id=f"r{cycle}-{index}", path=f"src/{index:02}.py")
+        rows.input("next")
+        view = context_view(rows.rows)
+        payload = compaction_payload(
+            view,
+            len(view.units) - 1,
+            mode="dropped",
+            reason="overflow",
+            checkpoint="",
+            state=(),
+            earlier_record="Search the earlier record.",
+            tokens_before=1,
+            threshold=2,
+            window=8_000,
+            summarizer=None,
+            usage=None,
+        )
+        rows.add("compaction", payload=payload)
+    assert payload["files_read"] == [f"src/{index:02}.py" for index in range(50, 0, -1)]
+    assert payload["files_read_omitted"] is True and payload["files_modified_omitted"] is False
+    artifacts = payload["summary"].split("<artifacts>\n", 1)[1].split("</artifacts>", 1)[0]
+    # The route's share (5 on an 8K window), the stored rest counted exactly, then the pointer: the same every pass.
+    assert artifacts == "\n".join(
+        [
+            "Read:",
+            *(f"- src/{index:02}.py" for index in range(50, 45, -1)),
+            "- and 45 more",
+            "- and earlier ones (see the earlier record)",
+            "Modified: (none)",
+            "",
+        ]
+    )
 
 
 @pytest.mark.parametrize("segment", ["deep/", "目录/"], ids=["ascii", "cjk"])
@@ -416,7 +456,6 @@ def test_an_artifact_path_is_middle_truncated_so_a_list_stays_small(segment):
         mode="dropped",
         reason="overflow",
         checkpoint="",
-        skills=(),
         state=(),
         earlier_record=None,
         tokens_before=1,
@@ -426,7 +465,7 @@ def test_an_artifact_path_is_middle_truncated_so_a_list_stays_small(segment):
         usage=None,
     )
     # The row keeps the original paths, the most recent first; only what the model reads is cut.
-    assert payload["files_read"] == paths[:-51:-1] and payload["files_read_more"] == 10
+    assert payload["files_read"] == paths[:-51:-1] and payload["files_read_omitted"] is True
     artifacts = payload["summary"].split("<artifacts>\n", 1)[1].split("</artifacts>", 1)[0]
     shown = [line[2:] for line in artifacts.splitlines() if line.startswith(f"- {segment}")]
     # Each path keeps its head and its file name, cut in the middle to 160 UTF-8 bytes on a character boundary.
@@ -451,7 +490,6 @@ def test_the_rendered_artifact_lists_scale_with_the_route_window(window, shown):
         mode="dropped",
         reason="overflow",
         checkpoint="",
-        skills=(),
         state=(),
         earlier_record=None,
         tokens_before=1,
@@ -460,9 +498,12 @@ def test_the_rendered_artifact_lists_scale_with_the_route_window(window, shown):
         summarizer=None,
         usage=None,
     )
-    assert len(payload["files_read"]) == 50 and payload["files_read_more"] == 10
+    assert len(payload["files_read"]) == 50 and payload["files_read_omitted"] is True
     artifacts = payload["summary"].split("<artifacts>\n", 1)[1].split("</artifacts>", 1)[0]
-    assert artifacts.count("- read/") == shown and f"- and {60 - shown} more\n" in artifacts
+    # The stored paths the route does not show are counted exactly; the ones pushed out are only marked.
+    assert artifacts.count("- read/") == shown and artifacts.count(" more\n") == (shown < 50)
+    assert (f"- and {50 - shown} more\n" in artifacts) == (shown < 50)
+    assert artifacts.endswith("- and earlier ones\nModified: (none)\n")
     assert "- read/59.py" in artifacts  # the most recently touched first
 
 
@@ -495,7 +536,6 @@ def test_distinct_long_paths_stay_distinct_files_after_their_display_is_cut():
         mode="dropped",
         reason="overflow",
         checkpoint="",
-        skills=(),
         state=(),
         earlier_record=None,
         tokens_before=1,
@@ -517,7 +557,6 @@ def test_distinct_long_paths_stay_distinct_files_after_their_display_is_cut():
         mode="dropped",
         reason="overflow",
         checkpoint="",
-        skills=(),
         state=(),
         earlier_record=None,
         tokens_before=1,
@@ -544,7 +583,6 @@ def test_a_displayed_path_or_skill_name_is_one_line_of_plain_text():
         mode="dropped",
         reason="overflow",
         checkpoint="",
-        skills=carried_skills(view, len(view.units) - 1),
         state=(),
         earlier_record=None,
         tokens_before=1,
@@ -582,14 +620,13 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
     rows.tool("bash", "t again", call_id="s3", command="vibe skill load t", skills=("t",))
     view = context_view(rows.rows)
     cut = 7  # before the read of c.py: the cut splits the parser turn
-    assert carried_skills(view, cut) == ("u", "s")  # the most recently loaded first
+    assert carried_skills(view, cut) == (("u", "s"), False)  # the most recently loaded first, none pushed out
     first = compaction_payload(
         view,
         cut,
         mode="normal",
         reason="threshold",
         checkpoint="# 1. Self and method\n- terse",
-        skills=carried_skills(view, cut),
         state=("SKILLS",),
         earlier_record="The full earlier conversation is stored; search it with `vibe data query`.",
         tokens_before=1,
@@ -599,6 +636,7 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
         usage=None,
     )
     assert (first["files_read"], first["files_modified"]) == (["a.py"], ["b.py"])
+    assert not (first["files_read_omitted"] or first["files_modified_omitted"] or first["skills_omitted"])
     assert first["current_request"] == "fix the parser\n[image: trace.png]"
     assert first["summary"] == "\n".join(
         [
@@ -641,7 +679,6 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
         mode="dropped",
         reason="overflow",
         checkpoint="",
-        skills=carried_skills(view, len(view.units) - 1),
         state=(),
         earlier_record=None,
         tokens_before=1,
@@ -667,27 +704,30 @@ def test_a_checkpoint_lists_at_most_20_loaded_skills_by_name_most_recent_first()
     for index, name in enumerate(names):
         rows.tool("bash", "body", call_id=f"s{index}", command="vibe skill load", skills=(name,))
     rows.input("next")
-    view = context_view(rows.rows)
-    skills = carried_skills(view, len(view.units) - 1)
-    # The originals, the most recent first; only the display is cut.
-    assert skills == ("x" * 300, *(f"skill-{index:02}" for index in range(23, 4, -1)))
-    payload = compaction_payload(
-        view,
-        len(view.units) - 1,
-        mode="dropped",
-        reason="overflow",
-        checkpoint="",
-        skills=skills,
-        state=(),
-        earlier_record=None,
-        tokens_before=1,
-        threshold=2,
-        window=200_000,
-        summarizer=None,
-        usage=None,
-    )
-    shown = payload["summary"].split("<skills-loaded>\n", 1)[1].split("</skills-loaded>", 1)[0].splitlines()[1:]
-    assert len(shown) == 20 and "…" in shown[0] and len(shown[0][2:].encode()) <= 160
+    for _ in range(2):  # a later checkpoint that loads nothing keeps the mark: the pushed-out skills stay out
+        view = context_view(rows.rows)
+        payload = compaction_payload(
+            view,
+            len(view.units) - 1,
+            mode="dropped",
+            reason="overflow",
+            checkpoint="",
+            state=(),
+            earlier_record="Search the earlier record.",
+            tokens_before=1,
+            threshold=2,
+            window=200_000,
+            summarizer=None,
+            usage=None,
+        )
+        # The originals, the most recent first, and a mark that earlier ones were pushed out; only the display is cut.
+        names = ["x" * 300, *(f"skill-{index:02}" for index in range(23, 4, -1))]
+        assert payload["skills"] == [{"name": name} for name in names] and payload["skills_omitted"] is True
+        shown = payload["summary"].split("<skills-loaded>\n", 1)[1].split("</skills-loaded>", 1)[0].splitlines()[1:]
+        assert len(shown) == 21 and "…" in shown[0] and len(shown[0][2:].encode()) <= 160
+        assert shown[-1] == "- and earlier ones (see the earlier record)"
+        rows.add("compaction", payload=payload)
+        rows.input("again")
 
 
 @pytest.mark.parametrize("body", ["x" * 40_000, "上下文" * 5_000])

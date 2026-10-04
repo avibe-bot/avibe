@@ -82,7 +82,6 @@ from core.agent_core.harness.context import (
     StateRequest,
     add_usage,
     budget,
-    carried_skills,
     checkpoint_max_tokens,
     checkpoint_request,
     checkpoint_text,
@@ -1566,7 +1565,6 @@ class Agent:
         The one builder of a ``Compaction`` row: the drop, the checkpoint turn, and the stop check's dry run.
         ``hosted`` is the host's part (``_hosted``).
         """
-        skills = carried_skills(view, cut)
         state, earlier = hosted
         payload = compaction_payload(
             view,
@@ -1574,7 +1572,6 @@ class Agent:
             mode=mode,
             reason=reason,
             checkpoint=checkpoint,
-            skills=skills,
             state=state,
             earlier_record=earlier,
             tokens_before=plan.est,

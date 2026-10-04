@@ -207,7 +207,10 @@ watches: wch_8f2k "nightly sync" command running; wch_3c1d job running
 ```
 
 `watches` names the Session's enabled Watches by id, name, and kind, never a command: at most 20, then `and N more`.
-Every value in the block, each Watch id and name included, is free text and goes through the one display helper
-(`display`, C-9 `context.md` §7): one line of plain text, control characters and `<`, `>` escaped, cut in the middle
-to 160 UTF-8 bytes. So the block stays bounded on every input whatever the script, and no value can add a line,
-forge a field, or close the block.
+A field's identity is its raw value; only the block displays it, through the one display helper (`display`, C-9
+`context.md` §7): one line of plain text, control characters and `<`, `>` escaped, cut in the middle to 160 UTF-8
+bytes, each Watch's line on its own, and the cwd to 1,024 (the model builds absolute paths from it, so a cut one would
+be false). So the block stays bounded on every input whatever the script, and no value can add a line, forge a field,
+or close the block. The rows hold only what the model read, so a field counts as unchanged only when its display
+equals what the model last read and is the value itself: a cut or escaped display can look the same after its value
+changed, so such a field is sent on every input rather than taken for unchanged.

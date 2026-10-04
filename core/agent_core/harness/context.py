@@ -51,15 +51,17 @@ THRESHOLD_RATIO = 0.9
 KEEP_MAX = 20_000
 KEEP_RATIO = 0.25
 IMAGE_TOKENS = 1_600
-#: Each artifact list a checkpoint row keeps this many paths, most recently touched first, then a count; what the
-#: model reads shows a 4,000th of the route's window of them, between ``ARTIFACTS_SHOWN_MIN`` and this (section 7).
+#: Each artifact list a checkpoint row keeps this many paths, most recently touched first, and marks whether earlier
+#: ones were pushed out; what the model reads shows a 4,000th of the route's window of them, between
+#: ``ARTIFACTS_SHOWN_MIN`` and this (section 7).
 ARTIFACTS_LISTED = 50
 ARTIFACTS_SHOWN_MIN = 5
 ARTIFACTS_SHOWN_RATIO = 4_000
 #: Every path an artifact list carries, and every field of the state's environment block, is cut in the middle to this
 #: many UTF-8 bytes: at most about 40 tokens each under the estimate, whatever the script (section 7).
 ITEM_BYTES = 160
-#: A checkpoint lists the skills its summarized rows loaded by name, at most this many, the most recent first (§7).
+#: A checkpoint lists the skills its summarized rows loaded by name, at most this many, the most recent first, and
+#: marks whether earlier ones were pushed out (section 7).
 SKILLS_LISTED = 20
 
 CLEAR_SOFT_RATIO = 0.8
@@ -539,19 +541,20 @@ def _within(text: str, limit: int) -> str:
 
 @dataclass(frozen=True)
 class _Artifacts:
-    """Each list most recently touched first, ``ARTIFACTS_LISTED`` kept; ``*_more`` counts the paths pushed out."""
+    """Each list most recently touched first, ``ARTIFACTS_LISTED`` kept; ``*_omitted`` marks that a path was ever
+    pushed out. A mark, not a count: a path pushed out and touched again is the same path, so no count stays true."""
 
     read: list[str]
-    read_more: int
+    read_omitted: bool
     modified: list[str]
-    modified_more: int
+    modified_omitted: bool
 
 
-def _recent(touched: Sequence[str], earlier: Sequence[str], more: int) -> tuple[list[str], int]:
+def _recent(touched: Sequence[str], earlier: Sequence[str], omitted: bool) -> tuple[list[str], bool]:
     """``touched`` paths (in touch order) ahead of ``earlier`` ones (stored, most recent first), at most
-    ``ARTIFACTS_LISTED`` kept and the rest counted. Paths are originals: only the display is cut (``display``)."""
+    ``ARTIFACTS_LISTED`` kept, and whether any was ever pushed out. Paths are originals: only the display is cut."""
     paths = _unique([*reversed(touched), *earlier])
-    return paths[:ARTIFACTS_LISTED], more + max(0, len(paths) - ARTIFACTS_LISTED)
+    return paths[:ARTIFACTS_LISTED], omitted or len(paths) > ARTIFACTS_LISTED
 
 
 def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> _Artifacts:
@@ -573,21 +576,22 @@ def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> _Artifacts:
                 read.append(path)
             elif call.name in {"write", "edit"}:
                 modified.append(path)
-    modified_listed, modified_more = _recent(
-        modified, previous.get("files_modified", ()), previous.get("files_modified_more", 0)
+    modified_listed, modified_omitted = _recent(
+        modified, previous.get("files_modified", ()), previous.get("files_modified_omitted", False)
     )
     changed = {*modified, *modified_listed}
-    read_listed, read_more = _recent(
+    read_listed, read_omitted = _recent(
         [path for path in read if path not in changed],
         [path for path in previous.get("files_read", ()) if path not in changed],
-        previous.get("files_read_more", 0),
+        previous.get("files_read_omitted", False),
     )
-    return _Artifacts(read_listed, read_more, modified_listed, modified_more)
+    return _Artifacts(read_listed, read_omitted, modified_listed, modified_omitted)
 
 
-def carried_skills(view: ContextView, cut: int) -> tuple[str, ...]:
+def carried_skills(view: ContextView, cut: int) -> tuple[tuple[str, ...], bool]:
     """The names of the skills loaded before the cut (and listed by the previous checkpoint), minus those loaded
-    after it: the most recently loaded first, at most ``SKILLS_LISTED``, as loaded (section 7)."""
+    after it: the most recently loaded first, at most ``SKILLS_LISTED``, as loaded; and whether any was ever pushed
+    out (section 7)."""
     loaded: dict[str, None] = {}  # the latest load last
     previous = view.compaction.payload if view.compaction is not None else {}
     for skill in reversed(previous.get("skills", ())):  # stored most recent first
@@ -602,7 +606,8 @@ def carried_skills(view: ContextView, cut: int) -> tuple[str, ...]:
         for entry, _ in unit.entries[1:]:
             for name in _skills(entry) if entry is not None else ():
                 loaded.pop(name, None)
-    return tuple(list(reversed(loaded))[:SKILLS_LISTED])
+    omitted = bool(previous.get("skills_omitted", False)) or len(loaded) > SKILLS_LISTED
+    return tuple(list(reversed(loaded))[:SKILLS_LISTED]), omitted
 
 
 def summarized_to_seq(view: ContextView, cut: int) -> int:
@@ -611,14 +616,14 @@ def summarized_to_seq(view: ContextView, cut: int) -> int:
     return max([previous, *seqs])
 
 
-def display(text: str) -> str:
+def display(text: str, *, limit: int = ITEM_BYTES) -> str:
     """One line of plain text for a path or a name the model reads (section 7): control characters and the markup
-    delimiters ``<`` and ``>`` escaped as ``\\uXXXX``, then cut in the middle to ``ITEM_BYTES``. The row keeps the
-    original."""
+    delimiters ``<`` and ``>`` escaped as ``\\uXXXX``, then cut in the middle to ``limit`` UTF-8 bytes. The row keeps
+    the original."""
     escaped = "".join(
         f"\\u{ord(char):04x}" if char in "<>" or unicodedata.category(char).startswith("C") else char for char in text
     )
-    return truncate_middle_bytes(escaped, ITEM_BYTES)
+    return truncate_middle_bytes(escaped, limit)
 
 
 def artifacts_shown(window: int) -> int:
@@ -630,28 +635,37 @@ def render_summary(
     *,
     checkpoint: str,
     files_read: Sequence[str],
-    files_read_more: int,
+    files_read_omitted: bool,
     files_modified: Sequence[str],
-    files_modified_more: int,
+    files_modified_omitted: bool,
     shown: int,
     skills: Sequence[str],
+    skills_omitted: bool,
     earlier_record: Optional[str],
     current_request: Optional[str],
 ) -> str:
     lines = ["<context-checkpoint>"]
     if checkpoint:
         lines += [CHECKPOINT_FRAMING, "", checkpoint, ""]
+    # Only what is exact is counted: the stored paths the route does not show. Ones pushed out are marked, never
+    # counted, and the earlier record, when there is one, holds them.
+    earlier = "- and earlier ones" + (" (see the earlier record)" if earlier_record else "")
     lines.append("<artifacts>")
-    lists = (("Read", files_read, files_read_more), ("Modified", files_modified, files_modified_more))
-    for label, paths, more in lists:
+    lists = (("Read", files_read, files_read_omitted), ("Modified", files_modified, files_modified_omitted))
+    for label, paths, omitted in lists:
         # The row keeps up to ``ARTIFACTS_LISTED``; the model reads the route's share of them (``shown``).
-        more += max(0, len(paths) - shown)
-        listed = [*(f"- {display(path)}" for path in paths[:shown]), *([f"- and {more} more"] if more else [])]
+        hidden = max(0, len(paths) - shown)
+        listed = [
+            *(f"- {display(path)}" for path in paths[:shown]),
+            *([f"- and {hidden} more"] if hidden else []),
+            *([earlier] if omitted else []),
+        ]
         lines += [f"{label}:", *listed] if listed else [f"{label}: (none)"]
     lines.append("</artifacts>")
     if skills:
         # Names only: a skill's instructions are loaded again by the model, never injected (section 7).
-        lines += ["<skills-loaded>", SKILLS_LEAD, *(f"- {display(name)}" for name in skills), "</skills-loaded>"]
+        named = [*(f"- {display(name)}" for name in skills), *([earlier] if skills_omitted else [])]
+        lines += ["<skills-loaded>", SKILLS_LEAD, *named, "</skills-loaded>"]
     if earlier_record:
         lines += ["<earlier-record>", earlier_record, "</earlier-record>"]
     if current_request is not None:
@@ -667,7 +681,6 @@ def compaction_payload(
     mode: str,
     reason: str,
     checkpoint: str,
-    skills: Sequence[str],
     state: Sequence[str],
     earlier_record: Optional[str],
     tokens_before: int,
@@ -684,6 +697,7 @@ def compaction_payload(
     previous = previous_row.payload if previous_row is not None else {}
     head = view.units[:cut]
     files = _files(previous, head)
+    skills, skills_omitted = carried_skills(view, cut)
     request_id: Optional[str] = None
     request: Optional[str] = None
     if view.units[cut].lead.kind != "input":
@@ -700,10 +714,11 @@ def compaction_payload(
             checkpoint=checkpoint,
             files_read=files.read,
             files_modified=files.modified,
-            files_read_more=files.read_more,
-            files_modified_more=files.modified_more,
+            files_read_omitted=files.read_omitted,
+            files_modified_omitted=files.modified_omitted,
             shown=artifacts_shown(window),
             skills=skills,
+            skills_omitted=skills_omitted,
             earlier_record=earlier_record,
             current_request=request,
         ),
@@ -715,10 +730,11 @@ def compaction_payload(
         "current_request": request,
         "current_request_message_id": request_id,
         "files_read": files.read,
-        "files_read_more": files.read_more,
+        "files_read_omitted": files.read_omitted,
         "files_modified": files.modified,
-        "files_modified_more": files.modified_more,
+        "files_modified_omitted": files.modified_omitted,
         "skills": [{"name": name} for name in skills],
+        "skills_omitted": skills_omitted,
         "tokens_before": tokens_before,
         "tokens_after_estimate": 0,
         "threshold": threshold,

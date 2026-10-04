@@ -354,8 +354,39 @@ async def test_the_state_is_the_environment_core_fields_each_bounded_in_bytes(en
     (environment,) = await host.render_state(StateRequest(SESSION))
     lines = environment.splitlines()[1:-1]
     assert [line.split(": ", 1)[0] for line in lines] == ["cwd", "os", "shell", "date", "timezone"]
-    assert all(len(line.split(": ", 1)[1].encode()) <= 160 for line in lines)
-    assert text_tokens(environment) <= 5 * 42 + 10
+    # The cwd may take 1,024 bytes (a cut absolute path would be false); every other field 160.
+    assert len(lines[0].split(": ", 1)[1].encode()) <= 1_024
+    assert all(len(line.split(": ", 1)[1].encode()) <= 160 for line in lines[1:])
+    assert text_tokens(environment) <= (1_024 + 4 * 160 + 80) // 4
+
+
+async def test_a_cjk_cwd_of_300_bytes_is_kept_whole_on_every_input_and_in_the_state(engine, session):
+    from modules.agents.avibe.prompt import current_environment
+
+    cwd = "/工作区/" + "目录" * 48  # about 300 UTF-8 bytes, past the 160 every other field gets
+    fields = current_environment(cwd, [])
+    assert fields["cwd"] == cwd and len(cwd.encode()) > 290
+    host = AvibeContextHost(engine, environment=lambda _: fields)
+    (environment,) = await host.render_state(StateRequest(SESSION))
+    assert f"\ncwd: {cwd}\n" in environment
+
+
+async def test_two_cwds_that_look_alike_once_cut_are_still_two_environments(engine, session, tmp_path, monkeypatch):
+    import modules.agents.avibe.prompt as prompt
+
+    # Identity is the raw value, and only the block the model reads is cut (display): a cut display never proves a
+    # field unchanged, so two cwds alike in their head and tail still tell the model it moved. The cut is lowered so
+    # that the paths stay within what this filesystem allows (macOS: 1,024 bytes); the rule is the same at any cut.
+    monkeypatch.setattr(prompt, "CWD_BYTES", 256)
+    scripts = [[Done(assistant("one"))], [Done(assistant("two"))]]
+    harness = _Harness(engine, tmp_path, "avibe", scripts)
+    for middle in ("one", "two"):
+        request = harness.request(f"in {middle}")
+        request.working_path = str(tmp_path / ("head" * 60) / middle / ("tail" * 60))
+        await harness.agent.handle_message(request)
+    first, second = [row.message.content[0].text for row in await harness.context_rows() if row.kind == "input"]
+    assert first.split("\n")[1] == second.split("\n")[1]  # the same display ...
+    assert second.startswith("<environment>\ncwd: ")  # ... yet the second input says the cwd changed
 
 
 async def test_every_skill_a_successful_bash_result_loaded_is_recorded():

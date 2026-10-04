@@ -27,11 +27,17 @@ from sqlalchemy.engine import Engine
 from core.agent_core.harness.projection import context_view
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import AssistantMessage, ToolResultMessage, UserMessage
-from modules.agents.avibe.prompt import environment_delta, environment_state, with_environment
+from modules.agents.avibe.prompt import (
+    EnvironmentValue,
+    displayed_environment,
+    environment_delta,
+    environment_state,
+    with_environment,
+)
 from storage.agent_transcript import SQLiteTranscriptStore
 from storage.models import messages
 
-EnvironmentSource = Callable[[str], Mapping[str, str]]
+EnvironmentSource = Callable[[str], Mapping[str, EnvironmentValue]]
 ResponseObserver = Callable[[str, str, AssistantMessage], None]
 
 #: How long consumption waits for an accepted steer's row before failing the run.
@@ -103,7 +109,7 @@ class AdapterTranscriptStore:
         current = dict(self._environment(session_id))
         rendered = with_environment(message, environment_delta(previous, current))
         entry = await self._store.consume_input(session_id, message_id, rendered)
-        self._env_state[session_id] = {**previous, **current}
+        self._env_state[session_id] = {**previous, **displayed_environment(current)}
         return entry
 
     async def append_response(

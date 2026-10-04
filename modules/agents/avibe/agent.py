@@ -50,7 +50,7 @@ from core.agent_core.agent.hooks import AgentInput
 from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
-from core.agent_core.harness.context import ContextConfig, display
+from core.agent_core.harness.context import ContextConfig
 from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.tools.jobs import instant
@@ -84,7 +84,7 @@ from modules.agents.avibe.context import (
 from modules.agents.avibe.errors import error_text
 from modules.agents.avibe.media import MediaSnapshots
 from modules.agents.avibe.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
-from modules.agents.avibe.prompt import current_environment, system_prompt
+from modules.agents.avibe.prompt import EnvironmentValue, current_environment, system_prompt
 from modules.agents.avibe.store import AdapterTranscriptStore
 from modules.agents.avibe.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
@@ -1054,7 +1054,7 @@ class AvibeAgent(BaseAgent):
         prepend_vendored_git_to_path(environment, base_env=environment, working_dir=cwd or None)
         return environment
 
-    def _environment(self, session_id: str) -> dict[str, str]:
+    def _environment(self, session_id: str) -> dict[str, EnvironmentValue]:
         runtime = self._runtimes.get(session_id)
         cwd = ((runtime.run.cwd if runtime.run is not None else "") or runtime.cwd) if runtime is not None else ""
         return current_environment(
@@ -1078,10 +1078,10 @@ class AvibeAgent(BaseAgent):
                 continue
             # Model context: a Watch's id, name and kind only. Its command can carry a
             # credential, and the block is persisted and sent to the provider.
-            # Each is one line of plain text cut to 160 bytes (``display``), as every free text in the block is.
+            # Raw here; the block displays each line (``render_environment``).
             kind = "job" if getattr(watch, "job_target", None) else "command"
-            watch_id, name = display(str(watch.id)), display(str(getattr(watch, "name", None) or "").strip())
-            lines.append(f'{watch_id} "{name}" {kind} running' if name else f"{watch_id} {kind} running")
+            name = str(getattr(watch, "name", None) or "").strip()
+            lines.append(f'{watch.id} "{name}" {kind} running' if name else f"{watch.id} {kind} running")
         return lines
 
     # --- output helpers ------------------------------------------------------

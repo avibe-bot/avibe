@@ -177,6 +177,10 @@ def _integer(value: Any) -> bool:
     return type(value) is int
 
 
+def _boolean(value: Any) -> bool:
+    return type(value) is bool
+
+
 def _count(value: Any) -> bool:
     return type(value) is int and value >= 0
 
@@ -195,10 +199,11 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
             "first_kept_seq": lambda value: _integer(value) and value > 0,
             "summarized_to_seq": _count,
             "files_read": _list(_string),
-            "files_read_more": _count,
+            "files_read_omitted": _boolean,
             "files_modified": _list(_string),
-            "files_modified_more": _count,
+            "files_modified_omitted": _boolean,
             "skills": _list(_object({"name": _string})),
+            "skills_omitted": _boolean,
             "tokens_before": _count,
             "tokens_after_estimate": _count,
             "threshold": _integer,

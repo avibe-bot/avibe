@@ -25,7 +25,7 @@ from sqlalchemy.engine import Engine
 
 from core.agent_core.harness.context import StateRequest, display
 from core.agent_core.tools.base import Tool, ToolContext, ToolResult, ToolSpec
-from modules.agents.avibe.prompt import render_environment
+from modules.agents.avibe.prompt import EnvironmentValue, render_environment
 
 #: The tags of the block ``vibe skill load`` writes for each skill it loads (``render_skill_content``).
 _SKILL_TAG = re.compile(r'<skill_content name="([^"]*)"[^>]*>|</skill_content>')
@@ -58,7 +58,7 @@ def budgeted(selection: Any) -> Any:
 class AvibeContextHost:
     """The loop's ``ContextHost`` for the Avibe Agent."""
 
-    def __init__(self, engine: Engine, *, environment: Callable[[str], Mapping[str, str]]) -> None:
+    def __init__(self, engine: Engine, *, environment: Callable[[str], Mapping[str, EnvironmentValue]]) -> None:
         self._engine = engine
         self._environment = environment
 
@@ -85,10 +85,10 @@ class AvibeContextHost:
         return [_environment(self._environment(request.session_id))]
 
 
-def _environment(fields: Mapping[str, str]) -> str:
-    """The environment's core fields, bounded by construction (section 7): no Watches, each field one line of plain
-    text cut to 160 bytes (``display``)."""
-    return render_environment({name: display(value) for name, value in fields.items() if name != "watches"})
+def _environment(fields: Mapping[str, EnvironmentValue]) -> str:
+    """The environment's core fields, bounded by construction (section 7): no Watches, and each field displayed as
+    every input's block displays it (``render_environment``)."""
+    return render_environment({name: value for name, value in fields.items() if name != "watches"})
 
 
 class _SkillLoadMarking:

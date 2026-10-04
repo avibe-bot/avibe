@@ -128,10 +128,11 @@
         "first_kept_seq",
         "summarized_to_seq",
         "files_read",
-        "files_read_more",
+        "files_read_omitted",
         "files_modified",
-        "files_modified_more",
+        "files_modified_omitted",
         "skills",
+        "skills_omitted",
         "tokens_before",
         "tokens_after_estimate",
         "threshold"
@@ -207,10 +208,9 @@
           "maxItems": 50,
           "description": "Paths given to `read` and never to `write` or `edit`, cumulative, most recently touched first as the calls gave them, at most 50; only the summary's display is cut."
         },
-        "files_read_more": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "How many read paths were pushed out of `files_read`, cumulative."
+        "files_read_omitted": {
+          "type": "boolean",
+          "description": "Whether a read path was ever pushed out of `files_read`; once set, it stays set. A mark, not a count: a path pushed out and touched again is the same path."
         },
         "files_modified": {
           "type": "array",
@@ -220,10 +220,9 @@
           "maxItems": 50,
           "description": "Paths given to `write` or `edit`, cumulative, most recently touched first as the calls gave them, at most 50; only the summary's display is cut."
         },
-        "files_modified_more": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "How many modified paths were pushed out of `files_modified`, cumulative."
+        "files_modified_omitted": {
+          "type": "boolean",
+          "description": "Whether a modified path was ever pushed out of `files_modified`; once set, it stays set."
         },
         "skills": {
           "type": "array",
@@ -241,6 +240,10 @@
             }
           },
           "maxItems": 20
+        },
+        "skills_omitted": {
+          "type": "boolean",
+          "description": "Whether a skill name was ever pushed out of `skills`; once set, it stays set."
         },
         "tokens_before": {
           "type": "integer",
@@ -444,7 +447,10 @@
       "files_modified": [
         "core/paths.py"
       ],
+      "files_read_omitted": false,
+      "files_modified_omitted": false,
       "skills": [],
+      "skills_omitted": false,
       "tokens_before": 158432,
       "tokens_after_estimate": 31877,
       "threshold": 155808,

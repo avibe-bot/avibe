@@ -203,13 +203,16 @@ is written, so projection stays a pure function of the rows:
   Read:
   - <path, cumulative across checkpoints, most recently touched first, the route's share of them>
   - and <N> more
+  - and earlier ones (see the earlier record)
   Modified:
   - <path, cumulative across checkpoints, most recently touched first, the route's share of them>
   - and <N> more
+  - and earlier ones (see the earlier record)
   </artifacts>
   <skills-loaded>
   Skills you had loaded are listed by name; run `vibe skill load <name>` again before you rely on one.
   - <name, most recently loaded first, at most 20>
+  - and earlier ones (see the earlier record)
   </skills-loaded>
   <earlier-record>
   <the adapter's hint: where this Session's earlier conversation is stored, through summarized_to_seq>
@@ -223,22 +226,26 @@ is written, so projection stays a pure function of the rows:
   `Read` lists paths of successful `read` calls that no `write` or `edit` touched; `Modified` lists paths of
   successful `write` or `edit` calls; `(none)` when a list is empty. The row keeps each path as the call gave it, so a
   file's identity and whether it was read or modified are always decided on its original path; only what the model
-  reads is cut. Each list keeps its 50 most recently touched paths in the row and counts the ones pushed out
-  (`files_read_more`, `files_modified_more`); the text shows the route's share of them, `clamp(floor(W / 4,000), 5,
-  50)` for the route the conversation's next request goes to (5 on 8K, 8 on 32K, 50 from 200K), and counts the rest in
-  "and N more". This is an Avibe deviation from Pi, which keeps every path: Avibe Sessions are long-lived (IM threads
-  and Workbench Sessions that run for weeks), so an unbounded list would turn a working Session into a forced `/new`.
-  `<skills-loaded>` lists the skills the summarized rows loaded (§4's marks, minus those whose load result the kept
-  rows still hold), by name only: the most recently loaded first, at most 20, cumulative, stored as loaded; it is left
-  out when there are none. A skill's instructions are never injected: the model loads the skill again, and `vibe skill
+  reads is cut. Each list keeps its 50 most recently touched paths in the row and marks, once and for good, that a
+  path was pushed out (`files_read_omitted`, `files_modified_omitted`); the text shows the route's share of them,
+  `clamp(floor(W / 4,000), 5, 50)` for the route the conversation's next request goes to (5 on 8K, 8 on 32K, 50 from
+  200K), counts the stored rest in "and N more", and when the mark is set ends with "and earlier ones" (pointing to
+  the earlier record when there is one). Only what is exact is counted: a path pushed out and touched again is the same
+  path, so a count of pushed-out paths would grow with every cycle and say what is not. This is an Avibe deviation
+  from Pi, which keeps every path: Avibe Sessions are long-lived (IM threads and Workbench Sessions that run for
+  weeks), so an unbounded list would turn a working Session into a forced `/new`. `<skills-loaded>` lists the skills
+  the summarized rows loaded (§4's marks, minus those whose load result the kept rows still hold), by name only: the
+  most recently loaded first, at most 20, cumulative, stored as loaded, with the same mark (`skills_omitted`) and line
+  for the ones pushed out; it is left out when there are none. A skill's instructions are never injected: the model loads the skill again, and `vibe skill
   load` checks the name against the catalog. Every path and name the model reads is one line of plain text
   (`display`): control characters and `<`, `>` escaped as `\uXXXX`, then cut in the middle to 160 UTF-8 bytes on a
   character boundary (its head and its file name stay), at most about 40 tokens whatever the script, so a filename can
   neither add a line nor close a tag. `<earlier-record>` is the adapter's short hint, left out when it supplies none,
   and `<current-request>` is left out when the cut did not split a turn.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment's core
-  fields (C-7 §8: cwd, os, shell, date, timezone; no Watches; each field one line of plain text cut to 160 UTF-8 bytes
-  (`display`), so the block is at most about 5 x 40 tokens by construction; a checkpoint always happens inside
+  fields (C-7 §8: cwd, os, shell, date, timezone; no Watches; each field displayed as every input's block displays it,
+  the cwd within 1,024 UTF-8 bytes and every other field 160 (`display`), so the block is at most about 256 + 4 x 40
+  tokens by construction; a checkpoint always happens inside
   a run, and a Turn's own input carries only the fields that changed). Nothing else is rehydrated in v1: skills are
   listed by name in `<skills-loaded>`, pending work is the checkpoint's own "Waiting on", and the split turn's
   model-facing input, environment block included, is in `<current-request>`.
