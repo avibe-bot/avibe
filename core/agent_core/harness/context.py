@@ -32,6 +32,7 @@ from core.agent_core.messages import (
     UserMessage,
     Usage,
     text,
+    usage_to_dict,
 )
 from core.agent_core.tools.base import ToolSpec
 
@@ -219,25 +220,23 @@ def usage_total(usage: Usage) -> int:
 
 
 def add_usage(total: Optional[Usage], usage: Optional[Usage]) -> Optional[Usage]:
+    """Sum every field; reasoning tokens are the sum of those reported, unknown only when none were."""
     if usage is None:
         return total
     if total is None:
         return usage
+    reasoning = (
+        None
+        if total.reasoning_tokens is None and usage.reasoning_tokens is None
+        else (total.reasoning_tokens or 0) + (usage.reasoning_tokens or 0)
+    )
     return Usage(
         input_tokens=total.input_tokens + usage.input_tokens,
         output_tokens=total.output_tokens + usage.output_tokens,
         cache_read_tokens=total.cache_read_tokens + usage.cache_read_tokens,
         cache_write_tokens=total.cache_write_tokens + usage.cache_write_tokens,
+        reasoning_tokens=reasoning,
     )
-
-
-def usage_dict(usage: Usage) -> dict[str, int]:
-    return {
-        "input_tokens": usage.input_tokens,
-        "output_tokens": usage.output_tokens,
-        "cache_read_tokens": usage.cache_read_tokens,
-        "cache_write_tokens": usage.cache_write_tokens,
-    }
 
 
 def _valid_baseline(message: Message) -> bool:
@@ -571,5 +570,5 @@ def compaction_payload(
         "summarizer": dict(summarizer) if summarizer is not None else None,
     }
     if usage is not None:
-        payload["usage"] = usage_dict(usage)
+        payload["usage"] = usage_to_dict(usage)
     return payload

@@ -53,8 +53,35 @@ def _edit(seq, row_id, target, replacement):
     return ContextEntry("session", seq, "context_edit", row_id, payload=payload)
 
 
-def _checkpoint_row(seq, first_kept_seq, *, summary="SUMMARY", state=("STATE",)):
-    payload = {"version": 1, "summary": summary, "state": list(state), "first_kept_seq": first_kept_seq}
+def _checkpoint_payload(first_kept_seq, *, summary="SUMMARY", state=("STATE",), **fields):
+    payload = {
+        "version": 1,
+        "mode": "normal",
+        "reason": "threshold",
+        "focus": None,
+        "summary": summary,
+        "checkpoint": "checkpoint",
+        "state": list(state),
+        "first_kept_seq": first_kept_seq,
+        "summarized_to_seq": first_kept_seq - 1,
+        "previous_compaction_id": None,
+        "current_request": None,
+        "current_request_message_id": None,
+        "files_read": ["a.py"],
+        "files_modified": [],
+        "skills": [{"name": "s", "revision": "1"}],
+        "tokens_before": 10,
+        "tokens_after_estimate": 5,
+        "threshold": 8,
+        "summarizer": {"origin": {"provider": "p", "api": "anthropic", "model": "m"}, "prompt_version": "v", "rounds": 0},
+        "usage": {"input_tokens": 1, "output_tokens": 2, "cache_read_tokens": 0, "cache_write_tokens": 0},
+    }
+    payload.update(fields)
+    return payload
+
+
+def _checkpoint_row(seq, first_kept_seq, *, summary="SUMMARY", state=("STATE",), **fields):
+    payload = _checkpoint_payload(first_kept_seq, summary=summary, state=state, **fields)
     return ContextEntry("session", seq, "compaction", f"checkpoint-{seq}", payload=payload)
 
 
@@ -114,6 +141,10 @@ def test_a_fork_before_a_checkpoint_or_edit_projects_the_original_context(fork_p
     assert projected.messages[5].content[0].text == result_b
 
 
+def _state_row(context):
+    return ContextEntry("session", 2, "agent_state", "state", payload={"version": 1, "state": {}, "context": context})
+
+
 @pytest.mark.parametrize(
     "row",
     [
@@ -122,11 +153,36 @@ def test_a_fork_before_a_checkpoint_or_edit_projects_the_original_context(fork_p
         ContextEntry("session", 2, "context_edit", "edit", payload={"version": 1, "target_event_id": "in-1"}),
         _checkpoint_row(2, 3),
         ContextEntry("session", 2, "compaction", "checkpoint", payload={"version": 1, "first_kept_seq": 1}),
+        # Every field the C-9 rules read later is checked when the row loads, not when it is next used.
+        _checkpoint_row(2, 1, skills=[{}]),
+        _checkpoint_row(2, 1, files_read="a.py"),
+        _checkpoint_row(2, 1, files_modified=[1]),
+        _checkpoint_row(2, 1, mode="partial"),
+        _checkpoint_row(2, 1, current_request=["text"]),
+        _checkpoint_row(2, 1, summarized_to_seq="1"),
+        _checkpoint_row(2, 1, threshold=1.5),
+        _checkpoint_row(2, 1, summarizer={"origin": {}, "prompt_version": "v", "rounds": 0}),
+        _checkpoint_row(2, 1, usage={"input_tokens": -1}),
+        _checkpoint_row(2, 1, unexpected=True),
+        _state_row({"failures": "1", "ineffective": 0, "paused": False}),
+        _state_row({"failures": 0, "ineffective": 0}),
+        _state_row({"failures": 0, "ineffective": 0, "paused": 1}),
     ],
 )
 def test_malformed_context_rows_fail_explicitly_instead_of_projecting_a_wrong_context(row):
     with pytest.raises(ProjectionError):
         project([ContextEntry("session", 1, "input", "in-1", user("start")), row])
+
+
+def test_a_complete_checkpoint_row_and_guard_state_load():
+    rows = [
+        ContextEntry("session", 1, "input", "in-1", user("start")),
+        _state_row({"failures": 1, "ineffective": 2, "paused": True}),
+        _checkpoint_row(3, 1, summarizer=None, current_request="go", current_request_message_id="in-1"),
+    ]
+    projected = project(rows)
+    assert projected.context_state == {"failures": 1, "ineffective": 2, "paused": True}
+    assert [block.text for block in projected.messages[0].content] == ["SUMMARY", "STATE"]
 
 
 def test_malformed_or_duplicate_results_are_not_silently_dropped():

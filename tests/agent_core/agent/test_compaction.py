@@ -50,6 +50,7 @@ from core.agent_core.messages import (
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
+    Usage,
     UserMessage,
     text,
 )
@@ -322,8 +323,11 @@ async def test_the_checkpoint_policy_allows_reads_and_scratch_writes_and_never_r
 
 
 async def test_the_checkpoint_turn_gets_five_tool_rounds_then_must_write():
-    tools = [reader(tokens(3_000))]
-    rounds = [call("read", f"r{index}", path="f") for index in range(7)]
+    tools = [reader(tokens(3_000)), FakeTool("bash")]
+    rounds = [call("read", f"r{index}", path="f") for index in range(5)]
+    sixth = [ToolCallBlock("r5", "read", {"path": "f"}), ToolCallBlock("b5", "bash", {"command": "ls"})]
+    rounds.append([Done(AssistantMessage(tuple(sixth), assistant().origin, "tool_use"))])
+    rounds.append(call("read", "r6", path="f"))
     model = Model(history(), rounds)
     agent = make_agent(model, tools=tools)
     await run(agent)
@@ -331,8 +335,10 @@ async def test_the_checkpoint_turn_gets_five_tool_rounds_then_must_write():
     tools[0].result = ToolResult((text("small"),))
     events = [event async for event in agent.compact(turn_id="compact")]
     assert [ctx.tool_call_id for _, ctx in tools[0].calls] == ["h0", "h1", "r0", "r1", "r2", "r3", "r4"]
-    sixth = model.requests[-1].messages[-1]
-    assert (sixth.tool_call_id, sixth.content[0].text) == ("r5", BUDGET_USED)
+    # Once the budget is used up, every call is told so, whatever the table says about it.
+    answered = [(message.tool_call_id, message.content[0].text) for message in model.requests[-1].messages[-2:]]
+    assert answered == [("r5", BUDGET_USED), ("b5", BUDGET_USED)]
+    assert not tools[1].calls
     failed = [event for event in events if isinstance(event, CompactionFailed)]
     assert len(failed) == 1 and "kept calling tools" in failed[0].error
     after = await agent.store.load("session")
@@ -384,6 +390,44 @@ FAILURES = [
 ]
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        assistant(CHECKPOINT, stop_reason="tool_use"),  # a tool-use stop with no call is not a final answer
+        assistant(CHECKPOINT, calls=[ToolCallBlock("c", "read", {"path": "f"})], stop_reason="stop"),
+        assistant(CHECKPOINT, stop_reason="refusal"),
+    ],
+)
+async def test_only_a_stop_with_text_and_no_calls_is_a_checkpoint(response):
+    model = Model(history(), [[Done(response)]])
+    tool = reader(tokens(3_000))
+    agent = make_agent(model, tools=[tool])
+    await run(agent)
+    events = [event async for event in agent.compact(turn_id="compact")]
+    assert [type(event).__name__ for event in events if "Compaction" in type(event).__name__] == [
+        "CompactionStarted",
+        "CompactionFailed",
+    ]
+    assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
+    assert [ctx.tool_call_id for _, ctx in tool.calls] == ["h0", "h1"]  # the call was never run
+
+
+async def test_the_checkpoint_usage_keeps_every_reported_field():
+    def with_usage(message, reasoning):
+        usage = Usage(input_tokens=100, output_tokens=10, cache_read_tokens=5, reasoning_tokens=reasoning)
+        return [Done(replace(message, usage=usage))]
+
+    turn = [with_usage(assistant(calls=[ToolCallBlock("r", "read", {"path": "f"})]), 7), with_usage(assistant(CHECKPOINT), 3)]
+    model = Model(history(), turn)
+    agent = make_agent(model, tools=[reader(tokens(3_000))])
+    await run(agent)
+    assert [event async for event in agent.compact(turn_id="compact")][-1].reason == "completed"
+    expected = {"input_tokens": 200, "output_tokens": 20, "cache_read_tokens": 10, "cache_write_tokens": 0, "reasoning_tokens": 10}
+    compaction = next(row for row in await agent.store.load("session") if row.kind == "compaction")
+    assert compaction.payload["usage"] == expected
+    assert agent.store.audits[0][2]["usage"] == expected
+
+
 async def test_failed_checkpoints_leave_the_context_and_three_pause_auto_compaction_until_manual():
     store = InMemoryTranscriptStore()
     model = Model(reads(7), FAILURES)
@@ -393,7 +437,7 @@ async def test_failed_checkpoints_leave_the_context_and_three_pause_auto_compact
     assert len(model.checkpoint_requests) == 3 and len(model.conversation_requests) == 8
     assert not [row for row in await store.load("session") if row.kind == "compaction"]
     assert [event.error.split(":")[0] for event in events if isinstance(event, CompactionFailed)] == [
-        "The checkpoint turn stopped with length.",
+        "The checkpoint turn stopped with length and no usable checkpoint.",
         "The checkpoint turn ended without checkpoint text.",
         "server",
     ]

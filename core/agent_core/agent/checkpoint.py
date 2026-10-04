@@ -50,11 +50,12 @@ class CheckpointPolicy(Hooks):
         self.open = True
 
     async def before_tool(self, call: ToolCallBlock, ctx: RunContext) -> Optional[Deny]:
+        if not self.open:
+            # Once the budget is used up, every call is told so: no other tool is worth trying.
+            return Deny(BUDGET_USED)
         rule = self._table.get(call.name)
         if rule is None or (rule == "scratch" and not self._in_scratch(call)):
             return Deny(DENIED)
-        if not self.open:
-            return Deny(BUDGET_USED)
         return None
 
     def _in_scratch(self, call: ToolCallBlock) -> bool:

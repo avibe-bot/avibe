@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import Any, Literal, Mapping, Optional, Sequence
+from typing import Any, Callable, Literal, Mapping, Optional, Sequence
 
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
@@ -24,8 +24,10 @@ from core.agent_core.messages import (
     ToolCallBlock,
     ToolResultMessage,
     UserMessage,
+    origin_from_dict,
     require_json_value,
     text,
+    usage_from_dict,
 )
 
 # C-1 cross-provider.md; also Pi (MIT), packages/ai/src/utils/transform-messages.ts.
@@ -103,15 +105,11 @@ def _ordered(entries: Sequence[ContextEntry], fork_point: Optional[int] = None) 
         if row.context_seq <= previous_seq:
             raise ProjectionError(f"duplicate context_seq: {row.context_seq}")
         previous_seq = row.context_seq
-        if row.kind == "agent_state":
-            if row.payload.get("version") != 1 or not isinstance(row.payload.get("state"), dict):
-                raise ProjectionError(f"unsupported agent_state payload (row {row.row_id})")
-            if not isinstance(row.payload.get("context", {}), dict):
-                raise ProjectionError(f"unsupported agent_state context (row {row.row_id})")
-        elif row.kind == "compaction":
-            _require_compaction(row)
-        elif row.kind == "context_edit":
-            _require_edit(row)
+        shape = _PAYLOAD_SHAPES.get(row.kind)
+        if shape is not None:
+            # Every field a later step reads is checked here, so a malformed row fails at load.
+            if not shape(row.payload) or (row.kind == "compaction" and row.payload["first_kept_seq"] > row.context_seq):
+                raise ProjectionError(f"unsupported {row.kind} payload (row {row.row_id})")
         elif row.message is None:
             raise ProjectionError(f"{row.kind} has no message (row {row.row_id})")
         if row.message is not None and any(
@@ -131,32 +129,103 @@ def _ordered(entries: Sequence[ContextEntry], fork_point: Optional[int] = None) 
     return rows
 
 
-def _require_compaction(row: ContextEntry) -> None:
-    payload = row.payload
-    first = payload.get("first_kept_seq")
-    state = payload.get("state")
-    if (
-        payload.get("version") != 1
-        or not isinstance(payload.get("summary"), str)
-        or not isinstance(state, list)
-        or not all(isinstance(item, str) for item in state)
-        or not isinstance(first, int)
-        or isinstance(first, bool)
-        or not 0 < first <= row.context_seq
-    ):
-        raise ProjectionError(f"unsupported context_compaction payload (row {row.row_id})")
+# --- persisted payload shapes (transcript-rows.schema.json) --------------------
+
+Check = Callable[[Any], bool]
 
 
-def _require_edit(row: ContextEntry) -> None:
-    payload = row.payload
-    replacement = payload.get("replacement")
-    if (
-        payload.get("version") != 1
-        or not isinstance(payload.get("target_event_id"), str)
-        or not isinstance(replacement, Mapping)
-        or not isinstance(replacement.get("text"), str)
-    ):
-        raise ProjectionError(f"unsupported context_edit payload (row {row.row_id})")
+def _object(required: Mapping[str, Check], optional: Mapping[str, Check] = {}) -> Check:
+    """An exact JSON object: no unknown key, every required key present, every value valid."""
+
+    def check(value: Any) -> bool:
+        if not isinstance(value, Mapping) or set(value) - set(required) - set(optional):
+            return False
+        if any(key not in value for key in required):
+            return False
+        return all(test(value[key]) for key, test in {**required, **optional}.items() if key in value)
+
+    return check
+
+
+def _reads(reader: Callable[[Any], Any]) -> Check:
+    """Valid when the foundation's own reader accepts it."""
+
+    def check(value: Any) -> bool:
+        try:
+            reader(value)
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    return check
+
+
+def _one_of(*values: Any) -> Check:
+    return lambda value: any(type(value) is type(item) and value == item for item in values)
+
+
+def _nullable(check: Check) -> Check:
+    return lambda value: value is None or check(value)
+
+
+def _list(check: Check) -> Check:
+    return lambda value: isinstance(value, list) and all(check(item) for item in value)
+
+
+def _string(value: Any) -> bool:
+    return isinstance(value, str)
+
+
+def _integer(value: Any) -> bool:
+    return type(value) is int
+
+
+def _count(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+_PAYLOAD_SHAPES: dict[str, Check] = {
+    "compaction": _object(
+        {
+            "version": _one_of(1),
+            "mode": _one_of("normal", "rolling", "dropped"),
+            "reason": _one_of("manual", "threshold", "overflow"),
+            "summary": _string,
+            "checkpoint": _string,
+            "state": _list(_string),
+            "first_kept_seq": lambda value: _integer(value) and value > 0,
+            "summarized_to_seq": _count,
+            "files_read": _list(_string),
+            "files_modified": _list(_string),
+            "skills": _list(_object({"name": _string, "revision": _string})),
+            "tokens_before": _count,
+            "tokens_after_estimate": _count,
+            "threshold": _integer,
+        },
+        {
+            "focus": _nullable(_string),
+            "previous_compaction_id": _nullable(_string),
+            "current_request": _nullable(_string),
+            "current_request_message_id": _nullable(_string),
+            "summarizer": _nullable(
+                _object({"origin": _reads(origin_from_dict), "prompt_version": _string, "rounds": _count})
+            ),
+            "usage": _reads(usage_from_dict),
+        },
+    ),
+    "context_edit": _object(
+        {
+            "version": _one_of(1),
+            "target_event_id": _string,
+            "replacement": _object({"text": _string}),
+            "reason": _one_of("clear_old_tool_result"),
+        }
+    ),
+    "agent_state": _object(
+        {"version": _one_of(1), "state": lambda value: isinstance(value, dict)},
+        {"context": _object({"failures": _count, "ineffective": _count, "paused": lambda value: type(value) is bool})},
+    ),
+}
 
 
 def _index_results(

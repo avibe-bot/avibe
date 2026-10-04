@@ -98,7 +98,6 @@ from core.agent_core.harness.context import (
     summarized_to_seq,
     text_tokens,
     unit_tokens,
-    usage_dict,
 )
 from core.agent_core.harness.projection import (
     ContextView,
@@ -117,6 +116,7 @@ from core.agent_core.messages import (
     Usage,
     message_to_dict,
     text,
+    usage_to_dict,
 )
 from core.agent_core.tools.base import JobHost, Tool, ToolContext, ToolResult, ToolSpec
 
@@ -1199,13 +1199,14 @@ class Agent:
             turn.append(message)
             usage = add_usage(usage, message.usage)
             origin = message.origin
-            if message.stop_reason not in {"stop", "tool_use"}:
-                error = f"The checkpoint turn stopped with {message.stop_reason}."
-                break
-            if not message.tool_calls:
+            if message.stop_reason == "stop" and not message.tool_calls:
                 checkpoint = checkpoint_text(message)
                 if not checkpoint:
                     error = "The checkpoint turn ended without checkpoint text."
+                break
+            if message.stop_reason != "tool_use" or not message.tool_calls:
+                # Only a stop with text and no call is a checkpoint, and only a tool-use stop carries calls.
+                error = f"The checkpoint turn stopped with {message.stop_reason} and no usable checkpoint."
                 break
             if not policy.open:
                 # Its earlier calls were already answered with BUDGET_USED.
@@ -1228,7 +1229,7 @@ class Agent:
             "messages": [message_to_dict(message) for message in turn],
         }
         if usage is not None:
-            record["usage"] = usage_dict(usage)
+            record["usage"] = usage_to_dict(usage)
         if not checkpoint:
             await self._record_turn({**record, "outcome": "failed", "error": error, "compaction_event_id": None})
             await emit(CompactionFailed, reason=reason, error=error)

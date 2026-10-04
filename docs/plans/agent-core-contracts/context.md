@@ -128,11 +128,12 @@ A checkpoint is written by a **fork** of the conversation, the only delivery pat
   `room - 1,000` tokens, head kept, ending with `[Output truncated to fit this checkpoint turn: showing about
   <shown> of <total> tokens. Read a smaller range if you need more.]`, so a single read cannot push the turn out of
   the window.
-- At most 5 tool rounds. After them, or once `room` falls below the floor, every allowed call gets `This is a
-  checkpoint turn and its tool budget is used up. Write the checkpoint now.` A response that still calls tools after
-  that ends the turn as failed.
-- The final response's text is the checkpoint. A length stop, any stop other than `stop`, an error, or no text is a
-  failure, and nothing enters the context.
+- At most 5 tool rounds. After them, or once `room` falls below the floor, every call, whatever the table says,
+  gets `This is a checkpoint turn and its tool budget is used up. Write the checkpoint now.` A response that still
+  calls tools after that ends the turn as failed.
+- The checkpoint is the text of a final response that stops with `stop` and calls no tool; only a `tool_use` stop
+  with calls continues the turn. Anything else (a length stop, a `tool_use` stop without calls, calls under any other
+  stop, an error, or no text) is a failure, and nothing enters the context.
 - The turn's messages are recorded once per attempt, outcome included, as an audit row
   (`agent_events.event_type = 'context_checkpoint_turn'`, `visibility = 'audit'`, no `context_seq`; shape
   `CheckpointTurn`), never as context.
@@ -175,6 +176,8 @@ is written, so projection stays a pure function of the rows:
 - Projection (C-5 §3): the system prompt, hook-rehydrated messages, one user message holding `summary` and then each
   `state` text as its own text block, then the rows from `first_kept_seq` on, with edits applied. A tool result whose
   call was summarized is left out with it. No synthetic "continue" message follows.
+- Every `Compaction`, `ContextEdit`, and `AgentState` row is checked against its complete schema shape when it is
+  loaded, so a malformed row fails projection instead of a later step that reads it.
 
 Iterative checkpoints use the same prompt: the previous checkpoint message is part of the forked prefix, and the
 prompt tells the model to carry forward what still matters. File lists and loaded skills accumulate mechanically.

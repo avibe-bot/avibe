@@ -200,12 +200,22 @@ def test_a_cut_never_separates_a_tool_call_from_its_result(seed):
     for cut in cuts - {None}:
         assert 0 < cut < len(view.units)
         assert view.units[cut].lead.kind in {"input", "response"}
-        checkpoint = {
-            "version": 1,
-            "summary": "SUMMARY",
-            "state": [],
-            "first_kept_seq": view.units[cut].seq,
-        }
+        checkpoint = compaction_payload(
+            view,
+            cut,
+            mode="normal",
+            reason="threshold",
+            focus=None,
+            checkpoint="SUMMARY",
+            skills=(),
+            state=(),
+            earlier_record=None,
+            tokens_before=0,
+            threshold=0,
+            summarizer=None,
+            usage=None,
+        )
+        checkpoint["summary"] = "SUMMARY"
         compacted = [*rows, ContextEntry("session", len(rows) + 1, "compaction", "checkpoint", payload=checkpoint)]
         messages = project(compacted).messages
         assert messages[0].content[0].text == "SUMMARY"
