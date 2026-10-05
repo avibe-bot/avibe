@@ -10,6 +10,8 @@ import type { InstanceCapabilities, InstanceRole } from '../../lib/sessionInfo';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import { capabilitiesFor } from '../../lib/testing/instanceRoleCapabilities';
+import { modelsApi } from '../settings/models/modelsApi';
+import type { AgentSupply } from '../settings/models/types';
 import { AgentsPage } from './AgentsPage';
 
 type FakeApi = {
@@ -231,6 +233,31 @@ describe('AgentsPage load requests follow the rank that can serve them', () => {
 });
 
 describe('AgentsPage contextual selection', () => {
+  it('marks an enabled Agent the gateway reports without a model, as the Models page does', async () => {
+    // Enabling the Avibe backend creates its built-in Agent before any model is selected.
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+      {
+        backend: 'avibe', cli_present: false, mode: 'hub', menu_kind: 'fixed',
+        named_agents: [{ name: 'avibe', effective_model_id: null, supply_status: null }],
+      },
+      {
+        backend: 'codex', cli_present: true, mode: 'hub', menu_kind: 'fixed',
+        named_agents: [{ name: 'codex', effective_model_id: 'gpt-5', supply_status: 'ok' }],
+      },
+    ] as AgentSupply[]);
+    const api = makeApi(vi.fn().mockResolvedValue(listResult([
+      { ...brief('avibe', 'Default Agent'), backend: 'avibe' },
+      { ...brief('codex', ''), model: 'gpt-5' },
+    ])));
+    renderPage(api);
+    const row = (name: string) => screen.getAllByText(name).find((node) => node.closest('button'))!.closest('button')!;
+
+    await waitFor(() => expect(
+      within(row('avibe')).getByText('settings.models.gateway.agentIssues.modelMissing'),
+    ).toBeTruthy());
+    expect(within(row('codex')).queryByText('settings.models.gateway.agentIssues.modelMissing')).toBeNull();
+  });
+
   it('lists, selects and edits an Avibe Agent without a native import option or CLI detail', async () => {
     const agent = { ...brief('local-helper', 'before'), backend: 'avibe' };
     const changed = { ...agent, description: 'updated in place' };

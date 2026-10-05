@@ -111,12 +111,16 @@ def _timed_out_line(timeout_s: float) -> str:
     return f"Command timed out after {format_number(timeout_s)} seconds"
 
 
+#: Avibe change to Pi's ``Command aborted``: an abort is the user's Stop, and the model should know who ended it.
+ABORTED_LINE = "Stopped by the user; the command was terminated."
+
+
 def _stopped_line(reason: Optional[str], timeout_s: Optional[float]) -> Optional[str]:
-    """Pi's status line for a job someone stopped, from the reason recorded when it was stopped."""
+    """The status line for a job someone stopped, from the reason recorded when it was stopped."""
     if reason == STOP_TIMEOUT and timeout_s is not None:
         return _timed_out_line(timeout_s)
     if reason == STOP_ABORTED:
-        return "Command aborted"
+        return ABORTED_LINE
     return None
 
 
@@ -138,25 +142,36 @@ async def handover_result(output: JobOutput, watch_id: str) -> ToolResult:
     return text_result("\n".join(lines), details={**output.details(truncation), "watch_id": watch_id})
 
 
-async def settle_bash_call(jobs: LocalJobHost, session_id: str, tool_call_id: str) -> Optional[ToolResult]:
-    """The durable result for a ``bash`` call left open by a crash (``recovery.md``).
+async def recovered_result(
+    jobs: LocalJobHost, job_id: str, status: JobStatus, watch_id: Optional[str]
+) -> Optional[ToolResult]:
+    """The result of a ``bash`` call whose run ended before it committed one (``recovery.md`` T2).
 
-    A finished job gets its final output, a job stopped at its deadline or by an
-    abort gets that result, and a running one is handed to Watch. ``None`` means
-    the job is gone for another reason, never ran, or does not exist: the caller
-    commits the synthetic interrupted result.
+    The one renderer for a crash, a restart, and a Stop: a job handed to ``watch_id``
+    gets the hand-over result, a finished job its final output, and a job stopped at
+    its deadline or by an abort that result. ``None`` means the job is gone for
+    another reason or never ran: the caller commits the synthetic interrupted result.
     """
+    output = JobOutput(jobs, job_id)
+    if watch_id is not None:
+        return await handover_result(output, watch_id)
+    if status.state == "exited":
+        return await final_result(output, status)
+    if status.state != "gone":
+        return None
+    line = _stopped_line(jobs.stop_reason(job_id), jobs.meta(job_id).get("timeout_s"))
+    return await stopped_result(output, line) if line else None
+
+
+async def settle_bash_call(jobs: LocalJobHost, session_id: str, tool_call_id: str) -> Optional[ToolResult]:
+    """The durable result for a ``bash`` call left open by a crash; a running job is handed to Watch first."""
     job_id = jobs.find_job(session_id, tool_call_id)
     if job_id is None:
         return None
     await jobs.enforce_deadline(job_id)
     status = jobs.status(job_id)
-    if status.state == "running":
-        return await handover_result(JobOutput(jobs, job_id), await jobs.hand_over(job_id))
-    if status.state == "exited":
-        return await final_result(JobOutput(jobs, job_id), status)
-    line = _stopped_line(jobs.stop_reason(job_id), jobs.meta(job_id).get("timeout_s"))
-    return await stopped_result(JobOutput(jobs, job_id), line) if line else None
+    watch_id = await jobs.hand_over(job_id) if status.state == "running" else None
+    return await recovered_result(jobs, job_id, status, watch_id)
 
 
 class BashTool:
@@ -232,7 +247,7 @@ class BashTool:
                 return await final_result(output, status, note=note)
             if ctx.cancel.cancelled:
                 await self._jobs.kill(job_id, reason=STOP_ABORTED)
-                return await stopped_result(output, "Command aborted")
+                return await stopped_result(output, ABORTED_LINE)
             if hand_over:
                 watch_id, handover_error = await self._hand_over(job_id)
                 if watch_id is not None:

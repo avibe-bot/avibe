@@ -108,7 +108,10 @@ is true". Logic, from Pi's `edit-diff.ts`:
 4. Apply all edits against the original, restore line endings and BOM, write once. Nothing is written if any edit
    fails.
 
-Result: `Successfully replaced {n} block(s) in {path}.`; the diff goes to `details` for display only. Errors:
+Result: `Successfully replaced {n} block(s) in {path}.`; the diff goes to `details` for display only. Avibe: when an
+item uses `replaceAll`, the result counts occurrences instead, `Successfully replaced {total} occurrences in {path}.`
+(`1 occurrence` when singular), followed for several items by ` (edits[0]: {count}, edits[1]: {count})` before the
+period, so the model need not read the file again to count them. Errors:
 
 - `Could not find edits[{i}] in {path}. The oldText must match exactly including all whitespace and newlines.`; when
   the normalization budget was reached, Avibe ends it with `: the file is too large to match it loosely after Unicode
@@ -150,7 +153,9 @@ continue in the background as an Avibe Watch; you get a follow-up message when t
   counts the whole line, including bytes the normalizer dropped from its start.
 - Exit 0 is a normal result; otherwise an error result ending in `Command exited with code {code}`. `(no output)` when
   empty.
-- `timeout` kills the process tree: `Command timed out after {n} seconds`. Abort kills it: `Command aborted`.
+- `timeout` kills the process tree: `Command timed out after {n} seconds`. Abort kills it: `Stopped by the user; the
+  command was terminated.` (Avibe change to Pi's `Command aborted`: an abort is the user's Stop, and the model should
+  know who ended the command). The adapter commits that result when the run ends (recovery's renderer, T2).
 - Handover (Avibe), when `watch: true` or the foreground window passes: the result is not an error and reads
   `Command is still running and is now Watch {watch_id}. You will get a follow-up message when it finishes.` followed
   by the output so far (tail rules above), `{label}: {path}`, and `Check: vibe watch show {watch_id}`,

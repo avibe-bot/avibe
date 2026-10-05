@@ -6,6 +6,7 @@
 import { processAvailabilityOf } from './eligibility';
 import { catalogModelIds } from './backendCatalog';
 import type {
+  AgentBackend,
   AgentSupply,
   ModelSupply,
   Source,
@@ -131,3 +132,18 @@ export function attribution(agent: AgentSupply): SupplyAttribution {
 
 export const hasAttribution = (a: SupplyAttribution): boolean =>
   a.interrupted.length > 0 || a.waiting.length > 0 || a.unassignedModels.length > 0;
+
+/**
+ * Enabled named Agents whose next turn fails because no model is selected: on the
+ * gateway a turn's route starts from the Agent's model. The reading behind the
+ * attention strip's 「No model selected」, for the pages that show such an Agent,
+ * or its backend, as enabled.
+ */
+export const agentsWithoutModel = (
+  supplies: readonly AgentSupply[],
+): { backend: AgentBackend; name: string }[] =>
+  supplies
+    .filter((supply) => supply.mode === 'hub')
+    .flatMap((supply) => (supply.named_agents ?? [])
+      .filter((named) => named.effective_model_id === null)
+      .map((named) => ({ backend: supply.backend, name: named.name })));

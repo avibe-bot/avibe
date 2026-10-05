@@ -1439,6 +1439,8 @@ async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session
     system = harness.provider.requests[0].system
     assert all(f"- {name}: " in system for name in ("read", "bash", "edit", "write"))
     assert "Use edit for precise changes" in system
+    # Short text between tool calls may never reach the user's transcript (the shared interim threshold).
+    assert "- Only your final reply is reliably shown to the user; put anything the user must see in it" in system
 
 
 async def test_an_idle_session_holds_no_adapter_state(engine, session, tmp_path, published) -> None:
@@ -2040,6 +2042,28 @@ async def test_bash_runs_with_the_turns_caller_environment(engine, session, tmp_
     assert {key for key in seen if key in CALLER_CONTEXT_ENV_NAMES} >= {AVIBE_SESSION_ID_ENV, AVIBE_CALLER_BACKEND_ENV}
     # The Model Hub gateway token stays in the adapter: never in a command's environment.
     assert "hub-token" not in output
+
+
+async def test_a_stop_settles_the_running_command_with_its_recorded_reason(engine, session, tmp_path, published) -> None:
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "echo started; sleep 30"})
+    suite = local_tool_suite(str(tmp_path / "jobs"))
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("", calls=(call,)))]], suite=suite)
+    request = harness.request("run it")
+
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    await _until(lambda: suite.find_job(SESSION, "call_bash") is not None, "the command never started")
+    job_id = suite.find_job(SESSION, "call_bash")
+    await _until(lambda: b"started" in suite.jobs.output(job_id)[0], "the command printed nothing")
+    assert await harness.agent.handle_stop(AgentRequest(**{**request.__dict__, "message": "stop"})) is True
+    await running
+
+    # Settled at Stop, before any later Turn, with why the job ended rather than an unexplained interruption.
+    result = (await harness.context_rows())[-1]
+    assert result.kind == "tool_result" and result.message.is_error
+    body = result.message.content[0].text
+    assert body.startswith("started\n") and body.endswith("\n\nStopped by the user; the command was terminated.")
+    assert suite.jobs.stop_reason(job_id) == "aborted" and suite.jobs.status(job_id).state != "running"
+    assert harness.controller.terminals == [{"turn": _turn(request.context), "is_error": False, "settled_by": "stopped"}]
 
 
 @pytest.mark.parametrize("state", ["exited", "running"])

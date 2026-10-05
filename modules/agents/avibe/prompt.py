@@ -9,7 +9,9 @@ model saw.
 Preamble, tool snippets, and rules ported from Pi (MIT, Copyright (c) 2025 Mario
 Zechner), ``packages/coding-agent/src/core/system-prompt.ts`` and
 ``packages/coding-agent/src/core/tools/{read,write,edit,bash}.ts`` at ``7fbbd5f``;
-Pi-specific lines (its docs, ``PI_*`` variables) are left out.
+Pi-specific lines (its docs, ``PI_*`` variables) are left out. ``FINAL_REPLY_RULE`` is
+Avibe's: text between tool calls reaches the user only above the shared interim
+threshold (``ConsolidatedMessageDispatcher._is_interim_worthy``).
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ TOOL_GUIDELINES: dict[str, tuple[str, ...]] = {
     "write": ("Use write only for new files or complete rewrites.",),
 }
 TOOL_ORDER = ("read", "bash", "edit", "write")
+FINAL_REPLY_RULE = "Only your final reply is reliably shown to the user; put anything the user must see in it"
 
 
 def coding_prompt(tool_names: Iterable[str]) -> str:
@@ -63,7 +66,7 @@ def coding_prompt(tool_names: Iterable[str]) -> str:
         rules.append("Use bash for file operations like ls, rg, find")
     for name in names:
         rules.extend(TOOL_GUIDELINES.get(name, ()))
-    rules += ["Be concise in your responses", "Show file paths clearly when working with files"]
+    rules += ["Be concise in your responses", "Show file paths clearly when working with files", FINAL_REPLY_RULE]
     return "\n\n".join(
         (
             PREAMBLE,

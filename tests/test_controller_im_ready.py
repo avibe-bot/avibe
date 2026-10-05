@@ -212,6 +212,39 @@ def test_runtime_owner_recovery_isolates_optional_model_hub_failure(
     assert "Model Hub runtime recovery failed" in caplog.text
 
 
+@pytest.mark.parametrize("avibe_recovery_fails", [False, True])
+def test_runtime_owner_recovery_settles_avibe_tool_calls_before_turns(avibe_recovery_fails: bool) -> None:
+    # recovery.md: T2 before T4. A Turn the restart interrupted is reported only after its
+    # running command became a Watch, so the notice can say so instead of asking for a resend.
+    order: list[str] = []
+
+    async def avibe_pass() -> list[str]:
+        order.append("avibe T2")
+        if avibe_recovery_fails:
+            raise OSError("jobs directory unreadable")
+        return []
+
+    async def turns_pass(**_kwargs) -> list[str]:
+        order.append("Turn T4")
+        return []
+
+    controller = Controller.__new__(Controller)
+    controller.avibe_recovery = SimpleNamespace(start=AsyncMock(side_effect=avibe_pass))
+    controller.session_turns = SimpleNamespace(
+        recover_durable_delivery_state=AsyncMock(side_effect=turns_pass),
+        recover_persisted_agent_run_queue=AsyncMock(return_value=[]),
+    )
+    controller.scheduled_task_service = SimpleNamespace(recover_processing_requests=Mock())
+    controller.runtime_work_supervisor = SimpleNamespace(activate=AsyncMock())
+    controller._delivery_recovery_complete = asyncio.Event()
+
+    asyncio.run(controller._recover_runtime_owners())
+
+    # Best effort, as before: the Avibe pass retries on its own and never blocks the delivery owners.
+    assert order == ["avibe T2", "Turn T4"]
+    assert controller._delivery_recovery_complete.is_set()
+
+
 def test_runtime_ready_fails_closed_after_queue_recovery_failure() -> None:
     controller = Controller.__new__(Controller)
     controller.agent_service = SimpleNamespace(agents={})

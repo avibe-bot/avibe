@@ -239,5 +239,42 @@ class QueuedReactionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.ack_reaction_message_id, "m1")
 
 
+class WorkbenchAckModeTests(unittest.IsolatedAsyncioTestCase):
+    """The Workbench client shows only an ack message, so its turns start with one, whatever ack_mode says."""
+
+    async def _start_and_promote(self, ack_mode: str) -> tuple[ProcessingIndicatorHandle, list[str]]:
+        from modules.im.avibe import AvibeBot, AvibeConfig
+
+        published: list[str] = []
+
+        async def publish(event, **payload):
+            published.append(payload["text"])
+
+        bot = AvibeBot(AvibeConfig())
+        bot.bind_sse_publisher(publish)
+        controller = SimpleNamespace(
+            config=SimpleNamespace(ack_mode=ack_mode, language="en"),
+            get_im_client_for_context=lambda ctx: bot,
+            im_client=bot,
+        )
+        svc = ProcessingIndicatorService(controller)
+        context = MessageContext(user_id="u1", channel_id="ses_1", message_id="msg_user", platform="avibe")
+
+        handle = await svc.start(context, "avibe")
+        # The ack message is the indicator from the start: nothing is deferred to the runtime gate.
+        self.assertEqual(published, [svc._get_ack_text("avibe")])
+        await svc.promote_reaction_to_running(handle, agent_name="avibe")
+        return handle, published
+
+    async def test_every_ack_mode_starts_with_the_ack_message_and_no_downgrade_warning(self):
+        for ack_mode in ("reaction", "typing", "message"):
+            with self.subTest(ack_mode=ack_mode):
+                with self.assertNoLogs("core.processing_indicator", level="WARNING"):
+                    handle, published = await self._start_and_promote(ack_mode)
+                self.assertIsNotNone(handle.ack_message_id)
+                self.assertIsNone(handle.ack_reaction_emoji)
+                self.assertEqual(len(published), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

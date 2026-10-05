@@ -2023,7 +2023,8 @@
           "detected": "检测到现有直连配置：{{detail}}，可一键导入模型网关",
           "import": "导入模型网关…"
         },
-        "fixHint": "去「模型」页添加或启用供应商即可恢复。"
+        "fixHint": "去「模型」页添加或启用供应商即可恢复。",
+        "warningWithFix": "{{warning}}。{{fixHint}}"
       },
       "migration": {
         "open": "迁移配置",

@@ -1107,10 +1107,6 @@ class Controller:
         # embedded and test paths that run a controller are unaffected.
         self._publish_readiness_unless_im_runtime_failed()
         try:
-            await self._recover_avibe_agent_runtime_state()
-        except Exception:
-            logger.exception("Failed to recover the Avibe Agent's runtime state")
-        try:
             await self.update_checker.check_and_send_post_update_notification(ready_platform="avibe")
         except Exception as e:
             logger.error(f"Failed to send post-update notification: {e}", exc_info=True)
@@ -1175,6 +1171,14 @@ class Controller:
                 coordinator = getattr(self, "backend_restart_coordinator", None)
                 if coordinator is not None:
                     coordinator.restore_migration_blocks()
+
+        # recovery.md: T2 before T4. The Avibe Agent hands the commands a restart left running
+        # to their Watches first, so the interruption notice of their Turn can say so instead
+        # of asking for a resend. Best effort: its single owner retries what it could not settle.
+        try:
+            await self._recover_avibe_agent_runtime_state()
+        except Exception:
+            logger.exception("Failed to recover the Avibe Agent's runtime state")
 
         recover_deliveries = getattr(
             self.session_turns,
