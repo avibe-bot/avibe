@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-from core.agent_core.harness.projection import INTERRUPTED, ProjectionError, project
+from core.agent_core.harness.projection import INTERRUPTED, ProjectionError, context_view, project
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import ImageBlock, ToolCallBlock, ToolResultMessage, UserMessage, text
 from tests.agent_core.fakes import assistant, user
@@ -64,6 +64,7 @@ def _checkpoint_payload(first_kept_seq, *, summary="SUMMARY", state=("STATE",), 
         "first_kept_seq": first_kept_seq,
         "summarized_to_seq": first_kept_seq - 1,
         "previous_compaction_id": None,
+        "kept_inputs": [],
         "files_read": ["a.py"],
         "files_modified": [],
         "files_modified_omitted": False,
@@ -158,6 +159,10 @@ def _state_row(context):
         _checkpoint_row(2, 1, files_read="a.py"),
         _checkpoint_row(2, 1, files_modified=[1]),
         _checkpoint_row(2, 1, mode="partial"),
+        # A kept input must be an input row before the kept rows.
+        _checkpoint_row(2, 1, kept_inputs=[1]),
+        _checkpoint_row(2, 2, kept_inputs=[9]),
+        _checkpoint_row(2, 2, kept_inputs=["1"]),
         _checkpoint_row(2, 1, summarized_to_seq="1"),
         _checkpoint_row(2, 1, threshold=1.5),
         _checkpoint_row(2, 1, summarizer={"origin": {}, "prompt_version": "v", "rounds": 0}),
@@ -182,6 +187,49 @@ def test_a_complete_checkpoint_row_loads():
     assert [block.text for block in projected.messages[0].content] == ["SUMMARY", "STATE"]
 
 
+def test_a_checkpoint_row_written_before_kept_inputs_keeps_the_pin_it_was_written_with():
+    # Rows written before the field pinned the latest input before first_kept_seq when the cut fell inside a turn;
+    # without the field, the same rule applies, so such a conversation keeps its request. An explicit empty list
+    # pins nothing.
+    def legacy(first_kept_seq, **fields):
+        payload = {key: value for key, value in _checkpoint_payload(first_kept_seq).items() if key != "kept_inputs"}
+        return ContextEntry("session", 9, "compaction", "c", payload={**payload, **fields})
+
+    rows = [
+        ContextEntry("session", 1, "input", "in-1", user("an older request")),
+        ContextEntry("session", 2, "response", "out-1", assistant("done")),
+        ContextEntry("session", 3, "input", "in-2", user("read f10 to f18")),
+        ContextEntry("session", 4, "response", "out-2", assistant("f10")),
+        ContextEntry("session", 5, "response", "out-3", assistant("f11")),
+    ]
+    texts = [message.content[0].text for message in project([*rows, legacy(5)]).messages]
+    assert texts == ["read f10 to f18", "SUMMARY", "f11"]
+    assert context_view([*rows, legacy(5)]).pinned == 1
+    # A cut at an input split nothing: nothing is pinned.
+    assert [m.content[0].text for m in project([*rows, legacy(3)]).messages][:2] == ["SUMMARY", "read f10 to f18"]
+    assert [m.content[0].text for m in project([*rows, legacy(5, kept_inputs=[])]).messages] == ["SUMMARY", "f11"]
+
+
+def test_the_kept_inputs_of_a_turn_stay_whole_in_order_before_the_checkpoint():
+    # The in-flight Turn's input and a steer it accepted, both before the cut: each stays as it was, in order.
+    call = ToolCallBlock("r1", "read", {"path": "a.py"})
+    rows = [
+        ContextEntry("session", 1, "input", "in-1", user("read f10 to f18")),
+        ContextEntry("session", 2, "response", "out-1", assistant(calls=[call])),
+        ContextEntry("session", 3, "tool_result", "res-1", ToolResultMessage("r1", "read", (text("f10"),))),
+        ContextEntry("session", 4, "input", "steer-1", user("also note each file's size")),
+        ContextEntry("session", 5, "response", "out-2", assistant("f11 next")),
+        _checkpoint_row(6, 5, kept_inputs=[1, 4]),
+    ]
+    messages = project(rows).messages
+    assert [message.content[0].text for message in messages] == [
+        "read f10 to f18",
+        "also note each file's size",
+        "SUMMARY",
+        "f11 next",
+    ]
+
+
 def test_a_checkpoint_that_splits_a_turn_keeps_the_turn_input_whole_before_it_and_the_tail():
     # The cut fell inside the turn: the turn's input stays as it was, image included, right before the checkpoint,
     # whose state is then the latest environment the model reads; what came before the input is summarized.
@@ -200,7 +248,7 @@ def test_a_checkpoint_that_splits_a_turn_keeps_the_turn_input_whole_before_it_an
         ContextEntry("session", 4, "response", "out-2", assistant(calls=[call])),
         ContextEntry("session", 5, "tool_result", "res-2", ToolResultMessage("r1", "read", (text("a"),))),
         ContextEntry("session", 6, "response", "out-3", assistant("the trace shows a stall")),
-        _checkpoint_row(7, 6, state=("<environment>\ndate: 2026-10-05\n</environment>",)),
+        _checkpoint_row(7, 6, state=("<environment>\ndate: 2026-10-05\n</environment>",), kept_inputs=[3]),
     ]
     messages = project(rows).messages
     assert [type(message).__name__ for message in messages] == ["UserMessage", "UserMessage", "AssistantMessage"]

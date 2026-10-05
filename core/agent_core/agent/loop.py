@@ -88,12 +88,15 @@ from core.agent_core.harness.context import (
     clear_edit,
     clearable_results,
     compaction_payload,
+    fit_batch,
+    fit_edit,
     fit_result,
     half_cut,
     last_anchor,
     message_tokens,
     messages_tokens,
     normal_cut,
+    notes_tokens,
     output_tokens,
     request_facts,
     request_tokens,
@@ -142,10 +145,14 @@ class UnsupportedModelRoute(ValueError):
 
 
 class _Exhausted(Exception):
-    """C-9 section 8 (d): the run stops ``context_exhausted``, saying what fills the context."""
+    """C-9 section 8 (d): the run stops ``context_exhausted``, saying what fills the context.
 
-    def __init__(self, limit: int, parts: tuple[ContextPart, ...]) -> None:
-        self.limit, self.parts = limit, parts
+    ``kind`` is the error's (``_cause``): the part that is too large when measurement shows it (``input_too_large``,
+    ``tool_output_too_large``, ``step_too_large``), else ``context_exhausted``, the conversation's length.
+    """
+
+    def __init__(self, limit: int, parts: tuple[ContextPart, ...], kind: str = "context_exhausted") -> None:
+        self.limit, self.parts, self.kind = limit, parts, kind
         sizes = ", ".join(f"{part.name} ~{part.tokens}" for part in parts)
         super().__init__(f"The context does not fit the model's input limit of {limit} tokens: {sizes}.")
 
@@ -260,6 +267,9 @@ class Agent:
         self._committed_state_json = "{}"
         # C-9's per-run bound (section 10): unproductive checkpoint attempts this run, in memory only.
         self._unproductive = 0
+        # The ``context_seq`` of each input this run consumed, its first and every steer: a checkpoint inside the Turn
+        # keeps them as they were (C-9 section 5).
+        self._turn_inputs: set[int] = set()
         # The run's attempt ledger (C-9): every model attempt, in order.
         self._attempts: list[_Attempt] = []
         self._last_model_at: Optional[float] = None
@@ -415,6 +425,7 @@ class Agent:
             interruptible=False,
         )
         self._rows.append(row)
+        self._turn_inputs.add(row.context_seq)
 
     def _validate_response(self, message: AssistantMessage, *, after: Sequence[Message] = ()) -> None:
         """A response is valid after the committed rows and then ``after`` (a checkpoint turn's own messages)."""
@@ -466,6 +477,7 @@ class Agent:
                 self._committed_state_json = state_representation(self._ctx.state)
                 self._committed_state = deepcopy(self._ctx.state)
                 self._unproductive = 0
+                self._turn_inputs = set()
                 self._attempts = []
                 loaded = True
                 system = self.system
@@ -487,7 +499,7 @@ class Agent:
             except _Exhausted as error:
                 decided = self._outcome.primary("context_exhausted")
                 await emit(ContextExhausted, limit=error.limit, parts=error.parts)
-                await self._error(emit, "context_exhausted", str(error), "local", cause=decided)
+                await self._error(emit, error.kind, str(error), "local", cause=decided)
             except _Aborted:
                 self._outcome.primary("aborted")
             except asyncio.CancelledError:
@@ -758,7 +770,9 @@ class Agent:
                         plan = budget(
                             request, route.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view)
                         )
-                        raise self._exhausted(request, view, plan)
+                        movable = half_cut(view.units, turn_inputs=self._turn_inputs, pinned=view.pinned) is not None
+                        kind = "context_exhausted" if movable else self._cause(view, None)
+                        raise self._exhausted(request, view, plan, kind=kind)
                     retries, started, retry_error = 0, time.monotonic(), None
                     continue
                 retry_error = terminal
@@ -1135,12 +1149,19 @@ class Agent:
         attempt in this pass can use it up.
         """
         # The bound first: once the run has stopped compacting, nothing is built for a compaction either.
-        if not plan.can_fit and (
-            self._stopped or not (await self._minimal(system, selected, request, view, plan, carry=False))[1].can_fit
-        ):
-            # (d): stopped, or not even the request the drop would leave (its row and the last unit, without the
-            # previous checkpoint's text) can fit. The provider never sees it.
-            raise self._exhausted(request, view, plan)
+        if not plan.can_fit:
+            if self._stopped:
+                raise self._exhausted(request, view, plan)  # (d); the provider never sees it
+            _, minimal = await self._minimal(system, selected, request, view, plan, carry=False)
+            if not minimal.can_fit:
+                # Not even the request the drop would leave (its row and the last unit, without the previous
+                # checkpoint's text) can fit: moving the conversation out cannot help. The newest tool batch is cut
+                # to fit (section 3); anything else is (d), and the provider never sees it.
+                rest = minimal.est - self._batch_tokens(view)
+                room = minimal.input_limit - minimal.output - rest
+                if await self._fit_batch(view, (room - minimal.margin, room)):
+                    return True
+                raise self._exhausted(request, view, plan, kind=self._cause(view, minimal))
         refused, ladder.refused = ladder.refused, False
         shrink = refused
         if not shrink:
@@ -1152,7 +1173,7 @@ class Agent:
                     await self._commit_context([("context_edit", clear_edit(target)) for target in targets])
                     return True
             if plan.est >= plan.threshold and not ladder.compacted and not self._stopped:
-                cut = normal_cut(view.units, plan.keep)
+                cut = normal_cut(view.units, plan.keep, turn_inputs=self._turn_inputs, pinned=view.pinned)
                 if cut is not None:
                     ladder.compacted = True
                     if not self._fork_fits(system, selected, view, "normal", cut):
@@ -1296,7 +1317,7 @@ class Agent:
                 return False
             if not ladder.summary_failed and not ladder.compacted:
                 ladder.compacted = True
-                cut = normal_cut(units, plan.keep)
+                cut = normal_cut(units, plan.keep, turn_inputs=self._turn_inputs, pinned=view.pinned)
                 if cut is not None and self._fork_fits(system, selected, view, "normal", cut):
                     outcome = await self._checkpoint(
                         system, selected, request, view, plan, cut, mode="normal", reason="overflow", emit=emit
@@ -1306,7 +1327,12 @@ class Agent:
                     ladder.summary_failed = not outcome.overflow
                 continue
             if not ladder.summary_failed and ladder.rolls < MAX_ROLLS:
-                cut = rolling_cut(units, lambda cut: self._fork_fits(system, selected, view, "rolling", cut))
+                cut = rolling_cut(
+                    units,
+                    lambda cut: self._fork_fits(system, selected, view, "rolling", cut),
+                    turn_inputs=self._turn_inputs,
+                    pinned=view.pinned,
+                )
                 if cut is None:
                     ladder.rolls = MAX_ROLLS
                     continue
@@ -1318,17 +1344,93 @@ class Agent:
                     return True
                 ladder.summary_failed = True
                 continue
-            cut = half_cut(units)
+            cut = half_cut(units, turn_inputs=self._turn_inputs, pinned=view.pinned)
             if cut is not None:
                 carry = await self._carries(system, selected, request, view, plan)
                 await self._drop(request, view, plan, cut, emit, carry=carry)
                 return True
+            # Nothing more can move out. A refused request's newest tool batch is cut to half of what the model read
+            # (the provider counts more than the estimate), down to its notes; the refusals bound the halvings.
+            if ladder.overflows and await self._fit_batch(view, (self._batch_tokens(view) // 2,), floor=True):
+                return True
             if ladder.overflows or not plan.can_fit:
-                raise self._exhausted(request, view, plan)
+                kind = self._cause(view, None if ladder.overflows else plan)
+                raise self._exhausted(request, view, plan, kind=kind)
             return False
 
-    def _exhausted(self, request: ModelRequest, view: ContextView, plan: Budget) -> _Exhausted:
-        """Section 8 (d): what fills the request, for the user's stop message."""
+    @staticmethod
+    def _newest_batch(view: ContextView) -> list[tuple[ContextEntry, Message]]:
+        """The committed results of the newest unit when it is a tool batch, as the model reads them."""
+        last = view.units[-1] if view.units else None
+        if last is None or last.lead.kind != "response":
+            return []
+        return [(entry, message) for entry, message in last.entries[1:] if entry is not None]
+
+    def _batch_tokens(self, view: ContextView) -> int:
+        return sum(message_tokens(message) for _, message in self._newest_batch(view))
+
+    async def _fit_batch(self, view: ContextView, rooms: Sequence[int], *, floor: bool = False) -> bool:
+        """Section 3: cut the newest tool batch, which nothing can move out, to the first of ``rooms`` (tokens) it can
+        fit, or with ``floor`` to its notes when none can; True when it committed the cuts as ``fit_tool_result``
+        edits.
+
+        Water-filling over the batch's whole outputs (the rows keep them): the largest results are cut to one cap,
+        each saying so. A batch that cannot fit any room is left as it is, for the stop.
+        """
+        results = self._newest_batch(view)
+        if not results:
+            return False
+        originals = [entry.message for entry, _ in results]
+        if floor:
+            rooms = (*rooms, notes_tokens(originals))
+        for room in rooms:
+            texts = fit_batch(originals, room)
+            if texts is not None:
+                break
+        else:
+            return False
+        # Only what changes what the model reads: a stage that cut nothing new leaves the stop to decide.
+        edits = [
+            ("context_edit", fit_edit(entry, cut))
+            for (entry, message), cut in zip(results, texts)
+            if cut is not None and message.content != (text(cut),)
+        ]
+        if not edits:
+            return False
+        await self._commit_context(edits)
+        return True
+
+    def _cause(self, view: ContextView, measured: Optional[Budget]) -> str:
+        """What a stop names as too large when nothing more can move out (section 8 d), decided by measurement.
+
+        ``measured`` is the request the stop judged (the minimal request, or the request itself), whose estimate is
+        over its limit: a part of the newest unit is named only when the request without it fits. A request the
+        provider refused (None) fit our estimate, so its excess is unknown: the results are named while the cuts left
+        them above their notes, the step once they are at their notes.
+        """
+        last = view.units[-1] if view.units else None
+        if last is None:
+            return "context_exhausted"
+        if last.lead.kind == "input":
+            if measured is None:
+                return "context_exhausted"
+            without = measured.est - message_tokens(last.lead.message) + measured.output
+            return "input_too_large" if without <= measured.input_limit else "context_exhausted"
+        results = self._batch_tokens(view)
+        at_notes = results <= notes_tokens([entry.message for entry, _ in self._newest_batch(view)])
+        if measured is None:
+            return "step_too_large" if at_notes else "tool_output_too_large"
+        rest = measured.est - results + measured.output
+        if rest <= measured.input_limit:
+            return "tool_output_too_large"  # the results, even at their notes, are the excess
+        if rest - message_tokens(last.lead.message) <= measured.input_limit:
+            return "step_too_large"  # the step itself: its tool-call arguments or text
+        return "context_exhausted"
+
+    def _exhausted(
+        self, request: ModelRequest, view: ContextView, plan: Budget, *, kind: str = "context_exhausted"
+    ) -> _Exhausted:
+        """Section 8 (d): what fills the request, for the user's stop message, and the error's ``kind`` (``_cause``)."""
         last = view.units[-1] if view.units else None
         last_tokens = unit_tokens(last) if last is not None else 0
         parts = [
@@ -1340,7 +1442,7 @@ class Agent:
             name = "current_request" if last.lead.kind == "input" else "latest_tool_batch"
             parts.append(ContextPart(name, last_tokens))
         parts.append(ContextPart("output", plan.output + plan.margin))
-        return _Exhausted(plan.input_limit, tuple(parts))
+        return _Exhausted(plan.input_limit, tuple(parts), kind)
 
     async def _checkpoint(
         self,
@@ -1607,6 +1709,7 @@ class Agent:
             summarizer=summarizer,
             usage=usage,
             checkpoint_omitted=checkpoint_omitted,
+            turn_inputs=self._turn_inputs,
         )
         seq = max((row.context_seq for row in self._rows), default=0) + 1
         candidate = ContextEntry(self.session_id, seq, "compaction", "uncommitted-compaction", payload=payload)

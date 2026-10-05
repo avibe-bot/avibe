@@ -95,7 +95,7 @@ async def test_a_threshold_checkpoint_carries_the_lookup_and_the_state_and_shows
     assert is_checkpoint(harness.provider.requests[1])
     compaction = [row for row in await harness.context_rows() if row.kind == "compaction"][0]
     through = compaction.payload["summarized_to_seq"]
-    assert f"session_id = '{SESSION}', context_seq <= {through}" in compaction.payload["summary"]
+    assert f"session_id='{SESSION}' AND context_seq <= {through} " in compaction.payload["summary"]
     # Inside a run, the checkpoint carries the full environment block.
     assert any(item.startswith("<environment>") for item in compaction.payload["state"])
     # Silent: the user sees the two replies and nothing about the compaction.
@@ -114,6 +114,24 @@ async def test_an_8k_route_compacts_instead_of_exhausting(engine, session, tmp_p
     compactions = [row for row in await harness.context_rows() if row.kind == "compaction"]
     assert [row.payload["mode"] for row in compactions] == ["normal"]
     assert _texts(harness, "result") == ["one", "two", "three"] and not harness.rows("notify")
+
+
+async def test_three_parallel_15k_reads_on_a_16k_route_complete(engine, session, tmp_path):
+    # The E2E Phase 1 repro, on a fresh Session: the Avibe system prompt and three 15.6 KB reads in one step cannot
+    # fit a 16,000-token route. The reads are cut to fit, each saying so, and the Turn answers instead of stopping.
+    from core.agent_core.harness.context import TOOL_TRUNCATED
+    from core.agent_core.messages import ToolResultMessage
+
+    calls = [ToolCallBlock(f"r{index}", "read", {"path": f"ctx/part0{index}.txt"}) for index in range(1, 4)]
+    scripts = [[Done(assistant("I'll read the first three files.", calls=calls))], [Done(assistant("codewords"))]]
+    reader = FakeTool("read", result=ToolResult((text("IMPORTANT: " + "x" * 15_589),)))
+    harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[reader])
+    harness.controller.hub_limits = {"context_window": 16_000, "max_output_tokens": None}
+    await _turn(harness, "collect the codewords from ctx/part01.txt to ctx/part03.txt")
+    assert _texts(harness, "result") == ["codewords"] and not harness.rows("notify")
+    results = [m for m in harness.provider.requests[-1].messages if isinstance(m, ToolResultMessage)]
+    assert len(results) == 3 and all(result.content[0].text.startswith("IMPORTANT: ") for result in results)
+    assert all(result.content[0].text.endswith(TOOL_TRUNCATED) for result in results)
 
 
 async def test_the_environment_survives_a_checkpoint_that_splits_the_turn(engine, session, tmp_path):
@@ -204,8 +222,8 @@ async def test_a_context_that_cannot_fit_locally_is_never_reported_as_a_source_f
     await _turn(harness, tokens(30_000))
     assert not harness.provider.requests and not reported  # stopped before the provider: no source was involved
     assert harness.controller.terminals[-1]["is_error"] is True
-    # The one user-visible compaction text: the conversation has grown too long; start a new session.
-    assert _texts(harness, "notify") == [f"❌ {i18n_t('avibeAgent.error.contextExhausted', 'en')}"]
+    # The message itself cannot fit, so the notice says that, not that the conversation has grown too long.
+    assert _texts(harness, "notify") == [f"❌ {i18n_t('avibeAgent.error.inputTooLarge', 'en')}"]
 
 
 async def _failing_commit(harness: _Harness) -> None:
@@ -336,11 +354,42 @@ async def test_the_earlier_record_hint_names_the_session_its_bound_and_its_fork_
         _insert_session(conn, "ses_child", _SCOPES["avibe"], metadata)
     host = AvibeContextHost(engine, environment=lambda _: {})
     hint = host.earlier_record("ses_child", 7)
-    assert "`vibe data query`" in hint and "table messages" in hint and "content_json.model.message" in hint
-    assert "session_id = 'ses_child', context_seq <= 7" in hint
+    assert "messages table" in hint and "session_id = 'ses_child'" in hint and "through context_seq 7" in hint
+    # It says plainly what is not there: tool output is re-run, not looked up.
+    assert "Tool outputs are not stored there" in hint and "re-run" in hint
     assert hint.endswith(f"This Session was forked from {SESSION} at context_seq 3.")
     # A Session that is no fork has no fork line.
     assert "forked" not in host.earlier_record(SESSION, 7)
+
+
+async def test_the_earlier_record_example_runs_through_the_real_read_only_guard(engine, session, tmp_path):
+    import shlex
+
+    from storage.pagination import PageRequest
+    from storage.read_only_query import run_read_only_query
+
+    # One runnable line, a fixed query with no CTE and no decoding: run as written, it returns the Session's earlier
+    # messages, newest first.
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("first reply"))], [Done(assistant("second"))]])
+    await _turn(harness, "the earliest question")
+    await _turn(harness, "a later one")
+    hint = AvibeContextHost(engine, environment=lambda _: {}).earlier_record(SESSION, 2)
+    (line,) = [line for line in hint.splitlines() if line.startswith("vibe data query ")]
+    argv = shlex.split(line)
+    assert argv[:4] == ["vibe", "data", "query", "--sql"] and len(argv) == 5
+    sql = argv[4]
+    assert "WITH" not in sql.upper().split()[0] and "json" not in sql.lower()
+    result = run_read_only_query(sql, db_path=Path(engine.url.database), page_request=PageRequest())
+    rows = [(row["context_seq"], row["type"]) for row in result.rows]
+    assert rows == [(2, "result"), (1, "user")]  # through the bound, newest first
+    assert "the earliest question" in result.rows[-1]["substr(content_text,1,500)"]
+
+
+def test_the_earlier_record_example_is_left_out_for_an_id_it_could_not_quote():
+    from modules.agents.avibe.context import example_query
+
+    assert example_query("ses_ok-1", 4).startswith('vibe data query --sql "SELECT ')
+    assert example_query("ses'; DROP", 4) is None and example_query('ses"x', 4) is None
 
 
 async def test_the_state_is_the_environment_core_fields_each_bounded_in_bytes(engine, session):

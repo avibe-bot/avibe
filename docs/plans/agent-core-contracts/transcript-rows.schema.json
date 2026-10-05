@@ -162,7 +162,7 @@
         },
         "summary": {
           "type": "string",
-          "description": "The rendered `<context-checkpoint>` message: framing, checkpoint, `<artifacts>`, `<skills-loaded>`, and `<earlier-record>`. Model-facing. When `first_kept_seq` is not an input, the split turn's input row stays in the projected context as it was, right before this message (context.md section 5); no field names it."
+          "description": "The rendered `<context-checkpoint>` message: framing, checkpoint, `<artifacts>`, `<skills-loaded>`, and `<earlier-record>`. Model-facing. The in-flight Turn's inputs before the cut (`kept_inputs`) stay in the projected context as they were, right before this message (context.md section 5)."
         },
         "checkpoint": {
           "type": "string",
@@ -179,6 +179,14 @@
           "type": "integer",
           "minimum": 1,
           "description": "`context_seq` of the first unit kept verbatim."
+        },
+        "kept_inputs": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": "`context_seq` of each input of the in-flight Turn (its first and every accepted steer) before `first_kept_seq`, ascending: projection keeps them verbatim, in order, right before this row's message (context.md section 5). Empty when the cut did not fall inside that Turn; optional: a row without it, written before the field, keeps the latest input before `first_kept_seq` when the first kept unit is not an input, as it was written."
         },
         "summarized_to_seq": {
           "type": "integer",
@@ -312,8 +320,10 @@
         },
         "reason": {
           "enum": [
-            "clear_old_tool_result"
-          ]
+            "clear_old_tool_result",
+            "fit_tool_result"
+          ],
+          "description": "`clear_old_tool_result` replaces an old result with the cleared placeholder (context.md section 4); `fit_tool_result` shows the newest batch's result cut to fit, ending with its note (section 3). The row keeps the whole output either way."
         }
       }
     },
@@ -428,6 +438,7 @@
         "<loaded-skills>\n...\n</loaded-skills>"
       ],
       "first_kept_seq": 412,
+      "kept_inputs": [],
       "summarized_to_seq": 411,
       "previous_compaction_id": null,
       "files_read": [
