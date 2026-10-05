@@ -23,6 +23,7 @@ _KIND_KEYS: dict[str, str] = {
     # The newest unit alone cannot fit (C-9 section 8 d): starting over would not help, so the copy says what to do.
     "tool_output_too_large": "toolOutputTooLarge",
     "input_too_large": "inputTooLarge",
+    "step_too_large": "stepTooLarge",
     "rate_limit": "rateLimit",
     "overloaded": "overloaded",
     "network": "network",

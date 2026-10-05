@@ -79,11 +79,8 @@ class ContextView:
     cleared: frozenset[str]
     context_seq: int
     state: Mapping[str, Any]
-
-    @property
-    def pinned(self) -> int:
-        """How many of ``units`` are the in-flight Turn's inputs the latest checkpoint keeps (C-9 context.md §5)."""
-        return len(self.compaction.payload.get("kept_inputs", ())) if self.compaction is not None else 0
+    #: How many of ``units``, first, are inputs the latest checkpoint keeps (``kept_inputs``, C-9 context.md §5).
+    pinned: int = 0
 
     @property
     def messages(self) -> tuple[Message, ...]:
@@ -325,10 +322,11 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
                     projected = replace(projected, content=(text(edits[result.row_id]),))
                 entries_of_unit.append((result, projected))
         units.append(Unit(row.context_seq, tuple(entries_of_unit)))
+    kept: list[int] = []
     if compaction is not None:
         # The checkpoint's cut fell inside the in-flight Turn: each of its inputs, the first and every steer, stays as
         # it was, in order, before the checkpoint and the kept rows (C-9 context.md section 5).
-        kept = compaction.payload.get("kept_inputs", [])
+        kept = kept_inputs(compaction, inputs, first_is_input=bool(units) and units[0].lead.kind == "input")
         if any(seq not in inputs for seq in kept) or kept != sorted(set(kept)):
             raise ProjectionError(f"compaction row {compaction.row_id} keeps inputs it cannot place: {kept}")
         units[:0] = [Unit(seq, ((inputs[seq], inputs[seq].message),)) for seq in kept]
@@ -344,7 +342,17 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
         cleared=frozenset(row_id for row_id, reason in reasons.items() if reason == "clear_old_tool_result"),
         context_seq=rows[-1].context_seq if rows else 0,
         state=deepcopy(state),
+        pinned=len(kept),
     )
+
+
+def kept_inputs(compaction: ContextEntry, inputs: Mapping[int, ContextEntry], *, first_is_input: bool) -> list[int]:
+    """The inputs a checkpoint row keeps: its ``kept_inputs``; a row written before that field kept the latest input
+    before its ``first_kept_seq`` when its cut fell inside a turn (the first kept unit is not an input), and the same
+    rule reads it now. ``inputs``: the input rows before ``first_kept_seq``, by ``context_seq``."""
+    if "kept_inputs" in compaction.payload:
+        return list(compaction.payload["kept_inputs"])
+    return [max(inputs)] if inputs and not first_is_input else []
 
 
 def project(

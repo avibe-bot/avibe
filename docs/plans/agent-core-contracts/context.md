@@ -146,7 +146,8 @@ environment blocks included, right before the checkpoint message and the kept ro
 The checkpoint summarizes everything else in the head, and a later checkpoint inside the same Turn keeps them again.
 In a later run they are ordinary history, yet no cut falls between them: one there would make an old input's seq the
 new `first_kept_seq` and bring back what that checkpoint summarized, so cuts start at the first unit after them.
-`kept_inputs` is optional; a row without it keeps none. An earlier Turn a cut splits is summarized like any head. If the kept inputs alone cannot fit, nothing can move them
+`kept_inputs` is optional: a row written before it kept the latest input before its `first_kept_seq` when its cut
+fell inside a turn (the first kept unit is not an input), and projection reads such a row by the same rule. An earlier Turn a cut splits is summarized like any head. If the kept inputs alone cannot fit, nothing can move them
 out, and §8 (d) applies.
 
 ## 6. Checkpoint turn
@@ -301,10 +302,13 @@ once the request fits:
   before provider admission), when nothing more can move out of a request that cannot fit or that the provider
   refused, after 4 provider overflows of one request, or once the run has stopped compacting (§10), the run ends
   `context_exhausted` and the `context_exhausted` event says what fills the context. No model is called for a
-  context that cannot fit. The error's kind says the cause: when moving the conversation out cannot help (the
-  minimal request cannot fit, or nothing more can move out), it names the newest unit, `tool_output_too_large` for a
-  tool batch (one too large even with every result cut to its note, §3) or `input_too_large` for an input, and
-  starting over would not help; otherwise it is `context_exhausted`, the conversation's length.
+  context that cannot fit. The error's kind names what is too large, decided by measurement when moving the
+  conversation out cannot help: a part of the newest unit is named only when the request the stop judged (the
+  minimal request, or the request itself) would fit without it. `tool_output_too_large` when that part is the tool
+  batch's results (even cut to their notes, §3), `step_too_large` when it is the step itself (its tool-call arguments
+  or text), `input_too_large` when it is an input; otherwise `context_exhausted`, the conversation's length. A
+  request the provider refused fit the estimate, so its excess is unknown: the results are named while the cuts left
+  them above their notes, the step once they are at their notes.
 
 An attempt the provider refused, or that is retried, is never context (§10, invariant 4).
 

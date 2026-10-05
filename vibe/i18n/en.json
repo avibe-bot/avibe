@@ -1537,6 +1537,7 @@
       "contextExhausted": "This conversation has grown too long to continue reliably. Start a new session with /new.",
       "toolOutputTooLarge": "The latest tool output does not fit this model's context, even shortened. Ask for a smaller part (a narrower command, or a file range with offset and limit), or switch to a model with a larger context.",
       "inputTooLarge": "This message does not fit this model's context. Send a shorter message, or switch to a model with a larger context.",
+      "stepTooLarge": "The latest step is too large for this model's context window. Ask for the work in smaller steps, or switch to a model with a larger context.",
       "rateLimit": "The model provider is rate-limiting requests. Try again in a moment.",
       "overloaded": "The model provider is overloaded. Try again in a moment.",
       "network": "The model provider could not be reached. Check the network and the Model Hub source.",

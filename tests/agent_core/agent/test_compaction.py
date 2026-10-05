@@ -963,6 +963,26 @@ async def test_a_batch_the_provider_keeps_refusing_is_reported_only_after_it_was
     assert len(sizes) == 4 and all(later <= earlier // 2 + 3 for earlier, later in zip(sizes, sizes[1:]))
 
 
+async def test_the_stop_names_the_step_when_its_own_arguments_are_what_does_not_fit():
+    # A write whose arguments nearly fill the window and whose result is two words: the results are not the excess,
+    # the step is, and the error says so instead of blaming the tool output.
+    write = ToolCallBlock("w", "write", {"path": "big.txt", "content": tokens(13_000)})
+    model = Model([[Done(assistant(calls=[write]))]])
+    agent = make_agent(model, tools=[FakeTool("write", result=ToolResult((text("ok"),)))], selection=SMALL)
+    events = await run(agent)
+    assert events[-1].reason == "context_exhausted"
+    assert [(e.kind, e.origin) for e in events if isinstance(e, AgentError)] == [("step_too_large", "local")]
+
+
+async def test_a_refused_step_whose_results_are_already_at_their_notes_is_named_as_the_step():
+    # The provider refuses, and the batch cannot be shortened (its result is smaller than a note): what is too large
+    # is the step, not its output.
+    model = Model([call("read", "r", path="f"), [OVERFLOW]])
+    agent = make_agent(model, tools=[reader("tiny")], selection=SMALL)
+    events = await run(agent)
+    assert [e.kind for e in events if isinstance(e, AgentError)] == ["step_too_large"]
+
+
 async def test_the_stop_names_the_tool_output_when_even_its_notes_cannot_fit():
     # 300 results on an 8,000-token route: cut to their notes, they still do not fit beside the step that asked for
     # them. The newest tool output is the cause, not the conversation's length, and the error says so.

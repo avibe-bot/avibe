@@ -147,8 +147,8 @@ class UnsupportedModelRoute(ValueError):
 class _Exhausted(Exception):
     """C-9 section 8 (d): the run stops ``context_exhausted``, saying what fills the context.
 
-    ``kind`` is the error's: ``context_exhausted`` when the conversation's length is the cause, or, when moving the
-    conversation out cannot help, what the newest unit is (``tool_output_too_large`` or ``input_too_large``).
+    ``kind`` is the error's (``_cause``): the part that is too large when measurement shows it (``input_too_large``,
+    ``tool_output_too_large``, ``step_too_large``), else ``context_exhausted``, the conversation's length.
     """
 
     def __init__(self, limit: int, parts: tuple[ContextPart, ...], kind: str = "context_exhausted") -> None:
@@ -770,8 +770,9 @@ class Agent:
                         plan = budget(
                             request, route.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view)
                         )
-                        newest = half_cut(view.units, turn_inputs=self._turn_inputs, pinned=view.pinned) is None
-                        raise self._exhausted(request, view, plan, newest=newest)
+                        movable = half_cut(view.units, turn_inputs=self._turn_inputs, pinned=view.pinned) is not None
+                        kind = "context_exhausted" if movable else self._cause(view, None)
+                        raise self._exhausted(request, view, plan, kind=kind)
                     retries, started, retry_error = 0, time.monotonic(), None
                     continue
                 retry_error = terminal
@@ -1150,7 +1151,7 @@ class Agent:
         # The bound first: once the run has stopped compacting, nothing is built for a compaction either.
         if not plan.can_fit:
             if self._stopped:
-                raise self._exhausted(request, view, plan, newest=False)  # (d); the provider never sees it
+                raise self._exhausted(request, view, plan)  # (d); the provider never sees it
             _, minimal = await self._minimal(system, selected, request, view, plan, carry=False)
             if not minimal.can_fit:
                 # Not even the request the drop would leave (its row and the last unit, without the previous
@@ -1160,7 +1161,7 @@ class Agent:
                 room = minimal.input_limit - minimal.output - rest
                 if await self._fit_batch(view, (room - minimal.margin, room)):
                     return True
-                raise self._exhausted(request, view, plan, newest=True)
+                raise self._exhausted(request, view, plan, kind=self._cause(view, minimal))
         refused, ladder.refused = ladder.refused, False
         shrink = refused
         if not shrink:
@@ -1207,7 +1208,7 @@ class Agent:
         if not self._stopped:
             return False
         if refused or not plan.can_fit:
-            raise self._exhausted(request, view, plan, newest=False)
+            raise self._exhausted(request, view, plan)
         return True
 
     async def _minimal(
@@ -1353,7 +1354,8 @@ class Agent:
             if ladder.overflows and await self._fit_batch(view, (self._batch_tokens(view) // 2,), floor=True):
                 return True
             if ladder.overflows or not plan.can_fit:
-                raise self._exhausted(request, view, plan, newest=True)
+                kind = self._cause(view, None if ladder.overflows else plan)
+                raise self._exhausted(request, view, plan, kind=kind)
             return False
 
     @staticmethod
@@ -1398,9 +1400,37 @@ class Agent:
         await self._commit_context(edits)
         return True
 
-    def _exhausted(self, request: ModelRequest, view: ContextView, plan: Budget, *, newest: bool) -> _Exhausted:
-        """Section 8 (d): what fills the request, for the user's stop message; ``newest`` when moving the conversation
-        out cannot help, so the newest unit is the cause."""
+    def _cause(self, view: ContextView, measured: Optional[Budget]) -> str:
+        """What a stop names as too large when nothing more can move out (section 8 d), decided by measurement.
+
+        ``measured`` is the request the stop judged (the minimal request, or the request itself), whose estimate is
+        over its limit: a part of the newest unit is named only when the request without it fits. A request the
+        provider refused (None) fit our estimate, so its excess is unknown: the results are named while the cuts left
+        them above their notes, the step once they are at their notes.
+        """
+        last = view.units[-1] if view.units else None
+        if last is None:
+            return "context_exhausted"
+        if last.lead.kind == "input":
+            if measured is None:
+                return "context_exhausted"
+            without = measured.est - message_tokens(last.lead.message) + measured.output
+            return "input_too_large" if without <= measured.input_limit else "context_exhausted"
+        results = self._batch_tokens(view)
+        at_notes = results <= notes_tokens([entry.message for entry, _ in self._newest_batch(view)])
+        if measured is None:
+            return "step_too_large" if at_notes else "tool_output_too_large"
+        rest = measured.est - results + measured.output
+        if rest <= measured.input_limit:
+            return "tool_output_too_large"  # the results, even at their notes, are the excess
+        if rest - message_tokens(last.lead.message) <= measured.input_limit:
+            return "step_too_large"  # the step itself: its tool-call arguments or text
+        return "context_exhausted"
+
+    def _exhausted(
+        self, request: ModelRequest, view: ContextView, plan: Budget, *, kind: str = "context_exhausted"
+    ) -> _Exhausted:
+        """Section 8 (d): what fills the request, for the user's stop message, and the error's ``kind`` (``_cause``)."""
         last = view.units[-1] if view.units else None
         last_tokens = unit_tokens(last) if last is not None else 0
         parts = [
@@ -1412,9 +1442,6 @@ class Agent:
             name = "current_request" if last.lead.kind == "input" else "latest_tool_batch"
             parts.append(ContextPart(name, last_tokens))
         parts.append(ContextPart("output", plan.output + plan.margin))
-        kind = "context_exhausted"
-        if newest and last is not None:
-            kind = "input_too_large" if last.lead.kind == "input" else "tool_output_too_large"
         return _Exhausted(plan.input_limit, tuple(parts), kind)
 
     async def _checkpoint(
