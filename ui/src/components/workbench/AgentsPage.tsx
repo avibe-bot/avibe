@@ -64,6 +64,8 @@ import {
   type Backend,
 } from '../../lib/backendAccent';
 import { getBackendUiMeta, type NativeCliBackend } from '@/lib/agentBackends';
+import { modelsApi } from '../settings/models/modelsApi';
+import { agentsWithoutModel } from '../settings/models/supply';
 import { errorMessage } from '@/lib/errorMessage';
 // Tab set + its cross-visit memory live together so the remembered value can
 // never name a tab this page no longer renders (see agentsViewMemory).
@@ -303,6 +305,8 @@ export const AgentsPage: React.FC = () => {
   const [runningActiveCount, setRunningActiveCount] = useState<number | null>(null);
   const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
+  // Agents the gateway cannot run for want of a model, read again whenever the list changes.
+  const [withoutModel, setWithoutModel] = useState<ReadonlySet<string>>(() => new Set());
   const [defaultName, setDefaultName] = useState<string | null>(null);
   const [selected, setSelected] = useState<VibeAgentFull | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1113,6 +1117,21 @@ export const AgentsPage: React.FC = () => {
     void refreshOnboarding();
   }, [refreshOnboarding]);
 
+  // The Models page's per-Agent projection: an Agent shown as enabled whose next turn fails
+  // for want of a model says so here too. A role that cannot read it sees no marker.
+  useEffect(() => {
+    let active = true;
+    modelsApi.listAgents().then(
+      (supplies) => {
+        if (active) setWithoutModel(new Set(agentsWithoutModel(supplies).map((named) => named.name)));
+      },
+      () => {},
+    );
+    return () => {
+      active = false;
+    };
+  }, [agents]);
+
   // Auto-select the default agent on first load so the detail panel has
   // something to show — eliminates the empty "select an agent" state
   // that confused users on first visit.
@@ -1603,6 +1622,7 @@ export const AgentsPage: React.FC = () => {
                       agent={agent}
                       isSelected={selected?.name === agent.name}
                       isDefault={defaultName === agent.name}
+                      modelMissing={agent.enabled && withoutModel.has(agent.name)}
                       onSelect={() => selectAgent(agent.name, true)}
                     />
                   ))}
@@ -1784,10 +1804,12 @@ interface AgentRowProps {
   agent: VibeAgentBrief;
   isSelected: boolean;
   isDefault: boolean;
+  /** Enabled, but its next turn fails: the gateway has no model selected for it. */
+  modelMissing: boolean;
   onSelect: () => void;
 }
 
-const AgentRow: React.FC<AgentRowProps> = ({ agent, isSelected, isDefault, onSelect }) => {
+const AgentRow: React.FC<AgentRowProps> = ({ agent, isSelected, isDefault, modelMissing, onSelect }) => {
   const { t } = useTranslation();
   const description = [agent.model, agent.reasoning_effort, agent.description].filter(Boolean).join(' · ');
   return (
@@ -1817,6 +1839,11 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, isSelected, isDefault, onSel
         </div>
         {description && <div className="text-[11px] text-muted">{description}</div>}
       </div>
+      {modelMissing && (
+        <Badge variant="warning" className="shrink-0">
+          {t('settings.models.gateway.agentIssues.modelMissing')}
+        </Badge>
+      )}
       <Badge variant={agent.enabled ? 'success' : 'secondary'} className="font-mono uppercase">
         <span className={clsx('size-1.5 rounded-full', agent.enabled ? 'bg-mint' : 'bg-muted')} />
         {agent.enabled ? t('agents.statusEnabled') : t('agents.statusDisabled')}

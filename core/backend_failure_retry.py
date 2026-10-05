@@ -38,6 +38,8 @@ def _notice(conn: Connection, session_id: str, notice_id: str) -> dict[str, Any]
         or not metadata.get("failure_id")
         or not metadata.get("turn_id")
         or metadata.get("detached")
+        # The Turn's running commands continue as Watches: a retry would run them twice.
+        or metadata.get("watch_ids")
     ):
         raise RetryUnavailable("retry_not_available")
     return notice

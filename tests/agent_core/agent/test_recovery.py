@@ -27,12 +27,16 @@ from tests.agent_core.fakes import (
 
 
 async def _never_rendered(*_args):
-    pytest.fail("missing/gone jobs must not invoke the renderer")
+    pytest.fail("a call without a job must not invoke the renderer")
 
 
 def renderer(jobs):
     async def render(call, job_id, status, watch_id):
         output, _ = jobs.output(job_id)
+        if status.state == "gone":
+            # Only a recorded stop reason gives an ended job a result of its own (bash's ``recovered_result``).
+            reason = jobs.stop_reason(job_id)
+            return ToolResult((text(f"{output.decode()}; stopped={reason}"),), is_error=True) if reason else None
         content = (
             f"still running, now Watch {watch_id}"
             if watch_id is not None
@@ -57,6 +61,7 @@ def renderer(jobs):
         ("bash", "running"),
         ("bash", "exited"),
         ("bash", "gone"),
+        ("bash", "stopped"),
     ],
 )
 async def test_resume_settles_each_job_state_once_and_projection_never_rechecks_it(tool_name, state):
@@ -69,20 +74,18 @@ async def test_resume_settles_each_job_state_once_and_projection_never_rechecks_
     if state != "missing":
         job_ids[("session", "call")] = "job_1"
         jobs.states["job_1"] = JobStatus(
-            "gone" if state == "never-ran" else state, exit_code=7 if state == "exited" else None
+            "gone" if state in {"never-ran", "stopped"} else state, exit_code=7 if state == "exited" else None
         )
         jobs.outputs["job_1"] = b"final output"
+        if state == "stopped":
+            jobs.stop_reasons["job_1"] = "aborted"
 
     committed = await settle_open_calls(
         session_id="session",
         store=store,
         jobs=jobs,
         job_ids=job_ids,
-        render_result=(
-            renderer(jobs)
-            if state in {"running", "exited"}
-            else _never_rendered
-        ),
+        render_result=_never_rendered if state == "missing" else renderer(jobs),
     )
     assert len(committed) == 1
     assert (
@@ -95,6 +98,7 @@ async def test_resume_settles_each_job_state_once_and_projection_never_rechecks_
             "gone": INTERRUPTED,
             "running": "still running, now Watch watch_job_1",
             "exited": "final output; exit=7",
+            "stopped": "final output; stopped=aborted",
         }[state]
     )
     assert committed[0].message.is_error == (state != "running")

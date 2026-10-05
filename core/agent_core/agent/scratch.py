@@ -25,7 +25,7 @@ from typing import Any, Mapping, Optional
 
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolResult
-from core.agent_core.tools.edit import MAX_EDIT_BYTES, _edits_arg, prepare_edit_arguments
+from core.agent_core.tools.edit import MAX_EDIT_BYTES, _edits_arg, edit_summary, prepare_edit_arguments
 from core.agent_core.tools.edit_diff import EditError, ResultTooLarge, apply_edits
 from core.agent_core.tools.text import decode_file, encode_file
 
@@ -99,7 +99,7 @@ class ScratchRoot:
                 return error_result(f"Could not edit file: {path}. It is not a regular file.")
             if len(raw) > MAX_EDIT_BYTES:
                 return error_result(f"File {path} is over the edit limit. Write it again instead.")
-            new_text, _, _ = apply_edits(decode_file(raw), edits, path, max_result_chars=MAX_EDIT_BYTES)
+            new_text, _, _, counts = apply_edits(decode_file(raw), edits, path, max_result_chars=MAX_EDIT_BYTES)
             self._publish(name, encode_file(new_text), expected=identity)
         except EditError as exc:
             return error_result(str(exc))
@@ -109,7 +109,7 @@ class ScratchRoot:
             return error_result(f"Could not edit file: {path}. It changed while the edit was being applied; read it again.")
         except OSError as exc:
             return error_result(f"Could not edit file: {path}. {os.strerror(exc.errno) if exc.errno else exc}.")
-        return text_result(f"Successfully replaced {len(edits)} block(s) in {path}.")
+        return text_result(edit_summary(path, edits, counts))
 
     # --- descriptor-relative steps ------------------------------------------------------------
 

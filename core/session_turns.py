@@ -64,6 +64,7 @@ from core.services.agent_steering import (
 )
 from storage import messages_service
 from storage import message_deliveries as delivery_store
+from storage.agent_transcript import recovered_watch_ids
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import get_cached_sqlite_engine
 from storage.background import (
@@ -212,6 +213,15 @@ SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 _NON_RESTORABLE_RUNTIME_BACKENDS = frozenset({"claude", "codex", "avibe"})
 _MAX_AUTOMATIC_UNKNOWN_START_REPLAYS = 1
 _MAX_PREWRITE_START_ATTEMPTS = 3
+# A lost Turn whose running commands recovery handed to Watches (recovery.md T2) gets
+# this copy, for one Watch and for several, instead of asking for a resend that would
+# run them twice; its notice then offers no Retry either (``watch_ids``).
+_HANDED_OVER_NOTICE_KEYS = {
+    "turn.interrupted.serviceRestart": (
+        "turn.interrupted.serviceRestartWatch",
+        "turn.interrupted.serviceRestartWatches",
+    ),
+}
 _UNKNOWN_START_REPLAY_INSTRUCTION = (
     "[Avibe recovery: this request may have been delivered before restart. "
     "Before any irreversible action, check whether the work is already complete.]\n\n"
@@ -6312,6 +6322,19 @@ class SessionTurnManager:
             )
             return ""
 
+    def _recovered_watch_ids(self, session_id: str, turn_id: str) -> list[str]:
+        """The Watches startup recovery handed the lost Turn's running commands to (T2 runs before T4)."""
+
+        if not turn_id or not self._durable_schema_available():
+            return []
+        try:
+            with self._sqlite_engine().connect() as conn:
+                return recovered_watch_ids(conn, session_id, turn_id)
+        except Exception:
+            # The notice still goes out, with the copy for a Turn that handed nothing over.
+            logger.warning("hand-over lookup failed for turn=%s", turn_id, exc_info=True)
+            return []
+
     def _controller_language(self) -> str:
         language_getter = getattr(self.controller, "_get_lang", None)
         if callable(language_getter):
@@ -6521,18 +6544,30 @@ class SessionTurnManager:
         by anything else.
         """
 
+        language = self._controller_language()
+        text = i18n_t(message_key, language)
+        metadata: dict[str, Any] = {"turn_id": turn_id or None, "replayed": True}
+        watch_ids = self._recovered_watch_ids(session_id, turn_id)
+        handed_over = _HANDED_OVER_NOTICE_KEYS.get(message_key)
+        if watch_ids and handed_over is not None:
+            one, many = handed_over
+            if len(watch_ids) == 1:
+                text = i18n_t(one, language, watch=watch_ids[0])
+            else:
+                text = i18n_t(many, language, watches=", ".join(watch_ids))
+            metadata["watch_ids"] = watch_ids
         try:
             delivered = await self.controller.emit_agent_message(
                 context,
                 "notify",
-                i18n_t(message_key, self._controller_language()),
+                text,
                 # Recovery already settled this Turn. Carry its exact identity
                 # through delayed sends without granting another settlement or
                 # guessing the target from the Session's current Turn.
                 output=backend_failure_notification_output(
                     context,
                     backend,
-                    output=MessageOutput(metadata={"turn_id": turn_id or None, "replayed": True}),
+                    output=MessageOutput(metadata=metadata),
                     # A legacy Turn has no durable id; its context token names it.
                     failure_id=f"turn:{turn_id}" if turn_id else None,
                     failure_id_authoritative=bool(turn_id),

@@ -215,9 +215,12 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
             <div className="flex items-start gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-2.5 text-[12px] leading-relaxed text-foreground">
               <Info className="model-hub-ink-gold mt-0.5 size-3.5 shrink-0" />
               <span>
-                {t(`settings.models.supply.${hubOutcome}`)}
-                {(hubOutcome === 'noSources' || hubOutcome === 'interrupted') &&
-                  ` ${t('settings.models.supplyMode.fixHint')}`}
+                {hubOutcome === 'noSources' || hubOutcome === 'interrupted'
+                  ? t('settings.models.supplyMode.warningWithFix', {
+                    warning: t(`settings.models.supply.${hubOutcome}`),
+                    fixHint: t('settings.models.supplyMode.fixHint'),
+                  })
+                  : t(`settings.models.supply.${hubOutcome}`)}
               </span>
             </div>
           )}

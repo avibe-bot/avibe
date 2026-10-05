@@ -80,6 +80,10 @@
             "watch_id": {
               "type": "string"
             },
+            "recovered": {
+              "type": "boolean",
+              "description": "Committed by T2 settlement (recovery.md) after the call's run ended, not by the tool."
+            },
             "exit_code": {
               "type": [
                 "integer",

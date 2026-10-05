@@ -20,8 +20,12 @@ from tests.test_ui_session_stream import _accepted_dispatch, _make_session, isol
 from tests.ui_server_test_helpers import csrf_headers
 
 
-def _restart_failure_notice(tmp_path, *, backend, delivery="ready"):
-    """Recover an accepted Turn through the real notice dispatcher and storage."""
+def _restart_failure_notice(tmp_path, *, backend, delivery="ready", before_restart=None):
+    """Recover an accepted Turn through the real notice dispatcher and storage.
+
+    ``before_restart(engine, session_id, turn_id)`` writes what the previous process
+    and the startup steps before Turn recovery left behind.
+    """
     from core.message_dispatcher import ConsolidatedMessageDispatcher
     from core.session_turns import SessionTurnManager
     from tests.scenario_harness.message_delivery import MessageDeliveryController
@@ -56,6 +60,8 @@ def _restart_failure_notice(tmp_path, *, backend, delivery="ready"):
         context=context(session_id),
     ))
     starts.clear()
+    if before_restart is not None:
+        before_restart(engine, session_id, str(original.turn_id))
     manager._active_identity = lambda *_args: None
     manager._transport_can_deliver = lambda _platform: delivery != "unready"
     asyncio.run(manager.recover_durable_delivery_state(session_id, service_restart=True))
@@ -141,6 +147,55 @@ def test_restart_notice_retries_through_web_and_controller(isolated_state, tmp_p
         reloaded = messages_service.get_message(conn, notice["id"])
     assert reloaded["text"] == notice["text"]
     assert reloaded["content"]["failure_retry"]["state"] == "accepted"
+
+
+def _hand_over_the_open_command(engine, session_id, turn_id):
+    """The restart left the Turn's bash command running; startup recovery made it a Watch (T2)."""
+    from core.agent_core.agent.recovery import settle_open_calls
+    from core.agent_core.messages import ToolCallBlock, UserMessage, text
+    from core.agent_core.tools.base import JobStatus, ToolResult
+    from storage.agent_transcript import SQLiteTranscriptStore
+    from tests.agent_core.fakes import FakeJobHost, assistant
+
+    with engine.connect() as conn:
+        input_id = message_deliveries.delivery_for_turn(conn, turn_id)["message_id"]
+    store, jobs = SQLiteTranscriptStore(engine), FakeJobHost()
+    jobs.states["job_1"] = JobStatus("running")
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "sleep 60; echo done >> s6.txt"})
+
+    async def handed_over(_call, _job_id, _status, watch_id):
+        return ToolResult((text(f"Command is still running and is now Watch {watch_id}."),))
+
+    async def previous_process_then_t2():
+        await store.consume_input(session_id, input_id, UserMessage((text("run it"),)))
+        await store.append_response(session_id, assistant("", calls=(call,)), final=False)
+        await settle_open_calls(
+            session_id=session_id, store=store, jobs=jobs,
+            job_ids={(session_id, "call_bash"): "job_1"}, render_result=handed_over,
+        )
+
+    asyncio.run(previous_process_then_t2())
+    assert jobs.watches == {"job_1": "watch_job_1"}
+
+
+def test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry(isolated_state, tmp_path):
+    """MESSAGE-DELIVERY-322: resending a command that still runs as a Watch would run its effects twice."""
+    from vibe.ui_server import app
+
+    session_id, notice = _restart_failure_notice(
+        tmp_path, backend="avibe", before_restart=_hand_over_the_open_command
+    )
+
+    assert "watch_job_1" in notice["text"] and "重新发送" not in notice["text"]
+    assert notice["metadata"]["watch_ids"] == ["watch_job_1"]
+    client = app.test_client()
+    with patch("vibe.internal_client.dispatch_async", AsyncMock()) as dispatch:
+        response = client.post(
+            f"/api/sessions/{session_id}/messages", headers=csrf_headers(client),
+            json={"retry_for": notice["id"]},
+        )
+    assert response.status_code == 409
+    dispatch.assert_not_awaited()
 
 
 @pytest.mark.parametrize("change", ["newer", "busy", "unlinked"])

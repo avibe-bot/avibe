@@ -225,7 +225,7 @@ async def test_abort_kills_the_command(tmp_path, make_ctx):
 
     assert seen == ["started\n"]
     assert result.is_error
-    assert result_text(result) == "started\n\n\nCommand aborted"
+    assert result_text(result) == "started\n\n\nStopped by the user; the command was terminated."
     assert _process_gone(int((tmp_path / "sh.pid").read_text()))
 
 
@@ -233,7 +233,7 @@ async def test_abort_kills_the_command(tmp_path, make_ctx):
     ("arguments", "abort", "expected"),
     [
         ({"command": "echo started; sleep 30", "timeout": 1.5}, False, "started\n\n\nCommand timed out after 1.5 seconds"),
-        ({"command": "echo started; sleep 30"}, True, "started\n\n\nCommand aborted"),
+        ({"command": "echo started; sleep 30"}, True, "started\n\n\nStopped by the user; the command was terminated."),
     ],
     ids=["timeout", "abort"],
 )
@@ -317,7 +317,7 @@ async def test_a_flood_of_output_never_stalls_the_event_loop(tmp_path, make_ctx,
     finally:
         ticking.cancel()
 
-    assert result_text(result).endswith("Command aborted")
+    assert result_text(result).endswith("Stopped by the user; the command was terminated.")
     assert time.monotonic() - started < 6.0
     # Following the output costs the loop about 0.1 s at worst (it took 3 to 5 s on the loop before);
     # the host's own small reads may add a slow disk's latency on top (ledger A56).

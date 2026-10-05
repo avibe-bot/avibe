@@ -635,6 +635,30 @@ def source_tool_result(
     return _event_entry(row["session_id"], row) if row is not None else None
 
 
+def recovered_watch_ids(conn: Connection, session_id: str, turn_id: str) -> list[str]:
+    """The Watches recovery handed a Turn's open calls to (``recovery.md`` T2), in context order.
+
+    Only results T2 committed count: a call the Turn handed over itself (``watch: true``,
+    the foreground window) was already reported to the model, so it is not work the
+    Turn lost.
+    """
+    from core.agent_core.agent.recovery import RECOVERED
+
+    rows = conn.execute(
+        select(agent_events.c.content_json)
+        .where(
+            agent_events.c.session_id == session_id,
+            agent_events.c.turn_id == turn_id,
+            agent_events.c.event_type == _EVENT_TYPE_BY_KIND["tool_result"],
+            agent_events.c.visibility == CONTEXT_VISIBILITY,
+            func.json_extract(agent_events.c.content_json, f"$.details.{RECOVERED}") == 1,
+            func.json_extract(agent_events.c.content_json, "$.details.watch_id").is_not(None),
+        )
+        .order_by(agent_events.c.context_seq)
+    ).scalars()
+    return [str(json.loads(raw)["details"]["watch_id"]) for raw in rows]
+
+
 def fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:
     """``(source_session_id, anchor_seq)`` when the Session inherits a context."""
     raw = conn.execute(

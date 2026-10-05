@@ -6,6 +6,8 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
+import { modelsApi } from './models/modelsApi';
+import type { AgentSupply } from './models/types';
 import { SettingsBackendPage } from './SettingsBackendPage';
 import { SettingsBackendsPage } from './SettingsBackendsPage';
 
@@ -39,7 +41,10 @@ beforeEach(async () => {
   mocks.api.mutateConfig.mockResolvedValue({ agents: { avibe: { enabled: true } } });
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe('in-process backend settings', () => {
   // Native-only fixtures never reached the missing-CLI default or showed which
@@ -86,5 +91,40 @@ describe('in-process backend settings', () => {
     expect(mocks.api.getBackendRuntime).not.toHaveBeenCalled();
     expect(mocks.api.installAgent).not.toHaveBeenCalled();
     expect(mocks.api.restartBackend).not.toHaveBeenCalled();
+  });
+});
+
+describe('backend attention', () => {
+  it('flags the backend whose Agent has no model once enabling it creates that Agent', async () => {
+    const withoutModel = [
+      {
+        backend: 'avibe', cli_present: false, mode: 'hub', menu_kind: 'fixed',
+        named_agents: [{ name: 'avibe', effective_model_id: null, supply_status: null }],
+      },
+      {
+        backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed',
+        named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-5-5', supply_status: 'ok' }],
+      },
+    ] as AgentSupply[];
+    // Disabled, the backend has no named Agent yet; enabling it creates the built-in one.
+    const listAgents = vi.spyOn(modelsApi, 'listAgents')
+      .mockResolvedValueOnce(withoutModel.slice(1))
+      .mockResolvedValue(withoutModel);
+    render(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter initialEntries={['/settings/backends']}>
+          <SettingsBackendsPage />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+    const row = async (name: string) => (await screen.findByText(name)).closest('.rounded-xl') as HTMLElement;
+    const avibe = await row('Avibe Agent');
+    await waitFor(() => expect(listAgents).toHaveBeenCalledTimes(1));
+    expect(within(avibe).queryByText('No model selected')).toBeNull();
+
+    fireEvent.click(within(avibe).getByRole('switch'));
+
+    expect(await within(avibe).findByText('No model selected')).toBeTruthy();
+    expect(within(await row('Claude Code')).queryByText('No model selected')).toBeNull();
   });
 });

@@ -80,6 +80,22 @@ describe('BackendSupplyModeCard', () => {
   });
 
   it.each([
+    ['en', 'On the gateway · no source enabled yet, the next turn will fail. Add or enable a source on the Models page to bring it back.'],
+    ['zh', '已接入模型网关 · 还没有启用任何供应商，下一个回合会失败。去「模型」页添加或启用供应商即可恢复。'],
+  ])('punctuates the warning and its fix as one %s sentence pair', async (language, banner) => {
+    await i18n.changeLanguage(language);
+    vi.mocked(modelsApi.listAgents).mockResolvedValue([
+      { backend: 'avibe', cli_present: false, mode: 'hub', menu_kind: 'fixed', sources: { order: [] } },
+    ]);
+    render(
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}><BackendSupplyModeCard backend="avibe" /></I18nextProvider>
+      </MemoryRouter>,
+    );
+    expect((await screen.findByText(banner)).textContent).toBe(banner);
+  });
+
+  it.each([
     ['switching to the gateway', /Gateway mode/, true],
     ['importing from the Direct strip', null, false],
   ] as const)('declining the migration offered while %s', async (_, radio, switches) => {

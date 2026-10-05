@@ -127,6 +127,17 @@ def _edits_arg(arguments: Mapping[str, Any]) -> list[Edit]:
     return parsed
 
 
+def edit_summary(path: str, edits: list[Edit], counts: tuple[int, ...]) -> str:
+    """Pi's result line, or, when an item used ``replaceAll`` (Avibe), the occurrences each item replaced."""
+    if not any(edit.replace_all for edit in edits):
+        return f"Successfully replaced {len(edits)} block(s) in {path}."
+    total = sum(counts)
+    summary = f"Successfully replaced {total} occurrence{'' if total == 1 else 's'} in {path}"
+    if len(counts) > 1:
+        summary += " (" + ", ".join(f"edits[{index}]: {count}" for index, count in enumerate(counts)) + ")"
+    return summary + "."
+
+
 class _TooLarge(Exception):
     def __init__(self, size: int) -> None:
         super().__init__(size)
@@ -144,8 +155,10 @@ def _line_count(text: str) -> int:
     return text.count("\n") + text.count("\r") - text.count("\r\n") + 1
 
 
-def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[int, bytes, str, str, FileIdentity]:
-    """Read the file and compute its new bytes: ``(size, data, view_before, view_after, identity)``.
+def _plan_edits(
+    absolute: str, edits: list[Edit], path: str
+) -> tuple[int, bytes, str, str, FileIdentity, tuple[int, ...]]:
+    """Read the file and compute its new bytes: ``(size, data, view_before, view_after, identity, counts)``.
 
     One descriptor gives the size and the contents, read up to the limit, so a file that grew after an
     earlier check by path cannot get past it. ``surrogateescape`` carries bytes that are not UTF-8
@@ -168,8 +181,8 @@ def _plan_edits(absolute: str, edits: list[Edit], path: str) -> tuple[int, bytes
     lines = _line_count(text)
     if lines > MAX_EDIT_LINES:
         raise _TooManyLines(lines)
-    new_text, before, after = apply_edits(text, edits, path, max_result_chars=MAX_EDIT_BYTES)
-    return len(raw), encode_file(new_text), before, after, FileIdentity.of(real, st)
+    new_text, before, after, counts = apply_edits(text, edits, path, max_result_chars=MAX_EDIT_BYTES)
+    return len(raw), encode_file(new_text), before, after, FileIdentity.of(real, st), counts
 
 
 class EditTool:
@@ -204,7 +217,9 @@ class EditTool:
             if not os.access(absolute, os.R_OK | os.W_OK):
                 return error_result(f"Could not edit file: {path}. Error code: EACCES.")
             try:
-                size, data, base, new_content, identity = await to_thread_joined(_plan_edits, absolute, edits, path)
+                size, data, base, new_content, identity, counts = await to_thread_joined(
+                    _plan_edits, absolute, edits, path
+                )
                 if len(data) > MAX_EDIT_BYTES:
                     raise ResultTooLarge()
                 if ctx.cancel.cancelled:
@@ -243,7 +258,7 @@ class EditTool:
             except OSError as exc:
                 return error_result(f"Could not edit file: {path}. Error code: {errno_name(exc)}.")
 
-        result = f"Successfully replaced {len(edits)} block(s) in {path}."
+        result = edit_summary(path, edits, counts)
         if max(size, len(data)) > MAX_DIFF_BYTES:
             # The diff is for display only, and difflib is superlinear on large inputs.
             return text_result(result, details={"diff_skipped": True})
