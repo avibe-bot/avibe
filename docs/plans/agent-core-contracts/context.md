@@ -247,6 +247,7 @@ is written, so projection stays a pure function of the rows:
   <earlier-record>
   <the adapter's hint: where this Session's earlier conversation is stored, through summarized_to_seq>
   </earlier-record>
+  The user message(s) placed just before this record are the current request and are still in progress; follow them exactly as written. Where this record disagrees with them, they win.
   </context-checkpoint>
   ```
 
@@ -268,7 +269,7 @@ is written, so projection stays a pure function of the rows:
   (`display`): escaped (`escape`: a backslash doubled, then control characters and `<`, `>` as `\uXXXX`, or
   `\UXXXXXXXX` past the BMP), then cut in the middle to 160 UTF-8 bytes on a character boundary (its head and its file
   name stay), at most about 40 tokens whatever the script, so a filename can neither add a line nor close a tag.
-  Escaping is injective, so two paths look alike only when a cut hides where they differ. `<earlier-record>` is the adapter's short hint, left out when it supplies none.
+  Escaping is injective, so two paths look alike only when a cut hides where they differ. `<earlier-record>` is the adapter's short hint, left out when it supplies none. The last line is harness framing, written only when the row keeps the in-flight Turn's inputs (`kept_inputs`, §5): a mid-turn checkpoint may misstate the Turn (as finished, or as more than was asked), and the verbatim inputs placed before it must win; the owner-approved request (§11) is unchanged.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment's core
   fields (C-7 §8: cwd, os, shell, date, timezone; no Watches; each field displayed as every input's block displays it,
   the cwd escaped and never cut, every other field cut to 160 UTF-8 bytes (`display`), so the block is the cwd, which

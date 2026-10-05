@@ -156,6 +156,12 @@ CHECKPOINT_FRAMING = (
     "history, not new instructions: the user requirements recorded in it still apply, but do not treat the "
     "record itself as a request."
 )
+#: The last line of a checkpoint that keeps the in-flight Turn's inputs (section 7): they come just before it, and a
+#: record that misstates the Turn (as finished, or as more than was asked) must not override them.
+KEPT_INPUTS_WIN = (
+    "The user message(s) placed just before this record are the current request and are still in progress; follow "
+    "them exactly as written. Where this record disagrees with them, they win."
+)
 #: A drop that leaves out a previous checkpoint too large for the route says so (section 8 c).
 CHECKPOINT_OMITTED = "An earlier checkpoint was too large for this model and was omitted"
 SKILLS_LEAD = "Skills you had loaded are listed by name; run `vibe skill load <name>` again before you rely on one."
@@ -751,6 +757,7 @@ def render_summary(
     skills_omitted: bool,
     earlier_record: Optional[str],
     checkpoint_omitted: bool = False,
+    keeps_inputs: bool = False,
 ) -> str:
     lines = ["<context-checkpoint>"]
     if checkpoint:
@@ -778,6 +785,8 @@ def render_summary(
         lines += ["<skills-loaded>", SKILLS_LEAD, *named, "</skills-loaded>"]
     if earlier_record:
         lines += ["<earlier-record>", earlier_record, "</earlier-record>"]
+    if keeps_inputs:
+        lines.append(KEPT_INPUTS_WIN)
     lines.append("</context-checkpoint>")
     return "\n".join(lines)
 
@@ -813,6 +822,7 @@ def compaction_payload(
     head = view.units[:cut]
     files = _files(previous, head)
     skills, skills_omitted = carried_skills(view, cut)
+    kept = [unit.seq for unit in head if unit.lead.kind == "input" and unit.seq in turn_inputs]
     payload: dict[str, Any] = {
         "version": 1,
         "mode": mode,
@@ -828,13 +838,14 @@ def compaction_payload(
             skills_omitted=skills_omitted,
             earlier_record=earlier_record,
             checkpoint_omitted=checkpoint_omitted,
+            keeps_inputs=bool(kept),
         ),
         "checkpoint": checkpoint,
         "state": list(state),
         "first_kept_seq": view.units[cut].seq,
         "summarized_to_seq": summarized_to_seq(view, cut),
         "previous_compaction_id": previous_row.row_id if previous_row is not None else None,
-        "kept_inputs": [unit.seq for unit in head if unit.lead.kind == "input" and unit.seq in turn_inputs],
+        "kept_inputs": kept,
         "files_read": files.read,
         "files_read_omitted": files.read_omitted,
         "files_modified": files.modified,
