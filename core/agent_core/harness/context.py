@@ -40,6 +40,7 @@ from core.agent_core.messages import (
     usage_to_dict,
 )
 from core.agent_core.tools.base import ToolSpec
+from core.reply_enhancer import strip_silent_blocks
 
 # --- constants (context.md) -----------------------------------------------------
 
@@ -568,24 +569,25 @@ def checkpoint_text(message: AssistantMessage) -> str:
     )
 
 
-#: A ``<silent>`` block, closed or running to the end: a note the model keeps from the user, never a checkpoint.
-_SILENT = re.compile(r"<silent>.*?(?:</silent>|\Z)", re.S)
 #: The approved template's top-level section markers (section 11), whatever language the headings are in.
 _SECTION = re.compile(r"^#[ \t]*([123])\.", re.M)
 
 
 def checkpoint_problem(reply: str) -> Optional[str]:
-    """Why a checkpoint turn's reply is not a checkpoint, or None when it is (section 6): outside any ``<silent>``
-    block, the template's three top-level sections (``# 1.``, ``# 2.``, ``# 3.``) appear in order, each with content
-    under its heading (a line that is not itself a heading). The one check every checkpoint path applies."""
-    visible = _SILENT.sub("", reply)
-    starts: list[int] = []
+    """Why a checkpoint turn's reply is not a checkpoint, or None when it is (section 6), judged on what the user
+    would see of it: the product's one silent-block grammar (``strip_silent_blocks``, which delivery uses) removes its
+    ``<silent>`` notes first. Then the template's three top-level markers (``# 1.``, ``# 2.``, ``# 3.``) appear
+    exactly once each, in order, each section with content under its heading (a line that is not itself a heading).
+    The one check every checkpoint path applies."""
+    visible = strip_silent_blocks(reply)
+    markers = list(_SECTION.finditer(visible))
+    numbers = [marker.group(1) for marker in markers]
     for number in "123":
-        at = next((m for m in _SECTION.finditer(visible, starts[-1] if starts else 0) if m.group(1) == number), None)
-        if at is None:
-            anywhere = any(m.group(1) == number for m in _SECTION.finditer(visible))
-            return f"section {number} is out of order" if anywhere else f"section {number} is missing"
-        starts.append(at.start())
+        if number not in numbers:
+            return f"section {number} is missing"
+    if numbers != ["1", "2", "3"]:
+        return "a section marker is repeated or out of order"
+    starts = [marker.start() for marker in markers]
     for number, (start, end) in enumerate(zip(starts, [*starts[1:], len(visible)]), 1):
         body = visible[start:end].splitlines()[1:]  # the heading line itself is not content
         if not any(line.strip() and not line.lstrip().startswith("#") for line in body):

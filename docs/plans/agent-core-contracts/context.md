@@ -201,11 +201,12 @@ budget (invariant 2):
   matching (`edit_diff`), BOM, and line-ending handling. The C-7 tools themselves are unchanged.
 - The checkpoint is the text of a final response that stops with `stop` and calls no tool; only a `tool_use` stop
   with calls continues the turn. That text is a checkpoint only if one validator, the same for every checkpoint
-  turn (normal and rolling), accepts it: outside any `<silent>` block (closed, or running to the end), the
-  template's three top-level section markers (`# 1.`, `# 2.`, `# 3.` at the start of a line, whatever language the
-  headings are in) appear in order, each section with content under its heading (a line that is not itself a
-  heading). A reply wrapped in, or made only of, a `<silent>` note, a section missing, out of order, or empty is no
-  checkpoint. Anything else (a response refused at admission, a length stop, a `tool_use` stop without calls, calls
+  turn (normal and rolling), accepts it, judged on what the user would see of it: the product's one silent-block
+  grammar (`core/reply_enhancer.strip_silent_blocks`, which delivery uses) removes its `<silent>` notes first. Then
+  the template's three top-level section markers (`# 1.`, `# 2.`, `# 3.` at the start of a line, whatever language
+  the headings are in) appear exactly once each, in order, each section with content under its heading (a line that
+  is not itself a heading). A reply wrapped in, or made only of, a `<silent>` note, or with a section missing,
+  repeated, out of order, or empty, is no checkpoint. Anything else (a response refused at admission, a length stop, a `tool_use` stop without calls, calls
   under any other stop, an error, no text, or a reply the validator rejects) is a failure: it counts as unproductive
   (§10), nothing enters the context, the old context is kept, and the ladder continues; the reply's text is only in
   the audit row. So is a checkpoint whose row the host cannot complete (§10, invariant 4).
