@@ -83,7 +83,7 @@ class ContextView:
     @property
     def pinned(self) -> int:
         """How many of ``units`` are the in-flight Turn's inputs the latest checkpoint keeps (C-9 context.md §5)."""
-        return len(self.compaction.payload["kept_inputs"]) if self.compaction is not None else 0
+        return len(self.compaction.payload.get("kept_inputs", ())) if self.compaction is not None else 0
 
     @property
     def messages(self) -> tuple[Message, ...]:
@@ -212,7 +212,6 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
             "checkpoint": _string,
             "state": _list(_string),
             "first_kept_seq": lambda value: _integer(value) and value > 0,
-            "kept_inputs": _list(lambda value: _integer(value) and value > 0),
             "summarized_to_seq": _count,
             "files_read": _list(_string),
             "files_read_omitted": _boolean,
@@ -226,6 +225,8 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
         },
         {
             "previous_compaction_id": _nullable(_string),
+            # Optional: a row without it keeps no inputs, as rows written before the field existed behave.
+            "kept_inputs": _list(lambda value: _integer(value) and value > 0),
             "summarizer": _nullable(
                 _object({"origin": _reads(origin_from_dict), "prompt_version": _string, "rounds": _count})
             ),
@@ -327,7 +328,7 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
     if compaction is not None:
         # The checkpoint's cut fell inside the in-flight Turn: each of its inputs, the first and every steer, stays as
         # it was, in order, before the checkpoint and the kept rows (C-9 context.md section 5).
-        kept = compaction.payload["kept_inputs"]
+        kept = compaction.payload.get("kept_inputs", [])
         if any(seq not in inputs for seq in kept) or kept != sorted(set(kept)):
             raise ProjectionError(f"compaction row {compaction.row_id} keeps inputs it cannot place: {kept}")
         units[:0] = [Unit(seq, ((inputs[seq], inputs[seq].message),)) for seq in kept]

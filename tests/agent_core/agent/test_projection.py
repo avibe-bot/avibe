@@ -187,6 +187,12 @@ def test_a_complete_checkpoint_row_loads():
     assert [block.text for block in projected.messages[0].content] == ["SUMMARY", "STATE"]
 
 
+def test_a_checkpoint_row_written_before_kept_inputs_existed_keeps_none():
+    payload = {key: value for key, value in _checkpoint_payload(1).items() if key != "kept_inputs"}
+    rows = [ContextEntry("session", 1, "input", "in-1", user("start")), ContextEntry("session", 2, "compaction", "c", payload=payload)]
+    assert project(rows).messages[0].content[0].text == "SUMMARY"
+
+
 def test_the_kept_inputs_of_a_turn_stay_whole_in_order_before_the_checkpoint():
     # The in-flight Turn's input and a steer it accepted, both before the cut: each stays as it was, in order.
     call = ToolCallBlock("r1", "read", {"path": "a.py"})

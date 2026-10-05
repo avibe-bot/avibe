@@ -338,12 +338,13 @@ def _estimate(request: ModelRequest, transcript: Sequence[Message], anchor: Opti
 
 
 def fit_result(
-    content: Sequence[UserContent], limit: int, *, note: str = CHECKPOINT_TRUNCATED
+    content: Sequence[UserContent], limit: int, *, note: str = CHECKPOINT_TRUNCATED, cut: bool = False
 ) -> tuple[UserContent, ...]:
     """A tool result cut to ``limit`` tokens, head kept, ending with ``note`` to say so: a checkpoint turn's (section
-    6), and through ``fit_batch`` a conversation's (section 3)."""
+    6), and through ``fit_batch`` a conversation's (section 3). ``cut``: the caller already dropped part of it (an
+    image a text replacement cannot carry), so it says so even when what is left fits."""
     total = message_tokens(ToolResultMessage("fit", "fit", tuple(content)))
-    if total <= limit:
+    if total <= limit and not cut:
         return tuple(content)
     note = note.format(shown=max(0, limit), total=total)
     room = max(0, limit - text_tokens(note) - 1) * 4
@@ -471,9 +472,10 @@ def fit_batch(results: Sequence[ToolResultMessage], room: int) -> Optional[list[
         if size <= low:
             cut.append(None)
             continue
-        # The replacement is one text: join the result's blocks first, so the cut measures what the model reads.
+        # The replacement is one text: join the result's blocks first, so the cut measures what the model reads, and
+        # it always says it was cut, an image dropped included.
         body = "\n".join(block.text or "" for block in result.content if isinstance(block, TextBlock))
-        kept = fit_result((text(body),), low, note=TOOL_TRUNCATED)
+        kept = fit_result((text(body),), low, note=TOOL_TRUNCATED, cut=True)
         cut.append("\n".join(block.text or "" for block in kept if isinstance(block, TextBlock)))
     return cut
 
@@ -496,16 +498,21 @@ def _turn(units: Sequence[Unit], turn_inputs: Collection[int]) -> tuple[list[int
     return counts, sizes
 
 
-def _moves(counts: Sequence[int], cut: int) -> bool:
-    """Whether a cut before ``units[cut]`` moves out more than the Turn's inputs it keeps."""
-    return cut > counts[cut]
+def _moves(counts: Sequence[int], cut: int, pinned: int) -> bool:
+    """Whether a cut before ``units[cut]`` moves out more than the Turn's inputs it keeps, and falls after the inputs
+    the latest checkpoint kept (``pinned`` of them, first in ``units``): one between them would bring back what that
+    checkpoint summarized."""
+    return cut >= pinned and cut > counts[cut]
 
 
-def normal_cut(units: Sequence[Unit], keep: int, *, turn_inputs: Collection[int] = ()) -> Optional[int]:
+def normal_cut(
+    units: Sequence[Unit], keep: int, *, turn_inputs: Collection[int] = (), pinned: int = 0
+) -> Optional[int]:
     """Index of the first kept unit: the longest tail of whole units within ``keep``, at least the last, with the
-    in-flight Turn's inputs a cut keeps counted once at their own size (section 5).
+    in-flight Turn's inputs a cut keeps counted once at their own size (section 5), never inside the ``pinned``
+    inputs the latest checkpoint kept.
 
-    None when nothing but those inputs would move out.
+    None when nothing but the Turn's inputs would move out.
     """
     if not units:
         return None
@@ -513,14 +520,14 @@ def normal_cut(units: Sequence[Unit], keep: int, *, turn_inputs: Collection[int]
     tails = list(accumulate(reversed(sizes)))[::-1]  # tails[cut]: the tokens of units[cut:]
     counts, kept = _turn(units, turn_inputs)
     cut = len(units) - 1
-    while cut > 0 and tails[cut - 1] + kept[cut - 1] <= keep:
+    while cut > max(0, pinned) and tails[cut - 1] + kept[cut - 1] <= keep:
         cut -= 1
-    return cut if _moves(counts, cut) else None
+    return cut if _moves(counts, cut, pinned) else None
 
 
-def half_cut(units: Sequence[Unit], *, turn_inputs: Collection[int] = ()) -> Optional[int]:
-    """The cut nearest to half the tokens, never past the last unit; None when nothing but the Turn's kept inputs
-    could move out."""
+def half_cut(units: Sequence[Unit], *, turn_inputs: Collection[int] = (), pinned: int = 0) -> Optional[int]:
+    """The cut nearest to half the tokens, never past the last unit nor inside the ``pinned`` kept inputs; None when
+    nothing but the Turn's kept inputs could move out."""
     sizes = [unit_tokens(unit) for unit in units]
     counts, _ = _turn(units, turn_inputs)
     half = sum(sizes) / 2
@@ -529,19 +536,19 @@ def half_cut(units: Sequence[Unit], *, turn_inputs: Collection[int] = ()) -> Opt
     before = 0
     for cut in range(1, len(units)):
         before += sizes[cut - 1]
-        if _moves(counts, cut) and (best is None or abs(before - half) < best_distance):
+        if _moves(counts, cut, pinned) and (best is None or abs(before - half) < best_distance):
             best, best_distance = cut, abs(before - half)
     return best
 
 
 def rolling_cut(
-    units: Sequence[Unit], fits: Callable[[int], bool], *, turn_inputs: Collection[int] = ()
+    units: Sequence[Unit], fits: Callable[[int], bool], *, turn_inputs: Collection[int] = (), pinned: int = 0
 ) -> Optional[int]:
     """The largest cut at or before ``half_cut`` whose forked request over the head fits."""
     counts, _ = _turn(units, turn_inputs)
-    cut = half_cut(units, turn_inputs=turn_inputs)
+    cut = half_cut(units, turn_inputs=turn_inputs, pinned=pinned)
     while cut is not None and cut > 0:
-        if _moves(counts, cut) and fits(cut):
+        if _moves(counts, cut, pinned) and fits(cut):
             return cut
         cut -= 1
     return None
@@ -773,6 +780,8 @@ def compaction_payload(
     """
     previous_row = view.compaction
     previous = previous_row.payload if previous_row is not None else {}
+    if cut < view.pinned:
+        raise ValueError(f"a cut at {cut} falls inside the {view.pinned} inputs the latest checkpoint kept")
     head = view.units[:cut]
     files = _files(previous, head)
     skills, skills_omitted = carried_skills(view, cut)

@@ -770,7 +770,7 @@ class Agent:
                         plan = budget(
                             request, route.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view)
                         )
-                        newest = half_cut(view.units, turn_inputs=self._turn_inputs) is None
+                        newest = half_cut(view.units, turn_inputs=self._turn_inputs, pinned=view.pinned) is None
                         raise self._exhausted(request, view, plan, newest=newest)
                     retries, started, retry_error = 0, time.monotonic(), None
                     continue
@@ -1172,7 +1172,7 @@ class Agent:
                     await self._commit_context([("context_edit", clear_edit(target)) for target in targets])
                     return True
             if plan.est >= plan.threshold and not ladder.compacted and not self._stopped:
-                cut = normal_cut(view.units, plan.keep, turn_inputs=self._turn_inputs)
+                cut = normal_cut(view.units, plan.keep, turn_inputs=self._turn_inputs, pinned=view.pinned)
                 if cut is not None:
                     ladder.compacted = True
                     if not self._fork_fits(system, selected, view, "normal", cut):
@@ -1316,7 +1316,7 @@ class Agent:
                 return False
             if not ladder.summary_failed and not ladder.compacted:
                 ladder.compacted = True
-                cut = normal_cut(units, plan.keep, turn_inputs=self._turn_inputs)
+                cut = normal_cut(units, plan.keep, turn_inputs=self._turn_inputs, pinned=view.pinned)
                 if cut is not None and self._fork_fits(system, selected, view, "normal", cut):
                     outcome = await self._checkpoint(
                         system, selected, request, view, plan, cut, mode="normal", reason="overflow", emit=emit
@@ -1330,6 +1330,7 @@ class Agent:
                     units,
                     lambda cut: self._fork_fits(system, selected, view, "rolling", cut),
                     turn_inputs=self._turn_inputs,
+                    pinned=view.pinned,
                 )
                 if cut is None:
                     ladder.rolls = MAX_ROLLS
@@ -1342,7 +1343,7 @@ class Agent:
                     return True
                 ladder.summary_failed = True
                 continue
-            cut = half_cut(units, turn_inputs=self._turn_inputs)
+            cut = half_cut(units, turn_inputs=self._turn_inputs, pinned=view.pinned)
             if cut is not None:
                 carry = await self._carries(system, selected, request, view, plan)
                 await self._drop(request, view, plan, cut, emit, carry=carry)

@@ -82,8 +82,9 @@ before a retry alike:
    anchor (its history would be gone). With fewer than two units nothing can move out, and the minimal request is
    the request itself. Moving the conversation out cannot help then, so when the last unit is a tool batch it is cut
    to fit: the minimal request with the margin `M` when it can, else without; the largest results are cut to one
-   common cap (water-filling), each keeping its head and ending with `[Output truncated to fit the context window;
-   re-run with offset/limit or a narrower command to see more.]`, as one `context_edit` row per cut result
+   common cap (water-filling), each keeping its head (its text blocks joined; an image the text replacement cannot
+   carry is dropped) and always ending with `[Output truncated to fit the context window; re-run with offset/limit
+   or a narrower command to see more.]`, as one `context_edit` row per cut result
    (`"reason": "fit_tool_result"`; the rows keep the whole output, §4). This is the bound a checkpoint turn applies
    to its own tool results (§6), one helper for both. The run continues and compacts as usual. A batch that does not
    fit even with every result cut to its note, or a last unit that is an input, stops the run: the provider never
@@ -143,7 +144,9 @@ records them (`kept_inputs`, their `context_seq`). Projection places them as the
 environment blocks included, right before the checkpoint message and the kept rows (§7), so the checkpoint's
 `state`, the current environment, comes after any environment block they carry and the latest wins by position.
 The checkpoint summarizes everything else in the head, and a later checkpoint inside the same Turn keeps them again.
-An earlier Turn a cut splits is summarized like any head. If the kept inputs alone cannot fit, nothing can move them
+In a later run they are ordinary history, yet no cut falls between them: one there would make an old input's seq the
+new `first_kept_seq` and bring back what that checkpoint summarized, so cuts start at the first unit after them.
+`kept_inputs` is optional; a row without it keeps none. An earlier Turn a cut splits is summarized like any head. If the kept inputs alone cannot fit, nothing can move them
 out, and §8 (d) applies.
 
 ## 6. Checkpoint turn

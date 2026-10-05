@@ -407,6 +407,54 @@ def test_a_result_of_many_blocks_cut_to_fit_stays_within_its_room():
         assert sum(message_tokens(message) for message in shown) <= room, room
 
 
+def test_a_cut_image_result_still_says_it_was_cut():
+    # The replacement is text: an image result's header fits, but its image is gone, so the note must still say so.
+    image = ToolResultMessage("i", "read", (text("Read image file [image/png]"), ImageBlock("image/png", "media-1")))
+    other = ToolResultMessage("o", "read", (text("c" * 4_000),))
+    texts = fit_batch([image, other], 600)
+    assert texts is not None and texts[0] is not None
+    assert texts[0].startswith("Read image file") and texts[0].endswith(TOOL_TRUNCATED)
+
+
+def test_a_later_cut_never_lands_inside_the_inputs_an_earlier_checkpoint_kept():
+    # A checkpoint kept the Turn's input and a steer; a later run has another Turn, so they are ordinary history now.
+    # A cut between them would make the steer's old seq the new first_kept_seq and bring back what that checkpoint
+    # summarized: cuts start at the first unit after the kept inputs.
+    rows = Rows()
+    first = rows.input("x" * 8_000)
+    rows.response(value="summarized once")
+    steer = rows.input("also this")
+    rows.response(value="summarized too")
+    kept = rows.response(value="kept")
+    view = context_view(rows.rows)
+    payload = compaction_payload(
+        view, len(view.units) - 1, mode="dropped", reason="overflow", checkpoint="", state=(), earlier_record=None,
+        tokens_before=1, threshold=2, window=200_000, summarizer=None, usage=None,
+        turn_inputs={first.context_seq, steer.context_seq},
+    )
+    rows.add("compaction", payload=payload)
+    rows.input("a new turn")
+    rows.response(value="answer")
+    units = context_view(rows.rows).units
+    assert [unit.seq for unit in units[:3]] == [first.context_seq, steer.context_seq, kept.context_seq]
+    size = [unit_tokens(unit) for unit in units]
+    assert normal_cut(units, sum(size) - size[0], pinned=2) == 2  # not 1, between the kept inputs
+    assert half_cut(units, pinned=2) == 2 and rolling_cut(units, lambda cut: True, pinned=2) == 2
+    later = compaction_payload(
+        context_view(rows.rows), 2, mode="dropped", reason="overflow", checkpoint="", state=(), earlier_record=None,
+        tokens_before=1, threshold=2, window=200_000, summarizer=None, usage=None,
+    )
+    assert later["first_kept_seq"] == kept.context_seq
+    rows.add("compaction", payload=later)
+    texts = [message.content[0].text for message in context_view(rows.rows).messages[1:]]
+    assert "summarized once" not in texts and "summarized too" not in texts
+    with pytest.raises(ValueError):
+        compaction_payload(
+            context_view(rows.rows[:-1]), 1, mode="dropped", reason="overflow", checkpoint="", state=(),
+            earlier_record=None, tokens_before=1, threshold=2, window=200_000, summarizer=None, usage=None,
+        )
+
+
 def test_a_result_cut_to_fit_can_still_be_cleared_when_it_is_old():
     rows = Rows()
     big = "o" * 20_000  # 5,000 tokens each
