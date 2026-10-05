@@ -77,8 +77,8 @@ Every conversation request takes the request pipeline (§10, invariant 1). Its C
 before a retry alike:
 
 1. **Stop** (§8 d) when the request cannot fit and neither can its minimal request: the request the drop (§8 c)
-   would leave with everything but the last unit moved out (the drop's own row, with its `state` and, when the cut
-   splits a turn, its `<current-request>` copy, §5), budgeted without the anchor (its history would be gone). With
+   would leave with everything but the last unit moved out (the drop's own row with its `state`, and, when the cut
+   splits a turn, the turn's input, which stays, §5), budgeted without the anchor (its history would be gone). With
    fewer than two units nothing can move out, and the minimal request is the request itself. The provider never
    sees the request.
 2. **Clear** (§4) when the provider cache is cold (no model request for longer than the cache TTL, 300 s by
@@ -119,15 +119,21 @@ results of its tool calls. A cut falls only before a unit: before a user message
 whose tool batch follows it; never at a tool result, so no call is separated from its result.
 
 - **Normal** (threshold, and the first overflow step): the tail is the longest run of whole units at the end
-  whose tokens total at most `keep`, and at least the last unit. Everything before it is the head. An empty head
-  means there is nothing to summarize.
+  whose tokens total at most `keep`, and at least the last unit; a split turn's input, which stays (below), counts
+  toward `keep` once, at its own size. Everything before it is the head. A head with nothing to summarize but that
+  input means there is nothing to summarize.
 - **Rolling** (§8 b): the cut nearest to half the tokens, moved earlier until the forked request over the head can fit
   (§1); never past the last unit.
 - **Dropped** (§8 c): the cut nearest to half the tokens; never past the last unit.
 
-`first_kept_seq` is the `context_seq` of the first kept unit. If that unit is not an input, the cut split a turn: the
-text of the latest input in the head, or the previous checkpoint's current request when the head has none, is copied
-verbatim into the checkpoint as `<current-request>` (images as `[image: name]`), with no model call.
+Neither moves out nothing but a split turn's input.
+
+`first_kept_seq` is the `context_seq` of the first kept unit. If that unit is not an input, the cut split a turn, and
+the turn's input stays: projection keeps the latest input before `first_kept_seq` as it was, images, attachments, and
+environment block included, right after the checkpoint message and before the kept rows (§7). The checkpoint
+summarizes everything else in the head. Nothing is copied and no row field names it: the input is found from the rows,
+and stays through later checkpoints while their cuts fall inside the same turn. If the input alone cannot fit, nothing
+can move it out, and §8 (d) applies.
 
 ## 6. Checkpoint turn
 
@@ -217,9 +223,6 @@ is written, so projection stays a pure function of the rows:
   <earlier-record>
   <the adapter's hint: where this Session's earlier conversation is stored, through summarized_to_seq>
   </earlier-record>
-  <current-request>
-  <the split turn's user message, verbatim>
-  </current-request>
   </context-checkpoint>
   ```
 
@@ -241,17 +244,17 @@ is written, so projection stays a pure function of the rows:
   (`display`): escaped (`escape`: a backslash doubled, then control characters and `<`, `>` as `\uXXXX`, or
   `\UXXXXXXXX` past the BMP), then cut in the middle to 160 UTF-8 bytes on a character boundary (its head and its file
   name stay), at most about 40 tokens whatever the script, so a filename can neither add a line nor close a tag.
-  Escaping is injective, so two paths look alike only when a cut hides where they differ. `<earlier-record>` is the adapter's short hint, left out when it supplies none,
-  and `<current-request>` is left out when the cut did not split a turn.
+  Escaping is injective, so two paths look alike only when a cut hides where they differ. `<earlier-record>` is the adapter's short hint, left out when it supplies none.
 - `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment's core
   fields (C-7 §8: cwd, os, shell, date, timezone; no Watches; each field displayed as every input's block displays it,
   the cwd escaped and never cut, every other field cut to 160 UTF-8 bytes (`display`), so the block is the cwd, which
   the OS bounds, plus at most about 4 x 40 tokens; a checkpoint always happens inside
   a run, and a Turn's own input carries only the fields that changed). Nothing else is rehydrated in v1: skills are
-  listed by name in `<skills-loaded>`, pending work is the checkpoint's own "Waiting on", and the split turn's
-  model-facing input, environment block included, is in `<current-request>`.
+  listed by name in `<skills-loaded>`, pending work is the checkpoint's own "Waiting on", and a split turn's input
+  stays as it was (§5).
 - Projection (C-5 §3): the system prompt, hook-rehydrated messages, one user message holding `summary` and then each
-  `state` text as its own text block, then the rows from `first_kept_seq` on, with edits applied. A tool result whose
+  `state` text as its own text block, then a split turn's input (§5), then the rows from `first_kept_seq` on, with
+  edits applied. A tool result whose
   call was summarized is left out with it. No synthetic "continue" message follows.
 - Every `Compaction`, `ContextEdit`, and `AgentState` row is checked against its complete schema shape when it is
   loaded, so a malformed row fails projection instead of a later step that reads it.
@@ -271,8 +274,8 @@ once the request fits:
   at most 2 rolls per request.
 - (c) **Dropped**: when no checkpoint request can help (one failed for this request other than by overflow, a rolling
   one failed, no rolling prefix can fit, or the rolls are used up), no model is called:
-  the earliest part (§5) moves out of the context. Built like any checkpoint row (§7: fresh `state`, and
-  `<current-request>` when the cut splits a turn), the row keeps the previous checkpoint's text and the
+  the earliest part (§5) moves out of the context. Built like any checkpoint row (§7: fresh `state`, and a split
+  turn's input stays), the row keeps the previous checkpoint's text and the
   `<earlier-record>` pointer; `checkpoint` is empty when there was none, and the message then has no framing text.
   Repeated while the request still does not fit.
 - (d) **Stop**: when the request and its minimal request (what the drop would leave of it: the drop's own row, §8 c,

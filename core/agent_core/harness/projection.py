@@ -210,8 +210,6 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
         },
         {
             "previous_compaction_id": _nullable(_string),
-            "current_request": _nullable(_string),
-            "current_request_message_id": _nullable(_string),
             "summarizer": _nullable(
                 _object({"origin": _reads(origin_from_dict), "prompt_version": _string, "rounds": _count})
             ),
@@ -266,7 +264,8 @@ def open_tool_calls(entries: Sequence[ContextEntry]) -> tuple[tuple[ContextEntry
 
 
 def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] = None) -> ContextView:
-    """The context in units: the latest checkpoint's message, then the rows from its ``first_kept_seq``.
+    """The context in units: the latest checkpoint's message, the split turn's input when its cut fell inside a turn,
+    then the rows from its ``first_kept_seq``.
 
     Results (including late recovery rows) follow their response in call
     order; a missing result is INTERRUPTED; a result whose call was summarized
@@ -290,6 +289,7 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
             edits[target.row_id] = row.payload["replacement"]["text"]
     first_kept = compaction.payload["first_kept_seq"] if compaction is not None else 0
     units: list[Unit] = []
+    inputs = [row for row in rows if row.kind == "input" and row.context_seq < first_kept]
     for row in rows:
         if row.kind not in {"input", "response"} or row.context_seq < first_kept:
             continue
@@ -306,6 +306,10 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
                     projected = replace(projected, content=(text(edits[result.row_id]),))
                 entries_of_unit.append((result, projected))
         units.append(Unit(row.context_seq, tuple(entries_of_unit)))
+    if inputs and units and units[0].lead.kind != "input":
+        # The checkpoint's cut fell inside a turn: the turn's input stays as it was, between the checkpoint and the
+        # kept rows (C-9 context.md section 5), so the rest of the turn keeps every block of its request.
+        units.insert(0, Unit(inputs[-1].context_seq, ((inputs[-1], inputs[-1].message),)))
     checkpoint = None
     if compaction is not None:
         checkpoint = UserMessage(

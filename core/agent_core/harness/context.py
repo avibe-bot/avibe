@@ -16,6 +16,7 @@ import json
 import math
 import time
 import unicodedata
+from itertools import accumulate
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
@@ -435,41 +436,67 @@ def unit_tokens(unit: Unit) -> int:
     return messages_tokens(unit.messages)
 
 
-def normal_cut(units: Sequence[Unit], keep: int) -> Optional[int]:
-    """Index of the first kept unit: the longest tail of whole units within ``keep``, at least the last.
+def _pins(units: Sequence[Unit]) -> list[Optional[int]]:
+    """For each cut before ``units[cut]``, the index of the input it keeps: a cut inside a turn keeps the turn's input
+    as it was (section 5), and a cut at an input keeps none."""
+    pins: list[Optional[int]] = []
+    last: Optional[int] = None
+    for index, unit in enumerate(units):
+        is_input = unit.lead.kind == "input"
+        pins.append(None if is_input else last)
+        last = index if is_input else last
+    return pins
 
-    None when the head would be empty.
+
+def _moves(pins: Sequence[Optional[int]], cut: int) -> bool:
+    """Whether a cut before ``units[cut]`` moves out more than the input it keeps."""
+    return cut > 1 or (cut == 1 and pins[1] != 0)
+
+
+def normal_cut(units: Sequence[Unit], keep: int) -> Optional[int]:
+    """Index of the first kept unit: the longest tail of whole units within ``keep``, at least the last, with the input
+    a cut inside a turn keeps counted at its own size (section 5).
+
+    None when nothing but that input would move out.
     """
     if not units:
         return None
+    sizes = [unit_tokens(unit) for unit in units]
+    tails = list(accumulate(reversed(sizes)))[::-1]  # tails[cut]: the tokens of units[cut:]
+    pins = _pins(units)
+
+    def kept(cut: int) -> int:
+        pin = pins[cut]
+        return tails[cut] + (sizes[pin] if pin is not None else 0)
+
     cut = len(units) - 1
-    kept = unit_tokens(units[cut])
-    while cut > 0 and kept + unit_tokens(units[cut - 1]) <= keep:
+    while cut > 0 and kept(cut - 1) <= keep:
         cut -= 1
-        kept += unit_tokens(units[cut])
-    return cut or None
+    return cut if _moves(pins, cut) else None
 
 
 def half_cut(units: Sequence[Unit]) -> Optional[int]:
-    """The cut nearest to half the tokens, never past the last unit; None when only one unit is left."""
-    if len(units) < 2:
-        return None
+    """The cut nearest to half the tokens, never past the last unit; None when nothing but a kept input could move
+    out."""
     sizes = [unit_tokens(unit) for unit in units]
+    pins = _pins(units)
     half = sum(sizes) / 2
-    best, before = 1, sizes[0]
-    best_distance = abs(before - half)
-    for cut in range(2, len(units)):
+    best: Optional[int] = None
+    best_distance = 0.0
+    before = 0
+    for cut in range(1, len(units)):
         before += sizes[cut - 1]
-        if abs(before - half) < best_distance:
+        if _moves(pins, cut) and (best is None or abs(before - half) < best_distance):
             best, best_distance = cut, abs(before - half)
     return best
 
 
 def rolling_cut(units: Sequence[Unit], fits: Callable[[int], bool]) -> Optional[int]:
     """The largest cut at or before ``half_cut`` whose forked request over the head fits."""
+    pins = _pins(units)
     cut = half_cut(units)
     while cut is not None and cut > 0:
-        if fits(cut):
+        if _moves(pins, cut) and fits(cut):
             return cut
         cut -= 1
     return None
@@ -486,16 +513,6 @@ def checkpoint_text(message: AssistantMessage) -> str:
     return "\n\n".join(
         block.text.strip() for block in message.content if isinstance(block, TextBlock) and block.text and block.text.strip()
     )
-
-
-def _input_text(message: UserMessage) -> str:
-    parts = []
-    for block in message.content:
-        if isinstance(block, TextBlock) and block.text is not None:
-            parts.append(block.text)
-        elif isinstance(block, ImageBlock):
-            parts.append(f"[image: {block.name or block.mime_type}]")
-    return "\n".join(parts)
 
 
 def _unique(items: Sequence[str]) -> list[str]:
@@ -653,7 +670,6 @@ def render_summary(
     skills: Sequence[str],
     skills_omitted: bool,
     earlier_record: Optional[str],
-    current_request: Optional[str],
 ) -> str:
     lines = ["<context-checkpoint>"]
     if checkpoint:
@@ -679,8 +695,6 @@ def render_summary(
         lines += ["<skills-loaded>", SKILLS_LEAD, *named, "</skills-loaded>"]
     if earlier_record:
         lines += ["<earlier-record>", earlier_record, "</earlier-record>"]
-    if current_request is not None:
-        lines += ["<current-request>", current_request, "</current-request>"]
     lines.append("</context-checkpoint>")
     return "\n".join(lines)
 
@@ -709,14 +723,6 @@ def compaction_payload(
     head = view.units[:cut]
     files = _files(previous, head)
     skills, skills_omitted = carried_skills(view, cut)
-    request_id: Optional[str] = None
-    request: Optional[str] = None
-    if view.units[cut].lead.kind != "input":
-        inputs = [unit.lead for unit in head if unit.lead.kind == "input"]
-        if inputs:
-            request_id, request = inputs[-1].row_id, _input_text(inputs[-1].message)
-        else:
-            request_id, request = previous.get("current_request_message_id"), previous.get("current_request")
     payload: dict[str, Any] = {
         "version": 1,
         "mode": mode,
@@ -731,15 +737,12 @@ def compaction_payload(
             skills=skills,
             skills_omitted=skills_omitted,
             earlier_record=earlier_record,
-            current_request=request,
         ),
         "checkpoint": checkpoint,
         "state": list(state),
         "first_kept_seq": view.units[cut].seq,
         "summarized_to_seq": summarized_to_seq(view, cut),
         "previous_compaction_id": previous_row.row_id if previous_row is not None else None,
-        "current_request": request,
-        "current_request_message_id": request_id,
         "files_read": files.read,
         "files_read_omitted": files.read_omitted,
         "files_modified": files.modified,

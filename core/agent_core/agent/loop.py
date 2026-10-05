@@ -1195,8 +1195,9 @@ class Agent:
     ) -> tuple[ModelRequest, Budget]:
         """Section 8 (d): the request that would remain with everything but the last unit moved out, and its budget.
 
-        The drop's own row for that cut (its ``<current-request>`` and state included), uncommitted, projected and
-        composed like the conversation's next request (invariant 1); budgeted with no anchor, whose history is gone.
+        The drop's own row for that cut (its state included, and the input of a turn it splits kept), uncommitted,
+        projected and composed like the conversation's next request (invariant 1); budgeted with no anchor, whose
+        history is gone.
         """
         if len(view.units) < 2:
             return request, plan  # nothing can move out

@@ -225,7 +225,8 @@ def test_an_edit_or_checkpoint_before_the_anchor_or_another_route_invalidates_it
         earlier_record=None, tokens_before=0, threshold=0, window=200_000, summarizer=None, usage=None,
     )
     rows.add("compaction", payload=payload)
-    assert context_view(rows.rows).units[0].seq == anchored.context_seq
+    # The cut split the anchored response's turn, so the turn's input stays first (section 5).
+    assert [unit.seq for unit in context_view(rows.rows).units[:2]] == [view.units[0].seq, anchored.context_seq]
     assert _est(rows) == whole(rows)
     # A failed or aborted response, or one without usage or request facts, never anchors.
     for message, facts in [
@@ -310,7 +311,10 @@ def test_a_cut_never_separates_a_tool_call_from_its_result(seed):
         messages = project(compacted).messages
         assert messages[0].content[0].text == "SUMMARY"
         _assert_paired(messages[1:])
-        assert len(messages) - 1 == sum(len(unit.messages) for unit in view.units[cut:])
+        # A cut inside a turn keeps the turn's input whole, right after the checkpoint (section 5).
+        inputs = [unit for unit in view.units[:cut] if unit.lead.kind == "input"]
+        pinned = inputs[-1:] if view.units[cut].lead.kind != "input" else []
+        assert messages[1:] == tuple(message for unit in (*pinned, *view.units[cut:]) for message in unit.messages)
 
 
 @pytest.mark.parametrize(
@@ -340,6 +344,22 @@ def test_the_half_cut_is_nearest_to_half_and_the_rolling_cut_moves_earlier_until
     assert rolling_cut(units, lambda cut: cut <= 1) == 1
     assert rolling_cut(units, lambda cut: False) is None
     assert half_cut(units[:1]) is None
+
+
+def test_a_cut_that_splits_a_turn_counts_the_input_it_pins():
+    # A cut inside a turn keeps the turn's input (section 5): it counts toward the kept tail once, at its own size,
+    # and a cut that would summarize nothing but that input is no cut.
+    rows = Rows()
+    rows.input("x" * 8_000)
+    for _ in range(4):
+        rows.response(value="y" * 4_000)
+    units = context_view(rows.rows).units
+    size = [unit_tokens(unit) for unit in units]
+    # The input and the last two responses fill the tail's budget: the first two responses are summarized.
+    assert normal_cut(units, size[0] + size[3] + size[4]) == 3
+    # An input and one response: moving the response's predecessors out would summarize only the pinned input.
+    assert normal_cut(units[:2], 10**6) is None and half_cut(units[:2]) is None
+    assert half_cut(units) == 2
 
 
 def test_clearing_spares_recent_turns_and_the_newest_results_and_nothing_else():
@@ -640,10 +660,10 @@ def test_the_checkpoint_request_is_the_owner_approved_prompt_verbatim():
     assert checkpoint_request().content[0].text == block
 
 
-def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_checkpoints():
+def test_a_checkpoint_carries_files_skills_and_pins_the_split_turn_input_across_checkpoints():
     rows = Rows()
     rows.input("old turn")
-    rows.add("input", UserMessage((text("fix the parser"), ImageBlock("image/png", "m", name="trace.png"))))
+    request = rows.add("input", UserMessage((text("fix the parser"), ImageBlock("image/png", "m", name="trace.png"))))
     rows.tool("read", "a", call_id="r1", path="a.py")
     rows.tool("write", "b", call_id="w1", path="b.py")
     rows.tool("read", "b", call_id="r2", path="b.py")
@@ -671,7 +691,7 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
     )
     assert (first["files_read"], first["files_modified"]) == (["a.py"], ["b.py"])
     assert not (first["files_read_omitted"] or first["files_modified_omitted"] or first["skills_omitted"])
-    assert first["current_request"] == "fix the parser\n[image: trace.png]"
+    assert "current_request" not in first and "current_request_message_id" not in first
     assert first["summary"] == "\n".join(
         [
             "<context-checkpoint>",
@@ -695,15 +715,17 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
             "<earlier-record>",
             "The full earlier conversation is stored; search it with `vibe data query`.",
             "</earlier-record>",
-            "<current-request>",
-            "fix the parser\n[image: trace.png]",
-            "</current-request>",
             "</context-checkpoint>",
         ]
     )
-
-    # A second checkpoint whose head has no input carries the split turn's request and accumulates files.
+    # The cut split the parser turn: its input stays in the context as it was, image included, between the
+    # checkpoint and the kept tail, which starts at the read of c.py.
     rows.add("compaction", payload=first)
+    view = context_view(rows.rows)
+    assert view.units[0].lead is not None and view.units[0].lead.row_id == request.row_id
+    assert view.messages[1] == request.message and view.messages[2].tool_calls[0].id == "r3"
+
+    # A second checkpoint whose head has no input but the pinned one keeps it pinned and accumulates files.
     rows.tool("edit", "ok", call_id="e1", path="c.py")
     rows.tool("read", "d", call_id="r4", path="d.py")
     view = context_view(rows.rows)
@@ -723,10 +745,12 @@ def test_a_checkpoint_carries_files_skills_and_the_split_turn_request_across_che
     )
     assert second["files_read"] == ["a.py"]
     assert second["files_modified"] == ["c.py", "b.py"]  # most recently touched first
-    assert second["current_request"] == first["current_request"]
+    rows.add("compaction", payload=second)
+    view = context_view(rows.rows)
+    assert view.messages[1] == request.message and view.messages[2].tool_calls[0].id == "r4"
     assert second["skills"] == [{"name": "t"}, {"name": "u"}, {"name": "s"}]
     assert second["summarized_to_seq"] > first["summarized_to_seq"]
-    # No model checkpoint and no lookup command: no framing text, no pointer.
+    # No model checkpoint and no lookup hint: no framing text, no pointer.
     assert second["summary"].startswith("<context-checkpoint>\n<artifacts>\n")
     assert "<earlier-record>" not in second["summary"]
 

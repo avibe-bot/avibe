@@ -223,10 +223,12 @@ async def test_a_threshold_checkpoint_forks_the_exact_prefix_and_leaves_checkpoi
     assert host.states == [StateRequest("session")]
     assert host.records == [("session", compaction.payload["summarized_to_seq"])]
 
-    # The next request: the checkpoint message (summary, then state), then the kept tool batch.
-    checkpoint, *tail = after.messages
+    # The next request: the checkpoint message (summary, then state), the split turn's input as it was, then the
+    # kept tool batch.
+    checkpoint, pinned, *tail = after.messages
     summary, state = (block.text for block in checkpoint.content)
-    assert CHECKPOINT in summary and "<current-request>\ngo\n</current-request>" in summary
+    assert CHECKPOINT in summary and "<current-request>" not in summary
+    assert pinned == next(row.message for row in rows if row.kind == "input")
     assert "lookup session through" in summary and state == "<state/>"
     assert [type(message).__name__ for message in tail] == ["AssistantMessage", "ToolResultMessage"]
     assert tail[0].tool_calls[0].id == "read-3"
@@ -880,9 +882,10 @@ async def test_the_stage_judges_the_fork_it_would_send_exactly_as_the_turn_compo
     assert all(request.messages[0] == state for request in model.requests)
 
 
-async def test_the_stop_check_counts_the_split_turn_input_the_drop_would_copy():
-    # The last unit is a tool batch after a large input: moving everything else out still copies that input into
-    # <current-request>, so nothing can make the request fit. It stops before any checkpoint call or row.
+async def test_the_stop_check_counts_the_split_turn_input_the_drop_would_keep():
+    # The last unit is a tool batch after a large input: moving everything else out still keeps that input, pinned
+    # as the split turn's, so nothing can make the request fit (section 8 d). It stops before any checkpoint call or
+    # row.
     model = Model([call("read", "big", path="f")], [[Done(assistant(CHECKPOINT))]])
     agent = make_agent(model, tools=[reader(tokens(12_000))])
     events = await run(agent, tokens(18_000))

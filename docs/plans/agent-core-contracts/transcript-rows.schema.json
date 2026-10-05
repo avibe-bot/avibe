@@ -158,7 +158,7 @@
         },
         "summary": {
           "type": "string",
-          "description": "The rendered `<context-checkpoint>` message: framing, checkpoint, `<artifacts>`, `<earlier-record>`, and `<current-request>` when present. Model-facing."
+          "description": "The rendered `<context-checkpoint>` message: framing, checkpoint, `<artifacts>`, `<skills-loaded>`, and `<earlier-record>`. Model-facing. When `first_kept_seq` is not an input, the split turn's input row stays in the projected context as it was, after this message (context.md section 5); no field names it."
         },
         "checkpoint": {
           "type": "string",
@@ -182,19 +182,6 @@
           "description": "The last `context_seq` moved out of the context; the `<earlier-record>` hint names it."
         },
         "previous_compaction_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "current_request": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Verbatim text of the split turn's user message, carried across checkpoints while that turn lasts."
-        },
-        "current_request_message_id": {
           "type": [
             "string",
             "null"
@@ -439,8 +426,6 @@
       "first_kept_seq": 412,
       "summarized_to_seq": 411,
       "previous_compaction_id": null,
-      "current_request": null,
-      "current_request_message_id": null,
       "files_read": [
         "tests/test_paths.py"
       ],

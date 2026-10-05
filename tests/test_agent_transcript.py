@@ -180,8 +180,6 @@ COMPACTION = {  # the current C-9 ``Compaction`` shape (transcript-rows.schema.j
     "first_kept_seq": 3,
     "summarized_to_seq": 2,
     "previous_compaction_id": None,
-    "current_request": None,
-    "current_request_message_id": None,
     "files_read": ["core/paths.py"],
     "files_modified": [],
     "files_modified_omitted": False,

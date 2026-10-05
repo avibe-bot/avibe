@@ -6,7 +6,7 @@ import pytest
 
 from core.agent_core.harness.projection import INTERRUPTED, ProjectionError, project
 from core.agent_core.harness.store import ContextEntry
-from core.agent_core.messages import ToolCallBlock, ToolResultMessage, text
+from core.agent_core.messages import ImageBlock, ToolCallBlock, ToolResultMessage, UserMessage, text
 from tests.agent_core.fakes import assistant, user
 
 
@@ -64,8 +64,6 @@ def _checkpoint_payload(first_kept_seq, *, summary="SUMMARY", state=("STATE",), 
         "first_kept_seq": first_kept_seq,
         "summarized_to_seq": first_kept_seq - 1,
         "previous_compaction_id": None,
-        "current_request": None,
-        "current_request_message_id": None,
         "files_read": ["a.py"],
         "files_modified": [],
         "files_modified_omitted": False,
@@ -160,7 +158,6 @@ def _state_row(context):
         _checkpoint_row(2, 1, files_read="a.py"),
         _checkpoint_row(2, 1, files_modified=[1]),
         _checkpoint_row(2, 1, mode="partial"),
-        _checkpoint_row(2, 1, current_request=["text"]),
         _checkpoint_row(2, 1, summarized_to_seq="1"),
         _checkpoint_row(2, 1, threshold=1.5),
         _checkpoint_row(2, 1, summarizer={"origin": {}, "prompt_version": "v", "rounds": 0}),
@@ -179,10 +176,33 @@ def test_a_complete_checkpoint_row_loads():
     rows = [
         ContextEntry("session", 1, "input", "in-1", user("start")),
         ContextEntry("session", 2, "agent_state", "state", payload={"version": 1, "state": {}}),
-        _checkpoint_row(3, 1, summarizer=None, current_request="go", current_request_message_id="in-1"),
+        _checkpoint_row(3, 1, summarizer=None),
     ]
     projected = project(rows)
     assert [block.text for block in projected.messages[0].content] == ["SUMMARY", "STATE"]
+
+
+def test_a_checkpoint_that_splits_a_turn_keeps_the_turn_input_whole_between_it_and_the_tail():
+    # The cut fell inside the turn: the turn's input stays as it was, image included, right after the checkpoint and
+    # before the kept tail; what came before it is summarized.
+    image = UserMessage((text("what is in this trace?"), ImageBlock("image/png", "media-1", name="trace.png")))
+    call = ToolCallBlock("r1", "read", {"path": "a.py"})
+    rows = [
+        ContextEntry("session", 1, "input", "in-1", user("an older turn")),
+        ContextEntry("session", 2, "response", "out-1", assistant("done")),
+        ContextEntry("session", 3, "input", "in-2", image),
+        ContextEntry("session", 4, "response", "out-2", assistant(calls=[call])),
+        ContextEntry("session", 5, "tool_result", "res-2", ToolResultMessage("r1", "read", (text("a"),))),
+        ContextEntry("session", 6, "response", "out-3", assistant("the trace shows a stall")),
+        _checkpoint_row(7, 6),
+    ]
+    messages = project(rows).messages
+    assert [type(message).__name__ for message in messages] == ["UserMessage", "UserMessage", "AssistantMessage"]
+    assert messages[0].content[0].text == "SUMMARY" and messages[1] == image
+    assert messages[2].content[0].text == "the trace shows a stall"
+    # A cut at an input splits nothing: no input is kept beyond the tail.
+    rows[-1] = _checkpoint_row(7, 3)
+    assert project(rows).messages[1] == image and len(project(rows).messages) == 5
 
 
 def test_malformed_or_duplicate_results_are_not_silently_dropped():

@@ -117,8 +117,8 @@ async def test_an_8k_route_compacts_instead_of_exhausting(engine, session, tmp_p
 
 
 async def test_the_environment_survives_a_checkpoint_that_splits_the_turn(engine, session, tmp_path):
-    # The Turn's input carries its environment block; a checkpoint that splits the Turn copies that model-facing
-    # input into <current-request>, so the rest of the Turn still has it.
+    # The Turn's input carries its environment block; a checkpoint that splits the Turn keeps that input as it was,
+    # right after the checkpoint, so the rest of the Turn still has it.
     def read(call_id: str) -> list:
         return [Done(assistant(calls=[ToolCallBlock(call_id, "read", {"path": "a.py"})]))]
 
@@ -127,9 +127,11 @@ async def test_the_environment_survives_a_checkpoint_that_splits_the_turn(engine
     harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[reader])
     await _turn(harness, "hello")
     (compaction,) = [row for row in await harness.context_rows() if row.kind == "compaction"]
-    current = compaction.payload["current_request"]
-    assert current.startswith("<environment>") and "\ncwd: " in current and current.endswith("hello")
-    assert f"<current-request>\n{current}\n</current-request>" in compaction.payload["summary"]
+    assert "<current-request>" not in compaction.payload["summary"]
+    after = harness.provider.requests[-1].messages
+    assert after[0].content[0].text.startswith("<context-checkpoint>")
+    environment, request = (block.text for block in after[1].content)
+    assert environment.startswith("<environment>") and "\ncwd: " in environment and request == "hello"
     assert _texts(harness, "result") == ["done"]
 
 
@@ -307,8 +309,10 @@ async def test_failed_checkpoints_are_silent_and_a_context_that_then_cannot_fit_
         return [Done(assistant(calls=[ToolCallBlock(call_id, "read", {"path": "a.py"})]))]
 
     failing = [Done(assistant(CHECKPOINT, stop_reason="length"))]
-    scripts = [call("r1"), failing, call("r2"), failing, call("r3")]
+    scripts = [[Done(assistant("hi"))], call("r1"), failing, call("r2"), failing, call("r3")]
     harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[FakeTool("read", execute=read)], language="zh")
+    # An earlier Turn gives the checkpoints something to summarize: a cut inside this Turn keeps its input.
+    await _turn(harness, "hello")
     await _turn(harness, tokens(12_000))
     # Two requests of the Turn cross T and their checkpoints fail, silently; the Turn then stops compacting, and the
     # request the last result leaves cannot fit: it ends the Turn with the one notice, and nothing was compacted.
