@@ -52,6 +52,7 @@ from core.agent_core.harness.context import (
 from core.agent_core.harness.projection import context_view, project
 from core.agent_core.messages import (
     AssistantMessage,
+    TextBlock,
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
@@ -76,7 +77,8 @@ from tests.agent_core.fakes import (
 #: T = 19,904 (section 1), the numbers every test here is sized against.
 SELECTION = ModelSelection(ENDPOINT, replace(FAKE_SELECTION.capabilities, context_window=64_000, input_limit=32_000))
 THRESHOLD = 19_904
-CHECKPOINT = "# 1. Self and method\n- the checkpoint"
+#: A checkpoint with the template's three sections (section 11), which the validator accepts.
+CHECKPOINT = "# 1. Self and method\n- the checkpoint\n# 2. Goals and requirements\n- the goal\n# 3. Now and next\n- the next step"
 
 
 def tokens(count: int) -> str:
@@ -96,6 +98,11 @@ def checkpoint_message(request) -> str:
     """The checkpoint message's text: first in the request, or right after a split turn's kept input (section 5)."""
     texts = [message.content[0].text or "" for message in request.messages[:2] if isinstance(message, UserMessage)]
     return next(text for text in texts if text.startswith("<context-checkpoint>"))
+
+
+def bulky(count: int) -> str:
+    """A checkpoint of the template's three sections, about ``count`` tokens long."""
+    return f"# 1. Self and method\n- {tokens(count)}\n# 2. Goals and requirements\n- the goal\n# 3. Now and next\n- next"
 
 
 def call(name: str, call_id: str, **arguments) -> list[Done]:
@@ -737,7 +744,7 @@ async def test_a_new_turn_on_a_large_english_conversation_uses_the_stored_anchor
 
 
 async def test_the_request_right_after_a_checkpoint_is_measured_and_rolls_when_it_does_not_fit():
-    big = [[Done(assistant(tokens(16_000)))], [Done(assistant("short"))]]
+    big = [[Done(assistant(bulky(16_000)))], [Done(assistant(CHECKPOINT))]]
     model = Model(reads(6), big)
     agent = make_agent(model, tools=[sized_reader(5_000, 5_000, 5_000, 2_000, 2_000, 2_000)])
     events = await run(agent)
@@ -747,7 +754,7 @@ async def test_the_request_right_after_a_checkpoint_is_measured_and_rolls_when_i
 
 
 async def test_two_ineffective_checkpoints_stop_compaction_for_the_run():
-    bloated = [[Done(assistant(tokens(15_000)))] for _ in range(2)]
+    bloated = [[Done(assistant(bulky(15_000)))] for _ in range(2)]
     model = Model(reads(7), bloated)
     agent = make_agent(model, tools=[sized_reader(6_000, 6_000, 6_000, 6_000, 5_000, 5_000, 5_000)])
     events = await run(agent)
@@ -794,7 +801,7 @@ async def test_the_ladder_rolls_when_no_fork_can_take_the_whole_context():
     store = InMemoryTranscriptStore()
     await _history_on_a_large_window(store, [5_000] * 9)
     before = await store.load("session")
-    model = Model([[Done(assistant("done"))]], [[Done(assistant("ROLL ONE"))], [Done(assistant("ROLL TWO"))]])
+    model = Model([[Done(assistant("done"))]], [[Done(assistant(f"{CHECKPOINT} ROLL ONE"))], [Done(assistant(f"{CHECKPOINT} ROLL TWO"))]])
     agent = make_agent(model, store=store)
     events = await run(agent)
     first, second = model.checkpoint_requests
@@ -813,6 +820,68 @@ async def test_the_ladder_rolls_when_no_fork_can_take_the_whole_context():
     assert rows[-1].kind == "response" and request.messages == project(rows[:-1]).messages
     assert request_tokens(request.system, request.tools, request.messages) + 4_096 + 8_000 <= 32_000
     assert events[-1].reason == "completed"
+
+
+#: The reply of the E2E checkpoint turn that replaced a Session's history: a write the turn denied, then a meta note.
+_E2E_WRITE = ToolCallBlock(
+    "toolu_write",
+    "write",
+    {"path": "/home/avibe/.avibe/workdir/e2e-scratch/CHECKPOINT.md", "content": "# 1. Self and method\n- strict"},
+)
+_E2E_NOTE = (
+    "<silent>The function call was rejected because this is a checkpoint turn. I have attempted to write the "
+    "checkpoint but hit the tool budget. The checkpoint content was prepared and ready; it documents the seven "
+    "codewords collected (f01\u2013f07).</silent>"
+)
+
+
+async def test_a_checkpoint_turn_that_replies_with_a_meta_note_fails_and_keeps_the_context():
+    # The E2E reply: the model tried to write the checkpoint to a file, was denied, then replied with a <silent> note.
+    # That is no checkpoint: it fails, counts, keeps the old context, and its text lives only in the audit row.
+    model = Model(
+        growing(4),
+        [[Done(AssistantMessage((_E2E_WRITE,), assistant().origin, "tool_use"))], [Done(assistant(_E2E_NOTE))]],
+    )
+    agent = make_agent(model, tools=[reader(tokens(6_000))])
+    events = await run(agent)
+    failed = [event for event in events if isinstance(event, CompactionFailed)]
+    assert len(failed) == 1 and "not a checkpoint" in failed[0].error
+    assert events[-1].reason == "completed" and agent._unproductive == 1
+    rows = await agent.store.load("session")
+    assert not [row for row in rows if row.kind == "compaction"]
+    sent = model.conversation_requests[-1]
+    assert sent.messages == project(rows[: len(rows) - 1]).messages  # the old context, whole
+    assert not any("<silent>" in (block.text or "") for message in sent.messages for block in message.content
+                   if isinstance(block, TextBlock))
+    (audit,) = [payload for _, _, payload in agent.store.audits]  # the checkpoint-turn audits
+    assert audit["outcome"] == "failed" and _E2E_NOTE in json.dumps(audit["messages"], ensure_ascii=False)
+    # The denial told the model where the checkpoint belongs.
+    denied = model.checkpoint_requests[1].messages[-1]
+    assert denied.content[0].text.endswith("Write the checkpoint as your reply text, not into a file.")
+
+
+async def test_a_checkpoint_with_translated_headings_is_accepted():
+    translated = (
+        "# 1. 自我与方法\n## 我在这里的工作方式\n- 一步只读一个文件\n"
+        "# 2. 目标与要求\n## 目标\n- 收集 f01 到 f27 的口令\n"
+        "# 3. 现在与下一步\n## 进度\n- 已读 f01–f04"
+    )
+    model = Model(growing(4), [[Done(assistant(translated))]])
+    agent = make_agent(model, tools=[reader(tokens(6_000))])
+    await run(agent)
+    (compaction,) = [row for row in await agent.store.load("session") if row.kind == "compaction"]
+    assert compaction.payload["checkpoint"] == translated
+
+
+async def test_a_checkpoint_missing_its_second_section_is_rejected():
+    partial = "# 1. Self and method\n- the checkpoint\n# 3. Now and next\n- the next step"
+    model = Model(growing(4), [[Done(assistant(partial))]])
+    agent = make_agent(model, tools=[reader(tokens(6_000))])
+    events = await run(agent)
+    assert [event.error for event in events if isinstance(event, CompactionFailed)] == [
+        "The checkpoint turn's reply is not a checkpoint: section 2 is missing."
+    ]
+    assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
 
 
 async def test_a_turn_keeps_its_input_and_every_steer_verbatim_across_a_mid_turn_checkpoint():
@@ -1207,7 +1276,7 @@ class FailingTransactionStore(InMemoryTranscriptStore):
 async def test_invariant_3_a_c9_transition_commits_in_one_transaction_or_not_at_all():
     # A checkpoint's row commits in one transaction or not at all.
     store = FailingTransactionStore(failures=1)
-    model = Model(reads(4), [[Done(assistant(tokens(15_000)))]])
+    model = Model(reads(4), [[Done(assistant(bulky(15_000)))]])
     agent = make_agent(model, store=store, tools=[sized_reader(6_000, 6_000, 6_000, 6_000)])
     events = await run(agent)
     rows = await store.load("session")
@@ -1215,7 +1284,7 @@ async def test_invariant_3_a_c9_transition_commits_in_one_transaction_or_not_at_
     assert not [row for row in rows if row.kind == "compaction"]
     assert [type(event).__name__ for event in events if "Compaction" in type(event).__name__] == ["CompactionStarted"]
     assert events[-1].reason == "error"
-    model = Model(reads(1), [[Done(assistant(tokens(15_000)))]])
+    model = Model(reads(1), [[Done(assistant(bulky(15_000)))]])
     agent = make_agent(model, store=store, tools=[sized_reader(1)])
     await run(agent, row="again")
     assert store.transactions[-1] == ["compaction"]

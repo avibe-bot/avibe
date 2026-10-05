@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 import unicodedata
 from itertools import accumulate
@@ -39,6 +40,7 @@ from core.agent_core.messages import (
     usage_to_dict,
 )
 from core.agent_core.tools.base import ToolSpec
+from core.reply_enhancer import strip_silent_blocks
 
 # --- constants (context.md) -----------------------------------------------------
 
@@ -565,6 +567,32 @@ def checkpoint_text(message: AssistantMessage) -> str:
     return "\n\n".join(
         block.text.strip() for block in message.content if isinstance(block, TextBlock) and block.text and block.text.strip()
     )
+
+
+#: The approved template's top-level section markers (section 11), whatever language the headings are in.
+_SECTION = re.compile(r"^#[ \t]*([123])\.", re.M)
+
+
+def checkpoint_problem(reply: str) -> Optional[str]:
+    """Why a checkpoint turn's reply is not a checkpoint, or None when it is (section 6), judged on what the user
+    would see of it: the product's one silent-block grammar (``strip_silent_blocks``, which delivery uses) removes its
+    ``<silent>`` notes first. Then the template's three top-level markers (``# 1.``, ``# 2.``, ``# 3.``) appear
+    exactly once each, in order, each section with content under its heading (a line that is not itself a heading).
+    The one check every checkpoint path applies."""
+    visible = strip_silent_blocks(reply)
+    markers = list(_SECTION.finditer(visible))
+    numbers = [marker.group(1) for marker in markers]
+    for number in "123":
+        if number not in numbers:
+            return f"section {number} is missing"
+    if numbers != ["1", "2", "3"]:
+        return "a section marker is repeated or out of order"
+    starts = [marker.start() for marker in markers]
+    for number, (start, end) in enumerate(zip(starts, [*starts[1:], len(visible)]), 1):
+        body = visible[start:end].splitlines()[1:]  # the heading line itself is not content
+        if not any(line.strip() and not line.lstrip().startswith("#") for line in body):
+            return f"section {number} is empty"
+    return None
 
 
 def _unique(items: Sequence[str]) -> list[str]:
