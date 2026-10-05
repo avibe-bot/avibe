@@ -1136,10 +1136,10 @@ class Agent:
         """
         # The bound first: once the run has stopped compacting, nothing is built for a compaction either.
         if not plan.can_fit and (
-            self._stopped or not (await self._minimal(system, selected, request, view, plan))[1].can_fit
+            self._stopped or not (await self._minimal(system, selected, request, view, plan, carry=False))[1].can_fit
         ):
-            # (d): stopped, or not even the request the drop would leave (its row and the last unit) can fit. The
-            # provider never sees it.
+            # (d): stopped, or not even the request the drop would leave (its row and the last unit, without the
+            # previous checkpoint's text) can fit. The provider never sees it.
             raise self._exhausted(request, view, plan)
         refused, ladder.refused = ladder.refused, False
         shrink = refused
@@ -1191,19 +1191,27 @@ class Agent:
         return True
 
     async def _minimal(
-        self, system: str, selected: ModelSelection, request: ModelRequest, view: ContextView, plan: Budget
+        self,
+        system: str,
+        selected: ModelSelection,
+        request: ModelRequest,
+        view: ContextView,
+        plan: Budget,
+        *,
+        carry: bool,
     ) -> tuple[ModelRequest, Budget]:
         """Section 8 (d): the request that would remain with everything but the last unit moved out, and its budget.
 
-        The drop's own row for that cut (its state included, and the input of a turn it splits kept), uncommitted,
-        projected and composed like the conversation's next request (invariant 1); budgeted with no anchor, whose
-        history is gone.
+        The drop's own row for that cut (its state included, the input of a turn it splits kept, and the previous
+        checkpoint's text when ``carry``), uncommitted, projected and composed like the conversation's next request
+        (invariant 1); budgeted with no anchor, whose history is gone.
         """
         if len(view.units) < 2:
             return request, plan  # nothing can move out
         cut = len(view.units) - 1
         hosted = await self._hosted(view, cut)
-        payload, after = await self._compaction(request, view, plan, cut, **self._dropped(view), hosted=hosted)
+        dropped = self._dropped(view, carry=carry)
+        payload, after = await self._compaction(request, view, plan, cut, **dropped, hosted=hosted)
         minimal, _ = self._built(system, selected, messages=self._carried(after))
         return minimal, budget(minimal, selected.capabilities, transcript=after.messages)
 
@@ -1212,23 +1220,31 @@ class Agent:
         return (*self._rehydrated(), *view.messages)
 
     @staticmethod
-    def _dropped(view: ContextView) -> dict[str, Any]:
-        """A dropped row's fields (section 8 c): no model call, the previous checkpoint's text kept."""
-        previous = view.compaction
+    def _dropped(view: ContextView, *, carry: bool) -> dict[str, Any]:
+        """A dropped row's fields (section 8 c): no model call; the previous checkpoint's text kept when ``carry``,
+        else left out and said so."""
+        previous = view.compaction.payload.get("checkpoint", "") if view.compaction is not None else ""
         return {
             "mode": "dropped",
             "reason": "overflow",
-            "checkpoint": previous.payload.get("checkpoint", "") if previous is not None else "",
+            "checkpoint": previous if carry else "",
+            "checkpoint_omitted": bool(previous) and not carry,
             "summarizer": None,
             "usage": None,
         }
 
+    async def _carries(
+        self, system: str, selected: ModelSelection, request: ModelRequest, view: ContextView, plan: Budget
+    ) -> bool:
+        """Whether a drop keeps the previous checkpoint's text (section 8 c): only when the request the drop would
+        leave, carrying it, can fit this route. A checkpoint written on a larger route may not."""
+        if view.compaction is None or not view.compaction.payload.get("checkpoint"):
+            return True  # nothing to carry
+        return (await self._minimal(system, selected, request, view, plan, carry=True))[1].can_fit
+
     def _fork_base(self, view: ContextView, mode: str, cut: int) -> tuple[Message, ...]:
         """What a fork carries before the checkpoint request: the whole context, or for a rolling fork its prefix."""
-        if mode == "normal":
-            return tuple(view.messages)
-        head = (view.checkpoint,) if view.checkpoint is not None else ()
-        return (*head, *(message for unit in view.units[:cut] for message in unit.messages))
+        return tuple(view.messages) if mode == "normal" else view.prefix(cut)
 
     def _fork(
         self,
@@ -1304,7 +1320,8 @@ class Agent:
                 continue
             cut = half_cut(units)
             if cut is not None:
-                await self._drop(request, view, plan, cut, emit)
+                carry = await self._carries(system, selected, request, view, plan)
+                await self._drop(request, view, plan, cut, emit, carry=carry)
                 return True
             if ladder.overflows or not plan.can_fit:
                 raise self._exhausted(request, view, plan)
@@ -1531,12 +1548,20 @@ class Agent:
         return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
 
     async def _drop(
-        self, request: ModelRequest, view: ContextView, plan: Budget, cut: int, emit: Callable[..., Awaitable[None]]
+        self,
+        request: ModelRequest,
+        view: ContextView,
+        plan: Budget,
+        cut: int,
+        emit: Callable[..., Awaitable[None]],
+        *,
+        carry: bool,
     ) -> None:
-        """Section 8 (c): the earliest part moves out with no model call; the previous checkpoint stays."""
+        """Section 8 (c): the earliest part moves out with no model call; the previous checkpoint stays when it can
+        fit (``_carries``)."""
         await emit(CompactionStarted, reason="overflow")
         hosted = await self._hosted(view, cut)
-        payload, _ = await self._compaction(request, view, plan, cut, **self._dropped(view), hosted=hosted)
+        payload, _ = await self._compaction(request, view, plan, cut, **self._dropped(view, carry=carry), hosted=hosted)
         (row,) = await self._commit_context([("compaction", payload)])
         await emit(
             CompactionFinished,
@@ -1560,6 +1585,7 @@ class Agent:
         summarizer: Optional[Mapping[str, Any]],
         usage: Optional[Usage],
         hosted: tuple[tuple[str, ...], Optional[str]],
+        checkpoint_omitted: bool = False,
     ) -> tuple[dict[str, Any], ContextView]:
         """The checkpoint row for ``cut`` (section 7), uncommitted, and the context it would leave.
 
@@ -1580,6 +1606,7 @@ class Agent:
             window=plan.window,
             summarizer=summarizer,
             usage=usage,
+            checkpoint_omitted=checkpoint_omitted,
         )
         seq = max((row.context_seq for row in self._rows), default=0) + 1
         candidate = ContextEntry(self.session_id, seq, "compaction", "uncommitted-compaction", payload=payload)

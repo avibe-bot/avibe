@@ -369,7 +369,8 @@ async def test_a_checkpoint_commits_with_its_state_and_a_new_agent_continues_fro
     events = await run(make_agent(model, store=c9.store), "next", row=c9.stored_input(SESSION))
     assert events[-1].reason == "completed"
     sent = model.conversation_requests[0].messages
-    assert CHECKPOINT in sent[0].content[0].text
+    # The cut split the first Turn: its input stays first, then the checkpoint (C-9 context.md section 5).
+    assert sent[0].content[0].text == "go" and CHECKPOINT in sent[1].content[0].text
     kept = [message.tool_call_id for message in sent if isinstance(message, ToolResultMessage)]
     assert "read-0" not in kept  # what the checkpoint summarized is gone after the restart too
 

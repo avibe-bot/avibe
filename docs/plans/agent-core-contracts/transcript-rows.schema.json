@@ -158,11 +158,11 @@
         },
         "summary": {
           "type": "string",
-          "description": "The rendered `<context-checkpoint>` message: framing, checkpoint, `<artifacts>`, `<skills-loaded>`, and `<earlier-record>`. Model-facing. When `first_kept_seq` is not an input, the split turn's input row stays in the projected context as it was, after this message (context.md section 5); no field names it."
+          "description": "The rendered `<context-checkpoint>` message: framing, checkpoint, `<artifacts>`, `<skills-loaded>`, and `<earlier-record>`. Model-facing. When `first_kept_seq` is not an input, the split turn's input row stays in the projected context as it was, right before this message (context.md section 5); no field names it."
         },
         "checkpoint": {
           "type": "string",
-          "description": "The model-written checkpoint. For `dropped`, the previous checkpoint's text, or empty when there was none."
+          "description": "The model-written checkpoint. For `dropped`, the previous checkpoint's text, or empty when there was none or it was too large for the route (context.md section 8 c)."
         },
         "state": {
           "type": "array",

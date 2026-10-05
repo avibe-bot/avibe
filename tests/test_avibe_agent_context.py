@@ -118,7 +118,7 @@ async def test_an_8k_route_compacts_instead_of_exhausting(engine, session, tmp_p
 
 async def test_the_environment_survives_a_checkpoint_that_splits_the_turn(engine, session, tmp_path):
     # The Turn's input carries its environment block; a checkpoint that splits the Turn keeps that input as it was,
-    # right after the checkpoint, so the rest of the Turn still has it.
+    # right before the checkpoint, so the rest of the Turn still has it.
     def read(call_id: str) -> list:
         return [Done(assistant(calls=[ToolCallBlock(call_id, "read", {"path": "a.py"})]))]
 
@@ -129,8 +129,8 @@ async def test_the_environment_survives_a_checkpoint_that_splits_the_turn(engine
     (compaction,) = [row for row in await harness.context_rows() if row.kind == "compaction"]
     assert "<current-request>" not in compaction.payload["summary"]
     after = harness.provider.requests[-1].messages
-    assert after[0].content[0].text.startswith("<context-checkpoint>")
-    environment, request = (block.text for block in after[1].content)
+    assert after[1].content[0].text.startswith("<context-checkpoint>")
+    environment, request = (block.text for block in after[0].content)
     assert environment.startswith("<environment>") and "\ncwd: " in environment and request == "hello"
     assert _texts(harness, "result") == ["done"]
 

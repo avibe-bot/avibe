@@ -309,12 +309,13 @@ def test_a_cut_never_separates_a_tool_call_from_its_result(seed):
         checkpoint["summary"] = "SUMMARY"
         compacted = [*rows, ContextEntry("session", len(rows) + 1, "compaction", "checkpoint", payload=checkpoint)]
         messages = project(compacted).messages
-        assert messages[0].content[0].text == "SUMMARY"
-        _assert_paired(messages[1:])
-        # A cut inside a turn keeps the turn's input whole, right after the checkpoint (section 5).
+        # A cut inside a turn keeps the turn's input whole, right before the checkpoint (section 5).
         inputs = [unit for unit in view.units[:cut] if unit.lead.kind == "input"]
-        pinned = inputs[-1:] if view.units[cut].lead.kind != "input" else []
-        assert messages[1:] == tuple(message for unit in (*pinned, *view.units[cut:]) for message in unit.messages)
+        pinned = tuple(inputs[-1].messages) if inputs and view.units[cut].lead.kind != "input" else ()
+        assert messages[: len(pinned)] == pinned
+        assert messages[len(pinned)].content[0].text == "SUMMARY"
+        _assert_paired(messages[len(pinned) + 1 :])
+        assert messages[len(pinned) + 1 :] == tuple(message for unit in view.units[cut:] for message in unit.messages)
 
 
 @pytest.mark.parametrize(
@@ -718,12 +719,13 @@ def test_a_checkpoint_carries_files_skills_and_pins_the_split_turn_input_across_
             "</context-checkpoint>",
         ]
     )
-    # The cut split the parser turn: its input stays in the context as it was, image included, between the
+    # The cut split the parser turn: its input stays in the context as it was, image included, before the
     # checkpoint and the kept tail, which starts at the read of c.py.
     rows.add("compaction", payload=first)
     view = context_view(rows.rows)
     assert view.units[0].lead is not None and view.units[0].lead.row_id == request.row_id
-    assert view.messages[1] == request.message and view.messages[2].tool_calls[0].id == "r3"
+    assert view.messages[0] == request.message and view.messages[1] == view.checkpoint
+    assert view.messages[2].tool_calls[0].id == "r3"
 
     # A second checkpoint whose head has no input but the pinned one keeps it pinned and accumulates files.
     rows.tool("edit", "ok", call_id="e1", path="c.py")
@@ -747,7 +749,7 @@ def test_a_checkpoint_carries_files_skills_and_pins_the_split_turn_input_across_
     assert second["files_modified"] == ["c.py", "b.py"]  # most recently touched first
     rows.add("compaction", payload=second)
     view = context_view(rows.rows)
-    assert view.messages[1] == request.message and view.messages[2].tool_calls[0].id == "r4"
+    assert view.messages[0] == request.message and view.messages[2].tool_calls[0].id == "r4"
     assert second["skills"] == [{"name": "t"}, {"name": "u"}, {"name": "s"}]
     assert second["summarized_to_seq"] > first["summarized_to_seq"]
     # No model checkpoint and no lookup hint: no framing text, no pointer.
@@ -786,6 +788,40 @@ def test_a_checkpoint_lists_at_most_20_loaded_skills_by_name_most_recent_first()
         assert shown[-1] == "- and earlier ones (see the earlier record)"
         rows.add("compaction", payload=payload)
         rows.input("again")
+
+
+def test_the_skills_section_says_earlier_skills_were_left_out_even_with_no_name_left():
+    # 21 skills load, so the first checkpoint lists 20 and marks one left out. The kept rows then load all 20 again:
+    # none is listed (their results are in the context), yet the section still says earlier ones were left out.
+    rows = Rows()
+    rows.input("load many")
+    names = [f"skill-{index:02}" for index in range(21)]
+    for index, name in enumerate(names):
+        rows.tool("bash", "body", call_id=f"s{index}", command="vibe skill load", skills=(name,))
+    rows.input("next")
+    for _ in range(2):
+        view = context_view(rows.rows)
+        payload = compaction_payload(
+            view,
+            len(view.units) - 1 if "compaction" not in {row.kind for row in rows.rows} else 1,
+            mode="dropped",
+            reason="overflow",
+            checkpoint="",
+            state=(),
+            earlier_record="Search the earlier record.",
+            tokens_before=1,
+            threshold=2,
+            window=200_000,
+            summarizer=None,
+            usage=None,
+        )
+        rows.add("compaction", payload=payload)
+        for index, name in enumerate(names[1:]):
+            rows.tool("bash", "body", call_id=f"again{index}", command="vibe skill load", skills=(name,))
+        rows.input("again")
+    assert payload["skills"] == [] and payload["skills_omitted"] is True
+    section = payload["summary"].split("<skills-loaded>\n", 1)[1].split("</skills-loaded>", 1)[0]
+    assert section.splitlines()[1:] == ["- and earlier ones (see the earlier record)"]
 
 
 @pytest.mark.parametrize("body", ["x" * 40_000, "上下文" * 5_000])

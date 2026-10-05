@@ -81,9 +81,24 @@ class ContextView:
     state: Mapping[str, Any]
 
     @property
+    def pinned(self) -> bool:
+        """Whether ``units[0]`` is a split turn's input the latest checkpoint keeps (C-9 context.md section 5)."""
+        return bool(self.compaction and self.units and self.units[0].seq < self.compaction.payload["first_kept_seq"])
+
+    @property
     def messages(self) -> tuple[Message, ...]:
+        return self.prefix(len(self.units))
+
+    def prefix(self, cut: int) -> tuple[Message, ...]:
+        """The projected messages before ``units[cut]``: a kept split turn's input first, then the checkpoint, whose
+        state is the latest environment the model reads, then the units."""
+        pinned = self.units[:1] if self.pinned and cut > 0 else ()
         head = (self.checkpoint,) if self.checkpoint is not None else ()
-        return head + tuple(message for unit in self.units for message in unit.messages)
+        return (
+            *(message for unit in pinned for message in unit.messages),
+            *head,
+            *(message for unit in self.units[len(pinned) : cut] for message in unit.messages),
+        )
 
 
 def interrupted_result(call: ToolCallBlock) -> ToolResultMessage:
@@ -264,8 +279,8 @@ def open_tool_calls(entries: Sequence[ContextEntry]) -> tuple[tuple[ContextEntry
 
 
 def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] = None) -> ContextView:
-    """The context in units: the latest checkpoint's message, the split turn's input when its cut fell inside a turn,
-    then the rows from its ``first_kept_seq``.
+    """The context in units: the split turn's input when the latest checkpoint's cut fell inside a turn, that
+    checkpoint's message, then the rows from its ``first_kept_seq`` (``ContextView.prefix``).
 
     Results (including late recovery rows) follow their response in call
     order; a missing result is INTERRUPTED; a result whose call was summarized
@@ -307,7 +322,7 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
                 entries_of_unit.append((result, projected))
         units.append(Unit(row.context_seq, tuple(entries_of_unit)))
     if inputs and units and units[0].lead.kind != "input":
-        # The checkpoint's cut fell inside a turn: the turn's input stays as it was, between the checkpoint and the
+        # The checkpoint's cut fell inside a turn: the turn's input stays as it was, before the checkpoint and the
         # kept rows (C-9 context.md section 5), so the rest of the turn keeps every block of its request.
         units.insert(0, Unit(inputs[-1].context_seq, ((inputs[-1], inputs[-1].message),)))
     checkpoint = None

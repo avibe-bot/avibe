@@ -192,10 +192,10 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
   checkpoint turn runs through the same loop under a "dreaming" tool policy: `read` allowed, writes only inside the
   Session's scratch directory, everything else denied; at most 5 tool rounds, each tool bounded by the room left in
   the window. Its messages are audit rows, never context.
-- **After a checkpoint** the request is the rebuilt system prompt, the `<context-checkpoint>` message (framing,
-  checkpoint, cumulative `<artifacts>`, an `<earlier-record>` hint), state rendered from its own stores when the
-  checkpoint was written (the environment's core fields; the skills it loaded are listed by name in the checkpoint,
-  for the model to load again), a split turn's input as it was, and the verbatim tail. No synthetic "continue" message.
+- **After a checkpoint** the request is the rebuilt system prompt, a split turn's input as it was, the
+  `<context-checkpoint>` message (framing, checkpoint, cumulative `<artifacts>`, an `<earlier-record>` hint), state
+  rendered from its own stores when the checkpoint was written (the environment's core fields; the skills it loaded
+  are listed by name in the checkpoint, for the model to load again), and the verbatim tail. No synthetic "continue" message.
 - **Overflow ladder**, bounded per request: the normal checkpoint; fork-summarize the prefix up to the cut nearest
   half the tokens, moved earlier until it fits (rolling); with no model call, move the earliest part out (dropped); stop and say what fills the context.
 - **Guards**: one compaction in flight per Session; after 2 failed or ineffective checkpoints in one Turn, the Turn

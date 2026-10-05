@@ -44,10 +44,11 @@ from core.agent_core.harness.context import (
     CHECKPOINT_REQUEST,
     ContextConfig,
     StateRequest,
+    compaction_payload,
     message_tokens,
     request_tokens,
 )
-from core.agent_core.harness.projection import project
+from core.agent_core.harness.projection import context_view, project
 from core.agent_core.messages import (
     AssistantMessage,
     ThinkingBlock,
@@ -88,6 +89,12 @@ def is_checkpoint(request) -> bool:
         and message.content[0].text.startswith("<context-checkpoint-request>")
         for message in request.messages
     )
+
+
+def checkpoint_message(request) -> str:
+    """The checkpoint message's text: first in the request, or right after a split turn's kept input (section 5)."""
+    texts = [message.content[0].text or "" for message in request.messages[:2] if isinstance(message, UserMessage)]
+    return next(text for text in texts if text.startswith("<context-checkpoint>"))
 
 
 def call(name: str, call_id: str, **arguments) -> list[Done]:
@@ -223,9 +230,9 @@ async def test_a_threshold_checkpoint_forks_the_exact_prefix_and_leaves_checkpoi
     assert host.states == [StateRequest("session")]
     assert host.records == [("session", compaction.payload["summarized_to_seq"])]
 
-    # The next request: the checkpoint message (summary, then state), the split turn's input as it was, then the
+    # The next request: the split turn's input as it was, the checkpoint message (summary, then state), then the
     # kept tool batch.
-    checkpoint, pinned, *tail = after.messages
+    pinned, checkpoint, *tail = after.messages
     summary, state = (block.text for block in checkpoint.content)
     assert CHECKPOINT in summary and "<current-request>" not in summary
     assert pinned == next(row.message for row in rows if row.kind == "input")
@@ -799,12 +806,39 @@ async def test_the_ladder_rolls_when_no_fork_can_take_the_whole_context():
     assert first.messages[:-1] == whole[: len(first.messages) - 1] and len(first.messages) - 1 < len(whole)
     assert abs(request_tokens("", (), first.messages[:-1]) - request_tokens("", (), whole) / 2) < 5_100
     assert compactions[0].payload["first_kept_seq"] > before[0].context_seq
-    # Rolling again: the second fork's prefix starts with the first checkpoint.
-    assert "ROLL ONE" in second.messages[0].content[0].text
-    assert "ROLL TWO" in request.messages[0].content[0].text
+    # Rolling again: the second fork's prefix leads with the first checkpoint.
+    assert "ROLL ONE" in checkpoint_message(second)
+    assert "ROLL TWO" in checkpoint_message(request)
     assert rows[-1].kind == "response" and request.messages == project(rows[:-1]).messages
     assert request_tokens(request.system, request.tools, request.messages) + 4_096 + 8_000 <= 32_000
     assert events[-1].reason == "completed"
+
+
+async def test_a_small_fallback_drops_a_previous_checkpoint_too_large_for_it_and_continues():
+    # A 15,000-token checkpoint written on a large route cannot fit an 8,000-token fallback: no fork can take it, and a
+    # drop that kept it would still not fit. The drop leaves its model text out, says so, and the Turn continues.
+    store = InMemoryTranscriptStore()
+    await _history_on_a_large_window(store, [1_000])
+    view = context_view(await store.load("session"))
+    large = "# 1. Self and method\n" + tokens(15_000)
+    payload = compaction_payload(
+        view, len(view.units) - 1, mode="normal", reason="threshold", checkpoint=large, state=(),
+        earlier_record="lookup", tokens_before=1, threshold=2, window=200_000, summarizer=None, usage=None,
+    )
+    await store.append_payloads("session", [("compaction", payload)])
+    small = ModelSelection(
+        ENDPOINT, replace(SELECTION.capabilities, context_window=8_000, input_limit=None, max_output_tokens=2_000)
+    )
+    model = Model([[Done(assistant("done"))]])
+    agent = make_agent(model, store=store, selection=small, context=ContextConfig(host=Host()))
+    events = await run(agent)
+    assert events[-1].reason == "completed" and not model.checkpoint_requests
+    dropped = [row for row in await store.load("session") if row.kind == "compaction"][-1]
+    assert dropped.payload["mode"] == "dropped" and dropped.payload["checkpoint"] == ""
+    summary = dropped.payload["summary"]
+    assert "Self and method" not in summary
+    assert "\nAn earlier checkpoint was too large for this model and was omitted; see the earlier record.\n" in summary
+    assert "<earlier-record>" in summary
 
 
 async def test_the_ladder_drops_mechanically_once_a_checkpoint_request_fails():
@@ -830,7 +864,7 @@ async def test_the_ladder_drops_mechanically_once_a_checkpoint_request_fails():
         assert dropped.payload["checkpoint"] == CHECKPOINT
         assert dropped.payload["summary"].startswith("<context-checkpoint>\nThis is a record")
         assert dropped.payload["first_kept_seq"] > first_row.payload["first_kept_seq"]
-    assert model.conversation_requests[-1].messages[0].content[0].text == drops[-1].payload["summary"]
+    assert checkpoint_message(model.conversation_requests[-1]) == drops[-1].payload["summary"]
     assert events[-1].reason == "completed"
 
 
@@ -1022,11 +1056,8 @@ async def test_a_long_session_keeps_every_conversation_request_under_T():
     rows = await agent.store.load("session")
     compactions = [row for row in rows if row.kind == "compaction"]
     assert len(compactions) >= 3
-    # Iterative: each later fork's prefix starts with the previous checkpoint, and file lists accumulate.
-    assert all(
-        request.messages[0].content[0].text.startswith("<context-checkpoint>")
-        for request in model.checkpoint_requests[1:]
-    )
+    # Iterative: each later fork's prefix leads with the previous checkpoint, and file lists accumulate.
+    assert all(checkpoint_message(request) for request in model.checkpoint_requests[1:])
     assert compactions[-1].payload["files_read"] == [f"f{index}" for index in range(6, -1, -1)]  # most recent first
     assert all(row.payload["previous_compaction_id"] == prior.row_id for prior, row in zip(compactions, compactions[1:]))
     # A fork anchored before the first checkpoint projects the original context.

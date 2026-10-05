@@ -130,8 +130,9 @@ Neither moves out nothing but a split turn's input.
 
 `first_kept_seq` is the `context_seq` of the first kept unit. If that unit is not an input, the cut split a turn, and
 the turn's input stays: projection keeps the latest input before `first_kept_seq` as it was, images, attachments, and
-environment block included, right after the checkpoint message and before the kept rows (§7). The checkpoint
-summarizes everything else in the head. Nothing is copied and no row field names it: the input is found from the rows,
+environment block included, right before the checkpoint message and the kept rows (§7), so the checkpoint's
+`state`, the current environment, comes after any environment block the input carries and the latest wins by
+position. The checkpoint summarizes everything else in the head. Nothing is copied and no row field names it: the input is found from the rows,
 and stays through later checkpoints while their cuts fall inside the same turn. If the input alone cannot fit, nothing
 can move it out, and §8 (d) applies.
 
@@ -252,8 +253,8 @@ is written, so projection stays a pure function of the rows:
   a run, and a Turn's own input carries only the fields that changed). Nothing else is rehydrated in v1: skills are
   listed by name in `<skills-loaded>`, pending work is the checkpoint's own "Waiting on", and a split turn's input
   stays as it was (§5).
-- Projection (C-5 §3): the system prompt, hook-rehydrated messages, one user message holding `summary` and then each
-  `state` text as its own text block, then a split turn's input (§5), then the rows from `first_kept_seq` on, with
+- Projection (C-5 §3): the system prompt, hook-rehydrated messages, a split turn's input (§5), one user message
+  holding `summary` and then each `state` text as its own text block, then the rows from `first_kept_seq` on, with
   edits applied. A tool result whose
   call was summarized is left out with it. No synthetic "continue" message follows.
 - Every `Compaction`, `ContextEdit`, and `AgentState` row is checked against its complete schema shape when it is
@@ -277,6 +278,10 @@ once the request fits:
   the earliest part (§5) moves out of the context. Built like any checkpoint row (§7: fresh `state`, and a split
   turn's input stays), the row keeps the previous checkpoint's text and the
   `<earlier-record>` pointer; `checkpoint` is empty when there was none, and the message then has no framing text.
+  The previous checkpoint's text is kept only if the minimal request (§3) carrying it can fit: a checkpoint written
+  on a larger route may not fit a smaller fallback. Otherwise the row has no model text, and its message says, in
+  place of the framing, "An earlier checkpoint was too large for this model and was omitted; see the earlier
+  record." (the pointer clause only when there is an `<earlier-record>`); the history stays retrievable there.
   Repeated while the request still does not fit.
 - (d) **Stop**: when the request and its minimal request (what the drop would leave of it: the drop's own row, §8 c,
   plus the last unit; §3) both cannot fit (checked in the stage, §3,

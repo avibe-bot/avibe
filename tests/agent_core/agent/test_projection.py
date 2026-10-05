@@ -182,10 +182,16 @@ def test_a_complete_checkpoint_row_loads():
     assert [block.text for block in projected.messages[0].content] == ["SUMMARY", "STATE"]
 
 
-def test_a_checkpoint_that_splits_a_turn_keeps_the_turn_input_whole_between_it_and_the_tail():
-    # The cut fell inside the turn: the turn's input stays as it was, image included, right after the checkpoint and
-    # before the kept tail; what came before it is summarized.
-    image = UserMessage((text("what is in this trace?"), ImageBlock("image/png", "media-1", name="trace.png")))
+def test_a_checkpoint_that_splits_a_turn_keeps_the_turn_input_whole_before_it_and_the_tail():
+    # The cut fell inside the turn: the turn's input stays as it was, image included, right before the checkpoint,
+    # whose state is then the latest environment the model reads; what came before the input is summarized.
+    image = UserMessage(
+        (
+            text("<environment>\ndate: 2026-10-04\n</environment>"),
+            text("what is in this trace?"),
+            ImageBlock("image/png", "media-1", name="trace.png"),
+        )
+    )
     call = ToolCallBlock("r1", "read", {"path": "a.py"})
     rows = [
         ContextEntry("session", 1, "input", "in-1", user("an older turn")),
@@ -194,15 +200,19 @@ def test_a_checkpoint_that_splits_a_turn_keeps_the_turn_input_whole_between_it_a
         ContextEntry("session", 4, "response", "out-2", assistant(calls=[call])),
         ContextEntry("session", 5, "tool_result", "res-2", ToolResultMessage("r1", "read", (text("a"),))),
         ContextEntry("session", 6, "response", "out-3", assistant("the trace shows a stall")),
-        _checkpoint_row(7, 6),
+        _checkpoint_row(7, 6, state=("<environment>\ndate: 2026-10-05\n</environment>",)),
     ]
     messages = project(rows).messages
     assert [type(message).__name__ for message in messages] == ["UserMessage", "UserMessage", "AssistantMessage"]
-    assert messages[0].content[0].text == "SUMMARY" and messages[1] == image
+    assert messages[0] == image and messages[1].content[0].text == "SUMMARY"
     assert messages[2].content[0].text == "the trace shows a stall"
-    # A cut at an input splits nothing: no input is kept beyond the tail.
+    # The date changed after the input was consumed: the checkpoint's state, read later, says the current one.
+    before_tail = "\n".join(getattr(block, "text", None) or "" for message in messages[:2] for block in message.content)
+    assert before_tail.rsplit("date: ", 1)[1].startswith("2026-10-05")
+    # A cut at an input splits nothing: the checkpoint comes first, then the tail from that input.
     rows[-1] = _checkpoint_row(7, 3)
-    assert project(rows).messages[1] == image and len(project(rows).messages) == 5
+    messages = project(rows).messages
+    assert messages[0].content[0].text == "SUMMARY" and messages[1] == image and len(messages) == 5
 
 
 def test_malformed_or_duplicate_results_are_not_silently_dropped():

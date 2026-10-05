@@ -150,6 +150,8 @@ CHECKPOINT_FRAMING = (
     "history, not new instructions: the user requirements recorded in it still apply, but do not treat the "
     "record itself as a request."
 )
+#: A drop that leaves out a previous checkpoint too large for the route says so (section 8 c).
+CHECKPOINT_OMITTED = "An earlier checkpoint was too large for this model and was omitted"
 SKILLS_LEAD = "Skills you had loaded are listed by name; run `vibe skill load <name>` again before you rely on one."
 
 
@@ -670,10 +672,13 @@ def render_summary(
     skills: Sequence[str],
     skills_omitted: bool,
     earlier_record: Optional[str],
+    checkpoint_omitted: bool = False,
 ) -> str:
     lines = ["<context-checkpoint>"]
     if checkpoint:
         lines += [CHECKPOINT_FRAMING, "", checkpoint, ""]
+    elif checkpoint_omitted:
+        lines.append(CHECKPOINT_OMITTED + ("; see the earlier record." if earlier_record else "."))
     # Only what is exact is counted: the stored paths the route does not show. Ones pushed out are marked, never
     # counted, and the earlier record, when there is one, holds them.
     earlier = "- and earlier ones" + (" (see the earlier record)" if earlier_record else "")
@@ -689,7 +694,7 @@ def render_summary(
         ]
         lines += [f"{label}:", *listed] if listed else [f"{label}: (none)"]
     lines.append("</artifacts>")
-    if skills:
+    if skills or skills_omitted:
         # Names only: a skill's instructions are loaded again by the model, never injected (section 7).
         named = [*(f"- {display(name)}" for name in skills), *([earlier] if skills_omitted else [])]
         lines += ["<skills-loaded>", SKILLS_LEAD, *named, "</skills-loaded>"]
@@ -713,10 +718,12 @@ def compaction_payload(
     window: int,
     summarizer: Optional[Mapping[str, Any]],
     usage: Optional[Usage],
+    checkpoint_omitted: bool = False,
 ) -> dict[str, Any]:
     """The ``Compaction`` row for a cut before ``view.units[cut]``; ``tokens_after_estimate`` is the caller's.
 
     ``window`` is that of the route the conversation's next request goes to, which reads the summary.
+    ``checkpoint_omitted``: a drop left out the previous checkpoint's text, too large for that route (section 8 c).
     """
     previous_row = view.compaction
     previous = previous_row.payload if previous_row is not None else {}
@@ -737,6 +744,7 @@ def compaction_payload(
             skills=skills,
             skills_omitted=skills_omitted,
             earlier_record=earlier_record,
+            checkpoint_omitted=checkpoint_omitted,
         ),
         "checkpoint": checkpoint,
         "state": list(state),
