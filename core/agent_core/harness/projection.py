@@ -44,8 +44,6 @@ class Projection:
     messages: tuple[Message, ...]
     context_seq: int
     state: Mapping[str, Any] = field(default_factory=dict)
-    #: Context-management guard state (``AgentState.context``), restored like hook state.
-    context_state: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -81,12 +79,26 @@ class ContextView:
     edited: frozenset[str]
     context_seq: int
     state: Mapping[str, Any]
-    context_state: Mapping[str, Any]
+
+    @property
+    def pinned(self) -> bool:
+        """Whether ``units[0]`` is a split turn's input the latest checkpoint keeps (C-9 context.md section 5)."""
+        return bool(self.compaction and self.units and self.units[0].seq < self.compaction.payload["first_kept_seq"])
 
     @property
     def messages(self) -> tuple[Message, ...]:
+        return self.prefix(len(self.units))
+
+    def prefix(self, cut: int) -> tuple[Message, ...]:
+        """The projected messages before ``units[cut]``: a kept split turn's input first, then the checkpoint, whose
+        state is the latest environment the model reads, then the units."""
+        pinned = self.units[:1] if self.pinned and cut > 0 else ()
         head = (self.checkpoint,) if self.checkpoint is not None else ()
-        return head + tuple(message for unit in self.units for message in unit.messages)
+        return (
+            *(message for unit in pinned for message in unit.messages),
+            *head,
+            *(message for unit in self.units[len(pinned) : cut] for message in unit.messages),
+        )
 
 
 def interrupted_result(call: ToolCallBlock) -> ToolResultMessage:
@@ -180,6 +192,10 @@ def _integer(value: Any) -> bool:
     return type(value) is int
 
 
+def _boolean(value: Any) -> bool:
+    return type(value) is bool
+
+
 def _count(value: Any) -> bool:
     return type(value) is int and value >= 0
 
@@ -191,24 +207,24 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
         {
             "version": _one_of(1),
             "mode": _one_of("normal", "rolling", "dropped"),
-            "reason": _one_of("manual", "threshold", "overflow"),
+            "reason": _one_of("threshold", "overflow"),
             "summary": _string,
             "checkpoint": _string,
             "state": _list(_string),
             "first_kept_seq": lambda value: _integer(value) and value > 0,
             "summarized_to_seq": _count,
             "files_read": _list(_string),
+            "files_read_omitted": _boolean,
             "files_modified": _list(_string),
-            "skills": _list(_object({"name": _string, "revision": _string})),
+            "files_modified_omitted": _boolean,
+            "skills": _list(_object({"name": _string})),
+            "skills_omitted": _boolean,
             "tokens_before": _count,
             "tokens_after_estimate": _count,
             "threshold": _integer,
         },
         {
-            "focus": _nullable(_string),
             "previous_compaction_id": _nullable(_string),
-            "current_request": _nullable(_string),
-            "current_request_message_id": _nullable(_string),
             "summarizer": _nullable(
                 _object({"origin": _reads(origin_from_dict), "prompt_version": _string, "rounds": _count})
             ),
@@ -223,10 +239,7 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
             "reason": _one_of("clear_old_tool_result"),
         }
     ),
-    "agent_state": _object(
-        {"version": _one_of(1), "state": lambda value: isinstance(value, dict)},
-        {"context": _object({"failures": _count, "ineffective": _count, "paused": lambda value: type(value) is bool})},
-    ),
+    "agent_state": _object({"version": _one_of(1), "state": lambda value: isinstance(value, dict)}),
 }
 
 
@@ -266,7 +279,8 @@ def open_tool_calls(entries: Sequence[ContextEntry]) -> tuple[tuple[ContextEntry
 
 
 def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] = None) -> ContextView:
-    """The context in units: the latest checkpoint's message, then the rows from its ``first_kept_seq``.
+    """The context in units: the split turn's input when the latest checkpoint's cut fell inside a turn, that
+    checkpoint's message, then the rows from its ``first_kept_seq`` (``ContextView.prefix``).
 
     Results (including late recovery rows) follow their response in call
     order; a missing result is INTERRUPTED; a result whose call was summarized
@@ -276,14 +290,11 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
     results, _ = _index_results(rows)
     rows_by_id = {row.row_id: row for row in rows}
     state: Mapping[str, Any] = {}
-    context_state: Mapping[str, Any] = {}
     compaction: Optional[ContextEntry] = None
     edits: dict[str, str] = {}
     for row in rows:
         if row.kind == "agent_state":
             state = row.payload["state"]
-            # Only C-9's own commits carry the guard state; a hook-state row leaves it as it was.
-            context_state = row.payload.get("context", context_state)
         elif row.kind == "compaction":
             compaction = row
         elif row.kind == "context_edit":
@@ -293,6 +304,7 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
             edits[target.row_id] = row.payload["replacement"]["text"]
     first_kept = compaction.payload["first_kept_seq"] if compaction is not None else 0
     units: list[Unit] = []
+    inputs = [row for row in rows if row.kind == "input" and row.context_seq < first_kept]
     for row in rows:
         if row.kind not in {"input", "response"} or row.context_seq < first_kept:
             continue
@@ -309,6 +321,10 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
                     projected = replace(projected, content=(text(edits[result.row_id]),))
                 entries_of_unit.append((result, projected))
         units.append(Unit(row.context_seq, tuple(entries_of_unit)))
+    if inputs and units and units[0].lead.kind != "input":
+        # The checkpoint's cut fell inside a turn: the turn's input stays as it was, before the checkpoint and the
+        # kept rows (C-9 context.md section 5), so the rest of the turn keeps every block of its request.
+        units.insert(0, Unit(inputs[-1].context_seq, ((inputs[-1], inputs[-1].message),)))
     checkpoint = None
     if compaction is not None:
         checkpoint = UserMessage(
@@ -321,7 +337,6 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
         edited=frozenset(edits),
         context_seq=rows[-1].context_seq if rows else 0,
         state=deepcopy(state),
-        context_state=deepcopy(context_state),
     )
 
 
@@ -340,7 +355,7 @@ def project(
     """
     view = context_view(entries, fork_point=fork_point)
     messages = (*deepcopy(tuple(rehydrated)), *view.messages)
-    return Projection(system, messages, view.context_seq, view.state, view.context_state)
+    return Projection(system, messages, view.context_seq, view.state)
 
 
 def validate_message_append(

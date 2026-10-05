@@ -192,8 +192,8 @@ durably settled; handover creates at most one Watch per job.
 
 Changing facts do not go into the system prompt, which stays stable and cacheable. When the loop consumes an input
 (C-5 `ModelInput`), it renders an environment block into that message with the fields that changed since the previous
-input (all fields on the first input), so the stored transcript still equals what the model saw. The first input after a checkpoint carries all fields
-again, because the inputs that carried the earlier values may be summarized away:
+input (all fields on the first input), so the stored transcript still equals what the model saw. The first input after a checkpoint carries every field
+the projected context no longer shows, because the inputs that carried the earlier values may be summarized away:
 
 ```text
 <environment>
@@ -205,3 +205,13 @@ timezone: Asia/Shanghai
 watches: wch_8f2k "nightly sync" command running; wch_3c1d job running
 </environment>
 ```
+
+`watches` names the Session's enabled Watches by id, name, and kind, never a command: at most 20, then `and N more`.
+A field's identity is its raw value; only the block displays it, through the one display helper (`display`, C-9
+`context.md` §7): one line of plain text, escaped injectively (a backslash doubled, control characters and `<`, `>`
+as `\uXXXX`), then cut in the middle to 160 UTF-8 bytes, each Watch's line on its own. The cwd is escaped and never
+cut: the model builds absolute paths from it, so a cut one would be false, and the OS bounds its length. So the block
+stays bounded on every input whatever the script, and no value can add a line, forge a field, or close the block.
+The rows hold only what the model read, so a field counts as unchanged only when its display equals what the model
+last read and is not cut: escaping is injective, but a cut display can look the same after its value changed, so a
+cut field is sent on every input rather than taken for unchanged.

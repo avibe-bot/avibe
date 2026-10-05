@@ -12,8 +12,12 @@ from dataclasses import dataclass
 from typing import Literal, Optional, Union
 
 RunEndReason = Literal["completed", "aborted", "error", "ended_by_hook", "context_exhausted"]
-CompactionReason = Literal["manual", "threshold", "overflow"]
+CompactionReason = Literal["threshold", "overflow"]
 CompactionMode = Literal["normal", "rolling", "dropped"]
+#: Who produced a failure: ``source`` is the served model (a provider error other than an overflow, an answer the loop
+#: rejected, a response the transcript cannot hold); ``local`` is everything else (a Stop, an overflow or context
+#: exhaustion, a hook, tool, or store error).
+ErrorOrigin = Literal["source", "local"]
 
 
 @dataclass(frozen=True)
@@ -107,24 +111,6 @@ class CompactionFailed:
 
 
 @dataclass(frozen=True)
-class CompactionSkipped:
-    """A manual compaction found nothing older than the kept tail to summarize (C-9 section 10)."""
-
-    turn_id: str
-    seq: int
-    reason: CompactionReason
-
-
-@dataclass(frozen=True)
-class CompactionPaused:
-    """Auto-compaction paused for the Session (C-9 section 10); emitted once, at the transition."""
-
-    turn_id: str
-    seq: int
-    cause: Literal["failures", "ineffective"]
-
-
-@dataclass(frozen=True)
 class ContextPart:
     name: Literal["system", "tools", "history", "current_request", "latest_tool_batch", "output"]
     tokens: int
@@ -145,6 +131,8 @@ class RunEnded:
     turn_id: str
     seq: int
     reason: RunEndReason
+    #: The error that decided ``reason``, the first cause; None when no error did. A diagnostic never does.
+    cause: Optional[AgentError] = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +141,7 @@ class AgentError:
     seq: int
     kind: str
     message: str
+    origin: ErrorOrigin
 
 
 AgentEvent = Union[
@@ -167,8 +156,6 @@ AgentEvent = Union[
     CompactionStarted,
     CompactionFinished,
     CompactionFailed,
-    CompactionSkipped,
-    CompactionPaused,
     ContextExhausted,
     RunEnded,
     AgentError,

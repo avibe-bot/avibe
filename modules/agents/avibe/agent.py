@@ -11,6 +11,8 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
   of persisting a second row (``MessageOutput.persisted_row_id``);
 * steers the running loop with P1 deliveries and lets a refused steer fall back
   to the P3 queue; Stop aborts the run;
+* runs every Turn with C-9 context management (``AvibeContextHost``), within
+  the route's Model Hub limits;
 * before any run of a Session in this process, under the Session writer lock,
   settles open tool calls (T2) and admits accepted inputs that were never
   consumed (T3); at startup it settles every Session's open calls eagerly. The
@@ -39,6 +41,7 @@ from config import paths
 from core.agent_core.agent.events import (
     AgentError,
     AgentEvent,
+    CompactionFinished,
     MessageCommitted,
     RunEnded,
     ToolStarted,
@@ -47,6 +50,7 @@ from core.agent_core.agent.hooks import AgentInput
 from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
+from core.agent_core.harness.context import ContextConfig
 from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.tools.jobs import instant
@@ -72,10 +76,15 @@ from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 from core.skill_observability import accept_catalog
+from modules.agents.avibe.context import (
+    AvibeContextHost,
+    budgeted,
+    mark_skill_loads,
+)
 from modules.agents.avibe.errors import error_text
 from modules.agents.avibe.media import MediaSnapshots
 from modules.agents.avibe.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
-from modules.agents.avibe.prompt import current_environment, system_prompt
+from modules.agents.avibe.prompt import EnvironmentValue, current_environment, system_prompt
 from modules.agents.avibe.store import AdapterTranscriptStore
 from modules.agents.avibe.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
@@ -115,6 +124,10 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
     return relative
 
 
+#: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
+_NO_OUTPUT_CAP = 1 << 30
+
+
 @dataclass
 class _Run:
     """One Turn's state, published before its first await (``handle_message``)."""
@@ -128,9 +141,11 @@ class _Run:
     cwd: str = ""
     settled: bool = False
     reason: Optional[str] = None
+    # The error that decided ``reason`` (``RunEnded.cause``): the failure's kind, text, and Model Hub attribution.
+    cause: Optional[AgentError] = None
     # Model Hub's copy for a route it refused during the run (``_preflight``).
     refusal: Optional[str] = None
-    errors: list[tuple[str, str]] = field(default_factory=list)
+    errors: list[AgentError] = field(default_factory=list)
     final_row: Optional[str] = None
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
     # This run's committed responses by row id, for delivering them; released with the run.
@@ -182,6 +197,8 @@ class AvibeAgent(BaseAgent):
             on_response=self._on_response,
         )
         self._providers = providers or registry_providers(media_loader=self.media)
+        # C-9: the Session parts a checkpoint carries (context.md section 9).
+        self.context_host = AvibeContextHost(self._engine, environment=self._environment)
         self._tool_suite = tool_suite
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.
@@ -520,7 +537,8 @@ class AvibeAgent(BaseAgent):
                 turn.refusal = launch_refusal_copy(self.controller, error)
                 raise
             bind_launch(context, launch)
-            return selection_from_hop(launch.to_hop_resolution(), gateway_base_url=launch.gateway_base_url)
+            # Every resolved hop, the first and each retry's, carries the output the Agent asks for on it.
+            return budgeted(selection_from_hop(launch.to_hop_resolution(), gateway_base_url=launch.gateway_base_url))
 
         return HubModelRouter(resolve, self._providers, first=await resolve())
 
@@ -538,9 +556,12 @@ class AvibeAgent(BaseAgent):
             cwd=cwd,
             env=environment,
             reasoning_effort=request.subagent_reasoning_effort or request.vibe_agent_reasoning_effort,
+            # The route decides the output (``budgeted``): no Agent-wide cap below it.
+            max_tokens=_NO_OUTPUT_CAP,
+            context=ContextConfig(host=self.context_host, scratch_dir=str(self._state_dir / "scratch" / session_id)),
         )
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
-        tools = tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id)))
+        tools = mark_skill_loads(tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id))))
         agent.set_tools(tools)
         agent.system = system_prompt([tool.spec.name for tool in tools], sections)
         turn.agent, turn.cwd = agent, cwd
@@ -555,9 +576,12 @@ class AvibeAgent(BaseAgent):
         elif isinstance(event, ToolStarted):
             await self._emit_tool_started(run, event)
         elif isinstance(event, AgentError):
-            run.errors.append((event.kind, event.message))
+            run.errors.append(event)
         elif isinstance(event, RunEnded):
-            run.reason = event.reason
+            run.reason, run.cause = event.reason, event.cause
+        elif isinstance(event, CompactionFinished):
+            # Silent (C-9 section 10); the session's occupancy snapshot drops with the context.
+            self._note_total(run, event.tokens_after_estimate)
 
     async def _settle(self, run: _Run) -> None:
         """Settle the Turn from the run's outcome (loop-control.md section 6).
@@ -573,7 +597,12 @@ class AvibeAgent(BaseAgent):
         run.settled = True
         request, context = run.request, run.request.context
         reason = run.reason or "error"
-        kind, diagnostic = run.errors[0] if run.errors else (None, reason)
+        # The failure is the error that decided the outcome, never a diagnostic, whose text is only a fallback
+        # detail. Model Hub records it against the route only when the served source produced it (C-6).
+        cause = run.cause
+        kind = cause.kind if cause is not None else None
+        diagnostic = cause.message if cause is not None else run.errors[0].message if run.errors else reason
+        source = cause is not None and cause.origin == "source"
         final = run.responses.get(run.final_row) if run.final_row else None
         if final is not None:
             if run.stop_requested and reason == "aborted":
@@ -585,7 +614,7 @@ class AvibeAgent(BaseAgent):
                 # A silent final whose run failed after the commit: like a final without text
                 # of its own (``_display_source``), its row carries the explanation.
                 body = error_text(kind or "empty_response", self._language(), reason=reason)
-            if failed:
+            if failed and source:
                 await self.record_model_hub_native_failure(context, diagnostic or (kind or "failed final"))
             if body.strip():
                 # The same result path as the other backends; the row is already the message.
@@ -616,7 +645,7 @@ class AvibeAgent(BaseAgent):
                 context, "result", "", level="silent", output=terminal_output_for(request)
             )
             return
-        await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal)
+        await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source)
 
     async def _continuing_input(self, run: _Run) -> Optional[AgentInput]:
         """The input that continues a Turn whose run ended by design with inputs it accepted.
@@ -1025,7 +1054,7 @@ class AvibeAgent(BaseAgent):
         prepend_vendored_git_to_path(environment, base_env=environment, working_dir=cwd or None)
         return environment
 
-    def _environment(self, session_id: str) -> dict[str, str]:
+    def _environment(self, session_id: str) -> dict[str, EnvironmentValue]:
         runtime = self._runtimes.get(session_id)
         cwd = ((runtime.run.cwd if runtime.run is not None else "") or runtime.cwd) if runtime is not None else ""
         return current_environment(
@@ -1049,8 +1078,9 @@ class AvibeAgent(BaseAgent):
                 continue
             # Model context: a Watch's id, name and kind only. Its command can carry a
             # credential, and the block is persisted and sent to the provider.
+            # Raw here; the block displays each line (``render_environment``).
             kind = "job" if getattr(watch, "job_target", None) else "command"
-            name = " ".join(str(getattr(watch, "name", None) or "").split())
+            name = str(getattr(watch, "name", None) or "").strip()
             lines.append(f'{watch.id} "{name}" {kind} running' if name else f"{watch.id} {kind} running")
         return lines
 
@@ -1101,7 +1131,12 @@ class AvibeAgent(BaseAgent):
         note = getattr(self.controller, "note_session_tokens", None)
         if usage is None or not callable(note):
             return
-        total = usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens + usage.output_tokens
+        self._note_total(run, usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens + usage.output_tokens)
+
+    def _note_total(self, run: _Run, total: int) -> None:
+        note = getattr(self.controller, "note_session_tokens", None)
+        if not callable(note):
+            return
         try:
             note(run.request.context, total=total)
         except Exception:
@@ -1116,10 +1151,15 @@ class AvibeAgent(BaseAgent):
         reason: Optional[str] = None,
         cause: Optional[BaseException] = None,
         refusal: Optional[str] = None,
+        source: bool = False,
     ) -> None:
-        """A failed Turn's notice; a Model Hub ``refusal`` copy takes precedence, as at preflight."""
-        # A failure after Model Hub served the route replaces that served attempt, as for the other backends.
-        await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
+        """A failed Turn's notice; a Model Hub ``refusal`` copy takes precedence, as at preflight.
+
+        A failure the served ``source`` produced (``AgentError.origin``) replaces that served attempt, as for the
+        other backends; any other (a context that cannot fit, a Stop, a local error) leaves Model Hub's record as it is.
+        """
+        if source:
+            await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
         await emit_backend_failure(
             self.controller,
             request.context,

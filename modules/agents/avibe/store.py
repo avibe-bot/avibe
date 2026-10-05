@@ -3,7 +3,8 @@
 Two adapter rules live at this boundary, where the loop consumes an input:
 
 * the environment block (C-7 tools.md section 8) is rendered into the input as
-  it is consumed, from the environment the context last recorded, so what
+  it is consumed, with the fields the projected context does not already show
+  (after a checkpoint, the summarized inputs' fields are not shown), so what
   ``consume_input`` stores is exactly what the model is sent;
 * a steered input's ``messages`` row is inserted by the Delivery manager right
   after the backend accepts the steer. The loop can reach that input first, so
@@ -23,13 +24,20 @@ from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Sequence
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
+from core.agent_core.harness.projection import context_view
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import AssistantMessage, ToolResultMessage, UserMessage
-from modules.agents.avibe.prompt import environment_delta, environment_state, with_environment
+from modules.agents.avibe.prompt import (
+    EnvironmentValue,
+    displayed_environment,
+    environment_delta,
+    environment_state,
+    with_environment,
+)
 from storage.agent_transcript import SQLiteTranscriptStore
 from storage.models import messages
 
-EnvironmentSource = Callable[[str], Mapping[str, str]]
+EnvironmentSource = Callable[[str], Mapping[str, EnvironmentValue]]
 ResponseObserver = Callable[[str, str, AssistantMessage], None]
 
 #: How long consumption waits for an accepted steer's row before failing the run.
@@ -55,8 +63,8 @@ class AdapterTranscriptStore:
         self._environment = environment
         self._on_response = on_response
         self._input_row_timeout_s = input_row_timeout_s
-        # Per Session, the environment the context last recorded; evicted by ``forget``
-        # when the adapter retires the Session's runtime.
+        # Per Session, the environment the projected context shows; evicted by ``forget`` when
+        # the adapter retires the Session's runtime, and when a checkpoint commits.
         self._env_state: dict[str, dict[str, str]] = {}
         # Per Session, the Agent of the Turn writing it (its request snapshot), so a
         # mid-Turn change of the Session's selected Agent never re-attributes its rows.
@@ -94,11 +102,14 @@ class AdapterTranscriptStore:
         await self._await_input_row(session_id, message_id)
         previous = self._env_state.get(session_id)
         if previous is None:
-            previous = environment_state(await self._store.load(session_id))
+            # What the model still sees: the inputs the projected context keeps. After a checkpoint the
+            # summarized inputs are gone, so the next input carries every field the context no longer shows.
+            view = context_view(await self._store.load(session_id))
+            previous = environment_state([unit.lead for unit in view.units if unit.lead.kind == "input"])
         current = dict(self._environment(session_id))
         rendered = with_environment(message, environment_delta(previous, current))
         entry = await self._store.consume_input(session_id, message_id, rendered)
-        self._env_state[session_id] = {**previous, **current}
+        self._env_state[session_id] = {**previous, **displayed_environment(current)}
         return entry
 
     async def append_response(
@@ -127,7 +138,10 @@ class AdapterTranscriptStore:
         session_id: str,
         entries: Sequence[tuple[Literal["compaction", "context_edit", "agent_state"], Mapping[str, Any]]],
     ) -> Sequence[ContextEntry]:
-        return await self._store.append_payloads(session_id, entries, agent_name=self._agents.get(session_id))
+        committed = await self._store.append_payloads(session_id, entries, agent_name=self._agents.get(session_id))
+        if any(kind == "compaction" for kind, _ in entries):
+            self._env_state.pop(session_id, None)  # the summarized inputs' environment is no longer seen
+        return committed
 
     async def append_audit(
         self, session_id: str, kind: Literal["attempt", "checkpoint_turn"], payload: Mapping[str, Any]

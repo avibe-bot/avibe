@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import math
 import time
+import unicodedata
+from itertools import accumulate
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
@@ -44,10 +46,24 @@ DEFAULT_CONTEXT_WINDOW = 128_000
 DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 MARGIN_MIN = 8_000
 MARGIN_RATIO = 0.03
+#: The margin is at most an eighth of the window: with ``O <= W / 4`` (the Avibe Agent's budget), ``T >= 0.625 * W``.
+MARGIN_CAP_RATIO = 0.125
 THRESHOLD_RATIO = 0.9
 KEEP_MAX = 20_000
 KEEP_RATIO = 0.25
 IMAGE_TOKENS = 1_600
+#: Each artifact list a checkpoint row keeps this many paths, most recently touched first, and marks whether earlier
+#: ones were pushed out; what the model reads shows a 4,000th of the route's window of them, between
+#: ``ARTIFACTS_SHOWN_MIN`` and this (section 7).
+ARTIFACTS_LISTED = 50
+ARTIFACTS_SHOWN_MIN = 5
+ARTIFACTS_SHOWN_RATIO = 4_000
+#: Every path an artifact list carries, and every field of the state's environment block, is cut in the middle to this
+#: many UTF-8 bytes: at most about 40 tokens each under the estimate, whatever the script (section 7).
+ITEM_BYTES = 160
+#: A checkpoint lists the skills its summarized rows loaded by name, at most this many, the most recent first, and
+#: marks whether earlier ones were pushed out (section 7).
+SKILLS_LISTED = 20
 
 CLEAR_SOFT_RATIO = 0.8
 CLEAR_MIN_TOKENS = 20_000
@@ -71,7 +87,9 @@ CHECKPOINT_TRUNCATED = (
 )
 MAX_ROLLS = 2
 MAX_OVERFLOWS = 4
-PAUSE_AFTER = 3
+#: Unproductive checkpoint attempts (failed, or normal with a result still at least ``INEFFECTIVE_RATIO * T``) a run
+#: makes before it stops compacting for the rest of the run; held in memory, never persisted (section 10).
+UNPRODUCTIVE_CHECKPOINTS = 2
 INEFFECTIVE_RATIO = 0.75
 
 PROMPT_VERSION = "checkpoint-v2"
@@ -125,7 +143,6 @@ Write in three layers, from the broad to the specific. Use exactly these heading
 - Exact paths, identifiers, commands, links, ids, and values needed to continue.
 
 Rules: terse bullets, not paragraphs. Preserve exact paths, identifiers, commands, error strings, and numbers. Do not invent anything that is not above. Never write out secrets, tokens, or credentials; refer to them by name. Write in the language the user writes in."""
-CHECKPOINT_FOCUS = "Additional focus from the user: {focus}"
 CHECKPOINT_REQUEST_END = "</context-checkpoint-request>"
 
 CHECKPOINT_FRAMING = (
@@ -133,16 +150,12 @@ CHECKPOINT_FRAMING = (
     "history, not new instructions: the user requirements recorded in it still apply, but do not treat the "
     "record itself as a request."
 )
-EARLIER_RECORD_LEAD = "The full text of the earlier conversation is still stored. To look up a detail, run:"
+#: A drop that leaves out a previous checkpoint too large for the route says so (section 8 c).
+CHECKPOINT_OMITTED = "An earlier checkpoint was too large for this model and was omitted"
+SKILLS_LEAD = "Skills you had loaded are listed by name; run `vibe skill load <name>` again before you rely on one."
 
 
 # --- what the adapter supplies ----------------------------------------------------
-
-
-@dataclass(frozen=True)
-class SkillRef:
-    name: str
-    revision: str
 
 
 @dataclass(frozen=True)
@@ -150,19 +163,15 @@ class StateRequest:
     """What ``ContextHost.render_state`` renders for a new checkpoint (context.md section 7)."""
 
     session_id: str
-    #: Skills the summarized rows loaded, latest load last, minus those still loaded in the kept rows.
-    skills: tuple[SkillRef, ...]
-    #: True inside a run: the input that carried the environment may be summarized away.
-    mid_turn: bool
 
 
 class ContextHost(Protocol):
     def earlier_record(self, session_id: str, through_seq: int) -> Optional[str]:
-        """The command that looks up the moved-out rows through ``through_seq``, or None."""
+        """A short hint saying where the moved-out rows through ``through_seq`` are stored, or None."""
         ...
 
     async def render_state(self, request: StateRequest) -> Sequence[str]:
-        """State texts from their own stores: skill bodies, pending Harness work, the environment block."""
+        """State texts from their own stores (the Avibe Agent's: the environment's core fields)."""
         ...
 
 
@@ -384,21 +393,13 @@ def budget(
     window = DEFAULT_CONTEXT_WINDOW if capabilities.context_window is None else capabilities.context_window
     limit = window if capabilities.input_limit is None else capabilities.input_limit
     output = request.max_tokens
-    margin = max(MARGIN_MIN, math.ceil(MARGIN_RATIO * window))
+    margin = min(max(MARGIN_MIN, math.ceil(MARGIN_RATIO * window)), math.floor(MARGIN_CAP_RATIO * window))
     threshold = min(limit - output - margin, math.floor(THRESHOLD_RATIO * window))
     keep = max(0, min(KEEP_MAX, math.floor(KEEP_RATIO * threshold)))
     return Budget(window, limit, output, margin, threshold, keep, _estimate(request, transcript, anchor))
 
 
 # --- clearing (context.md section 4) ------------------------------------------------
-
-
-def _skill(entry: ContextEntry) -> Optional[SkillRef]:
-    details = entry.payload.get("details")
-    skill = details.get("skill") if isinstance(details, Mapping) else None
-    if isinstance(skill, Mapping) and isinstance(skill.get("name"), str) and isinstance(skill.get("revision"), str):
-        return SkillRef(skill["name"], skill["revision"])
-    return None
 
 
 def clearable_results(view: ContextView) -> tuple[ContextEntry, ...]:
@@ -413,7 +414,6 @@ def clearable_results(view: ContextView) -> tuple[ContextEntry, ...]:
                 and isinstance(message, ToolResultMessage)
                 and message.tool_name in CLEARABLE_TOOLS
                 and entry.row_id not in view.edited
-                and _skill(entry) is None
             ):
                 eligible.append((index, entry, message))
     candidates = [item for item in eligible[: max(0, len(eligible) - CLEAR_KEEP_RESULTS)] if item[0] < protected_from]
@@ -438,41 +438,67 @@ def unit_tokens(unit: Unit) -> int:
     return messages_tokens(unit.messages)
 
 
-def normal_cut(units: Sequence[Unit], keep: int) -> Optional[int]:
-    """Index of the first kept unit: the longest tail of whole units within ``keep``, at least the last.
+def _pins(units: Sequence[Unit]) -> list[Optional[int]]:
+    """For each cut before ``units[cut]``, the index of the input it keeps: a cut inside a turn keeps the turn's input
+    as it was (section 5), and a cut at an input keeps none."""
+    pins: list[Optional[int]] = []
+    last: Optional[int] = None
+    for index, unit in enumerate(units):
+        is_input = unit.lead.kind == "input"
+        pins.append(None if is_input else last)
+        last = index if is_input else last
+    return pins
 
-    None when the head would be empty.
+
+def _moves(pins: Sequence[Optional[int]], cut: int) -> bool:
+    """Whether a cut before ``units[cut]`` moves out more than the input it keeps."""
+    return cut > 1 or (cut == 1 and pins[1] != 0)
+
+
+def normal_cut(units: Sequence[Unit], keep: int) -> Optional[int]:
+    """Index of the first kept unit: the longest tail of whole units within ``keep``, at least the last, with the input
+    a cut inside a turn keeps counted at its own size (section 5).
+
+    None when nothing but that input would move out.
     """
     if not units:
         return None
+    sizes = [unit_tokens(unit) for unit in units]
+    tails = list(accumulate(reversed(sizes)))[::-1]  # tails[cut]: the tokens of units[cut:]
+    pins = _pins(units)
+
+    def kept(cut: int) -> int:
+        pin = pins[cut]
+        return tails[cut] + (sizes[pin] if pin is not None else 0)
+
     cut = len(units) - 1
-    kept = unit_tokens(units[cut])
-    while cut > 0 and kept + unit_tokens(units[cut - 1]) <= keep:
+    while cut > 0 and kept(cut - 1) <= keep:
         cut -= 1
-        kept += unit_tokens(units[cut])
-    return cut or None
+    return cut if _moves(pins, cut) else None
 
 
 def half_cut(units: Sequence[Unit]) -> Optional[int]:
-    """The cut nearest to half the tokens, never past the last unit; None when only one unit is left."""
-    if len(units) < 2:
-        return None
+    """The cut nearest to half the tokens, never past the last unit; None when nothing but a kept input could move
+    out."""
     sizes = [unit_tokens(unit) for unit in units]
+    pins = _pins(units)
     half = sum(sizes) / 2
-    best, before = 1, sizes[0]
-    best_distance = abs(before - half)
-    for cut in range(2, len(units)):
+    best: Optional[int] = None
+    best_distance = 0.0
+    before = 0
+    for cut in range(1, len(units)):
         before += sizes[cut - 1]
-        if abs(before - half) < best_distance:
+        if _moves(pins, cut) and (best is None or abs(before - half) < best_distance):
             best, best_distance = cut, abs(before - half)
     return best
 
 
 def rolling_cut(units: Sequence[Unit], fits: Callable[[int], bool]) -> Optional[int]:
     """The largest cut at or before ``half_cut`` whose forked request over the head fits."""
+    pins = _pins(units)
     cut = half_cut(units)
     while cut is not None and cut > 0:
-        if fits(cut):
+        if _moves(pins, cut) and fits(cut):
             return cut
         cut -= 1
     return None
@@ -481,12 +507,8 @@ def rolling_cut(units: Sequence[Unit], fits: Callable[[int], bool]) -> Optional[
 # --- the checkpoint (context.md sections 6 and 7) ----------------------------------
 
 
-def checkpoint_request(focus: Optional[str] = None) -> UserMessage:
-    parts = [CHECKPOINT_REQUEST]
-    if focus and focus.strip():
-        parts.append(CHECKPOINT_FOCUS.format(focus=focus.strip()))
-    parts.append(CHECKPOINT_REQUEST_END)
-    return UserMessage((text("\n".join(parts)),))
+def checkpoint_request() -> UserMessage:
+    return UserMessage((text(f"{CHECKPOINT_REQUEST}\n{CHECKPOINT_REQUEST_END}"),))
 
 
 def checkpoint_text(message: AssistantMessage) -> str:
@@ -495,24 +517,60 @@ def checkpoint_text(message: AssistantMessage) -> str:
     )
 
 
-def _input_text(message: UserMessage) -> str:
-    parts = []
-    for block in message.content:
-        if isinstance(block, TextBlock) and block.text is not None:
-            parts.append(block.text)
-        elif isinstance(block, ImageBlock):
-            parts.append(f"[image: {block.name or block.mime_type}]")
-    return "\n".join(parts)
-
-
 def _unique(items: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> tuple[list[str], list[str]]:
-    """Cumulative artifacts: the path of each call that succeeded (no hook rewrites arguments under C-9)."""
-    read: list[str] = list(previous.get("files_read", ()))
-    modified: list[str] = list(previous.get("files_modified", ()))
+def truncate_middle_bytes(text: str, limit: int) -> str:
+    """``text`` cut in the middle to at most ``limit`` UTF-8 bytes with an ellipsis, on character boundaries.
+
+    Its head and its tail (a file name) stay. Bytes are counted as the estimate counts them (section 2, lone
+    surrogates included, as a POSIX path's undecodable bytes arrive), so a byte bound is a token bound whatever the
+    script.
+    """
+    if _utf8(text) <= limit:
+        return text
+    room = limit - _utf8("…")
+    head = _within(text, room - room // 2)
+    tail = _within(text[::-1], room // 2)[::-1]
+    return f"{head}…{tail}"
+
+
+def _within(text: str, limit: int) -> str:
+    """The longest prefix of ``text`` within ``limit`` estimate bytes."""
+    used = 0
+    for index, char in enumerate(text):
+        used += _utf8(char)
+        if used > limit:
+            return text[:index]
+    return text
+
+
+@dataclass(frozen=True)
+class _Artifacts:
+    """Each list most recently touched first, ``ARTIFACTS_LISTED`` kept; ``*_omitted`` marks that a path was ever
+    pushed out. A mark, not a count: a path pushed out and touched again is the same path, so no count stays true."""
+
+    read: list[str]
+    read_omitted: bool
+    modified: list[str]
+    modified_omitted: bool
+
+
+def _recent(touched: Sequence[str], earlier: Sequence[str], omitted: bool) -> tuple[list[str], bool]:
+    """``touched`` paths (in touch order) ahead of ``earlier`` ones (stored, most recent first), at most
+    ``ARTIFACTS_LISTED`` kept, and whether any was ever pushed out. Paths are originals: only the display is cut."""
+    paths = _unique([*reversed(touched), *earlier])
+    return paths[:ARTIFACTS_LISTED], omitted or len(paths) > ARTIFACTS_LISTED
+
+
+def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> _Artifacts:
+    """Cumulative artifacts: the path of each call that succeeded (no hook rewrites arguments under C-9).
+
+    Bounded across checkpoints (section 7): a long-lived Session would otherwise carry every path it ever touched.
+    """
+    read: list[str] = []
+    modified: list[str] = []
     for unit in head:
         message = unit.lead.message
         if not isinstance(message, AssistantMessage):
@@ -525,30 +583,49 @@ def _files(previous: Mapping[str, Any], head: Sequence[Unit]) -> tuple[list[str]
                 read.append(path)
             elif call.name in {"write", "edit"}:
                 modified.append(path)
-    modified = _unique(modified)
-    changed = set(modified)
-    return [path for path in _unique(read) if path not in changed], modified
+    modified_listed, modified_omitted = _recent(
+        modified, previous.get("files_modified", ()), previous.get("files_modified_omitted", False)
+    )
+    changed = {*modified, *modified_listed}
+    read_listed, read_omitted = _recent(
+        [path for path in read if path not in changed],
+        [path for path in previous.get("files_read", ()) if path not in changed],
+        previous.get("files_read_omitted", False),
+    )
+    return _Artifacts(read_listed, read_omitted, modified_listed, modified_omitted)
 
 
-def carried_skills(view: ContextView, cut: int) -> tuple[SkillRef, ...]:
-    """Skills loaded before the cut (and carried by the previous checkpoint), minus those loaded after it."""
-    loaded: dict[str, str] = {}
+def _skills(entry: ContextEntry) -> tuple[str, ...]:
+    """The names of the skills a tool result loaded (``details.skills``, which the adapter marks), in load order."""
+    details = entry.payload.get("details")
+    skills = details.get("skills") if isinstance(details, Mapping) else None
+    if not isinstance(skills, list):
+        return ()
+    return tuple(
+        skill["name"] for skill in skills if isinstance(skill, Mapping) and isinstance(skill.get("name"), str)
+    )
+
+
+def carried_skills(view: ContextView, cut: int) -> tuple[tuple[str, ...], bool]:
+    """The names of the skills loaded before the cut (and listed by the previous checkpoint), minus those loaded
+    after it: the most recently loaded first, at most ``SKILLS_LISTED``, as loaded; and whether any was ever pushed
+    out (section 7)."""
+    loaded: dict[str, None] = {}  # the latest load last
     previous = view.compaction.payload if view.compaction is not None else {}
-    for skill in previous.get("skills", ()):
+    for skill in reversed(previous.get("skills", ())):  # stored most recent first
         loaded.pop(skill["name"], None)
-        loaded[skill["name"]] = skill["revision"]
+        loaded[skill["name"]] = None
     for unit in view.units[:cut]:
         for entry, _ in unit.entries[1:]:
-            skill = _skill(entry) if entry is not None else None
-            if skill is not None:
-                loaded.pop(skill.name, None)
-                loaded[skill.name] = skill.revision
+            for name in _skills(entry) if entry is not None else ():
+                loaded.pop(name, None)
+                loaded[name] = None
     for unit in view.units[cut:]:
         for entry, _ in unit.entries[1:]:
-            skill = _skill(entry) if entry is not None else None
-            if skill is not None:
-                loaded.pop(skill.name, None)
-    return tuple(SkillRef(name, revision) for name, revision in loaded.items())
+            for name in _skills(entry) if entry is not None else ():
+                loaded.pop(name, None)
+    omitted = bool(previous.get("skills_omitted", False)) or len(loaded) > SKILLS_LISTED
+    return tuple(list(reversed(loaded))[:SKILLS_LISTED]), omitted
 
 
 def summarized_to_seq(view: ContextView, cut: int) -> int:
@@ -557,25 +634,72 @@ def summarized_to_seq(view: ContextView, cut: int) -> int:
     return max([previous, *seqs])
 
 
+def display(text: str) -> str:
+    """One line of plain text for a path or a name the model reads (section 7): ``escape``d, then cut in the middle to
+    ``ITEM_BYTES``. The row keeps the original."""
+    return truncate_middle_bytes(escape(text), ITEM_BYTES)
+
+
+def escape(text: str) -> str:
+    """``text`` as one line of plain text that closes no tag, injectively: a backslash doubled, then control
+    characters and the markup delimiters ``<`` and ``>`` as ``\\uXXXX`` (``\\UXXXXXXXX`` past the BMP). Two texts
+    never escape alike, so only a cut can make two displays look the same (section 7)."""
+    return "".join(_escaped(char) for char in text)
+
+
+def _escaped(char: str) -> str:
+    if char == "\\":
+        return "\\\\"
+    if char in "<>" or unicodedata.category(char).startswith("C"):
+        code = ord(char)
+        return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+    return char
+
+
+def artifacts_shown(window: int) -> int:
+    """How many paths of each artifact list the model reads on a route with ``window`` tokens (section 7)."""
+    return min(ARTIFACTS_LISTED, max(ARTIFACTS_SHOWN_MIN, window // ARTIFACTS_SHOWN_RATIO))
+
+
 def render_summary(
     *,
     checkpoint: str,
     files_read: Sequence[str],
+    files_read_omitted: bool,
     files_modified: Sequence[str],
+    files_modified_omitted: bool,
+    shown: int,
+    skills: Sequence[str],
+    skills_omitted: bool,
     earlier_record: Optional[str],
-    current_request: Optional[str],
+    checkpoint_omitted: bool = False,
 ) -> str:
     lines = ["<context-checkpoint>"]
     if checkpoint:
         lines += [CHECKPOINT_FRAMING, "", checkpoint, ""]
+    elif checkpoint_omitted:
+        lines.append(CHECKPOINT_OMITTED + ("; see the earlier record." if earlier_record else "."))
+    # Only what is exact is counted: the stored paths the route does not show. Ones pushed out are marked, never
+    # counted, and the earlier record, when there is one, holds them.
+    earlier = "- and earlier ones" + (" (see the earlier record)" if earlier_record else "")
     lines.append("<artifacts>")
-    for label, paths in (("Read", files_read), ("Modified", files_modified)):
-        lines += [f"{label}:", *(f"- {path}" for path in paths)] if paths else [f"{label}: (none)"]
+    lists = (("Read", files_read, files_read_omitted), ("Modified", files_modified, files_modified_omitted))
+    for label, paths, omitted in lists:
+        # The row keeps up to ``ARTIFACTS_LISTED``; the model reads the route's share of them (``shown``).
+        hidden = max(0, len(paths) - shown)
+        listed = [
+            *(f"- {display(path)}" for path in paths[:shown]),
+            *([f"- and {hidden} more"] if hidden else []),
+            *([earlier] if omitted else []),
+        ]
+        lines += [f"{label}:", *listed] if listed else [f"{label}: (none)"]
     lines.append("</artifacts>")
+    if skills or skills_omitted:
+        # Names only: a skill's instructions are loaded again by the model, never injected (section 7).
+        named = [*(f"- {display(name)}" for name in skills), *([earlier] if skills_omitted else [])]
+        lines += ["<skills-loaded>", SKILLS_LEAD, *named, "</skills-loaded>"]
     if earlier_record:
-        lines += ["<earlier-record>", EARLIER_RECORD_LEAD, earlier_record, "</earlier-record>"]
-    if current_request is not None:
-        lines += ["<current-request>", current_request, "</current-request>"]
+        lines += ["<earlier-record>", earlier_record, "</earlier-record>"]
     lines.append("</context-checkpoint>")
     return "\n".join(lines)
 
@@ -586,51 +710,53 @@ def compaction_payload(
     *,
     mode: str,
     reason: str,
-    focus: Optional[str],
     checkpoint: str,
-    skills: Sequence[SkillRef],
     state: Sequence[str],
     earlier_record: Optional[str],
     tokens_before: int,
     threshold: int,
+    window: int,
     summarizer: Optional[Mapping[str, Any]],
     usage: Optional[Usage],
+    checkpoint_omitted: bool = False,
 ) -> dict[str, Any]:
-    """The ``Compaction`` row for a cut before ``view.units[cut]``; ``tokens_after_estimate`` is the caller's."""
+    """The ``Compaction`` row for a cut before ``view.units[cut]``; ``tokens_after_estimate`` is the caller's.
+
+    ``window`` is that of the route the conversation's next request goes to, which reads the summary.
+    ``checkpoint_omitted``: a drop left out the previous checkpoint's text, too large for that route (section 8 c).
+    """
     previous_row = view.compaction
     previous = previous_row.payload if previous_row is not None else {}
     head = view.units[:cut]
-    read, modified = _files(previous, head)
-    request_id: Optional[str] = None
-    request: Optional[str] = None
-    if view.units[cut].lead.kind != "input":
-        inputs = [unit.lead for unit in head if unit.lead.kind == "input"]
-        if inputs:
-            request_id, request = inputs[-1].row_id, _input_text(inputs[-1].message)
-        else:
-            request_id, request = previous.get("current_request_message_id"), previous.get("current_request")
+    files = _files(previous, head)
+    skills, skills_omitted = carried_skills(view, cut)
     payload: dict[str, Any] = {
         "version": 1,
         "mode": mode,
         "reason": reason,
-        "focus": focus,
         "summary": render_summary(
             checkpoint=checkpoint,
-            files_read=read,
-            files_modified=modified,
+            files_read=files.read,
+            files_modified=files.modified,
+            files_read_omitted=files.read_omitted,
+            files_modified_omitted=files.modified_omitted,
+            shown=artifacts_shown(window),
+            skills=skills,
+            skills_omitted=skills_omitted,
             earlier_record=earlier_record,
-            current_request=request,
+            checkpoint_omitted=checkpoint_omitted,
         ),
         "checkpoint": checkpoint,
         "state": list(state),
         "first_kept_seq": view.units[cut].seq,
         "summarized_to_seq": summarized_to_seq(view, cut),
         "previous_compaction_id": previous_row.row_id if previous_row is not None else None,
-        "current_request": request,
-        "current_request_message_id": request_id,
-        "files_read": read,
-        "files_modified": modified,
-        "skills": [{"name": skill.name, "revision": skill.revision} for skill in skills],
+        "files_read": files.read,
+        "files_read_omitted": files.read_omitted,
+        "files_modified": files.modified,
+        "files_modified_omitted": files.modified_omitted,
+        "skills": [{"name": name} for name in skills],
+        "skills_omitted": skills_omitted,
         "tokens_before": tokens_before,
         "tokens_after_estimate": 0,
         "threshold": threshold,

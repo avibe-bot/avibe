@@ -744,6 +744,112 @@ async def test_retry_budget_and_terminal_error_taxonomy(kind, retryable, reason,
     assert [(event.kind, event.message) for event in events if isinstance(event, AgentError)] == [(kind, "clear error")]
 
 
+class _Failing(Hooks):
+    def __init__(self, step: str) -> None:
+        self.step = step
+
+    async def before_model(self, request, ctx):
+        if self.step == "before_model":
+            raise RuntimeError("hook failed")
+
+    async def after_run(self, outcome, ctx):
+        if self.step == "after_run":
+            raise RuntimeError("cleanup failed")
+
+
+async def _cancelled(request, cancel):
+    raise asyncio.CancelledError()
+    yield  # an async generator
+
+
+_TOOL_CALL = ToolCallBlock("call", "echo", {"x": 1})
+#: Every place the loop emits ``AgentError``, each row a run that reaches it: (site, kind, origin, scripts, options).
+#: ``source`` means the served model produced the failure, which an adapter may record against the route.
+ERROR_SITES = {
+    "provider error": ("provider", "auth", "source", [[ProviderError("auth", "denied", False)]], {}),
+    # An overflow says our request was too large, not that the source failed.
+    "provider overflow": ("provider", "overflow", "local", [[ProviderError("overflow", "too long", False)]], {}),
+    "provider stream aborted by the loop": (
+        "provider", "aborted", "local", [[ProviderError("aborted", "stop", False)]], {}
+    ),
+    "failed answer": ("failed answer", "error", "source", [[Done(assistant("half", stop_reason="error"))]], {}),
+    "answer aborted by the loop": (
+        "failed answer", "aborted", "local", [[Done(assistant("half", stop_reason="aborted"))]], {}
+    ),
+    "empty answer": ("empty answer", "empty_response", "source", [[Done(assistant(""))]], {}),
+    "refusal": ("empty answer", "refusal", "source", [[Done(assistant("", stop_reason="refusal"))]], {}),
+    "tool call cut by the output limit past the retries": (
+        "length",
+        "length",
+        "source",
+        [[Done(assistant(calls=[_TOOL_CALL], stop_reason="length"))]],
+        {"retry": RetryPolicy(max_retries=0, initial_delay_s=0)},
+    ),
+    "tool calls under a stop": (
+        "stop", "stop", "source", [[Done(assistant(calls=[_TOOL_CALL], stop_reason="stop"))]], {}
+    ),
+    "a response the transcript cannot hold": (
+        "exception",
+        "ProviderProtocolViolation",
+        "source",
+        [[Done(assistant(calls=[ToolCallBlock("same", "echo"), ToolCallBlock("same", "echo")]))]],
+        {},
+    ),
+    "a hook failure": ("exception", "RuntimeError", "local", [], {"hooks": [_Failing("before_model")]}),
+    "a context that cannot fit": ("exhausted", "context_exhausted", "local", [], {"context": ContextConfig()}),
+    "a cancelled dependency": ("cancelled", "dependency_cancelled", "local", [_cancelled], {}),
+    "a cleanup diagnostic": (
+        "diagnostic", "RuntimeError", "local", [[Done(assistant("ok"))]], {"hooks": [_Failing("after_run")]}
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(ERROR_SITES))
+async def test_every_error_says_whether_the_served_source_produced_it(case):
+    site, kind, origin, scripts, options = ERROR_SITES[case]
+    agent = make_agent(ScriptedProvider(scripts), tools=[FakeTool()], **options)
+    value = "x" * 160_000 if "context" in options else "hello"
+    events = await collect(agent, value=value)
+    errors = [event for event in events if isinstance(event, AgentError)]
+    assert [(error.kind, error.origin) for error in errors] == [(kind, origin)]
+    # The run names the error that decided its outcome; a diagnostic never does.
+    assert events[-1].cause == (None if site == "diagnostic" else errors[0])
+
+
+async def test_a_diagnostic_before_the_failure_is_never_the_cause():
+    class Stream:
+        def __init__(self, terminal, failing_close):
+            self.terminal, self.failing_close = terminal, failing_close
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.terminal is None:
+                raise StopAsyncIteration
+            terminal, self.terminal = self.terminal, None
+            return terminal
+
+        async def aclose(self):
+            if self.failing_close:
+                raise OSError("stream close failed")
+
+    class Provider:
+        protocol = "anthropic"
+        calls = 0
+
+        def stream(self, request, cancel):
+            self.calls += 1
+            if self.calls == 1:  # the first round's stream fails to close: a diagnostic, flushed after the round
+                return Stream(Done(assistant(calls=[ToolCallBlock("a", "echo")])), True)
+            return Stream(ProviderError("server", "upstream failed", False), False)
+
+    events = await collect(make_agent(Provider(), tools=[FakeTool()]))
+    errors = [(event.kind, event.origin) for event in events if isinstance(event, AgentError)]
+    assert errors == [("stream_cleanup", "local"), ("server", "source")]
+    assert (events[-1].cause.kind, events[-1].cause.origin) == ("server", "source")
+
+
 async def test_abort_closes_provider_stream_and_allows_a_new_turn():
     entered = asyncio.Event()
 

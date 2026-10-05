@@ -23,8 +23,6 @@
         "compaction_started",
         "compaction_finished",
         "compaction_failed",
-        "compaction_skipped",
-        "compaction_paused",
         "context_exhausted",
         "run_ended",
         "error"
@@ -221,7 +219,6 @@
           },
           "reason": {
             "enum": [
-              "manual",
               "threshold",
               "overflow"
             ]
@@ -260,7 +257,6 @@
         "properties": {
           "reason": {
             "enum": [
-              "manual",
               "threshold",
               "overflow"
             ]
@@ -287,54 +283,8 @@
         "properties": {
           "reason": {
             "enum": [
-              "manual",
               "threshold",
               "overflow"
-            ]
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "compaction_skipped"
-          }
-        }
-      },
-      "then": {
-        "description": "A manual compaction found nothing older than the kept tail to summarize (context.md section 10). The adapter replies that there is nothing to compact yet; the run ends `completed`.",
-        "required": [
-          "reason"
-        ],
-        "properties": {
-          "reason": {
-            "enum": [
-              "manual"
-            ]
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "compaction_paused"
-          }
-        }
-      },
-      "then": {
-        "description": "Auto-compaction paused for the Session (context.md section 10); emitted once, at the transition. The adapter tells the user.",
-        "required": [
-          "cause"
-        ],
-        "properties": {
-          "cause": {
-            "enum": [
-              "failures",
-              "ineffective"
             ]
           }
         }
@@ -411,6 +361,29 @@
               "ended_by_hook",
               "context_exhausted"
             ]
+          },
+          "cause": {
+            "description": "The error event that decided the reason (the first cause), when an error did; a diagnostic never does.",
+            "type": "object",
+            "required": [
+              "kind",
+              "message",
+              "origin"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "origin": {
+                "enum": [
+                  "source",
+                  "local"
+                ]
+              }
+            }
           }
         }
       }
@@ -426,7 +399,8 @@
       "then": {
         "required": [
           "kind",
-          "message"
+          "message",
+          "origin"
         ],
         "properties": {
           "kind": {
@@ -434,6 +408,13 @@
           },
           "message": {
             "type": "string"
+          },
+          "origin": {
+            "description": "source: the served model produced the failure (a provider error other than an overflow, an answer the loop rejected, a response the transcript cannot hold); local: everything else (a Stop, an overflow or context exhaustion, a hook, tool, or store error).",
+            "enum": [
+              "source",
+              "local"
+            ]
           }
         }
       }

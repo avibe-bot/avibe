@@ -96,21 +96,20 @@
               "type": "string",
               "description": "edit/write display diff."
             },
-            "skill": {
-              "type": "object",
-              "required": [
-                "name",
-                "revision"
-              ],
-              "properties": {
-                "name": {
-                  "type": "string"
-                },
-                "revision": {
-                  "type": "string"
+            "skills": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
                 }
               },
-              "description": "Set when the command loaded a skill (`vibe skill load`); used for rehydration after compaction."
+              "description": "Set when the result carries skills `vibe skill load` loaded: one entry per top-level `<skill_content name>` block, in load order; the names a checkpoint lists. The result clears like any other."
             }
           }
         }
@@ -129,8 +128,11 @@
         "first_kept_seq",
         "summarized_to_seq",
         "files_read",
+        "files_read_omitted",
         "files_modified",
+        "files_modified_omitted",
         "skills",
+        "skills_omitted",
         "tokens_before",
         "tokens_after_estimate",
         "threshold"
@@ -150,32 +152,24 @@
         },
         "reason": {
           "enum": [
-            "manual",
             "threshold",
             "overflow"
           ]
         },
-        "focus": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Text after `/compact`."
-        },
         "summary": {
           "type": "string",
-          "description": "The rendered `<context-checkpoint>` message: framing, checkpoint, `<artifacts>`, `<earlier-record>`, and `<current-request>` when present. Model-facing."
+          "description": "The rendered `<context-checkpoint>` message: framing, checkpoint, `<artifacts>`, `<skills-loaded>`, and `<earlier-record>`. Model-facing. When `first_kept_seq` is not an input, the split turn's input row stays in the projected context as it was, right before this message (context.md section 5); no field names it."
         },
         "checkpoint": {
           "type": "string",
-          "description": "The model-written checkpoint. For `dropped`, the previous checkpoint's text, or empty when there was none."
+          "description": "The model-written checkpoint. For `dropped`, the previous checkpoint's text, or empty when there was none or it was too large for the route (context.md section 8 c)."
         },
         "state": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "State the adapter rendered from its own stores when the checkpoint was written (skills, pending Harness work, the environment block); each is one text block after `summary`. Model-facing."
+          "description": "State the adapter rendered from its own stores when the checkpoint was written (the environment's core fields); each is one text block after `summary`. Model-facing."
         },
         "first_kept_seq": {
           "type": "integer",
@@ -185,22 +179,9 @@
         "summarized_to_seq": {
           "type": "integer",
           "minimum": 0,
-          "description": "The last `context_seq` moved out of the context; the `<earlier-record>` lookup reads through it."
+          "description": "The last `context_seq` moved out of the context; the `<earlier-record>` hint names it."
         },
         "previous_compaction_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "current_request": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "description": "Verbatim text of the split turn's user message, carried across checkpoints while that turn lasts."
-        },
-        "current_request_message_id": {
           "type": [
             "string",
             "null"
@@ -211,34 +192,45 @@
           "items": {
             "type": "string"
           },
-          "description": "Paths given to `read` and never to `write` or `edit`, cumulative."
+          "maxItems": 50,
+          "description": "Paths given to `read` and never to `write` or `edit`, cumulative, most recently touched first as the calls gave them, at most 50; only the summary's display is cut."
+        },
+        "files_read_omitted": {
+          "type": "boolean",
+          "description": "Whether a read path was ever pushed out of `files_read`; once set, it stays set. A mark, not a count: a path pushed out and touched again is the same path."
         },
         "files_modified": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Paths given to `write` or `edit`, cumulative."
+          "maxItems": 50,
+          "description": "Paths given to `write` or `edit`, cumulative, most recently touched first as the calls gave them, at most 50; only the summary's display is cut."
+        },
+        "files_modified_omitted": {
+          "type": "boolean",
+          "description": "Whether a modified path was ever pushed out of `files_modified`; once set, it stays set."
         },
         "skills": {
           "type": "array",
-          "description": "Skills loaded by summarized rows, cumulative, minus those whose load result is still in the context; their bodies are in `state`.",
+          "description": "Names of the skills the summarized rows loaded, cumulative, minus those whose load result is still in the context: the most recently loaded first, at most 20, as loaded. Listed by name in `summary` (`<skills-loaded>`, each displayed as one line of plain text); never their bodies.",
           "items": {
             "type": "object",
             "required": [
-              "name",
-              "revision"
+              "name"
             ],
             "additionalProperties": false,
             "properties": {
               "name": {
                 "type": "string"
-              },
-              "revision": {
-                "type": "string"
               }
             }
-          }
+          },
+          "maxItems": 20
+        },
+        "skills_omitted": {
+          "type": "boolean",
+          "description": "Whether a skill name was ever pushed out of `skills`; once set, it stays set."
         },
         "tokens_before": {
           "type": "integer",
@@ -322,7 +314,7 @@
       }
     },
     "AgentState": {
-      "description": "`agent_events.content_json` of an `agent_state` row: loop state at a commit point (loop-control.md section 7, context.md section 10). Not projected into messages.",
+      "description": "`agent_events.content_json` of an `agent_state` row: hook state at a commit point (loop-control.md section 7). Not projected into messages.",
       "type": "object",
       "required": [
         "version",
@@ -335,29 +327,6 @@
         },
         "state": {
           "type": "object"
-        },
-        "context": {
-          "type": "object",
-          "description": "Context-management guard state (context.md section 10). Written only by C-9's own commits, together with the hook state of that commit point; projection takes it from the latest agent_state row that carries it.",
-          "required": [
-            "failures",
-            "ineffective",
-            "paused"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "failures": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "ineffective": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "paused": {
-              "type": "boolean"
-            }
-          }
         }
       }
     },
@@ -378,7 +347,6 @@
         },
         "reason": {
           "enum": [
-            "manual",
             "threshold",
             "overflow"
           ]
@@ -450,7 +418,6 @@
       "version": 1,
       "mode": "normal",
       "reason": "threshold",
-      "focus": null,
       "summary": "<context-checkpoint>\nThis is a record of the earlier part of this conversation, written for you so you can continue. ...\n\n# 1. Self and method\n...\n\n<artifacts>\nRead:\n- tests/test_paths.py\nModified:\n- core/paths.py\n</artifacts>\n<earlier-record>\n...\n</earlier-record>\n</context-checkpoint>",
       "checkpoint": "# 1. Self and method\n...",
       "state": [
@@ -459,15 +426,16 @@
       "first_kept_seq": 412,
       "summarized_to_seq": 411,
       "previous_compaction_id": null,
-      "current_request": null,
-      "current_request_message_id": null,
       "files_read": [
         "tests/test_paths.py"
       ],
       "files_modified": [
         "core/paths.py"
       ],
+      "files_read_omitted": false,
+      "files_modified_omitted": false,
       "skills": [],
+      "skills_omitted": false,
       "tokens_before": 158432,
       "tokens_after_estimate": 31877,
       "threshold": 155808,

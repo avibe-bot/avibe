@@ -29,10 +29,20 @@ W    = context_window                              (128,000 when unknown)
 L_in = input_limit                                 (W when unknown)
 O    = the request's max_tokens: for a conversation request max_output_tokens (8,192 when unknown), capped by the
        Agent's output budget; for a checkpoint request min(16,000, that)
-M    = max(8,000, ceil(0.03 * W))
+M    = min(max(8,000, ceil(0.03 * W)), floor(W / 8))
 T    = min(L_in - O - M, floor(0.9 * W))           the compaction threshold
 keep = min(20,000, floor(0.25 * T))                the verbatim tail of a normal checkpoint
 ```
+
+`O` is what the request asks for, not the most the route could produce. Model Hub model definitions are seeded from
+models.dev, where many models list an output maximum as large as the window: in the snapshot checked on 2026-10-04,
+1,337 of 8,150 entries with both limits have `max_output_tokens + M >= context_window` (so `T <= 0` and nothing could
+be sent), and 296 more would leave `T < 0.25 * W`. The adapter therefore asks for
+`min(max_output_tokens, floor(W / 4))` on every hop it resolves (a retry's fallback included), the maximum 8,192 when
+unknown, so the output never takes more than a quarter of any window; the limits themselves still come from Model
+Hub. `M` is at most an eighth of the window, so with `O <= W / 4` the threshold stays positive on every window:
+`T >= 0.625 * W` (with `L_in = W`). Windows of 64,000 tokens and more are unchanged (`M = max(8,000, 3% W)`); on an
+8,000-token route `O = 2,000`, `M = 1,000`, and `T = 5,000`.
 
 A conversation request **fits** when `est + O + M <= L_in`, where `est` is its estimate (§2); `M` absorbs the
 estimate's error. A request **can fit** when `est + O <= L_in`. A checkpoint request (§6) is sent only when it can
@@ -67,19 +77,20 @@ Every conversation request takes the request pipeline (§10, invariant 1). Its C
 before a retry alike:
 
 1. **Stop** (§8 d) when the request cannot fit and neither can its minimal request: the request the drop (§8 c)
-   would leave with everything but the last unit moved out (the drop's own row, with its `state` and, when the cut
-   splits a turn, its `<current-request>` copy, §5), budgeted without the anchor (its history would be gone). With
+   would leave with everything but the last unit moved out (the drop's own row with its `state`, and, when the cut
+   splits a turn, the turn's input, which stays, §5), budgeted without the anchor (its history would be gone). With
    fewer than two units nothing can move out, and the minimal request is the request itself. The provider never
    sees the request.
 2. **Clear** (§4) when the provider cache is cold (no model request for longer than the cache TTL, 300 s by
    default; after a restart, measured from the latest response row's `created_at`) or `est >= 0.8 * T`.
-3. **Checkpoint** when `est >= T`, auto-compaction is not paused (§10), and there is something to summarize, at most
-   once per model request: a normal checkpoint (§6, reason `threshold`) when the fork it would send can fit,
+3. **Checkpoint** when `est >= T`, the run has not stopped compacting (§10), and there is something to summarize,
+   at most once per model request: a normal checkpoint (§6, reason `threshold`) when the fork it would send can fit,
    otherwise the overflow ladder from (b) (§8, reason `overflow`). A checkpoint request that overflows continues at
    (b).
 4. **Ladder** (§8) when the request does not fit. With no checkpoint request left to try (one failed for this
-   request other than by overflow, or auto-compaction is paused), a request that can fit is sent and the provider
-   judges.
+   request other than by overflow, or the run has stopped compacting), a request that can fit is sent and the
+   provider judges. Once the run has stopped compacting nothing is compacted at all: a request that cannot fit, or
+   that the provider refuses as overflow, ends the run `context_exhausted` (§10).
 
 A request the provider rejects as overflow (`ProviderError.kind == "overflow"`, classified by
 `ai/errors.is_overflow_message`, HTTP 413, and `context_length_exceeded`) before anything was streamed, and with no
@@ -93,8 +104,8 @@ each is sent only when it can fit.
 
 - Eligible: results of `read` and `bash` in the projected context (terminal screen snapshots join when they exist).
 - Protected: results after the second-latest input (the last 2 user turns; with fewer than 2 inputs since the latest
-  checkpoint, all of them), the newest 5 eligible results, skill loads (a result whose `details.skill` is set), and
-  results already cleared. Results before the latest checkpoint are not in the context.
+  checkpoint, all of them), the newest 5 eligible results, and results already cleared. A skill load clears like any
+  other result: the model loads the skill again by name when it needs it, as after a checkpoint (§7). Results before the latest checkpoint are not in the context.
 - Applied only when the candidates free at least 20,000 tokens, all at once, one `context_edit` row per result:
   `{"target_event_id": <tool_result row id>, "replacement": {"text": PLACEHOLDER}, "reason": "clear_old_tool_result"}`.
 - `PLACEHOLDER` = `[Old tool result cleared to save context. Re-run the tool or re-read the file if you need it again.]`
@@ -107,16 +118,23 @@ The projected context after the latest checkpoint is a list of **units**: an inp
 results of its tool calls. A cut falls only before a unit: before a user message, or before an assistant message
 whose tool batch follows it; never at a tool result, so no call is separated from its result.
 
-- **Normal** (threshold, manual, and the first overflow step): the tail is the longest run of whole units at the end
-  whose tokens total at most `keep`, and at least the last unit. Everything before it is the head. An empty head
-  means there is nothing to summarize.
+- **Normal** (threshold, and the first overflow step): the tail is the longest run of whole units at the end
+  whose tokens total at most `keep`, and at least the last unit; a split turn's input, which stays (below), counts
+  toward `keep` once, at its own size. Everything before it is the head. A head with nothing to summarize but that
+  input means there is nothing to summarize.
 - **Rolling** (§8 b): the cut nearest to half the tokens, moved earlier until the forked request over the head can fit
   (§1); never past the last unit.
 - **Dropped** (§8 c): the cut nearest to half the tokens; never past the last unit.
 
-`first_kept_seq` is the `context_seq` of the first kept unit. If that unit is not an input, the cut split a turn: the
-text of the latest input in the head, or the previous checkpoint's current request when the head has none, is copied
-verbatim into the checkpoint as `<current-request>` (images as `[image: name]`), with no model call.
+Neither moves out nothing but a split turn's input.
+
+`first_kept_seq` is the `context_seq` of the first kept unit. If that unit is not an input, the cut split a turn, and
+the turn's input stays: projection keeps the latest input before `first_kept_seq` as it was, images, attachments, and
+environment block included, right before the checkpoint message and the kept rows (§7), so the checkpoint's
+`state`, the current environment, comes after any environment block the input carries and the latest wins by
+position. The checkpoint summarizes everything else in the head. Nothing is copied and no row field names it: the input is found from the rows,
+and stays through later checkpoints while their cuts fall inside the same turn. If the input alone cannot fit, nothing
+can move it out, and §8 (d) applies.
 
 ## 6. Checkpoint turn
 
@@ -128,8 +146,7 @@ A checkpoint is written by a **fork** of the conversation, the only delivery pat
   effort are never changed: Anthropic renders them into the prompt. `max_tokens = min(16,000, O)`.
 - **Normal**: the prefix is the whole projected conversation. **Rolling**: the prefix is the projected context up to
   the cut, which is a prefix of the original request.
-- One user message is appended: the checkpoint request (§11), with `Additional focus from the user: <focus>` for
-  `/compact <focus>`.
+- One user message is appended: the checkpoint request (§11).
 - The turn's requests take the request pipeline (§10, invariant 1; a request that cannot fit is never sent and
   fails the attempt as an overflow), its responses the admission (invariant 6), and its tool calls the tool pipeline
   (invariant 2). Its responses and results are never committed to the context, and nothing is shown to the user.
@@ -148,7 +165,7 @@ budget (invariant 2):
   unavailable. Write the checkpoint now.`
 - Every request of the turn is budgeted on the route resolved for it (§1): its `max_tokens` is that route's
   `min(16,000, O)`.
-- The bound is the window, not `T`, the same way in threshold, manual, and rolling turns. Before each call,
+- The bound is the window, not `T`, the same way in threshold and rolling turns. Before each call,
   `room = L_in - est - min(16,000, O) - reserved`, where `est` is the budget of the turn's latest request plus the
   tokens of the response and results since, and `reserved` is one fixed-text result (the longer of the two below)
   for each later call of the same response, so every result of the batch is accounted for before it exists. This is
@@ -191,28 +208,54 @@ is written, so projection stays a pure function of the rows:
 
   <artifacts>
   Read:
-  - <path, cumulative across checkpoints>
+  - <path, cumulative across checkpoints, most recently touched first, the route's share of them>
+  - and <N> more
+  - and earlier ones (see the earlier record)
   Modified:
-  - <path, cumulative across checkpoints>
+  - <path, cumulative across checkpoints, most recently touched first, the route's share of them>
+  - and <N> more
+  - and earlier ones (see the earlier record)
   </artifacts>
+  <skills-loaded>
+  Skills you had loaded are listed by name; run `vibe skill load <name>` again before you rely on one.
+  - <name, most recently loaded first, at most 20>
+  - and earlier ones (see the earlier record)
+  </skills-loaded>
   <earlier-record>
-  The full text of the earlier conversation is still stored. To look up a detail, run:
-  <the adapter's lookup command for this Session through summarized_to_seq>
+  <the adapter's hint: where this Session's earlier conversation is stored, through summarized_to_seq>
   </earlier-record>
-  <current-request>
-  <the split turn's user message, verbatim>
-  </current-request>
   </context-checkpoint>
   ```
 
   `Read` lists paths of successful `read` calls that no `write` or `edit` touched; `Modified` lists paths of
-  successful `write` or `edit` calls; `(none)` when a list is empty. `<earlier-record>` is left out when the adapter supplies no command, and
-  `<current-request>` when the cut did not split a turn.
-- `state`: texts the adapter rendered from their own stores when the checkpoint was written: skill bodies by name and
-  revision (at most 5,000 tokens each and 25,000 in total), pending Watches, Tasks, and delegated Runs from the Harness
-  tables, and the full environment block when the checkpoint happened inside a run (C-7 §8).
-- Projection (C-5 §3): the system prompt, hook-rehydrated messages, one user message holding `summary` and then each
-  `state` text as its own text block, then the rows from `first_kept_seq` on, with edits applied. A tool result whose
+  successful `write` or `edit` calls; `(none)` when a list is empty. The row keeps each path as the call gave it, so a
+  file's identity and whether it was read or modified are always decided on its original path; only what the model
+  reads is cut. Each list keeps its 50 most recently touched paths in the row and marks, once and for good, that a
+  path was pushed out (`files_read_omitted`, `files_modified_omitted`); the text shows the route's share of them,
+  `clamp(floor(W / 4,000), 5, 50)` for the route the conversation's next request goes to (5 on 8K, 8 on 32K, 50 from
+  200K), counts the stored rest in "and N more", and when the mark is set ends with "and earlier ones" (pointing to
+  the earlier record when there is one). Only what is exact is counted: a path pushed out and touched again is the same
+  path, so a count of pushed-out paths would grow with every cycle and say what is not. This is an Avibe deviation
+  from Pi, which keeps every path: Avibe Sessions are long-lived (IM threads and Workbench Sessions that run for
+  weeks), so an unbounded list would turn a working Session into a forced `/new`. `<skills-loaded>` lists the skills
+  the summarized rows loaded (§4's marks, minus those whose load result the kept rows still hold), by name only: the
+  most recently loaded first, at most 20, cumulative, stored as loaded, with the same mark (`skills_omitted`) and line
+  for the ones pushed out; it is left out when there are none. A skill's instructions are never injected: the model loads the skill again, and `vibe skill
+  load` checks the name against the catalog. Every path and name the model reads is one line of plain text
+  (`display`): escaped (`escape`: a backslash doubled, then control characters and `<`, `>` as `\uXXXX`, or
+  `\UXXXXXXXX` past the BMP), then cut in the middle to 160 UTF-8 bytes on a character boundary (its head and its file
+  name stay), at most about 40 tokens whatever the script, so a filename can neither add a line nor close a tag.
+  Escaping is injective, so two paths look alike only when a cut hides where they differ. `<earlier-record>` is the adapter's short hint, left out when it supplies none.
+- `state`: texts the adapter rendered from their own stores when the checkpoint was written: the environment's core
+  fields (C-7 §8: cwd, os, shell, date, timezone; no Watches; each field displayed as every input's block displays it,
+  the cwd escaped and never cut, every other field cut to 160 UTF-8 bytes (`display`), so the block is the cwd, which
+  the OS bounds, plus at most about 4 x 40 tokens; a checkpoint always happens inside
+  a run, and a Turn's own input carries only the fields that changed). Nothing else is rehydrated in v1: skills are
+  listed by name in `<skills-loaded>`, pending work is the checkpoint's own "Waiting on", and a split turn's input
+  stays as it was (§5).
+- Projection (C-5 §3): the system prompt, hook-rehydrated messages, a split turn's input (§5), one user message
+  holding `summary` and then each `state` text as its own text block, then the rows from `first_kept_seq` on, with
+  edits applied. A tool result whose
   call was summarized is left out with it. No synthetic "continue" message follows.
 - Every `Compaction`, `ContextEdit`, and `AgentState` row is checked against its complete schema shape when it is
   loaded, so a malformed row fails projection instead of a later step that reads it.
@@ -231,16 +274,21 @@ once the request fits:
   fit (§5), so the context becomes checkpoint + the rest verbatim; roll again while the request still does not fit,
   at most 2 rolls per request.
 - (c) **Dropped**: when no checkpoint request can help (one failed for this request other than by overflow, a rolling
-  one failed, no rolling prefix can fit, the rolls are used up, or auto-compaction is paused), no model is called:
-  the earliest part (§5) moves out of the context. Built like any checkpoint row (§7: fresh `state`, and
-  `<current-request>` when the cut splits a turn), the row keeps the previous checkpoint's text and the
+  one failed, no rolling prefix can fit, or the rolls are used up), no model is called:
+  the earliest part (§5) moves out of the context. Built like any checkpoint row (§7: fresh `state`, and a split
+  turn's input stays), the row keeps the previous checkpoint's text and the
   `<earlier-record>` pointer; `checkpoint` is empty when there was none, and the message then has no framing text.
+  The previous checkpoint's text is kept only if the minimal request (§3) carrying it can fit: a checkpoint written
+  on a larger route may not fit a smaller fallback. Otherwise the row has no model text, and its message says, in
+  place of the framing, "An earlier checkpoint was too large for this model and was omitted; see the earlier
+  record." (the pointer clause only when there is an `<earlier-record>`); the history stays retrievable there.
   Repeated while the request still does not fit.
 - (d) **Stop**: when the request and its minimal request (what the drop would leave of it: the drop's own row, §8 c,
   plus the last unit; §3) both cannot fit (checked in the stage, §3,
   before provider admission), when nothing more can move out of a request that cannot fit or that the provider
-  refused, or after 4 provider overflows of one request, the run ends `context_exhausted` and the
-  `context_exhausted` event says what fills the context. No model is called for a context that cannot fit.
+  refused, after 4 provider overflows of one request, or once the run has stopped compacting (§10), the run ends
+  `context_exhausted` and the `context_exhausted` event says what fills the context. No model is called for a
+  context that cannot fit.
 
 An attempt the provider refused, or that is retried, is never context (§10, invariant 4).
 
@@ -250,13 +298,27 @@ mechanically, and stops after its fourth overflow.
 ## 9. What the adapter supplies
 
 The loop takes a `ContextConfig` (`harness/context.py`); without one, no context management runs and an overflow
-ends the run `context_exhausted`, as in P1. The adapter supplies:
+ends the run `context_exhausted`, as in P1. The adapter supplies the following; the Avibe Agent's are in
+`modules/agents/avibe` (`agent.py`, `context.py`, `store.py`), and every Turn of it runs with a `ContextConfig`.
 
-- `scratch_dir`: this Session's scratch directory; without it, the policy denies every write.
-- `ContextHost.earlier_record(session_id, through_seq)`: the lookup command, a `vibe data query` SQL naming every
-  Session whose rows the context holds and the last summarized `context_seq`.
-- `ContextHost.render_state(StateRequest)`: the `state` texts (§7) for the skills the summarized rows loaded and
-  whether the checkpoint happened inside a run.
+- The limits (§1): the route's capabilities come from the Model Hub model definition the user edits
+  (`context_window`, `max_output_tokens`; `input_limit` stays unknown until Model Hub stores one, so `L_in = W`), and
+  the Agent asks for `min(max_output_tokens, floor(W / 4))` (the maximum 8,192 when unknown) on every hop it resolves,
+  which is `O`.
+- `scratch_dir`: this Session's scratch directory, `<state>/agent_core/scratch/<session_id>/`; without it, the
+  policy denies every write.
+- `ContextHost.earlier_record(session_id, through_seq)`: a short factual hint, not a command: the earlier
+  conversation is stored in Avibe and can be searched with `vibe data query` against table `messages`, `session_id =
+  '<id>'`, `context_seq <= <through_seq>`, the model-facing text being in `content_json.model.message`; for a fork, one
+  more line names the Session it was forked from and at which `context_seq`. The model writes its own query (the
+  system prompt teaches `vibe data query`); `messages` is readable by every caller.
+- `ContextHost.render_state(StateRequest)`: the `state` texts (§7): the environment's core fields.
+- Skill loads marked in their results: `vibe skill load` writes one `<skill_content name="...">` block per skill it
+  loads, and every top-level block in a successful `bash` result is recorded in the result's `details.skills`
+  (`[{name}]`), whatever the command looked like; blocks are parsed as balanced, so an example tag inside a skill's
+  body is not a load. A checkpoint lists the names (§7); the result clears like any other (§4). A command that only
+  prints such a block (a `cat` of a file) is marked too; that lists a name the model may reload, which `vibe skill
+  load` checks, so it costs a line and injects nothing.
 - A `TranscriptStore` (C-5 §2) implementing the whole protocol C-9 uses: `append_response(..., request=...)` keeps
   `ModelResponse.request` for the anchor (§2); `append_payloads(session_id, entries)` writes several payload rows in
   one transaction (invariant 3); `append_audit(session_id, kind, payload)` writes a non-context audit row,
@@ -264,24 +326,33 @@ ends the run `context_exhausted`, as in P1. The adapter supplies:
   The SQLite store and the adapter's implement it, and one contract suite runs the same tests on them and on the
   in-memory store the engine tests use (`tests/test_transcript_store_contract.py`).
 - The full environment block (C-7 §8) on the first input after a checkpoint: the summarized inputs that carried it
-  are gone, and a checkpoint's `state` carries it only when it happened inside a run.
-- `Agent.compact(turn_id=..., focus=...)` behind `/compact [focus]` on every surface, and the pause notice (§10)
-  through `vibe/i18n`.
+  are gone. The Avibe Agent works out an
+  input's environment delta against the inputs the projected context keeps, so the input carries every field the
+  context no longer shows, and forgets what it sent when a checkpoint commits.
+- The one user-visible text of context management, through `vibe/i18n`: when a run ends `context_exhausted`, the stop
+  message says the conversation has grown too long to continue reliably and suggests starting a new session with
+  `/new`. Compaction itself, a failed checkpoint included, shows nothing. A failure is recorded against the Model Hub
+  route only when the served source produced it, which the loop states on every `error` event (`origin`, set where the
+  error is raised): `source` for a C-2 provider error other than an overflow (our request was too large) or the loop's
+  own abort, an answer the loop rejected (a failed or empty answer, a refusal, tool calls under `length` past the
+  retries or under another stop), or a reply the transcript cannot hold; `local` for everything else (an overflow or a
+  context that cannot fit, a Stop, a hook, tool, or store error). The adapter takes the failure (its kind, text, and
+  attribution) from `run_ended.cause`, the error that decided the run's outcome, never from a diagnostic.
 
 ## 10. Guards
 
-- **One compaction in flight per Session.** A checkpoint turn never starts another; `compact()` and `run()` refuse
-  each other on one Agent; across Agent instances the adapter's Session writer lock serializes them.
-- **Pause.** Each failed checkpoint counts as a failure; a successful one resets the count. A successful
-  normal checkpoint whose result is still at least `0.75 * T` counts as ineffective; an effective one resets that
-  count. After 3 consecutive failures or 3 ineffective checkpoints, auto-compaction pauses for the Session: threshold
-  checkpoints stop, and the overflow ladder skips straight to (c). The `compaction_paused` event fires once, at the
-  transition, and the adapter tells the user. The counters and the pause are durable loop state, stored beside the
-  hook state in `agent_state` rows (`AgentState.context`), so they survive restarts and forks; projection takes them
-  from the latest `agent_state` row that carries them.
-- **Manual `/compact [focus]`** clears the pause and both counters, then runs a normal checkpoint with reason
-  `manual`; its own outcome counts as above. When everything is within the kept tail, it emits `compaction_skipped`
-  and ends `completed`, and the adapter replies briefly that there is nothing to compact yet.
+- **One compaction in flight per Session.** A checkpoint turn never starts another; it runs inside a run, and an
+  Agent refuses a second run while one is active; across Agent instances the adapter's Session writer lock
+  serializes them.
+- **A per-run bound on unproductive checkpoints.** A checkpoint attempt that fails, or a normal one whose result is
+  still at least `0.75 * T` (ineffective), is unproductive; an effective one is not counted. After 2 unproductive
+  attempts in one run (`UNPRODUCTIVE_CHECKPOINTS`), the run stops compacting: nothing more is compacted in it (no
+  checkpoint, no mechanical drop), a request that can fit is still sent, and one that cannot fit or that the
+  provider refuses as overflow ends the run `context_exhausted` (§8 d). The bound is read live first on every
+  request, so nothing is built for a compaction it forbids (no hypothetical drop, no host call), and before every
+  step of the overflow ladder, which is one loop, so an attempt that uses it up ends the ladder there, never in a
+  drop. It is held in memory and never persisted: the next run starts at zero, whatever route or restart lies
+  between, so wasted checkpoint spend is at most 2 attempts per Turn. Nothing of it is shown to the user.
 
 **Ordering and ownership invariants.** This list is the one normative statement of these rules; the other sections
 refer to it. Each has a test in `tests/agent_core/agent/test_compaction.py` (route: `test_context.py`; the ledger's
@@ -303,10 +374,9 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    table (a denial is its fixed text), then execution (a scratch `write` or `edit` relative to the root's
    descriptor, as joined work an abort waits for), then the bound on the result of every call that ran (§6). The
    two fixed texts are never cut.
-3. **One commit for C-9 state.** A transition (its `context_edit` rows, its `context_compaction` row, the guard and
-   pause, and the hook state of that commit point in `AgentState`) is written in one transaction
-   (`append_payloads`), before any event announces it; a failed commit leaves nothing. Nothing else writes
-   `AgentState.context`.
+3. **One commit for C-9 state.** A transition (its `context_edit` rows or its `context_compaction` row, and the hook
+   state of that commit point in `AgentState`) is written in one transaction (`append_payloads`), before any event
+   announces it; a failed commit leaves nothing. C-9 keeps no other durable state.
 4. **One attempt ledger.** Every model attempt of a run (success, overflow, error, retry, checkpoint) records its
    request, its response or partial, and so its usage, in one place. The checkpoint audit and the request facts of a
    committed response (the anchor) read only from it. An attempt that does not become the run's response is never
@@ -318,9 +388,9 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    diagnostic and is not retried. The cancelled run scope admits no further store write, so an aborted call's
    unaudited attempts are not kept. It is the one place that usage is kept. A checkpoint attempt's partials and
    usage are kept in its `CheckpointTurn` row (§6), which the turn writes by the same rule: once, on every exit but
-   an abort, whichever step ends it (compose, provider, admission, the host's state or lookup, building the row,
+   an abort, whichever step ends it (compose, provider, admission, the host's state or hint, building the row,
    commit). A failed request or a host failure after the model answered is a failed checkpoint, counted by the
-   guard; an engine error building the row, or a failed commit, ends the run with nothing landed (invariant 3).
+   run's bound; an engine error building the row, or a failed commit, ends the run with nothing landed (invariant 3).
 5. **Route-scoped anchors.** An anchor answered by another origin (provider, api, model) is invalid (§2).
 6. **One admission path.** Every response, of every purpose (conversation, checkpoint), and every partial with
    content is admitted in one place, the model call, before anything acts on it: it must be valid after the
@@ -329,9 +399,8 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    protocol violation; a checkpoint response that fails is a failed checkpoint, and none of its calls runs. Its
    audit keeps the response when JSON can hold it.
 
-UX is silent: an automatic compaction shows nothing, and the raw messages stay in history. The only user-visible
-text is the pause notice, and, after (d), the run's stop message. A manual `/compact` is an explicit user action,
-so the adapter answers it.
+UX is silent: compaction is invisible, the user never needs to think about it, and the raw messages stay in
+history. The only user-visible text is the stop message after (d) (§9).
 
 ## 11. Checkpoint request (prompt `checkpoint-v2`)
 
@@ -386,7 +455,6 @@ Write in three layers, from the broad to the specific. Use exactly these heading
 - Exact paths, identifiers, commands, links, ids, and values needed to continue.
 
 Rules: terse bullets, not paragraphs. Preserve exact paths, identifiers, commands, error strings, and numbers. Do not invent anything that is not above. Never write out secrets, tokens, or credentials; refer to them by name. Write in the language the user writes in.
-Additional focus from the user: <focus, only for /compact <focus>>
 </context-checkpoint-request>
 ```
 

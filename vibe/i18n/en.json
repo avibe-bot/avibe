@@ -1532,7 +1532,7 @@
       "safety": "The model stopped this reply for safety reasons.",
       "emptyResponse": "The model returned an empty reply. Try again or rephrase the request.",
       "interrupted": "The Avibe Agent run was interrupted before it finished.",
-      "contextExhausted": "This conversation no longer fits in the model's context window. Start a new session, or fork from an earlier message.",
+      "contextExhausted": "This conversation has grown too long to continue reliably. Start a new session with /new.",
       "rateLimit": "The model provider is rate-limiting requests. Try again in a moment.",
       "overloaded": "The model provider is overloaded. Try again in a moment.",
       "network": "The model provider could not be reached. Check the network and the Model Hub source.",

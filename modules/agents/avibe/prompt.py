@@ -21,8 +21,9 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Iterable, Mapping, Optional, Sequence, Union
 
+from core.agent_core.harness.context import display, escape
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import TextBlock, UserMessage
 
@@ -104,25 +105,60 @@ def local_timezone() -> str:
     return time.tzname[0] if time.tzname else "UTC"
 
 
+#: The environment block names at most this many Watches (tools.md section 8).
+_WATCHES_LISTED = 20
+
+#: A field's raw value: text, or the Watches' lines.
+EnvironmentValue = Union[str, tuple[str, ...]]
+
+
 def current_environment(
     cwd: str, watches: Sequence[str], *, include_time: bool = True, now: Optional[datetime] = None
-) -> dict[str, str]:
-    """The environment fields; the clock ones follow ``include_time_info``, as every input prefix does."""
-    fields = {
+) -> dict[str, EnvironmentValue]:
+    """The environment fields, raw; the clock ones follow ``include_time_info``, as every input prefix does.
+
+    Identity is the raw value: only the block the model reads displays them (``render_environment``), and only the
+    exact display of one can prove it unchanged (``environment_delta``).
+    """
+    fields: dict[str, EnvironmentValue] = {
         "cwd": str(Path(cwd).resolve()) if cwd else "",
         "os": operating_system(),
         "shell": os.environ.get("SHELL") or "/bin/sh",
     }
     if include_time:
         fields.update(date=(now or datetime.now()).date().isoformat(), timezone=local_timezone())
-    fields["watches"] = "; ".join(watches) if watches else "none"
-    # One line per field: a value never carries the block's own line structure.
-    return {name: " ".join(value.split()) if "\n" in value else value for name, value in fields.items()}
+    fields["watches"] = tuple(watches)
+    return fields
 
 
-def render_environment(fields: Mapping[str, str]) -> str:
-    lines = [f"{name}: {fields[name]}" for name in ENVIRONMENT_FIELDS if name in fields]
+def render_environment(fields: Mapping[str, EnvironmentValue]) -> str:
+    shown = displayed_environment(fields)
+    lines = [f"{name}: {shown[name]}" for name in ENVIRONMENT_FIELDS if name in shown]
     return "<environment>\n" + "".join(f"{line}\n" for line in lines) + "</environment>"
+
+
+def displayed_environment(fields: Mapping[str, EnvironmentValue]) -> dict[str, str]:
+    """Each field as the model reads it, one line of plain text: the cwd escaped and never cut (the model builds
+    absolute paths from it, so a cut one would be false; the OS bounds its length), every other value, each Watch's
+    line included, cut to 160 bytes (``display``); the first Watches, then how many more."""
+    return {name: _shown(name, value) for name, value in fields.items()}
+
+
+def _shown(name: str, value: EnvironmentValue) -> str:
+    if name != "watches":
+        return escape(str(value)) if name == "cwd" else display(str(value))
+    # Bounded on every input, and so in every checkpoint: the first ones, then how many more (tools.md section 8).
+    listed = [display(line) for line in value[:_WATCHES_LISTED]]
+    if len(value) > _WATCHES_LISTED:
+        listed.append(f"and {len(value) - _WATCHES_LISTED} more")
+    return "; ".join(listed) if listed else "none"
+
+
+def _whole(name: str, value: EnvironmentValue) -> bool:
+    """Whether the model reads all of the value: escaping is injective, so only a cut can hide a change."""
+    if name != "watches":
+        return _shown(name, value) == escape(str(value))
+    return all(display(line) == escape(line) for line in value[:_WATCHES_LISTED])
 
 
 def parse_environment(text: str) -> Optional[dict[str, str]]:
@@ -134,7 +170,7 @@ def parse_environment(text: str) -> Optional[dict[str, str]]:
 
 
 def environment_state(entries: Sequence[ContextEntry]) -> dict[str, str]:
-    """The environment the model was last told, replaying each input's block in context order."""
+    """The environment the model was last told, as it read it, replaying each input's block in context order."""
     state: dict[str, str] = {}
     for entry in entries:
         if entry.kind != "input" or not isinstance(entry.message, UserMessage):
@@ -147,12 +183,22 @@ def environment_state(entries: Sequence[ContextEntry]) -> dict[str, str]:
     return state
 
 
-def environment_delta(previous: Mapping[str, str], current: Mapping[str, str]) -> dict[str, str]:
-    """Fields that changed since the model last saw them; every field on the first input."""
-    return {name: value for name, value in current.items() if previous.get(name) != value}
+def environment_delta(
+    previous: Mapping[str, str], current: Mapping[str, EnvironmentValue]
+) -> dict[str, EnvironmentValue]:
+    """The fields the model must be told: every field on the first input, then each one whose display differs from
+    what the model last read (``previous``), or is cut.
+
+    Identity is the raw value, but the rows hold only what the model read: escaping is injective, so a whole display
+    proves its value unchanged, while a cut one can look the same after its value changed and is sent on every input.
+    """
+    shown = displayed_environment(current)
+    return {
+        name: value for name, value in current.items() if previous.get(name) != shown[name] or not _whole(name, value)
+    }
 
 
-def with_environment(message: UserMessage, delta: Mapping[str, str]) -> UserMessage:
+def with_environment(message: UserMessage, delta: Mapping[str, EnvironmentValue]) -> UserMessage:
     if not delta:
         return message
     return UserMessage(content=(TextBlock(text=render_environment(delta)), *message.content))

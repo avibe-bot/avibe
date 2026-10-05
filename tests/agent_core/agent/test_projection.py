@@ -6,7 +6,7 @@ import pytest
 
 from core.agent_core.harness.projection import INTERRUPTED, ProjectionError, project
 from core.agent_core.harness.store import ContextEntry
-from core.agent_core.messages import ToolCallBlock, ToolResultMessage, text
+from core.agent_core.messages import ImageBlock, ToolCallBlock, ToolResultMessage, UserMessage, text
 from tests.agent_core.fakes import assistant, user
 
 
@@ -58,18 +58,18 @@ def _checkpoint_payload(first_kept_seq, *, summary="SUMMARY", state=("STATE",), 
         "version": 1,
         "mode": "normal",
         "reason": "threshold",
-        "focus": None,
         "summary": summary,
         "checkpoint": "checkpoint",
         "state": list(state),
         "first_kept_seq": first_kept_seq,
         "summarized_to_seq": first_kept_seq - 1,
         "previous_compaction_id": None,
-        "current_request": None,
-        "current_request_message_id": None,
         "files_read": ["a.py"],
         "files_modified": [],
-        "skills": [{"name": "s", "revision": "1"}],
+        "files_modified_omitted": False,
+        "files_read_omitted": False,
+        "skills_omitted": False,
+        "skills": [{"name": "s"}],
         "tokens_before": 10,
         "tokens_after_estimate": 5,
         "threshold": 8,
@@ -158,15 +158,13 @@ def _state_row(context):
         _checkpoint_row(2, 1, files_read="a.py"),
         _checkpoint_row(2, 1, files_modified=[1]),
         _checkpoint_row(2, 1, mode="partial"),
-        _checkpoint_row(2, 1, current_request=["text"]),
         _checkpoint_row(2, 1, summarized_to_seq="1"),
         _checkpoint_row(2, 1, threshold=1.5),
         _checkpoint_row(2, 1, summarizer={"origin": {}, "prompt_version": "v", "rounds": 0}),
         _checkpoint_row(2, 1, usage={"input_tokens": -1}),
         _checkpoint_row(2, 1, unexpected=True),
-        _state_row({"failures": "1", "ineffective": 0, "paused": False}),
-        _state_row({"failures": 0, "ineffective": 0}),
-        _state_row({"failures": 0, "ineffective": 0, "paused": 1}),
+        # Hook state only: C-9 keeps no guard in the rows.
+        _state_row({"failures": 0, "ineffective": 0, "paused": False}),
     ],
 )
 def test_malformed_context_rows_fail_explicitly_instead_of_projecting_a_wrong_context(row):
@@ -174,15 +172,47 @@ def test_malformed_context_rows_fail_explicitly_instead_of_projecting_a_wrong_co
         project([ContextEntry("session", 1, "input", "in-1", user("start")), row])
 
 
-def test_a_complete_checkpoint_row_and_guard_state_load():
+def test_a_complete_checkpoint_row_loads():
     rows = [
         ContextEntry("session", 1, "input", "in-1", user("start")),
-        _state_row({"failures": 1, "ineffective": 2, "paused": True}),
-        _checkpoint_row(3, 1, summarizer=None, current_request="go", current_request_message_id="in-1"),
+        ContextEntry("session", 2, "agent_state", "state", payload={"version": 1, "state": {}}),
+        _checkpoint_row(3, 1, summarizer=None),
     ]
     projected = project(rows)
-    assert projected.context_state == {"failures": 1, "ineffective": 2, "paused": True}
     assert [block.text for block in projected.messages[0].content] == ["SUMMARY", "STATE"]
+
+
+def test_a_checkpoint_that_splits_a_turn_keeps_the_turn_input_whole_before_it_and_the_tail():
+    # The cut fell inside the turn: the turn's input stays as it was, image included, right before the checkpoint,
+    # whose state is then the latest environment the model reads; what came before the input is summarized.
+    image = UserMessage(
+        (
+            text("<environment>\ndate: 2026-10-04\n</environment>"),
+            text("what is in this trace?"),
+            ImageBlock("image/png", "media-1", name="trace.png"),
+        )
+    )
+    call = ToolCallBlock("r1", "read", {"path": "a.py"})
+    rows = [
+        ContextEntry("session", 1, "input", "in-1", user("an older turn")),
+        ContextEntry("session", 2, "response", "out-1", assistant("done")),
+        ContextEntry("session", 3, "input", "in-2", image),
+        ContextEntry("session", 4, "response", "out-2", assistant(calls=[call])),
+        ContextEntry("session", 5, "tool_result", "res-2", ToolResultMessage("r1", "read", (text("a"),))),
+        ContextEntry("session", 6, "response", "out-3", assistant("the trace shows a stall")),
+        _checkpoint_row(7, 6, state=("<environment>\ndate: 2026-10-05\n</environment>",)),
+    ]
+    messages = project(rows).messages
+    assert [type(message).__name__ for message in messages] == ["UserMessage", "UserMessage", "AssistantMessage"]
+    assert messages[0] == image and messages[1].content[0].text == "SUMMARY"
+    assert messages[2].content[0].text == "the trace shows a stall"
+    # The date changed after the input was consumed: the checkpoint's state, read later, says the current one.
+    before_tail = "\n".join(getattr(block, "text", None) or "" for message in messages[:2] for block in message.content)
+    assert before_tail.rsplit("date: ", 1)[1].startswith("2026-10-05")
+    # A cut at an input splits nothing: the checkpoint comes first, then the tail from that input.
+    rows[-1] = _checkpoint_row(7, 3)
+    messages = project(rows).messages
+    assert messages[0].content[0].text == "SUMMARY" and messages[1] == image and len(messages) == 5
 
 
 def test_malformed_or_duplicate_results_are_not_silently_dropped():

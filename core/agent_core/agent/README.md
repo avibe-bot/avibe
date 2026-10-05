@@ -30,10 +30,10 @@ C-9 is on when the adapter passes `context=ContextConfig(host=..., scratch_dir=.
 error). Every conversation request then goes through one pipeline: projection,
 `budget()` on that request, the C-9 stage (stop, clear, checkpoint at T, overflow
 ladder), and the provider;
-a stage step that changes the context rebuilds the request. `agent.compact(turn_id=...,
-focus=...)` is `/compact`, refused while a run is active. Without a config nothing
-changes and an overflow ends the run `context_exhausted`. The `ContextHost` renders
-the `<earlier-record>` lookup and the state a checkpoint carries; the store adds
+a stage step that changes the context rebuilds the request. Compaction is automatic
+and invisible; there is no manual entry point. Without a config nothing changes and
+an overflow ends the run `context_exhausted`. The `ContextHost` renders
+the `<earlier-record>` hint and the state a checkpoint carries; the store adds
 `append_audit` (non-context audit rows), `append_payloads` (one transaction per C-9
 transition), `append_response(request=...)` (the estimate anchor), and each row's
 `created_at`. The SQLite and adapter stores implement all of it, and
@@ -162,7 +162,7 @@ localize that error rather than deliver a silent success.
   one, an overflow before anything was streamed and with no content in its
   partial enters the C-9 overflow ladder, which stops as `context.md` §8 (d) says.
 - Projection consumes store-resolved ancestry, sorts by sequence, restores hook
-  and guard state, applies the latest checkpoint and every context edit, and
+  state, applies the latest checkpoint and every context edit, and
   answers orphans with deterministic interrupted text. It has no job host or
   external settler. The caller supplies the system prompt and hook-rehydrated
   messages; a checkpoint's state is in its row.

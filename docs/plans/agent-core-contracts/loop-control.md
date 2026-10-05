@@ -12,7 +12,6 @@ class Agent:
                  context: ContextConfig | None = None) -> None: ...   # C-9; excludes hooks in v1 (§3)
 
     def run(self, input: Input, *, turn_id: str) -> AsyncIterator[AgentEvent]: ...   # one Avibe Turn
-    def compact(self, *, turn_id: str, focus: str | None = None) -> AsyncIterator[AgentEvent]: ...   # /compact (C-9)
     def steer(self, input: Input) -> bool: ...       # False: not accepted, the adapter keeps ownership
     def follow_up(self, input: Input) -> bool: ...
     def abort(self, reason: str) -> None: ...
@@ -104,12 +103,10 @@ sent with that request gets the error result `Tool <name> is not available.`
 | `tool_progress` | dropped in v1: no backend shows live tool output, so a running tool shows its `tool_started` line, as for the other backends (live tool output joins the live partial text and progress follow-up, `avibe-agent-core.md` §10) |
 | `tool_finished` | the committed `tool_result` row; a handed-over job names its Watch |
 | `steer_applied` | the steer delivery is accepted into the running Turn |
-| `compaction_started`, `compaction_finished`, `compaction_failed` | none for an automatic compaction (C-9 `context.md` §10); a manual `/compact` reports its outcome |
-| `compaction_skipped` | a manual `/compact` had nothing to compact yet: a brief localized reply |
-| `compaction_paused` | the pause notice, once per pause, localized through `vibe/i18n` |
-| `context_exhausted` | what fills the context, in the run's stop message (C-9 `context.md` §8 d) |
-| `run_ended` | `MessageOutput` settles the Turn |
-| `error` | `notify` / `error` row; the text shown is the adapter's localized copy for the event's `kind` (`vibe/i18n`), and `message` is diagnostic detail, never display copy |
+| `compaction_started`, `compaction_finished`, `compaction_failed` | none: compaction is invisible (C-9 `context.md` §10); a finished one lowers the session's token snapshot |
+| `context_exhausted` | the run's stop message: the conversation has grown too long to continue reliably; start a new session with `/new` (C-9 `context.md` §9); the parts are diagnostic |
+| `run_ended` | `MessageOutput` settles the Turn; `cause` is the error that decided the outcome, from which the adapter takes the failure's kind, text, and Model Hub attribution (a diagnostic is never the cause) |
+| `error` | `notify` / `error` row; the text shown is the adapter's localized copy for the event's `kind` (`vibe/i18n`), and `message` is diagnostic detail, never display copy; `origin` (`source` or `local`, set where the loop raises the error) decides whether Model Hub records the failure against the route (C-9 `context.md` §9) |
 
 ## 7. Snapshot and fork
 

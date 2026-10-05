@@ -3,17 +3,22 @@
 from collections import deque
 from typing import Optional
 
-from core.agent_core.agent.events import RunEndReason
+from core.agent_core.agent.events import AgentError, RunEndReason
 
 
 class OutcomeOwner:
     def __init__(self) -> None:
         self._reason: Optional[RunEndReason] = None
+        #: The error that decided the outcome (``RunEnded.cause``); a diagnostic never does.
+        self.cause: Optional[AgentError] = None
         self.diagnostics: deque[tuple[str, str]] = deque()
 
-    def primary(self, reason: RunEndReason) -> None:
+    def primary(self, reason: RunEndReason) -> bool:
+        """Record the run's outcome; True when this call decided it (the first cause wins)."""
         if self._reason is None:
             self._reason = reason
+            return True
+        return False
 
     @property
     def reason(self) -> RunEndReason:
