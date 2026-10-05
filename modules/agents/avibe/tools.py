@@ -48,10 +48,9 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
     and T2 recovery) goes through the host's ``on_hand_over``, which takes the Watch's
     Agent and authorization from ``route``: the job's owning Turn.
     """
-    from core.agent_core.tools.bash import final_result, handover_result
+    from core.agent_core.tools.bash import recovered_result
     from core.agent_core.tools.coding import create_coding_tools
     from core.agent_core.tools.jobs import LocalJobHost
-    from core.agent_core.tools.output import JobOutput
     from core.watches import ManagedWatchStore, agent_jobs_dir
 
     async def hand_over(meta: Mapping[str, Any]) -> str:
@@ -75,8 +74,7 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
         return create_coding_tools(jobs, image_sink=image_sink)
 
     async def render(call: Any, job_id: str, status: Any, watch_id: Optional[str]) -> Any:
-        output = JobOutput(host, job_id)
-        return await handover_result(output, watch_id) if watch_id else await final_result(output, status)
+        return await recovered_result(host, job_id, status, watch_id)
 
     def prune(call_settled: CallSettled) -> list[str]:
         # J5: a job's files stay until its call has a durable result and no Watch still manages it.

@@ -2023,7 +2023,8 @@
           "detected": "Existing direct config detected: {{detail}} — import it into the gateway in one click",
           "import": "Import to gateway…"
         },
-        "fixHint": "Add or enable a source on the Models page to bring it back."
+        "fixHint": "Add or enable a source on the Models page to bring it back.",
+        "warningWithFix": "{{warning}}. {{fixHint}}"
       },
       "migration": {
         "open": "Migrate configuration",

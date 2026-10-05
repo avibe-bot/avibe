@@ -116,8 +116,21 @@ async def test_replace_all_replaces_every_occurrence(tmp_path, make_ctx):
         {"oldText": "bar", "newText": "qux"},
     )
 
-    assert result_text(result) == "Successfully replaced 2 block(s) in f.txt."
+    # The model learns how many occurrences each item replaced without reading the file again.
+    assert result_text(result) == "Successfully replaced 4 occurrences in f.txt (edits[0]: 3, edits[1]: 1)."
     assert (tmp_path / "f.txt").read_text() == "baz(1)\nqux\nbaz(2)\nbaz(3)\n"
+
+
+@pytest.mark.parametrize(("content", "summary"), [
+    ("color=red\nborder=red\naccent=red\n", "Successfully replaced 3 occurrences in f.txt."),
+    ("color=red\n", "Successfully replaced 1 occurrence in f.txt."),
+])
+async def test_a_single_replace_all_reports_its_occurrences(tmp_path, make_ctx, content, summary):
+    (tmp_path / "f.txt").write_text(content)
+
+    result = await _edit(make_ctx, "f.txt", {"oldText": "red", "newText": "blue", "replaceAll": True})
+
+    assert result_text(result) == summary
 
 
 async def test_text_copied_from_read_edits_a_file_with_invalid_bytes(tmp_path, make_ctx):

@@ -3,10 +3,13 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronRight, Settings2 } from 'lucide-react';
 
+import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { SettingsResourceRow, ToggleSwitch } from './SettingsPrimitives';
 import { BackendLifecycleChip } from './BackendLifecycleChip';
 import { SettingsPageShell } from './SettingsPageShell';
+import { modelsApi } from './models/modelsApi';
+import { agentsWithoutModel } from './models/supply';
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { AGENT_BACKENDS, DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/agentBackends';
@@ -54,6 +57,20 @@ export const SettingsBackendsPage: React.FC = () => {
 
   const [loaded, setLoaded] = useState(false);
   const [agents, setAgents] = useState<Record<string, AgentState>>(DEFAULT_AGENTS);
+  // Backends with an enabled Agent whose next turn fails for want of a model (the Models page's reading).
+  const [withoutModel, setWithoutModel] = useState<ReadonlySet<string>>(() => new Set());
+
+  const refreshModelAttention = React.useCallback(async () => {
+    try {
+      setWithoutModel(new Set(agentsWithoutModel(await modelsApi.listAgents()).map((named) => named.backend)));
+    } catch {
+      // Without the Model Hub projection there is nothing to flag.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshModelAttention();
+  }, [refreshModelAttention]);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,6 +141,8 @@ export const SettingsBackendsPage: React.FC = () => {
   const handleToggle = async (name: string, enabled: boolean) => {
     setAgents((prev) => ({ ...prev, [name]: { ...prev[name], enabled } }));
     await persistBackendField(name, { enabled });
+    // Enabling a backend can create its built-in Agent, with no model selected yet.
+    await refreshModelAttention();
   };
 
   const refreshDetectionFor = async (name: string, cli_path?: string) => {
@@ -167,6 +186,9 @@ export const SettingsBackendsPage: React.FC = () => {
                 detail={t(meta.descriptionKey)}
                 actions={
                   <>
+                    {agent.enabled && withoutModel.has(meta.id) && (
+                      <Badge variant="warning">{t('settings.models.gateway.agentIssues.modelMissing')}</Badge>
+                    )}
                     {meta.capabilities.supports_runtime_refresh && <BackendLifecycleChip
                       name={meta.id}
                       enabled={agent.enabled}

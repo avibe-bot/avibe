@@ -353,8 +353,9 @@ def _line_groups(lines: _Lines, normalized: str, matches: list[_Replacement]) ->
 
 def apply_edits(
     text: str, edits: list[Edit], path: str, max_result_chars: Optional[int] = None
-) -> tuple[str, str, str]:
-    """Apply every edit to the file's ``text``; return the new text and the LF views before and after.
+) -> tuple[str, str, str, tuple[int, ...]]:
+    """Apply every edit to the file's ``text``; return the new text, the LF views before and after, and
+    how many occurrences each edit replaced.
 
     Each edit matches in its own tier against the original, in the file's LF view. Exact edits replace
     exactly the text they matched; a normalized edit rewrites the whole lines it touches from the
@@ -384,6 +385,7 @@ def apply_edits(
     fuzzy: list[_Replacement] = []
     inserted = 0
     replacements_made = 0
+    counts: list[int] = []
     for index, edit in enumerate(edits):
         used_normalized, haystack, needle, count = _tier(lines.view, normalized, edit.old_text)
         if not count:
@@ -391,6 +393,7 @@ def apply_edits(
         if not edit.replace_all and count > 1:
             raise _duplicate(path, index, total, count)
         replacements_made += count
+        counts.append(count)
         if replacements_made > MAX_REPLACEMENTS:
             raise _too_many(path, total, replacements_made)
         # The result holds at least every inserted text, so this bound never refuses a result that fits.
@@ -407,7 +410,7 @@ def apply_edits(
     new_text = _apply(text, replacements)
     if new_text == text:
         raise _no_change(path, total)
-    return new_text, lines.view, lf_view(new_text)
+    return new_text, lines.view, lf_view(new_text), tuple(counts)
 
 
 def lf_view(text: str) -> str:

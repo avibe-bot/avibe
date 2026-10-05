@@ -51,6 +51,21 @@ describe('failed-turn retry action', () => {
     expect(screen.getByRole('button', { name: '已请求重试' })).toBeTruthy();
   });
 
+  it('MESSAGE-DELIVERY-322: offers no retry when the interrupted command continues as a Watch', () => {
+    mount({
+      message: {
+        ...notice,
+        text: '⚠️ 本轮执行被中断——Avibe 服务在它运行期间重启。正在运行的命令已作为 Watch w_1 继续执行，结果会发到这里。',
+        metadata: {
+          event: 'backend_failure', backend: 'avibe',
+          failure_id: 'turn:interrupted-turn', turn_id: 'interrupted-turn', detached: false,
+          replayed: true, watch_ids: ['w_1'],
+        },
+      },
+    });
+    expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
+  });
+
   it('locks a click burst and reports only an admitted retry', async () => {
     let finish!: (value: boolean) => void;
     const pending = new Promise<boolean>((resolve) => { finish = resolve; });

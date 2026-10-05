@@ -298,6 +298,8 @@ class AvibeAgent(BaseAgent):
             async for event in turn.agent.run(agent_input, turn_id=turn.turn_id):
                 await self._on_event(turn, event)
             agent_input = await self._continuing_input(turn)
+        if turn.reason not in _COMPLETED:
+            await self._settle_left_open(runtime)
         await self._settle(turn)
         self._maybe_backfill_session_title(request, session_id)
 
@@ -713,6 +715,19 @@ class AvibeAgent(BaseAgent):
             # sender facts cannot be rebuilt must not stop every later Turn of the Session.
             logger.exception("Avibe Agent could not rebuild sender facts for input %s", delivery.get("id"))
             return None
+
+    async def _settle_left_open(self, runtime: _SessionRuntime) -> None:
+        """T2 as soon as a run ends without completing (a Stop, a failure), not at the Session's next resume.
+
+        The calls the run was executing then carry what their jobs recorded, such as a
+        Stop's reason, while the Turn's own outcome is still being settled.
+        """
+        try:
+            await self._settle_open_calls(runtime)
+        except Exception:
+            # The calls stay open, and the recovery owner settles them once this Turn releases the Session.
+            logger.exception("Avibe Agent could not settle the calls a run left open in Session %s", runtime.session_id)
+            self._schedule_recovery()
 
     async def _settle_open_calls(self, runtime: _SessionRuntime) -> None:
         """T2: one committed result for every open tool call, chosen from its job's state."""
