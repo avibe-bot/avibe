@@ -18,6 +18,7 @@ import pytest
 
 from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelRequest
 from core.agent_core.harness.context import (
+    KEPT_INPUTS_WIN,
     CLEARED_PLACEHOLDER,
     ITEM_BYTES,
     budget,
@@ -353,6 +354,39 @@ def test_the_half_cut_is_nearest_to_half_and_the_rolling_cut_moves_earlier_until
     assert rolling_cut(units, lambda cut: cut <= 1) == 1
     assert rolling_cut(units, lambda cut: False) is None
     assert half_cut(units[:1]) is None
+
+
+def test_a_checkpoint_that_keeps_the_turn_inputs_says_they_win_and_only_then():
+    # A mid-turn checkpoint keeps the Turn's inputs verbatim before it; its last line tells the model they are the
+    # request still in progress and win over the record. A checkpoint that keeps none says nothing of the kind.
+    rows = Rows()
+    rows.input("an older turn")
+    rows.response(value="done")
+    first = rows.input("read f10 to f18 in order")
+    rows.tool("read", "f10", call_id="r10", path="ctx2/f10.txt")
+    steer = rows.input("also count them")
+    rows.tool("read", "f11", call_id="r11", path="ctx2/f11.txt")
+    view = context_view(rows.rows)
+
+    def payload(turn_inputs):
+        return compaction_payload(
+            view, len(view.units) - 1, mode="normal", reason="threshold", checkpoint=_VALID, state=("STATE",),
+            earlier_record="Search the earlier record.", tokens_before=1, threshold=2, window=200_000,
+            summarizer=None, usage=None, turn_inputs=turn_inputs,
+        )
+
+    kept = payload({first.context_seq, steer.context_seq})
+    assert kept["kept_inputs"] == [first.context_seq, steer.context_seq]
+    assert kept["summary"].endswith(f"</earlier-record>\n{KEPT_INPUTS_WIN}\n</context-checkpoint>")
+    none = payload(set())
+    assert none["kept_inputs"] == [] and KEPT_INPUTS_WIN not in none["summary"]
+    assert none["summary"].endswith("</earlier-record>\n</context-checkpoint>")
+    # The order is unchanged: the kept inputs, the checkpoint (now ending with the line), then the tail.
+    rows.add("compaction", payload=kept)
+    messages = context_view(rows.rows).messages
+    texts = [message.content[0].text for message in messages[:3]]
+    assert texts[:2] == ["read f10 to f18 in order", "also count them"] and texts[2] == kept["summary"]
+    assert messages[3].tool_calls[0].id == "r11"
 
 
 def test_a_cut_inside_the_turn_counts_every_input_it_keeps():
@@ -856,6 +890,7 @@ def test_a_checkpoint_carries_files_skills_and_pins_the_split_turn_input_across_
             "<earlier-record>",
             "The full earlier conversation is stored; search it with `vibe data query`.",
             "</earlier-record>",
+            KEPT_INPUTS_WIN,  # it keeps the parser turn's input
             "</context-checkpoint>",
         ]
     )
