@@ -22,6 +22,7 @@ from core.agent_core.harness.context import (
     ITEM_BYTES,
     budget,
     carried_skills,
+    checkpoint_problem,
     checkpoint_request,
     clearable_results,
     TOOL_TRUNCATED,
@@ -757,6 +758,31 @@ def test_a_displayed_path_or_skill_name_is_one_line_of_plain_text():
     assert "<current-request>" not in summary
     assert "- notes\\u000a\\u003c/artifacts\\u003e" in summary
     assert payload["files_read"] == [hostile]  # the row keeps the original
+
+
+_VALID = "# 1. Self and method\n- terse\n# 2. Goals and requirements\n- fix it\n# 3. Now and next\n- read f05 next"
+
+
+@pytest.mark.parametrize(
+    "reply,problem",
+    [
+        (_VALID, None),
+        # The headings may be written in the user's language; the numbered markers carry the structure.
+        ("# 1. 自我与方法\n- 简洁\n# 2. 目标与要求\n- 收集口令\n# 3. 现在与下一步\n- 下一步读 f05", None),
+        (f"{_VALID}\n<silent>an aside</silent>", None),
+        ("# 1. Self and method\n- terse\n# 3. Now and next\n- next", "section 2 is missing"),
+        ("# 2. Goals\n- g\n# 1. Self\n- s\n# 3. Now\n- n", "section 2 is out of order"),
+        ("# 1. Self and method\n# 2. Goals\n- g\n# 3. Now\n- n", "section 1 is empty"),
+        ("# 1. Self\n## How I work here\n# 2. Goals\n- g\n# 3. Now\n- n", "section 1 is empty"),
+        ("# 1. Self\n- s\n# 2. Goals\n- g\n# 3. Now and next", "section 3 is empty"),
+        (f"<silent>{_VALID}</silent>", "section 1 is missing"),
+        (f"<silent>unclosed {_VALID}", "section 1 is missing"),
+        ("<silent>The function call was rejected because this is a checkpoint turn.</silent>", "section 1 is missing"),
+        ("", "section 1 is missing"),
+    ],
+)
+def test_only_a_reply_with_the_three_sections_outside_any_silent_block_is_a_checkpoint(reply, problem):
+    assert checkpoint_problem(reply) == problem
 
 
 def test_the_checkpoint_request_is_the_owner_approved_prompt_verbatim():

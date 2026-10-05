@@ -35,11 +35,14 @@ CHECKPOINT_TOOL_POLICY: Mapping[str, Rule] = MappingProxyType(
     }
 )
 
+#: Each ends by saying where the checkpoint belongs: a model denied a file write may otherwise keep trying one.
 DENIED = (
     "This is a checkpoint turn: tools that act outside your own scratch space are unavailable. "
-    "Write the checkpoint now."
+    "Write the checkpoint as your reply text, not into a file."
 )
-BUDGET_USED = "This is a checkpoint turn and its tool budget is used up. Write the checkpoint now."
+BUDGET_USED = (
+    "This is a checkpoint turn and its tool budget is used up. Write the checkpoint as your reply text, not into a file."
+)
 
 
 @dataclass(frozen=True)

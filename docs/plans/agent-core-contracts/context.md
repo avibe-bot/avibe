@@ -176,7 +176,8 @@ budget (invariant 2):
 | `bash` and every other tool | denied, never executed |
 
 - A denied call gets the error result `This is a checkpoint turn: tools that act outside your own scratch space are
-  unavailable. Write the checkpoint now.`
+  unavailable. Write the checkpoint as your reply text, not into a file.` (a model denied a file write may otherwise
+  keep trying one; the owner-approved request, §11, stays untouched).
 - Every request of the turn is budgeted on the route resolved for it (§1): its `max_tokens` is that route's
   `min(16,000, O)`.
 - The bound is the window, not `T`, the same way in threshold and rolling turns. Before each call,
@@ -191,16 +192,23 @@ budget (invariant 2):
   denial and the used-up budget) are a few dozen tokens and are never cut: a truncation note would invite another
   call.
 - At most 5 tool rounds run. After them, or once `room` falls below the floor, the budget is closed: every call gets
-  `This is a checkpoint turn and its tool budget is used up. Write the checkpoint now.` before the table is
+  `This is a checkpoint turn and its tool budget is used up. Write the checkpoint as your reply text, not into a
+  file.` before the table is
   consulted, so the audit's `rounds` can count one more response, the one answered that way. A response that still
   calls tools after that ends the turn as failed.
 - `write` and `edit` in a checkpoint turn keep the tools' arguments and success texts (C-7); their errors are their
   own, short and without the C-7 advice to use `bash`, which the turn may not call. `edit` reuses the tools'
   matching (`edit_diff`), BOM, and line-ending handling. The C-7 tools themselves are unchanged.
 - The checkpoint is the text of a final response that stops with `stop` and calls no tool; only a `tool_use` stop
-  with calls continues the turn. Anything else (a response refused at admission, a length stop, a `tool_use` stop
-  without calls, calls under any other stop, an error, or no text) is a failure, and nothing enters the context;
-  so is a checkpoint whose row the host cannot complete (§10, invariant 4).
+  with calls continues the turn. That text is a checkpoint only if one validator, the same for every checkpoint
+  turn (normal and rolling), accepts it: outside any `<silent>` block (closed, or running to the end), the
+  template's three top-level section markers (`# 1.`, `# 2.`, `# 3.` at the start of a line, whatever language the
+  headings are in) appear in order, each section with content under its heading (a line that is not itself a
+  heading). A reply wrapped in, or made only of, a `<silent>` note, a section missing, out of order, or empty is no
+  checkpoint. Anything else (a response refused at admission, a length stop, a `tool_use` stop without calls, calls
+  under any other stop, an error, no text, or a reply the validator rejects) is a failure: it counts as unproductive
+  (§10), nothing enters the context, the old context is kept, and the ladder continues; the reply's text is only in
+  the audit row. So is a checkpoint whose row the host cannot complete (§10, invariant 4).
 - The turn's messages, read from the attempt ledger (§10, invariant 4) with every failed or retried attempt's
   partial and its usage, and the turn's tool results, are recorded once per checkpoint turn, on every exit but an
   abort (§10, invariant 4), outcome included, as an audit row

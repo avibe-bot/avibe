@@ -33,7 +33,8 @@ from tests.test_avibe_agent import (  # noqa: F401 (fixtures)
 )
 from vibe.i18n import t as i18n_t
 
-CHECKPOINT = "# 1. Self and method\n- the checkpoint"
+#: A checkpoint with the template's three sections (section 11), which the validator accepts.
+CHECKPOINT = "# 1. Self and method\n- the checkpoint\n# 2. Goals and requirements\n- the goal\n# 3. Now and next\n- the next step"
 
 
 def tokens(count: int) -> str:

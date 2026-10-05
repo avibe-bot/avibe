@@ -84,6 +84,7 @@ from core.agent_core.harness.context import (
     budget,
     checkpoint_max_tokens,
     checkpoint_request,
+    checkpoint_problem,
     checkpoint_text,
     clear_edit,
     clearable_results,
@@ -1511,8 +1512,13 @@ class Agent:
                     origin = message.origin
                     if message.stop_reason == "stop" and not message.tool_calls:
                         checkpoint = checkpoint_text(message)
+                        problem = checkpoint_problem(checkpoint) if checkpoint else None
                         if not checkpoint:
                             error = "The checkpoint turn ended without checkpoint text."
+                        elif problem is not None:
+                            # Not a checkpoint (a meta note, a partial one): it fails, and its text stays in the
+                            # audit only; the old context is kept (section 6).
+                            checkpoint, error = "", f"The checkpoint turn's reply is not a checkpoint: {problem}."
                         break
                     if message.stop_reason != "tool_use" or not message.tool_calls:
                         # Only a stop with text and no call is a checkpoint, and only a tool-use stop carries calls.
