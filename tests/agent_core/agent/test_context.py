@@ -392,6 +392,21 @@ def test_a_tool_batch_is_cut_by_water_filling_the_largest_results_first():
     assert fit_batch(small, 10_000) == [None, None] and fit_batch(equal, 10) is None
 
 
+def test_a_result_of_many_blocks_cut_to_fit_stays_within_its_room():
+    # 200 blocks of 50 bytes: the replacement is one text, so the blocks are joined before the cut is measured, and
+    # the batch stays within its room however many blocks the result had.
+    many = ToolResultMessage("m", "bash", tuple(text("b" * 50) for _ in range(200)))
+    other = ToolResultMessage("o", "bash", (text("c" * 400),))
+    for room in (300, 1_000, 2_000):
+        texts = fit_batch([many, other], room)
+        assert texts is not None and texts[0] is not None and texts[0].endswith(TOOL_TRUNCATED)
+        shown = [
+            message if cut is None else ToolResultMessage(message.tool_call_id, message.tool_name, (text(cut),))
+            for message, cut in zip([many, other], texts)
+        ]
+        assert sum(message_tokens(message) for message in shown) <= room, room
+
+
 def test_a_result_cut_to_fit_can_still_be_cleared_when_it_is_old():
     rows = Rows()
     big = "o" * 20_000  # 5,000 tokens each

@@ -96,6 +96,7 @@ from core.agent_core.harness.context import (
     message_tokens,
     messages_tokens,
     normal_cut,
+    notes_tokens,
     output_tokens,
     request_facts,
     request_tokens,
@@ -1155,7 +1156,9 @@ class Agent:
                 # Not even the request the drop would leave (its row and the last unit, without the previous
                 # checkpoint's text) can fit: moving the conversation out cannot help. The newest tool batch is cut
                 # to fit (section 3); anything else is (d), and the provider never sees it.
-                if await self._fit_batch(view, minimal):
+                rest = minimal.est - self._batch_tokens(view)
+                room = minimal.input_limit - minimal.output - rest
+                if await self._fit_batch(view, (room - minimal.margin, room)):
                     return True
                 raise self._exhausted(request, view, plan, newest=True)
         refused, ladder.refused = ladder.refused, False
@@ -1344,25 +1347,41 @@ class Agent:
                 carry = await self._carries(system, selected, request, view, plan)
                 await self._drop(request, view, plan, cut, emit, carry=carry)
                 return True
+            # Nothing more can move out. A refused request's newest tool batch is cut to half of what the model read
+            # (the provider counts more than the estimate), down to its notes; the refusals bound the halvings.
+            if ladder.overflows and await self._fit_batch(view, (self._batch_tokens(view) // 2,), floor=True):
+                return True
             if ladder.overflows or not plan.can_fit:
-                raise self._exhausted(request, view, plan, newest=True)  # nothing more can move out
+                raise self._exhausted(request, view, plan, newest=True)
             return False
 
-    async def _fit_batch(self, view: ContextView, minimal: Budget) -> bool:
-        """Section 3: cut the newest tool batch, which nothing can move out, until the request the drop would leave
-        (``minimal``) fits, with the margin when it can; True when it committed the cuts as ``fit_tool_result`` edits.
-
-        Water-filling over the batch's whole outputs (the rows keep them): the largest results are cut to one cap,
-        each saying so. A batch whose results cut to their notes still cannot fit is left as it is, for the stop.
-        """
+    @staticmethod
+    def _newest_batch(view: ContextView) -> list[tuple[ContextEntry, Message]]:
+        """The committed results of the newest unit when it is a tool batch, as the model reads them."""
         last = view.units[-1] if view.units else None
         if last is None or last.lead.kind != "response":
+            return []
+        return [(entry, message) for entry, message in last.entries[1:] if entry is not None]
+
+    def _batch_tokens(self, view: ContextView) -> int:
+        return sum(message_tokens(message) for _, message in self._newest_batch(view))
+
+    async def _fit_batch(self, view: ContextView, rooms: Sequence[int], *, floor: bool = False) -> bool:
+        """Section 3: cut the newest tool batch, which nothing can move out, to the first of ``rooms`` (tokens) it can
+        fit, or with ``floor`` to its notes when none can; True when it committed the cuts as ``fit_tool_result``
+        edits.
+
+        Water-filling over the batch's whole outputs (the rows keep them): the largest results are cut to one cap,
+        each saying so. A batch that cannot fit any room is left as it is, for the stop.
+        """
+        results = self._newest_batch(view)
+        if not results:
             return False
-        results = [(entry, message) for entry, message in last.entries[1:] if entry is not None]
-        rest = minimal.est - sum(message_tokens(message) for _, message in results)
         originals = [entry.message for entry, _ in results]
-        for reserve in (minimal.output + minimal.margin, minimal.output):
-            texts = fit_batch(originals, minimal.input_limit - reserve - rest)
+        if floor:
+            rooms = (*rooms, notes_tokens(originals))
+        for room in rooms:
+            texts = fit_batch(originals, room)
             if texts is not None:
                 break
         else:

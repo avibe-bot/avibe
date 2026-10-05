@@ -934,6 +934,35 @@ async def test_a_tool_batch_the_ladder_can_make_room_for_is_never_cut():
     assert result.content[0].text == tokens(12_000)
 
 
+async def test_a_refused_batch_nothing_can_move_out_of_is_halved_until_the_provider_takes_it():
+    # The provider counts more than the estimate: it refuses a request that fits here, and nothing older can move
+    # out. The batch is the newest unit, so it is cut to half of what the model read, and the request is sent again.
+    calls = [ToolCallBlock(f"r{index}", "read", {"path": f"f{index}"}) for index in range(3)]
+    model = Model([[Done(assistant(calls=calls))], [OVERFLOW], [Done(assistant("done"))]])
+    agent = make_agent(model, tools=[reader(tokens(2_000))], selection=SMALL)
+    events = await run(agent)
+    assert events[-1].reason == "completed" and not model.checkpoint_requests
+    results = [m for m in model.conversation_requests[-1].messages if isinstance(m, ToolResultMessage)]
+    assert all(result.content[0].text.endswith(TOOL_TRUNCATED) for result in results)
+    assert sum(message_tokens(result) for result in results) <= 3 * 2_001 // 2
+
+
+async def test_a_batch_the_provider_keeps_refusing_is_reported_only_after_it_was_shortened():
+    # Refused on every request: the batch is halved after each refusal, and only then does the run say the tool
+    # output does not fit even shortened, which is now true.
+    calls = [ToolCallBlock(f"r{index}", "read", {"path": f"f{index}"}) for index in range(3)]
+    model = Model([[Done(assistant(calls=calls))], *[[OVERFLOW]] * 4])
+    agent = make_agent(model, tools=[reader(tokens(2_000))], selection=SMALL)
+    events = await run(agent)
+    assert events[-1].reason == "context_exhausted"
+    assert [e.kind for e in events if isinstance(e, AgentError)] == ["tool_output_too_large"]
+    sizes = [
+        sum(message_tokens(m) for m in request.messages if isinstance(m, ToolResultMessage))
+        for request in model.conversation_requests[1:]
+    ]
+    assert len(sizes) == 4 and all(later <= earlier // 2 + 3 for earlier, later in zip(sizes, sizes[1:]))
+
+
 async def test_the_stop_names_the_tool_output_when_even_its_notes_cannot_fit():
     # 300 results on an 8,000-token route: cut to their notes, they still do not fit beside the step that asked for
     # them. The newest tool output is the cause, not the conversation's length, and the error says so.

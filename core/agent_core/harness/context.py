@@ -442,10 +442,16 @@ def _edit(entry: ContextEntry, text: str, reason: str) -> dict[str, Any]:
     return {"version": 1, "target_event_id": entry.row_id, "replacement": {"text": text}, "reason": reason}
 
 
+def notes_tokens(results: Sequence[ToolResultMessage]) -> int:
+    """The tokens of a tool batch with every result cut to its note, the least ``fit_batch`` can make of it."""
+    floor = message_tokens(ToolResultMessage("fit", "fit", (text(TOOL_TRUNCATED),)))
+    return sum(min(message_tokens(result), floor) for result in results)
+
+
 def fit_batch(results: Sequence[ToolResultMessage], room: int) -> Optional[list[Optional[str]]]:
     """A tool batch cut to ``room`` tokens (section 3): the largest results cut to one common cap, water-filling, each
     ending with ``TOOL_TRUNCATED``; the others whole. Each result's cut text, or None where it stays whole; None for the
-    batch when even every result cut to its note cannot fit."""
+    batch when even every result cut to its note cannot fit (``notes_tokens``)."""
     sizes = [message_tokens(result) for result in results]
     if sum(sizes) <= room:
         return [None] * len(results)
@@ -454,7 +460,7 @@ def fit_batch(results: Sequence[ToolResultMessage], room: int) -> Optional[list[
     def total(cap: int) -> int:
         return sum(min(size, cap) for size in sizes)
 
-    if total(floor) > room:
+    if notes_tokens(results) > room:
         return None
     low, high = floor, max(sizes)  # total(low) <= room < total(high)
     while high - low > 1:
@@ -465,7 +471,9 @@ def fit_batch(results: Sequence[ToolResultMessage], room: int) -> Optional[list[
         if size <= low:
             cut.append(None)
             continue
-        kept = fit_result(result.content, low, note=TOOL_TRUNCATED)
+        # The replacement is one text: join the result's blocks first, so the cut measures what the model reads.
+        body = "\n".join(block.text or "" for block in result.content if isinstance(block, TextBlock))
+        kept = fit_result((text(body),), low, note=TOOL_TRUNCATED)
         cut.append("\n".join(block.text or "" for block in kept if isinstance(block, TextBlock)))
     return cut
 
