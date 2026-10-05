@@ -796,7 +796,8 @@ ERROR_SITES = {
         {},
     ),
     "a hook failure": ("exception", "RuntimeError", "local", [], {"hooks": [_Failing("before_model")]}),
-    "a context that cannot fit": ("exhausted", "context_exhausted", "local", [], {"context": ContextConfig()}),
+    # A request whose newest unit alone cannot fit: moving the conversation out would not help, and the kind says so.
+    "an input that cannot fit": ("exhausted", "input_too_large", "local", [], {"context": ContextConfig()}),
     "a cancelled dependency": ("cancelled", "dependency_cancelled", "local", [_cancelled], {}),
     "a cleanup diagnostic": (
         "diagnostic", "RuntimeError", "local", [[Done(assistant("ok"))]], {"hooks": [_Failing("after_run")]}

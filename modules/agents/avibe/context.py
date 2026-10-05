@@ -3,8 +3,9 @@
 ``AvibeContextHost`` is the loop's ``ContextHost``:
 
 * ``earlier_record`` is the short hint a checkpoint carries in ``<earlier-record>``:
-  where the earlier conversation is stored and how far it goes, and the Session's
-  fork source when it is a fork. The model writes its own ``vibe data query``;
+  where the earlier messages are stored and how far they go, one runnable example
+  query, and the Session's fork source when it is a fork. Tool outputs are not
+  there: the model runs a tool again for them;
 * ``render_state`` renders the state a checkpoint carries: the environment's core
   fields (a checkpoint always happens inside a run), bounded by construction.
 
@@ -29,6 +30,8 @@ from modules.agents.avibe.prompt import EnvironmentValue, render_environment
 
 #: The tags of the block ``vibe skill load`` writes for each skill it loads (``render_skill_content``).
 _SKILL_TAG = re.compile(r'<skill_content name="([^"]*)"[^>]*>|</skill_content>')
+#: An id the example query can quote as it is, in SQL and in the shell.
+_PLAIN_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 
 def output_budget(capabilities: Any) -> int:
@@ -63,26 +66,41 @@ class AvibeContextHost:
         self._environment = environment
 
     def earlier_record(self, session_id: str, through_seq: int) -> Optional[str]:
-        """Where the earlier conversation is stored, for the model to search with its own ``vibe data query``.
+        """Where the earlier messages are stored, with one runnable example (``example_query``).
 
-        Not a command: the system prompt already teaches ``vibe data query``, and the rows it names are in
-        ``messages``, which every caller may read.
+        ``messages`` holds them and every caller may read it; tool outputs are not there, so the model runs a tool
+        again for its output.
         """
         from storage.agent_transcript import fork_link
 
         with self._engine.connect() as conn:
             link = fork_link(conn, session_id)
         hint = (
-            "The full earlier conversation is stored in Avibe. Search it with `vibe data query` against table messages,"
-            f" session_id = '{display(session_id)}', context_seq <= {int(through_seq)}; the model-facing text is in"
-            " content_json.model.message."
+            "The earlier messages of this conversation (your inputs and replies, through context_seq"
+            f" {int(through_seq)}) are stored in Avibe's messages table, session_id = '{display(session_id)}'."
+            " Tool outputs are not stored there; re-run a tool if you need its output again."
         )
+        example = example_query(session_id, through_seq)
+        if example is not None:
+            hint += f" For example:\n{example}"
         if link is not None:
             hint += f"\nThis Session was forked from {display(link[0])} at context_seq {int(link[1])}."
         return hint
 
     async def render_state(self, request: StateRequest) -> list[str]:
         return [_environment(self._environment(request.session_id))]
+
+
+def example_query(session_id: str, through_seq: int) -> Optional[str]:
+    """One runnable ``vibe data query`` line over the Session's earlier messages, newest first; None for an id it
+    could not quote as it is."""
+    if _PLAIN_ID.fullmatch(session_id) is None:
+        return None
+    sql = (
+        "SELECT context_seq, type, substr(content_text,1,500) FROM messages"
+        f" WHERE session_id='{session_id}' AND context_seq <= {int(through_seq)} ORDER BY context_seq DESC LIMIT 20"
+    )
+    return f'vibe data query --sql "{sql}"'
 
 
 def _environment(fields: Mapping[str, EnvironmentValue]) -> str:

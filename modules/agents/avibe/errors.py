@@ -20,6 +20,9 @@ _KIND_KEYS: dict[str, str] = {
     "aborted": "interrupted",
     "overflow": "contextExhausted",
     "context_exhausted": "contextExhausted",
+    # The newest unit alone cannot fit (C-9 section 8 d): starting over would not help, so the copy says what to do.
+    "tool_output_too_large": "toolOutputTooLarge",
+    "input_too_large": "inputTooLarge",
     "rate_limit": "rateLimit",
     "overloaded": "overloaded",
     "network": "network",

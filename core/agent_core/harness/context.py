@@ -18,7 +18,7 @@ import time
 import unicodedata
 from itertools import accumulate
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
+from typing import Any, Callable, Collection, Mapping, Optional, Protocol, Sequence
 
 from core.agent_core.ai._common import endpoint_origin
 from core.agent_core.ai.provider import ModelCapabilities, ModelRequest
@@ -84,6 +84,10 @@ CHECKPOINT_TOOL_SLACK = 1_000
 CHECKPOINT_TRUNCATED = (
     "[Output truncated to fit this checkpoint turn: showing about {shown} of {total} tokens. "
     "Read a smaller range if you need more.]"
+)
+#: What a tool result cut to fit a conversation request says (section 3).
+TOOL_TRUNCATED = (
+    "[Output truncated to fit the context window; re-run with offset/limit or a narrower command to see more.]"
 )
 MAX_ROLLS = 2
 MAX_OVERFLOWS = 4
@@ -333,12 +337,15 @@ def _estimate(request: ModelRequest, transcript: Sequence[Message], anchor: Opti
     return whole
 
 
-def fit_result(content: Sequence[UserContent], limit: int) -> tuple[UserContent, ...]:
-    """A checkpoint turn's tool result cut to ``limit`` tokens, head kept, saying what was cut (section 6)."""
+def fit_result(
+    content: Sequence[UserContent], limit: int, *, note: str = CHECKPOINT_TRUNCATED
+) -> tuple[UserContent, ...]:
+    """A tool result cut to ``limit`` tokens, head kept, ending with ``note`` to say so: a checkpoint turn's (section
+    6), and through ``fit_batch`` a conversation's (section 3)."""
     total = message_tokens(ToolResultMessage("fit", "fit", tuple(content)))
     if total <= limit:
         return tuple(content)
-    note = CHECKPOINT_TRUNCATED.format(shown=max(0, limit), total=total)
+    note = note.format(shown=max(0, limit), total=total)
     room = max(0, limit - text_tokens(note) - 1) * 4
     kept: list[UserContent] = []
     for block in content:
@@ -413,7 +420,7 @@ def clearable_results(view: ContextView) -> tuple[ContextEntry, ...]:
                 entry is not None
                 and isinstance(message, ToolResultMessage)
                 and message.tool_name in CLEARABLE_TOOLS
-                and entry.row_id not in view.edited
+                and entry.row_id not in view.cleared
             ):
                 eligible.append((index, entry, message))
     candidates = [item for item in eligible[: max(0, len(eligible) - CLEAR_KEEP_RESULTS)] if item[0] < protected_from]
@@ -423,12 +430,44 @@ def clearable_results(view: ContextView) -> tuple[ContextEntry, ...]:
 
 
 def clear_edit(entry: ContextEntry) -> dict[str, Any]:
-    return {
-        "version": 1,
-        "target_event_id": entry.row_id,
-        "replacement": {"text": CLEARED_PLACEHOLDER},
-        "reason": "clear_old_tool_result",
-    }
+    return _edit(entry, CLEARED_PLACEHOLDER, "clear_old_tool_result")
+
+
+def fit_edit(entry: ContextEntry, text: str) -> dict[str, Any]:
+    """The edit that shows a tool result cut to fit (``fit_batch``, section 3); the row keeps the whole output."""
+    return _edit(entry, text, "fit_tool_result")
+
+
+def _edit(entry: ContextEntry, text: str, reason: str) -> dict[str, Any]:
+    return {"version": 1, "target_event_id": entry.row_id, "replacement": {"text": text}, "reason": reason}
+
+
+def fit_batch(results: Sequence[ToolResultMessage], room: int) -> Optional[list[Optional[str]]]:
+    """A tool batch cut to ``room`` tokens (section 3): the largest results cut to one common cap, water-filling, each
+    ending with ``TOOL_TRUNCATED``; the others whole. Each result's cut text, or None where it stays whole; None for the
+    batch when even every result cut to its note cannot fit."""
+    sizes = [message_tokens(result) for result in results]
+    if sum(sizes) <= room:
+        return [None] * len(results)
+    floor = message_tokens(ToolResultMessage("fit", "fit", (text(TOOL_TRUNCATED),)))
+
+    def total(cap: int) -> int:
+        return sum(min(size, cap) for size in sizes)
+
+    if total(floor) > room:
+        return None
+    low, high = floor, max(sizes)  # total(low) <= room < total(high)
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (middle, high) if total(middle) <= room else (low, middle)
+    cut: list[Optional[str]] = []
+    for result, size in zip(results, sizes):
+        if size <= low:
+            cut.append(None)
+            continue
+        kept = fit_result(result.content, low, note=TOOL_TRUNCATED)
+        cut.append("\n".join(block.text or "" for block in kept if isinstance(block, TextBlock)))
+    return cut
 
 
 # --- cut points (context.md section 5) ----------------------------------------------
@@ -438,67 +477,63 @@ def unit_tokens(unit: Unit) -> int:
     return messages_tokens(unit.messages)
 
 
-def _pins(units: Sequence[Unit]) -> list[Optional[int]]:
-    """For each cut before ``units[cut]``, the index of the input it keeps: a cut inside a turn keeps the turn's input
-    as it was (section 5), and a cut at an input keeps none."""
-    pins: list[Optional[int]] = []
-    last: Optional[int] = None
-    for index, unit in enumerate(units):
-        is_input = unit.lead.kind == "input"
-        pins.append(None if is_input else last)
-        last = index if is_input else last
-    return pins
+def _turn(units: Sequence[Unit], turn_inputs: Collection[int]) -> tuple[list[int], list[int]]:
+    """How many of the in-flight Turn's inputs ``units[:cut]`` holds, and their tokens, for each ``cut``: a cut inside
+    the Turn keeps each of them as it was (section 5)."""
+    counts, sizes = [0], [0]
+    for unit in units:
+        kept = unit.lead.kind == "input" and unit.seq in turn_inputs
+        counts.append(counts[-1] + kept)
+        sizes.append(sizes[-1] + (unit_tokens(unit) if kept else 0))
+    return counts, sizes
 
 
-def _moves(pins: Sequence[Optional[int]], cut: int) -> bool:
-    """Whether a cut before ``units[cut]`` moves out more than the input it keeps."""
-    return cut > 1 or (cut == 1 and pins[1] != 0)
+def _moves(counts: Sequence[int], cut: int) -> bool:
+    """Whether a cut before ``units[cut]`` moves out more than the Turn's inputs it keeps."""
+    return cut > counts[cut]
 
 
-def normal_cut(units: Sequence[Unit], keep: int) -> Optional[int]:
-    """Index of the first kept unit: the longest tail of whole units within ``keep``, at least the last, with the input
-    a cut inside a turn keeps counted at its own size (section 5).
+def normal_cut(units: Sequence[Unit], keep: int, *, turn_inputs: Collection[int] = ()) -> Optional[int]:
+    """Index of the first kept unit: the longest tail of whole units within ``keep``, at least the last, with the
+    in-flight Turn's inputs a cut keeps counted once at their own size (section 5).
 
-    None when nothing but that input would move out.
+    None when nothing but those inputs would move out.
     """
     if not units:
         return None
     sizes = [unit_tokens(unit) for unit in units]
     tails = list(accumulate(reversed(sizes)))[::-1]  # tails[cut]: the tokens of units[cut:]
-    pins = _pins(units)
-
-    def kept(cut: int) -> int:
-        pin = pins[cut]
-        return tails[cut] + (sizes[pin] if pin is not None else 0)
-
+    counts, kept = _turn(units, turn_inputs)
     cut = len(units) - 1
-    while cut > 0 and kept(cut - 1) <= keep:
+    while cut > 0 and tails[cut - 1] + kept[cut - 1] <= keep:
         cut -= 1
-    return cut if _moves(pins, cut) else None
+    return cut if _moves(counts, cut) else None
 
 
-def half_cut(units: Sequence[Unit]) -> Optional[int]:
-    """The cut nearest to half the tokens, never past the last unit; None when nothing but a kept input could move
-    out."""
+def half_cut(units: Sequence[Unit], *, turn_inputs: Collection[int] = ()) -> Optional[int]:
+    """The cut nearest to half the tokens, never past the last unit; None when nothing but the Turn's kept inputs
+    could move out."""
     sizes = [unit_tokens(unit) for unit in units]
-    pins = _pins(units)
+    counts, _ = _turn(units, turn_inputs)
     half = sum(sizes) / 2
     best: Optional[int] = None
     best_distance = 0.0
     before = 0
     for cut in range(1, len(units)):
         before += sizes[cut - 1]
-        if _moves(pins, cut) and (best is None or abs(before - half) < best_distance):
+        if _moves(counts, cut) and (best is None or abs(before - half) < best_distance):
             best, best_distance = cut, abs(before - half)
     return best
 
 
-def rolling_cut(units: Sequence[Unit], fits: Callable[[int], bool]) -> Optional[int]:
+def rolling_cut(
+    units: Sequence[Unit], fits: Callable[[int], bool], *, turn_inputs: Collection[int] = ()
+) -> Optional[int]:
     """The largest cut at or before ``half_cut`` whose forked request over the head fits."""
-    pins = _pins(units)
-    cut = half_cut(units)
+    counts, _ = _turn(units, turn_inputs)
+    cut = half_cut(units, turn_inputs=turn_inputs)
     while cut is not None and cut > 0:
-        if _moves(pins, cut) and fits(cut):
+        if _moves(counts, cut) and fits(cut):
             return cut
         cut -= 1
     return None
@@ -719,11 +754,14 @@ def compaction_payload(
     summarizer: Optional[Mapping[str, Any]],
     usage: Optional[Usage],
     checkpoint_omitted: bool = False,
+    turn_inputs: Collection[int] = (),
 ) -> dict[str, Any]:
     """The ``Compaction`` row for a cut before ``view.units[cut]``; ``tokens_after_estimate`` is the caller's.
 
     ``window`` is that of the route the conversation's next request goes to, which reads the summary.
     ``checkpoint_omitted``: a drop left out the previous checkpoint's text, too large for that route (section 8 c).
+    ``turn_inputs``: the ``context_seq`` of each input the in-flight Turn consumed, its first and every steer; those
+    in the head stay as they were (``kept_inputs``, section 5).
     """
     previous_row = view.compaction
     previous = previous_row.payload if previous_row is not None else {}
@@ -751,6 +789,7 @@ def compaction_payload(
         "first_kept_seq": view.units[cut].seq,
         "summarized_to_seq": summarized_to_seq(view, cut),
         "previous_compaction_id": previous_row.row_id if previous_row is not None else None,
+        "kept_inputs": [unit.seq for unit in head if unit.lead.kind == "input" and unit.seq in turn_inputs],
         "files_read": files.read,
         "files_read_omitted": files.read_omitted,
         "files_modified": files.modified,

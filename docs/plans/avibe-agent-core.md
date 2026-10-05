@@ -186,13 +186,15 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
   transcript up to the response is unchanged; otherwise UTF-8 bytes / 4 of the whole request. Compact when
   `est >= T`.
 - **Cut** before a user message or before an assistant message whose tool batch follows it, keeping
-  `min(20K, 0.25 T)` verbatim; a split turn's input stays in the context as it was, images included.
+  `min(20K, 0.25 T)` verbatim; a cut inside the in-flight Turn keeps its inputs (the first and each steer) as they
+  were, images included. A tool batch that cannot fit even with the conversation moved out is cut to fit, each
+  result saying so.
 - **Checkpoint delivery is a fork**: the same model, system prompt, tools, tool choice, and reasoning settings, the
   conversation prefix byte-identical, and the owner-approved three-layer prompt appended (`checkpoint-v2`). The
   checkpoint turn runs through the same loop under a "dreaming" tool policy: `read` allowed, writes only inside the
   Session's scratch directory, everything else denied; at most 5 tool rounds, each tool bounded by the room left in
   the window. Its messages are audit rows, never context.
-- **After a checkpoint** the request is the rebuilt system prompt, a split turn's input as it was, the
+- **After a checkpoint** the request is the rebuilt system prompt, the in-flight Turn's kept inputs as they were, the
   `<context-checkpoint>` message (framing, checkpoint, cumulative `<artifacts>`, an `<earlier-record>` hint), state
   rendered from its own stores when the checkpoint was written (the environment's core fields; the skills it loaded
   are listed by name in the checkpoint, for the model to load again), and the verbatim tail. No synthetic "continue" message.

@@ -76,11 +76,18 @@ So does anything after `R`, an edit there included.
 Every conversation request takes the request pipeline (§10, invariant 1). Its C-9 stage, inside the tool loop and
 before a retry alike:
 
-1. **Stop** (§8 d) when the request cannot fit and neither can its minimal request: the request the drop (§8 c)
-   would leave with everything but the last unit moved out (the drop's own row with its `state`, and, when the cut
-   splits a turn, the turn's input, which stays, §5), budgeted without the anchor (its history would be gone). With
-   fewer than two units nothing can move out, and the minimal request is the request itself. The provider never
-   sees the request.
+1. **Fit the newest tool batch, or stop** (§8 d) when the request cannot fit and neither can its minimal request:
+   the request the drop (§8 c) would leave with everything but the last unit moved out (the drop's own row with its
+   `state`, without the previous checkpoint's text, and the in-flight Turn's kept inputs, §5), budgeted without the
+   anchor (its history would be gone). With fewer than two units nothing can move out, and the minimal request is
+   the request itself. Moving the conversation out cannot help then, so when the last unit is a tool batch it is cut
+   to fit: the minimal request with the margin `M` when it can, else without; the largest results are cut to one
+   common cap (water-filling), each keeping its head and ending with `[Output truncated to fit the context window;
+   re-run with offset/limit or a narrower command to see more.]`, as one `context_edit` row per cut result
+   (`"reason": "fit_tool_result"`; the rows keep the whole output, §4). This is the bound a checkpoint turn applies
+   to its own tool results (§6), one helper for both. The run continues and compacts as usual. A batch that does not
+   fit even with every result cut to its note, or a last unit that is an input, stops the run: the provider never
+   sees the request. A batch that fits once the conversation moves out is never cut; the ladder makes room for it.
 2. **Clear** (§4) when the provider cache is cold (no model request for longer than the cache TTL, 300 s by
    default; after a restart, measured from the latest response row's `created_at`) or `est >= 0.8 * T`.
 3. **Checkpoint** when `est >= T`, the run has not stopped compacting (§10), and there is something to summarize,
@@ -104,7 +111,8 @@ each is sent only when it can fit.
 
 - Eligible: results of `read` and `bash` in the projected context (terminal screen snapshots join when they exist).
 - Protected: results after the second-latest input (the last 2 user turns; with fewer than 2 inputs since the latest
-  checkpoint, all of them), the newest 5 eligible results, and results already cleared. A skill load clears like any
+  checkpoint, all of them), the newest 5 eligible results, and results already cleared (a result cut to fit, §3, can
+  still be cleared). A skill load clears like any
   other result: the model loads the skill again by name when it needs it, as after a checkpoint (§7). Results before the latest checkpoint are not in the context.
 - Applied only when the candidates free at least 20,000 tokens, all at once, one `context_edit` row per result:
   `{"target_event_id": <tool_result row id>, "replacement": {"text": PLACEHOLDER}, "reason": "clear_old_tool_result"}`.
@@ -119,22 +127,24 @@ results of its tool calls. A cut falls only before a unit: before a user message
 whose tool batch follows it; never at a tool result, so no call is separated from its result.
 
 - **Normal** (threshold, and the first overflow step): the tail is the longest run of whole units at the end
-  whose tokens total at most `keep`, and at least the last unit; a split turn's input, which stays (below), counts
-  toward `keep` once, at its own size. Everything before it is the head. A head with nothing to summarize but that
-  input means there is nothing to summarize.
+  whose tokens total at most `keep`, and at least the last unit; the in-flight Turn's inputs a cut keeps (below)
+  count toward `keep` once, at their own size. Everything before it is the head. A head with nothing to summarize
+  but those inputs means there is nothing to summarize.
 - **Rolling** (§8 b): the cut nearest to half the tokens, moved earlier until the forked request over the head can fit
   (§1); never past the last unit.
 - **Dropped** (§8 c): the cut nearest to half the tokens; never past the last unit.
 
-Neither moves out nothing but a split turn's input.
+Neither moves out nothing but the in-flight Turn's kept inputs.
 
-`first_kept_seq` is the `context_seq` of the first kept unit. If that unit is not an input, the cut split a turn, and
-the turn's input stays: projection keeps the latest input before `first_kept_seq` as it was, images, attachments, and
-environment block included, right before the checkpoint message and the kept rows (§7), so the checkpoint's
-`state`, the current environment, comes after any environment block the input carries and the latest wins by
-position. The checkpoint summarizes everything else in the head. Nothing is copied and no row field names it: the input is found from the rows,
-and stays through later checkpoints while their cuts fall inside the same turn. If the input alone cannot fit, nothing
-can move it out, and §8 (d) applies.
+`first_kept_seq` is the `context_seq` of the first kept unit. A cut inside the in-flight Turn keeps every input that
+Turn consumed before it, its first and each accepted steer, verbatim and in order: the loop knows them (it consumed
+them in this run; the rows carry no Turn identity, and a Turn's start cannot be told from their shape), and the row
+records them (`kept_inputs`, their `context_seq`). Projection places them as they were, images, attachments, and
+environment blocks included, right before the checkpoint message and the kept rows (§7), so the checkpoint's
+`state`, the current environment, comes after any environment block they carry and the latest wins by position.
+The checkpoint summarizes everything else in the head, and a later checkpoint inside the same Turn keeps them again.
+An earlier Turn a cut splits is summarized like any head. If the kept inputs alone cannot fit, nothing can move them
+out, and §8 (d) applies.
 
 ## 6. Checkpoint turn
 
@@ -251,9 +261,9 @@ is written, so projection stays a pure function of the rows:
   the cwd escaped and never cut, every other field cut to 160 UTF-8 bytes (`display`), so the block is the cwd, which
   the OS bounds, plus at most about 4 x 40 tokens; a checkpoint always happens inside
   a run, and a Turn's own input carries only the fields that changed). Nothing else is rehydrated in v1: skills are
-  listed by name in `<skills-loaded>`, pending work is the checkpoint's own "Waiting on", and a split turn's input
-  stays as it was (§5).
-- Projection (C-5 §3): the system prompt, hook-rehydrated messages, a split turn's input (§5), one user message
+  listed by name in `<skills-loaded>`, pending work is the checkpoint's own "Waiting on", and the in-flight Turn's
+  inputs stay as they were (§5).
+- Projection (C-5 §3): the system prompt, hook-rehydrated messages, the kept inputs (§5), one user message
   holding `summary` and then each `state` text as its own text block, then the rows from `first_kept_seq` on, with
   edits applied. A tool result whose
   call was summarized is left out with it. No synthetic "continue" message follows.
@@ -275,8 +285,8 @@ once the request fits:
   at most 2 rolls per request.
 - (c) **Dropped**: when no checkpoint request can help (one failed for this request other than by overflow, a rolling
   one failed, no rolling prefix can fit, or the rolls are used up), no model is called:
-  the earliest part (§5) moves out of the context. Built like any checkpoint row (§7: fresh `state`, and a split
-  turn's input stays), the row keeps the previous checkpoint's text and the
+  the earliest part (§5) moves out of the context. Built like any checkpoint row (§7: fresh `state`, and the
+  in-flight Turn's inputs stay), the row keeps the previous checkpoint's text and the
   `<earlier-record>` pointer; `checkpoint` is empty when there was none, and the message then has no framing text.
   The previous checkpoint's text is kept only if the minimal request (§3) carrying it can fit: a checkpoint written
   on a larger route may not fit a smaller fallback. Otherwise the row has no model text, and its message says, in
@@ -288,7 +298,10 @@ once the request fits:
   before provider admission), when nothing more can move out of a request that cannot fit or that the provider
   refused, after 4 provider overflows of one request, or once the run has stopped compacting (§10), the run ends
   `context_exhausted` and the `context_exhausted` event says what fills the context. No model is called for a
-  context that cannot fit.
+  context that cannot fit. The error's kind says the cause: when moving the conversation out cannot help (the
+  minimal request cannot fit, or nothing more can move out), it names the newest unit, `tool_output_too_large` for a
+  tool batch (one too large even with every result cut to its note, §3) or `input_too_large` for an input, and
+  starting over would not help; otherwise it is `context_exhausted`, the conversation's length.
 
 An attempt the provider refused, or that is retried, is never context (§10, invariant 4).
 
@@ -307,11 +320,13 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   which is `O`.
 - `scratch_dir`: this Session's scratch directory, `<state>/agent_core/scratch/<session_id>/`; without it, the
   policy denies every write.
-- `ContextHost.earlier_record(session_id, through_seq)`: a short factual hint, not a command: the earlier
-  conversation is stored in Avibe and can be searched with `vibe data query` against table `messages`, `session_id =
-  '<id>'`, `context_seq <= <through_seq>`, the model-facing text being in `content_json.model.message`; for a fork, one
-  more line names the Session it was forked from and at which `context_seq`. The model writes its own query (the
-  system prompt teaches `vibe data query`); `messages` is readable by every caller.
+- `ContextHost.earlier_record(session_id, through_seq)`: a short factual hint: the earlier messages (inputs and
+  replies, through `through_seq`) are in Avibe's `messages` table under `session_id`, and tool outputs are not, so
+  the model re-runs a tool for its output (`messages` is readable by every caller; tool results are not). Then one
+  runnable example, a fixed query with no CTE and no decoding: `vibe data query --sql "SELECT context_seq, type,
+  substr(content_text,1,500) FROM messages WHERE session_id='<id>' AND context_seq <= <N> ORDER BY context_seq DESC
+  LIMIT 20"`, emitted only when the id is a plain token (letters, digits, `_`, `-`), so the line always runs as
+  written. For a fork, one more line names the Session it was forked from and at which `context_seq`.
 - `ContextHost.render_state(StateRequest)`: the `state` texts (§7): the environment's core fields.
 - Skill loads marked in their results: `vibe skill load` writes one `<skill_content name="...">` block per skill it
   loads, and every top-level block in a successful `bash` result is recorded in the result's `details.skills`

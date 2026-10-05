@@ -42,6 +42,7 @@ from core.agent_core.agent.models import ModelSelection
 from core.agent_core.cancel import CancelToken
 from core.agent_core.harness.context import (
     CHECKPOINT_REQUEST,
+    TOOL_TRUNCATED,
     ContextConfig,
     StateRequest,
     compaction_payload,
@@ -814,6 +815,29 @@ async def test_the_ladder_rolls_when_no_fork_can_take_the_whole_context():
     assert events[-1].reason == "completed"
 
 
+async def test_a_turn_keeps_its_input_and_every_steer_verbatim_across_a_mid_turn_checkpoint():
+    # The Turn's input and a steer it accepted mid-Turn both stay as they were, in order, ahead of the checkpoint: a
+    # checkpoint that rewrote either ("read f10 to f18" as "continue with f19") would drift what the Turn answers.
+    holder, steered = {}, []
+
+    async def execute(arguments, ctx):
+        if not steered:
+            steered.append(await holder["agent"].steer(input_row("steer", "STEER: also report each size")))
+        return ToolResult((text(tokens(6_000)),))
+
+    model = Model(growing(4), [[Done(assistant(CHECKPOINT))]])
+    holder["agent"] = agent = make_agent(model, tools=[FakeTool("read", execute=execute)])
+    events = await run(agent, "read f0 to f3")
+    assert steered == [True] and events[-1].reason == "completed" and len(model.checkpoint_requests) == 1
+    first, steer, checkpoint, *tail = model.conversation_requests[-1].messages
+    assert [first.content[0].text, steer.content[0].text] == ["read f0 to f3", "STEER: also report each size"]
+    assert checkpoint.content[0].text.startswith("<context-checkpoint>") and tail
+    rows = await agent.store.load("session")
+    (compaction,) = [row for row in rows if row.kind == "compaction"]
+    inputs = [row.context_seq for row in rows if row.kind == "input"]
+    assert compaction.payload["kept_inputs"] == inputs
+
+
 async def test_a_small_fallback_drops_a_previous_checkpoint_too_large_for_it_and_continues():
     # A 15,000-token checkpoint written on a large route cannot fit an 8,000-token fallback: no fork can take it, and a
     # drop that kept it would still not fit. The drop leaves its model text out, says so, and the Turn continues.
@@ -868,19 +892,63 @@ async def test_the_ladder_drops_mechanically_once_a_checkpoint_request_fails():
     assert events[-1].reason == "completed"
 
 
-async def test_the_ladder_stops_with_what_fills_the_context_when_nothing_more_can_move():
-    # One result of 30,000 tokens: only the current request and that tool batch are left, and they do not fit.
-    model = Model([call("read", "huge", path="f")])
-    agent = make_agent(model, tools=[reader(tokens(30_000))])
+#: A 16,000-token route answering at most 4,000 tokens (the Avibe Agent's budget, a quarter of the window).
+SMALL = ModelSelection(
+    ENDPOINT, replace(SELECTION.capabilities, context_window=16_000, input_limit=None, max_output_tokens=4_000)
+)
+
+
+async def test_three_parallel_reads_larger_than_a_16k_window_are_cut_to_fit_and_the_turn_completes():
+    # The E2E repro: a fresh session on a 16K route with a 4,000-token system prompt reads three 15.6 KB files in one
+    # step. Nothing can move out, yet the run continues: the largest results are cut to one cap, each saying so.
+    calls = [ToolCallBlock(f"r{index}", "read", {"path": f"ctx/part0{index}.txt"}) for index in range(3)]
+    model = Model([[Done(assistant(calls=calls))], [Done(assistant("done"))]])
+    agent = make_agent(model, tools=[reader("x" * 15_600)], selection=SMALL, system="s" * 16_000)
     events = await run(agent)
-    exhausted = next(event for event in events if isinstance(event, ContextExhausted))
-    assert exhausted.limit == 32_000
-    parts = {part.name: part.tokens for part in exhausted.parts}
-    assert set(parts) == {"system", "tools", "history", "latest_tool_batch", "output"}
-    assert parts["latest_tool_batch"] > 30_000 and parts["output"] == 4_096 + 8_000
-    assert [(e.kind) for e in events if isinstance(e, AgentError)] == ["context_exhausted"]
+    assert events[-1].reason == "completed" and not [e for e in events if isinstance(e, ContextExhausted)]
+    final = model.conversation_requests[-1]
+    results = [message for message in final.messages if isinstance(message, ToolResultMessage)]
+    assert len(results) == 3 and all(result.content[0].text.endswith(TOOL_TRUNCATED) for result in results)
+    assert len({message_tokens(result) for result in results}) == 1  # one cap for equal results
+    # The request fits with the margin, so it is sent as it is.
+    assert request_tokens(final.system, final.tools, final.messages) + 4_000 + 2_000 <= 16_000
+    rows = await agent.store.load("session")
+    # The rows keep every output whole; three edits cut what the model reads.
+    assert [len(row.message.content[0].text) for row in rows if row.kind == "tool_result"] == [15_600] * 3
+    assert [row.payload["reason"] for row in rows if row.kind == "context_edit"] == ["fit_tool_result"] * 3
+
+
+async def test_a_tool_batch_the_ladder_can_make_room_for_is_never_cut():
+    # The batch does not fit beside the history, but it fits once the history moves out: the ladder compacts, and
+    # the result reaches the model whole.
+    store = InMemoryTranscriptStore()
+    await _history_on_a_large_window(store, [5_000, 5_000, 5_000, 2_000])
+    model = Model([call("read", "big", path="f"), [Done(assistant("done"))]], [[Done(assistant(CHECKPOINT))]] * 3)
+    agent = make_agent(model, store=store, tools=[reader(tokens(12_000))])
+    events = await run(agent)
+    assert events[-1].reason == "completed" and [e for e in events if isinstance(e, CompactionFinished)]
+    rows = await store.load("session")
+    assert not [row for row in rows if row.kind == "context_edit" and row.payload["reason"] == "fit_tool_result"]
+    final = model.conversation_requests[-1]
+    (result,) = [m for m in final.messages if isinstance(m, ToolResultMessage) and m.tool_call_id == "big"]
+    assert result.content[0].text == tokens(12_000)
+
+
+async def test_the_stop_names_the_tool_output_when_even_its_notes_cannot_fit():
+    # 300 results on an 8,000-token route: cut to their notes, they still do not fit beside the step that asked for
+    # them. The newest tool output is the cause, not the conversation's length, and the error says so.
+    tiny = ModelSelection(
+        ENDPOINT, replace(SELECTION.capabilities, context_window=8_000, input_limit=None, max_output_tokens=2_000)
+    )
+    calls = [ToolCallBlock(f"r{index}", "read", {"path": f"f{index}"}) for index in range(300)]
+    model = Model([[Done(assistant(calls=calls))]])
+    agent = make_agent(model, tools=[reader(tokens(100))], selection=tiny)
+    events = await run(agent)
     assert events[-1].reason == "context_exhausted"
-    assert not model.checkpoint_requests  # nothing to summarize, so no model call
+    assert [(e.kind, e.origin) for e in events if isinstance(e, AgentError)] == [("tool_output_too_large", "local")]
+    exhausted = next(event for event in events if isinstance(event, ContextExhausted))
+    assert {part.name for part in exhausted.parts} >= {"latest_tool_batch", "output"}
+    assert not [row for row in await agent.store.load("session") if row.kind == "context_edit"]
     assert len(model.requests) == 1  # the oversized request never reached the provider
 
 
@@ -916,16 +984,17 @@ async def test_the_stage_judges_the_fork_it_would_send_exactly_as_the_turn_compo
     assert all(request.messages[0] == state for request in model.requests)
 
 
-async def test_the_stop_check_counts_the_split_turn_input_the_drop_would_keep():
-    # The last unit is a tool batch after a large input: moving everything else out still keeps that input, pinned
-    # as the split turn's, so nothing can make the request fit (section 8 d). It stops before any checkpoint call or
-    # row.
-    model = Model([call("read", "big", path="f")], [[Done(assistant(CHECKPOINT))]])
+async def test_the_turn_input_a_drop_would_keep_leaves_the_batch_only_the_room_after_it():
+    # The last unit is a tool batch after a large input: moving everything else out still keeps that input, the
+    # Turn's, so the batch gets only the room left beside it. It is cut to that, with no checkpoint call or row.
+    model = Model([call("read", "big", path="f"), [Done(assistant("done"))]], [[Done(assistant(CHECKPOINT))]])
     agent = make_agent(model, tools=[reader(tokens(12_000))])
     events = await run(agent, tokens(18_000))
-    assert events[-1].reason == "context_exhausted"
-    assert [event for event in events if isinstance(event, ContextExhausted)]
-    assert not model.checkpoint_requests
+    assert events[-1].reason == "completed" and not model.checkpoint_requests
+    final = model.conversation_requests[-1]
+    (result,) = [message for message in final.messages if isinstance(message, ToolResultMessage)]
+    assert result.content[0].text.endswith(TOOL_TRUNCATED) and message_tokens(result) < 2_000
+    assert request_tokens(final.system, final.tools, final.messages) + 4_096 + 8_000 <= 32_000
     assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
 
 

@@ -24,8 +24,11 @@ from core.agent_core.harness.context import (
     carried_skills,
     checkpoint_request,
     clearable_results,
+    TOOL_TRUNCATED,
     compaction_payload,
     display,
+    fit_batch,
+    fit_edit,
     fit_result,
     half_cut,
     checkpoint_max_tokens,
@@ -225,8 +228,7 @@ def test_an_edit_or_checkpoint_before_the_anchor_or_another_route_invalidates_it
         earlier_record=None, tokens_before=0, threshold=0, window=200_000, summarizer=None, usage=None,
     )
     rows.add("compaction", payload=payload)
-    # The cut split the anchored response's turn, so the turn's input stays first (section 5).
-    assert [unit.seq for unit in context_view(rows.rows).units[:2]] == [view.units[0].seq, anchored.context_seq]
+    assert context_view(rows.rows).units[0].seq == anchored.context_seq
     assert _est(rows) == whole(rows)
     # A failed or aborted response, or one without usage or request facts, never anchors.
     for message, facts in [
@@ -284,10 +286,13 @@ def test_a_cut_never_separates_a_tool_call_from_its_result(seed):
     rows = _random_rows(seed)
     view = context_view(rows)
     rng = random.Random(seed)
+    # The in-flight Turn's inputs: the last input and, by chance, the one before it (a steer).
+    inputs = [unit.seq for unit in view.units if unit.lead.kind == "input"]
+    turn = set(inputs[-2:] if rng.random() < 0.5 else inputs[-1:])
     cuts = {
-        normal_cut(view.units, rng.choice([0, 50, 500, 5_000])),
-        half_cut(view.units),
-        rolling_cut(view.units, lambda cut: rng.random() < 0.5),
+        normal_cut(view.units, rng.choice([0, 50, 500, 5_000]), turn_inputs=turn),
+        half_cut(view.units, turn_inputs=turn),
+        rolling_cut(view.units, lambda cut: rng.random() < 0.5, turn_inputs=turn),
     }
     for cut in cuts - {None}:
         assert 0 < cut < len(view.units)
@@ -305,13 +310,15 @@ def test_a_cut_never_separates_a_tool_call_from_its_result(seed):
             window=200_000,
             summarizer=None,
             usage=None,
+            turn_inputs=turn,
         )
         checkpoint["summary"] = "SUMMARY"
         compacted = [*rows, ContextEntry("session", len(rows) + 1, "compaction", "checkpoint", payload=checkpoint)]
         messages = project(compacted).messages
-        # A cut inside a turn keeps the turn's input whole, right before the checkpoint (section 5).
-        inputs = [unit for unit in view.units[:cut] if unit.lead.kind == "input"]
-        pinned = tuple(inputs[-1].messages) if inputs and view.units[cut].lead.kind != "input" else ()
+        # A cut inside the Turn keeps each of its inputs whole, in order, right before the checkpoint (section 5).
+        kept = [unit for unit in view.units[:cut] if unit.seq in turn]
+        assert checkpoint["kept_inputs"] == [unit.seq for unit in kept]
+        pinned = tuple(message for unit in kept for message in unit.messages)
         assert messages[: len(pinned)] == pinned
         assert messages[len(pinned)].content[0].text == "SUMMARY"
         _assert_paired(messages[len(pinned) + 1 :])
@@ -347,20 +354,55 @@ def test_the_half_cut_is_nearest_to_half_and_the_rolling_cut_moves_earlier_until
     assert half_cut(units[:1]) is None
 
 
-def test_a_cut_that_splits_a_turn_counts_the_input_it_pins():
-    # A cut inside a turn keeps the turn's input (section 5): it counts toward the kept tail once, at its own size,
-    # and a cut that would summarize nothing but that input is no cut.
+def test_a_cut_inside_the_turn_counts_every_input_it_keeps():
+    # A cut inside the in-flight Turn keeps all of its inputs, the first one and each steer (section 5): they count
+    # toward the kept tail once, at their own size, and a cut that would summarize nothing but them is no cut.
     rows = Rows()
-    rows.input("x" * 8_000)
-    for _ in range(4):
+    rows.input("an older turn")
+    rows.response(value="its answer")
+    first = rows.input("x" * 8_000)
+    rows.response(value="y" * 4_000)
+    steer = rows.input("z" * 2_000)
+    for _ in range(3):
         rows.response(value="y" * 4_000)
     units = context_view(rows.rows).units
+    turn = {first.context_seq, steer.context_seq}
     size = [unit_tokens(unit) for unit in units]
-    # The input and the last two responses fill the tail's budget: the first two responses are summarized.
-    assert normal_cut(units, size[0] + size[3] + size[4]) == 3
-    # An input and one response: moving the response's predecessors out would summarize only the pinned input.
-    assert normal_cut(units[:2], 10**6) is None and half_cut(units[:2]) is None
-    assert half_cut(units) == 2
+    # Both inputs and the last two responses fill the tail's budget; the older turn and two responses move out.
+    assert normal_cut(units, size[2] + size[4] + size[6] + size[7], turn_inputs=turn) == 6
+    # Without the Turn's inputs nothing is kept: the same budget keeps a longer tail.
+    assert normal_cut(units, size[2] + size[4] + size[6] + size[7]) < 6
+    # The Turn's inputs and one response: a cut there would summarize only kept inputs.
+    only = units[2:4]
+    assert normal_cut(only, 10**6, turn_inputs=turn) is None and half_cut(only, turn_inputs=turn) is None
+
+
+def test_a_tool_batch_is_cut_by_water_filling_the_largest_results_first():
+    big = ToolResultMessage("a", "read", (text("a" * 16_000),))  # 4,000 tokens
+    small = [ToolResultMessage(name, "read", (text("b" * 1_600),)) for name in ("b", "c")]  # 400 each
+    texts = fit_batch([big, *small], 2_000)
+    assert texts is not None and texts[1:] == [None, None]  # the small ones stay whole
+    assert texts[0].endswith(TOOL_TRUNCATED) and texts[0].startswith("a" * 100)
+    assert message_tokens(ToolResultMessage("a", "read", (text(texts[0]),))) <= 2_000 - 800
+    # Equal results share one cap.
+    equal = [ToolResultMessage(name, "read", (text("c" * 8_000),)) for name in "xyz"]
+    cut = fit_batch(equal, 3_000)
+    assert cut is not None and len({len(item) for item in cut}) == 1
+    # Everything fits: nothing is cut; even the notes cannot fit: None.
+    assert fit_batch(small, 10_000) == [None, None] and fit_batch(equal, 10) is None
+
+
+def test_a_result_cut_to_fit_can_still_be_cleared_when_it_is_old():
+    rows = Rows()
+    big = "o" * 20_000  # 5,000 tokens each
+    rows.input("turn 1")
+    old = [rows.tool("bash", big, call_id=f"old-{index}", command="ls") for index in range(11)]
+    first = next(row for row in rows.rows if row.kind == "tool_result")
+    rows.add("context_edit", payload=fit_edit(first, "o" * 4_000 + TOOL_TRUNCATED))
+    rows.input("turn 2")
+    rows.input("turn 3")
+    cleared = {entry.message.tool_call_id for entry in clearable_results(context_view(rows.rows))}
+    assert old[0].id in cleared
 
 
 def test_clearing_spares_recent_turns_and_the_newest_results_and_nothing_else():
@@ -682,6 +724,7 @@ def test_a_checkpoint_carries_files_skills_and_pins_the_split_turn_input_across_
         mode="normal",
         reason="threshold",
         checkpoint="# 1. Self and method\n- terse",
+        turn_inputs={request.context_seq},
         state=("SKILLS",),
         earlier_record="The full earlier conversation is stored; search it with `vibe data query`.",
         tokens_before=1,
@@ -692,7 +735,7 @@ def test_a_checkpoint_carries_files_skills_and_pins_the_split_turn_input_across_
     )
     assert (first["files_read"], first["files_modified"]) == (["a.py"], ["b.py"])
     assert not (first["files_read_omitted"] or first["files_modified_omitted"] or first["skills_omitted"])
-    assert "current_request" not in first and "current_request_message_id" not in first
+    assert first["kept_inputs"] == [request.context_seq]
     assert first["summary"] == "\n".join(
         [
             "<context-checkpoint>",
@@ -736,6 +779,7 @@ def test_a_checkpoint_carries_files_skills_and_pins_the_split_turn_input_across_
         len(view.units) - 1,
         mode="dropped",
         reason="overflow",
+        turn_inputs={request.context_seq},
         checkpoint="",
         state=(),
         earlier_record=None,

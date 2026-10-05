@@ -75,24 +75,24 @@ class ContextView:
     compaction: Optional[ContextEntry]
     checkpoint: Optional[UserMessage]
     units: tuple[Unit, ...]
-    #: Row ids of tool results a ``context_edit`` replaced.
-    edited: frozenset[str]
+    #: Row ids of tool results whose latest ``context_edit`` cleared them (a result cut to fit can still be cleared).
+    cleared: frozenset[str]
     context_seq: int
     state: Mapping[str, Any]
 
     @property
-    def pinned(self) -> bool:
-        """Whether ``units[0]`` is a split turn's input the latest checkpoint keeps (C-9 context.md section 5)."""
-        return bool(self.compaction and self.units and self.units[0].seq < self.compaction.payload["first_kept_seq"])
+    def pinned(self) -> int:
+        """How many of ``units`` are the in-flight Turn's inputs the latest checkpoint keeps (C-9 context.md §5)."""
+        return len(self.compaction.payload["kept_inputs"]) if self.compaction is not None else 0
 
     @property
     def messages(self) -> tuple[Message, ...]:
         return self.prefix(len(self.units))
 
     def prefix(self, cut: int) -> tuple[Message, ...]:
-        """The projected messages before ``units[cut]``: a kept split turn's input first, then the checkpoint, whose
-        state is the latest environment the model reads, then the units."""
-        pinned = self.units[:1] if self.pinned and cut > 0 else ()
+        """The projected messages before ``units[cut]``: the kept inputs of the in-flight Turn first, in order, then the
+        checkpoint, whose state is the latest environment the model reads, then the units."""
+        pinned = self.units[: min(self.pinned, cut)]
         head = (self.checkpoint,) if self.checkpoint is not None else ()
         return (
             *(message for unit in pinned for message in unit.messages),
@@ -212,6 +212,7 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
             "checkpoint": _string,
             "state": _list(_string),
             "first_kept_seq": lambda value: _integer(value) and value > 0,
+            "kept_inputs": _list(lambda value: _integer(value) and value > 0),
             "summarized_to_seq": _count,
             "files_read": _list(_string),
             "files_read_omitted": _boolean,
@@ -236,7 +237,7 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
             "version": _one_of(1),
             "target_event_id": _string,
             "replacement": _object({"text": _string}),
-            "reason": _one_of("clear_old_tool_result"),
+            "reason": _one_of("clear_old_tool_result", "fit_tool_result"),
         }
     ),
     "agent_state": _object({"version": _one_of(1), "state": lambda value: isinstance(value, dict)}),
@@ -279,8 +280,8 @@ def open_tool_calls(entries: Sequence[ContextEntry]) -> tuple[tuple[ContextEntry
 
 
 def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] = None) -> ContextView:
-    """The context in units: the split turn's input when the latest checkpoint's cut fell inside a turn, that
-    checkpoint's message, then the rows from its ``first_kept_seq`` (``ContextView.prefix``).
+    """The context in units: the in-flight Turn's inputs the latest checkpoint keeps, that checkpoint's message, then
+    the rows from its ``first_kept_seq`` (``ContextView.prefix``).
 
     Results (including late recovery rows) follow their response in call
     order; a missing result is INTERRUPTED; a result whose call was summarized
@@ -292,6 +293,7 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
     state: Mapping[str, Any] = {}
     compaction: Optional[ContextEntry] = None
     edits: dict[str, str] = {}
+    reasons: dict[str, str] = {}
     for row in rows:
         if row.kind == "agent_state":
             state = row.payload["state"]
@@ -302,9 +304,10 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
             if target is None or target.kind != "tool_result" or target.context_seq >= row.context_seq:
                 raise ProjectionError(f"context_edit row {row.row_id} targets no earlier tool result")
             edits[target.row_id] = row.payload["replacement"]["text"]
+            reasons[target.row_id] = row.payload["reason"]
     first_kept = compaction.payload["first_kept_seq"] if compaction is not None else 0
     units: list[Unit] = []
-    inputs = [row for row in rows if row.kind == "input" and row.context_seq < first_kept]
+    inputs = {row.context_seq: row for row in rows if row.kind == "input" and row.context_seq < first_kept}
     for row in rows:
         if row.kind not in {"input", "response"} or row.context_seq < first_kept:
             continue
@@ -321,10 +324,13 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
                     projected = replace(projected, content=(text(edits[result.row_id]),))
                 entries_of_unit.append((result, projected))
         units.append(Unit(row.context_seq, tuple(entries_of_unit)))
-    if inputs and units and units[0].lead.kind != "input":
-        # The checkpoint's cut fell inside a turn: the turn's input stays as it was, before the checkpoint and the
-        # kept rows (C-9 context.md section 5), so the rest of the turn keeps every block of its request.
-        units.insert(0, Unit(inputs[-1].context_seq, ((inputs[-1], inputs[-1].message),)))
+    if compaction is not None:
+        # The checkpoint's cut fell inside the in-flight Turn: each of its inputs, the first and every steer, stays as
+        # it was, in order, before the checkpoint and the kept rows (C-9 context.md section 5).
+        kept = compaction.payload["kept_inputs"]
+        if any(seq not in inputs for seq in kept) or kept != sorted(set(kept)):
+            raise ProjectionError(f"compaction row {compaction.row_id} keeps inputs it cannot place: {kept}")
+        units[:0] = [Unit(seq, ((inputs[seq], inputs[seq].message),)) for seq in kept]
     checkpoint = None
     if compaction is not None:
         checkpoint = UserMessage(
@@ -334,7 +340,7 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
         compaction=compaction,
         checkpoint=checkpoint,
         units=tuple(deepcopy(units)),
-        edited=frozenset(edits),
+        cleared=frozenset(row_id for row_id, reason in reasons.items() if reason == "clear_old_tool_result"),
         context_seq=rows[-1].context_seq if rows else 0,
         state=deepcopy(state),
     )
