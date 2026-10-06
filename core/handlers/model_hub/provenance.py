@@ -597,6 +597,8 @@ class TurnTrace:
     admission_closed: bool = False
     outcome_frozen: bool = False
     recovery_requests: dict[str, dict] = field(default_factory=dict)
+    # Per request, whether its exit was decided as scoped to itself.
+    exit_scoped_requests: dict[str, bool] = field(default_factory=dict)
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -2038,15 +2040,21 @@ class TurnCorrelationRegistry:
 
     @staticmethod
     def _peer_request_open(trace: TurnTrace, request_id: str) -> bool:
-        """Whether another request of this turn is still open.
+        """Whether this request's exit is scoped to itself beside an open peer.
 
         Every gateway request arms an identity on arrival, so this covers a
         peer that is waiting as well as one awaiting its upstream result. A
         request ending beside it records only its own exit: the turn settles
-        on whichever request ends last.
+        on whichever request ends last. One exit spans several separately
+        locked writes, so the first write decides and the rest reuse it; a
+        peer finishing in between cannot turn a later write turn-wide.
         """
 
-        return any(key != request_id for key in trace.pending_attempts)
+        scoped = trace.exit_scoped_requests.get(request_id)
+        if scoped is None:
+            scoped = any(key != request_id for key in trace.pending_attempts)
+            trace.exit_scoped_requests[request_id] = scoped
+        return scoped
 
     def fail_hub_attempt(self, turn_id: Optional[str]) -> None:
         """Replace a gateway success rejected by the backend terminal result."""

@@ -1943,17 +1943,20 @@ def test_a_canceled_turn_reports_the_attempt_it_waited_on_longest(
     }
 
 
+@pytest.mark.parametrize("peer_ends", ["after_loser", "between_loser_writes"])
 @pytest.mark.parametrize("peer_result", ["served", "exhausted"])
 @pytest.mark.parametrize("loser_exit", ["no_candidate", "gateway_exit"])
 def test_a_request_ending_beside_an_open_peer_leaves_the_turn_to_that_peer(
     tmp_path: Path,
     loser_exit: str,
     peer_result: str,
+    peer_ends: str,
 ) -> None:
     """MH-RETRY-PROVENANCE-003: one request's blocked or unclassified exit is not the turn's.
 
     A waiter that lost the half-open slot ends while the request that won it is
-    still awaiting upstream. The winner's result is what the turn settles on.
+    still awaiting upstream. The winner's result is what the turn settles on,
+    even when the winner finishes between the waiter's separate exit writes.
     """
 
     store = BoundedProvenanceStore(tmp_path / "routing-peer.json")
@@ -1975,16 +1978,24 @@ def test_a_request_ending_beside_an_open_peer_leaves_the_turn_to_that_peer(
             channel="hub",
             via_mapping=True,
         )
-        with registry.gateway_terminalizer(backend="claude", token=live_token) as loser:
-            assert loser.resolution_model("hub-live") == "caller-live"
-            if loser_exit == "no_candidate":
-                loser.mark_no_candidate("waiting")
         result = (
             _outcome(RawOutcomeKind.SUCCESS)
             if peer_result == "served"
             else _outcome(RawOutcomeKind.HTTP_ERROR, status=500, code="server_error")
         )
-        winner.finish_attempt(outcome=result, decision=classify_outcome(result))
+        with registry.gateway_terminalizer(backend="claude", token=live_token) as loser:
+            assert loser.resolution_model("hub-live") == "caller-live"
+            if loser_exit == "no_candidate":
+                loser.mark_no_candidate("waiting")
+            else:
+                loser.fail("protocol_error")
+            if peer_ends == "between_loser_writes":
+                winner.finish_attempt(outcome=result, decision=classify_outcome(result))
+            loser.record_turn_outcome(produce_turn_outcome("turn.engine_down"))
+        if peer_ends == "after_loser":
+            winner.finish_attempt(outcome=result, decision=classify_outcome(result))
+        # No stale projection of the loser can stand in for the winner's result.
+        assert registry.terminal_projection("turn_peer01", backend="claude") is None
     registry.settle("turn_peer01", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
 
     record = store.get("turn_peer01")
