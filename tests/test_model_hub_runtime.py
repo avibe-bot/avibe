@@ -7320,6 +7320,10 @@ def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
         ("""echo {'password': 'correct horse battery staple'}""", "echo {'password': [redacted]"),
         ('{"api_key" : "opaque"}', '{"api_key" : [redacted]'),
         ("max_tokens: 4096 exceeds the limit", "max_tokens: 4096 exceeds the limit"),
+        (
+            'Post "https://auth.openai.com/oauth/token": dial tcp: i/o timeout',
+            'Post "https://auth.openai.com/oauth/token": dial tcp: i/o timeout',
+        ),
     ],
 )
 def test_engine_upstream_detail_redacts_labeled_opaque_secrets(message: str, expected: str) -> None:
@@ -8837,9 +8841,9 @@ def test_oauth_engine_failure_names_what_the_user_can_do(
         assert failed.error_key == error_key
         # The engine's own words travel beside the key, for the dialog's
         # details and for the log.
-        assert failed.error_detail is not None
-        assert failed.error_detail.startswith(engine_error[:24])
-        assert len(failed.error_detail) <= 400
+        # None of these reasons carries credential material, so all of it,
+        # including the network cause after a URL, reaches the user.
+        assert failed.error_detail == " ".join(engine_error.split())
         assert any(
             error_key in record.getMessage() and engine_error[:24] in record.getMessage()
             for record in caplog.records
@@ -8850,13 +8854,31 @@ def test_oauth_engine_failure_names_what_the_user_can_do(
         assert isinstance(_ui_text(language, error_key), str), (language, error_key)
 
 
-def test_oauth_failure_detail_never_carries_credential_material(tmp_path: Path) -> None:
-    secret = "sk-proj-abcdefghijklmnop0123456789"
-    engine_error = (
-        "Failed to exchange authorization code for tokens: token exchange failed with status 401: "
-        f'{{"error": {{"message": "Incorrect API key provided: {secret}", "code": "invalid_api_key"}}}} '
-        + "x" * 600
-    )
+@pytest.mark.parametrize(
+    ("engine_error", "secrets", "kept"),
+    [
+        (
+            "Failed to exchange authorization code for tokens: token exchange failed with status 401: "
+            '{"error": {"message": "Incorrect API key provided: sk-proj-abcdefghijklmnop0123456789", '
+            '"code": "invalid_api_key"}} ' + "x" * 600,
+            ("sk-proj-abcdefghijklmnop0123456789",),
+            "invalid_api_key",
+        ),
+        # The failure echoes the address the user pasted: its code may still
+        # be exchangeable, and the state names the live session.
+        (
+            "Failed to exchange authorization code for tokens: token exchange request failed: "
+            'Post "https://auth.openai.com/oauth/token": redirect_url '
+            "http://localhost:1455/auth/callback?code=ac_live-Grant_123&scope=openid&state=0f1e2d3c "
+            "grant_type=authorization_code&code=ac_live-Grant_123&code_verifier=verifier-xyz",
+            ("ac_live-Grant_123", "0f1e2d3c", "verifier-xyz"),
+            "/oauth/token\": redirect_url",
+        ),
+    ],
+)
+def test_oauth_failure_detail_never_carries_credential_material(
+    tmp_path: Path, engine_error: str, secrets: tuple[str, ...], kept: str,
+) -> None:
 
     class Engine(_BrowserCallbackEngine):
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
@@ -8869,8 +8891,10 @@ def test_oauth_failure_detail_never_carries_credential_material(tmp_path: Path) 
         flow = await adapter.start_oauth("src_fixture123", "openai")
         failed = await adapter.oauth_status(flow.flow_id)
         assert failed.error_detail is not None
-        assert secret not in failed.error_detail
+        assert not any(secret in failed.error_detail for secret in secrets)
         assert "[redacted]" in failed.error_detail
+        # What explains the failure survives the redaction.
+        assert kept in failed.error_detail
         assert len(failed.error_detail) <= 400
 
     asyncio.run(run())

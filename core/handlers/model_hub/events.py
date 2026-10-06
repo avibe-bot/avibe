@@ -122,9 +122,11 @@ def redact_credential_material(value: str) -> str:
 # still matches on ``secret``) and has no nested quantifier, so matching stays linear
 # on hostile input. ``contains_credential_material`` keeps the narrower shape-based
 # patterns so benign labels such as ``max token: 4096`` in a model name are not
-# rejected.
+# rejected. A label right after ``/`` is a URL path segment, not a label: Go
+# reports ``Post "https://auth.openai.com/oauth/token": dial tcp …``, and the
+# network reason after it is the part worth reading.
 _LABELED_SECRET_PATTERN = re.compile(
-    r"(?i)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)[\"'`]?\s*[:=]\s*"
+    r"(?i)(?<!/)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)[\"'`]?\s*[:=]\s*"
 )
 
 
@@ -140,17 +142,30 @@ def redact_untrusted_text(value: str) -> str:
 
 FAILURE_DETAIL_CHARS = 400
 
+# OAuth grant material in a callback address or form body (``?code=…&state=…``,
+# ``code_verifier=…``). A sign-in failure can echo the very address the user
+# pasted, and its code may still be exchangeable. Only ``name=value`` parameters
+# match: a JSON ``"code": "token_expired"`` is the provider's error code and
+# stays readable.
+_OAUTH_GRANT_PARAMETER_PATTERN = re.compile(
+    r"(?i)(?<![a-z0-9_])"
+    r"(code|state|code_verifier|device_code|id_token|access_token|refresh_token)"
+    r"=[^&#\s\"'<>]*"
+)
+
 
 def bounded_failure_detail(value: object) -> str | None:
     """One line of untrusted failure text that is safe to show and copy.
 
-    Credential shapes are redacted first, then the text is bounded, so a cut can
-    never expose the tail of a secret. Blank or non-text input has no detail.
+    OAuth grant parameters and credential shapes are redacted first, then the
+    text is bounded, so a cut can never expose the tail of a secret. Blank or
+    non-text input has no detail.
     """
 
     if not isinstance(value, str):
         return None
-    text = redact_untrusted_text(" ".join(value.split()))
+    text = _OAUTH_GRANT_PARAMETER_PATTERN.sub(r"\1=[redacted]", " ".join(value.split()))
+    text = redact_untrusted_text(text)
     if not text:
         return None
     if len(text) > FAILURE_DETAIL_CHARS:
