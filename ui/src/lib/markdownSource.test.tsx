@@ -152,6 +152,10 @@ describe('selectedMarkdown', () => {
     ['a list item', '- alpha\n  beta\n- next', ['pha', 'before'], ['be', 'after'], 'pha\nbe'],
     ['code in a quote', '> ```\n> x = 1\n>   y = 2\n> ```', ['x', 'before'], ['y', 'after'], 'x = 1\n  y'],
     ['code in a list item', '- item\n\n  ```\n  x = 1\n    y = 2\n  ```', ['1', 'before'], ['y', 'after'], '1\n  y'],
+    // Indentation is counted in columns, a tab reaching the next stop of four.
+    ['a tab-indented list item', '-\talpha\n\tbeta', ['pha', 'before'], ['be', 'after'], 'pha\nbe'],
+    ['code in a tab-indented list item', '-\titem\n\n\t```\n\tx = 1\n\t\ty = 2\n\t```', ['1', 'before'], ['y', 'after'], '1\n\ty'],
+    ['a footnote definition', 'A[^1].\n\n[^1]: first line\n    second line', ['line', 'before'], ['sec', 'after'], 'line\nsec'],
   ])('drops the container syntax from a cut inside %s', (_case, content, start, end, expected) => {
     const container = renderDoc(content);
     expect(selectedMarkdown(rangeOver(container, start, end), container)).toBe(expected);
@@ -160,8 +164,35 @@ describe('selectedMarkdown', () => {
   it.each<[string, string, Edge, Edge, string]>([
     ['a quote', '> alpha\n>\n> beta\n\nafter', ['pha', 'before'], ['af', 'after'], '> alpha\n>\n> beta\n\nafter'],
     ['a nested list', '- top\n  - inner\n    - deep\n- next', ['ee', 'before'], ['ne', 'after', 1], '- deep\n- next'],
+    // Only the lines still inside the list item the copy leaves lose its indentation.
+    ['a nested list into code', '- top\n  - inner\n- next\n\n```\n  x\n```', ['inn', 'before'], ['x', 'after', 1], '- inner\n- next\n\n```\n  x\n```'],
   ])('keeps the container syntax of blocks copied whole from %s', (_case, content, start, end, expected) => {
     const container = renderDoc(content);
+    expect(selectedMarkdown(rangeOver(container, start, end), container)).toBe(expected);
+  });
+
+  it('copies a tab-indented nested list item as a list item, not as code', () => {
+    const container = renderDoc('- top\n\t- inner\n- next');
+    const copied = selectedMarkdown(rangeOver(container, ['inn', 'before'], ['ne', 'after', 1]), container)!;
+    cleanup();
+    const pasted = renderDoc(copied);
+
+    expect(pasted.querySelectorAll('li')).toHaveLength(2);
+    expect(pasted.querySelector('pre')).toBeNull();
+  });
+
+  it('brings along definitions an appended definition needs', () => {
+    const container = renderDoc('A claim[^1] here.\n\n[^1]: See [docs][ref].\n\n[ref]: https://example.com/docs');
+    expect(selectedMarkdown(rangeOver(container, ['claim', 'before'], ['here', 'after']), container))
+      .toBe('claim[^1] here\n\n[^1]: See [docs][ref].\n\n[ref]: https://example.com/docs');
+  });
+
+  // GFM links a bare URL up to the next space; the renderer ends it at CJK text.
+  it.each<[string, Edge, Edge, string]>([
+    ['a cut inside the URL', ['example', 'before'], ['example', 'after'], 'https://example.com/a'],
+    ['a cut from the URL into the text after it', ['example', 'before'], ['这个', 'after'], 'https://example.com/a这个'],
+  ])('copies a URL split from CJK text whole on %s', (_case, start, end, expected) => {
+    const container = renderDoc('打开 https://example.com/a这个页面');
     expect(selectedMarkdown(rangeOver(container, start, end), container)).toBe(expected);
   });
 
@@ -169,6 +200,133 @@ describe('selectedMarkdown', () => {
     const container = renderDoc('A claim[^1] here.\n\nNext.\n\n[^1]: The source.');
     expect(selectedMarkdown(rangeOver(container, ['claim', 'before'], ['here', 'after']), container))
       .toBe('claim[^1] here\n\n[^1]: The source.');
+  });
+
+  // The characters of a block's syntax can be the same as its text's.
+  it.each<[string, string, Edge, Edge, string]>([
+    ['an ordered item', '1. 2024 revenue\n2. 2025 plan', ['2025', 'before'], ['pl', 'after'], '2025 pl'],
+    ['a bullet item', '- --force overwrites\n- other', ['--force', 'before'], ['--force', 'after'], '--force'],
+    ['a task item', '- [x] xterm support\n- [ ] other', ['xterm', 'before'], ['xterm', 'after'], 'xterm'],
+    ['a heading', '## #123 fix\n\nx', ['#12', 'before'], ['#12', 'after'], '#12'],
+    // A character's source includes its escape.
+    ['an escaped character', '\\# not a heading here', ['# not', 'before'], ['# not', 'after'], '\\# not'],
+    ['escaped characters', '2 \\* 3 \\* 4', ['* 3 *', 'before'], ['* 3 *', 'after'], '\\* 3 \\*'],
+  ])('copies only the selected text of %s', (_case, content, start, end, expected) => {
+    const container = renderDoc(content);
+    expect(selectedMarkdown(rangeOver(container, start, end), container)).toBe(expected);
+  });
+
+  // An endpoint resting on an element's edge or in whitespace selects nothing there.
+  it.each<[string, string, Edge, (container: Element) => [Node, number], string]>([
+    ['the next paragraph', 'Intro with **bold** here.\n\nNext para.', ['here', 'before'], (c) => [c.querySelectorAll('p')[1], 0], 'here.'],
+    ['the next list item', '- alpha beta\n- gamma', ['beta', 'before'], (c) => [c.querySelectorAll('li')[1], 0], 'beta'],
+    ['a code block\'s copy button', '```\nabc\ndef\n```\n\nafter', ['bc', 'before'], (c) => [c.querySelector('button')!, 0], 'bc\ndef'],
+    ['the code block itself', '```\nabc\ndef\n```\n\nafter', ['bc', 'before'], (c) => [c.querySelector('pre')!, 1], 'bc\ndef'],
+  ])('ends a selection at its last character before %s', (_case, content, start, end, expected) => {
+    const container = renderDoc(content);
+    const range = document.createRange();
+    range.setStart(...pointAt(container, start));
+    range.setEnd(...end(container));
+
+    expect(selectedMarkdown(range, container)).toBe(expected);
+  });
+
+  // A code line's indentation is code: what of it is selected is copied.
+  it.each<[string, string, (container: Element) => [Node, number, number], string]>([
+    [
+      'part of an indented line in a list',
+      '- item\n\n  ```\n  x = 1\n    y = 2\n  ```',
+      (c) => { const [node, at] = pointAt(c, ['y', 'before']); return [node, at - 1, at + 1]; },
+      ' y',
+    ],
+    [
+      'from a line start in Python',
+      '```python\ndef f(x):\n    if x:\n        return 1\n    return 0\n```',
+      (c) => {
+        const node = c.querySelector('code')!.firstChild!;
+        const data = node.textContent!;
+        return [node, data.indexOf('    if'), data.indexOf('return 1') + 'return 1'.length];
+      },
+      '    if x:\n        return 1',
+    ],
+    [
+      'from a blank line',
+      '```python\nx = 1\n\n    y = 2\n```',
+      (c) => {
+        const node = c.querySelector('code')!.firstChild!;
+        const data = node.textContent!;
+        return [node, data.indexOf('\n\n') + 1, data.indexOf('2') + 1];
+      },
+      '    y = 2',
+    ],
+  ])('keeps the indentation of %s', (_case, content, at, expected) => {
+    const container = renderDoc(content);
+    const [node, from, to] = at(container);
+    const range = document.createRange();
+    range.setStart(node, from);
+    range.setEnd(node, to);
+
+    expect(selectedMarkdown(range, container)).toBe(expected);
+  });
+
+  // A list item whose marker line is outside the copy takes its indentation with it.
+  it.each<[string, string, Edge, (container: Element) => [Node, number], string]>([
+    ['a nested item', '- a\n  - b\n    - c\n- d', ['c', 'before'], (c) => [c.querySelectorAll('li')[3], 0], '- c'],
+    [
+      'a code block in a nested item',
+      '- a\n  - b\n\n    ```bash\n    npm i\n    ```\n- c',
+      ['npm', 'before'],
+      (c) => [c.querySelectorAll('li')[2], 0],
+      '```bash\nnpm i\n```',
+    ],
+  ])('copies the whole of %s without the indentation of items around it', (_case, content, start, end, expected) => {
+    const container = renderDoc(content);
+    const range = document.createRange();
+    range.setStart(...pointAt(container, start));
+    range.setEnd(...end(container));
+
+    expect(selectedMarkdown(range, container)).toBe(expected);
+  });
+
+  // Nested items are commonly indented four columns or a tab; a nested item's
+  // content starts at its own column, not at its parent's plus its marker.
+  it.each<[string, string, Edge, Edge, string]>([
+    ['a four-space nested item into the next', '- top\n    - inner\n        - deep\n- next', ['deep', 'before'], ['next', 'after'], '  - deep\n- next'],
+    ['a tab-nested item into the next', '- top\n\t- inner\n\t\t- deep\n- next', ['deep', 'before'], ['next', 'after'], '  - deep\n- next'],
+    ['a paragraph in a four-space nested item', '- top\n    - inner\n\n        more text\n- next', ['more', 'before'], ['next', 'after'], '  more text\n- next'],
+  ])('copies %s as list items, not code', (_case, content, start, end, expected) => {
+    const container = renderDoc(content);
+    const copied = selectedMarkdown(rangeOver(container, start, end), container);
+    expect(copied).toBe(expected);
+    cleanup();
+    expect(renderDoc(copied!).querySelector('pre')).toBeNull();
+  });
+
+  it('cuts code in a four-space nested item at its own indentation', () => {
+    const container = renderDoc('- top\n    - inner\n\n        ```\n        x\n          y\n        z\n        ```');
+    expect(selectedMarkdown(rangeOver(container, ['x', 'before'], ['y', 'after']), container)).toBe('x\n  y');
+  });
+
+  // An image or a rule shows content without text, and selecting it selects it.
+  it.each<[string, string, Edge, (container: Element) => [Node, number], string]>([
+    ['an image block', 'Here:\n\n![chart](/api/media/abc123)\n\nNext para.', ['Here', 'before'], (c) => [c.querySelectorAll('p')[2], 0], 'Here:\n\n![chart](/api/media/abc123)'],
+    ['an inline image', 'See ![chart](/api/media/abc123) and more', ['See', 'before'], (c) => { const img = c.querySelector('img')!; return [img.parentNode!, Array.from(img.parentNode!.childNodes).indexOf(img) + 1]; }, 'See ![chart](/api/media/abc123)'],
+    ['a rule', 'Above\n\n---\n\nBelow', ['Above', 'before'], (c) => [c.querySelectorAll('p')[1], 0], 'Above\n\n---'],
+  ])('keeps %s at the edge of a selection', (_case, content, start, end, expected) => {
+    const container = renderDoc(content);
+    const range = document.createRange();
+    range.setStart(...pointAt(container, start));
+    range.setEnd(...end(container));
+
+    expect(selectedMarkdown(range, container)).toBe(expected);
+  });
+
+  it('finds the lines inside a list item in the text as written, mentions and all', () => {
+    const content = '- ask @<claude> and @<codex>\n  - sub @<claude> here @<codex>\n- next\n  - keep nested';
+    const container = renderDoc(content, [{ kind: 'agent', name: 'claude' }, { kind: 'agent', name: 'codex' }]);
+
+    expect(selectedMarkdown(rangeOver(container, ['sub', 'before'], ['keep', 'after']), container))
+      .toBe('- sub @<claude> here @<codex>\n- next\n  - keep nested');
   });
 
   it('leaves out a block the selection only touches the edge of', () => {

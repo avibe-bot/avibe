@@ -9,9 +9,10 @@ import type { TextEdit } from '@/lib/citations';
 // parsed), marks the text blocks among them (paragraphs, headings, list items,
 // code blocks, tables, rules), and binds each rendered root to that text.
 //
-// A selection inside one text block — or one table cell — is cut at the
-// characters selected, found by aligning the rendered text before each endpoint
-// against the source. Only formatting is faithful enough to cut through: its
+// A selection is first narrowed to the characters it selects. One inside one
+// text block — or one table cell — is cut at those characters, found by aligning
+// the rendered text before each endpoint against the source from where the
+// block's content begins; a character's source includes its backslash escape. Only formatting is faithful enough to cut through: its
 // rendering is its source minus the delimiters. So emphasis or a code span is cut
 // only while the selection stays inside it, and anything else inline — a link,
 // image, mention chip, citation badge or file card, whose rendering is not its
@@ -21,20 +22,32 @@ import type { TextEdit } from '@/lib/citations';
 //
 // A selection that crosses blocks copies every block it touches, whole and with
 // the container syntax on its lines, so a list item keeps its `- ` and a quote
-// its `>`. A selection that reaches a bubble's edge reaches its source's edge,
-// so a whole bubble copies byte for byte. A reference-style link or footnote
-// brings its definition along when the copy would otherwise lose it.
+// its `>` — except a list item whose marker line the copy starts after, whose
+// indentation is dropped from the lines inside it. A selection that reaches a
+// bubble's edge reaches its source's edge, so a whole bubble copies byte for
+// byte. A reference-style link or footnote brings its definition along when the
+// copy would otherwise lose it.
+//
+// The promise is fidelity: the copy is the source of what was selected. A
+// fragment whose meaning depends on context it no longer has (a `# ` that began
+// mid-sentence, an item numbered 2 right after a paragraph) can render
+// differently when pasted on its own, as any copied piece of a document can.
 
 const START = 'data-md-start';
 const END = 'data-md-end';
 const BLOCK = 'data-md-block';
 const DEF_START = 'data-md-def-start';
 const DEF_END = 'data-md-def-end';
+const CONTENT_START = 'data-md-content-start';
 const ROOT = 'data-md-root';
 const MARKED = `[${START}]`;
 const BLOCKS = `[${BLOCK}]`;
 // Where an in-block cut is measured: a text block, or one cell of a table.
 const LEAVES = `td, th, ${BLOCKS}`;
+
+// What shows content without text.
+const TEXTLESS = new Set(['IMG', 'HR']);
+const isTextless = (node: Node) => node.nodeType === Node.ELEMENT_NODE && TEXTLESS.has((node as Element).tagName);
 
 const BLOCK_TAGS = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'pre', 'table', 'hr']);
 const FORMATTING = new Set(['STRONG', 'EM', 'DEL', 'CODE']);
@@ -45,6 +58,7 @@ const ATTRIBUTES = [
   ['dataMdBlock', BLOCK],
   ['dataMdDefStart', DEF_START],
   ['dataMdDefEnd', DEF_END],
+  ['dataMdContentStart', CONTENT_START],
 ] as const;
 
 /** What a rendered Markdown root was rendered from. */
@@ -102,9 +116,18 @@ function codeInterior(source: string, start: number, end: number): [number, numb
   return [start + open + 1, close > open && closing.test(raw.slice(close + 1)) ? start + close + 1 : end];
 }
 
-/** Point each reference at the definition it needs, which renders nowhere near it. */
-export function remarkDefinitionSpans() {
+/**
+ * Record what the rendered DOM no longer shows: where each list item, heading
+ * and table cell's content begins after its syntax, and which definition each
+ * reference needs, which renders nowhere near it.
+ */
+export function remarkSourceAnchors() {
   return (tree: unknown) => {
+    eachNode(tree as MdastNode, (node) => {
+      if (node.type !== 'listItem' && node.type !== 'heading' && node.type !== 'tableCell') return;
+      const start = node.children?.[0]?.position?.start?.offset;
+      if (typeof start === 'number') ((node.data ??= {}).hProperties ??= {}).dataMdContentStart = start;
+    });
     const kind = (type?: string) => {
       if (type === 'definition' || type === 'linkReference' || type === 'imageReference') return 'link';
       if (type === 'footnoteDefinition' || type === 'footnoteReference') return 'note';
@@ -197,10 +220,13 @@ function markedChildren(host: Element): Element[] {
 
 // Walk `typed` through `text[from, to)`, skipping the Markdown syntax between
 // its characters; the offset just after the last one matched. A character with
-// no counterpart (text a component drew rather than the source) is passed over.
+// no counterpart (text a component drew rather than the source) is passed over,
+// and whitespace anchors nothing: the renderer draws some of its own (after a
+// task checkbox), and a narrowed selection's endpoints never rest on it.
 function align(text: string, from: number, to: number, typed: string): number {
   let cursor = from;
   for (const ch of typed) {
+    if (blank(ch)) continue;
     const at = text.indexOf(ch, cursor);
     if (at >= 0 && at + ch.length <= to) cursor = at + ch.length;
   }
@@ -209,7 +235,7 @@ function align(text: string, from: number, to: number, typed: string): number {
 
 // The source offset of `point` inside `host`, its innermost marked element.
 function offsetIn(text: string, host: Element, point: Point, side: Side): number {
-  const from = spanStart(host);
+  const from = host.hasAttribute(CONTENT_START) ? Number(host.getAttribute(CONTENT_START)) : spanStart(host);
   const to = spanEnd(host);
   const here = host.ownerDocument.createRange();
   here.setStart(point.node, point.offset);
@@ -240,9 +266,15 @@ function offsetIn(text: string, host: Element, point: Point, side: Side): number
   // syntax, not at its first character.
   if (blank(rest)) return after ? spanStart(after) : to;
   const cursor = align(text, base, to, typed);
-  const next = String.fromCodePoint(rest.codePointAt(0)!);
+  // Only a code line's indentation can be selected whitespace: it is written
+  // right before the line's first character.
+  const lead = /^[ \t]*/.exec(rest)![0].length;
+  const next = String.fromCodePoint(rest.codePointAt(lead)!);
   const at = text.indexOf(next, cursor);
-  return at >= 0 && at < to ? at : cursor;
+  if (at < 0 || at >= to) return cursor;
+  if (lead) return Math.max(lineStart(text, at), at - lead);
+  // Escaped punctuation is written with its backslash.
+  return at > cursor && text[at - 1] === '\\' && /[!-/:-@[-`{-~]/.test(next) ? at - 1 : at;
 }
 
 // Where a cut inside `leaf` falls for `point`. An inline element that is not
@@ -261,19 +293,121 @@ function cutOffset(text: string, leaf: Element, point: Point, side: Side, other:
   return offsetIn(text, chain[chain.length - 1] ?? leaf, point, side);
 }
 
-// What each container around `leaf` repeats at the start of its continuation
-// lines, outermost first: a quote's `>`, a list item's indentation.
-function continuationPrefixes(leaf: Element, root: Element, text: string): RegExp[] {
-  const prefixes: RegExp[] = [];
-  for (let el: Element | null = leaf; el && el !== root; el = el.parentElement) {
-    if (el.tagName === 'BLOCKQUOTE') {
-      prefixes.unshift(/^[ \t]{0,3}>[ \t]?/);
-    } else if (el.tagName === 'LI' && el.hasAttribute(START)) {
-      const marker = /^(?:[-*+]|\d{1,9}[.)])[ \t]*/.exec(text.slice(spanStart(el)))?.[0].length ?? 0;
-      prefixes.unshift(new RegExp(`^ {0,${marker}}`));
+const TAB_STOP = 4;
+
+// What reading a container's syntax off the front of one line leaves: the
+// syntax read, the rest of the line, and the column the rest starts at.
+type Read = [syntax: string, rest: string, column: number];
+type Container = { el: Element; read: (line: string, column: number) => Read };
+
+// Up to `columns` columns of leading whitespace, counted from `column` the way
+// CommonMark counts them: a tab advances to the next tab stop, and a tab only
+// partly read leaves the rest of its width as spaces.
+function readIndent(line: string, columns: number, column: number): Read {
+  const limit = column + columns;
+  let syntax = '';
+  let at = 0;
+  while (at < line.length && column < limit) {
+    if (line[at] === ' ') {
+      syntax += ' ';
+      column += 1;
+    } else if (line[at] === '\t') {
+      const stop = column + TAB_STOP - (column % TAB_STOP);
+      if (stop > limit) {
+        return [syntax + ' '.repeat(limit - column), ' '.repeat(stop - limit) + line.slice(at + 1), limit];
+      }
+      syntax += '\t';
+      column = stop;
+    } else {
+      break;
+    }
+    at += 1;
+  }
+  return [syntax, line.slice(at), column];
+}
+
+// A quote marker: up to three columns of indent, `>`, and one optional column
+// after it. A lazy continuation line has none, and is left as it is.
+function readQuote(line: string, column: number): Read {
+  const [indent, rest, at] = readIndent(line, 3, column);
+  if (!rest.startsWith('>')) return ['', line, column];
+  const [space, after, end] = readIndent(rest.slice(1), 1, at + 1);
+  return [`${indent}>${space}`, after, end];
+}
+
+// The column `offset` sits at on its line.
+function columnAt(text: string, offset: number): number {
+  let column = 0;
+  for (let at = lineStart(text, offset); at < offset; at += 1) {
+    column = text[at] === '\t' ? column + TAB_STOP - (column % TAB_STOP) : column + 1;
+  }
+  return column;
+}
+
+// How far a list item's continuation lines are indented: to its content, or
+// one column past its marker when the content is blank or is indented code. A
+// footnote definition's continuation lines are indented four columns.
+function itemWidth(text: string, item: Element): number {
+  const start = spanStart(item);
+  if (text.startsWith('[^', start)) return TAB_STOP;
+  const marker = /^(?:[-*+]|\d{1,9}[.)])/.exec(text.slice(start))?.[0] ?? '';
+  const column = columnAt(text, start);
+  const end = text.indexOf('\n', start);
+  const line = text.slice(start + marker.length, end < 0 ? text.length : end);
+  const [, rest, content] = readIndent(line, Infinity, column + marker.length);
+  const spaces = content - column - marker.length;
+  return !rest || spaces > 4 ? marker.length + 1 : content - column;
+}
+
+// Indentation up to an absolute column, the way a container's content starts
+// at one: a nested item's own marker may sit a few columns into its parent's.
+const indentTo = (el: Element, target: number): Container => ({
+  el,
+  read: (line, column) => readIndent(line, Math.max(0, target - column), column),
+});
+
+// A list item's continuation lines are indented to the column its content starts at.
+const itemContainer = (text: string, item: Element) =>
+  indentTo(item, columnAt(text, spanStart(item)) + itemWidth(text, item));
+
+// The containers around `el` (itself excluded) whose syntax its continuation
+// lines repeat, outermost first: a quote's `>`, a list item's indentation.
+function containersOf(el: Element, root: Element, text: string): Container[] {
+  const containers: Container[] = [];
+  for (let parent = el.parentElement; parent && parent !== root; parent = parent.parentElement) {
+    if (parent.tagName === 'BLOCKQUOTE') {
+      containers.unshift({ el: parent, read: readQuote });
+    } else if (parent.tagName === 'LI' && parent.hasAttribute(START)) {
+      containers.unshift(itemContainer(text, parent));
     }
   }
-  return prefixes;
+  return containers;
+}
+
+// A code block's lines also carry the block's own indentation: an indented
+// block's four columns, or as many as its opening fence is indented.
+function codeContainer(text: string, block: Element, containers: Container[]): Container {
+  const start = lineStart(text, spanStart(block));
+  const end = text.indexOf('\n', start);
+  const line = text.slice(start, end < 0 ? text.length : end);
+  let [, rest, column] = ['', line, 0] as Read;
+  for (const container of containers) [, rest, column] = container.read(rest, column);
+  const [, fence, fenceColumn] = readIndent(rest, Infinity, column);
+  return indentTo(block, /^(?:`{3,}|~{3,})/.test(fence) ? fenceColumn : column + TAB_STOP);
+}
+
+// `line` with each container's syntax read off its front, kept or dropped.
+function rewriteLine(line: string, containers: Container[], keep: (container: Container) => boolean): string {
+  let kept = '';
+  let rest = line;
+  let column = 0;
+  for (const container of containers) {
+    const [syntax, after, next] = container.read(rest, column);
+    if (keep(container)) kept += syntax;
+    rest = after;
+    column = next;
+  }
+  return kept + rest;
 }
 
 function selectsAllOf(el: Element, start: Point, end: Point): boolean {
@@ -287,8 +421,8 @@ function selectsAllOf(el: Element, start: Point, end: Point): boolean {
 }
 
 // The blocks a selection crossing blocks copies: the innermost block holding
-// each endpoint, when the selection takes any of its text, and every block
-// between them.
+// each endpoint, when the selection takes any of its text or the image or rule
+// the endpoint rests on, and every block between them.
 function selectedBlocks(range: Range, root: Element, start: Point, end: Point): Element[] {
   const startBlock = enclosing(start, root, BLOCKS);
   const endBlock = enclosing(end, root, BLOCKS);
@@ -296,6 +430,7 @@ function selectedBlocks(range: Range, root: Element, start: Point, end: Point): 
     if (block !== startBlock && block !== endBlock) {
       return range.intersectsNode(block) && !block.contains(start.node) && !block.contains(end.node);
     }
+    if (isTextless(block === startBlock ? start.node : end.node)) return true;
     return !blank(textBetween(root, (taken) => {
       if (block === startBlock) taken.setStart(start.node, start.offset);
       else taken.setStart(block, 0);
@@ -339,14 +474,21 @@ function copyOf(
 ): string {
   const slice = (start: number, end: number) =>
     source.content.slice(toContent(source, start, 'start'), toContent(source, end, 'end'));
-  const definitions = new Map<number, number>();
-  for (const el of root.querySelectorAll(`[${DEF_START}]`)) {
-    const start = Number(el.getAttribute(DEF_START));
-    const end = Number(el.getAttribute(DEF_END));
-    const used = el.hasAttribute(START) && spanStart(el) >= from && spanEnd(el) <= to;
-    if (used && (start < from || end > to)) definitions.set(start, end);
+  // A definition brought along can itself hold references (a footnote citing a
+  // reference link), so collect until nothing copied needs anything more.
+  const copied: Array<[number, number]> = [[from, to]];
+  const holds = (start: number, end: number) => copied.some(([left, right]) => start >= left && end <= right);
+  const references = Array.from(root.querySelectorAll(`[${DEF_START}]`)).filter((el) => el.hasAttribute(START));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const el of references) {
+      const definition: [number, number] = [Number(el.getAttribute(DEF_START)), Number(el.getAttribute(DEF_END))];
+      if (!holds(spanStart(el), spanEnd(el)) || holds(...definition)) continue;
+      copied.push(definition);
+      grew = true;
+    }
   }
-  const needed = [...definitions].sort(([left], [right]) => left - right);
+  const needed = copied.slice(1).sort(([left], [right]) => left - right);
   return [tidy(slice(from, to)), ...needed.map(([start, end]) => slice(start, end))].join('\n\n');
 }
 
@@ -362,13 +504,17 @@ function copyFromRoot(range: Range, root: Element, start: Point, end: Point): st
     const from = cutOffset(text, leaf, start, 'start', end);
     const to = cutOffset(text, leaf, end, 'end', start);
     if (to <= from) return '';
-    const prefixes = continuationPrefixes(leaf, root, text);
-    const strip = (line: string) => prefixes.reduce((rest, prefix) => rest.replace(prefix, ''), line);
+    // The leaf's own continuation indentation is container syntax here too.
+    const containers = containersOf(leaf, root, text);
+    if (leaf.tagName === 'LI') containers.push(itemContainer(text, leaf));
+    if (leaf.tagName === 'PRE' || leaf.firstElementChild?.tagName === 'PRE') {
+      containers.push(codeContainer(text, leaf, containers));
+    }
     const fromLineStart = from === lineStart(text, from);
     return copyOf(source, root, from, to, (markdown) =>
       markdown
         .split('\n')
-        .map((line, index) => (index > 0 || fromLineStart ? strip(line) : line))
+        .map((line, index) => (index > 0 || fromLineStart ? rewriteLine(line, containers, () => false) : line))
         .join('\n'),
     );
   }
@@ -384,14 +530,72 @@ function copyFromRoot(range: Range, root: Element, start: Point, end: Point): st
   if (!before && !after) return source.content;
   const blocks = selectedBlocks(range, root, start, end);
   if (!blocks.length) return '';
-  const from = before ? Math.min(...blocks.map((block) => lineStart(text, spanStart(block)))) : 0;
+  const first = blocks[0];
+  const from = before ? lineStart(text, spanStart(first)) : 0;
   const to = after ? Math.max(...blocks.map(spanEnd)) : text.length;
-  // Lines copied from inside a nested container keep their indentation relative
-  // to the first one, not to a document they are no longer in.
+  // A list item whose marker line the copy starts after is not in the copy: its
+  // indentation is dropped from the lines inside it, which then read as they did
+  // inside it. Every other container keeps its syntax.
+  const containers = before ? containersOf(first, root, text) : [];
+  const opened = ({ el }: Container) => el.tagName === 'LI' && spanStart(el) < from;
+  if (!containers.some(opened)) return copyOf(source, root, from, to);
+  const ends = containers.map(({ el }) => toContent(source, spanEnd(el), 'end'));
   return copyOf(source, root, from, to, (markdown) => {
-    const indent = before ? /^ */.exec(markdown)![0].length : 0;
-    return indent ? markdown.replace(new RegExp(`^ {0,${indent}}`, 'gm'), '') : markdown;
+    let at = toContent(source, from, 'start');
+    return markdown
+      .split('\n')
+      .map((line) => {
+        const around = containers.filter((_, index) => at < ends[index]);
+        at += line.length + 1;
+        return rewriteLine(line, around, (container) => !opened(container));
+      })
+      .join('\n');
   });
+}
+
+// The selection narrowed to what it selects: characters, and images or rules.
+// An endpoint resting on an element's edge, between blocks, or in whitespace at
+// either end selects nothing there — a triple-click ends at the start of the
+// next block — except a code line's indentation, which is part of its code.
+function selectedCharacters(range: Range): Range | null {
+  const scope = range.commonAncestorContainer;
+  const nodes: Node[] = [];
+  if (scope.nodeType === Node.TEXT_NODE) {
+    nodes.push(scope);
+  } else {
+    const walker = scope.ownerDocument!.createTreeWalker(scope, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const content = node.nodeType === Node.TEXT_NODE || isTextless(node);
+      if (content && range.intersectsNode(node)) nodes.push(node);
+    }
+  }
+  const selected = (node: Text) => {
+    const from = node === range.startContainer ? range.startOffset : 0;
+    const to = node === range.endContainer ? range.endOffset : node.data.length;
+    return { from, text: node.data.slice(from, to) };
+  };
+  const holds = (node: Node) => node.nodeType !== Node.TEXT_NODE || !blank(selected(node as Text).text);
+  const first = nodes.find(holds);
+  const last = [...nodes].reverse().find(holds);
+  if (!first || !last) return null;
+  const narrowed = range.cloneRange();
+  if (first.nodeType === Node.TEXT_NODE) {
+    const head = selected(first as Text);
+    let at = head.from + head.text.search(/\S/);
+    if (first.parentElement?.closest('pre')) {
+      while (at > head.from && /[ \t]/.test((first as Text).data[at - 1])) at -= 1;
+    }
+    narrowed.setStart(first, at);
+  } else {
+    narrowed.setStart(first, 0);
+  }
+  if (last.nodeType === Node.TEXT_NODE) {
+    const tail = selected(last as Text);
+    narrowed.setEnd(last, tail.from + tail.text.search(/\s*$/));
+  } else {
+    narrowed.setEnd(last, 0);
+  }
+  return narrowed;
 }
 
 // The rendered Markdown roots `range` reaches inside `container`, in document order.
@@ -408,9 +612,11 @@ function markdownRoots(range: Range, container: Element): Element[] {
  * timestamps) is not Markdown and is left out.
  */
 export function selectedMarkdown(range: Range, container: Element): string | null {
-  const start: Point = { node: range.startContainer, offset: range.startOffset };
-  const end: Point = { node: range.endContainer, offset: range.endOffset };
-  const parts = markdownRoots(range, container).map((root) => copyFromRoot(range, root, start, end));
+  const selected = selectedCharacters(range);
+  if (!selected) return null;
+  const start: Point = { node: selected.startContainer, offset: selected.startOffset };
+  const end: Point = { node: selected.endContainer, offset: selected.endOffset };
+  const parts = markdownRoots(selected, container).map((root) => copyFromRoot(selected, root, start, end));
   return parts.filter((part) => !blank(part)).join('\n\n') || null;
 }
 
