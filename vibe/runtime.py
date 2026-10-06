@@ -2360,6 +2360,20 @@ def ui_pid_file_points_to_running_ui(pid_path: Path | None = None) -> bool:
     return bool(pid and pid_alive(pid) and _pid_matches_ui_server(pid))
 
 
+def recorded_ui_is_gone(pid_path: Path | None = None) -> bool:
+    """Whether no UI runs under the recorded pid, as far as can be known.
+
+    A live pid whose command cannot be read is not gone: it may be the UI, and
+    one started beside it would only die on its port.
+    """
+
+    pid = _read_pid_file(pid_path or paths.get_runtime_ui_pid_path())
+    if not pid or not pid_alive(pid):
+        return True
+    command = get_process_command(pid)
+    return command is not None and not _is_ui_server_command(command)
+
+
 def resolve_localhost_family() -> str:
     """Return the loopback family ``localhost`` actually maps to on this host.
 
