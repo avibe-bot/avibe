@@ -385,9 +385,6 @@ class Controller:
 
         store = self.vibe_agent_store
         try:
-            avibe = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
-            if avibe is None:
-                return
             selections = []
             # The native CLI backends, in the Model Hub's backend order.
             for backend in (item for item in MODEL_HUB_BACKENDS if item in NATIVE_CLI_BACKENDS):
@@ -396,7 +393,9 @@ class Controller:
                 if model:
                     selections.append((backend, model))
             seeded = await model_hub_service.seed_avibe_supply(selections)
-            if seeded:
+            # None when a user Agent already holds the name, as for any built-in.
+            avibe = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
+            if seeded and avibe is not None:
                 # The user may pick a model while the seed waits on models.dev.
                 store.update(
                     avibe.name,

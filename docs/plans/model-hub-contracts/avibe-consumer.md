@@ -22,7 +22,9 @@ created Source would be, and its catalog becomes the models the built-in Claude,
 Codex, and OpenCode Agents run, in that order, that one of those Sources lists,
 deduplicated and added as the picker adds a provider model (models.dev metadata
 included). The built-in Avibe Agent takes the first seeded model when it has none, decided
-under the Agent store's write lock so a model chosen meanwhile stands. A Source
+under the Agent store's write lock so a model chosen meanwhile stands; where a
+user Agent already holds the name and no built-in exists, only the supply is
+seeded. A Source
 created before the seed is placed by the seed, not by itself.
 The persisted row then belongs to the user and is never seeded again. Existing
 backend modes, model metadata, routes, source order, and runtime intent remain

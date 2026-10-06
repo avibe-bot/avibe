@@ -213,16 +213,20 @@ def test_avibe_model_options_come_from_configured_hub_catalog(monkeypatch):
     assert api.agent_model_options("avibe")["models"] == []
 
 
-@pytest.mark.parametrize("avibe", ["no model", "chosen before", "chosen during the seed"])
+@pytest.mark.parametrize("avibe", ["no model", "chosen before", "chosen during the seed", "name taken"])
 def test_avibe_agent_starts_on_the_first_seeded_model_it_lacks(tmp_path, sqlite_db_factory, avibe):
     """MH-AVIBE-007: the built-in Agents' models feed the Hub seed, in order.
 
     The Hub chooses which of them it can route; this process owns the Agent
     rows, so it alone reads those models and gives the Avibe Agent a model. A
     model the user chose stands, including one chosen while the seed waited.
+    When a user Agent already holds the name, no built-in exists: the supply is
+    still seeded and that Agent is left alone.
     """
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
     try:
+        if avibe == "name taken":
+            store.create(name="avibe", backend="claude", model="claude-haiku-4-5")
         store.ensure_builtin_default_agents(["opencode", "claude", "codex", "avibe"])
         store.create(name="reviewer", backend="claude", model="claude-sonnet-5-5")
         for name, model in (("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol")):
@@ -242,6 +246,13 @@ def test_avibe_agent_starts_on_the_first_seeded_model_it_lacks(tmp_path, sqlite_
         controller.vibe_agent_store = store
         asyncio.run(controller._seed_avibe_model_supply())
         assert requested == [[("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol")]]
-        assert store.get("avibe").model == ("gpt-5.5" if avibe == "no model" else "chosen-model")
+        builtin = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
+        assert (builtin is None) is (avibe == "name taken")
+        assert (store.get("avibe").backend, store.get("avibe").model) == {
+            "no model": ("avibe", "gpt-5.5"),
+            "chosen before": ("avibe", "chosen-model"),
+            "chosen during the seed": ("avibe", "chosen-model"),
+            "name taken": ("claude", "claude-haiku-4-5"),
+        }[avibe]
     finally:
         store.close()
