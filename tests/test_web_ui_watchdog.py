@@ -76,6 +76,35 @@ def test_a_ui_gone_for_two_checks_is_started_again_with_the_status_kept(host) ->
 
 
 @pytest.mark.parametrize(
+    ("command", "address"),
+    [
+        # What `runtime.start_ui` launches, the shape every config-driven launcher uses.
+        pytest.param(
+            "python3 -c from vibe.ui_server import run_ui_server; run_ui_server('::', 5203)",
+            ("::", 5203),
+            id="start-ui",
+        ),
+        # The Docker entrypoint binds from the container's environment, not the config.
+        pytest.param(
+            "python -c \nfrom vibe.ui_server import run_ui_server\nrun_ui_server('0.0.0.0', 6123)\n",
+            ("0.0.0.0", 6123),
+            id="docker-entrypoint",
+        ),
+    ],
+)
+def test_a_ui_seen_running_is_started_again_where_it_ran(host, command, address) -> None:
+    host.commands[200] = command
+    watchdog = WebUiWatchdog(stopping=lambda: False)
+    assert watchdog.check(0.0) is None
+
+    host.kill(200)
+    watchdog.check(CHECK_INTERVAL_SECONDS)
+    watchdog.check(2 * CHECK_INTERVAL_SECONDS)
+
+    assert host.starts == [address]
+
+
+@pytest.mark.parametrize(
     ("recorded", "command", "started"),
     [
         pytest.param("200", None, True, id="recorded-pid-dead"),
