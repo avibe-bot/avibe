@@ -380,14 +380,13 @@ class Controller:
         model_hub_service = getattr(self, "model_hub_service", None)
         if model_hub_service is None:
             return
-        from config.v2_config import MODEL_HUB_BACKENDS
         from vibe.authorization import instance_owner_context
 
         store = self.vibe_agent_store
         try:
             selections = []
-            # The native CLI backends, in the Model Hub's backend order.
-            for backend in (item for item in MODEL_HUB_BACKENDS if item in NATIVE_CLI_BACKENDS):
+            # The native CLI backends by name: claude, codex, opencode.
+            for backend in sorted(NATIVE_CLI_BACKENDS):
                 agent = store.get_builtin_default_agent_for_backend(backend)
                 model = str(getattr(agent, "model", None) or "").strip()
                 if model:
