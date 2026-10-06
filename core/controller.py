@@ -369,39 +369,46 @@ class Controller:
                 result.append(backend)
         return result
 
-    async def _seed_avibe_model_supply(self) -> None:
-        """Start an Avibe Agent that predates its Model Hub entry with what the user runs.
+    def _builtin_agent_models(self) -> list[tuple[str, str]]:
+        """The models the built-in native Agents run, by backend name: claude, codex, opencode."""
 
-        The Hub seeds that entry once from the models the built-in Agents run;
-        this process owns the Agent rows, so it reads those models and gives the
-        built-in Avibe Agent the first seeded one when it has none yet.
+        store = self.vibe_agent_store
+        selections = []
+        for backend in sorted(NATIVE_CLI_BACKENDS):
+            agent = store.get_builtin_default_agent_for_backend(backend)
+            model = str(getattr(agent, "model", None) or "").strip()
+            if model:
+                selections.append((backend, model))
+        return selections
+
+    def _hand_off_avibe_model(self, model_id: str) -> None:
+        """Give the built-in Avibe Agent a seeded model when it has none.
+
+        Decided under the store's write lock, so a model the user picked while
+        the seed ran stands. No built-in exists when a user Agent already holds
+        the name, as for any built-in; the supply is seeded all the same.
         """
+
+        from vibe.authorization import instance_owner_context
+
+        store = self.vibe_agent_store
+        avibe = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
+        if avibe is not None:
+            store.update(
+                avibe.name,
+                model=model_id,
+                only_if_model_unset=True,
+                user_context=instance_owner_context(),
+            )
+
+    async def _seed_avibe_model_supply(self) -> None:
+        """Seed the Avibe Agent's Model Hub entry from the Sources that existed at startup."""
 
         model_hub_service = getattr(self, "model_hub_service", None)
         if model_hub_service is None:
             return
-        from vibe.authorization import instance_owner_context
-
-        store = self.vibe_agent_store
         try:
-            selections = []
-            # The native CLI backends by name: claude, codex, opencode.
-            for backend in sorted(NATIVE_CLI_BACKENDS):
-                agent = store.get_builtin_default_agent_for_backend(backend)
-                model = str(getattr(agent, "model", None) or "").strip()
-                if model:
-                    selections.append((backend, model))
-            seeded = await model_hub_service.seed_avibe_supply(selections)
-            # None when a user Agent already holds the name, as for any built-in.
-            avibe = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
-            if seeded and avibe is not None:
-                # The user may pick a model while the seed waits on models.dev.
-                store.update(
-                    avibe.name,
-                    model=seeded[0],
-                    only_if_model_unset=True,
-                    user_context=instance_owner_context(),
-                )
+            await model_hub_service.seed_avibe_supply()
         except Exception:
             logger.warning("Avibe Agent starting model supply failed", exc_info=True)
 
@@ -2815,6 +2822,8 @@ class Controller:
             requested_model_override=default_vibe_agent_model,
             selected_agent_override=default_vibe_agent_name,
             named_agents_override=named_vibe_agents,
+            builtin_agent_models_override=self._builtin_agent_models,
+            avibe_model_handoff=self._hand_off_avibe_model,
             cli_present_override=cli_present,
             cli_presence_refresh=refresh_cli_presence,
             backend_catalog_changed=backend_catalog_changed,

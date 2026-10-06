@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -213,15 +212,14 @@ def test_avibe_model_options_come_from_configured_hub_catalog(monkeypatch):
     assert api.agent_model_options("avibe")["models"] == []
 
 
-@pytest.mark.parametrize("avibe", ["no model", "chosen before", "chosen during the seed", "name taken"])
+@pytest.mark.parametrize("avibe", ["no model", "chosen", "name taken"])
 def test_avibe_agent_starts_on_the_first_seeded_model_it_lacks(tmp_path, sqlite_db_factory, avibe):
-    """MH-AVIBE-007: the built-in Agents' models feed the Hub seed, in order.
+    """MH-AVIBE-007: the Agent rows behind the Hub seed, owned by this process.
 
-    The Hub chooses which of them it can route; this process owns the Agent
-    rows, so it alone reads those models and gives the Avibe Agent a model. A
-    model the user chose stands, including one chosen while the seed waited.
-    When a user Agent already holds the name, no built-in exists: the supply is
-    still seeded and that Agent is left alone.
+    The built-in native Agents' models feed the seed in backend-name order, and
+    the built-in Avibe Agent takes the first seeded model only while it has none,
+    so a model the user chose meanwhile stands. When a user Agent already holds
+    the name, no built-in exists and that Agent is left alone.
     """
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
     try:
@@ -231,27 +229,18 @@ def test_avibe_agent_starts_on_the_first_seeded_model_it_lacks(tmp_path, sqlite_
         store.create(name="reviewer", backend="claude", model="claude-sonnet-5-5")
         for name, model in (("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol")):
             store.update(name, model=model)
-        if avibe == "chosen before":
+        if avibe == "chosen":
             store.update("avibe", model="chosen-model")
-        requested = []
-
-        async def seed_avibe_supply(selections):
-            requested.append(list(selections))
-            if avibe == "chosen during the seed":
-                store.update("avibe", model="chosen-model")
-            return ["gpt-5.5", "claude-opus-5-5"]
-
         controller = Controller.__new__(Controller)
-        controller.model_hub_service = SimpleNamespace(seed_avibe_supply=seed_avibe_supply)
         controller.vibe_agent_store = store
-        asyncio.run(controller._seed_avibe_model_supply())
-        assert requested == [[("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol")]]
-        builtin = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
-        assert (builtin is None) is (avibe == "name taken")
+
+        assert controller._builtin_agent_models() == [
+            ("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol"),
+        ]
+        controller._hand_off_avibe_model("gpt-5.5")
         assert (store.get("avibe").backend, store.get("avibe").model) == {
             "no model": ("avibe", "gpt-5.5"),
-            "chosen before": ("avibe", "chosen-model"),
-            "chosen during the seed": ("avibe", "chosen-model"),
+            "chosen": ("avibe", "chosen-model"),
             "name taken": ("claude", "claude-haiku-4-5"),
         }[avibe]
     finally:

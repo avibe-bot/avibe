@@ -601,6 +601,19 @@ SEED_NATIVE = _seed_source(
     kind="subscription", vendor="anthropic", protocol="anthropic", channel="native_cli",
 )
 SEED_KEYS = [SEED_ANTHROPIC.id, SEED_RESPONSES.id, SEED_CHAT.id]
+SEED_CATALOG = {"anthropic": {"name": "Anthropic", "models": {
+    "claude-opus-5-5": {"name": "Claude Opus 5.5", "limit": {"context": 1_000_000, "output": 128_000}},
+}}}
+
+
+def _seed_service(tmp_path, payload, selections):
+    """A service over persisted state, with the controller's two Agent-row hooks."""
+    service = _service(tmp_path, sources=[])
+    service.store = _PersistedStore(payload)
+    service.models_dev_catalog = lambda: SEED_CATALOG
+    service.builtin_agent_models_override = lambda: list(selections)
+    service.avibe_model_handoff = (handed := []).append
+    return service, service.store, handed
 
 
 @pytest.mark.asyncio
@@ -634,21 +647,16 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
     agents = {backend: ModelHubAgentSupplyConfig.default(backend, mode="hub") for backend in ("claude", "codex", "opencode")}
     # The user keeps one Source for Claude; seeding Avibe must not restore the rest.
     agents["claude"].sources.order = [SEED_ANTHROPIC.id]
-    sources = [SEED_ANTHROPIC, SEED_RESPONSES, SEED_SUBSCRIPTION, SEED_NATIVE]
-    store = _PersistedStore({
+    sources = [SEED_ANTHROPIC, SEED_RESPONSES, SEED_CHAT, SEED_SUBSCRIPTION, SEED_NATIVE]
+    service, store, handed = _seed_service(tmp_path, {
         "enabled": True,
         "runtime_default_applied": True,
         "sources": [source.to_payload() for source in sources],
         "agents": {backend: agent.to_payload() for backend, agent in agents.items()},
-    })
-    service = _service(tmp_path, sources=[])
-    service.store = store
-    service.models_dev_catalog = lambda: {"anthropic": {"name": "Anthropic", "models": {
-        "claude-opus-5-5": {"name": "Claude Opus 5.5", "limit": {"context": 1_000_000, "output": 128_000}},
-    }}}
-    # A write ahead of the seed, here a Source created then, must neither record
-    # the empty placeholder as the user's entry nor place itself in it.
-    await service._commit_new_source_locked(copy.deepcopy(SEED_CHAT))
+    }, selections)
+    # An unrelated write ahead of the seed (a startup reconcile, a settings
+    # save) must not record the empty placeholder as the user's entry.
+    store.save(store.load())
     assert "avibe" not in store.payload["agents"]
 
     async def engine_not_started(_bindings):
@@ -658,10 +666,11 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
     service.adapter.sync_sources = engine_not_started
     others = {backend: store.payload["agents"][backend] for backend in agents}
 
-    assert await service.seed_avibe_supply(selections) == seeded
+    assert await service.seed_avibe_supply() == seeded
     avibe = store.payload["agents"]["avibe"]
     assert avibe["sources"]["order"] == order
     assert [model["id"] for model in avibe["models"]] == seeded
+    assert handed == seeded[:1]
     assert {backend: store.payload["agents"][backend] for backend in agents} == others
     if "claude-opus-5-5" in seeded:
         row = next(model for model in avibe["models"] if model["id"] == "claude-opus-5-5")
@@ -676,8 +685,48 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
     # The persisted entry is the user's: a Source they removed stays removed.
     avibe["sources"]["order"].remove(SEED_CHAT.id)
     kept = copy.deepcopy(store.payload)
-    assert await service.seed_avibe_supply(selections) == []
+    assert await service.seed_avibe_supply() == []
     assert store.payload == kept
+    assert handed == seeded[:1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("selections", "seeded"), [
+    ([("claude", "claude-opus-5-5"), ("codex", "gpt-6-astra")], ["claude-opus-5-5"]),
+    # Typical of a fresh install: no Agent runs a model this Source lists, and
+    # none is picked for the user.
+    ([("codex", "gpt-6-astra")], []),
+])
+async def test_fresh_install_seeds_avibe_with_its_first_source(tmp_path, selections, seeded):
+    """MH-AVIBE-007: on a fresh install the first eligible Source seeds Avibe at once.
+
+    A seed with no Source to place is not a seed: counted as done, it would
+    leave every later Source without starting models, and skipping the pending
+    entry at placement would leave the first Source out until a restart.
+    """
+    service, store, handed = _seed_service(tmp_path, ModelHubConfig().to_payload(), selections)
+    assert "avibe" not in store.payload["agents"]
+
+    assert await service.seed_avibe_supply() == []
+    native = copy.deepcopy(SEED_NATIVE)
+    await service._commit_new_source_locked(native)
+    assert "avibe" not in store.payload["agents"]
+
+    await service._commit_new_source_locked(copy.deepcopy(SEED_ANTHROPIC))
+    avibe = store.payload["agents"]["avibe"]
+    assert avibe["sources"]["order"] == [SEED_ANTHROPIC.id]
+    assert [model["id"] for model in avibe["models"]] == seeded
+    assert handed == seeded[:1]
+    assert {candidate["id"] for candidate in service.agent_model_candidates("avibe")["providers"]} == (
+        {"claude-opus-5-5", "claude-sonnet-5-5"} - set(seeded)
+    )
+
+    # Seeded once: a later Source is placed like any other, and nothing re-seeds.
+    await service._commit_new_source_locked(copy.deepcopy(SEED_RESPONSES))
+    avibe = store.payload["agents"]["avibe"]
+    assert avibe["sources"]["order"] == [SEED_ANTHROPIC.id, SEED_RESPONSES.id]
+    assert [model["id"] for model in avibe["models"]] == seeded
+    assert handed == seeded[:1]
 
 
 def test_native_cli_and_direct_are_not_avibe_channels(tmp_path):

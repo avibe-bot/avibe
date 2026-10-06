@@ -1053,6 +1053,10 @@ class ModelHubService:
         named_agents_override: Optional[
             Callable[[BackendName], list[tuple[str, Optional[str]]]]
         ] = None,
+        builtin_agent_models_override: Optional[
+            Callable[[], list[tuple[BackendName, str]]]
+        ] = None,
+        avibe_model_handoff: Optional[Callable[[str], None]] = None,
         cli_present_override: Optional[Callable[[BackendName], bool]] = None,
         cli_presence_refresh: Optional[
             Callable[[bool, tuple[BackendName, ...] | None], None]
@@ -1103,6 +1107,10 @@ class ModelHubService:
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
+        # The built-in Agents' models, and the Avibe Agent's model hand-off, for
+        # the Avibe starting supply; the controller owns those Agent rows.
+        self.builtin_agent_models_override = builtin_agent_models_override
+        self.avibe_model_handoff = avibe_model_handoff
         self.cli_present_override = cli_present_override
         self.cli_presence_refresh = cli_presence_refresh
         self.backend_catalog_changed = backend_catalog_changed
@@ -2477,6 +2485,7 @@ class ModelHubService:
         config.sources.append(source)
         self._apply_source_placement(config, source)
         await self._commit_synced(previous, config)
+        self._hand_off_avibe_seed(previous, config)
 
     def _apply_source_placement(
         self,
@@ -2493,7 +2502,8 @@ class ModelHubService:
 
         for backend in backends:
             if backend == "avibe" and config.avibe_supply_pending:
-                # Its seed places every Source at once (seed_avibe_supply).
+                # Its seed places every Source at once, this one included.
+                self._seed_avibe(config)
                 continue
             agent = config.agents[backend]
             if not self._eligible_for_agent(source, backend) or source.id in agent.sources.order:
@@ -5124,21 +5134,87 @@ class ModelHubService:
                 checked=[model.id for model in agent.models],
             )
 
-    async def seed_avibe_supply(
-        self,
-        selections: Iterable[tuple[BackendName, str]],
-    ) -> list[str]:
-        """Start an Avibe Agent that predates its supply entry with what the user runs.
+    def _seed_avibe(self, config: ModelHubConfig) -> bool:
+        """Give a pending Avibe entry its starting supply, in place; whether it took.
 
-        Runs once: only an entry absent from the persisted config is seeded, and
-        the commit persists it, so later starts and the user's edits never meet
-        a second seed. Its Sources are every existing one this backend may use,
-        placed as a newly created Source would be. Its models are the given
-        Agent selections, in order, that one of those Sources lists, each added
-        as the picker adds a provider model. Returns the seeded model ids.
+        Its Sources are every existing one this backend may use, placed as a
+        newly created Source would be. Its models are the built-in Agents'
+        selections, in order, that one of those Sources lists, each added as the
+        picker adds a provider model; none qualifying leaves the list empty
+        rather than picking one. The seed counts only once it has placed a
+        Source: until then the entry stays pending, so the first Source the user
+        adds still brings every Source and the starting models with it.
         """
 
-        if not self.store.load().avibe_supply_pending:
+        agent = config.agents["avibe"]
+        eligible = [source.id for source in config.sources if self._eligible_for_agent(source, "avibe")]
+        if not eligible:
+            return False
+        # A subscription joins only a menu it serves, so the menu is chosen
+        # first, against every Source that may join.
+        reachable = replace(config, agents={**config.agents, "avibe": replace(
+            agent, sources=ModelHubAgentSourcesConfig(order=eligible),
+        )})
+        selections = self.builtin_agent_models_override() if self.builtin_agent_models_override else ()
+        model_ids: list[str] = []
+        for backend, selected in selections:
+            served = next(
+                (
+                    candidate
+                    for candidate in (
+                        opencode_menu_model_candidates(selected)
+                        if backend == "opencode"
+                        else (selected,)
+                    )
+                    if self._matching_menu_model_hops(reachable, "avibe", candidate)
+                ),
+                None,
+            )
+            if served is not None and served not in model_ids:
+                model_ids.append(served)
+        described = self._models_dev_descriptions(model_ids)
+        rows = []
+        for model_id in model_ids:
+            candidate = self._provider_candidate(reachable, "avibe", model_id, described.get(model_id))
+            if candidate is not None:
+                rows.append(candidate[0])
+        agent.models = rows
+        config.avibe_supply_pending = False
+        for source in config.sources:
+            self._apply_source_placement(config, source, ("avibe",))
+        if agent.sources.order:
+            return True
+        # Only subscriptions that serve none of the menu: nothing took.
+        agent.models = []
+        config.avibe_supply_pending = True
+        return False
+
+    def _hand_off_avibe_seed(self, previous: ModelHubConfig, committed: ModelHubConfig) -> None:
+        """Offer the built-in Avibe Agent the first model a just-committed seed added."""
+
+        models = committed.agents["avibe"].models
+        if (
+            previous.avibe_supply_pending
+            and not committed.avibe_supply_pending
+            and models
+            and self.avibe_model_handoff is not None
+        ):
+            try:
+                self.avibe_model_handoff(models[0].id)
+            except Exception:  # noqa: BLE001 - the committed supply stands without it
+                logger.warning("Avibe Agent starting model hand-off failed", exc_info=True)
+
+    async def seed_avibe_supply(self) -> list[str]:
+        """Seed a pending Avibe entry from the Sources that existed at startup.
+
+        Source creation seeds a pending entry in its own mutation; this covers
+        Sources that predate the Avibe Agent. Returns the seeded model ids.
+        """
+
+        current = self.store.load()
+        if not current.avibe_supply_pending or not any(
+            self._eligible_for_agent(source, "avibe") for source in current.sources
+        ):
             return []
         # These rows are written once and then kept, so a first models.dev copy
         # is worth one bounded wait, off the loop and outside the lock.
@@ -5148,39 +5224,8 @@ class ModelHubService:
             if not previous.avibe_supply_pending:
                 return []
             config = self._clone_config(previous)
-            agent = config.agents["avibe"]
-            # A subscription joins only a menu it serves, so the menu is chosen
-            # first, against every Source that may join.
-            reachable = replace(config, agents={**config.agents, "avibe": replace(
-                agent,
-                sources=ModelHubAgentSourcesConfig(order=[
-                    source.id for source in config.sources if self._eligible_for_agent(source, "avibe")
-                ]),
-            )})
-            model_ids: list[str] = []
-            for backend, selected in selections:
-                served = next(
-                    (
-                        candidate
-                        for candidate in (
-                            opencode_menu_model_candidates(selected)
-                            if backend == "opencode"
-                            else (selected,)
-                        )
-                        if self._matching_menu_model_hops(reachable, "avibe", candidate)
-                    ),
-                    None,
-                )
-                if served is not None and served not in model_ids:
-                    model_ids.append(served)
-            described = self._models_dev_descriptions(model_ids)
-            for model_id in model_ids:
-                candidate = self._provider_candidate(reachable, "avibe", model_id, described.get(model_id))
-                if candidate is not None:
-                    agent.models.append(candidate[0])
-            config.avibe_supply_pending = False
-            for source in config.sources:
-                self._apply_source_placement(config, source, ("avibe",))
+            if not self._seed_avibe(config):
+                return []
             try:
                 # An engine that is not up must not undo the seed: the config is
                 # saved first, and the engine takes it on its next demand.
@@ -5188,7 +5233,8 @@ class ModelHubService:
             except ModelHubError:
                 if self.store.load().avibe_supply_pending:
                     raise
-            return [model.id for model in agent.models]
+        self._hand_off_avibe_seed(previous, config)
+        return [model.id for model in config.agents["avibe"].models]
 
     def _ensure_models_dev_copy(self) -> None:
         """Fetch models.dev once when no copy exists yet; a failure leaves none."""
@@ -8776,6 +8822,10 @@ def create_default_service(
     named_agents_override: Optional[
         Callable[[BackendName], list[tuple[str, Optional[str]]]]
     ] = None,
+    builtin_agent_models_override: Optional[
+        Callable[[], list[tuple[BackendName, str]]]
+    ] = None,
+    avibe_model_handoff: Optional[Callable[[str], None]] = None,
     cli_present_override: Optional[Callable[[BackendName], bool]] = None,
     cli_presence_refresh: Optional[
         Callable[[bool, tuple[BackendName, ...] | None], None]
@@ -8836,6 +8886,8 @@ def create_default_service(
         requested_model_override=requested_model_override,
         selected_agent_override=selected_agent_override,
         named_agents_override=named_agents_override,
+        builtin_agent_models_override=builtin_agent_models_override,
+        avibe_model_handoff=avibe_model_handoff,
         cli_present_override=cli_present_override,
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,

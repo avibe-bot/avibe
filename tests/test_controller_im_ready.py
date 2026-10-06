@@ -35,7 +35,7 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     controller.runtime_work_supervisor = SimpleNamespace(activate=AsyncMock())
     seed_started = []
 
-    async def seed_avibe_supply(_selections):
+    async def seed_avibe_supply():
         # A first start may wait on models.dev; startup must not wait with it.
         seed_started.append(True)
         await asyncio.Event().wait()
@@ -43,9 +43,6 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     controller.model_hub_service = SimpleNamespace(
         recover_runtime_intent=AsyncMock(),
         seed_avibe_supply=seed_avibe_supply,
-    )
-    controller.vibe_agent_store = SimpleNamespace(
-        get_builtin_default_agent_for_backend=lambda backend, enabled_only=True: SimpleNamespace(name=backend, model=None),
     )
     controller.avibe_model_supply_task = None
     controller._get_idle_cleanup_timeouts = Mock(return_value=(0, 0))

@@ -3156,6 +3156,8 @@ def test_v2_empty_route_normalizes_on_load_without_writing_until_save(tmp_path, 
 @pytest.mark.parametrize("bad_key", ["", "authorization=sk-unsafe-fixture"])
 def test_invalid_empty_route_key_keeps_v2_recovery_fence(tmp_path, backend, bad_key):
     payload = api.config_to_payload(default_config())
+    # A fresh config leaves the Avibe entry unwritten until it is seeded.
+    payload["model_hub"]["agents"].setdefault(backend, ModelHubAgentSupplyConfig.default(backend, mode="hub").to_payload())
     payload["model_hub"]["agents"][backend]["routes"][bad_key] = {"hops": []}
     path = tmp_path / "config.json"
     path.write_text(json.dumps(payload), encoding="utf-8")

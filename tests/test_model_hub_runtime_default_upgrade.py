@@ -22,7 +22,8 @@ def legacy_payload(tmp_path, *, enabled=False):
     payload = read_config(fixture_path)
     payload["model_hub"].pop("runtime_default_applied")
     payload["model_hub"]["enabled"] = enabled
-    payload["model_hub"]["agents"].pop("avibe")
+    # A released config predates the Avibe entry (a fresh one leaves it unwritten too).
+    payload["model_hub"]["agents"].pop("avibe", None)
     for backend in ("claude", "codex", "opencode"):
         payload["model_hub"]["agents"][backend]["mode"] = "direct"
     # Synthetic state proves the upgrade does not clear credentials or change
