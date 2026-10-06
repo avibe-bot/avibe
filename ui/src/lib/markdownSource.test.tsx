@@ -25,9 +25,9 @@ const DOC = [
   'const b = 2;',
   '```',
   '',
-  '| k | v |',
+  '| key | val |',
   '|---|---|',
-  '| x | y |',
+  '| x | yes |',
   '',
   '这是**重点**内容。见[文档][docs]。',
   '',
@@ -82,9 +82,12 @@ describe('selectedMarkdown', () => {
     [
       'a selection leaving a code block into a table',
       ['const b', 'before'],
-      ['k', 'after', 1],
-      '```ts\nconst a = 1;\nconst b = 2;\n```\n\n| k | v |\n|---|---|\n| x | y |',
+      ['key', 'after'],
+      '```ts\nconst a = 1;\nconst b = 2;\n```\n\n| key | val |\n|---|---|\n| x | yes |',
     ],
+    ['a cut inside one table cell', ['es', 'before'], ['es', 'after'], 'es'],
+    ['a selection across two cells of one row', ['ey', 'before'], ['va', 'after'], '| key | val |\n|---|---|\n| x | yes |'],
+    ['a selection across two rows', ['x', 'before', 1], ['ye', 'after'], '| key | val |\n|---|---|\n| x | yes |'],
   ])('copies %s', (_case, start, end, expected) => {
     const container = renderDoc();
     expect(selectedMarkdown(rangeOver(container, start, end), container)).toBe(expected);

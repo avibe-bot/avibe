@@ -24,6 +24,9 @@ const MARKED = `[${START}]`;
 // Elements a selection may begin or end inside of and still leave valid
 // Markdown. Everything else is copied whole when the selection crosses its edge.
 const CUTTABLE = new Set(['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'UL', 'OL', 'BLOCKQUOTE']);
+// Rows and cells are not Markdown on their own: a table is copied whole as soon
+// as a selection spans more than one cell, even when it stays inside the table.
+const TABLE_PARTS = new Set(['THEAD', 'TBODY', 'TR', 'TH', 'TD']);
 
 /** What a rendered Markdown root was rendered from. */
 type MarkdownSource = {
@@ -180,10 +183,14 @@ function offsetIn(text: string, host: Element, point: Point, side: Side): number
 function sourceOffset(root: Element, text: string, point: Point, side: Side, other: Point | null): number {
   const chain = markedChain(point, root);
   const holdsOther = (el: Element) => other !== null && el.contains(other.node);
+  const cell = chain.find((el) => el.tagName === 'TD' || el.tagName === 'TH');
+  const spansCells = !cell || !holdsOther(cell);
   // An element that is not cuttable and that the selection leaves is copied whole.
   for (let index = chain.length - 1; index >= 0; index -= 1) {
     const el = chain[index];
-    if (el !== root && !CUTTABLE.has(el.tagName) && !holdsOther(el)) {
+    if (el === root || CUTTABLE.has(el.tagName)) continue;
+    const table = !TABLE_PARTS.has(el.tagName) && TABLE_PARTS.has(chain[index - 1]?.tagName ?? '');
+    if (!holdsOther(el) || (table && spansCells)) {
       return side === 'start' ? spanStart(el) : spanEnd(el);
     }
   }
