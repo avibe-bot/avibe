@@ -703,8 +703,10 @@ def test_ra_tq_033_availability_recovery_protocol_follows_route_outage(
         requested_protocol="quic",
     )
     monkeypatch.setattr(remote_access, "_PREFERRED_PROTOCOL", "quic")
+    remote_access._set_preferred_protocol("quic")
     spawned_protocols = []
     results = []
+    drain_preferences = []
 
     def spawn_background(args, pid_path, stdout_name, stderr_name, env=None):
         spawned_protocols.append(env["TUNNEL_TRANSPORT_PROTOCOL"])
@@ -712,6 +714,8 @@ def test_ra_tq_033_availability_recovery_protocol_follows_route_outage(
         return candidate_pid
 
     def stop_pid(pid, timeout=8):
+        # The drain can outlive the process, so the preference must already be durable.
+        drain_preferences.append(remote_access._stored_preferred_protocol())
         alive.discard(pid)
         return True
 
@@ -727,7 +731,7 @@ def test_ra_tq_033_availability_recovery_protocol_follows_route_outage(
 
     assert spawned_protocols == [expected_protocol]
     assert results[0]["result"] == "improved"
-    assert remote_access._PREFERRED_PROTOCOL == expected_preference
+    assert drain_preferences == [expected_preference]
 
 
 @pytest.mark.parametrize(

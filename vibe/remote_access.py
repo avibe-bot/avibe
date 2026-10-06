@@ -3504,6 +3504,8 @@ def _run_route_optimization(
             _pid_path().write_text(str(candidate_pid), encoding="utf-8")
             _candidate_pid_path().unlink(missing_ok=True)
             promoted = True
+        if transport_switch:
+            _set_preferred_protocol("http2")
         if isinstance(old_pid, int) and old_pid != candidate_pid:
             old_pid_state = _cloudflared_pid_state(old_pid)
             if old_pid_state == "cloudflared":
@@ -3519,8 +3521,6 @@ def _run_route_optimization(
                         runtime.write_json(_state_path(), state)
             else:
                 logger.warning("Old Tunnel connector remains tracked after drain failed pid=%s", old_pid)
-        if transport_switch:
-            _set_preferred_protocol("http2")
         _finish_recovery(
             trigger=recovery_trigger,
             result="improved",
