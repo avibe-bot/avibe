@@ -33,7 +33,8 @@
         "instructions_key": { "type": ["string", "null"], "description": "i18n key for the step-2 helper line" }
       }
     },
-    "error_key": { "type": ["string", "null"], "description": "i18n key; raw upstream errors never surface" },
+    "error_key": { "type": ["string", "null"], "description": "Closed i18n key for the user-facing sentence. The provider's own words never replace it; when there are any, they travel separately in `error_detail`." },
+    "error_detail": { "type": "string", "minLength": 1, "maxLength": 400, "description": "Present only on a failed flow whose provider, engine, or native CLI gave a reason beyond `error_key`: that reason with whitespace collapsed, credential shapes and everything after a labeled secret redacted, then bounded to 400 characters. Shown behind an expandable details control the user can copy. Never grant material and never persisted." },
     "expires_at": { "type": ["string", "null"], "format": "date-time", "description": "Flow expiry. A flow without client_nonce may use null for ordinary or presentation-only lifetime handling; a nonce-bearing flow always carries a non-null date-time that bounds reconciliation and retained cancellation." }
   },
   "allOf": [

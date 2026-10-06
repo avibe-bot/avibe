@@ -9542,6 +9542,32 @@ def test_expired_oauth_flow_is_rejected_before_submit(tmp_path):
     assert service.oauth_flows.channel(flow["flow_id"]) is None
 
 
+@pytest.mark.parametrize("error_detail", [None, "token exchange failed with status 401: token_expired"])
+def test_failed_oauth_flow_carries_its_reason_only_when_there_is_one(tmp_path, error_detail):
+    service, _, adapter = _service(tmp_path)
+    flow_id = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))["flow"]["flow_id"]
+    adapter.flows[flow_id] = OAuthFlowState(
+        **{
+            **adapter.flows[flow_id].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.code_rejected",
+            "error_detail": error_detail,
+        }
+    )
+
+    result = asyncio.run(service.oauth_status(flow_id))
+
+    assert result["flow"]["error_key"] == "models.oauth.code_rejected"
+    assert result["flow"].get("error_detail") == error_detail
+    assert ("error_detail" in result["flow"]) is (error_detail is not None)
+    validator = Draft7Validator(
+        {"$ref": ("model-hub/api-response.schema.json#/definitions/OAuthResultResponse")},
+        registry=_api_response_registry(),
+        format_checker=FormatChecker(),
+    )
+    assert not list(validator.iter_errors({"ok": True, "contract_version": CONTRACT_VERSION, **result}))
+
+
 @pytest.mark.parametrize(
     ("reason", "detail"),
     [

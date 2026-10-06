@@ -15,10 +15,11 @@
 // the bug `settle` below was written to fix.
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { ArrowRight, CheckCircle2, Info, Sparkles, TriangleAlert, X } from 'lucide-react';
+import { ArrowRight, CheckCircle2, ChevronDown, ChevronRight, Info, Sparkles, TriangleAlert, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { CopyButton } from '@/components/ui/copy-button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/context/ToastContext';
@@ -76,6 +77,37 @@ const Step: React.FC<{ n: number; label: string; children: React.ReactNode }> = 
     {children}
   </div>
 );
+
+/**
+ * The provider's own words behind a failed sign-in, collapsed by default under
+ * the sentence that explains it, and copyable so the user can pass them on.
+ * The server bounds and redacts them before they arrive.
+ */
+const OAuthFailureDetail: React.FC<{ detail: string }> = ({ detail }) => {
+  const { t } = useTranslation();
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <button
+        type="button"
+        className="inline-flex items-center gap-0.5 self-start rounded text-[12px] text-destructive-ink/80 hover:text-destructive-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? <ChevronDown className="size-3" aria-hidden /> : <ChevronRight className="size-3" aria-hidden />}
+        {t(open ? 'settings.models.oauth.error.details.hide' : 'settings.models.oauth.error.details.show')}
+      </button>
+      {open && (
+        <div className="flex min-w-0 flex-col items-start gap-1.5">
+          <pre className="max-h-40 w-full overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/20 bg-background/60 px-2.5 py-2 font-mono text-[11.5px] leading-relaxed text-foreground">
+            {detail}
+          </pre>
+          <CopyButton value={detail} />
+        </div>
+      )}
+    </div>
+  );
+};
 
 export const OAuthConnectDialog: React.FC<{
   open: boolean;
@@ -881,9 +913,14 @@ export const OAuthConnectDialog: React.FC<{
             <div className="flex flex-col gap-2">
               <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.08] px-4 py-3 text-[13px] text-destructive-ink">
                 <TriangleAlert className="mt-0.5 size-4 shrink-0" />
-                {/* errorKey may be the flow's own runtime-declared `error_key`, so
-                    an unknown one degrades to 连接失败 rather than rendering itself. */}
-                <span>{serverText(t, errorKey, 'settings.models.oauth.error.generic')}</span>
+                <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+                  {/* errorKey may be the flow's own runtime-declared `error_key`, so
+                      an unknown one degrades to 连接失败 rather than rendering itself. */}
+                  <span>{serverText(t, errorKey, 'settings.models.oauth.error.generic')}</span>
+                  {/* Only the failed flow itself carries the provider's words; a
+                      failed request or the dialog's own timeout has none to show. */}
+                  {flow?.state === 'failed' && flow.error_detail && <OAuthFailureDetail detail={flow.error_detail} />}
+                </div>
               </div>
               {isReauth && stranded.length > 0 && <>
               {/* Past tense (`gapsDone`), because this is not a confirm: the

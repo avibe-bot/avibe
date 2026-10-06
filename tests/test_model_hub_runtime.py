@@ -8725,6 +8725,7 @@ def _browser_callback_adapter(tmp_path: Path, engine: _BrowserCallbackEngine) ->
         ("ac_issued", {"code": "ac_issued"}),
         ("4/0AbCd-issued", {"code": "4/0AbCd-issued"}),
         ("issued.part#browser-state", {"code": "issued.part#browser-state"}),
+        ("eyJhbGci.eyJzdWIi.c2lnbmF0dXJl", {"code": "eyJhbGci.eyJzdWIi.c2lnbmF0dXJl"}),
     ],
 )
 def test_oauth_paste_reaches_the_engine_as_the_value_it_is(
@@ -8748,6 +8749,9 @@ def test_oauth_paste_reaches_the_engine_as_the_value_it_is(
     ("pasted", "reason"),
     [
         ("localhost:1455/auth/callback?state=browser-state", "no_answer"),
+        # Only the authority survived the copy: still an address, still no answer.
+        ("localhost:1455", "no_answer"),
+        ("127.0.0.1:54545", "no_answer"),
         ("chatgpt.com/", "no_answer"),
         ("https://chatgpt.com/", "no_answer"),
         # A code minted for an earlier sign-in link fails the provider's
@@ -8789,6 +8793,22 @@ def test_oauth_paste_that_cannot_exchange_keeps_the_flow_awaiting(
             "Post \"https://auth.openai.com/oauth/token\": dial tcp: i/o timeout",
             "models.oauth.exchange_failed",
         ),
+        # Refusals that say nothing about the code: a proxy and a throttle.
+        (
+            "Failed to exchange authorization code for tokens: token exchange failed with status 407: "
+            "Proxy Authentication Required",
+            "models.oauth.exchange_failed",
+        ),
+        (
+            "Failed to exchange authorization code for tokens: token exchange failed with status 429: "
+            '{"error": {"message": "Too many requests", "code": "rate_limit_exceeded"}}',
+            "models.oauth.exchange_failed",
+        ),
+        (
+            "Failed to exchange authorization code for tokens: token exchange failed with status 403: "
+            '{"error": "invalid_grant", "error_description": "code already redeemed"}',
+            "models.oauth.code_rejected",
+        ),
         ("Failed to exchange token", "models.oauth.exchange_failed"),
         ("Timeout waiting for OAuth callback", "models.oauth.expired"),
         ("OAuth flow timed out", "models.oauth.expired"),
@@ -8815,15 +8835,45 @@ def test_oauth_engine_failure_names_what_the_user_can_do(
             failed = await adapter.oauth_status(flow.flow_id)
         assert failed.state == "failed"
         assert failed.error_key == error_key
-        # The provider's own words stay in the log, never on the wire.
+        # The engine's own words travel beside the key, for the dialog's
+        # details and for the log.
+        assert failed.error_detail is not None
+        assert failed.error_detail.startswith(engine_error[:24])
+        assert len(failed.error_detail) <= 400
         assert any(
-            error_key in record.getMessage() and engine_error.split(":")[0] in record.getMessage()
+            error_key in record.getMessage() and engine_error[:24] in record.getMessage()
             for record in caplog.records
         )
 
     asyncio.run(run())
     for language in ("en", "zh"):
         assert isinstance(_ui_text(language, error_key), str), (language, error_key)
+
+
+def test_oauth_failure_detail_never_carries_credential_material(tmp_path: Path) -> None:
+    secret = "sk-proj-abcdefghijklmnop0123456789"
+    engine_error = (
+        "Failed to exchange authorization code for tokens: token exchange failed with status 401: "
+        f'{{"error": {{"message": "Incorrect API key provided: {secret}", "code": "invalid_api_key"}}}} '
+        + "x" * 600
+    )
+
+    class Engine(_BrowserCallbackEngine):
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/get-auth-status":
+                return {"status": "error", "error": engine_error}
+            return super().management_request(method, path, query=query, payload=payload, timeout=timeout)
+
+    async def run() -> None:
+        adapter = _browser_callback_adapter(tmp_path, Engine())
+        flow = await adapter.start_oauth("src_fixture123", "openai")
+        failed = await adapter.oauth_status(flow.flow_id)
+        assert failed.error_detail is not None
+        assert secret not in failed.error_detail
+        assert "[redacted]" in failed.error_detail
+        assert len(failed.error_detail) <= 400
+
+    asyncio.run(run())
 
 
 def test_oauth_engine_400_fails_the_flow_rather_than_claiming_it_retryable(tmp_path: Path) -> None:

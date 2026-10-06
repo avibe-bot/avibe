@@ -138,6 +138,26 @@ def redact_untrusted_text(value: str) -> str:
     return redacted[: match.end()] + "[redacted]"
 
 
+FAILURE_DETAIL_CHARS = 400
+
+
+def bounded_failure_detail(value: object) -> str | None:
+    """One line of untrusted failure text that is safe to show and copy.
+
+    Credential shapes are redacted first, then the text is bounded, so a cut can
+    never expose the tail of a secret. Blank or non-text input has no detail.
+    """
+
+    if not isinstance(value, str):
+        return None
+    text = redact_untrusted_text(" ".join(value.split()))
+    if not text:
+        return None
+    if len(text) > FAILURE_DETAIL_CHARS:
+        text = text[: FAILURE_DETAIL_CHARS - 1].rstrip() + "…"
+    return text
+
+
 def contains_credential_material(value: object) -> bool:
     rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
     return any(pattern.search(rendered) for pattern in _CREDENTIAL_PATTERNS)

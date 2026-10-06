@@ -909,6 +909,8 @@ def _oauth_payload(
     }
     if client_nonce is not None:
         payload["client_nonce"] = client_nonce
+    if flow.state == "failed" and flow.error_detail:
+        payload["error_detail"] = flow.error_detail
     return payload
 
 

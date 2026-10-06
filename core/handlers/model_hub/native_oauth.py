@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
 
 from .adapter import OAuthFlowState, RetainedMaterialDisposition
-from .events import contains_credential_material
+from .events import bounded_failure_detail, contains_credential_material
 from .oauth import NativeOAuthSourceStatus, NativeOAuthUnavailableError
 
 _VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
@@ -275,8 +275,11 @@ class AgentAuthNativeOAuthAdapter:
                 account_label=resolved.account_label,
             )
         error_key = None
+        error_detail = None
         if state == "failed":
             error_key = _TIMEOUT_ERROR_KEY if payload.get("error") == "timed_out" else _GENERIC_ERROR_KEY
+            if error_key == _GENERIC_ERROR_KEY:
+                error_detail = bounded_failure_detail(payload.get("error"))
         elif state == "cancelled":
             error_key = _GENERIC_ERROR_KEY
 
@@ -299,6 +302,7 @@ class AgentAuthNativeOAuthAdapter:
             channel="native_cli",
             retained_material_disposition=RetainedMaterialDisposition.NONE,
             retained_credential_ref=None,
+            error_detail=error_detail,
         )
 
     async def _read_source_status(self, backend: str) -> NativeOAuthSourceStatus:

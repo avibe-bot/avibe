@@ -721,8 +721,11 @@ export type OAuthFlow = {
   channel: SupplyChannel;
   state: OAuthFlowState;
   presentation: OAuthPresentation;
-  /** i18n key; raw upstream errors never surface. */
+  /** Closed i18n key for the user-facing sentence. */
   error_key?: string | null;
+  /** A failed flow's own reason (provider, engine, or CLI), bounded and redacted
+   *  by the server; shown behind the copyable details control. */
+  error_detail?: string;
   expires_at?: string | null;
 };
 

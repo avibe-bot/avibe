@@ -403,6 +403,10 @@ class OAuthFlowState:
     channel: Literal["hub", "native_cli"] = "hub"
     retained_material_disposition: RetainedMaterialDisposition = RetainedMaterialDisposition.NONE
     retained_credential_ref: str | None = None
+    # What the provider or engine said when the flow failed, already bounded and
+    # credential-redacted for display beside ``error_key``. Null in every other
+    # state and whenever there is nothing to add to the key.
+    error_detail: str | None = None
 
 
 class InvokeHandle(Protocol):

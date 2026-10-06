@@ -38,7 +38,7 @@ from core.handlers.model_hub.adapter import (
     make_source_observation,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
-from core.handlers.model_hub.events import redact_untrusted_text
+from core.handlers.model_hub.events import bounded_failure_detail
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from core.handlers.model_hub.quota import (
     CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS,
@@ -1324,6 +1324,7 @@ class _OAuthFlow:
     credential_ref: str | None = None
     retained_material_disposition: RetainedMaterialDisposition = RetainedMaterialDisposition.NONE
     retained_credential_ref: str | None = None
+    error_detail: str | None = None
     grant_write_possible: bool = False
     retained_material_decided: bool = False
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -1344,6 +1345,7 @@ class _OAuthFlow:
             channel="hub",
             retained_material_disposition=self.retained_material_disposition,
             retained_credential_ref=self.retained_credential_ref,
+            error_detail=self.error_detail,
         )
 
 
@@ -2695,22 +2697,11 @@ class CLIProxyEngineAdapter:
                     await self._complete_oauth(flow, client)
                 elif status == "error":
                     reason = str(payload.get("error") or "")
-                    error_key = _oauth_engine_failure_key(reason)
-                    # The engine's reason can quote the provider's response, so
-                    # it stays in the scrubbed log; the user sees the classified
-                    # key (oauth-flow.schema.json: raw upstream errors never surface).
-                    logger.warning(
-                        "OAuth flow failed in the engine: flow=%s provider=%s error_key=%s reason=%s",
-                        flow.flow_id,
-                        flow.callback_provider,
-                        error_key,
-                        _scrubbed_engine_reason(reason),
-                    )
-                    self._fail_flow(flow, error_key)
+                    self._fail_flow(flow, _oauth_engine_failure_key(reason), detail=reason)
                 elif flow.state != "verifying":
                     flow.state = "awaiting_action"
-            except (EngineClientError, EngineUnavailableError):
-                self._fail_flow(flow, "models.oauth.engine_unavailable")
+            except (EngineClientError, EngineUnavailableError) as error:
+                self._fail_flow(flow, "models.oauth.engine_unavailable", detail=str(error))
             return flow.snapshot()
 
     async def submit_oauth(self, flow_id: str, value: str) -> OAuthFlowState:
@@ -2770,11 +2761,8 @@ class CLIProxyEngineAdapter:
                     "/oauth-callback",
                     payload=payload,
                 )
-            except EngineClientError:
-                self._fail_flow(flow, "models.oauth.submission_failed")
-                return flow.snapshot()
-            except EngineUnavailableError:
-                self._fail_flow(flow, "models.oauth.submission_failed")
+            except (EngineClientError, EngineUnavailableError) as error:
+                self._fail_flow(flow, "models.oauth.submission_failed", detail=str(error))
                 return flow.snapshot()
             flow.state = "verifying"
             return flow.snapshot()
@@ -3100,10 +3088,19 @@ class CLIProxyEngineAdapter:
             raise EngineStateError("OAuth flow is unknown")
         return flow
 
-    def _fail_flow(self, flow: _OAuthFlow, error_key: str) -> None:
+    def _fail_flow(self, flow: _OAuthFlow, error_key: str, *, detail: str | None = None) -> None:
         self._mark_retention_unknown_if_needed(flow)
         flow.state = "failed"
         flow.error_key = error_key
+        flow.error_detail = bounded_failure_detail(detail)
+        if flow.error_detail is not None:
+            logger.warning(
+                "OAuth flow failed: flow=%s provider=%s error_key=%s detail=%s",
+                flow.flow_id,
+                flow.callback_provider,
+                error_key,
+                flow.error_detail,
+            )
         self._release_provider(flow)
 
     @staticmethod
@@ -3165,7 +3162,12 @@ class CLIProxyEngineAdapter:
 # provider code carries none of them (Google's ``4/0A…`` has no host before its
 # slash, and Anthropic's ``code#state`` has no path or query).
 _SCHEMELESS_CALLBACK_ADDRESS = re.compile(
-    r"^(?:localhost|\[[0-9a-f:.]+\]|\d{1,3}(?:\.\d{1,3}){3}|(?:[a-z0-9-]+\.)+[a-z]{2,})(?::\d{1,5})?[/?]",
+    r"^(?:"
+    # A loopback or IP host is an address on its own, with or without a port.
+    r"(?:localhost|\[[0-9a-f:.]+\]|\d{1,3}(?:\.\d{1,3}){3})(?::\d{1,5})?(?:[/?]|$)"
+    # A named host needs a port, path or query: ``a.b.c`` alone may be a code.
+    r"|(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d{1,5}(?:[/?]|$)|[/?])"
+    r")",
     re.IGNORECASE,
 )
 
@@ -3191,7 +3193,9 @@ def _oauth_engine_failure_key(reason: str) -> str:
 
     text = " ".join(reason.split()).lower()
     if text.startswith("failed to exchange"):
-        if re.search(r"\bstatus 4\d\d\b", text):
+        # Only the provider's answers about the grant itself blame the pasted
+        # code; a proxy (407), a throttle (429) or any other refusal does not.
+        if re.search(r"\bstatus 40[01]\b", text) or "invalid_grant" in text:
             return "models.oauth.code_rejected"
         return "models.oauth.exchange_failed"
     if "timeout" in text or "timed out" in text:
@@ -3201,11 +3205,6 @@ def _oauth_engine_failure_key(reason: str) -> str:
     if text in {"bad request", "authentication failed"}:
         return "models.oauth.provider_denied"
     return "models.oauth.upstream_failed"
-
-
-def _scrubbed_engine_reason(reason: str) -> str:
-    text = redact_untrusted_text(" ".join(reason.split()))
-    return text if len(text) <= 400 else text[:399] + "…"
 
 
 def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
