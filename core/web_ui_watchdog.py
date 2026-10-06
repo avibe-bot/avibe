@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Callable
 
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL_SECONDS = 10.0
 MAX_RETRY_DELAY_SECONDS = 600.0
+# Names the process that supervises the Web UI where one outlives the service,
+# such as the Docker image's entrypoint. It stays the UI's only recovery owner.
+UI_SUPERVISOR_ENV = "AVIBE_WEB_UI_SUPERVISOR"
 
 
 def _restart_job_replacing_the_runtime() -> bool:
@@ -50,18 +54,11 @@ class WebUiWatchdog:
         self._attempts_without_recovery = 0
         self._retry_delay = CHECK_INTERVAL_SECONDS
         self._retry_at = 0.0
-        self._address: tuple[str, int] | None = None
 
     def check(self, now: float) -> int | None:
         """Observe the UI once; return the pid of a UI this check started."""
 
-        running = runtime.recorded_ui()
-        if running is not None:
-            if running.host is not None and running.port is not None:
-                # Launchers take the address from different places: the
-                # config, a container's environment, a reload request not yet
-                # saved. A replacement reproduces the UI that actually ran.
-                self._address = (running.host, running.port)
+        if not runtime.recorded_ui_is_gone():
             self._gone_checks = 0
             self._attempts_without_recovery = 0
             self._retry_delay = CHECK_INTERVAL_SECONDS
@@ -88,11 +85,8 @@ class WebUiWatchdog:
         # being respawned every few seconds for as long as the service runs.
         self._retry_delay = min(self._retry_delay * 2, MAX_RETRY_DELAY_SECONDS)
         self._retry_at = now + self._retry_delay
-        if self._address is not None:
-            host, port = self._address
-        else:
-            config = load_config_or_default()
-            host, port = runtime.effective_ui_bind_host(config), config.ui.setup_port
+        config = load_config_or_default()
+        host, port = runtime.effective_ui_bind_host(config), config.ui.setup_port
         if runtime.ui_server_compatible(host, port):
             # An Avibe UI, ready or not, holds the port without being the
             # recorded one. Another would only die on the port, and its pid
@@ -116,6 +110,10 @@ class WebUiWatchdog:
 async def watch_web_ui(stopping: Callable[[], bool], *, interval: float = CHECK_INTERVAL_SECONDS) -> None:
     """Keep the Web UI running until the service stops."""
 
+    supervisor = os.environ.get(UI_SUPERVISOR_ENV)
+    if supervisor:
+        logger.info("Web UI recovery is left to its supervisor: %s", supervisor)
+        return
     watchdog = WebUiWatchdog(stopping=stopping)
     while not stopping():
         await asyncio.sleep(interval)

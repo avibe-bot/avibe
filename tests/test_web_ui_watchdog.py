@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
 
 from config import paths
 from config.v2_config import V2Config
-from core.web_ui_watchdog import CHECK_INTERVAL_SECONDS, WebUiWatchdog
+from core.web_ui_watchdog import CHECK_INTERVAL_SECONDS, UI_SUPERVISOR_ENV, WebUiWatchdog, watch_web_ui
 from vibe import runtime
 
 UI_COMMAND = "python3 -c from vibe.ui_server import run_ui_server; run_ui_server('127.0.0.1', 5199)"
@@ -73,35 +74,6 @@ def test_a_ui_gone_for_two_checks_is_started_again_with_the_status_kept(host) ->
         301,
     )
     assert status["started_at"] == started_at
-
-
-@pytest.mark.parametrize(
-    ("command", "address"),
-    [
-        # What `runtime.start_ui` launches, the shape every config-driven launcher uses.
-        pytest.param(
-            "python3 -c from vibe.ui_server import run_ui_server; run_ui_server('::', 5203)",
-            ("::", 5203),
-            id="start-ui",
-        ),
-        # The Docker entrypoint binds from the container's environment, not the config.
-        pytest.param(
-            "python -c \nfrom vibe.ui_server import run_ui_server\nrun_ui_server('0.0.0.0', 6123)\n",
-            ("0.0.0.0", 6123),
-            id="docker-entrypoint",
-        ),
-    ],
-)
-def test_a_ui_seen_running_is_started_again_where_it_ran(host, command, address) -> None:
-    host.commands[200] = command
-    watchdog = WebUiWatchdog(stopping=lambda: False)
-    assert watchdog.check(0.0) is None
-
-    host.kill(200)
-    watchdog.check(CHECK_INTERVAL_SECONDS)
-    watchdog.check(2 * CHECK_INTERVAL_SECONDS)
-
-    assert host.starts == [address]
 
 
 @pytest.mark.parametrize(
@@ -196,3 +168,15 @@ def test_a_ui_that_keeps_dying_is_retried_less_often_until_it_stays_up(host) -> 
     host.kill(999)
     watchdog.check(210.0)
     assert watchdog.check(220.0) is not None
+
+
+def test_a_ui_with_its_own_supervisor_is_left_to_it(monkeypatch, host) -> None:
+    """The Docker entrypoint restarts its UI on its own address, even with the service stopped."""
+
+    monkeypatch.setenv(UI_SUPERVISOR_ENV, "docker-entrypoint")
+    checks: list[float] = []
+    monkeypatch.setattr(WebUiWatchdog, "check", lambda self, now: checks.append(now))
+
+    asyncio.run(asyncio.wait_for(watch_web_ui(lambda: False, interval=0), timeout=1))
+
+    assert checks == []

@@ -5,7 +5,6 @@ import ipaddress
 import json
 import logging
 import os
-import re
 import signal
 import shlex
 import shutil
@@ -2361,36 +2360,19 @@ def ui_pid_file_points_to_running_ui(pid_path: Path | None = None) -> bool:
     return bool(pid and pid_alive(pid) and _pid_matches_ui_server(pid))
 
 
-_UI_SERVER_ADDRESS = re.compile(r"run_ui_server\('([^']*)',\s*(\d+)\)")
-
-
-class RecordedUi(NamedTuple):
-    """The recorded UI process, with the address it was started on when its command shows it."""
-
-    host: str | None
-    port: int | None
-
-
-def recorded_ui(pid_path: Path | None = None) -> RecordedUi | None:
-    """The recorded UI while it may be running; ``None`` once it is known to be gone.
+def recorded_ui_is_gone(pid_path: Path | None = None) -> bool:
+    """Whether no UI runs under the recorded pid, as far as can be known.
 
     Gone means no record, a dead pid, or a pid now running another program. A
-    live pid whose command cannot be read may still be the UI, and one started
-    beside it would only die on its port, so it is returned without an address.
+    live pid whose command cannot be read is not gone: it may be the UI, and one
+    started beside it would only die on its port.
     """
 
     pid = _read_pid_file(pid_path or paths.get_runtime_ui_pid_path())
     if not pid or not pid_alive(pid):
-        return None
+        return True
     command = get_process_command(pid)
-    if command is None:
-        return RecordedUi(None, None)
-    if not _is_ui_server_command(command):
-        return None
-    address = _UI_SERVER_ADDRESS.search(command)
-    if address is None:
-        return RecordedUi(None, None)
-    return RecordedUi(address.group(1), int(address.group(2)))
+    return command is not None and not _is_ui_server_command(command)
 
 
 def resolve_localhost_family() -> str:

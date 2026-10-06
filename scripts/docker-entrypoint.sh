@@ -211,18 +211,31 @@ run_ui_server('0.0.0.0', ${VIBE_UI_PORT:-5123})
 
             SERVICE_PID="$(ensure_service_pid "$RUNTIME_DIR" "${SERVICE_PID:-}" "${CURRENT_UI_PID:-$UI_PID}")"
 
-            # A running service starts a UI that died again itself
-            # (core/web_ui_watchdog.py); this loop keeps the UI up only while
-            # the service is deliberately stopped, so one owner acts at a time.
-            if [ -z "${SERVICE_PID:-}" ] && { [ -z "$CURRENT_UI_PID" ] || ! kill -0 "$CURRENT_UI_PID" 2>/dev/null; }; then
-                if [ -n "$CURRENT_UI_PID" ]; then
-                    UI_EXIT_CODE=0
-                    wait "$CURRENT_UI_PID" 2>/dev/null || UI_EXIT_CODE=$?
-                    echo "UI server exited unexpectedly (code: ${UI_EXIT_CODE:-unknown}), restarting..."
-                fi
+            if [ -z "$CURRENT_UI_PID" ]; then
                 start_ui_process "$RUNTIME_DIR"
                 CURRENT_STATE="$(read_runtime_state "$RUNTIME_DIR" 2>/dev/null || true)"
-                write_runtime_status "${CURRENT_STATE:-stopped}" "ui restarted" "None" "$UI_PID"
+                if [ -z "$CURRENT_STATE" ]; then
+                    if [ -n "${SERVICE_PID:-}" ]; then
+                        CURRENT_STATE="running"
+                    else
+                        CURRENT_STATE="stopped"
+                    fi
+                fi
+                write_runtime_status "$CURRENT_STATE" "ui restarted" "${SERVICE_PID:-None}" "$UI_PID"
+            elif ! kill -0 "$CURRENT_UI_PID" 2>/dev/null; then
+                UI_EXIT_CODE=0
+                wait "$CURRENT_UI_PID" 2>/dev/null || UI_EXIT_CODE=$?
+                echo "UI server exited unexpectedly (code: ${UI_EXIT_CODE:-unknown}), restarting..."
+                start_ui_process "$RUNTIME_DIR"
+                CURRENT_STATE="$(read_runtime_state "$RUNTIME_DIR" 2>/dev/null || true)"
+                if [ -z "$CURRENT_STATE" ]; then
+                    if [ -n "${SERVICE_PID:-}" ]; then
+                        CURRENT_STATE="running"
+                    else
+                        CURRENT_STATE="stopped"
+                    fi
+                fi
+                write_runtime_status "$CURRENT_STATE" "ui restarted after crash" "${SERVICE_PID:-None}" "$UI_PID"
             fi
 
             sleep 1
