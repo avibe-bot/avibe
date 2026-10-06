@@ -99,7 +99,7 @@ def test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch(monkeypatch, 
     A batch importing several Sources seeds from all of them, so a starting
     model only a later Source serves still arrives; a native Source converted
     to the Hub in place seeds too. The takeover commits through its journal,
-    so its own save asks for the Avibe Agent's model to be reconciled.
+    so its own save announces the Avibe catalog change like any other.
     """
     home = tmp_path / "native"
     _write_claude_oauth(home)
@@ -124,8 +124,12 @@ def test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch(monkeypatch, 
         selections = [("claude", "claude-opus-5-5")]
     assert store.config.avibe_supply_pending
     service.builtin_agent_models_override = lambda: selections
-    service.avibe_agent_model_reconcile = lambda: reconciled.append(True)
-    reconciled = []
+    announced = []
+
+    async def catalog_changed(backend):
+        announced.append(backend)
+
+    service.backend_catalog_changed = catalog_changed
     items = service.migration_scan()["items"]
     assert [item["backend"] for item in items] == (
         ["claude", "codex"] if batch == "two new Sources" else ["claude"]
@@ -141,7 +145,7 @@ def test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch(monkeypatch, 
     avibe = store.config.agents["avibe"]
     assert not store.config.avibe_supply_pending
     assert (avibe.sources.order, [model.id for model in avibe.models]) == (serving, starting)
-    assert reconciled == [True]
+    assert announced == ["avibe"]
 
 
 def test_failure_after_possible_rotation_retains_current_owner_and_retries(monkeypatch, tmp_path):

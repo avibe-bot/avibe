@@ -266,10 +266,7 @@ def test_avibe_agent_runs_its_catalogs_first_model_until_it_has_one(tmp_path, sq
 
 
 def test_a_lost_avibe_model_hand_off_heals_on_the_next_start(tmp_path, sqlite_db_factory, monkeypatch):
-    """MH-AVIBE-007: the seed is committed even when the Agent write fails, and
-    the next start's reconciliation gives the Avibe Agent its model."""
-    from core.handlers.model_hub.service import ModelHubService
-
+    """MH-AVIBE-007: a failed Agent write after a committed seed heals at the next start."""
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
     try:
         store.ensure_builtin_default_agents(["avibe"])
@@ -282,15 +279,42 @@ def test_a_lost_avibe_model_hand_off_heals_on_the_next_start(tmp_path, sqlite_db
         def locked_database(*args, **kwargs):
             raise OperationalError("UPDATE agents", {}, Exception("database is locked"))
 
+        # The seed's catalog announcement: its reconciliation fails, the supply stays.
         monkeypatch.setattr(store, "update", locked_database)
-        # The service's after-seed call: a failed write leaves the committed supply.
-        service = ModelHubService.__new__(ModelHubService)
-        service.avibe_agent_model_reconcile = controller._reconcile_avibe_agent_model
-        service._after_avibe_seed()
+        asyncio.run(controller._model_hub_catalog_changed("avibe"))
         assert store.get("avibe").model is None
 
         monkeypatch.setattr(store, "update", real_update)
         asyncio.run(controller._seed_avibe_model_supply())
         assert store.get("avibe").model == "gpt-5.5"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_first_model_a_user_adds_makes_the_avibe_agent_runnable(tmp_path, sqlite_db_factory):
+    """MH-AVIBE-007: any Avibe catalog change reconciles the Agent, not only a seed.
+
+    A seed that found no starting model leaves the catalog empty; the model the
+    user then adds by hand reaches the Agent without a restart, through the
+    same catalog-change notification every catalog edit sends.
+    """
+    from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _service, _source
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["avibe"])
+        service = _service(tmp_path, sources=[_source("src_relay0001", "Relay", protocol="openai_chat", model_id="relay-model")])
+        _canonicalize_fixed_test_routes(service)
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        controller.model_hub_service = service
+        service.backend_catalog_changed = controller._model_hub_catalog_changed
+
+        assert await service.seed_avibe_supply() == []
+        assert store.get("avibe").model is None
+        candidate, = service.agent_model_candidates("avibe")["providers"]
+        await service.set_agent_models("avibe", [], [{key: value for key, value in candidate.items() if key != "suppliers"}])
+        assert store.get("avibe").model == "relay-model"
     finally:
         store.close()

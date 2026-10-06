@@ -612,9 +612,13 @@ def _seed_service(tmp_path, payload, selections):
     service.store = _PersistedStore(payload)
     service.models_dev_catalog = lambda: SEED_CATALOG
     service.builtin_agent_models_override = lambda: list(selections)
-    service.avibe_agent_model_reconcile = lambda: reconciled.append(True)
-    reconciled = []
-    return service, service.store, reconciled
+    announced = []
+
+    async def catalog_changed(backend):
+        announced.append(backend)
+
+    service.backend_catalog_changed = catalog_changed
+    return service, service.store, announced
 
 
 @pytest.mark.asyncio
@@ -646,7 +650,7 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
     # The user keeps one Source for Claude; seeding Avibe must not restore the rest.
     agents["claude"].sources.order = [SEED_ANTHROPIC.id]
     sources = [SEED_ANTHROPIC, SEED_RESPONSES, SEED_CHAT, SEED_SUBSCRIPTION, SEED_NATIVE]
-    service, store, _reconciled = _seed_service(tmp_path, {
+    service, store, _announced = _seed_service(tmp_path, {
         "enabled": True,
         "runtime_default_applied": True,
         "sources": [source.to_payload() for source in sources],
@@ -705,20 +709,20 @@ async def test_fresh_install_seeds_avibe_with_its_first_source(tmp_path, first, 
     leave every later Source without starting models, and skipping the pending
     entry at placement would leave the first Source out until a restart.
     """
-    service, store, reconciled = _seed_service(tmp_path, ModelHubConfig().to_payload(), selections)
+    service, store, announced = _seed_service(tmp_path, ModelHubConfig().to_payload(), selections)
     assert "avibe" not in store.payload["agents"]
 
     assert await service.seed_avibe_supply() == []
     native = copy.deepcopy(SEED_NATIVE)
     await service._commit_new_source_locked(native)
     assert "avibe" not in store.payload["agents"]
-    assert reconciled == []
+    assert announced == []
 
     await service._commit_new_source_locked(copy.deepcopy(first))
     avibe = store.payload["agents"]["avibe"]
     assert avibe["sources"]["order"] == [first.id]
     assert [model["id"] for model in avibe["models"]] == seeded
-    assert reconciled == [True]
+    assert announced == ["avibe"]
     assert {candidate["id"] for candidate in service.agent_model_candidates("avibe")["providers"]} == (
         {model.id for model in first.models} - set(seeded)
     )
@@ -728,7 +732,31 @@ async def test_fresh_install_seeds_avibe_with_its_first_source(tmp_path, first, 
     avibe = store.payload["agents"]["avibe"]
     assert avibe["sources"]["order"] == [first.id, SEED_CHAT.id]
     assert [model["id"] for model in avibe["models"]] == seeded
-    assert reconciled == [True]
+    assert announced == ["avibe"]
+
+
+@pytest.mark.asyncio
+async def test_the_first_source_seed_waits_for_a_models_dev_copy_in_flight(tmp_path, monkeypatch):
+    """MH-AVIBE-007: seeded rows keep the metadata they are written with.
+
+    On a fresh install the first Source can arrive while startup is still
+    fetching models.dev, so the seed joins that fetch instead of writing rows
+    without the context window and output limit the Agent budgets with.
+    """
+    service, store, _announced = _seed_service(
+        tmp_path, ModelHubConfig().to_payload(), [("claude", "claude-opus-5-5")],
+    )
+    copy_on_disk = {}
+    service.models_dev_catalog = lambda: copy_on_disk
+
+    def join_fetch_in_flight():
+        copy_on_disk.update(SEED_CATALOG)
+        return copy_on_disk
+
+    monkeypatch.setattr("vibe.models_dev_catalog.load_models_dev_catalog", join_fetch_in_flight)
+    await service._commit_new_source_locked(copy.deepcopy(SEED_ANTHROPIC))
+    [row] = store.payload["agents"]["avibe"]["models"]
+    assert (row["id"], row["context_window"], row["max_output_tokens"]) == ("claude-opus-5-5", 1_000_000, 128_000)
 
 
 def test_native_cli_and_direct_are_not_avibe_channels(tmp_path):

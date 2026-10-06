@@ -386,9 +386,10 @@ class Controller:
 
         An Avibe Agent without a model cannot run a turn, so this only makes an
         unrunnable Agent runnable. Decided under the store's write lock, it never
-        replaces a model the user chose. It runs after each seed and at every
-        start, so a hand-off a failed write or an exit lost heals on the next
-        one. No built-in exists when a user Agent already holds the name.
+        replaces a model the user chose. It runs whenever the Avibe catalog
+        changes (``backend_catalog_changed``) and at every start, so a hand-off a
+        failed write or an exit lost heals on the next one. No built-in exists
+        when a user Agent already holds the name.
         """
 
         from vibe.authorization import instance_owner_context
@@ -406,6 +407,29 @@ class Controller:
             only_if_model_unset=True,
             user_context=instance_owner_context(),
         )
+
+    async def _model_hub_catalog_changed(self, backend: str) -> None:
+        """Follow a committed Model Hub catalog change for one backend."""
+
+        from config.v2_config import V2Config
+
+        if backend == "avibe":
+            try:
+                self._reconcile_avibe_agent_model()
+            except Exception:
+                # The catalog change stands; the next start reconciles again.
+                logger.warning("Avibe Agent model reconciliation failed", exc_info=True)
+        try:
+            latest = V2Config.load()
+        except FileNotFoundError:
+            return
+        self.config.model_hub = latest.model_hub
+        # Each runtime moves to the committed catalog at its next turn;
+        # nothing restarts or drains. A disabled backend has nothing to adopt.
+        agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)
+        adopt_catalog = getattr(agent, "adopt_model_hub_catalog", None)
+        if callable(adopt_catalog):
+            await adopt_catalog()
 
     async def _seed_avibe_model_supply(self) -> None:
         """Seed the Avibe Agent's Model Hub entry from existing Sources, then reconcile its model."""
@@ -2801,19 +2825,6 @@ class Controller:
         # post-paint refresh, so controller readiness never waits on npm.
         refresh_cli_presence(False, None)
 
-        async def backend_catalog_changed(backend: str) -> None:
-            try:
-                latest = V2Config.load()
-            except FileNotFoundError:
-                return
-            self.config.model_hub = latest.model_hub
-            # Each runtime moves to the committed catalog at its next turn;
-            # nothing restarts or drains. A disabled backend has nothing to adopt.
-            agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)
-            adopt_catalog = getattr(agent, "adopt_model_hub_catalog", None)
-            if callable(adopt_catalog):
-                await adopt_catalog()
-
         async def repair_model_selections(addresses: frozenset[str]) -> int:
             # A Vibe Agent's model, a channel's routing override, and a
             # session's pin are each a copy of an id the Model Hub menu once
@@ -2833,10 +2844,9 @@ class Controller:
             selected_agent_override=default_vibe_agent_name,
             named_agents_override=named_vibe_agents,
             builtin_agent_models_override=self._builtin_agent_models,
-            avibe_agent_model_reconcile=self._reconcile_avibe_agent_model,
             cli_present_override=cli_present,
             cli_presence_refresh=refresh_cli_presence,
-            backend_catalog_changed=backend_catalog_changed,
+            backend_catalog_changed=self._model_hub_catalog_changed,
             repair_model_selections=repair_model_selections,
         )
         set_remote_catalog_refresh_completed(

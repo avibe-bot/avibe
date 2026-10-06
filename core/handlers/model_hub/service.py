@@ -1055,7 +1055,6 @@ class ModelHubService:
         builtin_agent_models_override: Optional[
             Callable[[], list[tuple[BackendName, str]]]
         ] = None,
-        avibe_agent_model_reconcile: Optional[Callable[[], None]] = None,
         cli_present_override: Optional[Callable[[BackendName], bool]] = None,
         cli_presence_refresh: Optional[
             Callable[[bool, tuple[BackendName, ...] | None], None]
@@ -1106,10 +1105,9 @@ class ModelHubService:
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
-        # The built-in Agents' models for the Avibe starting supply, and the
-        # Avibe Agent's model reconciliation; the controller owns those rows.
+        # The built-in Agents' models for the Avibe starting supply; the
+        # controller owns those Agent rows.
         self.builtin_agent_models_override = builtin_agent_models_override
-        self.avibe_agent_model_reconcile = avibe_agent_model_reconcile
         self.cli_present_override = cli_present_override
         self.cli_presence_refresh = cli_presence_refresh
         self.backend_catalog_changed = backend_catalog_changed
@@ -2483,10 +2481,10 @@ class ModelHubService:
                 number += 1
         config.sources.append(source)
         self._apply_source_placement(config, source)
-        seeded = config.avibe_supply_pending and self._seed_avibe(config)
+        seeded = config.avibe_supply_pending and await self._seed_avibe(config)
         await self._commit_synced(previous, config)
         if seeded:
-            self._after_avibe_seed()
+            await self._announce_avibe_seed()
 
     def _apply_source_placement(
         self,
@@ -5140,7 +5138,7 @@ class ModelHubService:
                 checked=[model.id for model in agent.models],
             )
 
-    def _seed_avibe(self, config: ModelHubConfig) -> bool:
+    async def _seed_avibe(self, config: ModelHubConfig) -> bool:
         """Give a pending Avibe entry its starting supply, in place; whether it took.
 
         Its Sources are every existing one this backend may use, placed as a
@@ -5157,6 +5155,9 @@ class ModelHubService:
         agent = config.agents["avibe"]
         if not any(self._eligible_for_agent(source, "avibe") for source in config.sources):
             return False
+        # Seeded rows keep the models.dev metadata they are written with, so a
+        # seed waits once for a first copy, joining a fetch already in flight.
+        await asyncio.to_thread(self._ensure_models_dev_copy)
         config.avibe_supply_pending = False
         for source in config.sources:
             self._apply_source_placement(config, source, ("avibe",))
@@ -5186,22 +5187,24 @@ class ModelHubService:
         agent.models = rows
         return True
 
-    def _after_avibe_seed(self) -> None:
-        """Let the Agent-row owner reconcile the Avibe Agent's model after a committed seed."""
+    async def _announce_avibe_seed(self) -> None:
+        """Announce a committed seed as the Avibe catalog change it is.
 
-        if self.avibe_agent_model_reconcile is None:
-            return
+        Like every catalog mutation it ends in ``_refresh_backend_catalog``,
+        whose owner reconciles the Avibe Agent's model. The seed is already
+        committed, so a failed announcement is logged; the next start reconciles.
+        """
+
         try:
-            self.avibe_agent_model_reconcile()
-        except Exception:  # noqa: BLE001 - the committed supply stands; startup reconciles again
-            logger.warning("Avibe Agent model reconciliation after its seed failed", exc_info=True)
+            await self._refresh_backend_catalog("avibe")
+        except Exception:  # noqa: BLE001 - the committed supply stands
+            logger.warning("Model Hub: the Avibe Agent's seeded catalog was not announced", exc_info=True)
 
     async def seed_avibe_supply(self) -> list[str]:
         """Seed a pending Avibe entry from the Sources that existed at startup.
 
         Source creation seeds a pending entry in its own mutation; this covers
-        Sources that predate the Avibe Agent. The startup caller reconciles the
-        Avibe Agent's model right after. Returns the seeded model ids.
+        Sources that predate the Avibe Agent. Returns the seeded model ids.
         """
 
         if not self.store.load().avibe_supply_pending:
@@ -5215,7 +5218,7 @@ class ModelHubService:
             if not previous.avibe_supply_pending:
                 return []
             config = self._clone_config(previous)
-            if not self._seed_avibe(config):
+            if not await self._seed_avibe(config):
                 return []
             try:
                 # An engine that is not up must not undo the seed: the config is
@@ -5224,6 +5227,7 @@ class ModelHubService:
             except ModelHubError:
                 if self.store.load().avibe_supply_pending:
                     raise
+        await self._announce_avibe_seed()
         return [model.id for model in config.agents["avibe"].models]
 
     def _ensure_models_dev_copy(self) -> None:
@@ -8815,7 +8819,6 @@ def create_default_service(
     builtin_agent_models_override: Optional[
         Callable[[], list[tuple[BackendName, str]]]
     ] = None,
-    avibe_agent_model_reconcile: Optional[Callable[[], None]] = None,
     cli_present_override: Optional[Callable[[BackendName], bool]] = None,
     cli_presence_refresh: Optional[
         Callable[[bool, tuple[BackendName, ...] | None], None]
@@ -8877,7 +8880,6 @@ def create_default_service(
         selected_agent_override=selected_agent_override,
         named_agents_override=named_agents_override,
         builtin_agent_models_override=builtin_agent_models_override,
-        avibe_agent_model_reconcile=avibe_agent_model_reconcile,
         cli_present_override=cli_present_override,
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,
