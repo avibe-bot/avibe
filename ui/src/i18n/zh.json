@@ -4732,7 +4732,8 @@
       "errorCode": "错误码",
       "reasonLabel": "原因",
       "blockers": "当时不可用的供应商",
-      "upstreamNote": "以上状态码与错误码均由上游供应商的 API 返回。Avibe 会保留状态码和错误码，但不会保存供应商返回的原始报文，因为其中可能包含凭据。",
+      "upstreamNote": "以上内容均由上游供应商的 API 返回。Avibe 会保留状态码、错误码，以及去除凭据后的上游报错信息（最多 400 字）。",
+        "upstreamDetail": "上游返回",
       "copyRecord": "复制记录",
       "reason": {
         "quota_exhausted": "额度用尽",

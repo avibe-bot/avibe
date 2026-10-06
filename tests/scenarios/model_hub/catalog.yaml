@@ -223,6 +223,14 @@ scenarios:
     test: tests/test_model_hub_l3.py::test_a_request_ending_beside_an_open_peer_leaves_the_turn_to_that_peer
     related_tests:
       - tests/test_model_hub_retry_lifecycle.py::test_a_waiter_ending_beside_the_slot_owner_leaves_no_turn_projection
+  - id: MH-UPSTREAM-DETAIL-001
+    name: A failed turn shows, records, and logs what the upstream said, not only its class
+    status: covered
+    kind: copy
+    layer: unit
+    test: tests/test_model_hub_failure_presentation.py::test_upstream_refusal_text_reaches_reply_record_and_log
+    related_tests:
+      - ui/src/components/workbench/FailureDetails.test.tsx
   - id: MH-RETRY-ADVICE-001
     name: Failed HTTP advice retains the receipt clock across delayed or broken bodies
     status: covered

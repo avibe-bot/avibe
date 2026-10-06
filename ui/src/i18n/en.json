@@ -4732,7 +4732,8 @@
       "errorCode": "Error code",
       "reasonLabel": "Reason",
       "blockers": "Sources that were unavailable",
-      "upstreamNote": "These codes come from the upstream provider's API. Avibe keeps the status and error code but never stores the provider's raw response text, because it can echo credentials.",
+      "upstreamNote": "These come from the upstream provider's API. Avibe keeps the status, error code, and the provider's error message with credentials removed, up to 400 characters.",
+        "upstreamDetail": "Upstream said",
       "copyRecord": "Copy record",
       "reason": {
         "quota_exhausted": "Quota exhausted",

@@ -13,6 +13,7 @@ from typing import Awaitable, Callable
 
 from config.v2_config import ModelHubConfig, ModelHubSourceConfig
 
+from .provenance import TurnUpstreamFailure
 from .resolver import SourceRecoveryAnnotation, parse_model_hub_timestamp
 
 
@@ -72,6 +73,8 @@ class RecoveryRequest:
     observer: Callable[[dict | None], None] | None = None
     # A hard failure this request itself observed ends it with that verdict.
     non_retryable_failure: bool = False
+    # Carried across walks so a later blocked walk still names what failed.
+    last_upstream_failure: TurnUpstreamFailure | None = None
 
     def start(self) -> None:
         if self.started is None:

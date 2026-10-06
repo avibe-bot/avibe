@@ -1295,9 +1295,16 @@ checked mechanically against both `vibe/i18n` locale files. A new outcome, discr
 or supply message ships as one new matrix row plus its enum/key/mirror fixtures; none may
 land as standalone prose.
 
-`upstream_detail` is display-only reply text. It is never read by classification,
-never written to resolution events, probes, or persisted provenance, and lives only on
-the in-memory turn projection that renders this turn's reply.
+`upstream_detail` is display-only text. It is never read by classification and
+never written to resolution events or probes. Owner decision (2026-10-07): an upstream
+refusal that only says "server error" cannot be diagnosed, so persisted provenance keeps
+it per attempt (`failed_attempts[].upstream_detail`, `terminal_error.upstream_detail`),
+each failed Hub attempt logs it once, and the `turn.exhausted`,
+`turn.no_candidate.blocked`, and `turn.streamed_fallback` rows append
+`modelHub.launch.last_upstream_failure` (Source, HTTP status, and text of the last
+fallback-class refusal of the pending request) to their summary copy. The text is the
+same credential-redacted, whitespace-collapsed, 400-character projection in every
+place.
 
 For `turn.engine_down`, an optional `local_error_detail` carries the numeric OS
 errno and its system message, such as `[Errno 28] No space left on device`.

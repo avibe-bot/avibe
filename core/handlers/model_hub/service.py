@@ -135,6 +135,7 @@ from .provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
     ExactHopBlocker,
     TurnOutcomeProjectionInput,
+    TurnUpstreamFailure,
     exact_hop_blockers,
     no_candidate_decision,
     produce_turn_outcome,
@@ -7559,24 +7560,37 @@ class ModelHubService:
             backend=backend,
             model_id=model_id,
         )
+        source_label = next(
+            (source.display_name for source in config.sources if source.id == source_id), source_id,
+        )
         return produce_turn_outcome(
             "turn.streamed_fallback",
             config=config,
             resolution=resolution,
             attempted_hop=(source_id, source_model_id),
             source_transition_persisted=source_transition_persisted,
+            last_upstream_failure=self._upstream_failure(source_label, outcome),
         )
+
+    @staticmethod
+    def _upstream_failure(source_label: str, outcome: RawCallOutcome) -> TurnUpstreamFailure | None:
+        status = outcome.http_status
+        if not outcome.upstream_detail or type(status) is not int or not 100 <= status <= 599:
+            return None
+        return TurnUpstreamFailure(source=source_label, http_status=status, detail=outcome.upstream_detail)
 
     @staticmethod
     def _produce_no_candidate_terminal_outcome(
         *,
         config: ModelHubConfig,
         resolution: ModelHubTurnResolution,
+        last_upstream_failure: TurnUpstreamFailure | None = None,
     ) -> TurnOutcomeProjectionInput:
         return produce_turn_outcome(
             no_candidate_decision(config, resolution),
             config=config,
             resolution=resolution,
+            last_upstream_failure=last_upstream_failure,
         )
 
     @staticmethod
@@ -7584,11 +7598,13 @@ class ModelHubService:
         *,
         config: ModelHubConfig,
         resolution: ModelHubTurnResolution,
+        last_upstream_failure: TurnUpstreamFailure | None = None,
     ) -> TurnOutcomeProjectionInput:
         return produce_turn_outcome(
             "turn.exhausted",
             config=config,
             resolution=resolution,
+            last_upstream_failure=last_upstream_failure,
         )
 
     @staticmethod
@@ -8170,6 +8186,9 @@ class ModelHubService:
             )(
                 config=projection_config,
                 resolution=projection_resolution,
+                last_upstream_failure=(
+                    recovery_request.last_upstream_failure if recovery_request is not None else None
+                ),
             )
             facts = turn_outcome.supply_facts
             if facts is None:
@@ -8186,6 +8205,9 @@ class ModelHubService:
 
         failed_source: Optional[ModelHubSourceConfig] = None
         failed_reason: Optional[EventReason] = None
+        last_upstream_failure = (
+            recovery_request.last_upstream_failure if recovery_request is not None else None
+        )
         window_closed = False
         non_retryable_failure = False
         attempted = False
@@ -8444,6 +8466,11 @@ class ModelHubService:
                     recovery_request.reason = decision.reason
                 elif recovery_request is not None:
                     recovery_request.non_retryable_failure = True
+                failure = self._upstream_failure(source.display_name, outcome)
+                if failure is not None:
+                    last_upstream_failure = failure
+                    if recovery_request is not None:
+                        recovery_request.last_upstream_failure = failure
                 event_reason, _persisted = await self._settle_fallback_source(
                     source,
                     decision,
@@ -8478,6 +8505,7 @@ class ModelHubService:
         turn_outcome = produce_outcome(
             config=final_config,
             resolution=final_resolution,
+            last_upstream_failure=last_upstream_failure,
         )
         final_facts = turn_outcome.supply_facts
         if final_facts is None:

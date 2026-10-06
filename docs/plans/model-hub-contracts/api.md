@@ -1319,8 +1319,8 @@ was observed and classification returned `upstream_request_invalid`, retain it o
 co-occurring generic `invalid_request_error` type; otherwise use existing specificity
 order. This is diagnostic selection, not a classifier rank/decision change. Never infer
 `model_not_found` from `invalid_parameter`, the requested model, or today's route.
-Unknown upstream strings, raw bodies, messages, headers and credentials are not
-retained. These optional observations do not change classification, fallback or Source
+Unknown upstream strings, raw bodies, headers and credentials are not retained; the
+upstream message is kept only as the bounded `upstream_detail` below. These optional observations do not change classification, fallback or Source
 health. Historical records may omit both fields and keep their existing read behavior.
 
 `failed_attempts[].http_status` is independently optional: a strict integer
@@ -1328,6 +1328,12 @@ health. Historical records may omit both fields and keep their existing read beh
 It records the original upstream status, for example 503 even when native
 compatibility uses 400. Older retained records without it remain readable.
 This additive diagnostic changes neither the failure reason nor classifier.
+
+`failed_attempts[].upstream_detail` and `terminal_error.upstream_detail` are
+independently optional strings: the upstream error message the engine client
+projected for that attempt, credential-redacted, whitespace-collapsed, and bounded
+to 400 characters. They are omitted when no message was observed and in older
+records, and are never read by classification.
 
 The dialog independently reads this projection on demand and labels it "Latest recorded
 turn" / "最近已记录回合". Its error panel and details action use the same structured record,

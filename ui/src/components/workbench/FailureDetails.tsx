@@ -6,8 +6,9 @@
 // HTTP status and machine error code, and why it moved on. That is what lets a
 // user see the refusal came from the upstream API and not from the gateway.
 //
-// Raw upstream response prose is never retained. Local OS reasons are also
-// carried by the notice, so details survive an unavailable provenance read.
+// The upstream message is kept only as the engine client's credential-redacted,
+// 400-character projection. Local OS reasons are also carried by the notice, so
+// details survive an unavailable provenance read.
 import * as React from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -27,6 +28,7 @@ type Row = {
   status: number | null;
   code: string | null;
   reason: string;
+  detail: string | null;
 };
 
 const RECORD_RETRIES = 3;
@@ -97,6 +99,7 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
       status: entry.http_status ?? null,
       code: null,
       reason: t(`chat.failureDetails.reason.${entry.reason}`, { defaultValue: entry.reason }),
+      detail: entry.upstream_detail ?? null,
     }));
     const terminal = record.terminal_error;
     if (terminal) {
@@ -107,6 +110,7 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
         status: terminal.http_status ?? null,
         code: terminal.upstream_error_code ?? null,
         reason: t(`settings.models.routing.errorReason.${terminal.reason}`),
+        detail: terminal.upstream_detail ?? null,
       });
     }
     return attempts;
@@ -121,7 +125,7 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
     const outcome = record.outcome === 'failed_terminal' && record.terminal_error?.reason !== 'invalid_parameter'
       ? 'failed_local'
       : record.outcome;
-    const upstreamFacts = attempts.some((row) => row.status !== null || row.code !== null);
+    const upstreamFacts = attempts.some((row) => row.status !== null || row.code !== null || row.detail !== null);
     return (
       <div className="flex flex-col gap-2">
         <p className="text-gold-ink">
@@ -137,6 +141,12 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
                   {row.code && <span>{t('chat.failureDetails.errorCode')}: <span className="font-mono text-gold-ink">{row.code}</span></span>}
                   <span>{t('chat.failureDetails.reasonLabel')}: <span className="text-gold-ink">{row.reason}</span></span>
                 </span>
+                {row.detail && (
+                  <span className="text-gold-ink/70">
+                    {t('chat.failureDetails.upstreamDetail')}:{' '}
+                    <span className="whitespace-pre-wrap break-words font-mono text-gold-ink">{row.detail}</span>
+                  </span>
+                )}
               </li>
             ))}
           </ol>

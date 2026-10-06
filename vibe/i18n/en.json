@@ -995,6 +995,7 @@
       "waiting_without_retry": "This request could not complete. Automatic recovery has ended. You can retry model {model} or choose another model.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
+      "last_upstream_failure": "Last upstream error ({source}, HTTP {status}): {detail}",
       "model_unlisted": "Model {model} is not in the {backend} model list. Choose another model to continue.",
       "request_incompatible": "This request is incompatible; switching Sources will not help.",
       "request_incompatible_detail": "This request was rejected upstream and switching Sources will not help. Upstream said: {detail}"

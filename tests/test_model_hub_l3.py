@@ -193,7 +193,7 @@ def test_turn_outcome_rendering_authority_covers_matrix_and_locales() -> None:
     projected_keys = {
         key
         for rule in TURN_OUTCOME_RENDERING_AUTHORITY.values()
-        for _variant, key in rule.copy_keys
+        for key in (*(key for _variant, key in rule.copy_keys), rule.upstream_failure_key)
         if key is not None
     }
     locale_launch_keys = None
