@@ -8466,11 +8466,11 @@ class ModelHubService:
                     recovery_request.reason = decision.reason
                 elif recovery_request is not None:
                     recovery_request.non_retryable_failure = True
-                failure = self._upstream_failure(source.display_name, outcome)
-                if failure is not None:
-                    last_upstream_failure = failure
-                    if recovery_request is not None:
-                        recovery_request.last_upstream_failure = failure
+                # The newest refusal wins even without text: an older message
+                # would name a response that did not end this request.
+                last_upstream_failure = self._upstream_failure(source.display_name, outcome)
+                if recovery_request is not None:
+                    recovery_request.last_upstream_failure = last_upstream_failure
                 event_reason, _persisted = await self._settle_fallback_source(
                     source,
                     decision,

@@ -220,21 +220,24 @@ async def test_gateway_terminal_survives_native_recorder_before_shared_notice(
         await gateway.close()
 
 
+@pytest.mark.parametrize("last_said", ["text", "nothing"])
 @pytest.mark.parametrize("backend,endpoint,status", [
     ("codex", "responses", 400), ("claude", "messages", 424),
 ])
 @pytest.mark.parametrize("language", ["en", "zh"])
 async def test_upstream_refusal_text_reaches_reply_record_and_log(
-    tmp_path, caplog, backend, endpoint, status, language,
+    tmp_path, caplog, backend, endpoint, status, language, last_said,
 ):
     """MH-UPSTREAM-DETAIL-001: what the upstream said is shown, kept, and logged, not only its class."""
     detail = "upstream request failed: read tcp 198.51.100.7:443: i/o timeout"
+    # Only the first refusal carries text when the last one said nothing.
+    texts = [detail] + [detail if last_said == "text" else None] * 4
     service, _clock = clock_service(tmp_path, outcomes=[
         replace(
             _outcome(RawOutcomeKind.HTTP_ERROR, source_id="src_recovery01", status=500, code="server_error"),
-            upstream_detail=detail,
+            upstream_detail=text,
         )
-        for _ in range(5)
+        for text in texts
     ])
     service.store.load().sources[0].display_name = "Relay 服务"
     models = _canonicalize_fixed_test_routes(service)
@@ -274,15 +277,18 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
         notice, _terminal = controller.emit_agent_message.await_args_list
         projection = gateway.correlation.terminal_projection("turn-detail", backend=backend)
         assert notice.args[2] == render_turn_outcome_copy(projection, language)
-        assert t(
+        suffix = t(
             "modelHub.launch.last_upstream_failure", language,
             source="Relay 服务", status=500, detail=detail,
-        ) in notice.args[2]
+        )
+        # An older message never stands in for a newer refusal that had none.
+        assert (suffix in notice.args[2]) is (last_said == "text")
         gateway.correlation.settle("turn-detail", settled_by=SETTLED_BY_TERMINAL_RESULT)
         record = service.provenance.get("turn-detail")
-        assert [attempt.get("upstream_detail") for attempt in record["failed_attempts"]] == [detail] * attempts
+        assert [attempt.get("upstream_detail") for attempt in record["failed_attempts"]] == texts[:attempts]
         logged = [entry.getMessage() for entry in caplog.records if "Model Hub attempt failed" in entry.getMessage()]
-        assert len(logged) == attempts and all(detail in line and "http_status=500" in line for line in logged)
+        assert len(logged) == attempts and all("http_status=500" in line for line in logged)
+        assert detail in logged[0]
     finally:
         await gateway.close()
 

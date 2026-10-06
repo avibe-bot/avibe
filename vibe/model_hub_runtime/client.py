@@ -64,6 +64,7 @@ _ENGINE_TRANSPORT_FAILURE = re.compile(
     r"http2: (?:client connection lost|server sent GOAWAY)|server closed idle connection|"
     r"no such host|network is unreachable|proxyconnect"
 )
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
@@ -1797,7 +1798,9 @@ def _upstream_error_detail(
 
 
 def _bounded_upstream_detail(message: str) -> str | None:
-    text = " ".join(message.split())
+    # Control characters (terminal escapes, BEL) would act on whatever renders
+    # the text, a log viewer included; they carry no message content.
+    text = " ".join(_CONTROL_CHARACTERS.sub(" ", message).split())
     if not text:
         return None
     text = plain_untrusted_text(redact_untrusted_text(text))

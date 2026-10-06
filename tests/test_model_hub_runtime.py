@@ -7517,6 +7517,16 @@ def test_engine_upstream_detail_keeps_email_addresses_usable() -> None:
     )
 
 
+def test_engine_upstream_detail_drops_terminal_control_characters() -> None:
+    payload = json.dumps(
+        {"error": {"message": "relay \x1b]52;c;cGF5bG9hZA==\x07 down\x1b[2J\x9b now"}}
+    ).encode()
+
+    detail = client_module._upstream_error_detail(payload, (("error",),))
+
+    assert detail == "relay ]52;c;cGF5bG9hZA== down [2J now"
+
+
 def test_engine_upstream_detail_replaces_lone_surrogates_so_it_can_persist() -> None:
     payload = b'{"error": {"message": "bad \\ud800 byte"}}'
 
