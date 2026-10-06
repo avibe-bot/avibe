@@ -122,11 +122,9 @@ def redact_credential_material(value: str) -> str:
 # still matches on ``secret``) and has no nested quantifier, so matching stays linear
 # on hostile input. ``contains_credential_material`` keeps the narrower shape-based
 # patterns so benign labels such as ``max token: 4096`` in a model name are not
-# rejected. A label right after ``/`` is a URL path segment, not a label: Go
-# reports ``Post "https://auth.openai.com/oauth/token": dial tcp …``, and the
-# network reason after it is the part worth reading.
+# rejected.
 _LABELED_SECRET_PATTERN = re.compile(
-    r"(?i)(?<!/)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)[\"'`]?\s*[:=]\s*"
+    r"(?i)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)[\"'`]?\s*[:=]\s*"
 )
 
 
@@ -154,6 +152,29 @@ _OAUTH_GRANT_PARAMETER_PATTERN = re.compile(
 )
 
 
+# A quoted URL in a transport error (Go's ``Post "https://…/oauth/token": dial
+# tcp …``). Its last path segment can read like a secret label (``token":``),
+# which would drop the network cause after it, so each such URL is redacted as
+# its own segment instead of as a label for the text that follows.
+_QUOTED_URL_PATTERN = re.compile(r'"https?://[^"\s]*"')
+
+
+def _redact_failure_text(text: str) -> str:
+    redacted: list[str] = []
+    cursor = 0
+    for match in [*_QUOTED_URL_PATTERN.finditer(text), None]:
+        prose = text[cursor : match.start() if match else len(text)]
+        safe = redact_untrusted_text(prose)
+        redacted.append(safe)
+        # A labeled secret drops everything after it, URLs included, exactly
+        # as ``redact_untrusted_text`` does for one undivided text.
+        if match is None or safe != redact_credential_material(prose):
+            break
+        redacted.append(redact_untrusted_text(match.group(0)))
+        cursor = match.end()
+    return "".join(redacted)
+
+
 def bounded_failure_detail(value: object) -> str | None:
     """One line of untrusted failure text that is safe to show and copy.
 
@@ -165,7 +186,7 @@ def bounded_failure_detail(value: object) -> str | None:
     if not isinstance(value, str):
         return None
     text = _OAUTH_GRANT_PARAMETER_PATTERN.sub(r"\1=[redacted]", " ".join(value.split()))
-    text = redact_untrusted_text(text)
+    text = _redact_failure_text(text)
     if not text:
         return None
     if len(text) > FAILURE_DETAIL_CHARS:

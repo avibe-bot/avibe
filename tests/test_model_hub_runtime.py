@@ -7320,10 +7320,6 @@ def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
         ("""echo {'password': 'correct horse battery staple'}""", "echo {'password': [redacted]"),
         ('{"api_key" : "opaque"}', '{"api_key" : [redacted]'),
         ("max_tokens: 4096 exceeds the limit", "max_tokens: 4096 exceeds the limit"),
-        (
-            'Post "https://auth.openai.com/oauth/token": dial tcp: i/o timeout',
-            'Post "https://auth.openai.com/oauth/token": dial tcp: i/o timeout',
-        ),
     ],
 )
 def test_engine_upstream_detail_redacts_labeled_opaque_secrets(message: str, expected: str) -> None:
@@ -8821,6 +8817,9 @@ def test_oauth_paste_that_cannot_exchange_keeps_the_flow_awaiting(
         ("Bad Request", "models.oauth.provider_denied"),
         ("Authentication failed", "models.oauth.provider_denied"),
         ("Failed to save authentication tokens", "models.oauth.upstream_failed"),
+        # A timeout outside the callback wait says nothing about the callback.
+        ("Failed to save authentication tokens: timed out writing auth file", "models.oauth.upstream_failed"),
+        ("Authentication failed: device code expired", "models.oauth.upstream_failed"),
     ],
 )
 def test_oauth_engine_failure_names_what_the_user_can_do(
@@ -8873,6 +8872,19 @@ def test_oauth_engine_failure_names_what_the_user_can_do(
             "grant_type=authorization_code&code=ac_live-Grant_123&code_verifier=verifier-xyz",
             ("ac_live-Grant_123", "0f1e2d3c", "verifier-xyz"),
             "/oauth/token\": redirect_url",
+        ),
+        # A field path that ends like a label still guards the value after it.
+        (
+            "Failed to exchange authorization code for tokens: provider rejected /token: opaquevalue123456789",
+            ("opaquevalue123456789",),
+            "provider rejected /token: ",
+        ),
+        # A label before a quoted URL still drops everything after it.
+        (
+            'Failed to exchange authorization code for tokens: session: opaquesession42 '
+            'Post "https://auth.openai.com/oauth/token": dial tcp: i/o timeout',
+            ("opaquesession42", "auth.openai.com"),
+            "session: ",
         ),
     ],
 )

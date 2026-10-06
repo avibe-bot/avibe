@@ -3182,29 +3182,34 @@ def _oauth_callback_address(submitted: str) -> str | None:
     return None
 
 
-def _oauth_engine_failure_key(reason: str) -> str:
-    """Map the engine's session error to what the user can do about it.
+# The pinned engine's OAuth session errors, verbatim and lower-cased, mapped to
+# what the user can do about each. A closed table: anything the engine says that
+# is not here, including a future rewording, keeps the generic key rather than
+# borrowing a cause it did not state.
+_OAUTH_ENGINE_SESSION_ERRORS = {
+    "timeout waiting for oauth callback": "models.oauth.expired",
+    "oauth flow timed out": "models.oauth.expired",
+    "state code error": "models.oauth.callback_mismatch",
+    "authentication failed: state mismatch": "models.oauth.callback_mismatch",
+    "bad request": "models.oauth.provider_denied",
+    "authentication failed": "models.oauth.provider_denied",
+    "failed to exchange token": "models.oauth.exchange_failed",
+}
+# The one session error that carries its cause after the phrase.
+_OAUTH_ENGINE_EXCHANGE_FAILURE = "failed to exchange authorization code for tokens"
 
-    The phrases are the pinned engine's own session errors; anything else keeps
-    the generic key. The token exchange is checked first because its network
-    causes can themselves read "timeout", which would otherwise pass for the
-    callback deadline.
-    """
+
+def _oauth_engine_failure_key(reason: str) -> str:
+    """Map the engine's session error to what the user can do about it."""
 
     text = " ".join(reason.split()).lower()
-    if text.startswith("failed to exchange"):
+    if text == _OAUTH_ENGINE_EXCHANGE_FAILURE or text.startswith(_OAUTH_ENGINE_EXCHANGE_FAILURE + ":"):
         # Only the provider's answers about the grant itself blame the pasted
         # code; a proxy (407), a throttle (429) or any other refusal does not.
         if re.search(r"\bstatus 40[01]\b", text) or "invalid_grant" in text:
             return "models.oauth.code_rejected"
         return "models.oauth.exchange_failed"
-    if "timeout" in text or "timed out" in text:
-        return "models.oauth.expired"
-    if "state code error" in text or "state mismatch" in text:
-        return "models.oauth.callback_mismatch"
-    if text in {"bad request", "authentication failed"}:
-        return "models.oauth.provider_denied"
-    return "models.oauth.upstream_failed"
+    return _OAUTH_ENGINE_SESSION_ERRORS.get(text, "models.oauth.upstream_failed")
 
 
 def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
