@@ -143,7 +143,9 @@ class MigrationHost(Protocol):
 
     def _save_config(self, config: ModelHubConfig) -> ModelHubConfig: ...
 
-    def _hand_off_avibe_seed(self, previous: ModelHubConfig, committed: ModelHubConfig) -> None: ...
+    def _seed_avibe(self, config: ModelHubConfig) -> bool: ...
+
+    def _after_avibe_seed(self) -> None: ...
 
     def _carry_agent_selections(self, config: ModelHubConfig, backend: Any) -> None: ...
 
@@ -1876,6 +1878,9 @@ async def _prepare_takeover(
                         "store_backend": item.backend, "store_routing": item.native_store_routing or "",
                     } if item.native_store_revision else {}),
                 }
+        if updated.avibe_supply_pending:
+            # Once every Source of the batch is in place, reused identities too.
+            host._seed_avibe(updated)
         backends = sorted({item.backend for item in [*(consented or selected), *retained_keys]})
         native_before = _native_auth_snapshot(host, tuple(backends))
         # Copy-only keeps the Avibe-saved native key; Hub launches shadow it.
@@ -2077,7 +2082,8 @@ async def _resume_takeover(
             # Save the decision without projecting staged grants into CPA.
             # sync_sources is a runtime write, not a config-only operation.
             host._save_config(updated)
-            host._hand_off_avibe_seed(previous, updated)
+            if previous.avibe_supply_pending and not updated.avibe_supply_pending:
+                host._after_avibe_seed()
             host._engine_synced = False
             host._reconcile_native_auth(tuple(record["backends"]))
             # This durable marker precedes any credential exposure to CPA.

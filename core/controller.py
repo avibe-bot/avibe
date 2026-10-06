@@ -381,28 +381,34 @@ class Controller:
                 selections.append((backend, model))
         return selections
 
-    def _hand_off_avibe_model(self, model_id: str) -> None:
-        """Give the built-in Avibe Agent a seeded model when it has none.
+    def _reconcile_avibe_agent_model(self) -> None:
+        """Give the built-in Avibe Agent its catalog's first model while it has none.
 
-        Decided under the store's write lock, so a model the user picked while
-        the seed ran stands. No built-in exists when a user Agent already holds
-        the name, as for any built-in; the supply is seeded all the same.
+        An Avibe Agent without a model cannot run a turn, so this only makes an
+        unrunnable Agent runnable. Decided under the store's write lock, it never
+        replaces a model the user chose. It runs after each seed and at every
+        start, so a hand-off a failed write or an exit lost heals on the next
+        one. No built-in exists when a user Agent already holds the name.
         """
 
         from vibe.authorization import instance_owner_context
 
+        models = self.model_hub_service.store.load().agents["avibe"].models
+        if not models:
+            return
         store = self.vibe_agent_store
         avibe = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
-        if avibe is not None:
-            store.update(
-                avibe.name,
-                model=model_id,
-                only_if_model_unset=True,
-                user_context=instance_owner_context(),
-            )
+        if avibe is None or str(avibe.model or "").strip():
+            return
+        store.update(
+            avibe.name,
+            model=models[0].id,
+            only_if_model_unset=True,
+            user_context=instance_owner_context(),
+        )
 
     async def _seed_avibe_model_supply(self) -> None:
-        """Seed the Avibe Agent's Model Hub entry from the Sources that existed at startup."""
+        """Seed the Avibe Agent's Model Hub entry from existing Sources, then reconcile its model."""
 
         model_hub_service = getattr(self, "model_hub_service", None)
         if model_hub_service is None:
@@ -411,6 +417,10 @@ class Controller:
             await model_hub_service.seed_avibe_supply()
         except Exception:
             logger.warning("Avibe Agent starting model supply failed", exc_info=True)
+        try:
+            self._reconcile_avibe_agent_model()
+        except Exception:
+            logger.warning("Avibe Agent model reconciliation failed", exc_info=True)
 
     def get_native_session_service(self):
         if self.native_session_service is None:
@@ -2823,7 +2833,7 @@ class Controller:
             selected_agent_override=default_vibe_agent_name,
             named_agents_override=named_vibe_agents,
             builtin_agent_models_override=self._builtin_agent_models,
-            avibe_model_handoff=self._hand_off_avibe_model,
+            avibe_agent_model_reconcile=self._reconcile_avibe_agent_model,
             cli_present_override=cli_present,
             cli_presence_refresh=refresh_cli_presence,
             backend_catalog_changed=backend_catalog_changed,

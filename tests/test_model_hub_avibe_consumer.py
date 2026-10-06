@@ -612,8 +612,9 @@ def _seed_service(tmp_path, payload, selections):
     service.store = _PersistedStore(payload)
     service.models_dev_catalog = lambda: SEED_CATALOG
     service.builtin_agent_models_override = lambda: list(selections)
-    service.avibe_model_handoff = (handed := []).append
-    return service, service.store, handed
+    service.avibe_agent_model_reconcile = lambda: reconciled.append(True)
+    reconciled = []
+    return service, service.store, reconciled
 
 
 @pytest.mark.asyncio
@@ -648,7 +649,7 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
     # The user keeps one Source for Claude; seeding Avibe must not restore the rest.
     agents["claude"].sources.order = [SEED_ANTHROPIC.id]
     sources = [SEED_ANTHROPIC, SEED_RESPONSES, SEED_CHAT, SEED_SUBSCRIPTION, SEED_NATIVE]
-    service, store, handed = _seed_service(tmp_path, {
+    service, store, _reconciled = _seed_service(tmp_path, {
         "enabled": True,
         "runtime_default_applied": True,
         "sources": [source.to_payload() for source in sources],
@@ -670,7 +671,6 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
     avibe = store.payload["agents"]["avibe"]
     assert avibe["sources"]["order"] == order
     assert [model["id"] for model in avibe["models"]] == seeded
-    assert handed == seeded[:1]
     assert {backend: store.payload["agents"][backend] for backend in agents} == others
     if "claude-opus-5-5" in seeded:
         row = next(model for model in avibe["models"] if model["id"] == "claude-opus-5-5")
@@ -687,7 +687,6 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
     kept = copy.deepcopy(store.payload)
     assert await service.seed_avibe_supply() == []
     assert store.payload == kept
-    assert handed == seeded[:1]
 
 
 @pytest.mark.asyncio
@@ -704,19 +703,20 @@ async def test_fresh_install_seeds_avibe_with_its_first_source(tmp_path, selecti
     leave every later Source without starting models, and skipping the pending
     entry at placement would leave the first Source out until a restart.
     """
-    service, store, handed = _seed_service(tmp_path, ModelHubConfig().to_payload(), selections)
+    service, store, reconciled = _seed_service(tmp_path, ModelHubConfig().to_payload(), selections)
     assert "avibe" not in store.payload["agents"]
 
     assert await service.seed_avibe_supply() == []
     native = copy.deepcopy(SEED_NATIVE)
     await service._commit_new_source_locked(native)
     assert "avibe" not in store.payload["agents"]
+    assert reconciled == []
 
     await service._commit_new_source_locked(copy.deepcopy(SEED_ANTHROPIC))
     avibe = store.payload["agents"]["avibe"]
     assert avibe["sources"]["order"] == [SEED_ANTHROPIC.id]
     assert [model["id"] for model in avibe["models"]] == seeded
-    assert handed == seeded[:1]
+    assert reconciled == [True]
     assert {candidate["id"] for candidate in service.agent_model_candidates("avibe")["providers"]} == (
         {"claude-opus-5-5", "claude-sonnet-5-5"} - set(seeded)
     )
@@ -726,7 +726,7 @@ async def test_fresh_install_seeds_avibe_with_its_first_source(tmp_path, selecti
     avibe = store.payload["agents"]["avibe"]
     assert avibe["sources"]["order"] == [SEED_ANTHROPIC.id, SEED_RESPONSES.id]
     assert [model["id"] for model in avibe["models"]] == seeded
-    assert handed == seeded[:1]
+    assert reconciled == [True]
 
 
 def test_native_cli_and_direct_are_not_avibe_channels(tmp_path):

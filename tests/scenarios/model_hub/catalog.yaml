@@ -143,8 +143,9 @@ scenarios:
     test: tests/test_model_hub_avibe_consumer.py::test_avibe_agent_predating_its_supply_starts_with_the_users_providers_and_models
     related_tests:
       - tests/test_model_hub_avibe_consumer.py::test_fresh_install_seeds_avibe_with_its_first_source
-      - tests/test_model_hub_native_takeover.py::test_takeover_seeds_a_pending_avibe_entry_and_offers_its_first_model
-      - tests/test_avibe_backend_registration.py::test_avibe_agent_starts_on_the_first_seeded_model_it_lacks
+      - tests/test_model_hub_native_takeover.py::test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch
+      - tests/test_avibe_backend_registration.py::test_avibe_agent_runs_its_catalogs_first_model_until_it_has_one
+      - tests/test_avibe_backend_registration.py::test_a_lost_avibe_model_hand_off_heals_on_the_next_start
       - tests/test_controller_im_ready.py::test_runtime_services_start_when_post_update_notification_fails
   - id: MH-AVIBE-004
     name: Avibe refuses native CLI sources and Direct mode

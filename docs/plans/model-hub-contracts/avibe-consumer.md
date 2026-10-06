@@ -18,16 +18,18 @@ before the Avibe Agent existed, reads an empty Hub row that writes leave absent.
 The seed runs once, when a Source it can place exists: in the background after
 the service reports ready for Sources that already exist (so a first models.dev
 fetch never delays startup), and otherwise inside the mutation that creates the
-first eligible Source, API key, OAuth, or native takeover alike, so no restart is
-needed. Its source order becomes every existing eligible Source, placed exactly as
+first eligible Source, API key, OAuth, or native takeover alike, once that
+mutation's Sources are final, so no restart is needed. Its source order becomes every existing eligible Source, placed exactly as
 a newly created Source would be, and its catalog becomes the models the built-in
 Claude, Codex, and OpenCode Agents run, in that order, that one of those Sources
 lists, deduplicated and added as the picker adds a provider model (models.dev
 metadata included). None qualifying leaves the catalog empty; no model is picked
-on the user's behalf. The built-in Avibe Agent takes the first seeded model when
-it has none, decided under the Agent store's write lock so a model chosen
-meanwhile stands; where a user Agent already holds the name and no built-in
-exists, only the supply is seeded.
+on the user's behalf. An Avibe Agent without a model cannot run a turn, so the
+built-in one takes its catalog's first model while it has none: one controller
+rule, decided under the Agent store's write lock so a chosen model stands, run
+after each seed and at every start, so a lost hand-off heals on the next start.
+Where a user Agent already holds the name and no built-in exists, only the
+supply is seeded.
 The persisted row then belongs to the user and is never seeded again. Existing
 backend modes, model metadata, routes, source order, and runtime intent remain
 unchanged. An empty Avibe catalog does not prevent an explicit runtime Stop.

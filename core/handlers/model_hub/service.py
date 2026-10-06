@@ -1056,7 +1056,7 @@ class ModelHubService:
         builtin_agent_models_override: Optional[
             Callable[[], list[tuple[BackendName, str]]]
         ] = None,
-        avibe_model_handoff: Optional[Callable[[str], None]] = None,
+        avibe_agent_model_reconcile: Optional[Callable[[], None]] = None,
         cli_present_override: Optional[Callable[[BackendName], bool]] = None,
         cli_presence_refresh: Optional[
             Callable[[bool, tuple[BackendName, ...] | None], None]
@@ -1107,10 +1107,10 @@ class ModelHubService:
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
-        # The built-in Agents' models, and the Avibe Agent's model hand-off, for
-        # the Avibe starting supply; the controller owns those Agent rows.
+        # The built-in Agents' models for the Avibe starting supply, and the
+        # Avibe Agent's model reconciliation; the controller owns those rows.
         self.builtin_agent_models_override = builtin_agent_models_override
-        self.avibe_model_handoff = avibe_model_handoff
+        self.avibe_agent_model_reconcile = avibe_agent_model_reconcile
         self.cli_present_override = cli_present_override
         self.cli_presence_refresh = cli_presence_refresh
         self.backend_catalog_changed = backend_catalog_changed
@@ -2484,8 +2484,10 @@ class ModelHubService:
                 number += 1
         config.sources.append(source)
         self._apply_source_placement(config, source)
+        seeded = config.avibe_supply_pending and self._seed_avibe(config)
         await self._commit_synced(previous, config)
-        self._hand_off_avibe_seed(previous, config)
+        if seeded:
+            self._after_avibe_seed()
 
     def _apply_source_placement(
         self,
@@ -2502,8 +2504,8 @@ class ModelHubService:
 
         for backend in backends:
             if backend == "avibe" and config.avibe_supply_pending:
-                # Its seed places every Source at once, this one included.
-                self._seed_avibe(config)
+                # Its seed places every Source at once, once the mutation's
+                # Sources are final (see _seed_avibe).
                 continue
             agent = config.agents[backend]
             if not self._eligible_for_agent(source, backend) or source.id in agent.sources.order:
@@ -5143,7 +5145,9 @@ class ModelHubService:
         picker adds a provider model; none qualifying leaves the list empty
         rather than picking one. The seed counts only once it has placed a
         Source: until then the entry stays pending, so the first Source the user
-        adds still brings every Source and the starting models with it.
+        adds still brings every Source and the starting models with it. Each
+        mutation that adds Sources seeds after its Sources are final, so one
+        that adds several seeds from all of them.
         """
 
         agent = config.agents["avibe"]
@@ -5189,26 +5193,22 @@ class ModelHubService:
         config.avibe_supply_pending = True
         return False
 
-    def _hand_off_avibe_seed(self, previous: ModelHubConfig, committed: ModelHubConfig) -> None:
-        """Offer the built-in Avibe Agent the first model a just-committed seed added."""
+    def _after_avibe_seed(self) -> None:
+        """Let the Agent-row owner reconcile the Avibe Agent's model after a committed seed."""
 
-        models = committed.agents["avibe"].models
-        if (
-            previous.avibe_supply_pending
-            and not committed.avibe_supply_pending
-            and models
-            and self.avibe_model_handoff is not None
-        ):
-            try:
-                self.avibe_model_handoff(models[0].id)
-            except Exception:  # noqa: BLE001 - the committed supply stands without it
-                logger.warning("Avibe Agent starting model hand-off failed", exc_info=True)
+        if self.avibe_agent_model_reconcile is None:
+            return
+        try:
+            self.avibe_agent_model_reconcile()
+        except Exception:  # noqa: BLE001 - the committed supply stands; startup reconciles again
+            logger.warning("Avibe Agent model reconciliation after its seed failed", exc_info=True)
 
     async def seed_avibe_supply(self) -> list[str]:
         """Seed a pending Avibe entry from the Sources that existed at startup.
 
         Source creation seeds a pending entry in its own mutation; this covers
-        Sources that predate the Avibe Agent. Returns the seeded model ids.
+        Sources that predate the Avibe Agent. The startup caller reconciles the
+        Avibe Agent's model right after. Returns the seeded model ids.
         """
 
         if not self.store.load().avibe_supply_pending:
@@ -5231,7 +5231,6 @@ class ModelHubService:
             except ModelHubError:
                 if self.store.load().avibe_supply_pending:
                     raise
-        self._hand_off_avibe_seed(previous, config)
         return [model.id for model in config.agents["avibe"].models]
 
     def _ensure_models_dev_copy(self) -> None:
@@ -8823,7 +8822,7 @@ def create_default_service(
     builtin_agent_models_override: Optional[
         Callable[[], list[tuple[BackendName, str]]]
     ] = None,
-    avibe_model_handoff: Optional[Callable[[str], None]] = None,
+    avibe_agent_model_reconcile: Optional[Callable[[], None]] = None,
     cli_present_override: Optional[Callable[[BackendName], bool]] = None,
     cli_presence_refresh: Optional[
         Callable[[bool, tuple[BackendName, ...] | None], None]
@@ -8885,7 +8884,7 @@ def create_default_service(
         selected_agent_override=selected_agent_override,
         named_agents_override=named_agents_override,
         builtin_agent_models_override=builtin_agent_models_override,
-        avibe_model_handoff=avibe_model_handoff,
+        avibe_agent_model_reconcile=avibe_agent_model_reconcile,
         cli_present_override=cli_present_override,
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,

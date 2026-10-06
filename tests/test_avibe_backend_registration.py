@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from config.v2_config import V2Config
 from config.v2_compat import to_app_config
@@ -212,14 +215,23 @@ def test_avibe_model_options_come_from_configured_hub_catalog(monkeypatch):
     assert api.agent_model_options("avibe")["models"] == []
 
 
-@pytest.mark.parametrize("avibe", ["no model", "chosen", "name taken"])
-def test_avibe_agent_starts_on_the_first_seeded_model_it_lacks(tmp_path, sqlite_db_factory, avibe):
+def _hub_catalog(*model_ids, origin="provider"):
+    from config.v2_config import ModelHubBackendModelConfig, ModelHubConfig
+
+    config = ModelHubConfig()
+    config.agents["avibe"].models = [ModelHubBackendModelConfig(id=model_id, origin=origin) for model_id in model_ids]
+    return SimpleNamespace(store=SimpleNamespace(load=lambda: config))
+
+
+@pytest.mark.parametrize("avibe", ["seeded", "user-built list", "chosen", "name taken", "empty list"])
+def test_avibe_agent_runs_its_catalogs_first_model_until_it_has_one(tmp_path, sqlite_db_factory, avibe):
     """MH-AVIBE-007: the Agent rows behind the Hub seed, owned by this process.
 
-    The built-in native Agents' models feed the seed in backend-name order, and
-    the built-in Avibe Agent takes the first seeded model only while it has none,
-    so a model the user chose meanwhile stands. When a user Agent already holds
-    the name, no built-in exists and that Agent is left alone.
+    The built-in native Agents' models feed the seed in backend-name order. An
+    Avibe Agent without a model cannot run a turn, so it takes its catalog's
+    first model, seeded or listed by the user, and only while it has none: a
+    model the user chose stands. When a user Agent already holds the name, no
+    built-in exists and that Agent is left alone.
     """
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
     try:
@@ -233,15 +245,52 @@ def test_avibe_agent_starts_on_the_first_seeded_model_it_lacks(tmp_path, sqlite_
             store.update("avibe", model="chosen-model")
         controller = Controller.__new__(Controller)
         controller.vibe_agent_store = store
+        controller.model_hub_service = {
+            "empty list": _hub_catalog(),
+            "user-built list": _hub_catalog("my-relay-model", "gpt-5.5", origin="manual"),
+        }.get(avibe, _hub_catalog("gpt-5.5", "claude-opus-5-5"))
 
         assert controller._builtin_agent_models() == [
             ("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol"),
         ]
-        controller._hand_off_avibe_model("gpt-5.5")
+        controller._reconcile_avibe_agent_model()
         assert (store.get("avibe").backend, store.get("avibe").model) == {
-            "no model": ("avibe", "gpt-5.5"),
+            "seeded": ("avibe", "gpt-5.5"),
+            "user-built list": ("avibe", "my-relay-model"),
             "chosen": ("avibe", "chosen-model"),
             "name taken": ("claude", "claude-haiku-4-5"),
+            "empty list": ("avibe", None),
         }[avibe]
+    finally:
+        store.close()
+
+
+def test_a_lost_avibe_model_hand_off_heals_on_the_next_start(tmp_path, sqlite_db_factory, monkeypatch):
+    """MH-AVIBE-007: the seed is committed even when the Agent write fails, and
+    the next start's reconciliation gives the Avibe Agent its model."""
+    from core.handlers.model_hub.service import ModelHubService
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["avibe"])
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        hub = _hub_catalog("gpt-5.5")
+        controller.model_hub_service = SimpleNamespace(store=hub.store, seed_avibe_supply=AsyncMock(return_value=[]))
+        real_update = store.update
+
+        def locked_database(*args, **kwargs):
+            raise OperationalError("UPDATE agents", {}, Exception("database is locked"))
+
+        monkeypatch.setattr(store, "update", locked_database)
+        # The service's after-seed call: a failed write leaves the committed supply.
+        service = ModelHubService.__new__(ModelHubService)
+        service.avibe_agent_model_reconcile = controller._reconcile_avibe_agent_model
+        service._after_avibe_seed()
+        assert store.get("avibe").model is None
+
+        monkeypatch.setattr(store, "update", real_update)
+        asyncio.run(controller._seed_avibe_model_supply())
+        assert store.get("avibe").model == "gpt-5.5"
     finally:
         store.close()
