@@ -3399,7 +3399,7 @@ def _run_route_optimization(
     previous_path = previous.get("request_path") if isinstance(previous.get("request_path"), dict) else None
     previous_p95 = _request_path_metric(previous_path, "p95")
     previous_p99 = _request_path_metric(previous_path, "p99")
-    transport_switch = False
+    route_down = False
     _report_runtime_status_async(event="route_optimization_started")
     try:
         loaded = config or V2Config.load()
@@ -3442,8 +3442,8 @@ def _run_route_optimization(
                 # cloudflared's auto mode starts on QUIC and falls back only after
                 # repeated dial failures, so it cannot replace a dead QUIC route
                 # within the candidate readiness window.
-                transport_switch = previous_protocol == "quic" and _route_unavailable(previous)
-                requested_protocol = "http2" if transport_switch else "auto"
+                route_down = _route_unavailable(previous)
+                requested_protocol = "http2" if route_down and previous_protocol == "quic" else "auto"
             candidate_pid, metrics_url = _start_candidate_connector(
                 loaded,
                 binary,
@@ -3504,8 +3504,15 @@ def _run_route_optimization(
             _pid_path().write_text(str(candidate_pid), encoding="utf-8")
             _candidate_pid_path().unlink(missing_ok=True)
             promoted = True
-        if transport_switch:
-            _set_preferred_protocol("http2")
+        if route_down:
+            # The previous transport failed; restarts must use the one just verified.
+            verified_protocol = (
+                requested_protocol
+                if requested_protocol in {"quic", "http2"}
+                else candidate_snapshot.get("protocol")
+            )
+            if verified_protocol in {"quic", "http2"}:
+                _set_preferred_protocol(verified_protocol)
         if isinstance(old_pid, int) and old_pid != candidate_pid:
             old_pid_state = _cloudflared_pid_state(old_pid)
             if old_pid_state == "cloudflared":

@@ -671,39 +671,46 @@ _UNAVAILABLE_REQUEST_PATH = {
 
 
 @pytest.mark.parametrize(
-    ("previous", "expected_protocol", "expected_preference"),
+    ("previous", "candidate_protocol", "expected_protocol", "expected_preference"),
     [
         # Partial availability keeps the existing edge-reselection behavior.
-        ({"ha_connections": 2, "protocol": "quic"}, "auto", "quic"),
+        ({"ha_connections": 2, "protocol": "quic"}, "quic", "auto", "quic"),
         # RA-TQ-033: a dead QUIC route is replaced over HTTP/2, whether the
         # connector admits it or still reports a stale ready connection.
-        ({"ha_connections": 0, "protocol": "quic"}, "http2", "http2"),
+        ({"ha_connections": 0, "protocol": "quic"}, "http2", "http2", "http2"),
         (
             {"ha_connections": 1, "protocol": "quic", "request_path": _UNAVAILABLE_REQUEST_PATH},
             "http2",
             "http2",
+            "http2",
         ),
-        # Cloudflare auto already starts on QUIC, the alternative to a dead HTTP/2 route.
-        ({"ha_connections": 0, "protocol": "http2"}, "auto", "quic"),
+        # Cloudflare auto already starts on QUIC, the alternative to a dead
+        # HTTP/2 route; the transport it verified replaces the failed preference.
+        ({"ha_connections": 0, "protocol": "http2"}, "quic", "auto", "quic"),
     ],
 )
 def test_ra_tq_033_availability_recovery_protocol_follows_route_outage(
     monkeypatch,
     tmp_path,
     previous,
+    candidate_protocol,
     expected_protocol,
     expected_preference,
 ) -> None:
-    config, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(80))
+    config, active_pid, candidate_pid, alive = _setup_recovery(
+        monkeypatch,
+        tmp_path,
+        {**_quality(80), "protocol": candidate_protocol},
+    )
     remote_access._write_state(
         active_pid,
         config,
         "/usr/local/bin/cloudflared",
         "http://127.0.0.1:29001",
-        requested_protocol="quic",
+        requested_protocol=previous["protocol"],
     )
-    monkeypatch.setattr(remote_access, "_PREFERRED_PROTOCOL", "quic")
-    remote_access._set_preferred_protocol("quic")
+    monkeypatch.setattr(remote_access, "_PREFERRED_PROTOCOL", previous["protocol"])
+    remote_access._set_preferred_protocol(previous["protocol"])
     spawned_protocols = []
     results = []
     drain_preferences = []

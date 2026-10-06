@@ -74,9 +74,10 @@ continue to exchange that payload.
    within eight seconds is replaced by Cloudflare `auto`. Availability recovery
    in `auto` mode also uses Cloudflare `auto` for partial availability. When the
    route is unavailable (zero ready connections, or a high-confidence request
-   window with no successful probe) on QUIC, the candidate uses explicit HTTP/2,
-   and promotion persists HTTP/2 as the remembered preference. A dead HTTP/2
-   route already gets QUIC first through Cloudflare `auto`.
+   window with no successful probe) on QUIC, the candidate uses explicit HTTP/2;
+   a dead HTTP/2 route already gets QUIC first through Cloudflare `auto`.
+   Promoting a candidate for an unavailable route persists the protocol it
+   verified as the remembered preference before the old connector drains.
 6. No raw URL, response body, IP, connector identifier, or per-request sample is
    reported to avibe.bot. Only the bounded V2 aggregate is uploaded.
 
