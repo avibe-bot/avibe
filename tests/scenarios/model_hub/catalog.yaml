@@ -15,7 +15,6 @@ capability:
     - tests/test_model_hub_retry_advice.py
     - tests/test_model_hub_retry_policy.py
     - tests/test_model_hub_retry_lifecycle.py
-    - tests/test_model_hub_provenance.py
     - tests/test_model_hub_recovery_evidence.py
     - tests/test_model_hub_progress.py
     - tests/test_model_hub_failure_presentation.py
@@ -216,12 +215,6 @@ scenarios:
     test: tests/test_model_hub_retry_lifecycle.py::test_waiters_without_an_attempt_record_blocked_supply_not_a_protocol_error
     related_tests:
       - tests/test_model_hub_retry_policy.py::test_a_request_that_attempted_keeps_exhausted_after_a_peer_takes_the_slot
-  - id: MH-RETRY-PROVENANCE-002
-    name: A backend stream broken after Hub output is recorded as interrupted, not rejected content
-    status: covered
-    kind: contract
-    layer: unit
-    test: tests/test_model_hub_provenance.py::test_native_failure_after_hub_output_names_a_broken_stream
   - id: MH-RETRY-PROVENANCE-003
     name: A request ending beside an open peer request leaves the turn's outcome to that peer
     status: covered

@@ -76,12 +76,6 @@ _NETWORK_ERROR_RE = re.compile(
     r"(?:timed?\s*out|timeout|connection (?:failed|reset|refused)|network (?:error|unreachable))",
     re.IGNORECASE,
 )
-# Transport-drop wording only; a generic timeout (for example a tool's) is not one.
-_STREAM_DROPPED_RE = re.compile(
-    r"(?:\b(?:read|write) tcp\b|unexpected EOF|ECONNRESET|connection reset|socket hang up|"
-    r"connection .{0,24}lost|stream idle timeout|i/o timeout)",
-    re.IGNORECASE,
-)
 @dataclass(frozen=True)
 class ModelHubLaunch:
     backend: BackendName
@@ -1147,10 +1141,7 @@ class ModelHubRuntimeRouter:
                 )
                 or ""
             ).strip()
-            self.turn_gateway.correlation.fail_hub_attempt(
-                turn_id,
-                transport_dropped=_STREAM_DROPPED_RE.search(diagnostic) is not None,
-            )
+            self.turn_gateway.correlation.fail_hub_attempt(turn_id)
             setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
             return False
         decision: ResolutionDecision | None
