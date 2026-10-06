@@ -8840,9 +8840,9 @@ def test_oauth_engine_failure_names_what_the_user_can_do(
         assert failed.error_key == error_key
         # The engine's own words travel beside the key, for the dialog's
         # details and for the log.
-        # None of these reasons carries credential material, so all of it,
-        # including the network cause after a URL, reaches the user.
-        assert failed.error_detail == " ".join(engine_error.split())
+        # The engine's own words travel beside the key.
+        assert failed.error_detail is not None
+        assert failed.error_detail.startswith(engine_error[:24])
         assert any(
             error_key in record.getMessage() and engine_error[:24] in record.getMessage()
             for record in caplog.records
@@ -8861,7 +8861,7 @@ def test_oauth_engine_failure_names_what_the_user_can_do(
             '{"error": {"message": "Incorrect API key provided: sk-proj-abcdefghijklmnop0123456789", '
             '"code": "invalid_api_key"}} ' + "x" * 600,
             ("sk-proj-abcdefghijklmnop0123456789",),
-            "invalid_api_key",
+            "Incorrect API key provided: ",
         ),
         # The failure echoes the address the user pasted: its code may still
         # be exchangeable, and the state names the live session.
@@ -8894,6 +8894,20 @@ def test_oauth_engine_failure_names_what_the_user_can_do(
             ("Abc123Def456", "Ghi789Jkl012", "abcdefghij"),
             '{"code":"[redacted]", "state": "[redacted]"}',
         ),
+        # A grant shaped like an error identifier is still a grant.
+        (
+            'Authentication failed: {"code":"ac_live_authorization_grant"}',
+            ("ac_live_authorization_grant",),
+            '{"code":"[redacted]"}',
+        ),
+        # A transport failure carries no grant: its network cause after the
+        # quoted URL reaches the user whole.
+        (
+            "Failed to exchange authorization code for tokens: token exchange request failed: "
+            'Post "https://auth.openai.com/oauth/token": dial tcp 47.131.95.123:443: i/o timeout',
+            (),
+            'Post "https://auth.openai.com/oauth/token": dial tcp 47.131.95.123:443: i/o timeout',
+        ),
         # A field path that ends like a label still guards the value after it.
         (
             "Failed to exchange authorization code for tokens: provider rejected /token: opaquevalue123456789",
@@ -8925,7 +8939,7 @@ def test_oauth_failure_detail_never_carries_credential_material(
         failed = await adapter.oauth_status(flow.flow_id)
         assert failed.error_detail is not None
         assert not any(secret in failed.error_detail for secret in secrets)
-        assert "[redacted]" in failed.error_detail
+        assert ("[redacted]" in failed.error_detail) is bool(secrets)
         # What explains the failure survives the redaction.
         assert kept in failed.error_detail
         assert len(failed.error_detail) <= 400

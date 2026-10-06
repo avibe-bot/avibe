@@ -145,9 +145,10 @@ FAILURE_DETAIL_CHARS = 400
 #
 # * by name: the value of any grant field (``code``, ``state``, verifiers,
 #   tokens), whether written as a URL/form parameter (``code=…``), a JSON member
-#   (``"code": "…"``) or prose (``authorization code: …``). A value that is a
-#   multi-word snake_case identifier (``"code": "token_expired"``) is the
-#   provider's error code, not a grant, and stays readable.
+#   (``"code": "…"``) or prose (``authorization code: …``). No value is
+#   exempt: a grant can look like anything, including a provider error code
+#   (``"code": "token_expired"`` is redacted too; ``error_key`` already names
+#   the cause, and the provider's message stays readable).
 # * by shape: any run of 20+ characters from the URL/base64 alphabet that mixes
 #   letters and digits, wherever it appears. Prose, error identifiers, status
 #   codes, host names and IP addresses do not match; codes, states, verifiers,
@@ -158,16 +159,9 @@ _GRANT_FIELD_PATTERN = re.compile(
     r"(\"?\s*[:=]\s*\"?)"
     r"([^\s\"'&#<>,;)}\]]+)"
 )
-_ERROR_IDENTIFIER = re.compile(r"[a-z]+(?:_[a-z]+)+")
 _OPAQUE_VALUE_PATTERN = re.compile(r"[A-Za-z0-9_\-.+/=~%]{20,}")
 _HAS_LETTER = re.compile(r"[A-Za-z]")
 _HAS_DIGIT = re.compile(r"\d")
-
-
-def _redact_grant_field(match: re.Match[str]) -> str:
-    if _ERROR_IDENTIFIER.fullmatch(match.group(3)):
-        return match.group(0)
-    return f"{match.group(1)}{match.group(2)}[redacted]"
 
 
 def _redact_opaque_value(match: re.Match[str]) -> str:
@@ -210,7 +204,7 @@ def bounded_failure_detail(value: object) -> str | None:
 
     if not isinstance(value, str):
         return None
-    text = _GRANT_FIELD_PATTERN.sub(_redact_grant_field, " ".join(value.split()))
+    text = _GRANT_FIELD_PATTERN.sub(r"\1\2[redacted]", " ".join(value.split()))
     text = _OPAQUE_VALUE_PATTERN.sub(_redact_opaque_value, text)
     text = _redact_failure_text(text)
     if not text:
