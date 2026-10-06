@@ -736,7 +736,9 @@ def test_api_response_conformance_diagnostic_names_the_offending_field(tmp_path)
         "contract_version": CONTRACT_VERSION,
         "agents": service.list_agents(),
     }
-    body["agents"][0]["model_supply"][0].pop("has_runnable_hop")
+    # The first backend with a model menu; the built-in Avibe Agent leads the list with none.
+    index = next(index for index, agent in enumerate(body["agents"]) if agent["model_supply"])
+    body["agents"][index]["model_supply"][0].pop("has_runnable_hop")
     validator = Draft7Validator(
         {"$ref": ("model-hub/api-response.schema.json#/definitions/AgentListResponse")},
         registry=_api_response_registry(),
@@ -745,7 +747,7 @@ def test_api_response_conformance_diagnostic_names_the_offending_field(tmp_path)
 
     error = _response_validation_error(list(validator.iter_errors(body)))
 
-    assert _response_error_path(error) == ("$.agents[0].model_supply[0].has_runnable_hop")
+    assert _response_error_path(error) == f"$.agents[{index}].model_supply[0].has_runnable_hop"
 
 
 def test_oauth_result_response_discriminates_terminal_intent_and_tail():

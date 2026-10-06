@@ -432,18 +432,6 @@ class AvibeAgent(BaseAgent):
             ).scalars()
             return any((moment := instant(value)) is not None and moment >= created for value in committed)
 
-    async def shutdown_runtime(self, settle_reason: Optional[str] = None) -> None:
-        """Disabling the backend ends its runs now.
-
-        The core settles their Turns and Activities with ``settle_reason``. The
-        runs live in this process, so ending them is all this adapter stops.
-        """
-        for runtime in list(self._runtimes.values()):
-            if runtime.run is not None:
-                runtime.run.stop_requested = True
-                if runtime.run.agent is not None:
-                    runtime.run.agent.abort("backend disabled")
-
     async def prepare_resume_binding(self, *, base_session_id: str, session_key: str, working_path: str) -> None:
         """Nothing to prepare: the transcript is the Session's own rows, read at the next run."""
         return None
@@ -1190,13 +1178,19 @@ class AvibeAgent(BaseAgent):
         )
 
     async def _fail_preflight(self, request: AgentRequest, error: BaseException) -> None:
-        from modules.agents.model_hub import launch_refusal_copy
+        from modules.agents.model_hub import hub_supply_refusal, launch_refusal_copy
 
         logger.warning("Avibe Agent could not resolve its model route: %s", error)
-        refusal = launch_refusal_copy(self.controller, error)
+        language = self._language()
+        # Every route runs through the Model Hub: when it is disabled or its gateway is off, that explains the failure.
+        refusal = (
+            await asyncio.to_thread(hub_supply_refusal, self.controller, BACKEND, language)
+            or launch_refusal_copy(self.controller, error)
+            or error_text("generic", language)
+        )
         # Recorded on every start failure, as the other backends do: a no-op unless a launch is bound.
         await self.record_model_hub_native_failure(request.context, str(error))
-        display = f"❌ {refusal}" if refusal is not None else f"❌ {error_text('generic', self._language())}"
+        display = f"❌ {refusal}"
         await emit_backend_failure(
             self.controller,
             request.context,

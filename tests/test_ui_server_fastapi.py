@@ -2096,6 +2096,68 @@ def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path
         assert "client_secret" not in data["gateway"]
 
 
+@pytest.mark.parametrize(
+    ("hub_switch", "gateway_enabled", "blocks"),
+    [("1", True, {}), ("1", False, {"avibe": "gateway_off"}), ("0", True, {"avibe": "hub_disabled"})],
+)
+def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(monkeypatch, tmp_path, hub_switch, gateway_enabled, blocks):
+    """The Backends page shows the server's answer; it keeps no rule of its own."""
+    from modules.agents.catalog import NATIVE_CLI_BACKENDS
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", hub_switch)
+    from vibe import api
+
+    config = api.save_config(_full_config_payload())
+    # The gateway turns off only while no native backend is in Hub mode (``runtime_in_use``).
+    for backend in NATIVE_CLI_BACKENDS:
+        config.model_hub.agents[backend].mode = "direct"
+    config.model_hub.enabled = gateway_enabled
+    config.save()
+
+    assert app.test_client().get("/api/config").get_json()["agent_supply_blocks"] == blocks
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body", "code"),
+    [
+        ("post", "/api/config", {"agents": {"avibe": {"enabled": False}}}, None),
+        ("patch", "/api/agents/avibe", {"enabled": False}, "agent_always_enabled"),
+    ],
+)
+def test_requests_to_turn_off_the_built_in_avibe_agent_fail_with_a_client_error(
+    monkeypatch, tmp_path, method, path, body, code
+):
+    """It has no switch: a request to turn it off is refused instead of silently ignored."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.vibe_agents import VibeAgentStore
+    from vibe import api
+
+    api.save_config(_full_config_payload())
+    store = VibeAgentStore()
+    try:
+        store.ensure_builtin_default_agents([])
+    finally:
+        store.close()
+    client = app.test_client()
+
+    response = getattr(client, method)(path, json=body, headers=csrf_headers(client))
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["ok"] is False
+    if code is None:
+        assert "always enabled" in payload["error"]
+    else:
+        assert payload["code"] == code and payload["message"]
+    assert "avibe" not in api.config_to_payload(api.load_config())["agents"]
+    store = VibeAgentStore()
+    try:
+        assert store.require("avibe").enabled is True
+    finally:
+        store.close()
+
+
 def test_config_post_hot_reconciles_platform_enablement(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
@@ -2304,15 +2366,14 @@ def test_changed_agent_backend_runtimes_keeps_saved_selector_changes_visible(mon
     ) == ["claude"]
 
 
-@pytest.mark.parametrize("backend", ["codex", "avibe"])
-def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tmp_path, backend):
+def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-902."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
     from vibe import internal_client
 
     payload = _full_config_payload()
-    payload["agents"].setdefault(backend, {})["enabled"] = False
+    payload["agents"]["codex"]["enabled"] = False
     api.save_config(payload)
 
     reconcile_calls = []
@@ -2324,7 +2385,7 @@ def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tm
             "body": {
                 "ok": True,
                 "backends": backends,
-                "states": {backend: "restarted"},
+                "states": {"codex": "restarted"},
             },
         }
 
@@ -2335,9 +2396,9 @@ def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tm
         "/api/config",
         json={
             "agents": {
-                backend: {
+                "codex": {
                     "enabled": True,
-                    **({"cli_path": "/opt/codex"} if backend == "codex" else {}),
+                    "cli_path": "/opt/codex",
                 }
             }
         },
@@ -2346,20 +2407,18 @@ def test_config_post_hot_reconciles_first_setup_codex_enablement(monkeypatch, tm
 
     assert response.status_code == 200
     data = response.get_json()
-    assert data["agents"][backend]["enabled"] is True
-    if backend == "avibe":
-        assert data["agents"][backend] == {"enabled": True}
+    assert data["agents"]["codex"]["enabled"] is True
     assert data["agent_backend_runtime"] == {
         "ok": True,
         "hot_reconciled": True,
-        "backends": [backend],
+        "backends": ["codex"],
         "body": {
             "ok": True,
-            "backends": [backend],
-            "states": {backend: "restarted"},
+            "backends": ["codex"],
+            "states": {"codex": "restarted"},
         },
     }
-    assert reconcile_calls == [[backend]]
+    assert reconcile_calls == [["codex"]]
 
 
 def test_config_post_defers_backend_reconcile_until_next_start_when_service_is_stopped(

@@ -212,9 +212,6 @@ def _build_config_payload() -> dict:
                 "enabled": True,
                 "cli_path": "codex",
             },
-            "avibe": {
-                "enabled": any(_env(definition["backend_env"]) == "avibe" for definition in PLATFORM_DEFS.values()),
-            },
         },
         "gateway": None,
         "ui": {

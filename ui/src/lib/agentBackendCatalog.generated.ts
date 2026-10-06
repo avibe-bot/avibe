@@ -2,6 +2,24 @@
 // Regenerate with: uv run python -m scripts.generate_agent_backend_catalog
 export const BACKEND_CATALOG = [
   {
+    "id": "avibe",
+    "display_name": "Avibe Agent",
+    "config_key": "avibe",
+    "default_cli": null,
+    "default_enabled": true,
+    "latest_probe": null,
+    "capabilities": {
+      "supports_cli": false,
+      "supports_native_sessions": false,
+      "supports_runtime_refresh": false,
+      "supports_web_oauth": false,
+      "supports_install": false
+    },
+    "builtin": true,
+    "description_key": "settings.backends.avibeDescription",
+    "settings_route": "/settings/backends/avibe"
+  },
+  {
     "id": "opencode",
     "display_name": "OpenCode",
     "config_key": "opencode",
@@ -18,6 +36,7 @@ export const BACKEND_CATALOG = [
       "supports_web_oauth": true,
       "supports_install": true
     },
+    "builtin": false,
     "description_key": "settings.backends.opencodeDescription",
     "settings_route": "/settings/backends/opencode"
   },
@@ -38,6 +57,7 @@ export const BACKEND_CATALOG = [
       "supports_web_oauth": true,
       "supports_install": true
     },
+    "builtin": false,
     "description_key": "settings.backends.claudeDescription",
     "settings_route": "/settings/backends/claude"
   },
@@ -58,24 +78,8 @@ export const BACKEND_CATALOG = [
       "supports_web_oauth": true,
       "supports_install": true
     },
+    "builtin": false,
     "description_key": "settings.backends.codexDescription",
     "settings_route": "/settings/backends/codex"
-  },
-  {
-    "id": "avibe",
-    "display_name": "Avibe Agent",
-    "config_key": "avibe",
-    "default_cli": null,
-    "default_enabled": false,
-    "latest_probe": null,
-    "capabilities": {
-      "supports_cli": false,
-      "supports_native_sessions": false,
-      "supports_runtime_refresh": false,
-      "supports_web_oauth": false,
-      "supports_install": false
-    },
-    "description_key": "settings.backends.avibeDescription",
-    "settings_route": "/settings/backends/avibe"
   }
 ] as const;

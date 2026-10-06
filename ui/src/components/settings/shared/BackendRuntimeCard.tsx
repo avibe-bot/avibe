@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 
+import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Card, CardContent } from '../../ui/card';
 import { Input } from '../../ui/input';
@@ -81,7 +82,7 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
 }) => {
   const { t } = useTranslation();
   const inputId = `${backend}-cli-path`;
-  const { capabilities } = getBackendUiMeta(backend);
+  const { capabilities, builtin } = getBackendUiMeta(backend);
 
   return (
     <Card>
@@ -110,7 +111,9 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
               onChanged={runtime.handleLifecycleChanged}
               onOperationChange={(busy) => { if (!busy) void runtime.handleLifecycleChanged(null); }}
             />}
-            {!hideEnableToggle && (
+            {builtin ? (
+              <Badge variant="secondary">{t('settings.backends.builtinBadge')}</Badge>
+            ) : !hideEnableToggle && (
               <ToggleSwitch enabled={runtime.enabled} onClick={runtime.toggleEnabled} />
             )}
           </div>

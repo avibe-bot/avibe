@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any, TypeVar
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
+from modules.agents.catalog import NATIVE_CLI_BACKENDS
 
 logger = logging.getLogger(__name__)
 
@@ -775,7 +775,7 @@ class BackendRestartCoordinator:
         # or a stale successful outcome to excuse unexpected missing agents.
         if isinstance(config, AppCompatConfig):
             disabled = (
-                backend in AGENT_BACKENDS and backend != "claude"
+                backend in NATIVE_CLI_BACKENDS and backend != "claude"
                 and getattr(config, backend) is None and not registered
             ) or (
                 backend == "claude" and registered and config.claude.enabled is False

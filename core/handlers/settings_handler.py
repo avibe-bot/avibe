@@ -5,7 +5,7 @@ import logging
 from typing import Optional
 
 from modules.agents import get_agent_display_name
-from modules.agents.catalog import AGENT_BACKENDS
+from modules.agents.catalog import AGENT_BACKENDS, implicit_default_rank, is_builtin_backend
 from modules.im import MessageContext, InlineKeyboard, InlineButton
 from core.modals import RoutingModalData, RoutingModalSelection
 from vibe import backend_model_catalog
@@ -433,8 +433,11 @@ class SettingsHandler(BaseHandler):
         enabled_backends = [backend for backend in all_backends if self._is_backend_enabled(backend)]
         if not enabled_backends and current_backend:
             enabled_backends = [current_backend]
-        registered_backends = sorted(enabled_backends, key=lambda x: (x != "opencode", x))
-        active_backend = registered_backends[0] if registered_backends else current_backend
+        # Catalog order, the built-in backend first. As for the default Agent, the fallback
+        # selection is the built-in backend only when no other backend is enabled.
+        catalog_order = {backend: index for index, backend in enumerate(AGENT_BACKENDS)}
+        registered_backends = sorted(enabled_backends, key=lambda x: catalog_order.get(x, len(catalog_order)))
+        active_backend = min(registered_backends, key=implicit_default_rank, default=current_backend)
         if current_backend in registered_backends:
             active_backend = current_backend
         if selected_backend in registered_backends:
@@ -528,6 +531,8 @@ class SettingsHandler(BaseHandler):
         )
 
     def _is_backend_enabled(self, backend: str) -> bool:
+        if is_builtin_backend(backend):
+            return True
         backend_config = getattr(self.config, backend, None)
         if backend_config is None:
             return False

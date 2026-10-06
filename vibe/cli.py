@@ -57,7 +57,7 @@ from core.caller_context import (
 from core.command_runner import command_line_preview
 from core.cron_weekday import ambiguous_weekday_field, weekday_readings
 from core.install_integrity import verify_python_environment, verify_site_packages
-from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentAccessError, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
+from core.vibe_agents import AgentAlwaysEnabledError, AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentAccessError, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
     NO_EVENT_EXIT_CODE,
@@ -5690,8 +5690,8 @@ def cmd_agent_update(args):
         agent = _agent_store().update(args.name, **kwargs)
         _print_cli_payload("agent", agent=_agent_payload(agent), **_agent_value_warning_fields(agent))
         return 0
-    except AgentArchivedEditError as exc:
-        _print_task_error(_agent_archived_edit_cli_error(exc))
+    except (AgentArchivedEditError, AgentAlwaysEnabledError) as exc:
+        _print_task_error(_agent_lifecycle_cli_error(exc))
         return 1
     except Exception as exc:
         _print_task_error(exc)
@@ -5703,15 +5703,15 @@ def cmd_agent_set_enabled(args, *, enabled: bool):
         agent = _agent_store().set_enabled(args.name, enabled)
         _print_cli_payload("agent", agent=_agent_payload(agent))
         return 0
-    except AgentArchivedEditError as exc:
-        _print_task_error(_agent_archived_edit_cli_error(exc))
+    except (AgentArchivedEditError, AgentAlwaysEnabledError) as exc:
+        _print_task_error(_agent_lifecycle_cli_error(exc))
         return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
 
 
-def _agent_archived_edit_cli_error(exc: AgentArchivedEditError) -> TaskCliError:
+def _agent_lifecycle_cli_error(exc: AgentArchivedEditError | AgentAlwaysEnabledError) -> TaskCliError:
     try:
         lang = V2Config.load().language
     except Exception:

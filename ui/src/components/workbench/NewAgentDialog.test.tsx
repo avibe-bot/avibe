@@ -98,12 +98,18 @@ afterEach(() => {
 
 describe('NewAgentDialog', () => {
   // The picker used a second label table, so its Claude label disagreed with
-  // Settings and Model Hub. All backend choices share the catalog brands.
-  it('uses the catalog brand names for every backend choice', () => {
+  // Settings and Model Hub. All backend choices share the catalog brands, and
+  // they follow catalog order, the built-in Avibe Agent first.
+  it('uses the catalog brand names and order for every backend choice', () => {
     renderDialog();
-    for (const label of ['Claude Code', 'OpenCode', 'Codex', 'Avibe Agent']) {
+    const labels = ['Avibe Agent', 'OpenCode', 'Claude Code', 'Codex'];
+    for (const label of labels) {
       expect(screen.getByRole('button', { name: new RegExp(label) }).textContent).toContain(label);
     }
+    const order = screen.getAllByRole('button')
+      .map((button) => labels.find((label) => button.textContent?.includes(label)))
+      .filter(Boolean);
+    expect(order).toEqual(labels);
     expect(screen.queryByText('Claude', { exact: true })).toBeNull();
   });
 

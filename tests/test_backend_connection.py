@@ -442,8 +442,6 @@ def test_avibe_connection_uses_hub_supply_without_any_native_probe(hub_connectio
 
     monkeypatch.setattr(api, "resolve_cli_path", forbidden)
     monkeypatch.setattr(backend_restart, "pending_native_backends", forbidden)
-    hub_connection.config.agents.avibe.enabled = True
-    hub_connection.config.save()
     empty = asyncio.run(api.get_backend_connection("avibe"))
     assert empty["installed"] and empty["enabled"]
     assert empty["auth"] == "none" and not empty["ready"]
@@ -455,9 +453,18 @@ def test_avibe_connection_uses_hub_supply_without_any_native_probe(hub_connectio
     assert state["ready"] and state["entry_eligible"]
     assert state["supply_mode"] == "hub" and state["auth"] == "api_key"
     hub_connection.native_read.assert_not_called()
-    hub_connection.config.agents.avibe.enabled = False
+    # With the Model Hub disabled on the instance, or its gateway turned off, the built-in backend
+    # stays enabled with nothing to run on, whatever source is saved.
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
+    disabled = asyncio.run(api.get_backend_connection("avibe"))
+    assert disabled["enabled"] and disabled["auth"] == "none"
+    assert not disabled["ready"] and not disabled["entry_eligible"]
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    hub_connection.config.model_hub.enabled = False
     hub_connection.config.save()
-    assert not asyncio.run(api.get_backend_connection("avibe"))["ready"]
+    stopped = asyncio.run(api.get_backend_connection("avibe"))
+    assert stopped["enabled"] and stopped["auth"] == "none"
+    assert not stopped["ready"] and not stopped["entry_eligible"]
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])

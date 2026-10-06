@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
-from modules.agents.catalog import AGENT_BACKENDS
+from modules.agents.catalog import BUILTIN_AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 from config.v2_config import (
     _FIELD_SCOPED_RECOVERY_SECTIONS,
     AudioAsrConfig,
@@ -142,10 +142,11 @@ def test_config_save_initializes_real_state_with_or_without_schema_preparation(
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     store = api.VibeAgentStore()
     try:
+        # The configured backends, plus the built-in one, which has no config section.
         enabled = {
             backend for backend, options in _full_config_payload()["agents"].items()
             if isinstance(options, dict) and options.get("enabled")
-        }
+        } | set(BUILTIN_AGENT_BACKENDS)
         assert {agent.backend for agent in store.list_agents() if agent.enabled} == enabled
         assert store.get_default_agent_name() in {agent.name for agent in store.list_agents()}
     finally:
@@ -167,7 +168,7 @@ def test_save_config_merges_partial_payload(monkeypatch, tmp_path, sqlite_schema
     assert original.update.auto_update is False
     assert all(
         not hasattr(getattr(original.agents, backend), "default_model")
-        for backend in AGENT_BACKENDS
+        for backend in NATIVE_CLI_BACKENDS
     )
 
     updated = api.save_config({"show_duration": False, "include_time_info": False, "update": {"auto_update": True}})
@@ -1274,7 +1275,7 @@ def test_full_config_serializers_cover_every_config_field(monkeypatch, tmp_path,
     # ``platform_configs`` is the internal per-platform aggregate; it is emitted
     # under each platform's own key, not as a top-level ``platform_configs`` key.
     top_level = {f.name for f in fields(V2Config)} - {"platform_configs"}
-    agents = set(AGENT_BACKENDS) | {"avault"}
+    agents = set(NATIVE_CLI_BACKENDS) | {"avault"}  # The built-in backend has no config section.
 
     def _assert_complete(label: str, payload: dict) -> None:
         assert top_level <= set(payload), f"{label} top-level missing: {top_level - set(payload)}"

@@ -33,7 +33,7 @@ NATIVE = frozenset(NATIVE_CLI_BACKENDS)
 # unclassified declaration. Member fingerprints survive identifier-only edits.
 # Mappings remain literal when their per-backend values are the implementation.
 PYTHON_DECLARATIONS = {
-    ("config/v2_config.py", "Dict", AGENTS): (2, "agent", "Config serialization/recovery plus the avault tool."),
+    ("config/v2_config.py", "Dict", NATIVE): (2, "native", "Config serialization/recovery plus the avault tool; the built-in backend has no section."),
     ("config/v2_config.py", "Set", frozenset({"claude", "codex"})): (3, "native_subset", "Built-in model catalogs and legacy vendor credentials."),
     ("config/v2_config.py", "Tuple", frozenset({"claude", "codex"})): (3, "native_subset", "Released two-vendor model/credential migration."),
     ("config/v2_config.py", "Pairs", NATIVE): (1, "native", "Per-CLI auto-update config objects."),
@@ -56,10 +56,9 @@ PYTHON_DECLARATIONS = {
     ("core/session_turns.py", "Set", frozenset({"claude", "codex", "avibe"})): (1, "agent_subset", "Runtimes whose accepted turns cannot survive a service restart (process-bound, including Avibe's in-process loop)."),
     ("core/vibe_agents.py", "Dict", NATIVE): (1, "native", "Native recommendations; Avibe uses its configured Hub catalog."),
     ("modules/im/telegram.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "Native subagent routing controls."),
-    ("scripts/incus_tenant.py", "Dict", AGENTS): (1, "agent", "Bootstrap config with backend-specific fields."),
-    ("scripts/prepare_regression.py", "Dict", AGENTS): (1, "agent", "Regression config with backend-specific fields."),
-    ("scripts/prepare_regression.py", "Dict", NATIVE): (1, "native", "Known legacy CLI executable paths."),
-    ("vibe/api.py", "Dict", AGENTS): (1, "agent", "Public runtime config plus the avault tool."),
+    ("scripts/incus_tenant.py", "Dict", NATIVE): (1, "native", "Bootstrap config with backend-specific fields."),
+    ("scripts/prepare_regression.py", "Dict", NATIVE): (2, "native", "Regression config with backend-specific fields; known legacy CLI executable paths."),
+    ("vibe/api.py", "Dict", NATIVE): (1, "native", "Public runtime config plus the avault tool; the built-in backend has no section."),
     ("vibe/api.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "OAuth relay configuration."),
     ("vibe/api.py", "Tuple", frozenset({"claude", "codex"})): (1, "native_subset", "Masked vendor credentials."),
     ("vibe/backend_model_catalog.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Bundled model catalog files."),

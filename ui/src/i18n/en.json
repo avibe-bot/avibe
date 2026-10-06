@@ -586,6 +586,10 @@
       "codexDescription": "OpenAI agent · ChatGPT login or OPENAI_API_KEY",
       "avibeDescription": "Built-in agent · models and routes managed in Model Hub",
       "backToBackends": "Back to backends",
+      "gatewayOff": "The model gateway is off, so {{name}} has no model to run on.",
+      "hubDisabled": "Model Hub disabled",
+      "hubDisabledNotice": "Model Hub is disabled on this instance, so {{name}} has no model to run on.",
+      "builtinBadge": "Built-in",
       "openProviderPage": "Configure provider",
       "providerOauth": "OAuth (default)",
       "providerApiKey": "API key",
@@ -4021,6 +4025,7 @@
     "detail": {
       "enabled": "Enabled",
       "enabledHint": "Disabling keeps the agent in the registry but excludes it from new sessions; running sessions are unaffected.",
+      "alwaysEnabledHint": "The built-in Avibe Agent is always enabled. You can still adjust its model, effort, and system prompt.",
       "defaultTitle": "Default agent",
       "defaultHint": "New chats and IM messages without an explicit agent route to this one.",
       "defaultActive": "Default",

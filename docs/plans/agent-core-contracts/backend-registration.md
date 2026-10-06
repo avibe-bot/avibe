@@ -13,6 +13,12 @@ and they mean two different things. This contract makes the difference explicit.
 `avibe` has no CLI, CLI auth, native session store, or native fork. It must never be added to a native-CLI list, and
 it must be added to every agent-backend list.
 
+`avibe` is also the one **built-in** backend (`AgentBackendDescriptor.builtin`, owner decision 2026-10-06): part of the
+platform, so it is always enabled. It has no `agents.avibe` config section and no enable switch, the controller
+registers it at startup and never unregisters it, and its built-in Agent cannot be disabled. Registry order is display
+order, and the built-in backend comes first. Being listed first does not make it the default: any fallback that picks
+a backend or Agent nobody chose ranks it last ([`avibe-agent-always-on.md`](../avibe-agent-always-on.md)).
+
 ## 2. One declaration
 
 `modules/agents/catalog.py` declares both sets. Every other list imports them; literals of backend names are removed.

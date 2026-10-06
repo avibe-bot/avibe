@@ -42,8 +42,9 @@ sits below the product boundary Avibe must own: loop semantics, persistence, and
 
 - The tension system itself. v1 guarantees only the seams it will need: steer, follow-up, hooks, events.
 - Any terminal UI, and any new Web UI beyond registering the backend where backends already appear.
-- Becoming the default agent for new installs. v1 is opt-in; the default is decided after the P4 regression with real
-  usage evidence.
+- Becoming the default agent for new installs. v1 is the built-in backend, always enabled and listed first
+  ([`avibe-agent-always-on.md`](avibe-agent-always-on.md)), but not the default for new chats; that default is decided
+  after the P4 regression with real usage evidence.
 - Hosting MCP servers (Avibe is an MCP client only). Sandboxing beyond Avibe's existing cwd policy.
 - Failover and credentials inside the agent; they stay in Model Hub.
 - Interactive terminal programs (planned, §5.4).

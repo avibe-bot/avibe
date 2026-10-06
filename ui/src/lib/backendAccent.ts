@@ -6,9 +6,8 @@
 
 import { AGENT_BACKENDS, isNativeCliBackend, type AgentBackendId, type NativeCliBackend } from './agentBackends';
 
-export const BACKEND_ORDER = [...AGENT_BACKENDS]
-  .sort((left, right) => left.agentOrder - right.agentOrder)
-  .map((backend) => backend.id);
+// Catalog order, the built-in Avibe Agent first: the one order every backend list shows.
+export const BACKEND_ORDER = AGENT_BACKENDS.map((backend) => backend.id);
 export const NATIVE_BACKEND_ORDER = BACKEND_ORDER.filter(isNativeCliBackend);
 export type Backend = AgentBackendId;
 
