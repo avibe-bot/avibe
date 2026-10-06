@@ -97,6 +97,19 @@ export const oauthFailureKey = (code: string | undefined, journey: OAuthJourney)
  */
 export const SUBMISSION_REJECTED_FAILURE = 'submission_rejected';
 export const PASTE_REJECTED_KEY: TranslationKey = 'settings.models.oauth.callback.rejected';
+const PASTE_OTHER_ATTEMPT_KEY: TranslationKey = 'settings.models.oauth.callback.otherAttempt';
+const SUBMISSION_OTHER_ATTEMPT_DETAIL = 'modelHub.errors.submission_rejected_other_attempt';
+
+/** What to paste instead, by why the server refused the value. */
+export const pasteRejectedKey = (detail: string | undefined): TranslationKey =>
+  detail === SUBMISSION_OTHER_ATTEMPT_DETAIL ? PASTE_OTHER_ATTEMPT_KEY : PASTE_REJECTED_KEY;
+
+// A browser that cannot load the loopback callback page often copies its address
+// without the scheme (`localhost:1455/auth/callback?code=…`). Same rule as the
+// server's `_oauth_callback_address`: a host followed by a port, path or query is
+// an address; a provider code carries none of them.
+const SCHEMELESS_CALLBACK_ADDRESS =
+  /^(?:localhost|\[[0-9a-f:.]+\]|\d{1,3}(?:\.\d{1,3}){3}|(?:[a-z0-9-]+\.)+[a-z]{2,})(?::\d{1,5})?[/?]/i;
 
 /**
  * Whether a pasted callback address carries the provider's answer. The engine
@@ -106,9 +119,14 @@ export const PASTE_REJECTED_KEY: TranslationKey = 'settings.models.oauth.callbac
  */
 export const callbackValueCarriesResult = (value: string): boolean => {
   const trimmed = value.trim();
-  if (!/^https?:\/\//i.test(trimmed)) return trimmed.length > 0;
+  const address = /^https?:\/\//i.test(trimmed)
+    ? trimmed
+    : trimmed.includes('?') || SCHEMELESS_CALLBACK_ADDRESS.test(trimmed)
+      ? `http://${trimmed.replace(/^\/+/, '')}`
+      : null;
+  if (address === null) return trimmed.length > 0;
   try {
-    const params = new URL(trimmed).searchParams;
+    const params = new URL(address).searchParams;
     return Boolean(params.get('code')?.trim() || params.get('error')?.trim() || params.get('error_description')?.trim());
   } catch {
     return false;

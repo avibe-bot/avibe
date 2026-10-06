@@ -8660,6 +8660,172 @@ def test_oauth_rejected_paste_keeps_flow_awaiting_a_corrected_value(tmp_path: Pa
     asyncio.run(run())
 
 
+_UI_BUNDLES = {
+    language: json.loads((Path(__file__).resolve().parents[1] / "ui/src/i18n" / f"{language}.json").read_text())
+    for language in ("en", "zh")
+}
+
+
+def _ui_text(language: str, key: str) -> object:
+    node: object = _UI_BUNDLES[language]
+    for part in key.split("."):
+        node = node.get(part) if isinstance(node, dict) else None
+    return node
+
+
+class _BrowserCallbackEngine:
+    """The engine's side of a browser OAuth flow, as far as a paste reaches it.
+
+    It records what Avibe hands to ``POST /oauth-callback``; whether that value
+    can ever exchange is the provider's business, decided by the code alone.
+    """
+
+    def __init__(self) -> None:
+        self.submitted: list[dict] = []
+
+    def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+        if path == "/auth-files":
+            return {"files": []}
+        if path in {"/codex-auth-url", "/anthropic-auth-url", "/antigravity-auth-url"}:
+            return {"state": "browser-state", "url": "https://example.test/oauth"}
+        if path == "/oauth-callback":
+            self.submitted.append(dict(payload))
+            return {"status": "ok"}
+        raise AssertionError((method, path, query, payload, timeout))
+
+
+def _browser_callback_adapter(tmp_path: Path, engine: _BrowserCallbackEngine) -> CLIProxyEngineAdapter:
+    store = EngineStateStore(tmp_path / "state")
+    return CLIProxyEngineAdapter(
+        supervisor=SimpleNamespace(state_store=store, client=lambda: engine),  # type: ignore[arg-type]
+        state_store=store,
+    )
+
+
+@pytest.mark.parametrize("vendor", ["openai", "anthropic", "gemini"])
+@pytest.mark.parametrize(
+    ("pasted", "sent"),
+    [
+        # Browsers that fail to load the loopback page copy its address without
+        # the scheme. It is still the address, never a code.
+        (
+            "localhost:1455/auth/callback?code=ac_issued&state=browser-state",
+            {"redirect_url": "http://localhost:1455/auth/callback?code=ac_issued&state=browser-state"},
+        ),
+        (
+            "127.0.0.1:54545/callback?code=ac_issued&state=browser-state",
+            {"redirect_url": "http://127.0.0.1:54545/callback?code=ac_issued&state=browser-state"},
+        ),
+        (
+            "http://localhost:51121/oauth-callback?code=ac_issued&state=browser-state",
+            {"redirect_url": "http://localhost:51121/oauth-callback?code=ac_issued&state=browser-state"},
+        ),
+        # Bare provider codes stay codes, including shapes with a slash or a
+        # fragment-like suffix.
+        ("ac_issued", {"code": "ac_issued"}),
+        ("4/0AbCd-issued", {"code": "4/0AbCd-issued"}),
+        ("issued.part#browser-state", {"code": "issued.part#browser-state"}),
+    ],
+)
+def test_oauth_paste_reaches_the_engine_as_the_value_it_is(
+    tmp_path: Path, vendor: str, pasted: str, sent: dict,
+) -> None:
+    async def run() -> None:
+        engine = _BrowserCallbackEngine()
+        adapter = _browser_callback_adapter(tmp_path, engine)
+        flow = await adapter.start_oauth("src_fixture123", vendor)
+        result = await adapter.submit_oauth(flow.flow_id, pasted)
+        assert result.state == "verifying"
+        assert len(engine.submitted) == 1
+        submitted = engine.submitted[0]
+        assert submitted["state"] == "browser-state"
+        assert {key: submitted[key] for key in submitted if key in {"code", "redirect_url"}} == sent
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("pasted", "reason"),
+    [
+        ("localhost:1455/auth/callback?state=browser-state", "no_answer"),
+        ("chatgpt.com/", "no_answer"),
+        ("https://chatgpt.com/", "no_answer"),
+        # A code minted for an earlier sign-in link fails the provider's
+        # verifier check, and that failure would end this flow.
+        ("http://localhost:1455/auth/callback?code=ac_old&state=earlier-state", "other_attempt"),
+        ("localhost:1455/auth/callback?code=ac_old&state=earlier-state", "other_attempt"),
+    ],
+)
+def test_oauth_paste_that_cannot_exchange_keeps_the_flow_awaiting(
+    tmp_path: Path, pasted: str, reason: str,
+) -> None:
+    async def run() -> None:
+        engine = _BrowserCallbackEngine()
+        adapter = _browser_callback_adapter(tmp_path, engine)
+        flow = await adapter.start_oauth("src_fixture123", "openai")
+        with pytest.raises(OAuthSubmissionRejectedError) as rejected:
+            await adapter.submit_oauth(flow.flow_id, pasted)
+        assert rejected.value.reason == reason
+        held = adapter._oauth_flows[flow.flow_id]
+        assert held.state == "awaiting_action"
+        assert held.grant_write_possible is False
+        assert engine.submitted == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("engine_error", "error_key"),
+    [
+        # The pinned engine's own session errors, verbatim.
+        (
+            "Failed to exchange authorization code for tokens: token exchange failed with status 401: "
+            '{"error": {"message": "Could not validate your token. Please try signing in again.", '
+            '"type": "invalid_request_error", "param": null, "code": "token_expired"}}',
+            "models.oauth.code_rejected",
+        ),
+        (
+            "Failed to exchange authorization code for tokens: token exchange request failed: "
+            "Post \"https://auth.openai.com/oauth/token\": dial tcp: i/o timeout",
+            "models.oauth.exchange_failed",
+        ),
+        ("Failed to exchange token", "models.oauth.exchange_failed"),
+        ("Timeout waiting for OAuth callback", "models.oauth.expired"),
+        ("OAuth flow timed out", "models.oauth.expired"),
+        ("State code error", "models.oauth.callback_mismatch"),
+        ("Authentication failed: state mismatch", "models.oauth.callback_mismatch"),
+        ("Bad Request", "models.oauth.provider_denied"),
+        ("Authentication failed", "models.oauth.provider_denied"),
+        ("Failed to save authentication tokens", "models.oauth.upstream_failed"),
+    ],
+)
+def test_oauth_engine_failure_names_what_the_user_can_do(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, engine_error: str, error_key: str,
+) -> None:
+    class Engine(_BrowserCallbackEngine):
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/get-auth-status":
+                return {"status": "error", "error": engine_error}
+            return super().management_request(method, path, query=query, payload=payload, timeout=timeout)
+
+    async def run() -> None:
+        adapter = _browser_callback_adapter(tmp_path, Engine())
+        flow = await adapter.start_oauth("src_fixture123", "openai")
+        with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.adapter"):
+            failed = await adapter.oauth_status(flow.flow_id)
+        assert failed.state == "failed"
+        assert failed.error_key == error_key
+        # The provider's own words stay in the log, never on the wire.
+        assert any(
+            error_key in record.getMessage() and engine_error.split(":")[0] in record.getMessage()
+            for record in caplog.records
+        )
+
+    asyncio.run(run())
+    for language in ("en", "zh"):
+        assert isinstance(_ui_text(language, error_key), str), (language, error_key)
+
+
 def test_oauth_engine_400_fails_the_flow_rather_than_claiming_it_retryable(tmp_path: Path) -> None:
     class Client:
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):

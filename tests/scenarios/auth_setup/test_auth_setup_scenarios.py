@@ -3971,6 +3971,91 @@ def test_hub_oauth_model_free_observation_closed_loop(
     ScenarioExpect.step_history(runner, ["start_login", "complete_consent", "materialize_source"])
 
 
+def test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-127
+
+    A user on another device pastes the callback address back. The first paste
+    answers an earlier sign-in link; the second is the right address with its
+    scheme dropped by the browser. Neither may end the flow: the first is refused
+    before it reaches the provider, and the second reaches the engine as the
+    address it is.
+    """
+    from core.handlers.model_hub.service import ModelHubError
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    callbacks = []
+
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {"files": []}
+        if path == "/codex-auth-url":
+            return {
+                "state": "browser-state",
+                "url": "https://auth.openai.com/oauth/authorize?state=browser-state",
+            }
+        if path == "/get-auth-status":
+            assert query == {"state": "browser-state"}
+            return {"status": "wait"}
+        if path == "/oauth-callback":
+            callbacks.append(dict(payload))
+            return {"status": "ok"}
+        raise AssertionError((method, path))
+
+    client = Mock()
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    transport = CLIProxyEngineAdapter(
+        supervisor=supervisor, state_store=EngineStateStore(tmp_path / "engine-state"),
+    )
+    service, store, adapter = _service(tmp_path)
+    for method in ("start_oauth", "oauth_status", "submit_oauth", "cancel_oauth"):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+    harness = SimpleNamespace()
+    runner = ScenarioRunner(harness)
+
+    async def start_login(h):
+        started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
+        h.flow_id = started["flow"]["flow_id"]
+        assert started["flow"]["presentation"]["expects"] == "paste_callback_url"
+
+    async def paste_earlier_link_address(h):
+        with pytest.raises(ModelHubError) as rejected:
+            await service.oauth_submit({
+                "flow_id": h.flow_id,
+                "value": "http://localhost:1455/auth/callback?code=ac_old&state=earlier-state",
+            })
+        assert (rejected.value.code, rejected.value.status) == ("submission_rejected", 422)
+        assert rejected.value.detail == "modelHub.errors.submission_rejected_other_attempt"
+        assert callbacks == []
+        assert (await service.oauth_status(h.flow_id))["flow"]["state"] == "awaiting_action"
+
+    async def paste_schemeless_address(h):
+        result = await service.oauth_submit({
+            "flow_id": h.flow_id,
+            "value": "localhost:1455/auth/callback?code=ac_issued&scope=openid&state=browser-state",
+        })
+        assert result["flow"]["state"] == "verifying"
+        assert callbacks == [{
+            "provider": "codex",
+            "state": "browser-state",
+            "redirect_url": "http://localhost:1455/auth/callback?code=ac_issued&scope=openid&state=browser-state",
+        }]
+        assert not store.config.sources
+
+    asyncio.run(runner.run(
+        ScenarioStep("start_login", start_login),
+        ScenarioStep("paste_earlier_link_address", paste_earlier_link_address),
+        ScenarioStep("paste_schemeless_address", paste_schemeless_address),
+    ))
+    ScenarioExpect.step_history(
+        runner, ["start_login", "paste_earlier_link_address", "paste_schemeless_address"],
+    )
+
+
 @pytest.mark.parametrize("status", [401, 403])
 @pytest.mark.parametrize("policy_body", ["<html>Request blocked</html>", '{"message":"Regional policy"}'])
 @pytest.mark.parametrize("competing_protocol", [False, True])

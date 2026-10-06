@@ -74,6 +74,7 @@ from tests.ui_server_test_helpers import (
     save_config,
 )
 from vibe import backend_model_catalog, remote_access, ui_server
+from vibe.i18n import t as i18n_t
 from vibe.model_hub_client import ModelHubRemoteService, _decode
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
 from vibe.model_hub_runtime.state import EngineStateError, _validate_source_target
@@ -9541,12 +9542,19 @@ def test_expired_oauth_flow_is_rejected_before_submit(tmp_path):
     assert service.oauth_flows.channel(flow["flow_id"]) is None
 
 
-def test_rejected_oauth_submission_is_non_terminal_and_keeps_the_flow(tmp_path):
+@pytest.mark.parametrize(
+    ("reason", "detail"),
+    [
+        ("no_answer", "modelHub.errors.submission_rejected"),
+        ("other_attempt", "modelHub.errors.submission_rejected_other_attempt"),
+    ],
+)
+def test_rejected_oauth_submission_is_non_terminal_and_keeps_the_flow(tmp_path, reason, detail):
     service, _, adapter = _service(tmp_path)
     flow = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))["flow"]
 
     async def reject(_flow_id, _value):
-        raise OAuthSubmissionRejectedError(_flow_id)
+        raise OAuthSubmissionRejectedError(_flow_id, reason)
 
     adapter.submit_oauth = reject
     with pytest.raises(ModelHubError) as exc_info:
@@ -9554,6 +9562,10 @@ def test_rejected_oauth_submission_is_non_terminal_and_keeps_the_flow(tmp_path):
 
     assert exc_info.value.code == "submission_rejected"
     assert exc_info.value.status == 422
+    # The detail tells the dialog what to paste instead, in both languages.
+    assert exc_info.value.detail == detail
+    for language in ("en", "zh"):
+        assert i18n_t(detail, language) != detail
     assert service.oauth_flows.channel(flow["flow_id"]) == "hub"
     status = asyncio.run(service.oauth_status(flow["flow_id"]))
     assert status["flow"]["state"] == "awaiting_action"

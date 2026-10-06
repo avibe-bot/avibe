@@ -46,6 +46,7 @@ import {
   callbackValueCarriesResult,
   oauthFailureKey,
   oauthStartFailureKey,
+  pasteRejectedKey,
   serverText,
   type OAuthJourney,
 } from './serverCopy';
@@ -638,7 +639,7 @@ export const OAuthConnectDialog: React.FC<{
       // ignored. `failureLanded` is the part that knows.
       const failure = apiFailure(err);
       if (failure?.code === SUBMISSION_REJECTED_FAILURE) {
-        setPasteError(PASTE_REJECTED_KEY);
+        setPasteError(pasteRejectedKey(failure.detail));
         return;
       }
       const failureClass = classifyOAuthFailure(failure);
