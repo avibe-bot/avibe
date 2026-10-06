@@ -10,7 +10,12 @@ import pytest
 
 from core.handlers.model_hub.migration_journal import NativeFileEdit, NativeTakeoverJournal
 from core.handlers.model_hub.service import EngineUnavailableError, ModelHubError
-from config.v2_config import ModelHubConfig
+from config.v2_config import (
+    ModelHubConfig,
+    ModelHubModelConfig,
+    ModelHubSourceConfig,
+    ModelHubSourceStateConfig,
+)
 from core.handlers.model_hub.adapter import (
     OAuthCredentialRejectedError,
     OAuthFlowState,
@@ -85,6 +90,70 @@ def test_oauth_is_not_exposed_until_native_cleanup_and_mode_commit(monkeypatch, 
     assert asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))["applied"] == 1
     assert len(adapter.oauth_provisioned) == 1
     assert "refresh_token" not in service.migration_journal.path.with_name("last-completed.json").read_text()
+
+
+@pytest.mark.parametrize("batch", ["two new Sources", "a reused native Source", "a reused native Source after the seed"])
+def test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch(monkeypatch, tmp_path, batch):
+    """MH-AVIBE-007: a takeover seeds Avibe once its Sources are final.
+
+    A batch importing several Sources seeds from all of them, so a starting
+    model only a later Source serves still arrives; a native Source converted
+    to the Hub in place seeds too. The takeover commits through its journal,
+    so its own save announces the Avibe catalog change like any other. Once
+    seeded, a native Source moving to the Hub is new to Avibe and joins it.
+    """
+    home = tmp_path / "native"
+    _write_claude_oauth(home)
+    _isolate_native_home(monkeypatch, home)
+    service, store, _adapter = _service(tmp_path, migration_home=home)
+    store.config.agents["claude"].mode = "direct"
+    if batch == "two new Sources":
+        _write_codex_oauth(home)
+        store.config.agents["codex"].mode = "direct"
+        # The first Source alone would already seed; gpt-5.5 is served only by
+        # the Codex subscription, which the batch adds second.
+        selections = [("claude", "claude-opus-5-5"), ("codex", "gpt-5.5")]
+    else:
+        native = ModelHubSourceConfig(
+            id="src_nativeclaude", kind="subscription", vendor="anthropic", display_name="Claude",
+            protocol="anthropic", supply_channel="native_cli", billing="monthly",
+            state=ModelHubSourceStateConfig(status="active"),
+            models=[ModelHubModelConfig(id="claude-opus-5-5", provenance="discovered")],
+        )
+        store.config.sources.append(native)
+        store.config.agents["claude"].sources.order = [native.id]
+        selections = [("claude", "claude-opus-5-5")]
+    if batch == "a reused native Source after the seed":
+        store.config.avibe_supply_pending = False
+    else:
+        assert store.config.avibe_supply_pending
+    service.builtin_agent_models_override = lambda: selections
+    announced = []
+
+    async def catalog_changed(backend):
+        announced.append(backend)
+
+    service.backend_catalog_changed = catalog_changed
+    items = service.migration_scan()["items"]
+    assert [item["backend"] for item in items] == (
+        ["claude", "codex"] if batch == "two new Sources" else ["claude"]
+    )
+
+    asyncio.run(service.migration_apply([item["id"] for item in items], clean_api_keys=True))
+
+    starting = [model for _backend, model in selections]
+    serving = [
+        source.id for model in starting for source in store.config.sources
+        if source.supply_channel == "hub" and any(item.id == model for item in source.models)
+    ]
+    avibe = store.config.agents["avibe"]
+    assert not store.config.avibe_supply_pending
+    if batch == "a reused native Source after the seed":
+        # Placed like a new Source; the user's catalog is not seeded again.
+        assert (avibe.sources.order, avibe.models, announced) == (serving, [], [])
+        return
+    assert (avibe.sources.order, [model.id for model in avibe.models]) == (serving, starting)
+    assert announced == ["avibe"]
 
 
 def test_failure_after_possible_rotation_retains_current_owner_and_retries(monkeypatch, tmp_path):

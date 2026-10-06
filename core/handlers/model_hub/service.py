@@ -1052,6 +1052,9 @@ class ModelHubService:
         named_agents_override: Optional[
             Callable[[BackendName], list[tuple[str, Optional[str]]]]
         ] = None,
+        builtin_agent_models_override: Optional[
+            Callable[[], list[tuple[BackendName, str]]]
+        ] = None,
         cli_present_override: Optional[Callable[[BackendName], bool]] = None,
         cli_presence_refresh: Optional[
             Callable[[bool, tuple[BackendName, ...] | None], None]
@@ -1102,6 +1105,9 @@ class ModelHubService:
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
+        # The built-in Agents' models for the Avibe starting supply; the
+        # controller owns those Agent rows.
+        self.builtin_agent_models_override = builtin_agent_models_override
         self.cli_present_override = cli_present_override
         self.cli_presence_refresh = cli_presence_refresh
         self.backend_catalog_changed = backend_catalog_changed
@@ -2475,21 +2481,30 @@ class ModelHubService:
                 number += 1
         config.sources.append(source)
         self._apply_source_placement(config, source)
+        seeded = config.avibe_supply_pending and await self._seed_avibe(config)
         await self._commit_synced(previous, config)
+        if seeded:
+            await self._announce_avibe_seed()
 
     def _apply_source_placement(
         self,
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
+        backends: Iterable[str] = MODEL_HUB_BACKENDS,
     ) -> None:
         """Add a new Source to eligible backend defaults without editing overrides.
 
         A subscription serves a fixed catalog, so it joins only the backends whose
-        menu that catalog serves (OpenCode reaches every vendor), ahead of the API
-        keys there. API keys stay open to every eligible backend, appended.
+        menu that catalog serves (OpenCode and the Avibe Agent reach every
+        vendor), ahead of the API keys there. API keys stay open to every
+        eligible backend, appended.
         """
 
-        for backend in MODEL_HUB_BACKENDS:
+        for backend in backends:
+            if backend == "avibe" and config.avibe_supply_pending:
+                # Its seed places every Source at once, once the mutation's
+                # Sources are final (see _seed_avibe).
+                continue
             agent = config.agents[backend]
             if not self._eligible_for_agent(source, backend) or source.id in agent.sources.order:
                 continue
@@ -2515,9 +2530,13 @@ class ModelHubService:
         source: ModelHubSourceConfig,
         backend: BackendName,
     ) -> bool:
-        if backend == "opencode" or _NATIVE_VENDOR_BACKENDS.get(source.vendor) == backend:
-            # The vendor's own Agent serves its subscription even when the
-            # catalog is ahead of the backend's menu.
+        if (
+            backend not in _NATIVE_VENDOR_BACKENDS.values()
+            or _NATIVE_VENDOR_BACKENDS.get(source.vendor) == backend
+        ):
+            # A backend that is no one vendor's client (OpenCode, the Avibe
+            # Agent) reaches every vendor, and the vendor's own Agent serves its
+            # subscription even when the catalog is ahead of the backend's menu.
             return True
         if not agent.models or not any(not model.retired for model in source.models):
             return False
@@ -5118,6 +5137,124 @@ class ModelHubService:
                 view=agent.menu.view if agent.menu else "featured",
                 checked=[model.id for model in agent.models],
             )
+
+    async def _seed_avibe(self, config: ModelHubConfig) -> bool:
+        """Give a pending Avibe entry its starting supply, in place; whether it took.
+
+        Its Sources are every existing one this backend may use, placed as a
+        newly created Source would be. Its models are the built-in Agents'
+        selections, in order, that one of those Sources lists, each added as the
+        picker adds a provider model; none qualifying leaves the list empty
+        rather than picking one. The seed counts only once it has placed a
+        Source: until then the entry stays pending, so the first Source the user
+        adds still brings every Source and the starting models with it. Each
+        mutation that adds Sources seeds after its Sources are final, so one
+        that adds several seeds from all of them.
+        """
+
+        agent = config.agents["avibe"]
+        if not any(self._eligible_for_agent(source, "avibe") for source in config.sources):
+            return False
+        # Seeded rows keep the models.dev metadata they are written with, so a
+        # seed with no copy cached fetches one in the foreground, bounded; a
+        # foreground fetch already running (the startup warm-up) is shared.
+        await asyncio.to_thread(self._ensure_models_dev_copy)
+        config.avibe_supply_pending = False
+        for source in config.sources:
+            self._apply_source_placement(config, source, ("avibe",))
+        # A starting model is one a placed Source's own inventory lists; a
+        # route, passthrough included, is no evidence.
+        listed = {
+            model.id
+            for source in config.sources
+            if source.id in agent.sources.order
+            for model in source.models
+            if not model.retired
+        }
+        selections = self.builtin_agent_models_override() if self.builtin_agent_models_override else ()
+        model_ids: list[str] = []
+        for backend, selected in selections:
+            served = next(
+                (
+                    candidate
+                    for candidate in (
+                        opencode_menu_model_candidates(selected)
+                        if backend == "opencode"
+                        else (selected,)
+                    )
+                    if candidate in listed
+                ),
+                None,
+            )
+            if served is not None and served not in model_ids:
+                model_ids.append(served)
+        described = self._models_dev_descriptions(model_ids)
+        rows = []
+        for model_id in model_ids:
+            candidate = self._provider_candidate(config, "avibe", model_id, described.get(model_id))
+            if candidate is not None:
+                rows.append(candidate[0])
+        agent.models = rows
+        return True
+
+    async def _announce_avibe_seed(self) -> None:
+        """Announce a committed seed as the Avibe catalog change it is.
+
+        Like every catalog mutation it ends in ``_refresh_backend_catalog``,
+        whose owner reconciles the Avibe Agent's model. The seed is already
+        committed, so a failed announcement is logged; the next start reconciles.
+        """
+
+        try:
+            await self._refresh_backend_catalog("avibe")
+        except Exception:  # noqa: BLE001 - the committed supply stands
+            logger.warning("Model Hub: the Avibe Agent's seeded catalog was not announced", exc_info=True)
+
+    async def seed_avibe_supply(self) -> list[str]:
+        """Seed a pending Avibe entry from the Sources that existed at startup.
+
+        Source creation seeds a pending entry in its own mutation; this covers
+        Sources that predate the Avibe Agent. Returns the seeded model ids.
+        """
+
+        if not self.store.load().avibe_supply_pending:
+            return []
+        # Seeded rows are written once and then kept, so a first models.dev copy
+        # is worth one bounded foreground fetch, off the loop and outside the
+        # lock. Taken even with no Source yet, so a fresh install's first
+        # Source usually finds it.
+        await asyncio.to_thread(self._ensure_models_dev_copy)
+        async with self._mutation_lock:
+            previous = self.store.load()
+            if not previous.avibe_supply_pending:
+                return []
+            config = self._clone_config(previous)
+            if not await self._seed_avibe(config):
+                return []
+            try:
+                # An engine that is not up must not undo the seed: the config is
+                # saved first, and the engine takes it on its next demand.
+                await self._commit_synced(previous, config, rollback_on_sync_failure=False)
+            except ModelHubError:
+                if self.store.load().avibe_supply_pending:
+                    raise
+        await self._announce_avibe_seed()
+        return [model.id for model in config.agents["avibe"].models]
+
+    def _ensure_models_dev_copy(self) -> None:
+        """Fetch models.dev in the foreground, bounded, when no copy is cached.
+
+        A foreground fetch already running is shared through the catalog's cache
+        lock; a background refresh is not waited for. A failure leaves no copy.
+        """
+
+        from vibe.models_dev_catalog import load_models_dev_catalog
+
+        try:
+            if not self.models_dev_catalog():
+                load_models_dev_catalog()
+        except Exception as exc:  # noqa: BLE001 - optional metadata never fails a seed
+            logger.info("Avibe Agent seed has no models.dev metadata: %s", type(exc).__name__)
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"} or (backend == "avibe" and mode != "hub"):
@@ -8694,6 +8831,9 @@ def create_default_service(
     named_agents_override: Optional[
         Callable[[BackendName], list[tuple[str, Optional[str]]]]
     ] = None,
+    builtin_agent_models_override: Optional[
+        Callable[[], list[tuple[BackendName, str]]]
+    ] = None,
     cli_present_override: Optional[Callable[[BackendName], bool]] = None,
     cli_presence_refresh: Optional[
         Callable[[bool, tuple[BackendName, ...] | None], None]
@@ -8754,6 +8894,7 @@ def create_default_service(
         requested_model_override=requested_model_override,
         selected_agent_override=selected_agent_override,
         named_agents_override=named_agents_override,
+        builtin_agent_models_override=builtin_agent_models_override,
         cli_present_override=cli_present_override,
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,

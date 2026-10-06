@@ -1048,6 +1048,7 @@ class VibeAgentStore:
         system_prompt: Any = _UNSET,
         metadata: Any = _UNSET,
         enabled: Any = _UNSET,
+        only_if_model_unset: bool = False,
         user_context: Any = None,
     ) -> VibeAgent:
         normalized = normalize_agent_name(name)
@@ -1068,6 +1069,9 @@ class VibeAgentStore:
             )
             if existing.archived_at is not None:
                 raise AgentArchivedEditError(agent_name=name)
+            if only_if_model_unset and _clean_optional(existing.model):
+                # Decided under the write lock, so a model chosen meanwhile stands.
+                return existing
 
             values: dict[str, Any] = {"updated_at": _utc_now_iso()}
             if description is not _UNSET:

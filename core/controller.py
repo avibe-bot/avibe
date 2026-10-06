@@ -317,6 +317,7 @@ class Controller:
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
+        self.avibe_model_supply_task: Optional[asyncio.Task] = None
         from modules.agents.avibe.recovery import AvibeRecovery
 
         # The single owner of the Avibe Agent's settlement outside a Turn.
@@ -367,6 +368,83 @@ class Controller:
             if bool(getattr(cfg, "enabled", False)):
                 result.append(backend)
         return result
+
+    def _builtin_agent_models(self) -> list[tuple[str, str]]:
+        """The models the built-in native Agents run, by backend name: claude, codex, opencode."""
+
+        store = self.vibe_agent_store
+        selections = []
+        for backend in sorted(NATIVE_CLI_BACKENDS):
+            agent = store.get_builtin_default_agent_for_backend(backend)
+            model = str(getattr(agent, "model", None) or "").strip()
+            if model:
+                selections.append((backend, model))
+        return selections
+
+    def _reconcile_avibe_agent_model(self) -> None:
+        """Give the built-in Avibe Agent its catalog's first model while it has none.
+
+        An Avibe Agent without a model cannot run a turn, so this only makes an
+        unrunnable Agent runnable. Decided under the store's write lock, it never
+        replaces a model the user chose. It runs whenever the Avibe catalog
+        changes (``backend_catalog_changed``) and at every start, so a hand-off a
+        failed write or an exit lost heals on the next one. No built-in exists
+        when a user Agent already holds the name.
+        """
+
+        from vibe.authorization import instance_owner_context
+
+        models = self.model_hub_service.store.load().agents["avibe"].models
+        if not models:
+            return
+        store = self.vibe_agent_store
+        avibe = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
+        if avibe is None or str(avibe.model or "").strip():
+            return
+        store.update(
+            avibe.name,
+            model=models[0].id,
+            only_if_model_unset=True,
+            user_context=instance_owner_context(),
+        )
+
+    async def _model_hub_catalog_changed(self, backend: str) -> None:
+        """Follow a committed Model Hub catalog change for one backend."""
+
+        from config.v2_config import V2Config
+
+        if backend == "avibe":
+            try:
+                self._reconcile_avibe_agent_model()
+            except Exception:
+                # The catalog change stands; the next start reconciles again.
+                logger.warning("Avibe Agent model reconciliation failed", exc_info=True)
+        try:
+            latest = V2Config.load()
+        except FileNotFoundError:
+            return
+        self.config.model_hub = latest.model_hub
+        # Each runtime moves to the committed catalog at its next turn;
+        # nothing restarts or drains. A disabled backend has nothing to adopt.
+        agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)
+        adopt_catalog = getattr(agent, "adopt_model_hub_catalog", None)
+        if callable(adopt_catalog):
+            await adopt_catalog()
+
+    async def _seed_avibe_model_supply(self) -> None:
+        """Seed the Avibe Agent's Model Hub entry from existing Sources, then reconcile its model."""
+
+        model_hub_service = getattr(self, "model_hub_service", None)
+        if model_hub_service is None:
+            return
+        try:
+            await model_hub_service.seed_avibe_supply()
+        except Exception:
+            logger.warning("Avibe Agent starting model supply failed", exc_info=True)
+        try:
+            self._reconcile_avibe_agent_model()
+        except Exception:
+            logger.warning("Avibe Agent model reconciliation failed", exc_info=True)
 
     def get_native_session_service(self):
         if self.native_session_service is None:
@@ -1169,6 +1247,14 @@ class Controller:
                 e,
                 exc_info=True,
             )
+
+        try:
+            # Off the readiness path: on a first start the seed may wait for a
+            # models.dev copy, and nothing below needs it.
+            if getattr(self, "avibe_model_supply_task", None) is None:
+                self.avibe_model_supply_task = asyncio.create_task(self._seed_avibe_model_supply())
+        except Exception as e:
+            logger.error("Failed to start the Avibe Agent's model supply seed: %s", e, exc_info=True)
 
         try:
             if self.cleanup_task is None or self.cleanup_task.done():
@@ -2332,6 +2418,16 @@ class Controller:
                     pass
             self.cleanup_task = None
 
+        async def _cancel_avibe_model_supply_task() -> None:
+            task = getattr(self, "avibe_model_supply_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self.avibe_model_supply_task = None
+
         async def _cancel_trace_retention_task() -> None:
             cancel_event = getattr(self, "_trace_retention_cancel_event", None)
             if cancel_event is not None:
@@ -2376,6 +2472,7 @@ class Controller:
             logger.debug(f"Internal dispatch server status write skipped: {e}")
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
+        _stop_loop_coroutine(_cancel_avibe_model_supply_task(), "Avibe Agent model supply seed")
         # Retention cancellation is cooperative at a delete-batch boundary;
         # wait for that bounded join instead of abandoning the worker after
         # the generic five-second cleanup timeout.
@@ -2728,19 +2825,6 @@ class Controller:
         # post-paint refresh, so controller readiness never waits on npm.
         refresh_cli_presence(False, None)
 
-        async def backend_catalog_changed(backend: str) -> None:
-            try:
-                latest = V2Config.load()
-            except FileNotFoundError:
-                return
-            self.config.model_hub = latest.model_hub
-            # Each runtime moves to the committed catalog at its next turn;
-            # nothing restarts or drains. A disabled backend has nothing to adopt.
-            agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)
-            adopt_catalog = getattr(agent, "adopt_model_hub_catalog", None)
-            if callable(adopt_catalog):
-                await adopt_catalog()
-
         async def repair_model_selections(addresses: frozenset[str]) -> int:
             # A Vibe Agent's model, a channel's routing override, and a
             # session's pin are each a copy of an id the Model Hub menu once
@@ -2759,9 +2843,10 @@ class Controller:
             requested_model_override=default_vibe_agent_model,
             selected_agent_override=default_vibe_agent_name,
             named_agents_override=named_vibe_agents,
+            builtin_agent_models_override=self._builtin_agent_models,
             cli_present_override=cli_present,
             cli_presence_refresh=refresh_cli_presence,
-            backend_catalog_changed=backend_catalog_changed,
+            backend_catalog_changed=self._model_hub_catalog_changed,
             repair_model_selections=repair_model_selections,
         )
         set_remote_catalog_refresh_completed(

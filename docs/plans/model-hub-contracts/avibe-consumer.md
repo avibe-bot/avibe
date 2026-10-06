@@ -12,10 +12,34 @@ the existing `resolve("avibe", ...)`; `ModelHubLaunch.to_hop_resolution()` proje
 that launch. There is no second planner, credential store, or upstream client.
 
 The backend id is `avibe`. It has a fixed catalog (ordinary editable model rows),
-no native protocol pin, no native CLI, and no Direct mode. Its default catalog and
-source order are empty. Old configurations acquire only that empty Hub row;
-existing backend modes, model metadata, routes, source order, and runtime intent
-remain unchanged. An empty Avibe catalog does not prevent an explicit runtime Stop.
+no native protocol pin, no native CLI, and no Direct mode. Until its starting
+supply is seeded, the Avibe row is pending: a fresh configuration, or one written
+before the Avibe Agent existed, reads an empty Hub row that writes leave absent.
+The seed runs once, when a Source it can place exists: in the background after
+the service reports ready for Sources that already exist (so a first models.dev
+fetch never delays startup), and otherwise inside the mutation that creates the
+first eligible Source, API key, OAuth, or native takeover alike, once that
+mutation's Sources are final, so no restart is needed. Its source order becomes every existing eligible Source, placed exactly as
+a newly created Source would be (like OpenCode, Avibe reaches every vendor, so a
+subscription joins it whether or not a starting model matches, ahead of the API
+keys), and its catalog becomes the models the built-in
+Claude, Codex, and OpenCode Agents run, in that order, that one of those Sources
+lists, deduplicated and added as the picker adds a provider model (models.dev
+metadata included). None qualifying leaves the catalog empty; no model is picked
+on the user's behalf. An Avibe Agent without a model cannot run a turn, so the
+built-in one takes its catalog's first model while it has none: one controller
+rule, decided under the Agent store's write lock so a chosen model stands, run
+on every Avibe catalog change (`_refresh_backend_catalog`, which each seed also
+announces) and at every start, so a lost hand-off heals on the next start. A
+seed with no models.dev copy cached first fetches one in the foreground, bounded,
+so its rows usually carry the limits the Agent budgets with; a starting model is
+one a placed Source's own non-retired inventory lists, never a passthrough route. A native Source that later moves
+to the Hub joins Avibe like a new Source.
+Where a user Agent already holds the name and no built-in exists, only the
+supply is seeded.
+The persisted row then belongs to the user and is never seeded again. Existing
+backend modes, model metadata, routes, source order, and runtime intent remain
+unchanged. An empty Avibe catalog does not prevent an explicit runtime Stop.
 
 The primary currently selected hop owns `protocol`, `provider` (the Source's vendor
 identity), and `source_id`. `base_url` is the loopback gateway's `/avibe/v1` API root;
@@ -164,6 +188,9 @@ The header needs no upstream credentials and is never forwarded upstream.
 
 - Released-shape loading: old modes/routes/capabilities survive without mutation;
   the new row is empty Hub, and native-cli Sources remain ineligible.
+- Starting supply (MH-AVIBE-007): an unrelated write keeps the unseeded row absent;
+  the seed places existing Sources for Avibe alone and keeps only routable Agent
+  models; a second start leaves the persisted row, including removed Sources, alone.
 - Real loopback gateway requests through the existing service, with hermetic engine
   fixtures: primary protocol resolution, cross-protocol failover, non-ASCII origin,
   slow Anthropic resolution, buffered/streamed bodies, and concurrent requests.

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from config.v2_config import V2Config
 from config.v2_compat import to_app_config
@@ -210,3 +213,144 @@ def test_avibe_model_options_come_from_configured_hub_catalog(monkeypatch):
     ]
     config.model_hub.agents["avibe"].models = []
     assert api.agent_model_options("avibe")["models"] == []
+
+
+def _hub_catalog(*model_ids, origin="provider"):
+    from config.v2_config import ModelHubBackendModelConfig, ModelHubConfig
+
+    config = ModelHubConfig()
+    config.agents["avibe"].models = [ModelHubBackendModelConfig(id=model_id, origin=origin) for model_id in model_ids]
+    return SimpleNamespace(store=SimpleNamespace(load=lambda: config))
+
+
+@pytest.mark.parametrize("avibe", ["seeded", "user-built list", "chosen", "name taken", "empty list"])
+def test_avibe_agent_runs_its_catalogs_first_model_until_it_has_one(tmp_path, sqlite_db_factory, avibe):
+    """MH-AVIBE-007: the Agent rows behind the Hub seed, owned by this process.
+
+    The built-in native Agents' models feed the seed in backend-name order. An
+    Avibe Agent without a model cannot run a turn, so it takes its catalog's
+    first model, seeded or listed by the user, and only while it has none: a
+    model the user chose stands. When a user Agent already holds the name, no
+    built-in exists and that Agent is left alone.
+    """
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        if avibe == "name taken":
+            store.create(name="avibe", backend="claude", model="claude-haiku-4-5")
+        store.ensure_builtin_default_agents(["opencode", "claude", "codex", "avibe"])
+        store.create(name="reviewer", backend="claude", model="claude-sonnet-5-5")
+        for name, model in (("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol")):
+            store.update(name, model=model)
+        if avibe == "chosen":
+            store.update("avibe", model="chosen-model")
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        controller.model_hub_service = {
+            "empty list": _hub_catalog(),
+            "user-built list": _hub_catalog("my-relay-model", "gpt-5.5", origin="manual"),
+        }.get(avibe, _hub_catalog("gpt-5.5", "claude-opus-5-5"))
+
+        assert controller._builtin_agent_models() == [
+            ("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol"),
+        ]
+        controller._reconcile_avibe_agent_model()
+        assert (store.get("avibe").backend, store.get("avibe").model) == {
+            "seeded": ("avibe", "gpt-5.5"),
+            "user-built list": ("avibe", "my-relay-model"),
+            "chosen": ("avibe", "chosen-model"),
+            "name taken": ("claude", "claude-haiku-4-5"),
+            "empty list": ("avibe", None),
+        }[avibe]
+    finally:
+        store.close()
+
+
+def test_a_lost_avibe_model_hand_off_heals_on_the_next_start(tmp_path, sqlite_db_factory, monkeypatch):
+    """MH-AVIBE-007: a failed Agent write after a committed seed heals at the next start."""
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["avibe"])
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        hub = _hub_catalog("gpt-5.5")
+        controller.model_hub_service = SimpleNamespace(store=hub.store, seed_avibe_supply=AsyncMock(return_value=[]))
+        real_update = store.update
+
+        def locked_database(*args, **kwargs):
+            raise OperationalError("UPDATE agents", {}, Exception("database is locked"))
+
+        # The seed's catalog announcement: its reconciliation fails, the supply stays.
+        monkeypatch.setattr(store, "update", locked_database)
+        asyncio.run(controller._model_hub_catalog_changed("avibe"))
+        assert store.get("avibe").model is None
+
+        monkeypatch.setattr(store, "update", real_update)
+        asyncio.run(controller._seed_avibe_model_supply())
+        assert store.get("avibe").model == "gpt-5.5"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_the_first_model_a_user_adds_makes_the_avibe_agent_runnable(tmp_path, sqlite_db_factory):
+    """MH-AVIBE-007: any Avibe catalog change reconciles the Agent, not only a seed.
+
+    A seed that found no starting model leaves the catalog empty; the model the
+    user then adds by hand reaches the Agent without a restart, through the
+    same catalog-change notification every catalog edit sends.
+    """
+    from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _service, _source
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["avibe"])
+        service = _service(tmp_path, sources=[_source("src_relay0001", "Relay", protocol="openai_chat", model_id="relay-model")])
+        _canonicalize_fixed_test_routes(service)
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        controller.model_hub_service = service
+        service.backend_catalog_changed = controller._model_hub_catalog_changed
+
+        assert await service.seed_avibe_supply() == []
+        assert store.get("avibe").model is None
+        candidate, = service.agent_model_candidates("avibe")["providers"]
+        await service.set_agent_models("avibe", [], [{key: value for key, value in candidate.items() if key != "suppliers"}])
+        assert store.get("avibe").model == "relay-model"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db_factory):
+    """MH-AVIBE-007: a Source's inventory, not a route, decides a starting model.
+
+    An Anthropic key could pass any model id through, but it lists only Claude
+    models: the Codex Agent's ``gpt-6-astra`` is no starting model for Avibe,
+    and the Avibe Agent stays without a model rather than routing it there.
+    """
+    from config.v2_config import ModelHubConfig
+    from tests.test_model_hub_l3 import _service, _source
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["codex", "avibe"])
+        store.update("codex", model="gpt-6-astra")
+        service = _service(tmp_path, sources=[])
+        service.store.config = ModelHubConfig()
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        controller.model_hub_service = service
+        service.builtin_agent_models_override = controller._builtin_agent_models
+        service.backend_catalog_changed = controller._model_hub_catalog_changed
+        anthropic = _source(
+            "src_anthropic01", "Anthropic key", vendor="anthropic", protocol="anthropic", model_id="claude-opus-5-5",
+        )
+
+        async with service._mutation_lock:
+            await service._commit_new_source_locked(anthropic)
+
+        avibe = service.store.load().agents["avibe"]
+        assert (avibe.sources.order, avibe.models) == ([anthropic.id], [])
+        assert store.get("avibe").model is None
+    finally:
+        store.close()

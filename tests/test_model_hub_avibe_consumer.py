@@ -21,10 +21,14 @@ from jsonschema import Draft7Validator, ValidationError
 from referencing import Registry, Resource
 
 from config.v2_config import (
+    ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
     ModelHubConfig,
+    ModelHubModelConfig,
     ModelHubRouteConfig,
     ModelHubRouteHopConfig,
+    ModelHubSourceConfig,
+    ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.provenance import BoundedProvenanceStore, HopOrigin, SERVED_HOP_HEADER
@@ -560,6 +564,199 @@ def test_released_config_adds_only_empty_avibe_supply():
     )
     assert config.enabled is before["enabled"]
     assert ModelHubConfig.from_payload(config.to_payload()).to_payload() == config.to_payload()
+
+
+class _PersistedStore:
+    """Reads and writes the persisted payload, as the config file does."""
+
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def load(self) -> ModelHubConfig:
+        return ModelHubConfig.from_payload(copy.deepcopy(self.payload))
+
+    def save(self, config: ModelHubConfig) -> None:
+        self.payload = config.to_payload()
+
+
+def _seed_source(source_id, day, *model_ids, kind="api_key", vendor="openai", protocol="openai_responses", channel="hub"):
+    return ModelHubSourceConfig(
+        id=source_id, kind=kind, vendor=vendor, display_name=source_id[4:], protocol=protocol,
+        supply_channel=channel, billing="metered" if kind == "api_key" else "monthly",
+        state=ModelHubSourceStateConfig(status="active" if channel == "native_cli" else "standby"),
+        models=[ModelHubModelConfig(id=model_id, provenance="discovered") for model_id in model_ids],
+        created_at=f"2026-01-0{day}T00:00:00Z",
+        credential_ref=None if channel == "native_cli" else f"cred_{source_id}",
+    )
+
+
+SEED_ANTHROPIC = _seed_source(
+    "src_seedanthropic", 1, "claude-opus-5-5", "claude-sonnet-5-5", vendor="anthropic", protocol="anthropic",
+)
+SEED_RESPONSES = _seed_source("src_seedresponses", 2, "gpt-5.6-sol")
+SEED_CHAT = _seed_source("src_seedchat0001", 3, "模型/β", vendor="custom", protocol="openai_chat")
+SEED_SUBSCRIPTION = _seed_source("src_seedsubscribe", 4, "gpt-5.6-sol", kind="subscription")
+SEED_NATIVE = _seed_source(
+    "src_seednative01", 5, "claude-opus-5-5",
+    kind="subscription", vendor="anthropic", protocol="anthropic", channel="native_cli",
+)
+SEED_KEYS = [SEED_ANTHROPIC.id, SEED_RESPONSES.id, SEED_CHAT.id]
+SEED_CATALOG = {"anthropic": {"name": "Anthropic", "models": {
+    "claude-opus-5-5": {"name": "Claude Opus 5.5", "limit": {"context": 1_000_000, "output": 128_000}},
+}}}
+
+
+def _seed_service(tmp_path, payload, selections):
+    """A service over persisted state, with the controller's two Agent-row hooks."""
+    service = _service(tmp_path, sources=[])
+    service.store = _PersistedStore(payload)
+    service.models_dev_catalog = lambda: SEED_CATALOG
+    service.builtin_agent_models_override = lambda: list(selections)
+    announced = []
+
+    async def catalog_changed(backend):
+        announced.append(backend)
+
+    service.backend_catalog_changed = catalog_changed
+    return service, service.store, announced
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("selections", "seeded"), [
+    # Each built-in Agent's model, in order; OpenCode's names its provider, and
+    # a model reached twice is listed once.
+    (
+        [("claude", "claude-opus-5-5"), ("codex", "gpt-5.6-sol"), ("opencode", "openai/gpt-5.6-sol")],
+        ["claude-opus-5-5", "gpt-5.6-sol"],
+    ),
+    # A model no Source lists is no start, and a menu id may carry a slash.
+    (
+        [("claude", "opus"), ("codex", "gpt-6-astra"), ("opencode", "custom/模型/β")],
+        ["模型/β"],
+    ),
+    # Nothing qualifies: the list starts empty, and the picker offers every
+    # provider model.
+    ([], []),
+])
+async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_and_models(
+    tmp_path, selections, seeded,
+):
+    """MH-AVIBE-007: one seed from the Sources and Agent models the user already has.
+
+    A config written before the Avibe Agent existed has Sources that were never
+    placed for it, so its picker offered no provider model at all.
+    """
+    agents = {backend: ModelHubAgentSupplyConfig.default(backend, mode="hub") for backend in ("claude", "codex", "opencode")}
+    # The user keeps one Source for Claude; seeding Avibe must not restore the rest.
+    agents["claude"].sources.order = [SEED_ANTHROPIC.id]
+    sources = [SEED_ANTHROPIC, SEED_RESPONSES, SEED_CHAT, SEED_SUBSCRIPTION, SEED_NATIVE]
+    service, store, _announced = _seed_service(tmp_path, {
+        "enabled": True,
+        "runtime_default_applied": True,
+        "sources": [source.to_payload() for source in sources],
+        "agents": {backend: agent.to_payload() for backend, agent in agents.items()},
+    }, selections)
+    # An unrelated write ahead of the seed (a startup reconcile, a settings
+    # save) must not record the empty placeholder as the user's entry.
+    store.save(store.load())
+    assert "avibe" not in store.payload["agents"]
+
+    async def engine_not_started(_bindings):
+        # Startup seeds before the engine is up; the seed must not depend on it.
+        raise ModelHubError("engine_down", status=503)
+
+    service.adapter.sync_sources = engine_not_started
+    others = {backend: store.payload["agents"][backend] for backend in agents}
+
+    assert await service.seed_avibe_supply() == seeded
+    avibe = store.payload["agents"]["avibe"]
+    # Every Source Avibe may use joins, subscriptions ahead of keys, whether or
+    # not a starting model matches: like OpenCode, it reaches every vendor.
+    assert avibe["sources"]["order"] == [SEED_SUBSCRIPTION.id, *SEED_KEYS]
+    assert [model["id"] for model in avibe["models"]] == seeded
+    assert {backend: store.payload["agents"][backend] for backend in agents} == others
+    if "claude-opus-5-5" in seeded:
+        row = next(model for model in avibe["models"] if model["id"] == "claude-opus-5-5")
+        assert (row["origin"], row["display_name"], row["context_window"], row["max_output_tokens"]) == (
+            "provider", "Claude Opus 5.5", 1_000_000, 128_000,
+        )
+    candidates = service.agent_model_candidates("avibe")
+    listed = {model.id for source in (SEED_ANTHROPIC, SEED_RESPONSES, SEED_CHAT, SEED_SUBSCRIPTION) for model in source.models}
+    assert {candidate["id"] for candidate in candidates["providers"]} == listed - set(seeded)
+    assert [candidate["id"] for candidate in candidates["in_list"]] == seeded
+
+    # The persisted entry is the user's: a Source they removed stays removed.
+    avibe["sources"]["order"].remove(SEED_CHAT.id)
+    kept = copy.deepcopy(store.payload)
+    assert await service.seed_avibe_supply() == []
+    assert store.payload == kept
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("first", "selections", "seeded"), [
+    (SEED_ANTHROPIC, [("claude", "claude-opus-5-5"), ("codex", "gpt-6-astra")], ["claude-opus-5-5"]),
+    # Typical of a fresh install: no Agent runs a model this Source lists, and
+    # none is picked for the user.
+    (SEED_ANTHROPIC, [("codex", "gpt-6-astra")], []),
+    # A subscription joins even when no starting model matches it, so its
+    # catalog still reaches the picker.
+    (SEED_SUBSCRIPTION, [("codex", "gpt-6-astra")], []),
+])
+async def test_fresh_install_seeds_avibe_with_its_first_source(tmp_path, first, selections, seeded):
+    """MH-AVIBE-007: on a fresh install the first eligible Source seeds Avibe at once.
+
+    A seed with no Source to place is not a seed: counted as done, it would
+    leave every later Source without starting models, and skipping the pending
+    entry at placement would leave the first Source out until a restart.
+    """
+    service, store, announced = _seed_service(tmp_path, ModelHubConfig().to_payload(), selections)
+    assert "avibe" not in store.payload["agents"]
+
+    assert await service.seed_avibe_supply() == []
+    native = copy.deepcopy(SEED_NATIVE)
+    await service._commit_new_source_locked(native)
+    assert "avibe" not in store.payload["agents"]
+    assert announced == []
+
+    await service._commit_new_source_locked(copy.deepcopy(first))
+    avibe = store.payload["agents"]["avibe"]
+    assert avibe["sources"]["order"] == [first.id]
+    assert [model["id"] for model in avibe["models"]] == seeded
+    assert announced == ["avibe"]
+    assert {candidate["id"] for candidate in service.agent_model_candidates("avibe")["providers"]} == (
+        {model.id for model in first.models} - set(seeded)
+    )
+
+    # Seeded once: a later Source is placed like any other, and nothing re-seeds.
+    await service._commit_new_source_locked(copy.deepcopy(SEED_CHAT))
+    avibe = store.payload["agents"]["avibe"]
+    assert avibe["sources"]["order"] == [first.id, SEED_CHAT.id]
+    assert [model["id"] for model in avibe["models"]] == seeded
+    assert announced == ["avibe"]
+
+
+@pytest.mark.asyncio
+async def test_the_first_source_seed_fetches_a_models_dev_copy_when_none_is_cached(tmp_path, monkeypatch):
+    """MH-AVIBE-007: seeded rows keep the metadata they are written with.
+
+    On a fresh install the first Source can arrive before any models.dev copy
+    is cached, so the seed fetches one first rather than writing rows without
+    the context window and output limit the Agent budgets with.
+    """
+    service, store, _announced = _seed_service(
+        tmp_path, ModelHubConfig().to_payload(), [("claude", "claude-opus-5-5")],
+    )
+    copy_on_disk = {}
+    service.models_dev_catalog = lambda: copy_on_disk
+
+    def fetch_first_copy():
+        copy_on_disk.update(SEED_CATALOG)
+        return copy_on_disk
+
+    monkeypatch.setattr("vibe.models_dev_catalog.load_models_dev_catalog", fetch_first_copy)
+    await service._commit_new_source_locked(copy.deepcopy(SEED_ANTHROPIC))
+    [row] = store.payload["agents"]["avibe"]["models"]
+    assert (row["id"], row["context_window"], row["max_output_tokens"]) == ("claude-opus-5-5", 1_000_000, 128_000)
 
 
 def test_native_cli_and_direct_are_not_avibe_channels(tmp_path):

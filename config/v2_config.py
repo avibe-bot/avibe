@@ -3012,18 +3012,29 @@ class ModelHubConfig:
     sources: list[ModelHubSourceConfig] = field(default_factory=list)
     agents: dict[str, ModelHubAgentSupplyConfig] = field(
         default_factory=lambda: {
-            backend: ModelHubAgentSupplyConfig.default(backend, mode="hub") for backend in MODEL_HUB_BACKENDS
+            backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
+            for backend in MODEL_HUB_BACKENDS
+            if backend != "avibe"
         }
     )
     # Fresh configs and explicit Start/Stop consume the default. Disk observers
     # retain a pending false marker until lock-owning startup commits promotion;
     # an unrelated save must not acknowledge an upgrade it did not perform.
     runtime_default_applied: bool = True
+    # Not persisted, like ``V2Config.load_warnings``. True while the Avibe
+    # entry was never supplied: a fresh install, or a file written before the
+    # Avibe Agent existed. The empty entry standing in waits for its starting
+    # supply (see ``ModelHubService._seed_avibe``), and until that seed, or any
+    # other edit, touches it, ``to_payload`` keeps it absent, so an unrelated
+    # write cannot record an empty supply as the user's choice.
+    avibe_supply_pending: ClassVar[bool] = False
 
     def __post_init__(self) -> None:
         # Existing in-process config producers may still supply the released
         # three-backend shape, just like older on-disk configurations.
-        self.agents.setdefault("avibe", ModelHubAgentSupplyConfig.default("avibe", mode="hub"))
+        if "avibe" not in self.agents:
+            self.agents["avibe"] = ModelHubAgentSupplyConfig.default("avibe", mode="hub")
+            self.avibe_supply_pending = True
 
     @staticmethod
     def source_eligible_for_backend(
@@ -3106,6 +3117,9 @@ class ModelHubConfig:
                 )
         agents = {}
         for backend in MODEL_HUB_BACKENDS:
+            if backend == "avibe" and backend not in agents_payload:
+                # Supplied by ``__post_init__``, which marks it pending.
+                continue
             if backend not in agents_payload:
                 # An omitted legacy backend is not consent to change its
                 # working authentication. Fresh installs use the dataclass
@@ -3128,6 +3142,7 @@ class ModelHubConfig:
             agents=agents,
             runtime_default_applied=runtime_default_applied,
         )
+        agents = config.agents
         for backend in MODEL_HUB_BACKENDS:
             configured_sources = agents[backend].sources
             invalid_id = next(
@@ -3161,11 +3176,18 @@ class ModelHubConfig:
         return config
 
     def to_payload(self) -> dict:
+        unseeded = self.avibe_supply_pending and self.agents["avibe"] == ModelHubAgentSupplyConfig.default(
+            "avibe", mode="hub"
+        )
         return {
             "enabled": self.enabled,
             "runtime_default_applied": self.runtime_default_applied,
             "sources": [source.to_payload() for source in self.sources],
-            "agents": {backend: self.agents[backend].to_payload() for backend in MODEL_HUB_BACKENDS},
+            "agents": {
+                backend: self.agents[backend].to_payload()
+                for backend in MODEL_HUB_BACKENDS
+                if not (backend == "avibe" and unseeded)
+            },
         }
 
 
