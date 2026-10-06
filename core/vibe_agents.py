@@ -17,7 +17,14 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
-from modules.agents.catalog import AGENT_BACKENDS, BUILTIN_AGENT_BACKENDS, implicit_default_rank, is_builtin_backend
+from modules.agents.catalog import (
+    AGENT_BACKENDS,
+    BUILTIN_AGENT_BACKENDS,
+    builtin_agent_name_for_backend,
+    display_name_for_backend,
+    implicit_default_rank,
+    is_builtin_backend,
+)
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
@@ -1675,8 +1682,9 @@ class VibeAgentStore:
             if current is not None:
                 return self._write_builtin_state(current, metadata={**current.metadata, **metadata})
             # An always-enabled backend needs its own row: when another Agent holds the
-            # backend's name, the built-in takes the next free one.
-            name = self._free_agent_name(backend) if is_builtin_backend(backend) else backend
+            # catalog's name for it, the built-in takes the next free one.
+            base = builtin_agent_name_for_backend(backend)
+            name = self._free_agent_name(base) if is_builtin_backend(backend) else base
         agent_name = str(name).strip()
         existing = self.get(agent_name)
         if existing:
@@ -1692,7 +1700,7 @@ class VibeAgentStore:
         return self.create(
             name=agent_name,
             backend=backend,
-            description=f"Default Agent for the {backend} backend.",
+            description=f"Default Agent for the {display_name_for_backend(backend)} backend.",
             source="builtin",
             metadata=metadata,
             enabled=True,

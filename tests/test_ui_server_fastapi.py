@@ -2122,7 +2122,7 @@ def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(monkeypa
     ("method", "path", "body", "code"),
     [
         ("post", "/api/config", {"agents": {"avibe": {"enabled": False}}}, None),
-        ("patch", "/api/agents/avibe", {"enabled": False}, "agent_always_enabled"),
+        ("patch", "/api/agents/vibey", {"enabled": False}, "agent_always_enabled"),
     ],
 )
 def test_requests_to_turn_off_the_built_in_avibe_agent_fail_with_a_client_error(
@@ -2153,7 +2153,7 @@ def test_requests_to_turn_off_the_built_in_avibe_agent_fail_with_a_client_error(
     assert "avibe" not in api.config_to_payload(api.load_config())["agents"]
     store = VibeAgentStore()
     try:
-        assert store.require("avibe").enabled is True
+        assert store.require("vibey").enabled is True
     finally:
         store.close()
 

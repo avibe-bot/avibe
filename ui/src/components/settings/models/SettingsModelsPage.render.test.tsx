@@ -930,10 +930,10 @@ describe('SettingsModelsPage surface branches', () => {
     ]);
     const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue({ ...runtime, enabled: false });
     const toggle = await screen.findByRole('switch', {
-      name: configured ? /Avibe models use|Avibe 的模型通过/i : /Turn model gateway off|关闭模型网关/i,
+      name: configured ? /Vibey's models use|Vibey 的模型通过/i : /Turn model gateway off|关闭模型网关/i,
     });
     expect((toggle as HTMLButtonElement).disabled).toBe(configured);
-    const avibeCard = (await screen.findByText('Avibe Agent')).closest('[data-agent-backend]') as HTMLElement;
+    const avibeCard = (await screen.findByText('Vibey')).closest('[data-agent-backend]') as HTMLElement;
     expect(within(avibeCard).getAllByRole('button', { name: /^Manage models$|^管理模型$/i }).length).toBeGreaterThan(0);
     await userEvent.click(within(avibeCard).getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
     const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });

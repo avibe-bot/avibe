@@ -131,7 +131,7 @@ import { Markdown } from '../ui/markdown';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { VaultApprovalFloat, VaultChatRequests } from '../ui/vault-chat-requests';
 import { VaultProvisionDialogProvider, VaultRequestCard } from '../ui/vault-request-card';
-import { StatusPill } from '../visual';
+import { BackendAvatar, StatusPill } from '../visual';
 import { usePendingVaultRequests } from '../../lib/usePendingVaultRequests';
 import { useCoalescedWrite } from '../../lib/useCoalescedWrite';
 import { hasInAppBackEntry } from '../../lib/navigationHistory';
@@ -160,6 +160,7 @@ import { errorMessage } from '@/lib/errorMessage';
 import { pendingInitialMessageHandoff } from '@/lib/chatInitialMessage';
 import { sessionAgentDisplayName } from './sessionAgentName';
 import { useModelHubRecovery } from '../../lib/modelHubRecovery';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 
 // While a turn is in flight, reconcile the working/Stop state against the
 // controller on this cadence (the backend ``GET /turn-state`` is authoritative).
@@ -3301,7 +3302,7 @@ const ActivityRow: React.FC<{
   // cannot read as in-progress (its kind label already says "Queued message").
   const queued = isQueuedRun(item);
   const subtitle =
-    kind === 'backend_activity' && item.backend ? `${item.backend} · ${relative}` : relative;
+    kind === 'backend_activity' && item.backend ? `${getBackendUiMeta(item.backend).label} · ${relative}` : relative;
   const body = (
     <>
       <span
@@ -4643,7 +4644,7 @@ export const ThinkingBubble: React.FC<{
     <div className="flex w-full justify-start">
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
-          <RoleAvatar tone="mint"><Bot /></RoleAvatar>
+          <RoleAvatar tone="mint"><BackendAvatar backend={session.agent_backend ?? ''} /></RoleAvatar>
           <span className="text-[11px] font-medium text-muted">
             {statusLabel || agentDisplayName || session.agent_name || t('chat.thinking')}
           </span>
@@ -5037,7 +5038,7 @@ export const MessageRow = memo(function MessageRow({
     <div data-message-id={message.id} className={rowClass('justify-start')}>
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
-          <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{agentIdentity ? <Bot /> : <Info />}</RoleAvatar>
+          <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{agentIdentity ? <BackendAvatar backend={session.agent_backend ?? ''} /> : <Info />}</RoleAvatar>
           {name && <span className="text-[11px] font-medium text-muted">{name}</span>}
         </div>
         {bodyNode || attachmentsNode ? (

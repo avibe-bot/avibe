@@ -79,7 +79,7 @@ describe('backend brand ownership', () => {
       { backend: 'claude', label: 'Claude Code' },
       { backend: 'codex', label: 'Codex' },
       { backend: 'opencode', label: 'OpenCode' },
-      { backend: 'avibe', label: 'Avibe Agent' },
+      { backend: 'avibe', label: 'Vibey' },
     ] as const;
     for (const { backend } of rows) {
       locale.addResource(language, 'translation', `settings.models.backends.${backend}`, 'Obsolete localized brand');

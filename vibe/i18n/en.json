@@ -394,7 +394,7 @@
     },
     "agentLifecycle": {
       "agent_always_enabled": {
-        "message": "Agent `{agent}` is the built-in Avibe Agent and is always enabled.",
+        "message": "Agent `{agent}` is built in and always enabled.",
         "hint": "You can still change its model, effort, and system prompt."
       },
       "agent_archived_read_only": {
@@ -1543,7 +1543,7 @@
       "refusal": "The model declined to answer this request.",
       "safety": "The model stopped this reply for safety reasons.",
       "emptyResponse": "The model returned an empty reply. Try again or rephrase the request.",
-      "interrupted": "The Avibe Agent run was interrupted before it finished.",
+      "interrupted": "{backend}'s run was interrupted before it finished.",
       "contextExhausted": "This conversation has grown too long to continue reliably. Start a new session with /new.",
       "toolOutputTooLarge": "The latest tool output does not fit this model's context, even shortened. Ask for a smaller part (a narrower command, or a file range with offset and limit), or switch to a model with a larger context.",
       "inputTooLarge": "This message does not fit this model's context. Send a shorter message, or switch to a model with a larger context.",
@@ -1555,9 +1555,9 @@
       "auth": "The model provider rejected the credentials of this route. Check the Model Hub source.",
       "invalidRequest": "The model provider rejected the request.",
       "modelError": "The model stopped with an error.",
-      "toolsUnsupported": "The selected model does not support tools, which the Avibe Agent needs. Choose another model.",
-      "providerProtocol": "The model provider sent a reply the Avibe Agent cannot use.",
-      "generic": "The Avibe Agent run failed."
+      "toolsUnsupported": "The selected model does not support tools, which {backend} needs. Choose another model.",
+      "providerProtocol": "The model provider sent a reply {backend} cannot use.",
+      "generic": "{backend}'s run failed."
     }
   }
 }

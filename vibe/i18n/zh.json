@@ -394,7 +394,7 @@
     },
     "agentLifecycle": {
       "agent_always_enabled": {
-        "message": "Agent `{agent}` 是内置的 Avibe Agent，始终启用。",
+        "message": "Agent `{agent}` 是内置 Agent，始终启用。",
         "hint": "仍可调整它的模型、Effort 与系统提示词。"
       },
       "agent_archived_read_only": {
@@ -1543,7 +1543,7 @@
       "refusal": "模型拒绝回答这个请求。",
       "safety": "模型出于安全原因停止了这次回复。",
       "emptyResponse": "模型返回了空回复。请重试，或换一种说法。",
-      "interrupted": "Avibe Agent 的运行在完成前被中断。",
+      "interrupted": "{backend} 的运行在完成前被中断。",
       "contextExhausted": "本次对话已经太长，无法可靠地继续。请发送 /new 开始一个新会话。",
       "toolOutputTooLarge": "最新的工具输出即使截短也放不进当前模型的上下文。请只取其中一部分（用更窄的命令，或用 offset/limit 读取文件的一段），或换用上下文更大的模型。",
       "inputTooLarge": "这条消息放不进当前模型的上下文。请发送更短的消息，或换用上下文更大的模型。",
@@ -1555,9 +1555,9 @@
       "auth": "模型服务商拒绝了此路由的凭据。请检查 Model Hub 来源。",
       "invalidRequest": "模型服务商拒绝了这个请求。",
       "modelError": "模型因错误而停止。",
-      "toolsUnsupported": "所选模型不支持工具，而 Avibe Agent 需要工具。请换一个模型。",
-      "providerProtocol": "模型服务商返回的回复 Avibe Agent 无法使用。",
-      "generic": "Avibe Agent 运行失败。"
+      "toolsUnsupported": "所选模型不支持工具，而 {backend} 需要工具。请换一个模型。",
+      "providerProtocol": "模型服务商返回的回复 {backend} 无法使用。",
+      "generic": "{backend} 运行失败。"
     }
   }
 }

@@ -23,6 +23,8 @@ class AgentBackendDescriptor:
     id: str
     display_name: str
     config_key: str
+    # The name the store creates the backend's built-in Agent under (``@name``, ``--agent name``).
+    builtin_agent_name: str
     default_cli: str | None
     default_enabled: bool
     latest_probe: tuple[str, str] | None
@@ -45,12 +47,13 @@ class AgentBackendDescriptor:
         return payload
 
 
-# Registry order is the order every backend list shows: the built-in Avibe Agent first.
+# Registry order is the order every backend list shows: the built-in backend first.
 AGENT_BACKEND_REGISTRY: Final[dict[str, AgentBackendDescriptor]] = {
     "avibe": AgentBackendDescriptor(
         id="avibe",
-        display_name="Avibe Agent",
+        display_name="Vibey",
         config_key="avibe",
+        builtin_agent_name="vibey",
         default_cli=None,
         default_enabled=True,
         latest_probe=None,
@@ -67,6 +70,7 @@ AGENT_BACKEND_REGISTRY: Final[dict[str, AgentBackendDescriptor]] = {
         id="opencode",
         display_name="OpenCode",
         config_key="opencode",
+        builtin_agent_name="opencode",
         default_cli="opencode",
         default_enabled=True,
         latest_probe=("github", "sst/opencode"),
@@ -76,6 +80,7 @@ AGENT_BACKEND_REGISTRY: Final[dict[str, AgentBackendDescriptor]] = {
         id="claude",
         display_name="Claude Code",
         config_key="claude",
+        builtin_agent_name="claude",
         default_cli="claude",
         default_enabled=True,
         latest_probe=("npm", "@anthropic-ai/claude-code"),
@@ -85,6 +90,7 @@ AGENT_BACKEND_REGISTRY: Final[dict[str, AgentBackendDescriptor]] = {
         id="codex",
         display_name="Codex",
         config_key="codex",
+        builtin_agent_name="codex",
         default_cli="codex",
         default_enabled=False,
         latest_probe=("npm", "@openai/codex"),
@@ -159,10 +165,15 @@ def is_builtin_backend(name: str) -> bool:
 def implicit_default_rank(name: str) -> int:
     """The one rule for a default nobody chose, among backends or their Agents: a built-in backend comes last.
 
-    Making the Avibe Agent the default for new chats is its own decision, so no fallback
+    Making the built-in backend the default for new chats is its own decision, so no fallback
     picks it while another candidate exists.
     """
     return 1 if is_builtin_backend(name) else 0
+
+
+def builtin_agent_name_for_backend(name: str) -> str:
+    """Return the name of *name*'s built-in Agent."""
+    return get_agent_backend_descriptor(name).builtin_agent_name
 
 
 def display_name_for_backend(name: str) -> str:

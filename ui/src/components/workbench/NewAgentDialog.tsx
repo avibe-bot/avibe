@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowRight, Bot, Maximize2, X } from 'lucide-react';
+import { ArrowRight, Maximize2, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -18,6 +18,7 @@ import { Button } from '../ui/button';
 import { errorMessage } from '@/lib/errorMessage';
 import { useRouteSurfaceWindowEvent } from '@/lib/routeSurfaceActivity';
 import { getBackendUiMeta, type AgentBackendId } from '@/lib/agentBackends';
+import { BackendAvatar } from '../visual';
 import { BACKEND_ORDER, BACKEND_LABEL } from '@/lib/backendAccent';
 
 const BACKEND_OPTIONS = BACKEND_ORDER.map((id) => ({
@@ -218,7 +219,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
                   )}
                 >
                   <div className={clsx('flex size-8 items-center justify-center rounded-lg border', active ? cc.border + ' ' + cc.bg : 'border-border-strong')}>
-                    <Bot className={clsx('size-4', active ? cc.text : 'text-muted')} />
+                    <BackendAvatar backend={opt.key} className={clsx('size-4', active ? cc.text : 'text-muted')} />
                   </div>
                   <span className={clsx('text-[12px] font-bold', active ? cc.text : 'text-foreground')}>
                     {opt.label}

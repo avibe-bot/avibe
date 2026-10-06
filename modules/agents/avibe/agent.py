@@ -88,6 +88,7 @@ from modules.agents.avibe.prompt import EnvironmentValue, current_environment, s
 from modules.agents.avibe.store import AdapterTranscriptStore
 from modules.agents.avibe.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
+from modules.agents.catalog import display_name_for_backend
 from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
 from storage.agent_transcript import (
@@ -232,7 +233,7 @@ class AvibeAgent(BaseAgent):
         turn_id = str(payload.get("turn_token") or "").strip()
         input_id = str(payload.get("delivery_id") or "").strip()
         if not session_id or not turn_id or not input_id:
-            await self._fail(request, "generic", "Avibe Agent turn has no Session, Turn, or input identity.")
+            await self._fail(request, "generic", f"{display_name_for_backend(BACKEND)} turn has no Session, Turn, or input identity.")
             return
         turn = _Run(request, session_id, turn_id, self._instance)
         async with self._held(session_id, run=turn) as runtime:
@@ -519,7 +520,7 @@ class AvibeAgent(BaseAgent):
 
         model = request.subagent_model or request.vibe_agent_model
         if not model:
-            raise ValueError("The Avibe Agent has no model selected.")
+            raise ValueError(f"{display_name_for_backend(BACKEND)} has no model selected.")
         context = request.context
 
         async def resolve() -> ModelSelection:

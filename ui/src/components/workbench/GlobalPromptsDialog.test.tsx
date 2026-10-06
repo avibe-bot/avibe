@@ -32,7 +32,7 @@ describe('native global prompts', () => {
     render(<GlobalPromptsDialog open onClose={vi.fn()} />);
     await screen.findByRole('tab', { name: 'Claude Code' });
     expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['OpenCode', 'Claude Code', 'Codex']);
-    expect(screen.queryByRole('tab', { name: 'Avibe Agent' })).toBeNull();
+    expect(screen.queryByRole('tab', { name: 'Vibey' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'globalPrompts.sync' }));
     await waitFor(() => expect(mocks.saveGlobalPrompts).toHaveBeenCalledWith({
       content: 'Instructions', backends: ['opencode', 'claude', 'codex'],

@@ -60,15 +60,15 @@ const renderBackends = () => render(
 const rowOf = async (name: string) => (await screen.findByText(name)).closest('.rounded-xl') as HTMLElement;
 
 describe('built-in backend settings', () => {
-  // The built-in Avibe Agent is part of the platform: listed first, always on,
+  // The built-in Vibey is part of the platform: listed first, always on,
   // and marked Built-in where every other backend has its enable switch.
   it('lists Avibe first as Built-in with no switch, and its page has no switch or native actions', async () => {
     renderBackends();
 
-    const avibe = await rowOf('Avibe Agent');
+    const avibe = await rowOf('Vibey');
     const rows = [...document.querySelectorAll('.rounded-xl')];
     expect(rows.map((row) => row.querySelector('span.font-semibold')?.textContent)).toEqual([
-      'Avibe Agent', 'OpenCode', 'Claude Code', 'Codex',
+      'Vibey', 'OpenCode', 'Claude Code', 'Codex',
     ]);
     expect(within(avibe).getByText('Built-in')).toBeTruthy();
     expect(within(avibe).queryByRole('switch')).toBeNull();
@@ -84,7 +84,7 @@ describe('built-in backend settings', () => {
     expect(configure.getAttribute('href')).toBe('/settings/backends/avibe');
     fireEvent.click(configure);
 
-    await screen.findByRole('heading', { level: 1, name: 'Avibe Agent' });
+    await screen.findByRole('heading', { level: 1, name: 'Vibey' });
     expect(await screen.findByText('Built-in')).toBeTruthy();
     expect(screen.queryByRole('switch')).toBeNull();
     expect(screen.queryByRole('textbox')).toBeNull();
@@ -121,7 +121,7 @@ describe('backend attention', () => {
     mocks.api.getConfig.mockResolvedValue(modelHubConfig(true));
     renderBackends();
 
-    const avibe = await rowOf('Avibe Agent');
+    const avibe = await rowOf('Vibey');
     expect(await within(avibe).findByText('No model selected')).toBeTruthy();
     expect(within(avibe).queryByText('Gateway off')).toBeNull();
     expect(within(await rowOf('Claude Code')).queryByText('No model selected')).toBeNull();
@@ -134,13 +134,13 @@ describe('backend attention', () => {
     mocks.api.getConfig.mockResolvedValue(modelHubConfig(false));
     renderBackends();
 
-    const avibe = await rowOf('Avibe Agent');
+    const avibe = await rowOf('Vibey');
     expect(await within(avibe).findByText('Gateway off')).toBeTruthy();
     expect(within(avibe).queryByText('No model selected')).toBeNull();
     expect(within(await rowOf('Claude Code')).queryByText('Gateway off')).toBeNull();
 
     fireEvent.click(within(avibe).getByRole('link', { name: 'Configure' }));
-    expect(await screen.findByText('The model gateway is off, so Avibe Agent has no model to run on.')).toBeTruthy();
+    expect(await screen.findByText('The model gateway is off, so Vibey has no model to run on.')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Open Models page' }).getAttribute('href')).toBe('/settings/models');
   });
 
@@ -153,12 +153,12 @@ describe('backend attention', () => {
     });
     renderBackends();
 
-    const avibe = await rowOf('Avibe Agent');
+    const avibe = await rowOf('Vibey');
     expect(await within(avibe).findByText('Model Hub disabled')).toBeTruthy();
     expect(within(await rowOf('Claude Code')).queryByText('Model Hub disabled')).toBeNull();
 
     fireEvent.click(within(avibe).getByRole('link', { name: 'Configure' }));
-    expect(await screen.findByText('Model Hub is disabled on this instance, so Avibe Agent has no model to run on.')).toBeTruthy();
+    expect(await screen.findByText('Model Hub is disabled on this instance, so Vibey has no model to run on.')).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'Open Models page' })).toBeNull();
   });
 });

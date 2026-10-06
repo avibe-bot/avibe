@@ -1,6 +1,8 @@
 import type React from 'react';
 import { Bot, Sparkles, Terminal } from 'lucide-react';
 import { BACKEND_CATALOG } from './agentBackendCatalog.generated';
+import { BACKEND_BRAND_MARKS } from '@/components/visual/backendBrandMarks';
+import { brandMarkIcon } from '@/components/visual/BrandMarkIcon';
 
 type BackendDescriptor = (typeof BACKEND_CATALOG)[number];
 export type AgentBackendId = BackendDescriptor['id'];
@@ -12,6 +14,8 @@ type BackendCapabilities = { [K in keyof BackendDescriptor['capabilities']]: boo
 export type BackendUiMeta = {
   id: BackendId;
   label: string;
+  /** The name the store gives this backend's built-in Agent. */
+  builtinAgentName: string;
   defaultCli: string | null;
   defaultEnabled: boolean;
   /** Part of the platform: always enabled, with no switch. */
@@ -23,12 +27,17 @@ export type BackendUiMeta = {
   publisher: string;
   accent: 'mint' | 'cyan' | 'violet';
   Icon: React.ComponentType<{ size?: number; className?: string }>;
+  /** What stands for one of this backend's Agents (Agent lists, chat heads): its persona
+   *  where it has one, otherwise the generic Agent glyph. */
+  Avatar: React.ComponentType<{ size?: number; className?: string }>;
   initials: string;
   blockCls: string;
   glyphCls: string;
   tileCls: string;
   iconCls: string;
 };
+
+const VibeyMark = brandMarkIcon(BACKEND_BRAND_MARKS.avibe, 'VibeyMark');
 
 // Presentation only. Membership, defaults and capabilities come from Python.
 const BACKEND_VISUALS = {
@@ -37,6 +46,7 @@ const BACKEND_VISUALS = {
     publisher: 'opencode.ai',
     accent: 'cyan',
     Icon: Terminal,
+    Avatar: Bot,
     initials: 'OP',
     blockCls: 'border-mint/40 bg-mint/[0.10] text-mint-ink',
     glyphCls: 'text-mint-ink',
@@ -48,6 +58,7 @@ const BACKEND_VISUALS = {
     publisher: 'Anthropic',
     accent: 'mint',
     Icon: Sparkles,
+    Avatar: Bot,
     initials: 'CL',
     blockCls: 'border-[rgba(217,119,87,0.4)] bg-[rgba(217,119,87,0.10)] text-[#e8a87c]',
     glyphCls: 'text-cyan-ink',
@@ -59,6 +70,7 @@ const BACKEND_VISUALS = {
     publisher: 'OpenAI',
     accent: 'violet',
     Icon: Bot,
+    Avatar: Bot,
     initials: 'CO',
     blockCls: 'border-violet/40 bg-violet/[0.10] text-violet-ink',
     glyphCls: 'text-violet-ink',
@@ -69,20 +81,22 @@ const BACKEND_VISUALS = {
     nativeOrder: 3,
     publisher: 'Avibe',
     accent: 'mint',
-    Icon: Bot,
-    initials: 'AV',
+    Icon: VibeyMark,
+    Avatar: VibeyMark,
+    initials: 'VB',
     blockCls: 'border-mint/40 bg-mint/[0.10] text-mint-ink',
     glyphCls: 'text-mint-ink',
     tileCls: 'bg-mint-soft',
     iconCls: 'text-mint-ink',
   },
 } as const satisfies Record<AgentBackendId, Pick<BackendUiMeta,
-  'nativeOrder' | 'publisher' | 'accent' | 'Icon' | 'initials' | 'blockCls' | 'glyphCls' | 'tileCls' | 'iconCls'>>;
+  'nativeOrder' | 'publisher' | 'accent' | 'Icon' | 'Avatar' | 'initials' | 'blockCls' | 'glyphCls' | 'tileCls' | 'iconCls'>>;
 
 export const AGENT_BACKENDS = BACKEND_CATALOG.map((backend) => ({
   ...BACKEND_VISUALS[backend.id],
   id: backend.id,
   label: backend.display_name,
+  builtinAgentName: backend.builtin_agent_name,
   defaultCli: backend.default_cli,
   defaultEnabled: backend.default_enabled,
   builtin: backend.builtin,
@@ -131,6 +145,7 @@ export function getBackendUiMeta(id: string): BackendUiMeta {
     AGENT_BACKEND_BY_ID[id] || {
       id,
       label: id.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase()),
+      builtinAgentName: id,
       defaultCli: null,
       defaultEnabled: false,
       builtin: false,
@@ -147,6 +162,7 @@ export function getBackendUiMeta(id: string): BackendUiMeta {
       publisher: '',
       accent: 'mint',
       Icon: Bot,
+      Avatar: Bot,
       initials: id.slice(0, 2).toUpperCase(),
       blockCls: 'border-border bg-surface-2 text-foreground',
       glyphCls: 'text-muted',

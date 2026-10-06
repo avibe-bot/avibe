@@ -887,7 +887,7 @@
           "turnOn": "Turn model gateway on",
           "turnOff": "Turn model gateway off",
           "stopBlocked": "Switch {{names}} to Direct before turning the model gateway off",
-          "stopAvibeBlocked": "Avibe models use the model gateway; remove them before turning it off.",
+          "stopAvibeBlocked": "{{name}}'s models use the model gateway; remove them before turning it off.",
           "stopUnavailable": "Agent routing status is unavailable; the model gateway cannot be turned off yet"
         },
         "closed": {
@@ -4025,7 +4025,7 @@
     "detail": {
       "enabled": "Enabled",
       "enabledHint": "Disabling keeps the agent in the registry but excludes it from new sessions; running sessions are unaffected.",
-      "alwaysEnabledHint": "The built-in Avibe Agent is always enabled. You can still adjust its model, effort, and system prompt.",
+      "alwaysEnabledHint": "{{name}} is built in and always enabled. You can still adjust its model, effort, and system prompt.",
       "defaultTitle": "Default agent",
       "defaultHint": "New chats and IM messages without an explicit agent route to this one.",
       "defaultActive": "Default",

@@ -1,4 +1,4 @@
-"""User-facing copy for Avibe Agent failures.
+"""User-facing copy for the built-in agent's failures, named by the catalog.
 
 ``AgentError.kind`` is the engine's stable discriminator (loop-control.md section 6);
 ``AgentError.message`` is diagnostic detail and is never shown as display copy.
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from modules.agents.catalog import display_name_for_backend
 from vibe.i18n import t as i18n_t
 
 # Engine and provider kinds (C-2 error classification, C-3 run outcomes) with their own copy.
@@ -50,4 +51,4 @@ def error_key(kind: Optional[str], *, reason: Optional[str] = None) -> str:
 
 
 def error_text(kind: Optional[str], lang: str, *, reason: Optional[str] = None) -> str:
-    return i18n_t(error_key(kind, reason=reason), lang)
+    return i18n_t(error_key(kind, reason=reason), lang, backend=display_name_for_backend("avibe"))

@@ -258,7 +258,7 @@ describe('AgentsPage contextual selection', () => {
     expect(within(row('codex')).queryByText('settings.models.gateway.agentIssues.modelMissing')).toBeNull();
   });
 
-  it('lists, selects and edits an Avibe Agent without a native import option or CLI detail', async () => {
+  it('lists, selects and edits a Vibey Agent without a native import option or CLI detail', async () => {
     const agent = { ...brief('local-helper', 'before'), backend: 'avibe' };
     const changed = { ...agent, description: 'updated in place' };
     const updateVibeAgent = vi.fn().mockResolvedValue(fullAgent(changed, 'prompt'));
@@ -268,7 +268,7 @@ describe('AgentsPage contextual selection', () => {
       undefined, undefined, updateVibeAgent,
     );
     renderPage(api, { canManageAgents: true, entry: '/agents?agent=local-helper' });
-    expect(await screen.findByText('Avibe Agent')).toBeTruthy();
+    expect(await screen.findByText('Vibey')).toBeTruthy();
     const row = screen.getAllByText('local-helper').find((node) => node.closest('button'))?.closest('button');
     expect(row).toBeTruthy();
     fireEvent.click(row!);
@@ -276,10 +276,10 @@ describe('AgentsPage contextual selection', () => {
     fireEvent.change(description, { target: { value: 'updated in place' } });
     fireEvent.blur(description);
     await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('local-helper', { description: 'updated in place' }));
-    expect(screen.queryByText(/Avibe Agent CLI/)).toBeNull();
-    expect(screen.getByText('agents.detail.backendName:{"backend":"Avibe Agent"}')).toBeTruthy();
+    expect(screen.queryByText(/Vibey CLI/)).toBeNull();
+    expect(screen.getByText('agents.detail.backendName:{"backend":"Vibey"}')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'agents.import' }));
-    expect(screen.queryByText('agents.importFrom:{"backend":"Avibe Agent"}')).toBeNull();
+    expect(screen.queryByText('agents.importFrom:{"backend":"Vibey"}')).toBeNull();
     // Display names are not translation-key suffixes: a catalog brand change
     // must keep the native import actions translated and correctly scoped.
     for (const label of ['Claude Code', 'OpenCode', 'Codex']) {
@@ -287,12 +287,12 @@ describe('AgentsPage contextual selection', () => {
     }
   });
 
-  // The built-in Avibe Agent is part of the platform: model, effort and prompt
-  // stay editable, but nothing turns it off. Another Avibe Agent is ordinary.
+  // The built-in Vibey is part of the platform: model, effort and prompt
+  // stay editable, but nothing turns it off. Another Agent on its backend is ordinary.
   it.each([
-    ['avibe', 'builtin', { builtin: true, builtin_default: true, lock_delete: true }, true],
+    ['vibey', 'builtin', { builtin: true, builtin_default: true, lock_delete: true }, true],
     ['local-helper', 'custom', {}, false],
-  ])('locks the enable switch of %s only when it is the built-in Avibe Agent', async (name, source, metadata, locked) => {
+  ])('locks the enable switch of %s only when it is the built-in Vibey', async (name, source, metadata, locked) => {
     const agent = { ...brief(name, 'avibe agent'), backend: 'avibe', source };
     const full = fullAgent(agent, 'prompt');
     const api = makeApi(
@@ -303,7 +303,8 @@ describe('AgentsPage contextual selection', () => {
 
     const toggle = await screen.findByRole('switch', { name: 'agents.detail.enabled' });
     expect(toggle.hasAttribute('disabled')).toBe(locked);
-    expect(Boolean(screen.queryByText('agents.detail.alwaysEnabledHint'))).toBe(locked);
+    // The hint names the built-in by the catalog's display name.
+    expect(Boolean(screen.queryByText('agents.detail.alwaysEnabledHint:{"name":"Vibey"}'))).toBe(locked);
   });
 
   it('opens the Agent named by ?agent= instead of the default one', async () => {

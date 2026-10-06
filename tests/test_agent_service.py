@@ -369,9 +369,9 @@ def test_model_selection_is_required_before_any_backend_dispatch(backend, model,
 @pytest.mark.parametrize(
     ("backend", "hub_switch", "gateway_enabled", "refusal"),
     [
-        ("avibe", "1", False, "The model gateway is off, so Avibe Agent has no model to run on"),
+        ("avibe", "1", False, "The model gateway is off, so Vibey has no model to run on"),
         ("avibe", "1", True, "Select a model"),
-        ("avibe", "0", True, "Model Hub is disabled on this instance, so Avibe Agent has no model to run on"),
+        ("avibe", "0", True, "Model Hub is disabled on this instance, so Vibey has no model to run on"),
         # A native backend runs direct without the Hub: choosing a model is still the fix.
         ("codex", "0", True, "Select a model"),
     ],

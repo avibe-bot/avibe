@@ -134,7 +134,7 @@ const highlighted = (label: string) => {
 };
 
 const openMenu = async (user: ReturnType<typeof userEvent.setup>) => {
-  await user.click(screen.getByRole('button', { name: /claude/ }));
+  await user.click(screen.getByRole('button', { name: /claude/i }));
   await screen.findByText('chat.picker.model');
 };
 
