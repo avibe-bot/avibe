@@ -13,7 +13,8 @@ from config.v2_compat import to_app_config
 from config.v2_settings import RoutingSettings
 from core.controller import Controller
 from core.services.agent_run_target import resolve_agent_run_target
-from core.vibe_agents import VibeAgentStore
+from core.vibe_agents import BUILTIN_DEFAULT_AGENT_METADATA, VibeAgentStore, is_always_enabled_agent
+from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from modules.im import MessageContext
 from tests.test_api_save_config_merge import _full_config_payload
 from vibe import api
@@ -23,33 +24,78 @@ RELEASED = json.loads((Path(__file__).parent / "fixtures/agent_registration/rele
 
 
 @pytest.mark.parametrize("fixture", RELEASED, ids=lambda fixture: fixture["name"])
-def test_released_config_shapes_preserve_native_settings_and_keep_avibe_off(tmp_path, fixture):
-    """A new optional backend must not change released config values or enable itself."""
+def test_released_config_shapes_preserve_native_settings(tmp_path, fixture):
+    """A new backend must not change released config values."""
     payload = _full_config_payload()
     payload["agents"] = fixture["agents"]
     path = tmp_path / "config.json"
     path.write_text(json.dumps(payload))
     loaded = V2Config.load(path, persist_migrations=False)
     for config in (loaded, V2Config.from_payload(api.config_to_payload(loaded, include_secrets=True))):
-        assert config.agents.avibe.enabled is False
-        assert config.agents.avibe.__dict__ == {"enabled": False}
         for backend, expected in fixture["preserved"].items():
             actual = getattr(config.agents, backend).__dict__
             assert {field: actual[field] for field in expected} == expected
 
 
-@pytest.mark.parametrize("invalid", [None, [], "invalid", {"enabled": "false"}, {"enabled": 1}])
-def test_invalid_optional_avibe_config_recovers_off_without_disabling_native_backends(tmp_path, invalid):
-    """Malformed new optional state must recover locally, not prevent startup."""
+@pytest.mark.parametrize("persisted", [{"enabled": False}, {"enabled": True}, None, "invalid", {"enabled": "false"}])
+def test_a_persisted_avibe_switch_loads_as_on_and_leaves_on_the_next_save(tmp_path, sqlite_db_factory, persisted):
+    """Builds with an Avibe Agent switch wrote ``agents.avibe``; the built-in backend has no switch to honor.
+
+    Such a build also left its built-in Agent disabled while the switch was off.
+    """
     payload = _full_config_payload()
-    payload["agents"]["avibe"] = invalid
+    payload["agents"]["avibe"] = persisted
     path = tmp_path / "config.json"
     path.write_text(json.dumps(payload))
     loaded = V2Config.load(path, persist_migrations=False)
-    assert loaded.agents.avibe.enabled is False
+    assert not loaded.load_warnings
     assert loaded.agents.codex.enabled is True
     assert loaded.agents.opencode.active_turn_timeout_seconds == 7200
-    assert loaded.load_warnings
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.create(
+            name="avibe",
+            backend="avibe",
+            source="builtin",
+            metadata={**BUILTIN_DEFAULT_AGENT_METADATA, "backend": "avibe", "backend_enabled": False},
+            enabled=False,
+        )
+        store.ensure_builtin_default_agents(api._enabled_agent_backends_from_config(loaded))
+        assert store.get("avibe").enabled
+        assert store.get_default_agent_name() == "opencode"
+    finally:
+        store.close()
+
+    loaded.save(path)
+    saved = json.loads(path.read_text())
+    assert "avibe" not in saved["agents"]
+    assert saved["agents"]["codex"]["enabled"] is True
+
+
+@pytest.mark.parametrize("earlier_row", ["absent", "disabled"])
+@pytest.mark.parametrize("enabled_backends", [[], ["claude"], list(NATIVE_CLI_BACKENDS)])
+def test_the_startup_sync_leaves_the_built_in_avibe_agent_enabled(tmp_path, sqlite_db_factory, earlier_row, enabled_backends):
+    """Controller startup runs this sync first; Model Hub then seeds the Avibe supply onto that Agent row.
+
+    Whatever backends the caller read from config, and whatever an earlier build left behind, the row exists
+    and is enabled once the sync returns.
+    """
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        if earlier_row == "disabled":
+            store.create(
+                name="avibe",
+                backend="avibe",
+                source="builtin",
+                metadata={**BUILTIN_DEFAULT_AGENT_METADATA, "backend": "avibe", "backend_enabled": True},
+                enabled=False,
+            )
+        store.ensure_builtin_default_agents(enabled_backends)
+        avibe = store.get("avibe")
+        assert avibe is not None and avibe.enabled and is_always_enabled_agent(avibe)
+    finally:
+        store.close()
 
 
 def test_avibe_agent_can_be_created_listed_selected_and_routed(tmp_path, sqlite_db_factory):
@@ -64,7 +110,6 @@ def test_avibe_agent_can_be_created_listed_selected_and_routed(tmp_path, sqlite_
             ("worker-工作助手", "avibe")
         ]
         config = V2Config.from_payload(_full_config_payload())
-        config.agents.avibe.enabled = True
         controller = Controller.__new__(Controller)
         controller.primary_platform = "slack"
         controller.sqlite_engine = store.engine
@@ -81,7 +126,6 @@ def test_avibe_agent_can_be_created_listed_selected_and_routed(tmp_path, sqlite_
         assert target.agent_backend == "avibe"
         assert target.agent_name == "worker-工作助手"
         assert target.model == "team-model"
-        assert api._enabled_agent_backends_from_config(config)[-1] == "avibe"
     finally:
         store.close()
 
@@ -111,11 +155,10 @@ def test_avibe_native_operations_are_rejected_before_any_native_probe(monkeypatc
 
 
 def test_native_auth_refresh_preserves_enabled_avibe_builtin(tmp_path, sqlite_db_factory, monkeypatch):
-    """Native auth refresh synchronizes all built-ins; CLI-only fixtures miss cross-backend disablement."""
+    """Native auth refresh synchronizes all built-ins from config, which has no section for the built-in backend."""
     from core.agent_auth_service import AgentAuthService
 
     config = V2Config.from_payload(_full_config_payload())
-    config.agents.avibe.enabled = True
     monkeypatch.setattr(V2Config, "load", lambda: config)
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
     try:

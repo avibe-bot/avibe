@@ -51,10 +51,10 @@ const mountRuntime = async () => {
 };
 
 describe('persisted backend install paths', () => {
-  it('keeps an in-process backend disabled by default and rejects CLI work at the hook boundary', async () => {
+  it('reads the built-in backend as enabled without a config section and rejects CLI work at the hook boundary', async () => {
     const hook = renderHook(() => useBackendRuntime({ backend: 'avibe' }));
     await waitFor(() => expect(hook.result.current.loaded).toBe(true));
-    expect(hook.result.current.enabled).toBe(false);
+    expect(hook.result.current.enabled).toBe(true);
     expect(hook.result.current.cliPath).toBe('');
     await act(async () => {
       await hook.result.current.detect();

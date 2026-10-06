@@ -52,7 +52,9 @@ from core.handlers.model_hub.service import (
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.native_dispatch_phase import mark_prewrite_recovery_required
+from modules.agents.catalog import display_name_for_backend
 from vibe.codex_config import format_toml_basic_string
+from vibe.i18n import t
 from vibe.opencode_config import managed_opencode_runtime_config_content
 
 
@@ -356,6 +358,22 @@ def launch_refusal_copy(controller: Any, error: BaseException) -> str | None:
     if outcome is None:
         return None
     return render_turn_outcome_copy(outcome, _language(controller))
+
+
+def model_gateway_off(controller: Any, backend: str) -> bool:
+    """Whether ``backend``'s models run through the gateway the user turned off in Models."""
+
+    store = getattr(getattr(controller, "model_hub_service", None), "store", None)
+    if store is None:
+        return False
+    config = store.load()
+    return not config.enabled and config.agents[backend].mode == "hub"
+
+
+def model_gateway_off_copy(backend: str, language: str) -> str:
+    """The copy a turn shows when ``model_gateway_off``: the cause, and where to fix it."""
+
+    return t("errors.modelGatewayOff", language, backend=display_name_for_backend(backend))
 
 
 def _hold_unrunnable_input(context: Any, error: ModelHubError) -> None:

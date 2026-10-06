@@ -527,8 +527,7 @@ def test_gather_routing_modal_data_only_fetches_current_backend() -> None:
         data = asyncio.run(handler._gather_routing_modal_data(context))
 
     assert data.current_backend == "opencode"
-    assert set(data.registered_backends) == set(AGENT_BACKENDS)
-    assert data.registered_backends[0] == "opencode"
+    assert data.registered_backends == list(AGENT_BACKENDS)  # Catalog order: the built-in Avibe Agent first.
     assert server.calls == [
         "current_server",
         "agents:/tmp/workspace",
@@ -597,8 +596,7 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
     ):
         data = asyncio.run(handler._gather_routing_modal_data(context, include_all_backend_data=True))
 
-    assert set(data.registered_backends) == set(AGENT_BACKENDS)
-    assert data.registered_backends[0] == "opencode"
+    assert data.registered_backends == list(AGENT_BACKENDS)
     assert data.opencode_agents == [{"name": "build"}]
     assert data.claude_agents == [{"id": "reviewer"}]
     assert data.claude_models == ["claude-sonnet-4-6"]
@@ -624,7 +622,7 @@ def test_gather_routing_modal_data_hides_disabled_backends() -> None:
 
     data = asyncio.run(handler._gather_routing_modal_data(context))
 
-    assert data.registered_backends == ["opencode", "avibe"]
+    assert data.registered_backends == ["avibe", "opencode"]
     assert server.calls == [
         "current_server",
         "agents:/tmp/workspace",
@@ -646,8 +644,9 @@ def test_gather_routing_modal_data_falls_back_to_visible_backend_when_current_is
     ):
         data = asyncio.run(handler._gather_routing_modal_data(context))
 
+    # Listed first, the built-in backend is still not the fallback while another is enabled.
     assert data.current_backend == "opencode"
-    assert data.registered_backends == ["opencode", "avibe", "codex"]
+    assert data.registered_backends == ["avibe", "opencode", "codex"]
     assert data.opencode_agents == [{"name": "build"}]
     assert server.calls == [
         "current_server",

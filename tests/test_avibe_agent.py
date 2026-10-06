@@ -1318,20 +1318,31 @@ async def test_a_failure_while_settling_reaches_the_shared_owner(engine, session
         await harness.agent.handle_message(harness.request("hello"))
 
 
-async def test_a_refused_model_route_fails_before_the_input_is_written(engine, session, tmp_path, published) -> None:
+@pytest.mark.parametrize("gateway_enabled", [True, False])
+async def test_a_refused_model_route_fails_before_the_input_is_written(
+    engine, session, tmp_path, published, gateway_enabled
+) -> None:
     harness = _Harness(engine, tmp_path, "telegram", [])
 
     async def refuse(*_args, **_kwargs):
         raise RuntimeError("no source serves this model")
 
     harness.controller.model_hub_runtime = SimpleNamespace(resolve=refuse)
+    hub = SimpleNamespace(enabled=gateway_enabled, agents={"avibe": SimpleNamespace(mode="hub")})
+    harness.controller.model_hub_service = SimpleNamespace(store=SimpleNamespace(load=lambda: hub))
     request = harness.request("hello")
     await harness.agent.handle_message(request)
 
     assert harness.controller.started == []
     assert await harness.context_rows() == []
     assert harness.provider.requests == []
-    assert harness.controller.im_client.sent == [f"❌ {i18n_t('avibeAgent.error.generic', 'en')}"]
+    # Every route runs through the gateway: with it off, the copy names it and where to turn it back on.
+    expected = (
+        i18n_t("avibeAgent.error.generic", "en")
+        if gateway_enabled
+        else i18n_t("errors.modelGatewayOff", "en", backend="Avibe Agent")
+    )
+    assert harness.controller.im_client.sent == [f"❌ {expected}"]
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [True]
 
 
@@ -1537,48 +1548,6 @@ async def test_a_stop_after_the_final_reply_committed_loses_the_race(
     assert harness.controller.terminals[-1] == {
         "turn": _turn(request.context), "is_error": False, "settled_by": "terminal_result"
     }
-
-
-async def test_the_config_refresh_registers_and_retires_the_backend(engine, monkeypatch) -> None:
-    from config.v2_compat import to_app_config
-    from config.v2_config import V2Config
-    from core.agent_auth_service import AgentAuthService
-
-    agents: dict[str, Any] = {}
-    recovered: list[AvibeAgent] = []
-
-    async def recover(agent) -> list[str]:
-        recovered.append(agent)
-        return []
-
-    # A backend enabled after startup missed the startup recovery (T2, J5); it runs on registration.
-    monkeypatch.setattr(AvibeAgent, "recover_runtime_state", recover)
-
-    async def refresh_runtime_config(name, runtime_config) -> bool:
-        return False
-
-    service = SimpleNamespace(
-        agents=agents,
-        register=lambda agent: agents.__setitem__(agent.name, agent),
-        refresh_runtime_config=refresh_runtime_config,
-        runtime_turn_tokens_for_backend=lambda _backend: {},
-        release_runtime_turn_tokens=lambda _tokens: None,
-    )
-    config = V2Config.default()
-    from modules.agents.avibe.recovery import AvibeRecovery
-
-    controller = SimpleNamespace(
-        agent_service=service, im_client=_IMClient(), settings_manager=_SettingsManager(), config=None
-    )
-    controller.avibe_recovery = AvibeRecovery(controller)
-    owner = AgentAuthService(controller)
-    for enabled in (True, False, True):
-        config.agents.avibe.enabled = enabled
-        config.save()
-        controller.config = to_app_config(config)
-        await owner._apply_backend_runtime_refresh("avibe")
-        assert isinstance(agents.get("avibe"), AvibeAgent) is enabled
-    assert len(recovered) == 2 and recovered[-1] is agents["avibe"]
 
 
 async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, session, tmp_path, published) -> None:
@@ -2152,48 +2121,18 @@ async def test_resume_settles_a_reused_call_id_from_the_job_its_own_call_started
         await suite.jobs.kill(current)
 
 
-def _disabled_controller() -> SimpleNamespace:
-    """A controller with ``agents.avibe`` disabled: no registered adapter, and its single recovery owner."""
+def _controller_with(agent: AvibeAgent) -> SimpleNamespace:
+    """A controller with the registered adapter and its single recovery owner."""
     from modules.agents.avibe.recovery import AvibeRecovery
 
     controller = SimpleNamespace(
-        agent_service=SimpleNamespace(agents={}),
-        config=SimpleNamespace(avibe=None, platform="avibe", language="en"),
+        agent_service=SimpleNamespace(agents={"avibe": agent}),
+        config=SimpleNamespace(platform="avibe", language="en"),
         im_client=None,
         settings_manager=SimpleNamespace(),
     )
     controller.avibe_recovery = AvibeRecovery(controller)
     return controller
-
-
-async def test_startup_hands_a_foreground_job_to_its_watch_with_the_backend_disabled(
-    engine, session, tmp_path, published
-) -> None:
-    from core.controller import Controller
-    from core.watches import ManagedWatchStore
-
-    harness = _Harness(engine, tmp_path, "avibe", [], suite=local_tool_suite())
-    request = harness.request("run it")
-    harness.controller._native_start(request.context)
-    await harness.agent.store.consume_input(
-        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run it"),))
-    )
-    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "sleep 30"})
-    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
-    suite = harness.suite
-    job_id = await _real_job(suite, "sleep 30", call_id="call_bash", cwd=tmp_path)
-    # The process restarts with agents.avibe disabled: no adapter is registered.
-    controller = _disabled_controller()
-    try:
-        await Controller._recover_avibe_agent_runtime_state(controller)
-
-        watch_id = ManagedWatchStore().find_job_watch(job_id)
-        assert watch_id is not None and not controller.avibe_recovery.retrying
-        result = (await harness.context_rows())[-1]
-        assert result.kind == "tool_result" and f"now Watch {watch_id}" in result.message.content[0].text
-    finally:
-        if suite.jobs.status(job_id).state == "running":
-            await suite.jobs.kill(job_id)
 
 
 async def _two_sessions_with_open_calls(engine, tmp_path, suite) -> tuple[_Harness, str, str]:
@@ -2247,18 +2186,14 @@ async def _results(engine, session_id: str) -> list[str]:
         ).scalars())
 
 
-@pytest.mark.parametrize("registered", [True, False])
 async def test_recovery_retries_a_session_it_could_not_settle(
-    engine, session, tmp_path, published, monkeypatch, registered
+    engine, session, tmp_path, published, monkeypatch
 ) -> None:
     from core.watches import ManagedWatchStore
 
     _hand_over_failing_once(monkeypatch)
     harness, running, _exited = await _two_sessions_with_open_calls(engine, tmp_path, local_tool_suite())
-    controller = _disabled_controller()
-    if registered:
-        controller.agent_service.agents["avibe"] = harness.new_agent()
-    recovery = controller.avibe_recovery
+    recovery = _controller_with(harness.new_agent()).avibe_recovery
     try:
         # The first pass settles ses_b and reports SESSION, never success over a failure.
         assert await recovery.start() == [SESSION]
@@ -2306,52 +2241,19 @@ async def test_two_recovery_passes_racing_on_one_open_call_settle_it_once(engine
     assert len(renders) == 2 and len(results) == 1
 
 
-async def test_enabling_the_backend_hands_recovery_to_the_registered_adapter(
-    engine, session, tmp_path, published, monkeypatch
-) -> None:
-    import modules.agents.avibe as avibe_module
-    import modules.agents.avibe.recovery as recovery_module
-    from config.v2_config import AvibeAgentConfig
+async def test_applying_saved_config_never_retires_the_built_in_backend(engine, tmp_path) -> None:
+    """It has no config section, which for an optional backend reads as disabled."""
     from core.agent_auth_service import AgentAuthService
-    from core.controller import Controller
-    from core.watches import ManagedWatchStore
-    from modules.agents.service import AgentService
 
-    calls = _hand_over_failing_once(monkeypatch)
-    # The detached retry would wait long; live registration must not leave it beside the new owner.
-    monkeypatch.setattr(recovery_module, "RETRY_DELAYS_S", (60.0,))
-    harness, running, _exited = await _two_sessions_with_open_calls(engine, tmp_path, local_tool_suite())
-    controller = _disabled_controller()
-    controller.agent_service = AgentService(controller)
+    harness = _Harness(engine, tmp_path, "avibe", [])
+    controller = _controller_with(harness.agent)
     auth = AgentAuthService(controller)
+    auth._load_backend_runtime_config = lambda _backend: None
     auth._sync_builtin_default_agents = lambda: None
-    monkeypatch.setattr(avibe_module, "AvibeAgent", lambda _controller: harness.new_agent())
-    try:
-        # Startup with agents.avibe disabled: SESSION's hand-over fails and a retry is pending.
-        await Controller._recover_avibe_agent_runtime_state(controller)
-        # agents.avibe is saved enabled: applying it registers an adapter and recovers on it.
-        auth._load_backend_runtime_config = lambda _backend: AvibeAgentConfig(enabled=True)
-        await auth.renew_backend_runtime("avibe", config_save=True)
 
-        # One owner: the registered adapter settled everything, and no detached retry remains.
-        assert "avibe" in controller.agent_service.agents
-        pending = [task for task in asyncio.all_tasks() if task.get_name().startswith("avibe-agent-recovery")]
-        assert [task for task in pending if not task.done()] == []
-        assert ManagedWatchStore().find_job_watch(running) is not None
-        assert len(await _results(engine, SESSION)) == 1 and calls.count(running) == 2
+    await auth.renew_backend_runtime("avibe", config_save=True)
 
-        # Saved disabled again: the adapter leaves routing and its stop completes, leaving
-        # no teardown for the idle sweep to retry.
-        auth._load_backend_runtime_config = lambda _backend: None
-        await auth.renew_backend_runtime("avibe", config_save=True)
-        assert "avibe" not in controller.agent_service.agents and controller.config.avibe is None
-        assert controller.agent_service._pending_operations == {}
-    finally:
-        await controller.avibe_recovery.stop()
-        for task in asyncio.all_tasks():
-            if task.get_name().startswith("avibe-agent-recovery"):
-                task.cancel()
-        await harness.suite.jobs.kill(running)
+    assert controller.agent_service.agents["avibe"] is harness.agent
 
 
 async def test_recovery_admits_a_returned_input_whose_admission_failed(engine, session, tmp_path, published) -> None:

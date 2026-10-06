@@ -586,6 +586,8 @@
       "codexDescription": "OpenAI Agent · 通过 ChatGPT 登录或 OPENAI_API_KEY",
       "avibeDescription": "内置 Agent · 在模型中枢管理模型和路由",
       "backToBackends": "返回后端列表",
+      "gatewayOff": "模型网关已关闭，{{name}} 没有可用的模型。",
+      "builtinBadge": "内置",
       "openProviderPage": "配置 Provider",
       "providerOauth": "OAuth(默认)",
       "providerApiKey": "API Key",
@@ -4021,6 +4023,7 @@
     "detail": {
       "enabled": "已启用",
       "enabledHint": "关掉后此 Agent 不会被新会话选用,已运行的会话不受影响",
+      "alwaysEnabledHint": "内置的 Avibe Agent 始终启用，仍可调整模型、Effort 与系统提示词。",
       "defaultTitle": "默认 Agent",
       "defaultHint": "未指定 Agent 的新会话和 IM 消息都会路由到这个 Agent。",
       "defaultActive": "默认",

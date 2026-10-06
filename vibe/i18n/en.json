@@ -6,6 +6,7 @@
   },
   "errors": {
     "agentModelRequired": "Select a model for the {backend} Agent or Session in Avibe before running it.",
+    "modelGatewayOff": "The model gateway is off, so {backend} has no model to run on. Turn it on in Models, then choose a model.",
     "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route."
   },
   "status": {
@@ -390,6 +391,10 @@
       }
     },
     "agentLifecycle": {
+      "agent_always_enabled": {
+        "message": "Agent `{agent}` is the built-in Avibe Agent and is always enabled.",
+        "hint": "You can still change its model, effort, and system prompt."
+      },
       "agent_archived_read_only": {
         "message": "Agent `{agent}` is archived and cannot be edited.",
         "hint": "Archived Agents are read-only and remain available only to existing durable references."

@@ -27,6 +27,8 @@ class AgentBackendDescriptor:
     default_enabled: bool
     latest_probe: tuple[str, str] | None
     capabilities: AgentBackendCapabilities
+    # Part of the platform itself: always enabled, with no switch and no configuration section.
+    builtin: bool = False
 
     @property
     def description_key(self) -> str:
@@ -43,7 +45,24 @@ class AgentBackendDescriptor:
         return payload
 
 
+# Registry order is the order every backend list shows: the built-in Avibe Agent first.
 AGENT_BACKEND_REGISTRY: Final[dict[str, AgentBackendDescriptor]] = {
+    "avibe": AgentBackendDescriptor(
+        id="avibe",
+        display_name="Avibe Agent",
+        config_key="avibe",
+        default_cli=None,
+        default_enabled=True,
+        latest_probe=None,
+        capabilities=AgentBackendCapabilities(
+            supports_cli=False,
+            supports_native_sessions=False,
+            supports_runtime_refresh=False,
+            supports_web_oauth=False,
+            supports_install=False,
+        ),
+        builtin=True,
+    ),
     "opencode": AgentBackendDescriptor(
         id="opencode",
         display_name="OpenCode",
@@ -71,21 +90,6 @@ AGENT_BACKEND_REGISTRY: Final[dict[str, AgentBackendDescriptor]] = {
         latest_probe=("npm", "@openai/codex"),
         capabilities=AgentBackendCapabilities(),
     ),
-    "avibe": AgentBackendDescriptor(
-        id="avibe",
-        display_name="Avibe Agent",
-        config_key="avibe",
-        default_cli=None,
-        default_enabled=False,
-        latest_probe=None,
-        capabilities=AgentBackendCapabilities(
-            supports_cli=False,
-            supports_native_sessions=False,
-            supports_runtime_refresh=False,
-            supports_web_oauth=False,
-            supports_install=False,
-        ),
-    ),
 }
 
 AGENT_BACKENDS: Final[tuple[str, ...]] = tuple(AGENT_BACKEND_REGISTRY)
@@ -93,6 +97,9 @@ NATIVE_CLI_BACKENDS: Final[tuple[str, ...]] = tuple(
     descriptor.id
     for descriptor in AGENT_BACKEND_REGISTRY.values()
     if descriptor.capabilities.supports_cli
+)
+BUILTIN_AGENT_BACKENDS: Final[tuple[str, ...]] = tuple(
+    descriptor.id for descriptor in AGENT_BACKEND_REGISTRY.values() if descriptor.builtin
 )
 DEFAULT_AGENT_BACKEND: Final[str] = "opencode"
 RUNTIME_REFRESH_BACKENDS: Final[frozenset[str]] = frozenset(
@@ -142,6 +149,11 @@ def default_cli_for_backend(name: str) -> str | None:
 def default_enabled_for_backend(name: str) -> bool:
     """Return whether *name* is enabled by default."""
     return get_agent_backend_descriptor(name).default_enabled
+
+
+def is_builtin_backend(name: str) -> bool:
+    """Return whether *name* is a built-in backend, which is always enabled."""
+    return name in BUILTIN_AGENT_BACKENDS
 
 
 def display_name_for_backend(name: str) -> str:

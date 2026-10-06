@@ -218,7 +218,6 @@ def default_config(spec: TenantSpec) -> dict:
             "opencode": {"enabled": "opencode" in enabled, "cli_path": "opencode", "error_retry_limit": 1},
             "claude": {"enabled": "claude" in enabled, "cli_path": "claude"},
             "codex": {"enabled": "codex" in enabled, "cli_path": "codex"},
-            "avibe": {"enabled": "avibe" in enabled},
         },
         "gateway": None,
         "ui": {"setup_host": "0.0.0.0", "setup_port": spec.ui_port, "open_browser": False},

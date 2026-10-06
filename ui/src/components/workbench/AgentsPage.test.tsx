@@ -287,6 +287,25 @@ describe('AgentsPage contextual selection', () => {
     }
   });
 
+  // The built-in Avibe Agent is part of the platform: model, effort and prompt
+  // stay editable, but nothing turns it off. Another Avibe Agent is ordinary.
+  it.each([
+    ['avibe', 'builtin', { builtin: true, builtin_default: true, lock_delete: true }, true],
+    ['local-helper', 'custom', {}, false],
+  ])('locks the enable switch of %s only when it is the built-in Avibe Agent', async (name, source, metadata, locked) => {
+    const agent = { ...brief(name, 'avibe agent'), backend: 'avibe', source };
+    const full = fullAgent(agent, 'prompt');
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(agent)),
+      vi.fn().mockResolvedValue({ ...full, agent: { ...full.agent, metadata } }),
+    );
+    renderPage(api, { canManageAgents: true, entry: `/agents?agent=${name}` });
+
+    const toggle = await screen.findByRole('switch', { name: 'agents.detail.enabled' });
+    expect(toggle.hasAttribute('disabled')).toBe(locked);
+    expect(Boolean(screen.queryByText('agents.detail.alwaysEnabledHint'))).toBe(locked);
+  });
+
   it('opens the Agent named by ?agent= instead of the default one', async () => {
     const agentA = brief('agent-a', 'A');
     const agentB = brief('agent-b', 'B');

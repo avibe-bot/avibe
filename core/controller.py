@@ -733,6 +733,7 @@ class Controller:
 
     def _init_agents(self):
         from core.session_activities import SessionActivityRegistry
+        from modules.agents.avibe import AvibeAgent
         from modules.agents.claude_agent import ClaudeAgent
         from modules.agents.codex import CodexAgent
         from modules.agents.opencode import OpenCodeAgent
@@ -759,14 +760,8 @@ class Controller:
                 self.agent_service.register(OpenCodeAgent(self, self.config.opencode))
             except Exception as e:
                 logger.error(f"Failed to initialize OpenCode agent: {e}")
-        avibe_config = getattr(self.config, "avibe", None)
-        if avibe_config is not None and getattr(avibe_config, "enabled", True):
-            try:
-                from modules.agents.avibe import AvibeAgent
-
-                self.agent_service.register(AvibeAgent(self))
-            except Exception as e:
-                logger.error(f"Failed to initialize Avibe Agent: {e}")
+        # Built in: always registered, never unregistered.
+        self.agent_service.register(AvibeAgent(self))
 
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
@@ -1046,8 +1041,6 @@ class Controller:
     async def _recover_avibe_agent_runtime_state(self) -> None:
         """Settle what the previous process left of the Avibe Agent's work (T2, T3 admission, J5).
 
-        Not gated on ``agents.avibe.enabled``: a foreground job the previous process left
-        running must be handed to its Watch even when the backend admits no new Turns.
         ``avibe_recovery`` is the single owner, retrying until every Session has settled.
         """
         await self.avibe_recovery.start()

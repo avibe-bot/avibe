@@ -17,7 +17,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
-from modules.agents.catalog import AGENT_BACKENDS
+from modules.agents.catalog import AGENT_BACKENDS, BUILTIN_AGENT_BACKENDS, is_builtin_backend
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
@@ -102,6 +102,16 @@ class AgentArchivedEditError(ValueError):
     """An archived Agent is read-only on public mutation surfaces."""
 
     code = "agent_archived_read_only"
+
+    def __init__(self, *, agent_name: str) -> None:
+        super().__init__(self.code)
+        self.agent_name = str(agent_name)
+
+
+class AgentAlwaysEnabledError(ValueError):
+    """The built-in Agent of a built-in backend is part of the platform and stays enabled."""
+
+    code = "agent_always_enabled"
 
     def __init__(self, *, agent_name: str) -> None:
         super().__init__(self.code)
@@ -532,8 +542,8 @@ def resolve_effective_default_agent(connection, *, enabled_only: bool = True) ->
 
     if not enabled_only:
         return None
-    row = connection.execute(select(agents).where(agents.c.enabled == 1).order_by(agents.c.name).limit(1)).mappings().first()
-    return VibeAgentStore._from_row(row) if row is not None else None
+    rows = connection.execute(select(agents).where(agents.c.enabled == 1).order_by(agents.c.name)).mappings().all()
+    return min((VibeAgentStore._from_row(row) for row in rows), key=_implicit_default_rank, default=None)
 
 
 # Default routing surfaces -- the instance-wide default Agent and a project's
@@ -596,8 +606,8 @@ def resolve_usable_default_agent(
     )
     candidates = [VibeAgentStore._from_row(row) for row in rows]
     # Builtins first: they are the shape every install has and the one a caller
-    # is most likely to be entitled to.
-    candidates.sort(key=lambda item: 0 if item.source == "builtin" else 1)
+    # is most likely to be entitled to. A built-in backend's Agents still come last.
+    candidates.sort(key=lambda item: (_implicit_default_rank(item), 0 if item.source == "builtin" else 1))
     for candidate in candidates:
         if agent is not None and candidate.id == agent.id:
             continue
@@ -1067,8 +1077,18 @@ class VibeAgentStore:
             if system_prompt is not _UNSET:
                 values["system_prompt"] = _clean_optional(system_prompt)
             if metadata is not _UNSET:
-                values["metadata_json"] = _json_dumps(dict(metadata or {}))
+                metadata = dict(metadata or {})
+                if is_builtin_default_agent(existing):
+                    # The built-in markers belong to the catalog, not to the caller.
+                    metadata.update(
+                        (key, existing.metadata[key])
+                        for key in BUILTIN_DEFAULT_AGENT_METADATA
+                        if key in existing.metadata
+                    )
+                values["metadata_json"] = _json_dumps(metadata)
             if enabled is not _UNSET:
+                if not enabled and is_always_enabled_agent(existing):
+                    raise AgentAlwaysEnabledError(agent_name=existing.name)
                 values["enabled"] = 1 if bool(enabled) else 0
             result = conn.execute(
                 agents.update()
@@ -1682,10 +1702,12 @@ class VibeAgentStore:
         if not is_builtin_default_agent(agent):
             return agent
 
+        always_enabled = is_always_enabled_agent(agent)
+        backend_enabled = bool(backend_enabled) or always_enabled
         previous_backend_enabled = agent.metadata.get(BUILTIN_BACKEND_ENABLED_META_KEY)
-        metadata = {**agent.metadata, BUILTIN_BACKEND_ENABLED_META_KEY: bool(backend_enabled)}
-        should_enable = bool(backend_enabled) and previous_backend_enabled is not True
-        should_disable = not bool(backend_enabled) and agent.enabled
+        metadata = {**agent.metadata, BUILTIN_BACKEND_ENABLED_META_KEY: backend_enabled}
+        should_enable = (backend_enabled and previous_backend_enabled is not True) or (always_enabled and not agent.enabled)
+        should_disable = not backend_enabled and agent.enabled
         updates: dict[str, Any] = {}
         if metadata != agent.metadata:
             updates["metadata"] = metadata
@@ -1707,7 +1729,8 @@ class VibeAgentStore:
     ) -> list[VibeAgent]:
         ensured: list[VibeAgent] = []
         enabled_backends: list[str] = []
-        for backend in backends:
+        # A built-in backend is always enabled, whatever the caller read from config.
+        for backend in (*backends, *BUILTIN_AGENT_BACKENDS):
             normalized_backend = validate_agent_backend(backend)
             if normalized_backend not in enabled_backends:
                 enabled_backends.append(normalized_backend)
@@ -1731,7 +1754,7 @@ class VibeAgentStore:
         enabled_ensured = [agent for agent in ensured if agent.enabled]
         if (default_agent is None or not default_agent.enabled) and enabled_ensured:
             self.set_default_agent_name(
-                enabled_ensured[0].name,
+                min(enabled_ensured, key=_implicit_default_rank).name,
                 user_context=instance_owner_context(),
             )
         return ensured
@@ -1875,6 +1898,20 @@ def parse_agent_file(path: Path, *, backend: str) -> AgentImportCandidate:
 
 def is_builtin_default_agent(agent: VibeAgent) -> bool:
     return bool(agent.metadata.get("builtin_default") or agent.metadata.get("lock_delete"))
+
+
+def is_always_enabled_agent(agent: VibeAgent) -> bool:
+    """The built-in Agent of a built-in backend: model, prompt and effort stay editable, ``enabled`` does not."""
+    return is_builtin_default_agent(agent) and is_builtin_backend(agent.backend)
+
+
+def _implicit_default_rank(agent: VibeAgent) -> int:
+    """Order Agents for a default nobody chose: a built-in backend's Agents come last.
+
+    Making the Avibe Agent the default for new chats is its own decision, so no fallback
+    picks it while another enabled Agent exists.
+    """
+    return 1 if is_builtin_backend(agent.backend) else 0
 
 
 def iter_global_agent_files(source: str) -> list[tuple[Path, str]]:

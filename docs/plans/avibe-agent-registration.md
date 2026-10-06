@@ -1,5 +1,9 @@
 # Avibe Agent registration (C-8)
 
+> Superseded in part by [`avibe-agent-always-on.md`](avibe-agent-always-on.md): the Avibe Agent is the built-in
+> backend, always enabled, and `agents.avibe` no longer exists. The opt-in and disabled-state statements below are
+> this lane's history.
+
 ## Change contract
 
 Avibe Agent is an opt-in, in-process backend. The backend catalog declares the

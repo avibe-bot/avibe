@@ -14,6 +14,8 @@ export type BackendUiMeta = {
   label: string;
   defaultCli: string | null;
   defaultEnabled: boolean;
+  /** Part of the platform: always enabled, with no switch. */
+  builtin: boolean;
   settingsRoute: string;
   descriptionKey: string;
   capabilities: BackendCapabilities;
@@ -32,7 +34,7 @@ export type BackendUiMeta = {
 // Presentation only. Membership, defaults and capabilities come from Python.
 const BACKEND_VISUALS = {
   opencode: {
-    agentOrder: 1,
+    agentOrder: 2,
     nativeOrder: 2,
     publisher: 'opencode.ai',
     accent: 'cyan',
@@ -44,7 +46,7 @@ const BACKEND_VISUALS = {
     iconCls: 'text-violet-ink',
   },
   claude: {
-    agentOrder: 0,
+    agentOrder: 1,
     nativeOrder: 0,
     publisher: 'Anthropic',
     accent: 'mint',
@@ -56,7 +58,7 @@ const BACKEND_VISUALS = {
     iconCls: 'text-cyan-ink',
   },
   codex: {
-    agentOrder: 2,
+    agentOrder: 3,
     nativeOrder: 1,
     publisher: 'OpenAI',
     accent: 'violet',
@@ -68,7 +70,7 @@ const BACKEND_VISUALS = {
     iconCls: 'text-gold-foreground',
   },
   avibe: {
-    agentOrder: 3,
+    agentOrder: 0,
     nativeOrder: 3,
     publisher: 'Avibe',
     accent: 'mint',
@@ -88,6 +90,7 @@ export const AGENT_BACKENDS = BACKEND_CATALOG.map((backend) => ({
   label: backend.display_name,
   defaultCli: backend.default_cli,
   defaultEnabled: backend.default_enabled,
+  builtin: backend.builtin,
   settingsRoute: backend.settings_route,
   descriptionKey: backend.description_key,
   capabilities: backend.capabilities,
@@ -135,6 +138,7 @@ export function getBackendUiMeta(id: string): BackendUiMeta {
       label: id.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase()),
       defaultCli: null,
       defaultEnabled: false,
+      builtin: false,
       settingsRoute: `/settings/backends/${id}`,
       descriptionKey: `settings.backends.${id}Description`,
       capabilities: {

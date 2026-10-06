@@ -8,7 +8,7 @@ import pytest
 
 from core.backend_restart import BackendRestartCoordinator, NativeCredentialLease, NativeMigrationBlockedError
 from core.controller import Controller
-from modules.agents.catalog import AGENT_BACKENDS
+from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from core.run_settlement import SETTLED_BY_BACKEND_DISABLED
 
 
@@ -131,7 +131,7 @@ def test_controller_rejects_unknown_backend_reconcile() -> None:
     controller.backend_restart_coordinator.request_restart.assert_not_awaited()
 
 
-@pytest.mark.parametrize("backend", [backend for backend in AGENT_BACKENDS if backend != "claude"])
+@pytest.mark.parametrize("backend", [backend for backend in NATIVE_CLI_BACKENDS if backend != "claude"])
 def test_application_projection_accepts_disabled_optional_compat_backends(backend):
     """No registered runtime is expected only after its compat section is disabled."""
     from config.v2_compat import to_app_config

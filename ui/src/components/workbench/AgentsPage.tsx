@@ -64,6 +64,7 @@ import {
   type Backend,
 } from '../../lib/backendAccent';
 import { getBackendUiMeta, type NativeCliBackend } from '@/lib/agentBackends';
+import { isBuiltinAgent } from '../onboarding/setupTargets';
 import { modelsApi } from '../settings/models/modelsApi';
 import { agentsWithoutModel } from '../settings/models/supply';
 import { errorMessage } from '@/lib/errorMessage';
@@ -1969,6 +1970,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   // System agents are locked everywhere; remote access locks every agent.
   const locked = isSystemAgent(agent) || !canEdit;
   const system = isSystemAgent(agent);
+  // The built-in Agent of the built-in backend is part of the platform: it stays enabled.
+  const alwaysEnabled = isBuiltinAgent(agent) && getBackendUiMeta(agent.backend).builtin;
   const [name, setName] = useState(agent.name);
   const [renaming, setRenaming] = useState(false);
   const [settingDefault, setSettingDefault] = useState(false);
@@ -2292,14 +2295,16 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
       >
         <div className="flex min-w-0 flex-col gap-0.5">
           <span className="text-[13px] font-bold text-foreground">{t('agents.detail.enabled')}</span>
-          <span className="text-[11px] text-muted">{t('agents.detail.enabledHint')}</span>
+          <span className="text-[11px] text-muted">
+            {t(alwaysEnabled ? 'agents.detail.alwaysEnabledHint' : 'agents.detail.enabledHint')}
+          </span>
         </div>
         <Switch
           checked={agent.enabled}
           onCheckedChange={(next) => {
             consumeBackgroundMutation(onChange({ enabled: next }));
           }}
-          disabled={!canEdit}
+          disabled={!canEdit || alwaysEnabled}
           title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
           label={t('agents.detail.enabled')}
         />

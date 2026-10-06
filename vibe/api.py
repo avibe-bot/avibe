@@ -104,11 +104,13 @@ from vibe import backend_model_catalog
 from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
     AGENT_BACKENDS,
+    BUILTIN_AGENT_BACKENDS,
     NATIVE_CLI_BACKENDS,
     agent_backend_catalog_payload,
     agent_backend_descriptors,
     display_name_for_backend,
     is_agent_backend,
+    is_builtin_backend,
     is_native_cli_backend,
     latest_probe_for_backend,
     supports_runtime_refresh,
@@ -117,6 +119,7 @@ from modules.agents.catalog import (
 )
 from modules.agents.subagent_router import list_codex_subagents
 from core.vibe_agents import (
+    AgentAlwaysEnabledError,
     AgentArchivedEditError,
     AgentArchiveError,
     AgentNameValidationError,
@@ -779,6 +782,19 @@ def _strip_agent_auth_fields(payload: dict) -> dict:
     return {**payload, "agents": cleaned_agents}
 
 
+def _reject_builtin_backend_config(payload: dict) -> None:
+    """A built-in backend has no config section, so a request to set one, such as disabling it, fails."""
+    agents = payload.get("agents")
+    if not isinstance(agents, dict):
+        return
+    for backend in BUILTIN_AGENT_BACKENDS:
+        if backend in agents:
+            raise ValueError(
+                f"{display_name_for_backend(backend)} is built in and always enabled; "
+                f"'agents.{backend}' cannot be configured"
+            )
+
+
 def _strip_preserved_config_secrets(payload: dict) -> dict:
     """Drop redacted secret placeholders from generic config saves.
 
@@ -997,6 +1013,7 @@ def save_config(
     # as a read-only projection here rather than accepting a potentially stale
     # client snapshot.
     payload = {key: value for key, value in payload.items() if key != "model_hub"}
+    _reject_builtin_backend_config(payload)
     payload = _strip_agent_auth_fields(payload)
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)
@@ -1296,7 +1313,6 @@ def config_to_payload(
             "opencode": config.agents.opencode.__dict__,
             "claude": _agent_payload(config.agents.claude.__dict__, include_secrets=include_secrets),
             "codex": _agent_payload(config.agents.codex.__dict__, include_secrets=include_secrets),
-            "avibe": config.agents.avibe.__dict__,
             # Mirror ``V2Config.save`` — avault must be emitted here too, or every
             # UI save (which uses this payload as the deep-merge base) silently
             # resets ``agents.avault.cli_path`` to the dataclass default.
@@ -2181,8 +2197,8 @@ def update_vibe_agent(name: str, payload: dict, *, user_context: Any = None) -> 
             )
         except AgentNameValidationError as exc:
             return _agent_name_validation_error(exc)
-        except AgentArchivedEditError as exc:
-            return _agent_archived_edit_error(exc)
+        except (AgentArchivedEditError, AgentAlwaysEnabledError) as exc:
+            return _agent_lifecycle_error(exc)
         except AgentReferenceRewriteError as exc:
             return _agent_reference_rewrite_error(exc)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
@@ -2204,7 +2220,7 @@ def _agent_name_validation_error(exc: AgentNameValidationError) -> dict:
     }
 
 
-def _agent_archived_edit_error(exc: AgentArchivedEditError) -> dict:
+def _agent_lifecycle_error(exc: AgentArchivedEditError | AgentAlwaysEnabledError) -> dict:
     try:
         lang = V2Config.load().language
     except Exception:
@@ -10055,8 +10071,9 @@ async def get_backend_connection(name: str) -> dict:
     if not is_agent_backend(name):
         return {"ok": False, "error": "unsupported_backend"}
     config = await asyncio.to_thread(load_config)
-    backend_config = getattr(config.agents, name)
-    enabled = bool(backend_config.enabled)
+    builtin = is_builtin_backend(name)
+    backend_config = None if builtin else getattr(config.agents, name)
+    enabled = builtin or bool(backend_config.enabled)
     supply_mode = config.model_hub.agents[name].mode
     native = is_native_cli_backend(name)
     installed = (

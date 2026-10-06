@@ -366,6 +366,33 @@ def test_model_selection_is_required_before_any_backend_dispatch(backend, model,
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("gateway_enabled", "refusal"),
+    [(False, "The model gateway is off, so Avibe Agent has no model to run on"), (True, "Select a model")],
+)
+def test_a_missing_model_behind_the_turned_off_gateway_names_the_gateway(gateway_enabled, refusal):
+    """The Avibe Agent's models come only through the gateway: while it is off, choosing a model is not the fix."""
+
+    async def run():
+        controller = _Controller()
+        hub = SimpleNamespace(enabled=gateway_enabled, agents={"avibe": SimpleNamespace(mode="hub")})
+        controller.model_hub_service = SimpleNamespace(store=SimpleNamespace(load=lambda: hub))
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        agent = _RuntimeAgent()
+        agent.name = "avibe"
+        service.register(agent)
+        request = _request("hello")
+        request.vibe_agent_model = None
+        request.failure_handler = AsyncMock(return_value=True)
+
+        with pytest.raises(ValueError, match=refusal):
+            await service.handle_message("avibe", request)
+        assert agent.started == []
+
+    asyncio.run(run())
+
+
 def test_agent_service_dispatches_runtime_config_refresh() -> None:
     service = AgentService(controller=SimpleNamespace())
     runtime_config = object()

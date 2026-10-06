@@ -8,6 +8,7 @@ import { Button } from '../ui/button';
 import { SettingsResourceRow, ToggleSwitch } from './SettingsPrimitives';
 import { BackendLifecycleChip } from './BackendLifecycleChip';
 import { SettingsPageShell } from './SettingsPageShell';
+import { backendsWithGatewayOff } from './models/featureFlags';
 import { modelsApi } from './models/modelsApi';
 import { agentsWithoutModel } from './models/supply';
 import { useApi } from '@/context/ApiContext';
@@ -16,9 +17,10 @@ import { AGENT_BACKENDS, DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/age
 import { configChanges } from '@/lib/configMutations';
 import { errorMessage } from '@/lib/errorMessage';
 
-// Mirrors design.pen qVHh4 (VR/CM/Backends): three horizontal cards
-// (OpenCode/Claude/Codex). Each card
-// surfaces icon + name/description + status chip + enable toggle + a
+// Mirrors design.pen qVHh4 (VR/CM/Backends): one horizontal card per backend,
+// in catalog order with the built-in Avibe Agent first. Each card
+// surfaces icon + name/description + status chip + enable toggle (a
+// "Built-in" badge instead for the always-enabled backend) + a
 // "Configure" link that drills into the level-2 provider page. CLI path,
 // detect, install, and permission profile live on the provider page now —
 // keep the level-1 page about backend availability, not Agent defaults.
@@ -57,6 +59,7 @@ export const SettingsBackendsPage: React.FC = () => {
 
   const [loaded, setLoaded] = useState(false);
   const [agents, setAgents] = useState<Record<string, AgentState>>(DEFAULT_AGENTS);
+  const [gatewayOff, setGatewayOff] = useState<ReadonlySet<string>>(() => new Set());
   // Backends with an enabled Agent whose next turn fails for want of a model (the Models page's reading).
   const [withoutModel, setWithoutModel] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -79,6 +82,7 @@ export const SettingsBackendsPage: React.FC = () => {
       .then((config) => {
         if (cancelled) return;
         setAgents(normalizeAgents(config));
+        setGatewayOff(backendsWithGatewayOff(config));
         setLoaded(true);
       })
       .catch(() => {
@@ -183,10 +187,13 @@ export const SettingsBackendsPage: React.FC = () => {
                 tileClassName={meta.tileCls}
                 iconClassName={meta.iconCls}
                 title={meta.label}
+                badges={meta.builtin && <Badge variant="secondary">{t('settings.backends.builtinBadge')}</Badge>}
                 detail={t(meta.descriptionKey)}
                 actions={
                   <>
-                    {agent.enabled && withoutModel.has(meta.id) && (
+                    {gatewayOff.has(meta.id) ? (
+                      <Badge variant="warning">{t('settings.models.shell.stopped')}</Badge>
+                    ) : agent.enabled && withoutModel.has(meta.id) && (
                       <Badge variant="warning">{t('settings.models.gateway.agentIssues.modelMissing')}</Badge>
                     )}
                     {meta.capabilities.supports_runtime_refresh && <BackendLifecycleChip
@@ -205,10 +212,12 @@ export const SettingsBackendsPage: React.FC = () => {
                         await refreshDetectionFor(meta.id, installedPath || agent.cli_path);
                       }}
                     />}
-                    <ToggleSwitch
-                      enabled={agent.enabled}
-                      onClick={() => void handleToggle(meta.id, !agent.enabled)}
-                    />
+                    {!meta.builtin && (
+                      <ToggleSwitch
+                        enabled={agent.enabled}
+                        onClick={() => void handleToggle(meta.id, !agent.enabled)}
+                      />
+                    )}
                     {route && (
                       <Button asChild variant="secondary" size="xs">
                         <Link to={route} aria-label={t('settings.backends.configure', { name: meta.label }) as string}>

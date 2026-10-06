@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, is_builtin_backend
 
 from core.backend_failure import terminal_backend_failure_output
 from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError, finish_native_operation
@@ -2393,14 +2393,6 @@ class AgentAuthService:
 
             self.controller.config.opencode = runtime_config
             agent_service.register(OpenCodeAgent(self.controller, runtime_config))
-        elif backend == "avibe":
-            from modules.agents.avibe import AvibeAgent
-
-            if not getattr(runtime_config, "enabled", True):
-                return False
-
-            self.controller.config.avibe = runtime_config
-            agent_service.register(AvibeAgent(self.controller))
         else:
             return False
 
@@ -2409,29 +2401,17 @@ class AgentAuthService:
         logger.info("Registered %s backend after runtime config refresh", backend)
         return True
 
-    async def _recover_after_live_registration(self, backend: str) -> None:
-        """A backend registered after startup: its recovery owner hands over to the registered adapter.
-
-        For ``avibe`` the controller's single ``AvibeRecovery`` retires any pending retry
-        (an unregistered adapter's) and runs the next pass on the registered adapter, so
-        two adapters never settle the same Session at once.
-        """
-        recovery = getattr(self.controller, "avibe_recovery", None) if backend == "avibe" else None
-        if recovery is None:
-            return
-        try:
-            await recovery.start()
-        except Exception:
-            logger.exception("Failed to recover %s runtime state after live registration", backend)
-
     async def renew_backend_runtime(self, backend: str, config_save: bool = False) -> None:
         """Apply persisted runtime config.
 
         An enabled backend renews in place without waiting for or interrupting
         work, so each runtime unit moves at its next turn, and a newly enabled
         backend registers at once. Disabling is the one exception: the user
-        turned the backend off, so its work stops now.
+        turned the backend off, so its work stops now. A built-in backend has
+        no runtime config and is never disabled, so there is nothing to apply.
         """
+        if is_builtin_backend(backend):
+            return
         runtime_config = self._load_backend_runtime_config(backend)
         if runtime_config is None:
             await self._stop_disabled_backend(backend, unregister=True)
@@ -2444,7 +2424,6 @@ class AgentAuthService:
         ):
             if backend == "opencode":
                 await self._restore_polls_after_enable()
-            await self._recover_after_live_registration(backend)
             return
         agent_service = getattr(self.controller, "agent_service", None)
         agent = getattr(agent_service, "agents", {}).get(backend) if agent_service else None
@@ -2486,7 +2465,6 @@ class AgentAuthService:
                     backend,
                     runtime_config,
                 ):
-                    await self._recover_after_live_registration(backend)
                     return
                 if force and backend == "opencode":
                     agent = getattr(agent_service, "agents", {}).get(backend)

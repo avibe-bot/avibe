@@ -28,7 +28,8 @@ from modules.im import telegram_api
 from config.v2_config import TelegramConfig
 
 
-ROUTING_BACKENDS = ["opencode", *(backend for backend in AGENT_BACKENDS if backend != "opencode")]
+# The settings handler lists routing backends in catalog order, the built-in Avibe Agent first.
+ROUTING_BACKENDS = list(AGENT_BACKENDS)
 
 
 @pytest.fixture(autouse=True)
@@ -1354,11 +1355,11 @@ def test_routing_state_marks_current_backend_in_first_row() -> None:
     _, keyboard = bot._render_routing_state(state)
 
     assert [button.callback_data for button in keyboard.buttons[0]] == [
+        "tg_route:backend:avibe",
         "tg_route:backend:opencode",
         "tg_route:backend:claude",
-        "tg_route:backend:codex",
     ]
-    assert keyboard.buttons[0][1].text.startswith("☑️ ")
+    assert keyboard.buttons[0][2].text.startswith("☑️ ")
 
 
 def test_routing_codex_reasoning_uses_shared_catalog_options() -> None:
@@ -1481,9 +1482,9 @@ def test_routing_state_keeps_backend_picker_entry_for_extra_backends(extra_backe
         assert "Avibe Agent" in text
 
     assert [button.callback_data for button in keyboard.buttons[0]] == [
+        "tg_route:backend:avibe",
         "tg_route:backend:opencode",
         "tg_route:backend:claude",
-        "tg_route:backend:codex",
     ]
     assert keyboard.buttons[1][0].callback_data == "tg_route:field:backend"
 

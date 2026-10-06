@@ -131,28 +131,6 @@ def test_to_app_config_uses_shared_agent_defaults() -> None:
     assert DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS == 0
 
 
-def test_to_app_config_avibe_presence_tracks_enablement() -> None:
-    """Rolling refresh uses None, not enabled=False, to unregister a backend."""
-    config = V2Config(
-        mode="self_host",
-        version="v2",
-        slack=SlackConfig(),
-        runtime=RuntimeConfig(default_cwd="."),
-        agents=AgentsConfig(),
-        ui=UiConfig(),
-        update=UpdateConfig(),
-    )
-
-    for enabled in (False, True, False):
-        config.agents.avibe.enabled = enabled
-        compat = to_app_config(config, resolve_agent_paths=False)
-        if enabled:
-            assert compat.avibe is not None
-            assert compat.avibe.enabled is True
-        else:
-            assert compat.avibe is None
-
-
 def test_config_load_neutralizes_legacy_opencode_turn_timeout_default(
     monkeypatch, tmp_path
 ) -> None:
