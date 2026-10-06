@@ -9,7 +9,7 @@ import { SettingsPageShell } from './SettingsPageShell';
 import { BackendRuntimeCard } from './shared/BackendRuntimeCard';
 import { useBackendRuntime } from './shared/useBackendRuntime';
 import { BackendSupplyModeCard } from './models/BackendSupplyModeCard';
-import { backendsWithGatewayOff } from './models/featureFlags';
+import { hubSupplyBlocks, type HubSupplyBlock } from './models/featureFlags';
 import { useModelHubCapability } from './models/useModelHubCapability';
 
 /** Shared settings body for backends whose runtime is owned by Avibe. */
@@ -19,13 +19,13 @@ export function SettingsBackendPage({ backend }: { backend: AgentBackendId }) {
   const runtime = useBackendRuntime({ backend });
   const modelHubEnabled = useModelHubCapability();
   const { getConfig } = useApi();
-  const [gatewayOff, setGatewayOff] = useState(false);
+  const [supplyBlock, setSupplyBlock] = useState<HubSupplyBlock | undefined>();
 
   useEffect(() => {
     let cancelled = false;
     getConfig()
       .then((config) => {
-        if (!cancelled) setGatewayOff(backendsWithGatewayOff(config).has(backend));
+        if (!cancelled) setSupplyBlock(hubSupplyBlocks(config).get(backend));
       })
       .catch(() => {});
     return () => {
@@ -55,16 +55,20 @@ export function SettingsBackendPage({ backend }: { backend: AgentBackendId }) {
             iconTileClassName={meta.tileCls}
             iconClassName={meta.iconCls}
             runtime={runtime}
-            extraSlot={gatewayOff && (
+            extraSlot={supplyBlock && (
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gold/40 bg-gold/10 px-3 py-2.5">
-                <p className="text-[12px] text-gold-ink">{t('settings.backends.gatewayOff', { name: meta.label })}</p>
-                <Link
+                <p className="text-[12px] text-gold-ink">
+                  {supplyBlock === 'hubDisabled'
+                    ? t('settings.backends.hubDisabledNotice', { name: meta.label })
+                    : t('settings.backends.gatewayOff', { name: meta.label })}
+                </p>
+                {supplyBlock === 'gatewayOff' && <Link
                   to="/settings/models"
                   className="model-hub-action-mint inline-flex shrink-0 items-center gap-1 text-[13px] font-medium transition-colors"
                 >
                   {t('settings.models.supplyMode.hub.openModels')}
                   <ArrowRight className="size-3.5" />
-                </Link>
+                </Link>}
               </div>
             )}
           />

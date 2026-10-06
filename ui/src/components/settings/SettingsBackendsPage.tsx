@@ -8,7 +8,7 @@ import { Button } from '../ui/button';
 import { SettingsResourceRow, ToggleSwitch } from './SettingsPrimitives';
 import { BackendLifecycleChip } from './BackendLifecycleChip';
 import { SettingsPageShell } from './SettingsPageShell';
-import { backendsWithGatewayOff } from './models/featureFlags';
+import { hubSupplyBlocks, type HubSupplyBlock } from './models/featureFlags';
 import { modelsApi } from './models/modelsApi';
 import { agentsWithoutModel } from './models/supply';
 import { useApi } from '@/context/ApiContext';
@@ -59,7 +59,7 @@ export const SettingsBackendsPage: React.FC = () => {
 
   const [loaded, setLoaded] = useState(false);
   const [agents, setAgents] = useState<Record<string, AgentState>>(DEFAULT_AGENTS);
-  const [gatewayOff, setGatewayOff] = useState<ReadonlySet<string>>(() => new Set());
+  const [supplyBlocks, setSupplyBlocks] = useState<ReadonlyMap<string, HubSupplyBlock>>(() => new Map());
   // Backends with an enabled Agent whose next turn fails for want of a model (the Models page's reading).
   const [withoutModel, setWithoutModel] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -82,7 +82,7 @@ export const SettingsBackendsPage: React.FC = () => {
       .then((config) => {
         if (cancelled) return;
         setAgents(normalizeAgents(config));
-        setGatewayOff(backendsWithGatewayOff(config));
+        setSupplyBlocks(hubSupplyBlocks(config));
         setLoaded(true);
       })
       .catch(() => {
@@ -191,8 +191,12 @@ export const SettingsBackendsPage: React.FC = () => {
                 detail={t(meta.descriptionKey)}
                 actions={
                   <>
-                    {gatewayOff.has(meta.id) ? (
-                      <Badge variant="warning">{t('settings.models.shell.stopped')}</Badge>
+                    {supplyBlocks.has(meta.id) ? (
+                      <Badge variant="warning">
+                        {supplyBlocks.get(meta.id) === 'hubDisabled'
+                          ? t('settings.backends.hubDisabled')
+                          : t('settings.models.shell.stopped')}
+                      </Badge>
                     ) : agent.enabled && withoutModel.has(meta.id) && (
                       <Badge variant="warning">{t('settings.models.gateway.agentIssues.modelMissing')}</Badge>
                     )}

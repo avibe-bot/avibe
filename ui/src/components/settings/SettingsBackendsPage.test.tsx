@@ -142,4 +142,20 @@ describe('backend attention', () => {
     expect(await screen.findByText('The model gateway is off, so Avibe Agent has no model to run on.')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Open Models page' }).getAttribute('href')).toBe('/settings/models');
   });
+
+  // The operator's Model Hub switch leaves the always-on backend nothing to run on,
+  // and there is no Models page to open.
+  it('says Model Hub is disabled when the instance turns it off', async () => {
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(withoutModel);
+    mocks.api.getConfig.mockResolvedValue({ agents: {}, capabilities: { model_hub: { enabled: false } } });
+    renderBackends();
+
+    const avibe = await rowOf('Avibe Agent');
+    expect(await within(avibe).findByText('Model Hub disabled')).toBeTruthy();
+    expect(within(await rowOf('Claude Code')).queryByText('Model Hub disabled')).toBeNull();
+
+    fireEvent.click(within(avibe).getByRole('link', { name: 'Configure' }));
+    expect(await screen.findByText('Model Hub is disabled on this instance, so Avibe Agent has no model to run on.')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Open Models page' })).toBeNull();
+  });
 });

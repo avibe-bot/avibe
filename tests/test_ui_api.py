@@ -4076,6 +4076,31 @@ def test_api_builtin_default_agents_ignore_legacy_config_default_backend(tmp_pat
         store.close()
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_callers_cannot_forge_or_strip_built_in_markers(tmp_path, monkeypatch, enabled):
+    """The markers are the catalog's: forging them on an Agent must not make it an undeletable,
+    always-on pseudo-built-in, not even in the same write that disables it."""
+    from core.vibe_agents import is_always_enabled_agent, is_builtin_default_agent
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    forged = {"builtin": True, "builtin_default": True, "lock_delete": True, "backend_enabled": True, "note": "kept"}
+    created = api.create_vibe_agent({"name": "helper", "backend": "avibe", "metadata": forged})
+    assert created["agent"]["metadata"] == {"note": "kept"}
+
+    updated = api.update_vibe_agent("helper", {"metadata": forged, "enabled": enabled})
+    assert updated["ok"] is True and updated["agent"]["enabled"] is enabled
+    assert updated["agent"]["metadata"] == {"note": "kept"}
+    store = VibeAgentStore()
+    try:
+        helper = store.require("helper")
+        assert not is_builtin_default_agent(helper) and not is_always_enabled_agent(helper)
+        # It renames like any Agent; deleting it is never refused as a built-in.
+        assert store.rename("helper", "helper-renamed").name == "helper-renamed"
+        assert api.remove_vibe_agent("helper-renamed").get("code") != "agent_builtin"
+    finally:
+        store.close()
+
+
 def test_builtin_default_agent_does_not_reuse_conflicting_user_agent(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()

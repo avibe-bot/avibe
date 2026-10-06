@@ -1971,7 +1971,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   const locked = isSystemAgent(agent) || !canEdit;
   const system = isSystemAgent(agent);
   // The built-in Agent of the built-in backend is part of the platform: it stays enabled.
-  const alwaysEnabled = isBuiltinAgent(agent) && getBackendUiMeta(agent.backend).builtin;
+  const alwaysEnabled = agent.source === 'builtin' && isBuiltinAgent(agent) && getBackendUiMeta(agent.backend).builtin;
   const [name, setName] = useState(agent.name);
   const [renaming, setRenaming] = useState(false);
   const [settingDefault, setSettingDefault] = useState(false);

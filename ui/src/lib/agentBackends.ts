@@ -19,7 +19,6 @@ export type BackendUiMeta = {
   settingsRoute: string;
   descriptionKey: string;
   capabilities: BackendCapabilities;
-  agentOrder: number;
   nativeOrder: number;
   publisher: string;
   accent: 'mint' | 'cyan' | 'violet';
@@ -34,7 +33,6 @@ export type BackendUiMeta = {
 // Presentation only. Membership, defaults and capabilities come from Python.
 const BACKEND_VISUALS = {
   opencode: {
-    agentOrder: 2,
     nativeOrder: 2,
     publisher: 'opencode.ai',
     accent: 'cyan',
@@ -46,7 +44,6 @@ const BACKEND_VISUALS = {
     iconCls: 'text-violet-ink',
   },
   claude: {
-    agentOrder: 1,
     nativeOrder: 0,
     publisher: 'Anthropic',
     accent: 'mint',
@@ -58,7 +55,6 @@ const BACKEND_VISUALS = {
     iconCls: 'text-cyan-ink',
   },
   codex: {
-    agentOrder: 3,
     nativeOrder: 1,
     publisher: 'OpenAI',
     accent: 'violet',
@@ -70,7 +66,6 @@ const BACKEND_VISUALS = {
     iconCls: 'text-gold-foreground',
   },
   avibe: {
-    agentOrder: 0,
     nativeOrder: 3,
     publisher: 'Avibe',
     accent: 'mint',
@@ -82,7 +77,7 @@ const BACKEND_VISUALS = {
     iconCls: 'text-mint-ink',
   },
 } as const satisfies Record<AgentBackendId, Pick<BackendUiMeta,
-  'agentOrder' | 'nativeOrder' | 'publisher' | 'accent' | 'Icon' | 'initials' | 'blockCls' | 'glyphCls' | 'tileCls' | 'iconCls'>>;
+  'nativeOrder' | 'publisher' | 'accent' | 'Icon' | 'initials' | 'blockCls' | 'glyphCls' | 'tileCls' | 'iconCls'>>;
 
 export const AGENT_BACKENDS = BACKEND_CATALOG.map((backend) => ({
   ...BACKEND_VISUALS[backend.id],
@@ -148,7 +143,6 @@ export function getBackendUiMeta(id: string): BackendUiMeta {
         supports_web_oauth: false,
         supports_install: false,
       },
-      agentOrder: Number.MAX_SAFE_INTEGER,
       nativeOrder: Number.MAX_SAFE_INTEGER,
       publisher: '',
       accent: 'mint',

@@ -99,10 +99,10 @@ afterEach(() => {
 describe('NewAgentDialog', () => {
   // The picker used a second label table, so its Claude label disagreed with
   // Settings and Model Hub. All backend choices share the catalog brands, and
-  // the built-in Avibe Agent leads them.
-  it('uses the catalog brand names for every backend choice, Avibe Agent first', () => {
+  // they follow catalog order, the built-in Avibe Agent first.
+  it('uses the catalog brand names and order for every backend choice', () => {
     renderDialog();
-    const labels = ['Avibe Agent', 'Claude Code', 'OpenCode', 'Codex'];
+    const labels = ['Avibe Agent', 'OpenCode', 'Claude Code', 'Codex'];
     for (const label of labels) {
       expect(screen.getByRole('button', { name: new RegExp(label) }).textContent).toContain(label);
     }

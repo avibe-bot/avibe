@@ -73,15 +73,16 @@ def test_a_persisted_avibe_switch_loads_as_on_and_leaves_on_the_next_save(tmp_pa
     assert saved["agents"]["codex"]["enabled"] is True
 
 
-# Rows an earlier build may have left under the built-in's name: (backend, source, metadata, enabled).
+# Rows an earlier build may have left: (name, backend, source, metadata, enabled).
 _BUILT_IN = {**BUILTIN_DEFAULT_AGENT_METADATA, "backend": "avibe", "backend_enabled": True}
 _EARLIER_ROWS = {
     "absent": None,
-    "disabled": ("avibe", "builtin", _BUILT_IN, False),
-    # A metadata update could strip the built-in markers before they became the catalog's.
-    "markers-stripped": ("avibe", "builtin", {}, False),
-    "user-agent-same-backend": ("avibe", "user", {}, False),
-    "user-agent-other-backend": ("claude", "user", {}, True),
+    "disabled": ("avibe", "avibe", "builtin", _BUILT_IN, False),
+    # Before the markers were the catalog's, a metadata update could strip them, and the row could then be renamed.
+    "markers-stripped": ("avibe", "avibe", "builtin", {}, False),
+    "markers-stripped-and-renamed": ("assistant", "avibe", "builtin", {}, False),
+    "user-agent-same-backend": ("avibe", "avibe", "user", {}, False),
+    "user-agent-other-backend": ("avibe", "claude", "user", {}, True),
 }
 
 
@@ -90,24 +91,28 @@ _EARLIER_ROWS = {
 def test_the_startup_sync_leaves_the_built_in_avibe_agent_enabled(tmp_path, sqlite_db_factory, earlier_row, enabled_backends):
     """Controller startup runs this sync first; Model Hub then seeds the Avibe supply onto that Agent row.
 
-    Whatever backends the caller read from config, and whatever an earlier build left under the name,
-    exactly one built-in Avibe Agent exists and is enabled once the sync returns. A user's own Agent
-    keeps its name and state.
+    Whatever backends the caller read from config, and whatever an earlier build left, exactly one
+    built-in Avibe Agent exists and is enabled once the sync returns, and the identity lookup names
+    it. A row the store created stays the built-in under any name; a user's own Agent keeps its name
+    and state.
     """
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
     try:
         row = _EARLIER_ROWS[earlier_row]
+        earlier = None
         if row is not None:
-            backend, source, metadata, enabled = row
-            store.create(name="avibe", backend=backend, source=source, metadata=metadata, enabled=enabled)
+            name, backend, source, metadata, enabled = row
+            earlier = store.create(name=name, backend=backend, source=source, metadata=metadata, enabled=enabled)
         store.ensure_builtin_default_agents(enabled_backends)
 
         built_in = [agent for agent in store.list_agents() if agent.backend == "avibe" and is_always_enabled_agent(agent)]
         assert len(built_in) == 1 and built_in[0].enabled
         assert store.get_builtin_default_agent_for_backend("avibe") == built_in[0]
-        if row is not None and row[1] == "user":
-            user_agent = store.get("avibe")
-            assert (user_agent.backend, user_agent.enabled, user_agent.source) == (row[0], row[3], "user")
+        if earlier is not None and earlier.source == "builtin":
+            assert built_in[0].id == earlier.id
+        if earlier is not None and earlier.source == "user":
+            kept = store.get_by_id(earlier.id)
+            assert (kept.name, kept.backend, kept.enabled, kept.source) == ("avibe", row[1], row[4], "user")
             assert built_in[0].name == "avibe-2"
     finally:
         store.close()

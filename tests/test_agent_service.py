@@ -367,27 +367,36 @@ def test_model_selection_is_required_before_any_backend_dispatch(backend, model,
 
 
 @pytest.mark.parametrize(
-    ("gateway_enabled", "refusal"),
-    [(False, "The model gateway is off, so Avibe Agent has no model to run on"), (True, "Select a model")],
+    ("backend", "hub_switch", "gateway_enabled", "refusal"),
+    [
+        ("avibe", "1", False, "The model gateway is off, so Avibe Agent has no model to run on"),
+        ("avibe", "1", True, "Select a model"),
+        ("avibe", "0", True, "Model Hub is disabled on this instance, so Avibe Agent has no model to run on"),
+        # A native backend runs direct without the Hub: choosing a model is still the fix.
+        ("codex", "0", True, "Select a model"),
+    ],
 )
-def test_a_missing_model_behind_the_turned_off_gateway_names_the_gateway(gateway_enabled, refusal):
-    """The Avibe Agent's models come only through the gateway: while it is off, choosing a model is not the fix."""
+def test_a_missing_model_the_model_hub_explains_names_the_model_hub(
+    monkeypatch, backend, hub_switch, gateway_enabled, refusal
+):
+    """The Avibe Agent's models come only through the Model Hub: while it cannot supply any, choosing a model is not the fix."""
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", hub_switch)
 
     async def run():
         controller = _Controller()
-        hub = SimpleNamespace(enabled=gateway_enabled, agents={"avibe": SimpleNamespace(mode="hub")})
+        hub = SimpleNamespace(enabled=gateway_enabled, agents={backend: SimpleNamespace(mode="hub")})
         controller.model_hub_service = SimpleNamespace(store=SimpleNamespace(load=lambda: hub))
         service = AgentService(controller=controller)
         controller.agent_service = service
         agent = _RuntimeAgent()
-        agent.name = "avibe"
+        agent.name = backend
         service.register(agent)
         request = _request("hello")
         request.vibe_agent_model = None
         request.failure_handler = AsyncMock(return_value=True)
 
         with pytest.raises(ValueError, match=refusal):
-            await service.handle_message("avibe", request)
+            await service.handle_message(backend, request)
         assert agent.started == []
 
     asyncio.run(run())

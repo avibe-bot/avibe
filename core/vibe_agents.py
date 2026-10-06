@@ -47,6 +47,8 @@ DEFAULT_AGENT_NAME = "default"
 DEFAULT_AGENT_META_KEY = "default_agent_name"
 BUILTIN_DEFAULT_AGENT_METADATA = {"builtin": True, "builtin_default": True, "lock_delete": True}
 BUILTIN_BACKEND_ENABLED_META_KEY = "backend_enabled"
+# Catalog-owned: only the store writes them, and only on rows it created (``source == "builtin"``).
+BUILTIN_AGENT_MARKER_KEYS = frozenset((*BUILTIN_DEFAULT_AGENT_METADATA, BUILTIN_BACKEND_ENABLED_META_KEY))
 AGENT_ARCHIVE_METADATA_KEY = "_avibe_archive"
 ARCHIVED_AGENT_NAME_PREFIX = "_"
 LEGACY_ARCHIVED_AGENT_NAME_PREFIX = "_archived_"
@@ -1009,7 +1011,7 @@ class VibeAgentStore:
             enabled=bool(enabled),
             source=str(source or "user"),
             source_ref=_clean_optional(source_ref),
-            metadata=dict(metadata or {}),
+            metadata=dict(metadata or {}) if source == "builtin" else _without_builtin_markers(metadata),
             created_at=now,
             updated_at=now,
         )
@@ -1077,14 +1079,11 @@ class VibeAgentStore:
             if system_prompt is not _UNSET:
                 values["system_prompt"] = _clean_optional(system_prompt)
             if metadata is not _UNSET:
-                metadata = dict(metadata or {})
-                if is_builtin_default_agent(existing):
-                    # The built-in markers belong to the catalog, not to the caller.
-                    metadata.update(
-                        (key, existing.metadata[key])
-                        for key in BUILTIN_DEFAULT_AGENT_METADATA
-                        if key in existing.metadata
-                    )
+                # The built-in markers belong to the catalog: a caller neither sets nor clears them.
+                metadata = _without_builtin_markers(metadata)
+                metadata.update(
+                    (key, existing.metadata[key]) for key in BUILTIN_AGENT_MARKER_KEYS if key in existing.metadata
+                )
                 values["metadata_json"] = _json_dumps(metadata)
             if enabled is not _UNSET:
                 if not enabled and is_always_enabled_agent(existing):
@@ -1667,12 +1666,15 @@ class VibeAgentStore:
 
     def ensure_builtin_default_agent(self, *, backend: str, name: str | None = None) -> VibeAgent:
         backend = validate_agent_backend(backend)
-        always_enabled = is_builtin_backend(backend)
-        if always_enabled and name is None:
-            name = self._always_enabled_agent_name(backend)
-        agent_name = str(name or backend).strip()
-        metadata = dict(BUILTIN_DEFAULT_AGENT_METADATA)
-        metadata["backend"] = backend
+        metadata = {**BUILTIN_DEFAULT_AGENT_METADATA, "backend": backend}
+        if name is None:
+            current = self.get_builtin_default_agent_for_backend(backend, enabled_only=False)
+            if current is not None:
+                return self._write_builtin_state(current, metadata={**current.metadata, **metadata})
+            # An always-enabled backend needs its own row: when another Agent holds the
+            # backend's name, the built-in takes the next free one.
+            name = self._free_agent_name(backend) if is_builtin_backend(backend) else backend
+        agent_name = str(name).strip()
         existing = self.get(agent_name)
         if existing:
             if existing.backend != backend:
@@ -1680,16 +1682,10 @@ class VibeAgentStore:
                     f"agent '{agent_name}' already exists with backend '{existing.backend}', "
                     f"cannot use it as the built-in default for '{backend}'"
                 )
-            if not is_builtin_default_agent(existing) and not (always_enabled and existing.source == "builtin"):
+            if existing.source != "builtin":
+                # A user's Agent keeps its own identity.
                 return existing
-            merged = {**existing.metadata, **metadata}
-            if existing.source != "builtin" or existing.metadata != merged:
-                return self.update(
-                    existing.name,
-                    metadata=merged,
-                    user_context=instance_owner_context(),
-                )
-            return existing
+            return self._write_builtin_state(existing, metadata={**existing.metadata, **metadata})
         return self.create(
             name=agent_name,
             backend=backend,
@@ -1699,24 +1695,29 @@ class VibeAgentStore:
             enabled=True,
         )
 
-    def _always_enabled_agent_name(self, backend: str) -> str:
-        """Where an always-enabled backend's built-in Agent is, or is created.
-
-        It is the row carrying the built-in markers, under any name. Without one, the
-        backend's name is used: a built-in row there that an earlier metadata update
-        stripped of its markers is restored, and another Agent holding the name keeps
-        it while the built-in takes the next free name.
-        """
-        current = self.get_builtin_default_agent_for_backend(backend, enabled_only=False)
-        if current is not None:
-            return current.name
-        candidate, suffix = backend, 1
-        while (holder := self.get(candidate)) is not None and not (
-            holder.backend == backend and holder.source == "builtin"
-        ):
+    def _free_agent_name(self, name: str) -> str:
+        candidate, suffix = name, 1
+        while self.get(candidate) is not None:
             suffix += 1
-            candidate = f"{backend}-{suffix}"
+            candidate = f"{name}-{suffix}"
         return candidate
+
+    def _write_builtin_state(self, agent: VibeAgent, *, metadata: Any = _UNSET, enabled: Any = _UNSET) -> VibeAgent:
+        """The catalog's own write to a built-in row: its markers and enabled state."""
+        values: dict[str, Any] = {}
+        if metadata is not _UNSET and metadata != agent.metadata:
+            values["metadata_json"] = _json_dumps(metadata)
+        if enabled is not _UNSET and bool(enabled) != agent.enabled:
+            values["enabled"] = 1 if enabled else 0
+        if not values:
+            return agent
+        with self.engine.begin() as conn:
+            reserve_write_lock(conn)
+            conn.execute(
+                agents.update().where(agents.c.id == agent.id).values(updated_at=_utc_now_iso(), **values)
+            )
+            row = conn.execute(select(agents).where(agents.c.id == agent.id).limit(1)).mappings().one()
+        return self._from_row(row)
 
     def sync_builtin_default_agent(self, *, backend: str, backend_enabled: bool, name: str | None = None) -> VibeAgent:
         backend = validate_agent_backend(backend)
@@ -1730,20 +1731,8 @@ class VibeAgentStore:
         metadata = {**agent.metadata, BUILTIN_BACKEND_ENABLED_META_KEY: backend_enabled}
         should_enable = (backend_enabled and previous_backend_enabled is not True) or (always_enabled and not agent.enabled)
         should_disable = not backend_enabled and agent.enabled
-        updates: dict[str, Any] = {}
-        if metadata != agent.metadata:
-            updates["metadata"] = metadata
-        if should_enable:
-            updates["enabled"] = True
-        elif should_disable:
-            updates["enabled"] = False
-        if updates:
-            return self.update(
-                agent.name,
-                user_context=instance_owner_context(),
-                **updates,
-            )
-        return agent
+        enabled: Any = True if should_enable else False if should_disable else _UNSET
+        return self._write_builtin_state(agent, metadata=metadata, enabled=enabled)
 
     def ensure_builtin_default_agents(
         self,
@@ -1782,23 +1771,34 @@ class VibeAgentStore:
         return ensured
 
     def get_builtin_default_agent_for_backend(self, backend: str, *, enabled_only: bool = True) -> Optional[VibeAgent]:
+        """The backend's built-in Agent: the one owner of built-in identity.
+
+        It is a row the store created for the backend (``source == "builtin"``, which no
+        caller can write), under any name; its markers are only a projection the sync
+        keeps current. A marked row wins over one an earlier build left without
+        markers, then the oldest. The legacy instance default, also store-made, is a
+        backend's built-in only if marked. ``enabled_only`` reports a disabled one as
+        missing.
+        """
         backend = validate_agent_backend(backend)
-        for candidate in (backend, DEFAULT_AGENT_NAME):
-            agent = self.get(candidate)
-            if (
-                agent
-                and agent.backend == backend
-                and is_builtin_default_agent(agent)
-                and (agent.enabled or not enabled_only)
-            ):
-                return agent
         with self.engine.connect() as conn:
-            rows = conn.execute(select(agents).where(agents.c.backend == backend).order_by(agents.c.name)).mappings()
-            for row in rows:
-                agent = self._from_row(row)
-                if is_builtin_default_agent(agent) and (agent.enabled or not enabled_only):
-                    return agent
-        return None
+            rows = conn.execute(
+                select(agents)
+                .where(agents.c.backend == backend, agents.c.source == "builtin", agents.c.archived_at.is_(None))
+                .order_by(agents.c.created_at, agents.c.id)
+            ).mappings().all()
+        built_in = min(
+            (
+                agent
+                for agent in map(self._from_row, rows)
+                if _has_builtin_markers(agent) or agent.normalized_name != DEFAULT_AGENT_NAME
+            ),
+            key=lambda agent: not _has_builtin_markers(agent),
+            default=None,
+        )
+        if built_in is None or (enabled_only and not built_in.enabled):
+            return None
+        return built_in
 
     def get_default_agent_name(self) -> Optional[str]:
         with self.engine.connect() as conn:
@@ -1918,8 +1918,17 @@ def parse_agent_file(path: Path, *, backend: str) -> AgentImportCandidate:
     )
 
 
-def is_builtin_default_agent(agent: VibeAgent) -> bool:
+def _has_builtin_markers(agent: VibeAgent) -> bool:
     return bool(agent.metadata.get("builtin_default") or agent.metadata.get("lock_delete"))
+
+
+def _without_builtin_markers(metadata: Any) -> dict[str, Any]:
+    return {key: value for key, value in dict(metadata or {}).items() if key not in BUILTIN_AGENT_MARKER_KEYS}
+
+
+def is_builtin_default_agent(agent: VibeAgent) -> bool:
+    """A backend's built-in Agent: store-made (``source == "builtin"``) and marked by the catalog."""
+    return agent.source == "builtin" and _has_builtin_markers(agent)
 
 
 def is_always_enabled_agent(agent: VibeAgent) -> bool:

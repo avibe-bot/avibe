@@ -587,6 +587,8 @@
       "avibeDescription": "内置 Agent · 在模型中枢管理模型和路由",
       "backToBackends": "返回后端列表",
       "gatewayOff": "模型网关已关闭，{{name}} 没有可用的模型。",
+      "hubDisabled": "模型中枢已停用",
+      "hubDisabledNotice": "本实例已停用模型中枢，{{name}} 没有可用的模型。",
       "builtinBadge": "内置",
       "openProviderPage": "配置 Provider",
       "providerOauth": "OAuth(默认)",

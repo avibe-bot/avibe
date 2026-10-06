@@ -1178,14 +1178,16 @@ class AvibeAgent(BaseAgent):
         )
 
     async def _fail_preflight(self, request: AgentRequest, error: BaseException) -> None:
-        from modules.agents.model_hub import launch_refusal_copy, model_gateway_off, model_gateway_off_copy
+        from modules.agents.model_hub import hub_supply_refusal, launch_refusal_copy
 
         logger.warning("Avibe Agent could not resolve its model route: %s", error)
-        if await asyncio.to_thread(model_gateway_off, self.controller, BACKEND):
-            # Every route runs through the gateway, so while it is off nothing else explains the failure.
-            refusal = model_gateway_off_copy(BACKEND, self._language())
-        else:
-            refusal = launch_refusal_copy(self.controller, error) or error_text("generic", self._language())
+        language = self._language()
+        # Every route runs through the Model Hub: when it is disabled or its gateway is off, that explains the failure.
+        refusal = (
+            await asyncio.to_thread(hub_supply_refusal, self.controller, BACKEND, language)
+            or launch_refusal_copy(self.controller, error)
+            or error_text("generic", language)
+        )
         # Recorded on every start failure, as the other backends do: a no-op unless a launch is bound.
         await self.record_model_hub_native_failure(request.context, str(error))
         display = f"❌ {refusal}"

@@ -10,9 +10,11 @@ backend list, it is always enabled, and it cannot be turned off.
 - **One descriptor fact.** `AgentBackendDescriptor.builtin` marks the built-in backend (`avibe`).
   `BUILTIN_AGENT_BACKENDS` and `is_builtin_backend()` derive from it; the generated UI catalog projects it as
   `builtin`. No consumer special-cases the id.
-- **Order.** `AGENT_BACKEND_REGISTRY` lists `avibe` first, and registry order is display order:
+- **Order.** `AGENT_BACKEND_REGISTRY` lists `avibe` first, and registry order is the one display order:
   Settings → Backends, the Models page routes (`MODEL_HUB_BACKENDS` is now the registry order, whose ordering had no
-  processing meaning), the Agent create picker and Agents page groups (`agentOrder`), and IM routing pickers.
+  processing meaning), the Agent create picker, the Agents page groups and filter, the Global prompts tabs (the UI's
+  `BACKEND_ORDER`, derived from the catalog; the separate `agentOrder` is gone), and IM routing pickers. Native
+  backends therefore read OpenCode, Claude Code, Codex everywhere a backend list is shown.
 - **Not the default.** `DEFAULT_AGENT_BACKEND` stays `opencode`. Every fallback that picks a backend or Agent nobody
   chose ranks the built-in backend last (`_implicit_default_rank` in `core/vibe_agents.py`, the IM routing modal's
   fallback selection), so it is chosen only when nothing else is enabled.
@@ -20,24 +22,35 @@ backend list, it is always enabled, and it cannot be turned off.
   branch reading it are removed. A config written by an earlier build loads unchanged otherwise and drops the key on
   its next save. The controller registers the adapter at startup and never unregisters it; runtime renewal is a no-op
   for it.
-- **Built-in Agent.** `ensure_builtin_default_agents` always includes the built-in backend and re-enables its Agent, so
-  the row exists and is enabled when controller startup's sync returns (Model Hub seeds the Avibe supply onto it
-  next). The row is the one carrying the built-in markers, under any name. Without one, a built-in row under the
-  backend's name whose markers an earlier metadata update stripped is restored; a user's Agent holding the name keeps
-  it, and the built-in takes the next free name (`avibe-2`). `VibeAgentStore.update` refuses to disable it
-  (`agent_always_enabled`) and keeps its built-in markers; its model, effort, prompt and description stay editable.
-- **Refusals.** `POST /api/config` with `agents.avibe` returns 400; `PATCH /api/agents/avibe` with `enabled: false`
-  returns 400 `agent_always_enabled`; the CLI reports the same code.
+- **Built-in Agent.** `get_builtin_default_agent_for_backend` is the one owner of built-in identity: the row the store
+  created for the backend (`source == "builtin"`, which no caller can write), under any name. A marked row wins, then
+  the oldest; the legacy instance default (`default`) counts only if marked. The built-in markers (`builtin`,
+  `builtin_default`, `lock_delete`, `backend_enabled`) are a projection only the store writes: `create` and `update`
+  drop them from caller metadata and keep the row's own. `ensure_builtin_default_agents` always includes the built-in
+  backend, restores the markers of whatever row the lookup names and re-enables it, so the row exists and is enabled
+  when controller startup's sync returns (Model Hub seeds the Avibe supply onto it next). Without such a row it is
+  created at `avibe`, or at the next free name (`avibe-2`) when a user's Agent holds `avibe`. `VibeAgentStore.update`
+  refuses to disable it (`agent_always_enabled`); its model, effort, prompt and description stay editable.
+- **Refusals.** `POST /api/config` with `agents.avibe` returns 400 (`errors.builtinBackendConfig`, in the configured
+  language); `PATCH /api/agents/avibe` with `enabled: false` returns 400 `agent_always_enabled`; the CLI reports the
+  same code.
 - **UI.** The built-in backend shows a "Built-in" badge where other backends have their enable switch, in the list and
   on its page. The built-in Avibe Agent's enable switch is locked on.
-- **Model gateway off.** Stopping the Model Hub runtime stays allowed. The backend stays enabled; its row says
-  "Gateway off", its page explains that it has no model to run on and links to Models, and a Turn refuses with
-  `errors.modelGatewayOff`, which names the gateway and Models, from the shared model gate or the adapter's preflight.
+- **Model Hub cannot supply.** `hub_supply_refusal` (`modules/agents/model_hub.py`) owns the cause; the shared model gate
+  and the adapter's preflight both use it. The backend stays listed and enabled in both cases.
+  - Gateway off (Models → Start/Stop): its row says "Gateway off", its page links to Models, and a Turn refuses with
+    `errors.modelGatewayOff`.
+  - Model Hub disabled on the instance (`VIBE_MODEL_HUB_ENABLED=0`): a backend without its own CLI gets every model
+    through the Hub, so its row says "Model Hub disabled", its page says so without a Models link, and a Turn refuses
+    with `errors.modelHubDisabled`.
 
 ## Known by design
 
-- The setup wizard lists only native CLIs, which need detection, install or sign-in. The Avibe Agent needs none, so
-  the wizard does not show it; this lane adds no wizard card.
-- The Agents page detail panel and the setup flow mirror `is_builtin_default_agent` from Agent metadata, as
-  `setupTargets.isBuiltinAgent` already does.
+- The setup wizard lists only native CLIs here. Its Avibe Agent card (built-in, model picker, providers destination)
+  is a follow-up owner decision, delivered separately as `feat/avibe-agent-setup-wizard`.
+- The setup wizard keeps its own native setup sequence (Claude Code, Codex, OpenCode: `nativeOrder`). It is an
+  ordered onboarding flow, not a backend list: its intro geometry is indexed and its first ready backend decides the
+  default Agent after setup, which this lane leaves unchanged.
+- The Agents page detail panel mirrors `is_builtin_default_agent` from the Agent's `source` and markers;
+  `setupTargets.isBuiltinAgent` reads the markers, which callers can no longer write.
 - Making the Avibe Agent the default for new chats is a separate owner decision.

@@ -587,6 +587,8 @@
       "avibeDescription": "Built-in agent · models and routes managed in Model Hub",
       "backToBackends": "Back to backends",
       "gatewayOff": "The model gateway is off, so {{name}} has no model to run on.",
+      "hubDisabled": "Model Hub disabled",
+      "hubDisabledNotice": "Model Hub is disabled on this instance, so {{name}} has no model to run on.",
       "builtinBadge": "Built-in",
       "openProviderPage": "Configure provider",
       "providerOauth": "OAuth (default)",

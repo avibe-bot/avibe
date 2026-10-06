@@ -1318,10 +1318,11 @@ async def test_a_failure_while_settling_reaches_the_shared_owner(engine, session
         await harness.agent.handle_message(harness.request("hello"))
 
 
-@pytest.mark.parametrize("gateway_enabled", [True, False])
+@pytest.mark.parametrize(("hub_switch", "gateway_enabled"), [("1", True), ("1", False), ("0", True)])
 async def test_a_refused_model_route_fails_before_the_input_is_written(
-    engine, session, tmp_path, published, gateway_enabled
+    engine, session, tmp_path, published, monkeypatch, hub_switch, gateway_enabled
 ) -> None:
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", hub_switch)
     harness = _Harness(engine, tmp_path, "telegram", [])
 
     async def refuse(*_args, **_kwargs):
@@ -1336,12 +1337,13 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(
     assert harness.controller.started == []
     assert await harness.context_rows() == []
     assert harness.provider.requests == []
-    # Every route runs through the gateway: with it off, the copy names it and where to turn it back on.
-    expected = (
-        i18n_t("avibeAgent.error.generic", "en")
-        if gateway_enabled
-        else i18n_t("errors.modelGatewayOff", "en", backend="Avibe Agent")
-    )
+    # Every route runs through the Model Hub: disabled, or its gateway off, the copy names that cause.
+    if hub_switch == "0":
+        expected = i18n_t("errors.modelHubDisabled", "en", backend="Avibe Agent")
+    elif not gateway_enabled:
+        expected = i18n_t("errors.modelGatewayOff", "en", backend="Avibe Agent")
+    else:
+        expected = i18n_t("avibeAgent.error.generic", "en")
     assert harness.controller.im_client.sent == [f"❌ {expected}"]
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [True]
 

@@ -52,7 +52,7 @@ from core.handlers.model_hub.service import (
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.native_dispatch_phase import mark_prewrite_recovery_required
-from modules.agents.catalog import display_name_for_backend
+from modules.agents.catalog import display_name_for_backend, is_native_cli_backend
 from vibe.codex_config import format_toml_basic_string
 from vibe.i18n import t
 from vibe.opencode_config import managed_opencode_runtime_config_content
@@ -360,20 +360,26 @@ def launch_refusal_copy(controller: Any, error: BaseException) -> str | None:
     return render_turn_outcome_copy(outcome, _language(controller))
 
 
-def model_gateway_off(controller: Any, backend: str) -> bool:
-    """Whether ``backend``'s models run through the gateway the user turned off in Models."""
+def hub_supply_refusal(controller: Any, backend: str, language: str) -> str | None:
+    """Why ``backend`` has no model to run on, when the Model Hub's state is the reason; else ``None``.
 
+    A backend without its own CLI gets every model through the Hub, so the operator's
+    Model Hub switch (``VIBE_MODEL_HUB_ENABLED``) leaves it none. Any backend the Hub
+    supplies has none while the user has turned the gateway off in Models.
+    """
+
+    from config.v2_config import is_model_hub_enabled
+
+    name = display_name_for_backend(backend)
+    if not is_model_hub_enabled():
+        return None if is_native_cli_backend(backend) else t("errors.modelHubDisabled", language, backend=name)
     store = getattr(getattr(controller, "model_hub_service", None), "store", None)
     if store is None:
-        return False
+        return None
     config = store.load()
-    return not config.enabled and config.agents[backend].mode == "hub"
-
-
-def model_gateway_off_copy(backend: str, language: str) -> str:
-    """The copy a turn shows when ``model_gateway_off``: the cause, and where to fix it."""
-
-    return t("errors.modelGatewayOff", language, backend=display_name_for_backend(backend))
+    if not config.enabled and config.agents[backend].mode == "hub":
+        return t("errors.modelGatewayOff", language, backend=name)
+    return None
 
 
 def _hold_unrunnable_input(context: Any, error: ModelHubError) -> None:

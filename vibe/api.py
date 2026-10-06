@@ -790,8 +790,12 @@ def _reject_builtin_backend_config(payload: dict) -> None:
     for backend in BUILTIN_AGENT_BACKENDS:
         if backend in agents:
             raise ValueError(
-                f"{display_name_for_backend(backend)} is built in and always enabled; "
-                f"'agents.{backend}' cannot be configured"
+                backend_t(
+                    "errors.builtinBackendConfig",
+                    _configured_backend_language(),
+                    backend=display_name_for_backend(backend),
+                    section=f"agents.{backend}",
+                )
             )
 
 
