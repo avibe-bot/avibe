@@ -54,6 +54,16 @@ class WebUiWatchdog:
         self._attempts_without_recovery = 0
         self._retry_delay = CHECK_INTERVAL_SECONDS
         self._retry_at = 0.0
+        self._unrecorded_ui_reported = False
+
+    def _owns_recovery(self) -> bool:
+        # Every deliberate stop takes the service down with the UI, and a
+        # restart job brings the UI back itself.
+        return not (
+            self._stopping()
+            or not runtime.current_process_owns_service_instance()
+            or _restart_job_replacing_the_runtime()
+        )
 
     def check(self, now: float) -> int | None:
         """Observe the UI once; return the pid of a UI this check started."""
@@ -63,6 +73,7 @@ class WebUiWatchdog:
             self._attempts_without_recovery = 0
             self._retry_delay = CHECK_INTERVAL_SECONDS
             self._retry_at = 0.0
+            self._unrecorded_ui_reported = False
             return None
         # A stop, a restart, and a start replacing a stale UI each pass through
         # a moment with no live UI recorded. A UI gone at two consecutive checks
@@ -70,29 +81,29 @@ class WebUiWatchdog:
         self._gone_checks += 1
         if self._gone_checks < 2 or now < self._retry_at:
             return None
-        # Every deliberate stop takes the service down with the UI, and a
-        # restart job brings the UI back itself.
-        if (
-            self._stopping()
-            or not runtime.current_process_owns_service_instance()
-            or _restart_job_replacing_the_runtime()
-        ):
-            return None
-
         self._gone_checks = 0
-        self._attempts_without_recovery += 1
-        # A UI that keeps dying is retried less and less often instead of
-        # being respawned every few seconds for as long as the service runs.
-        self._retry_delay = min(self._retry_delay * 2, MAX_RETRY_DELAY_SECONDS)
-        self._retry_at = now + self._retry_delay
+
         config = load_config_or_default()
         host, port = runtime.effective_ui_bind_host(config), config.ui.setup_port
         if runtime.ui_server_compatible(host, port):
             # An Avibe UI, ready or not, holds the port without being the
             # recorded one. Another would only die on the port, and its pid
-            # record would then name the dead replacement instead of it.
-            logger.warning("Web UI on port %s is serving but is not the recorded UI process; leaving it", port)
+            # record would then name the dead replacement instead of it. No
+            # start was attempted, so the retry delay stays where it was.
+            if not self._unrecorded_ui_reported:
+                logger.warning("Web UI on port %s is serving but is not the recorded UI process; leaving it", port)
+                self._unrecorded_ui_reported = True
             return None
+        # Asked last, after the probe that can take seconds, so a stop or a
+        # restart that began meanwhile is seen before anything is started.
+        if not self._owns_recovery():
+            return None
+
+        self._attempts_without_recovery += 1
+        # A UI that keeps dying is retried less and less often instead of
+        # being respawned every few seconds for as long as the service runs.
+        self._retry_delay = min(self._retry_delay * 2, MAX_RETRY_DELAY_SECONDS)
+        self._retry_at = now + self._retry_delay
         logger.warning(
             "Web UI is not running; starting it again (attempt %s since it was last seen running)",
             self._attempts_without_recovery,

@@ -139,6 +139,44 @@ def test_no_ui_is_started_where_it_would_fight_another_owner(
     assert host.starts == []
 
 
+@pytest.mark.parametrize("begins", ["stop", "owner-lost", "restart"])
+def test_a_stop_or_restart_that_begins_during_the_port_probe_starts_nothing(monkeypatch, host, begins) -> None:
+    state = {"stopping": False, "owner": True}
+    monkeypatch.setattr(runtime, "current_process_owns_service_instance", lambda: state["owner"])
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == os.getpid() or pid in host.commands)
+
+    def probe(host_, port, **kwargs):
+        # The probe takes seconds; the lifecycle change lands inside it.
+        if begins == "stop":
+            state["stopping"] = True
+        elif begins == "owner-lost":
+            state["owner"] = False
+        else:
+            _restart_job("running")
+        return False
+
+    monkeypatch.setattr(runtime, "ui_server_compatible", probe)
+    watchdog = WebUiWatchdog(stopping=lambda: state["stopping"])
+
+    watchdog.check(0.0)
+    assert watchdog.check(CHECK_INTERVAL_SECONDS) is None
+
+    assert host.starts == []
+
+
+def test_an_unrecorded_ui_holding_the_port_does_not_delay_recovery_once_it_exits(host) -> None:
+    host.serving = True
+    watchdog = WebUiWatchdog(stopping=lambda: False)
+    for tick in range(60):
+        assert watchdog.check(tick * CHECK_INTERVAL_SECONDS) is None
+
+    host.serving = False
+    now = 60 * CHECK_INTERVAL_SECONDS
+    watchdog.check(now)
+
+    assert watchdog.check(now + CHECK_INTERVAL_SECONDS) == 301
+
+
 def test_a_restart_still_waiting_out_its_delay_does_not_hold_the_ui_down(monkeypatch, host) -> None:
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == os.getpid() or pid in host.commands)
     _restart_job("scheduled")
