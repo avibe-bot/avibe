@@ -104,7 +104,10 @@ does not replace the connector grade or trigger recovery.
 | Poor | P95 `< 1000 ms`, P99 `< 2000 ms`, and `< 10%` above 1 second |
 | Critical | Any remaining measured window, or failure rate `>= 10%` |
 
-Automatic tail-latency recovery requires high confidence and one of:
+A high-confidence window with zero successful requests is an availability
+episode, not tail latency, whatever connection count cloudflared reports; its
+candidate is compared as though the active connector had no ready connections.
+Otherwise, automatic tail-latency recovery requires high confidence and one of:
 
 - request failure rate `>= 10%`;
 - P95 `>= 750 ms`, or P95 at least twice the protocol-local baseline;
@@ -453,6 +456,7 @@ three-minute rule; a single spike changes the displayed number but not health.
 | --- | --- | --- |
 | No ready connections | `ha_connections == 0` | 15 seconds |
 | Partial availability | `ha_connections < 4` | 60 seconds |
+| No successful request | High-confidence request window with zero successes | Rolling request window |
 | Request errors | `>= 3/minute` | 2 consecutive windows |
 | Timeout packet loss | `>= 10/minute` across at least 2 connections | 2 consecutive windows |
 | Metrics unavailable | State becomes `unknown`; never rotate from this alone | 45 seconds |

@@ -684,6 +684,12 @@ _UNAVAILABLE_REQUEST_PATH = {
             "http2",
             "http2",
         ),
+        (
+            {"ha_connections": 4, "protocol": "quic", "request_path": _UNAVAILABLE_REQUEST_PATH},
+            "http2",
+            "http2",
+            "http2",
+        ),
         # Cloudflare auto already starts on QUIC, the alternative to a dead
         # HTTP/2 route; the transport it verified replaces the failed preference.
         ({"ha_connections": 0, "protocol": "http2"}, "quic", "auto", "quic"),

@@ -141,6 +141,29 @@ def test_partial_availability_triggers_recovery_after_four_samples() -> None:
     assert evaluator.recovery_trigger(snapshot) == "availability"
 
 
+def test_ra_tq_033_unavailable_request_path_is_an_availability_episode() -> None:
+    evaluator = tunnel_quality.QualityEvaluator()
+
+    # cloudflared still reports four ready connections while no request succeeds.
+    for index in range(12):
+        sampled_at = 100 + index * 15
+        snapshot = evaluator.update(
+            _sample(sampled_at, (70, 75, 80, 85)),
+            configured_protocol="auto",
+            effective_protocol="quic",
+            request_path_sample=tunnel_quality.RequestPathSample(
+                sampled_at=sampled_at,
+                latency_ms=(3500, 3500, 3500),
+                successes=(False, False, False),
+            ),
+        )
+
+    assert snapshot["ha_connections"] == 4
+    assert snapshot["request_path"]["confidence"] == "high"
+    assert snapshot["request_path"]["status"] == "unavailable"
+    assert evaluator.recovery_trigger(snapshot) == "availability"
+
+
 def test_ra_tq_003_metrics_failure_becomes_unknown_after_45_seconds() -> None:
     evaluator = tunnel_quality.QualityEvaluator()
     evaluator.update(_sample(100, (70, 75, 80, 85)))
