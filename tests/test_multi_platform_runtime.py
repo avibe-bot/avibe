@@ -30,8 +30,6 @@ from modules.agents.model_hub import OpenCodeOverlay, launch_for_context
 from modules.agents.service import AgentService
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.server import (
-    OpenCodeManagedPolicyRefreshPendingError,
-    OpenCodeModelHubOverlayRequiredError,
     OpenCodeRuntimeConfigInvalidError,
 )
 from modules.agents.opencode.poll_loop import (
@@ -40,6 +38,7 @@ from modules.agents.opencode.poll_loop import (
 )
 from modules.agents.opencode.utils import resolve_opencode_reasoning_effort
 from core.native_dispatch_phase import prewrite_failure_evidence
+from tests.opencode_generation_fakes import serve_opencode_agent
 from tests.scenario_harness.model_hub import (
     UNLISTED_MODEL,
     unlisted_model_copy,
@@ -56,22 +55,6 @@ class _StubConfig(BaseIMConfig):
         return None
 
 
-def test_opencode_policy_refresh_failure_is_localized() -> None:
-    agent = OpenCodeAgent.__new__(OpenCodeAgent)
-    agent.controller = type(
-        "Controller",
-        (),
-        {"config": type("Config", (), {"language": "zh"})()},
-    )()
-
-    display = agent._server_start_error_display_text(
-        OpenCodeManagedPolicyRefreshPendingError("internal diagnostic")
-    )
-
-    assert "仍在完成已有回合" in display
-    assert "internal diagnostic" not in display
-
-
 def test_opencode_runtime_config_failure_is_localized() -> None:
     agent = OpenCodeAgent.__new__(OpenCodeAgent)
     agent.controller = type(
@@ -85,22 +68,6 @@ def test_opencode_runtime_config_failure_is_localized() -> None:
     )
 
     assert "运行时配置" in display
-    assert "internal diagnostic" not in display
-
-
-def test_opencode_model_hub_overlay_failure_is_localized() -> None:
-    agent = OpenCodeAgent.__new__(OpenCodeAgent)
-    agent.controller = type(
-        "Controller",
-        (),
-        {"config": type("Config", (), {"language": "zh"})()},
-    )()
-
-    display = agent._server_start_error_display_text(
-        OpenCodeModelHubOverlayRequiredError("internal diagnostic")
-    )
-
-    assert "准备 Gateway 模式" in display
     assert "internal diagnostic" not in display
 
 
@@ -128,7 +95,6 @@ def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running
     monkeypatch,
 ) -> None:
     calls: list[str] = []
-    reservation = object()
     empty_overlay = OpenCodeOverlay(
         path=Path("/tmp/opencode-empty-overlay.json"),
         content_hash="empty-overlay-hash",
@@ -153,22 +119,11 @@ def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running
             return empty_overlay
 
     class _Server:
-        async def configure_model_hub_overlay(self, overlay):
-            assert overlay is empty_overlay
-            calls.append("configure")
-            return reservation
-
-        async def release_model_hub_overlay_reservation(self, value):
-            assert value is reservation
-            calls.append("release")
-
-        async def ensure_running(self):
-            calls.append("ensure")
+        async def ensure_directory_ready(self, _path):
+            calls.append("ready")
+            raise RuntimeError("test boundary after server start")
 
     server = _Server()
-
-    async def _get_server():
-        return server
 
     async def _emit_failure(*_args, **_kwargs):
         calls.append("failure")
@@ -191,14 +146,9 @@ def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running
     agent = OpenCodeAgent.__new__(OpenCodeAgent)
     agent.controller = controller
     agent.config = controller.config
-    agent._get_server = _get_server
+    runtime = serve_opencode_agent(agent, server)
+    agent._session_manager = SimpleNamespace(ensure_working_dir=AsyncMock())
     agent._remove_ack_reaction = _remove_ack
-
-    def _finish_after_start(_server):
-        calls.append("attach")
-        raise RuntimeError("test boundary after server start")
-
-    agent._attach_server_activation = _finish_after_start
     request = AgentRequest(
         context=MessageContext(
             user_id="user",
@@ -214,9 +164,17 @@ def test_opencode_hub_turn_with_empty_menu_uses_overlay_and_keeps_server_running
         session_key="slack::channel",
     )
 
-    asyncio.run(agent._process_message(request))
+    async def _run():
+        await agent._process_message(request)
+        await asyncio.gather(*agent._lifecycle_tasks)
 
-    assert calls == ["configure", "ensure", "attach", "release", "failure", "ack"]
+    asyncio.run(_run())
+
+    # An empty Hub menu still launches on its overlay: the overlay is the
+    # spec input, the turn reaches the generation, and its binding is released.
+    assert [spec.overlay for spec in runtime.specs] == [empty_overlay]
+    assert calls == ["ready", "failure", "ack"]
+    assert [binding.released for binding in runtime.bindings] == [True]
 
 
 @pytest.mark.parametrize("language", ["en", "zh"])
@@ -231,12 +189,6 @@ def test_opencode_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(
     explicit retry."""
 
     class _Server:
-        async def configure_model_hub_overlay(self, overlay):
-            return None
-
-        async def ensure_running(self):
-            return None
-
         async def ensure_directory_ready(self, _path):
             return None
 
@@ -245,9 +197,6 @@ def test_opencode_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(
 
         async def abort_session(self, _session_id, _path):
             return None
-
-    async def _get_server():
-        return server
 
     async def _noop(*_args, **_kwargs):
         return None
@@ -265,7 +214,7 @@ def test_opencode_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(
     agent = OpenCodeAgent.__new__(OpenCodeAgent)
     agent.controller = controller
     agent.config = controller.config
-    agent._get_server = _get_server
+    serve_opencode_agent(agent, server)
     agent._delete_ack = _noop
     agent._remove_ack_reaction = _noop
     agent.record_model_hub_native_failure = _noop
@@ -1180,8 +1129,6 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
     calls = []
 
     class _Server:
-        async def ensure_running(self):
-            return None
 
         async def ensure_directory_ready(self, directory):
             return None
@@ -1234,8 +1181,7 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
         async def run_prompt_poll(self, *args, **kwargs):
             return "done", True
 
-    async def _get_server():
-        return _Server()
+    server = _Server()
 
     async def _async_noop():
         return None
@@ -1279,7 +1225,7 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
     agent._steering_states = {}
-    agent._get_server = _get_server
+    serve_opencode_agent(agent, server)
     agent._delete_ack = lambda request: _async_noop()
     agent._remove_ack_reaction = lambda request: _async_noop()
     agent.emit_result_message = lambda *args, **kwargs: _async_noop()
@@ -1384,8 +1330,6 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
     set_dispatch_phase(request_context, DISPATCH_PHASE_PREWRITE)
 
     class _Server:
-        async def ensure_running(self):
-            return None
 
         async def ensure_directory_ready(self, directory):
             return None
@@ -1461,8 +1405,7 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
         def get_opencode_overrides(self, context):
             return None, None, None
 
-    async def _get_server():
-        return _Server()
+    server = _Server()
 
     async def _async_noop():
         return None
@@ -1480,7 +1423,7 @@ def test_opencode_process_message_removes_active_poll_when_question_tool_aborts(
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
     agent._steering_states = {}
-    agent._get_server = _get_server
+    serve_opencode_agent(agent, server)
     agent._delete_ack = lambda request: _async_noop()
     agent._remove_ack_reaction = _remove_ack
 
@@ -2724,8 +2667,6 @@ def test_opencode_restored_poll_settles_error_after_retry_budget(monkeypatch):
         controller = _Controller()
         sessions = _Sessions()
 
-        async def _get_server(self):
-            return server
 
         def _extract_response_text(self, message):
             return ""
@@ -2751,7 +2692,7 @@ def test_opencode_restored_poll_settles_error_after_retry_budget(monkeypatch):
         prompt_started_at=time.time(),
     )
 
-    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
+    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll, server))
 
     assert terminal is True
     assert removed == []
@@ -2849,8 +2790,6 @@ def test_opencode_restored_poll_keeps_empty_completion_successful():
         sessions = _Sessions()
         im_client = type("IM", (), {"formatter": _Formatter()})()
 
-        async def _get_server(self):
-            return server
 
         def _get_formatter(self, context):
             return _Formatter()
@@ -2882,7 +2821,7 @@ def test_opencode_restored_poll_keeps_empty_completion_successful():
     )
 
     loop = OpenCodePollLoop(_Agent())
-    terminal = asyncio.run(loop.run_restored_poll_loop(poll))
+    terminal = asyncio.run(loop.run_restored_poll_loop(poll, server))
 
     assert diagnostics == []
     assert terminal is True
@@ -2955,8 +2894,6 @@ def test_opencode_restored_poll_emits_intermediate_assistant_once():
         controller = _Controller()
         sessions = _Sessions()
 
-        async def _get_server(self):
-            return server
 
         def _extract_response_text(self, message):
             return "".join(part.get("text", "") for part in message.get("parts", []))
@@ -2980,7 +2917,7 @@ def test_opencode_restored_poll_emits_intermediate_assistant_once():
         prompt_started_at=time.time(),
     )
 
-    assert asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll)) is True
+    assert asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll, server)) is True
 
     assert [item for item in emitted if item[0] == "assistant"] == [("assistant", "msg-new")]
     assert ("result", "done") in emitted
@@ -3058,8 +2995,6 @@ def test_opencode_restored_poll_settles_after_consecutive_transport_failures(
         controller = _Controller()
         sessions = _Sessions()
 
-        async def _get_server(self):
-            return server
 
         async def _remove_ack_reaction(self, request):
             return None
@@ -3079,7 +3014,7 @@ def test_opencode_restored_poll_settles_after_consecutive_transport_failures(
         prompt_started_at=time.time(),
     )
 
-    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
+    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll, server))
 
     assert aborted == [("oc-restored-transport-dead", "/tmp/work")]
     assert terminal is True
@@ -3154,8 +3089,6 @@ def test_opencode_restored_poll_consumes_original_timeout_budget():
         controller = _Controller()
         sessions = _Sessions()
 
-        async def _get_server(self):
-            return server
 
         async def _remove_ack_reaction(self, request):
             return None
@@ -3175,7 +3108,7 @@ def test_opencode_restored_poll_consumes_original_timeout_budget():
         prompt_started_at=time.time() - 1,
     )
 
-    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
+    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll, server))
 
     assert list_calls == []
     assert aborted == [("oc-restored-timeout", "/tmp/work")]
@@ -3650,8 +3583,6 @@ def test_mh_chan_001_opencode_restored_poll_records_source_failure():
         controller = _Controller()
         sessions = _Sessions()
 
-        async def _get_server(self):
-            return server
 
         def _extract_response_text(self, message):
             return ""
@@ -3691,7 +3622,7 @@ def test_mh_chan_001_opencode_restored_poll_records_source_failure():
         },
     )
 
-    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll))
+    terminal = asyncio.run(OpenCodePollLoop(_Agent()).run_restored_poll_loop(poll, server))
 
     assert model_hub_failures == [
         (
@@ -3987,10 +3918,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
     active_polls = []
     active_poll_updates = []
     recovery_order = []
-    overlay_reservation = object()
-    configured_overlays = []
     active_registrations = []
-    released_reservations = []
     prompt_skill_cwds = []
 
     def build_prompt(**kwargs):
@@ -4003,13 +3931,6 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
     )
 
     class _Server:
-        async def configure_model_hub_overlay(self, overlay):
-            configured_overlays.append(overlay)
-            return overlay_reservation
-
-        async def ensure_running(self):
-            return None
-
         async def ensure_directory_ready(self, directory):
             return None
 
@@ -4034,11 +3955,8 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
             recovery_order.append("prompt")
             calls.append(kwargs)
 
-        async def mark_run_active(self, session_id, *, overlay_reservation=None):
-            active_registrations.append((session_id, overlay_reservation))
-
-        async def release_model_hub_overlay_reservation(self, reservation):
-            released_reservations.append(reservation)
+        async def mark_run_active(self, session_id):
+            active_registrations.append(session_id)
 
         async def mark_run_inactive(self, session_id):
             return None
@@ -4085,8 +4003,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
         async def run_prompt_poll(self, *args, **kwargs):
             return "done", True
 
-    async def _get_server():
-        return _Server()
+    server = _Server()
 
     async def _async_noop():
         return None
@@ -4107,6 +4024,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
                             {
                                 "default_provider": "openai",
                                 "default_reasoning_effort": "high",
+                                "error_retry_limit": 0,
                             },
                     )(),
                 },
@@ -4125,11 +4043,12 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
     agent.im_client = agent.controller.im_client
     agent.settings_manager = agent.controller.settings_manager
     agent.sessions = agent.controller.sessions
-    agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+    # One ``agents.opencode`` object, as in production.
+    agent.opencode_config = agent.controller.config.opencode
     agent._session_manager = _SessionManager()
     agent._poll_loop = _PollLoop()
     agent._steering_states = {}
-    agent._get_server = _get_server
+    runtime = serve_opencode_agent(agent, server)
     agent._delete_ack = lambda request: _async_noop()
     agent._remove_ack_reaction = lambda request: _async_noop()
     agent.emit_result_message = lambda *args, **kwargs: _async_noop()
@@ -4155,6 +4074,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
             vibe_agent_system_prompt=custom_prompt,
         )
         await agent._process_message(request)
+        await asyncio.gather(*agent._lifecycle_tasks)
 
     asyncio.run(_run())
 
@@ -4169,9 +4089,12 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms(monkeypatch, c
     assert calls[0]["attempt_id"] == ATTEMPT_ID
     assert "message_id" not in calls[0]
     assert recovery_order[:3] == ["poll", "prompt", "accepted"]
-    assert configured_overlays == [None]
-    assert active_registrations == [("oc-session", overlay_reservation)]
-    assert released_reservations == []
+    # A Direct turn's spec has no overlay; its run is marked on its own
+    # generation, which the turn pins until it settles.
+    assert [spec.overlay for spec in runtime.specs] == [None]
+    assert active_registrations == ["oc-session"]
+    assert [binding.released for binding in runtime.bindings] == [True]
+    assert active_polls[0]["processing_indicator"]["opencode_generation_id"] == "ocg_test"
     assert active_poll_updates[0][0] == "oc-session"
     assert isinstance(active_poll_updates[0][1]["prompt_started_at"], float)
     steering_snapshot = active_polls[0]["processing_indicator"]["opencode_native_steering"]

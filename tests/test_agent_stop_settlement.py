@@ -20,6 +20,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -108,13 +109,16 @@ class AgentStopSettlementTests(unittest.IsolatedAsyncioTestCase):
 
 
 def _codex_stop_case():
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent._session_mgr = SimpleNamespace(get_thread_id=lambda base_session_id: "thread-1")
     agent._turn_registry = _StubTurnRegistry()
     agent._turn_registry._active_turns["session-1"] = "turn-1"
-    agent._transports = {
-        "/tmp": SimpleNamespace(is_alive=True, send_request=AsyncMock(return_value={}))
-    }
+    install_codex_transport(
+        agent,
+        "/tmp",
+        SimpleNamespace(is_alive=True, send_request=AsyncMock(return_value={})),
+        sessions={"session-1": "thread-1"},
+    )
     agent._event_handler = SimpleNamespace(clear_pending=lambda turn_id: SimpleNamespace())
     agent._user_stopped_turn_ids = set()
     agent._remove_ack_reaction = AsyncMock()
@@ -154,6 +158,7 @@ def _opencode_stop_case():
         get_request_session=lambda _base: None,
     )
     agent._user_stopped_sessions = set()
+    agent._session_generations = {}
 
     async def _in_flight():
         await asyncio.Event().wait()

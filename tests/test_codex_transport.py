@@ -303,28 +303,33 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
             await transport.send_notification("initialized")
 
     async def test_cancelled_request_does_not_leave_pending_rpc(self):
-        request_written = asyncio.Event()
+        # Cancelled while its write is still draining, or while awaiting the answer.
+        for phase in ("writing", "awaiting_response"):
+            with self.subTest(phase=phase):
+                request_written = asyncio.Event()
 
-        class _Stdin:
-            def is_closing(self):
-                return False
+                class _Stdin:
+                    def is_closing(self):
+                        return False
 
-            def write(self, _payload):
-                return None
+                    def write(self, _payload):
+                        return None
 
-            async def drain(self):
-                request_written.set()
+                    async def drain(self):
+                        request_written.set()
+                        if phase == "writing":
+                            await asyncio.Event().wait()
 
-        transport = CodexTransport(binary="codex", cwd="/tmp")
-        transport._process = SimpleNamespace(returncode=None, stdin=_Stdin())
+                transport = CodexTransport(binary="codex", cwd="/tmp")
+                transport._process = SimpleNamespace(returncode=None, stdin=_Stdin())
 
-        task = asyncio.create_task(transport.send_request("turn/interrupt", {}))
-        await request_written.wait()
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
+                task = asyncio.create_task(transport.send_request("turn/interrupt", {}))
+                await request_written.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
 
-        self.assertEqual(transport._pending, {})
+                self.assertEqual(transport._pending, {})
 
     async def test_pending_notification_keeps_terminal_pipeline_alive(self):
         transport = CodexTransport(binary="codex", cwd="/tmp")

@@ -14,6 +14,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
@@ -567,3 +569,40 @@ def test_apply_api_key_restore_falls_back_when_provider_gone(tmp_path: Path) -> 
     toml = config_path.read_text(encoding="utf-8")
     assert 'model_provider = "openai-managed"' in toml
     assert 'base_url = "https://relay.example/v1"' in toml
+
+
+def _id_token(**claims: object) -> str:
+    import base64
+
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"e30.{payload}.signature"
+
+
+def _credential_identity(tmp_path: Path, name: str, tokens: dict) -> str:
+    codex_home = tmp_path / name
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        json.dumps({"auth_mode": "chatgpt", "tokens": tokens}),
+        encoding="utf-8",
+    )
+    return codex_config.codex_credential_identity(codex_home)
+
+
+@pytest.mark.parametrize("claim", ["sub", "email"])
+def test_credential_identity_tells_legacy_oauth_accounts_apart_but_not_their_refreshes(
+    tmp_path: Path, claim: str
+) -> None:
+    """RUNTIME-GEN-015: an id_token-only bag names no account id, yet an account switch still needs a new process.
+
+    A token refresh keeps the identity, so the running app-server is reused.
+    """
+    alice = _credential_identity(tmp_path, "alice", {"id_token": _id_token(**{claim: "alice"}, iat=1)})
+    refreshed = _credential_identity(
+        tmp_path,
+        "alice-refreshed",
+        {"id_token": _id_token(**{claim: "alice"}, iat=2), "access_token": "access-2", "refresh_token": "refresh-2"},
+    )
+    bob = _credential_identity(tmp_path, "bob", {"id_token": _id_token(**{claim: "bob"}, iat=1)})
+
+    assert alice != bob
+    assert alice == refreshed

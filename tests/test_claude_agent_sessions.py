@@ -1,10 +1,13 @@
 import asyncio
+import logging
 import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -65,6 +68,43 @@ async def test_skill_catalog_is_offered_once_per_accepted_claude_client(monkeypa
     assert accepted.call_args.args[2] is None
     for task in controller.receiver_tasks.values():
         await task
+
+
+@pytest.mark.parametrize("disabled_while_connecting", [False, True], ids=["before-admission", "while-connecting"])
+async def test_runtime_gen_006_a_turn_reaching_a_disabled_claude_starts_nothing(monkeypatch, disabled_while_connecting):
+    """RUNTIME-GEN-006 (Claude): Claude stays registered while disabled, so a turn
+    queued behind the one a disable interrupted still reaches it. It must start
+    no client and tell the user Claude was turned off, also when Claude was
+    turned off while the turn's client was connecting."""
+    from core.handlers.session_handler import ClaudeBackendDisabledError
+
+    controller = _StubController()
+    controller.session_handler.get_or_create_claude_session = AsyncMock(
+        side_effect=ClaudeBackendDisabledError("claude backend disabled")
+    )
+    agent = ClaudeAgent(controller)
+    # Turned off while connecting: still enabled when the turn was admitted.
+    agent.config.claude = SimpleNamespace(enabled=disabled_while_connecting)
+    agent._remove_ack_reaction = AsyncMock()
+    failures = []
+
+    async def emit_backend_failure(_controller, _context, backend, _diagnostic, *, display_text=None, **_kwargs):
+        failures.append((backend, display_text))
+        return False
+
+    monkeypatch.setattr("modules.agents.claude_agent.emit_backend_failure", emit_backend_failure)
+    request = SimpleNamespace(
+        context=SimpleNamespace(platform_specific={}), message="queued", base_session_id="ses",
+        composite_session_id="runtime", session_key="scope", subagent_name=None, subagent_model=None,
+        subagent_reasoning_effort=None, ack_message_id=None, ack_reaction_message_id=None,
+        ack_reaction_emoji=None, files=None, working_path="/fixture",
+    )
+
+    await agent.handle_message(request)
+
+    assert controller.session_handler.get_or_create_claude_session.await_count == (1 if disabled_while_connecting else 0)
+    assert len(failures) == 1 and failures[0][0] == "claude"
+    assert "Claude Code was turned off" in failures[0][1]
 
 
 class _StubSessions:
@@ -1607,6 +1647,170 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(composite_key, agent._pending_requests)
         self.assertNotIn(composite_key, agent._native_input_receipts)
+
+    async def test_coalesced_echo_acknowledges_its_whole_queued_run(self):
+        """HFR-487: one native echo may acknowledge every queued input."""
+
+        agent_logger = logging.getLogger("modules.agents.claude_agent")
+        queued = ["first steer", "second steer"]
+        # (name, echo, origin, receipts still pending once the echo is observed)
+        cases = (
+            # Claude dequeues inputs queued behind a response together and
+            # replays them as one newline-joined user message.
+            ("coalesced", "first steer\nsecond steer", None, []),
+            # Avibe input in a shape the receipts do not model: nothing is
+            # guessed, and the drift is logged.
+            ("unrecognized human", "first steer, rewritten", {"kind": "human"}, queued),
+            ("unrecognized origin-less", "first steer, rewritten", None, queued),
+            # Same text as the queued run, but an injected turn is not Avibe input.
+            ("injected notification", "first steer\nsecond steer", {"kind": "task-notification"}, queued),
+        )
+        for name, echo, origin, still_pending in cases:
+            settles = not still_pending
+            observed_pending = []
+            with self.subTest(name):
+                controller = _StubController()
+                controller._get_session_key = lambda _context: "session-1"
+                controller.emit_agent_message = AsyncMock()
+                controller.session_handler.mark_session_idle = lambda _key: None
+                controller.session_handler.handle_session_error = AsyncMock()
+                agent = ClaudeAgent(controller)
+                agent.emit_result_message = AsyncMock()
+                agent._get_formatter = lambda _context: SimpleNamespace(
+                    format_assistant_message=lambda parts: "\n\n".join(parts),
+                )
+                composite_key = "session-coalesced-steer:/tmp/work"
+                context = SimpleNamespace(
+                    user_id="U1",
+                    channel_id="C1",
+                    platform_specific={"turn_token": "T1"},
+                )
+                pending_request = SimpleNamespace(
+                    context=context,
+                    started_at=None,
+                    ack_reaction_message_id=None,
+                    ack_reaction_emoji=None,
+                )
+                agent._pending_requests[composite_key] = [pending_request]
+                for text in ("first steer", "second steer"):
+                    receipt = agent._register_native_input(
+                        composite_key,
+                        text,
+                        kind="steer",
+                    )
+                    receipt.state = "accepted"
+                    agent._advance_steering_generation(composite_key)
+
+                class _Client:
+                    def receive_messages(self):
+                        async def _iterate():
+                            yield type(
+                                "ResultMessage",
+                                (),
+                                {
+                                    "subtype": "success",
+                                    "result": "primary result",
+                                    "duration_ms": 1,
+                                },
+                            )()
+                            yield UserMessage(echo, origin=origin)
+                            observed_pending.append(
+                                [r.text for r in agent._native_input_receipts.get(composite_key, [])]
+                            )
+                            yield type(
+                                "ResultMessage",
+                                (),
+                                {
+                                    "subtype": "success",
+                                    "result": "steered result",
+                                    "duration_ms": 2,
+                                },
+                            )()
+
+                        return _iterate()
+
+                with self.assertLogs("modules.agents.claude_agent", "WARNING") as logs:
+                    await agent._receive_messages(
+                        _Client(),
+                        "session-coalesced-steer",
+                        "/tmp/work",
+                        context,
+                        composite_key=composite_key,
+                    )
+                    agent_logger.warning("receiver finished")
+                drifted = any("matches no pending receipt" in line for line in logs.output)
+                self.assertEqual(drifted, name.startswith("unrecognized"))
+
+                self.assertEqual(observed_pending, [still_pending])
+                if settles:
+                    agent.emit_result_message.assert_awaited_once_with(
+                        context,
+                        "steered result",
+                        subtype="success",
+                        duration_ms=2,
+                        parse_mode="markdown",
+                        request=pending_request,
+                    )
+                    self.assertNotIn(composite_key, agent._native_input_receipts)
+                else:
+                    # Unacknowledged input keeps the Turn open.
+                    agent.emit_result_message.assert_not_awaited()
+    async def test_narration_keeps_claude_markdown_as_written(self):
+        """Narration reaches every surface as the Markdown Claude wrote, like the Result."""
+
+        from modules.im.formatters.avibe_formatter import AvibeFormatter
+
+        controller = _StubController()
+        controller._get_session_key = lambda _context: "session-1"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler.mark_session_idle = lambda _key: None
+        controller.session_handler.handle_session_error = AsyncMock()
+        agent = ClaudeAgent(controller)
+        agent.emit_result_message = AsyncMock()
+        agent._get_formatter = lambda _context: AvibeFormatter()
+        composite_key = "session-markdown-narration:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"turn_token": "T1"},
+        )
+        agent._pending_requests[composite_key] = [
+            SimpleNamespace(
+                context=context,
+                started_at=None,
+                ack_reaction_message_id=None,
+                ack_reaction_emoji=None,
+            )
+        ]
+        narration = "**Plan:** run `vibe status`, then pick one:\n\n---\n[Check] | [Skip]"
+
+        class _Client:
+            def receive_messages(self):
+                async def _iterate():
+                    for text in (narration, "Done."):
+                        yield type("AssistantMessage", (), {"content": [TextBlock(text)]})()
+                    yield type(
+                        "ResultMessage",
+                        (),
+                        {"subtype": "success", "result": "Done.", "duration_ms": 1},
+                    )()
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _Client(),
+            "session-markdown-narration",
+            "/tmp/work",
+            context,
+            composite_key=composite_key,
+        )
+
+        controller.emit_agent_message.assert_any_await(
+            context,
+            "assistant",
+            narration,
+            parse_mode="markdown",
+        )
 
     async def test_ambiguous_results_emit_each_answer_in_order(self):
         controller = _StubController()

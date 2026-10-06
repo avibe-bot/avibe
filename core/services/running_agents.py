@@ -6,7 +6,7 @@ liveness source it reads is controller in-memory state:
 
 - Claude: ``controller.claude_sessions`` (composite_key -> SDK client),
   ``claude_active_sessions`` (active turn set), ``session_last_activity``.
-- Codex: ``CodexAgent._session_mgr`` / ``_turn_registry`` / ``_transports``
+- Codex: ``CodexAgent._session_mgr`` / ``_turn_registry`` / ``transport_for_session``
   (one transport/pid per working dir, shared by many sessions).
 - OpenCode: ``OpenCodeAgent._active_requests`` (no OS subprocess / pid).
 - Orphans: the persisted Claude process registry (``claude_processes.json``)
@@ -206,17 +206,17 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
         return rows
     session_mgr = getattr(agent, "_session_mgr", None)
     turn_registry = getattr(agent, "_turn_registry", None)
-    transports = getattr(agent, "_transports", {}) or {}
-    if session_mgr is None:
+    transport_for_session = getattr(agent, "transport_for_session", None)
+    if session_mgr is None or not callable(transport_for_session):
         return rows
 
     # ``all_base_sessions`` unions three lock-free dicts internally, so guard it
     # against concurrent mutation (we run in a worker thread, §to_thread).
     base_ids = list(_safe_call(session_mgr.all_base_sessions, []))
-    # Resolve each base's cwd once, then count sessions per cwd (so the UI can
-    # flag a pid shared across sessions) — avoids a second get_cwd pass.
+    # Resolve each base's app-server once, then count sessions per process (so
+    # the UI can flag a pid shared across sessions).
     entries: list[tuple[str, Optional[str], bool, Any]] = []
-    cwd_session_count: dict[str, int] = {}
+    transport_session_count: dict[int, int] = {}
     for base in base_ids:
         cwd = session_mgr.get_cwd(base)
         active_turn = turn_registry.get_active_turn(base) if turn_registry is not None else None
@@ -231,11 +231,11 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
             else False
         )
         is_active = bool(active_turn) or has_pending
-        transport = transports.get(cwd) if cwd else None
+        transport = _safe_call(lambda base=base: transport_for_session(base), None)
         # A transport object can outlive its app-server when the process exits out
-        # of band (crash / reader-task failure): it lingers in ``_transports`` with
-        # ``is_alive`` False until a later cleanup removes it. Treat a dead transport
-        # as no live transport so it can't surface as a phantom idle row.
+        # of band (crash / reader-task failure): it stays bound with ``is_alive``
+        # False until a later cleanup removes it. Treat a dead transport as no
+        # live transport so it can't surface as a phantom idle row.
         if transport is not None and not getattr(transport, "is_alive", True):
             transport = None
         # Idle eviction drops the app-server transport but preserves cwd/session
@@ -245,16 +245,16 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
         if transport is None and not is_active:
             continue
         entries.append((base, cwd, is_active, transport))
-        if cwd and transport is not None:
-            cwd_session_count[cwd] = cwd_session_count.get(cwd, 0) + 1
+        if transport is not None:
+            transport_session_count[id(transport)] = transport_session_count.get(id(transport), 0) + 1
 
     for base, cwd, is_active, transport in entries:
         pid = getattr(transport, "pid", None) if transport is not None else None
-        # No per-session elapsed for codex: ``_transport_last_activity`` is keyed
-        # by cwd (shared across every session on that transport) and is touched on
-        # every streaming event, so it reflects neither this session's turn
-        # duration nor its idle time. Report ``None`` rather than a misleading
-        # value; the row still shows backend / state / pid_shared.
+        # No per-session elapsed for codex: an app-server's activity time is shared
+        # across every session on that process and is touched on every streaming
+        # event, so it reflects neither this session's turn duration nor its idle
+        # time. Report ``None`` rather than a misleading value; the row still
+        # shows backend / state / pid_shared.
         rows.append(
             _make_row(
                 backend="codex",
@@ -262,7 +262,7 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
                 base_session_id=base,
                 workdir=cwd,
                 pid=pid,
-                pid_shared=bool(cwd and transport is not None and cwd_session_count.get(cwd, 0) > 1),
+                pid_shared=bool(transport is not None and transport_session_count.get(id(transport), 0) > 1),
                 elapsed_seconds=None,
             )
         )
@@ -648,60 +648,23 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
     agent = _get_agent(controller, "codex")
     if agent is None:
         return {"ok": False, "error": "codex_unavailable"}
-    session_mgr = getattr(agent, "_session_mgr", None)
-    turn_registry = getattr(agent, "_turn_registry", None)
-    transports = getattr(agent, "_transports", {}) or {}
-    if session_mgr is None or turn_registry is None:
+    end_session = getattr(agent, "end_session", None)
+    if not callable(end_session):
         return {"ok": False, "error": "codex_registries_unavailable"}
-    cwd = session_mgr.get_cwd(base_session_id)
-    thread_id = session_mgr.get_thread_id(base_session_id)
-    turn_id = turn_registry.get_active_turn(base_session_id)
-    transport = transports.get(cwd) if cwd else None
-    # Interrupt the active turn (the shared app-server transport stays up for
-    # other sessions on the same cwd); then clear THIS session's thread/turn state.
-    interrupted = False
-    if turn_id and thread_id and transport is not None:
-        try:
-            await transport.send_request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
-            interrupted = True
-        except Exception:  # noqa: BLE001
-            logger.debug("end: codex turn/interrupt failed for %s", base_session_id, exc_info=True)
+    # The adapter owns End: it serializes it with the Session's turns, releases
+    # the Session's thread on an app-server other Sessions still use, or stops
+    # the directory's app-servers once this was their last user, and clears the
+    # Session only after that succeeded.
     try:
-        turn_registry.clear_session(base_session_id)
+        ended = await end_session(base_session_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("end: codex clear failed for %s: %s", base_session_id, exc)
-        return {"ok": False, "error": "clear_failed", "detail": str(exc)}
-    # The app-server transport is shared per cwd. If THIS was the last session on
-    # that cwd, stop it too so the codex process is actually freed (otherwise it
-    # lingers with zero sessions); if other sessions still use it, leave it up.
-    process_killed = False
-    retire_idle = getattr(agent, "retire_unowned_session_transport", None)
-    other_sessions = (
-        set(session_mgr.sessions_for_cwd(cwd)) - {base_session_id}
-        if cwd else set()
-    )
-    if cwd and transport is not None and not other_sessions and callable(retire_idle):
-        try:
-            process_killed = bool(
-                await retire_idle(cwd, ending_session_id=base_session_id)
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("end: codex transport stop failed for %s", cwd, exc_info=True)
-            return {"ok": False, "error": "transport_retire_failed", "detail": str(exc)}
-        if not process_killed:
-            return {"ok": False, "error": "transport_retire_failed"}
-    try:
-        # Keep the cwd mapping until transport retirement succeeds, so a failed
-        # close remains reachable by Session ID for a later End attempt.
-        session_mgr.clear(base_session_id)
-        getattr(agent, "_session_locks", {}).pop(base_session_id, None)
-        getattr(agent, "_session_last_activity", {}).pop(base_session_id, None)
-        clear_thread_cache = getattr(agent, "_clear_thread_developer_instructions", None)
-        if callable(clear_thread_cache):
-            clear_thread_cache(base_session_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("end: codex clear failed for %s: %s", base_session_id, exc)
-        return {"ok": False, "error": "clear_failed", "detail": str(exc)}
+        released = getattr(exc, "reason", None) == "codex_thread_release_unavailable"
+        logger.warning("end: codex teardown failed for %s", base_session_id, exc_info=True)
+        return {
+            "ok": False,
+            "error": "thread_release_failed" if released else "transport_retire_failed",
+            "detail": str(exc),
+        }
     # ``interrupted`` is False when there was no active turn to stop (idle/stale):
     # the session state is still cleared, but the caller can tell nothing was
     # actively interrupted.
@@ -709,8 +672,8 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
         "ok": True,
         "action": "ended",
         "backend": "codex",
-        "interrupted": interrupted,
-        "process_killed": process_killed,
+        "interrupted": bool(ended.get("interrupted")),
+        "process_killed": bool(ended.get("process_killed")),
     }
 
 
@@ -729,8 +692,10 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
         # Active End has already gone through the canonical stop path. Finish
         # interrupting its native poll, but do not retire a shared server here.
         try:
-            if req_info:
-                server = await agent._get_server()
+            # Only the generation running this native turn can abort it.
+            bound = getattr(agent, "_bound_generation", None)
+            server = bound(base_session_id) if callable(bound) else None
+            if req_info and server is not None:
                 await server.abort_session(req_info[0], req_info[1])
         except Exception:  # noqa: BLE001
             logger.debug("end: opencode remote abort failed for %s", base_session_id, exc_info=True)
@@ -751,17 +716,24 @@ async def _end_opencode(controller: "Controller", base_session_id: Optional[str]
     if any(not request.done() for request in active_requests.values()):
         return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
 
-    # The serve process is shared across Sessions. Its existing strict idle
-    # retirement checks native requests, durable ownership, and process proof.
-    server = getattr(getattr(agent, "_client_manager", None), "_server_manager", None)
-    if server is None:
+    # The serve process is shared across Sessions. Retiring the current
+    # generation stops it now when idle; work bound to any generation keeps
+    # that process until the work drains.
+    retire = getattr(agent, "retire_current_generation", None)
+    if not callable(retire):
         return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": False}
     try:
-        await server.retire_for_native_migration()
+        outcome = await retire()
     except Exception as exc:  # noqa: BLE001
         logger.warning("end: opencode idle server retirement failed for %s: %s", base_session_id, exc)
         return {"ok": False, "error": "runtime_retirement_failed", "detail": str(exc)}
-    return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": True}
+    outcome = getattr(outcome, "value", outcome)
+    if outcome == "failed":
+        # The stop ran and the process survived; its record stays for a retry.
+        return {"ok": False, "error": "runtime_retirement_failed", "detail": "OpenCode server did not exit"}
+    # "draining": a lease or other work still binds the process, which stops
+    # once that drains. Only a confirmed stop reports a killed process.
+    return {"ok": True, "action": "ended", "backend": "opencode", "process_killed": outcome == "stopped"}
 
 
 async def _settle_workbench_turn(
@@ -1322,12 +1294,19 @@ async def end_running_agent(
                 if teardown.get("process_killed"):
                     result["process_killed"] = True
                 return result
-            return stop_result if stop_ok else (teardown if isinstance(teardown, dict) else stop_result)
+            # The turn may be stopped, but the Session still holds its thread
+            # and its row, so End did not finish: report the teardown failure.
+            return teardown if isinstance(teardown, dict) else stop_result
 
         if not stop_ok:
             return stop_result
         if backend == "opencode":
-            await _end_opencode(controller, base_session_id)
+            teardown = await _end_opencode(controller, base_session_id)
+            if isinstance(teardown, dict) and not teardown.get("ok"):
+                # The turn stopped, but the runtime End asked to retire survived.
+                return teardown
+            if isinstance(teardown, dict) and teardown.get("process_killed"):
+                stop_result["process_killed"] = True
         elif backend == "claude" and isinstance(claude_pid, int):
             # Claude's client is already removed by the stop path (so its row clears,
             # and calling _end_claude here would wrongly report ``session_not_live``);

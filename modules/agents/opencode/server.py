@@ -1,54 +1,50 @@
-"""OpenCode server lifecycle + HTTP API wrapper."""
+"""OpenCode runtime generations: process lifecycle and HTTP API."""
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
-import hashlib
+from enum import Enum
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import socket
-import subprocess
 import time
 from urllib.parse import quote as _url_quote
 import urllib.error
 import urllib.parse
 import urllib.request
-import threading
 from asyncio.subprocess import Process
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 import aiohttp
 import psutil
 
 from config import paths
 from config.atomic_io import write_atomic
-from config.v2_config import V2Config, is_model_hub_enabled
 from core.handlers.model_hub.identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL
 from core.process_isolation import isolated_subprocess_kwargs
-from core.resource_governance import is_controller_resource_governor
 from modules.agents.opencode.caller_context import ensure_plugin_installed, server_environment
-from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
-from vibe.desktop_runtime import DESKTOP_OPENCODE_ROLE, DESKTOP_ROLE_ENV
+from vibe.desktop_runtime import DESKTOP_OPENCODE_ROLE, DESKTOP_ROLE_ENV, desktop_caller_provenance
 from vibe.opencode_config import (
     OPENCODE_REASONING_VARIANTS,
     OpenCodeRuntimeConfigInvalidError,
     get_opencode_custom_provider_adapter,
     load_first_opencode_user_config,
     managed_opencode_runtime_config_content as _managed_runtime_config_content,
-    parse_jsonc_object,
     read_opencode_provider_auth_entries,
 )
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_OPENCODE_PORT = 4096
 DEFAULT_OPENCODE_HOST = "127.0.0.1"
 # A cold OpenCode process can take close to a minute to load on a busy or
 # freshly provisioned host. This is only a ceiling: a healthy start returns as
@@ -63,12 +59,33 @@ SERVER_START_TIMEOUT = 120
 # a request timeout.
 DIRECTORY_BOOTSTRAP_TIMEOUT = 300
 OPENCODE_LOG_TAIL_BYTES = 2_000_000
-MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS = 30.0
-_USE_CURRENT_CALLER_CONTEXT_PATH = object()
-_CURRENT_OWNER_PID = os.getpid()
+# Ports Avibe chooses can be taken by another process before OpenCode binds.
+_PORT_ATTEMPTS = 3
+GENERATION_RECORD_SCHEMA = 1
+# The spec of a server adopted from the single-server record of a release
+# before generations. No new turn's spec ever equals it.
+LEGACY_SPEC_DIGEST = "legacy"
+# A record written before the desktop Runtime id was recorded.
+_UNRECORDED_RUNTIME_ID = object()
+# Generations a runtime of this process is starting or has attached, with the
+# process each one runs. Adoption leaves them to that runtime, for example the
+# one of an OpenCode backend disabled and enabled again while its turn still
+# runs; it stops them once their work drains. A started process is owned from
+# its spawn, before its record is written, until a stop proves it gone or its
+# start proves it exited, so this controller's shutdown stops it, recorded or not.
+_OWNED_HERE: dict[str, tuple[int, Optional[float]]] = {}
+# The process handle of each owned generation this process spawned. Until the
+# handle reaps it, its pid cannot name another process, so the handle, never
+# the start time the platform reports (which moves with every clock step),
+# says whether it is still running.
+_CHILDREN_HERE: dict[str, Any] = {}
+# A busy server after a controller crash can miss one health probe; adoption
+# gives it this many before stopping it.
+_ADOPTION_PROBES = 3
+_ADOPTION_PROBE_INTERVAL_SECONDS = 2.0
 _DURABLE_ATTEMPT_ID_RE = re.compile(r"^atm_([0-9a-f]{32})$")
-# Bump whenever the process-level Avibe policy applied in ``_start_server``
-# changes so an adopted process cannot silently keep the previous behavior.
+# Bump whenever the process-level Avibe policy applied at launch changes. It is
+# a launch spec input, so the next turn starts a generation under the new policy.
 _MANAGED_RUNTIME_POLICY_REVISION = "disable-native-skill-v2"
 
 
@@ -231,183 +248,121 @@ class OpenCodePromptRejectedError(RuntimeError):
         return self.status == 400
 
 
-class OpenCodeManagedPolicyRefreshPendingError(RuntimeError):
-    """The adopted OpenCode process cannot apply Avibe's current policy yet."""
-
-
-class OpenCodeModelHubOverlayRequiredError(RuntimeError):
-    """Hub mode cannot launch OpenCode until its owner configures an overlay."""
-
 
 class OpenCodeDirectoryBootstrapTimeoutError(RuntimeError):
     """OpenCode is still bootstrapping a directory after the readiness ceiling."""
 
 
-class OpenCodeServerManager:
-    """Manages a singleton OpenCode server process shared across all working directories."""
+class StopOutcome(str, Enum):
+    """What a confirmed stop found once nothing about it was still pending."""
 
-    _instance: Optional["OpenCodeServerManager"] = None
-    _class_lock: threading.Lock = threading.Lock()
+    # The process is gone and its record removed.
+    STOPPED = "stopped"
+    # Work or a lease still binds it; it stops once that drains.
+    DRAINING = "draining"
+    # Its stop ran and the process survived; its record stays for a retry.
+    FAILED = "failed"
+
+
+class OpenCodeGenerationStartError(RuntimeError):
+    """A generation's ``opencode serve`` process did not become ready."""
+
+    def __init__(self, message: str, *, exited_pid: int | None = None) -> None:
+        super().__init__(message)
+        # Set only when the process exited on its own: the evidence a resource
+        # pressure diagnosis may consume. A process Avibe stopped for timeout is
+        # not that evidence.
+        self.exited_pid = exited_pid
+
+
+def generation_records_dir() -> Path:
+    """Where each generation's process record lives."""
+
+    return paths.get_runtime_dir() / "opencode" / "generations"
+
+
+def legacy_pid_file() -> Path:
+    """The single-server record every release before generations wrote."""
+
+    return paths.get_logs_dir() / "opencode_server.json"
+
+
+def _pid_exists(pid: int) -> bool:
+    return runtime.pid_alive(pid)
+
+
+def _get_pid_command(pid: int) -> Optional[str]:
+    return runtime.get_process_command(pid)
+
+
+def _is_opencode_serve_cmd(command: str, port: int) -> bool:
+    if not command:
+        return False
+    return "opencode" in command and " serve" in command and f"--port={port}" in command
+
+
+def _pid_listens_on(pid: int, port: int) -> bool:
+    """Whether ``pid``, or a process it started, holds the listening socket on ``port``.
+
+    A launcher such as an npm shim or a Windows ``.cmd`` wrapper starts the
+    server as its child, so the listener can belong to a descendant.
+    """
+
+    try:
+        root = psutil.Process(pid)
+        processes = [root, *root.children(recursive=True)]
+    except psutil.Error:
+        return False
+    for process in processes:
+        try:
+            connections = process.net_connections(kind="tcp")
+        except psutil.Error:
+            continue
+        if any(
+            connection.status == psutil.CONN_LISTEN
+            and connection.laddr
+            and connection.laddr.port == port
+            for connection in connections
+        ):
+            return True
+    return False
+
+
+def _choose_port(host: str) -> int:
+    # ``opencode serve --port=0`` listens on its default 4096 rather than an
+    # ephemeral port, so the port is chosen here. Another process can take it
+    # before OpenCode binds; the start then sees its own process exit and
+    # retries with another port.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
+
+
+class OpenCodeServerClient:
+    """The HTTP API of one ``opencode serve`` process at ``base_url``."""
 
     def __init__(
         self,
-        binary: str = "opencode",
-        port: int = DEFAULT_OPENCODE_PORT,
+        base_url: str,
+        *,
         request_timeout_seconds: int = 60,
-        resource_governor: Any | None = None,
-    ):
-        self.binary = binary
-        self.port = port
+        model_hub_provider_ids: tuple[str, ...] = (),
+    ) -> None:
+        self.base_url = base_url
         self.request_timeout_seconds = request_timeout_seconds
-        self.resource_governor = resource_governor
-        self.host = DEFAULT_OPENCODE_HOST
-        self._process: Optional[Process] = None
-        self._last_start_failure_pid: int | None = None
-        self._start_attempt_generation = 0
-        # The event loop ``_process`` was created on. Subprocess transports
-        # bind their internal Future / wait helpers to the creating loop;
-        # ``process.wait()`` from a different loop raises ``RuntimeError: got
-        # Future attached to a different loop``. The singleton outlives
-        # ``asyncio.run`` calls (Flask UI server creates a new loop per
-        # request), so any code that touches ``_process`` from a
-        # non-creating loop has to detach it first. ``_process_loop`` is set
-        # alongside every ``_process`` assignment.
-        self._process_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._base_url: Optional[str] = None
+        # Private Hub transport providers of the process behind ``base_url``;
+        # user-facing catalogs never show them.
+        self.model_hub_provider_ids = tuple(model_hub_provider_ids)
         self._http_session: Optional[aiohttp.ClientSession] = None
         self._http_session_loop: Optional[asyncio.AbstractEventLoop] = None
         self._lock: Optional[asyncio.Lock] = None
         self._lock_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._pid_file = paths.get_logs_dir() / "opencode_server.json"
         self._active_requests = 0
-        self._active_run_sessions: set[str] = set()
-        self._active_poll_session_ids_provider: Callable[[], set[str]] | None = None
-        self._auth_refresh_pending = False
-        self._auth_refresh_pending_port: Optional[int] = None
-        self._caller_context_plugin_refresh_pending = False
-        self._pending_runtime_config: Optional[tuple[str, int, int]] = None
         self._last_prompt_started_at: dict[str, float] = {}
-        self._model_hub_overlay_path: Optional[str] = None
-        self._model_hub_overlay_hash: Optional[str] = None
-        self._model_hub_overlay_content: Optional[str] = None
-        self._model_hub_overlay_provider_ids: tuple[str, ...] = ()
-        self._model_hub_overlay_preparer: (
-            Callable[[], Awaitable[Any | None]] | None
-        ) = None
-        self._model_hub_overlay_refusal_logged = False
-        self._model_hub_overlay_transition: tuple[
-            Optional[str], Optional[str], object
-        ] | None = None
-        self._model_hub_overlay_reservations: dict[
-            object, tuple[Optional[str], Optional[str]]
-        ] = {}
-        self._model_hub_overlay_drain_timeout_seconds = MODEL_HUB_OVERLAY_DRAIN_TIMEOUT_SECONDS
-        self._runtime_activation_retire: Callable[[bool, bool], bool] | None = None
-        self._runtime_generation_token: tuple[int, float | None] | None = None
-        self._observed_runtime_process: tuple[int, float] | None = None
-
-    def set_runtime_activation_retire(
-        self,
-        callback: Callable[[bool, bool], bool],
-    ) -> None:
-        self._runtime_activation_retire = callback
-
-    def set_active_poll_session_ids_provider(
-        self,
-        provider: Callable[[], set[str]],
-    ) -> None:
-        """Attach the durable recovery records that confirm adopted run markers."""
-
-        self._active_poll_session_ids_provider = provider
-
-    @staticmethod
-    def _runtime_token_from_pid_info(
-        info: Optional[Dict[str, Any]],
-    ) -> tuple[int, float | None] | None:
-        if not isinstance(info, dict):
-            return None
-        pid = info.get("pid")
-        if not isinstance(pid, int):
-            return None
-        started_at = info.get("started_at")
-        return (
-            pid,
-            float(started_at) if isinstance(started_at, (int, float)) else None,
-        )
-
-    def _retire_runtime_generation_for_replacement(self) -> None:
-        retire_activation = self._runtime_activation_retire
-        if callable(retire_activation) and not retire_activation(True, False):
-            raise RuntimeError(
-                "OpenCode runtime replacement could not retire its activation generation"
-            )
-        self._runtime_generation_token = None
-        self._observed_runtime_process = None
-
-    def _observe_runtime_generation(
-        self,
-        info: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        if info is None:
-            info = self._read_pid_file()
-        token = self._runtime_token_from_pid_info(info)
-        if token is None:
-            return
-        previous = self._runtime_generation_token
-        if previous is not None and previous != token:
-            self._retire_runtime_generation_for_replacement()
-        self._runtime_generation_token = token
-        if previous != token:
-            self._last_start_failure_pid = None
-        if previous != token or self._observed_runtime_process is None:
-            created_at = runtime.process_create_time(token[0])
-            self._observed_runtime_process = (
-                (token[0], created_at) if created_at is not None else None
-            )
-
-    def observed_runtime_exit_pid(self) -> int | None:
-        """Return only an observed server generation that has since exited."""
-
-        identity = self._observed_runtime_process
-        if identity is None:
-            return None
-        pid, created_at = identity
-        current_created_at = runtime.process_create_time(pid)
-        if current_created_at == created_at or (
-            current_created_at is None and self._pid_exists(pid)
-        ):
-            return None
-        return pid
-
-    def _pid_file_proves_owned_server(self, info: Optional[Dict[str, Any]]) -> bool:
-        if not isinstance(info, dict):
-            return False
-        pid = info.get("pid")
-        created_at = info.get("process_created_at")
-        if not isinstance(pid, int) or not isinstance(created_at, (int, float)):
-            return False
-        if isinstance(created_at, bool) or created_at <= 0:
-            return False
-        if not self._pid_file_references_current_server(info):
-            return False
-        return runtime.process_create_time(pid) == float(created_at)
-
-    def _terminate_owned_adopted_server_sync(
-        self, pid: int, info: Dict[str, Any]
-    ) -> bool:
-        if not self._pid_file_proves_owned_server(info):
-            raise RuntimeError("OpenCode server ownership cannot be proven")
-        return self._terminate_pid_tree_sync(pid)
-
-    def _caller_context_path(self) -> str:
-        return server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"]
-
-    def caller_context_binding_path(self) -> Path:
-        info = self._read_pid_file()
-        recorded = info.get("caller_context_path") if isinstance(info, dict) else None
-        if isinstance(recorded, str) and recorded and os.path.isabs(recorded):
-            return Path(recorded)
-        return Path(self._caller_context_path())
+        # The event-loop time a lease on this process expires, for a client in
+        # another process than the controller. No request starts that its
+        # timeout could carry past it, so the process never stops under one.
+        self.lease_expires_at: Optional[float] = None
 
     def _get_lock(self) -> asyncio.Lock:
         """Get or create an asyncio.Lock bound to the current event loop."""
@@ -417,94 +372,21 @@ class OpenCodeServerManager:
             self._lock_loop = current_loop
         return self._lock
 
-    def _maybe_update_resource_governor(self, resource_governor: Any | None) -> None:
-        if resource_governor is None:
-            return
-        if is_controller_resource_governor(resource_governor) or not is_controller_resource_governor(
-            self.resource_governor
+    def _active_model_hub_provider_ids(self) -> tuple[str, ...]:
+        return self.model_hub_provider_ids
+
+    @asynccontextmanager
+    async def _request_scope(self):
+        if (
+            self.lease_expires_at is not None
+            and asyncio.get_running_loop().time() + self.request_timeout_seconds > self.lease_expires_at
         ):
-            self.resource_governor = resource_governor
-
-    def set_model_hub_overlay_preparer(
-        self,
-        preparer: Callable[[], Awaitable[Any | None]],
-    ) -> None:
-        """Attach the controller-owned overlay builder to this process."""
-
-        self._model_hub_overlay_preparer = preparer
-
-    @classmethod
-    async def get_instance(
-        cls,
-        binary: str = "opencode",
-        port: int = DEFAULT_OPENCODE_PORT,
-        request_timeout_seconds: int = 60,
-        resource_governor: Any | None = None,
-    ) -> "OpenCodeServerManager":
-        with cls._class_lock:
-            if cls._instance is None:
-                cls._instance = cls(
-                    binary=binary,
-                    port=port,
-                    request_timeout_seconds=request_timeout_seconds,
-                    resource_governor=resource_governor,
-                )
-                return cls._instance
-            cls._instance._maybe_update_resource_governor(resource_governor)
-            if (
-                cls._instance.binary != binary
-                or cls._instance.port != port
-                or cls._instance.request_timeout_seconds != request_timeout_seconds
-            ):
-                logger.warning(
-                    "OpenCodeServerManager already initialized with "
-                    f"binary={cls._instance.binary}, port={cls._instance.port}, "
-                    f"request_timeout_seconds={cls._instance.request_timeout_seconds}; "
-                    f"ignoring new params binary={binary}, port={port}, "
-                    f"request_timeout_seconds={request_timeout_seconds}"
-                )
-            return cls._instance
-
-    @classmethod
-    async def get_instance_if_managed_server_exists(
-        cls,
-        binary: str = "opencode",
-        port: int = DEFAULT_OPENCODE_PORT,
-        request_timeout_seconds: int = 60,
-        resource_governor: Any | None = None,
-    ) -> Optional["OpenCodeServerManager"]:
-        with cls._class_lock:
-            if cls._instance is not None:
-                cls._instance._maybe_update_resource_governor(resource_governor)
-                return cls._instance
-
-            pid_file = paths.get_logs_dir() / "opencode_server.json"
-            try:
-                data = json.loads(pid_file.read_text())
-            except Exception:
-                return None
-            if not isinstance(data, dict) or data.get("port") != port:
-                return None
-            pid = data.get("pid")
-            if not isinstance(pid, int) or not runtime.pid_alive(pid):
-                return None
-            command = runtime.get_process_command(pid)
-            if not command or not cls._is_opencode_serve_cmd(command, port):
-                return None
-
-            cls._instance = cls(
-                binary=binary,
-                port=port,
-                request_timeout_seconds=request_timeout_seconds,
-                resource_governor=resource_governor,
-            )
-            return cls._instance
-
-    @property
-    def base_url(self) -> str:
-        if self._base_url:
-            return self._base_url
-        return f"http://{self.host}:{self.port}"
+            raise TimeoutError(f"The OpenCode lease on {self.base_url} ends before this request could")
+        self._active_requests += 1
+        try:
+            yield
+        finally:
+            self._active_requests = max(0, self._active_requests - 1)
 
     @staticmethod
     def _normalize_variant(reasoning_effort: Optional[str]) -> Optional[str]:
@@ -546,666 +428,6 @@ class OpenCodeServerManager:
             if loop is not None and self._http_session_loop is not loop:
                 return
             await self._close_http_session_locked()
-
-    async def retire_for_native_migration(self) -> None:
-        """Strictly stop our tracked server, never an arbitrary port occupant."""
-        from core.backend_restart import finish_native_operation
-
-        async with self._get_lock():
-            if self._active_requests or self._has_active_run_sessions():
-                raise RuntimeError("OpenCode runtime is busy")
-            process = self._process
-            info = self._read_pid_file()
-            recorded_pid = info.get("pid") if isinstance(info, dict) else None
-            if process is None and isinstance(recorded_pid, int) and self._pid_exists(recorded_pid):
-                # A command/port match alone can belong to a reused PID.
-                if not self._pid_file_proves_owned_server(info):
-                    raise RuntimeError("OpenCode server ownership cannot be proven")
-            retire = self._runtime_activation_retire
-            if callable(retire) and not retire(False, True):
-                raise RuntimeError("OpenCode runtime retirement was refused")
-            if process is None and isinstance(recorded_pid, int) and self._pid_exists(recorded_pid):
-                if not await finish_native_operation(
-                    asyncio.to_thread(
-                        self._terminate_owned_adopted_server_sync,
-                        recorded_pid,
-                        info,
-                    )
-                ) or self._pid_exists(recorded_pid):
-                    raise RuntimeError("OpenCode server did not exit")
-            if process is not None and process.returncode is None:
-                if not await finish_native_operation(
-                    asyncio.to_thread(self._terminate_pid_tree_sync, process.pid)
-                ):
-                    raise RuntimeError("OpenCode server did not exit")
-                await asyncio.wait_for(process.wait(), timeout=5)
-                if process.returncode is None:
-                    raise RuntimeError("OpenCode server did not exit")
-            await self._close_http_session_locked()
-            self._clear_pid_file()
-            self._process = None
-            self._process_loop = None
-            self._base_url = None
-            self._runtime_generation_token = None
-            self._observed_runtime_process = None
-            self._auth_refresh_pending = False
-            self._auth_refresh_pending_port = None
-            self._apply_pending_runtime_config_locked()
-
-    async def _restart_for_auth_refresh_locked(
-        self,
-        *,
-        force: bool = False,
-        native_turns_drained: bool = False,
-    ) -> None:
-        retire_activation = self._runtime_activation_retire
-        if callable(retire_activation) and not retire_activation(
-            force,
-            native_turns_drained,
-        ):
-            self._auth_refresh_pending = True
-            raise RuntimeError(
-                "OpenCode runtime restart is blocked by a newly admitted owner"
-            )
-        await self._close_http_session_locked()
-
-        cleanup_port = self._auth_refresh_pending_port or self.port
-        targets: list[int] = []
-        info = self._read_pid_file()
-        pid = info.get("pid") if isinstance(info, dict) else None
-        if isinstance(pid, int) and self._pid_exists(pid):
-            cmd = self._get_pid_command(pid)
-            if cmd and self._is_opencode_serve_cmd(cmd, cleanup_port):
-                targets.append(pid)
-            elif (
-                isinstance(info, dict)
-                and info.get("port") == cleanup_port
-                and self._pid_owns_listening_port(pid, cleanup_port)
-            ):
-                logger.info(
-                    "Trusting OpenCode pid file for pid=%s because it still owns port %s",
-                    pid,
-                    cleanup_port,
-                )
-                targets.append(pid)
-
-        if not targets:
-            for candidate in self._find_opencode_serve_pids(cleanup_port):
-                cmd = self._get_pid_command(candidate)
-                if cmd and self._is_opencode_serve_cmd(cmd, cleanup_port):
-                    targets.append(candidate)
-
-        for target_pid in dict.fromkeys(targets):
-            await self._terminate_pid(target_pid, reason="auth refresh")
-
-        self._clear_pid_file()
-        self._process = None
-        self._process_loop = None
-        self._base_url = None
-        self._runtime_generation_token = None
-        self._observed_runtime_process = None
-        self._auth_refresh_pending = False
-        self._auth_refresh_pending_port = None
-        self._apply_pending_runtime_config_locked()
-
-    async def detach_after_deferred_refresh(self, *, force: bool = False) -> None:
-        """Drop cached client state when a refresh must wait for active runs."""
-        async with self._get_lock():
-            if force:
-                self._active_run_sessions.clear()
-            if not force and (self._active_requests > 0 or self._has_active_run_sessions()):
-                self._auth_refresh_pending = True
-                self._auth_refresh_pending_port = self.port
-                logger.info(
-                    "Deferring OpenCode runtime detach until %s active request(s) and %s active run(s) finish",
-                    self._active_requests,
-                    len(self._active_run_sessions),
-                )
-                return
-            await self._restart_for_auth_refresh_locked(force=force)
-
-    async def refresh_global_config(self) -> bool:
-        """Ask a live OpenCode server to reload global opencode.json config.
-
-        OpenCode's HTTP API applies ``PATCH /global/config`` to the
-        global config and disposes its cached instances, which refreshes
-        provider options without terminating the shared ``opencode serve``
-        process. Return ``False`` when the endpoint is unavailable so
-        callers can fall back to a process restart.
-        """
-
-        config = self._load_opencode_user_config()
-        if config is None:
-            return False
-
-        total_timeout: Optional[int] = None if self.request_timeout_seconds <= 0 else self.request_timeout_seconds
-        async with self._get_lock():
-            if self._active_requests > 0 or self._has_active_run_sessions():
-                return False
-            if not await self._is_healthy():
-                return False
-            current_config = await self._get_global_config_snapshot()
-            if current_config is None:
-                return False
-            config = self._merge_global_config_snapshot(current_config, config)
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=total_timeout)) as session:
-                async with session.patch(
-                    f"{self.base_url}/global/config",
-                    json=config,
-                ) as resp:
-                    if resp.status == 200:
-                        await resp.read()
-                        return True
-                    if resp.status in (404, 405):
-                        await resp.read()
-                        return False
-                    error_text = await resp.text()
-                    raise RuntimeError(
-                        f"Failed to refresh OpenCode global config: {resp.status} {error_text}"
-                    )
-        return False
-
-    async def reload_runtime_config(
-        self,
-        *,
-        binary: str,
-        port: int,
-        request_timeout_seconds: int,
-    ) -> None:
-        async with self._get_lock():
-            if self._auth_refresh_pending:
-                self._pending_runtime_config = (binary, port, request_timeout_seconds)
-                return
-            self._set_runtime_config(binary, port, request_timeout_seconds)
-
-    def _set_runtime_config(self, binary: str, port: int, request_timeout_seconds: int) -> None:
-        self.binary = binary
-        self.port = port
-        self.request_timeout_seconds = request_timeout_seconds
-
-    def _apply_pending_runtime_config_locked(self) -> None:
-        if self._pending_runtime_config is None:
-            return
-        self._set_runtime_config(*self._pending_runtime_config)
-        self._pending_runtime_config = None
-
-    def _has_active_run_sessions(self) -> bool:
-        return bool(self._active_run_sessions)
-
-    def _reconcile_adopted_active_run_sessions(
-        self,
-        info: Optional[Dict[str, Any]],
-    ) -> Optional[Dict[str, Any]]:
-        """Discard adopted pre-write markers that have no durable recovery poll."""
-
-        if self._active_run_sessions or not self._pid_file_references_current_server(info):
-            return info
-        active = info.get("active_run_sessions") if isinstance(info, dict) else None
-        if not isinstance(active, list) or not active:
-            return info
-        if any(not isinstance(item, str) or not item for item in active):
-            return info
-        provider = self._active_poll_session_ids_provider
-        if provider is None:
-            return info
-        try:
-            durable = provider()
-        except Exception:
-            logger.warning(
-                "Could not reconcile adopted OpenCode run markers with durable polls",
-                exc_info=True,
-            )
-            return info
-        if any(not isinstance(item, str) or not item for item in durable):
-            logger.warning("Ignoring invalid OpenCode durable active-poll identifiers")
-            return info
-
-        retained = set(active).intersection(durable)
-        revised = dict(info)
-        revised["active_run_sessions"] = sorted(retained)
-        if retained != set(active):
-            try:
-                write_atomic(self._pid_file, json.dumps(revised))
-            except Exception:
-                logger.warning(
-                    "Could not persist reconciled OpenCode run markers",
-                    exc_info=True,
-                )
-                return info
-            logger.info(
-                "Removed %s orphaned OpenCode run marker(s) without durable polls",
-                len(set(active) - retained),
-            )
-        self._active_run_sessions = retained
-        return revised
-
-    def runtime_has_active_turns(self) -> bool:
-        if self._active_requests > 0 or self._has_active_run_sessions():
-            return True
-        info = self._read_pid_file()
-        if not self._pid_file_references_current_server(info):
-            return False
-        pid = info.get("pid") if isinstance(info, dict) else None
-        if not isinstance(pid, int) or not self._pid_exists(pid):
-            return False
-        active = info.get("active_run_sessions") if isinstance(info, dict) else None
-        return isinstance(active, list) and bool(active)
-
-    def _active_model_hub_provider_ids(self) -> tuple[str, ...]:
-        if self._model_hub_overlay_provider_ids:
-            return self._model_hub_overlay_provider_ids
-        info = self._read_pid_file()
-        if not self._pid_file_references_current_server(info):
-            return ()
-        provider_ids = (
-            info.get("model_hub_overlay_provider_ids")
-            if isinstance(info, dict)
-            else ()
-        )
-        if not isinstance(provider_ids, list) or any(
-            not isinstance(provider_id, str) or not provider_id
-            for provider_id in provider_ids
-        ):
-            return ()
-        return tuple(dict.fromkeys(provider_ids))
-
-    def _configured_model_hub_overlay(self) -> bool:
-        return bool(
-            self._model_hub_overlay_path
-            and self._model_hub_overlay_hash
-            and self._model_hub_overlay_content
-            and self._model_hub_overlay_provider_ids
-        )
-
-    @staticmethod
-    def _model_hub_mode_enabled() -> bool:
-        if not is_model_hub_enabled():
-            return False
-        return V2Config.load().model_hub.agents["opencode"].mode == "hub"
-
-    def _refuse_unconfigured_model_hub_launch(self) -> None:
-        message = (
-            "OpenCode cannot be launched in Gateway mode without the Model Hub "
-            "overlay; the controller owns overlay configuration"
-        )
-        if not self._model_hub_overlay_refusal_logged:
-            logger.error(message)
-            self._model_hub_overlay_refusal_logged = True
-        raise OpenCodeModelHubOverlayRequiredError(message)
-
-    async def _start_server_for_current_model_hub_mode_locked(self) -> None:
-        # Known by design: a settings PATCH may commit while the OS spawn is in
-        # progress. Reading here bounds that cross-process race to the spawn;
-        # the next controller Hub use configures the overlay and restarts any
-        # unoverlaid server through the normal overlay-change path.
-        if self._model_hub_mode_enabled() and (
-            not is_controller_resource_governor(self.resource_governor)
-            or not self._configured_model_hub_overlay()
-        ):
-            self._refuse_unconfigured_model_hub_launch()
-        await self._start_server()
-
-    async def _prepare_model_hub_launch_boundary(self) -> object | None:
-        hub_mode = self._model_hub_mode_enabled()
-        if not hub_mode:
-            self._model_hub_overlay_refusal_logged = False
-            if (
-                is_controller_resource_governor(self.resource_governor)
-                and self._configured_model_hub_overlay()
-                and not self._model_hub_overlay_reservations
-            ):
-                return await self.configure_model_hub_overlay(None)
-            return None
-
-        if not is_controller_resource_governor(self.resource_governor):
-            self._refuse_unconfigured_model_hub_launch()
-        if self._model_hub_overlay_reservations:
-            if not self._configured_model_hub_overlay():
-                self._refuse_unconfigured_model_hub_launch()
-            return None
-
-        preparer = self._model_hub_overlay_preparer
-        if not callable(preparer):
-            self._refuse_unconfigured_model_hub_launch()
-        overlay = await preparer()
-        if overlay is None:
-            self._refuse_unconfigured_model_hub_launch()
-        return await self.configure_model_hub_overlay(overlay)
-
-    async def configure_model_hub_overlay(self, overlay: Any | None) -> object:
-        """Select an overlay and reserve it until the caller registers its run."""
-
-        desired_path = str(overlay.path) if overlay is not None else None
-        desired_hash = str(overlay.content_hash) if overlay is not None else None
-        desired_provider_ids = getattr(overlay, "provider_ids", ())
-        if overlay is not None and (
-            not isinstance(desired_provider_ids, tuple)
-            or not desired_provider_ids
-            or any(
-                not isinstance(provider_id, str) or not provider_id
-                for provider_id in desired_provider_ids
-            )
-            or len(set(desired_provider_ids)) != len(desired_provider_ids)
-        ):
-            raise RuntimeError("Model Hub OpenCode overlay providers are unavailable")
-        desired_content = None
-        if overlay is not None:
-            content = getattr(overlay, "content", None)
-            if isinstance(content, bytes):
-                desired_content = _managed_runtime_config_content(content)
-            elif isinstance(content, str):
-                desired_content = _managed_runtime_config_content(content)
-            if desired_content is None:
-                raise RuntimeError("Model Hub OpenCode overlay content is unavailable")
-            composed_hash = hashlib.sha256(desired_content.encode()).hexdigest()
-            if composed_hash != desired_hash:
-                raise RuntimeError("Model Hub OpenCode overlay content hash changed")
-            self._model_hub_overlay_refusal_logged = False
-        drain_deadline = time.monotonic() + self._model_hub_overlay_drain_timeout_seconds
-        transition_owner = object()
-        owns_transition = False
-        try:
-            while True:
-                should_wait = False
-                async with self._get_lock():
-                    transition = self._model_hub_overlay_transition
-                    if transition is not None and transition[2] is not transition_owner:
-                        # Once a real configuration change is queued, new turns on
-                        # the old overlay must wait. Otherwise they can continuously
-                        # replenish the active set and starve the transition.
-                        should_wait = True
-                    else:
-                        info = self._read_pid_file() or {}
-                        current_server = self._pid_file_references_current_server(info)
-                        effective_path = (
-                            info.get("model_hub_overlay_path") if current_server else None
-                        )
-                        effective_hash = (
-                            info.get("model_hub_overlay_hash") if current_server else None
-                        )
-                        if effective_path is None and effective_hash is None:
-                            effective_path = self._model_hub_overlay_path
-                            effective_hash = self._model_hub_overlay_hash
-
-                        # Most turns reuse the running server's overlay. They must
-                        # not wait behind unrelated active work when no transition
-                        # has claimed the runtime.
-                        if (effective_path, effective_hash) == (
-                            desired_path,
-                            desired_hash,
-                        ):
-                            self._model_hub_overlay_path = desired_path
-                            self._model_hub_overlay_hash = desired_hash
-                            self._model_hub_overlay_content = desired_content
-                            self._model_hub_overlay_provider_ids = desired_provider_ids
-                            self._model_hub_overlay_reservations[transition_owner] = (
-                                desired_path,
-                                desired_hash,
-                            )
-                            return transition_owner
-
-                        if not owns_transition:
-                            self._model_hub_overlay_transition = (
-                                desired_path,
-                                desired_hash,
-                                transition_owner,
-                            )
-                            owns_transition = True
-
-                        if (
-                            self._active_requests > 0
-                            or self._has_active_run_sessions()
-                            or self._model_hub_overlay_reservations
-                        ):
-                            should_wait = True
-                        else:
-                            persisted_active = current_server and bool(
-                                info.get("active_run_sessions")
-                            )
-                            if persisted_active and time.monotonic() < drain_deadline:
-                                should_wait = True
-                            else:
-                                if persisted_active:
-                                    logger.warning(
-                                        "Ignoring stale OpenCode active-run metadata after %.1fs overlay drain timeout",
-                                        self._model_hub_overlay_drain_timeout_seconds,
-                                    )
-                                self._model_hub_overlay_path = desired_path
-                                self._model_hub_overlay_hash = desired_hash
-                                self._model_hub_overlay_content = desired_content
-                                self._model_hub_overlay_provider_ids = desired_provider_ids
-                                if await self._is_healthy():
-                                    logger.info(
-                                        "Restarting OpenCode server after Model Hub overlay change"
-                                    )
-                                    await self._restart_for_auth_refresh_locked(
-                                        native_turns_drained=True,
-                                    )
-                                self._model_hub_overlay_reservations[
-                                    transition_owner
-                                ] = (desired_path, desired_hash)
-                                self._model_hub_overlay_transition = None
-                                owns_transition = False
-                                return transition_owner
-                if should_wait:
-                    await asyncio.sleep(0.05)
-        finally:
-            if owns_transition:
-                async with self._get_lock():
-                    transition = self._model_hub_overlay_transition
-                    if transition is not None and transition[2] is transition_owner:
-                        self._model_hub_overlay_transition = None
-
-    async def release_model_hub_overlay_reservation(
-        self,
-        reservation: object,
-    ) -> None:
-        async with self._get_lock():
-            self._model_hub_overlay_reservations.pop(reservation, None)
-
-    async def mark_run_active(
-        self,
-        session_id: str,
-        *,
-        overlay_reservation: object | None = None,
-    ) -> None:
-        async with self._get_lock():
-            reserved_overlay = None
-            if overlay_reservation is not None:
-                reserved_overlay = self._model_hub_overlay_reservations.get(
-                    overlay_reservation
-                )
-                if reserved_overlay is None:
-                    raise RuntimeError("OpenCode overlay reservation is no longer active")
-            previous_active_runs = set(self._active_run_sessions)
-            if overlay_reservation is not None:
-                self._model_hub_overlay_reservations.pop(
-                    overlay_reservation,
-                    None,
-                )
-            try:
-                self._active_run_sessions = self._persist_active_run_session_change(
-                    session_id,
-                    active=True,
-                )
-            except Exception:
-                self._active_run_sessions = previous_active_runs
-                if overlay_reservation is not None and reserved_overlay is not None:
-                    self._model_hub_overlay_reservations[
-                        overlay_reservation
-                    ] = reserved_overlay
-                raise
-
-    async def mark_run_inactive(self, session_id: str) -> None:
-        async with self._get_lock():
-            previous_active_runs = set(self._active_run_sessions)
-            try:
-                self._active_run_sessions = self._persist_active_run_session_change(
-                    session_id,
-                    active=False,
-                )
-            except Exception:
-                self._active_run_sessions = previous_active_runs
-                raise
-
-    @asynccontextmanager
-    async def _request_scope(self):
-        async with self._get_lock():
-            if self._auth_refresh_pending and self._active_requests == 0 and not self._has_active_run_sessions():
-                await self._restart_for_auth_refresh_locked()
-            self._active_requests += 1
-        try:
-            yield
-        finally:
-            async with self._get_lock():
-                self._active_requests = max(0, self._active_requests - 1)
-
-    def _read_pid_file(self) -> Optional[Dict[str, Any]]:
-        try:
-            raw = self._pid_file.read_text()
-        except FileNotFoundError:
-            return None
-        except Exception as e:
-            logger.debug(f"Failed to read OpenCode pid file: {e}")
-            return None
-
-        try:
-            data = json.loads(raw)
-        except Exception as e:
-            logger.debug(f"Failed to parse OpenCode pid file: {e}")
-            return None
-
-        return data if isinstance(data, dict) else None
-
-    def _write_pid_file(
-        self,
-        pid: int,
-        *,
-        caller_context_path: object = _USE_CURRENT_CALLER_CONTEXT_PATH,
-        owner_pid: Optional[int] = _CURRENT_OWNER_PID,
-        runtime_policy_revision: Optional[str] = _MANAGED_RUNTIME_POLICY_REVISION,
-        process_created_at: float | None = None,
-    ) -> None:
-        try:
-            self._pid_file.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "pid": pid,
-                "port": self.port,
-                "host": self.host,
-                "started_at": time.time(),
-                "active_run_sessions": sorted(self._active_run_sessions),
-            }
-            if owner_pid is not None:
-                payload["owner_pid"] = owner_pid
-            if process_created_at is not None:
-                payload["process_created_at"] = process_created_at
-            if runtime_policy_revision is not None:
-                payload["runtime_policy_revision"] = runtime_policy_revision
-            if caller_context_path is _USE_CURRENT_CALLER_CONTEXT_PATH:
-                caller_context_path = self._caller_context_path()
-            if isinstance(caller_context_path, str) and caller_context_path:
-                payload["caller_context_path"] = caller_context_path
-            if self._model_hub_overlay_path and self._model_hub_overlay_hash:
-                payload["model_hub_overlay_path"] = self._model_hub_overlay_path
-                payload["model_hub_overlay_hash"] = self._model_hub_overlay_hash
-            if self._model_hub_overlay_provider_ids:
-                payload["model_hub_overlay_provider_ids"] = list(
-                    self._model_hub_overlay_provider_ids
-                )
-            write_atomic(self._pid_file, json.dumps(payload))
-        except Exception as e:
-            logger.debug(f"Failed to write OpenCode pid file: {e}")
-
-    def _apply_resource_governance(self, pid: int | None) -> None:
-        governor = getattr(self, "resource_governor", None)
-        apply_to_pid = getattr(governor, "apply_to_pid", None)
-        if callable(apply_to_pid):
-            apply_to_pid(pid, label="opencode serve")
-
-    def _persist_active_run_session_change(
-        self,
-        session_id: str,
-        *,
-        active: bool,
-    ) -> set[str]:
-        try:
-            raw_info = self._pid_file.read_text()
-        except FileNotFoundError:
-            info = None
-        except Exception as exc:
-            raise RuntimeError("Could not read OpenCode active-run metadata") from exc
-        else:
-            try:
-                info = json.loads(raw_info)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError("OpenCode active-run metadata is invalid") from exc
-            if not isinstance(info, dict):
-                raise RuntimeError("OpenCode active-run metadata is invalid")
-
-        updated = set(self._active_run_sessions)
-        references_current_server = self._pid_file_references_current_server(info)
-        if references_current_server:
-            assert isinstance(info, dict)
-            persisted = info.get("active_run_sessions")
-            if not isinstance(persisted, list) or any(
-                not isinstance(item, str) or not item for item in persisted
-            ):
-                raise RuntimeError("OpenCode active-run metadata is invalid")
-            updated.update(persisted)
-
-        if active:
-            updated.add(session_id)
-        else:
-            updated.discard(session_id)
-
-        if references_current_server:
-            assert isinstance(info, dict)
-            info["active_run_sessions"] = sorted(updated)
-            write_atomic(self._pid_file, json.dumps(info))
-        return updated
-
-    def _clear_pid_file(self) -> None:
-        try:
-            if self._pid_file.exists():
-                self._pid_file.unlink()
-        except Exception as e:
-            logger.debug(f"Failed to clear OpenCode pid file: {e}")
-
-    def _pid_file_references_current_server(self, info: Optional[Dict[str, Any]]) -> bool:
-        if not isinstance(info, dict):
-            return False
-        pid = info.get("pid")
-        if not isinstance(pid, int):
-            return False
-        if info.get("port") != self.port:
-            return False
-        cmd = self._get_pid_command(pid)
-        if cmd:
-            return self._is_opencode_serve_cmd(cmd, self.port)
-        if self._pid_owns_listening_port(pid, self.port):
-            return True
-        return False
-
-    def _pid_file_has_caller_context_binding(self, info: Optional[Dict[str, Any]]) -> bool:
-        if not self._pid_file_references_current_server(info):
-            return False
-        recorded = info.get("caller_context_path") if isinstance(info, dict) else None
-        return bool(isinstance(recorded, str) and recorded and os.path.isabs(recorded))
-
-    def _pid_file_has_current_runtime_policy(self, info: Optional[Dict[str, Any]]) -> bool:
-        return bool(
-            self._pid_file_references_current_server(info)
-            and isinstance(info, dict)
-            and info.get("runtime_policy_revision") == _MANAGED_RUNTIME_POLICY_REVISION
-        )
-
-    def _pid_file_was_started_by_current_process(self, info: Optional[Dict[str, Any]]) -> bool:
-        return bool(isinstance(info, dict) and info.get("owner_pid") == _CURRENT_OWNER_PID)
-
-    @staticmethod
-    def _pid_file_has_known_no_active_runs(info: Optional[Dict[str, Any]]) -> bool:
-        active = info.get("active_run_sessions") if isinstance(info, dict) else None
-        return isinstance(active, list) and not active
 
     @staticmethod
     def _extract_json_object(text: str, start: int) -> Optional[str]:
@@ -1415,10 +637,10 @@ class OpenCodeServerManager:
             if isinstance(error, dict):
                 message = error.get("message")
                 if isinstance(message, str) and message.strip():
-                    return OpenCodeServerManager._redact_diagnostic_text(message.strip())[:240]
+                    return OpenCodeServerClient._redact_diagnostic_text(message.strip())[:240]
             message = payload.get("message")
             if isinstance(message, str) and message.strip():
-                return OpenCodeServerManager._redact_diagnostic_text(message.strip())[:240]
+                return OpenCodeServerClient._redact_diagnostic_text(message.strip())[:240]
         return ""
 
     @staticmethod
@@ -1553,655 +775,6 @@ class OpenCodeServerManager:
 
     async def get_provider_api_diagnostic(self, provider_id: str, model_id: str) -> Optional[str]:
         return await asyncio.to_thread(self._provider_api_diagnostic_sync, provider_id, model_id)
-
-    @staticmethod
-    def _pid_exists(pid: int) -> bool:
-        return runtime.pid_alive(pid)
-
-    @staticmethod
-    def _get_pid_command(pid: int) -> Optional[str]:
-        return runtime.get_process_command(pid)
-
-    @staticmethod
-    def _is_opencode_serve_cmd(command: str, port: int) -> bool:
-        if not command:
-            return False
-        return "opencode" in command and " serve" in command and f"--port={port}" in command
-
-    @staticmethod
-    def _pid_owns_listening_port(pid: int, port: int) -> bool:
-        if os.name == "nt" or pid <= 0:
-            return False
-
-        proc_fd_dir = f"/proc/{pid}/fd"
-        try:
-            fd_entries = os.listdir(proc_fd_dir)
-        except OSError:
-            return False
-
-        inodes: set[str] = set()
-        for entry in fd_entries:
-            try:
-                target = os.readlink(f"{proc_fd_dir}/{entry}")
-            except OSError:
-                continue
-            if target.startswith("socket:[") and target.endswith("]"):
-                inodes.add(target[8:-1])
-
-        if not inodes:
-            return False
-
-        for table in ("/proc/net/tcp", "/proc/net/tcp6"):
-            try:
-                with open(table, encoding="utf-8") as handle:
-                    next(handle, None)
-                    for raw_line in handle:
-                        parts = raw_line.split()
-                        if len(parts) < 10:
-                            continue
-                        local_address = parts[1]
-                        state = parts[3]
-                        inode = parts[9]
-                        if state != "0A" or inode not in inodes:
-                            continue
-                        _, _, port_hex = local_address.rpartition(":")
-                        try:
-                            if int(port_hex, 16) == port:
-                                return True
-                        except ValueError:
-                            continue
-            except OSError:
-                continue
-
-        return False
-
-    def _is_port_available(self) -> bool:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind((self.host, self.port))
-            return True
-        except OSError:
-            return False
-
-    @staticmethod
-    def _find_opencode_serve_pids(port: int) -> List[int]:
-        if os.name == "nt":
-            try:
-                result = subprocess.run(
-                    ["netstat", "-ano", "-p", "tcp"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-            except Exception:
-                return []
-
-            pids: List[int] = []
-            for line in (result.stdout or "").splitlines():
-                parts = line.split()
-                if len(parts) < 5 or parts[0].upper() != "TCP":
-                    continue
-                local_addr = parts[1]
-                state = parts[3].upper()
-                pid_str = parts[4]
-                if state != "LISTENING" or local_addr.rsplit(":", 1)[-1] != str(port):
-                    continue
-                try:
-                    pid = int(pid_str)
-                except ValueError:
-                    continue
-                command = runtime.get_process_command(pid)
-                if command and OpenCodeServerManager._is_opencode_serve_cmd(command, port):
-                    pids.append(pid)
-            return pids
-
-        try:
-            result = subprocess.run(
-                ["ps", "-ax", "-o", "pid=,command="],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except Exception:
-            return []
-
-        needle = f"--port={port}"
-        pids: List[int] = []
-        for line in (result.stdout or "").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split(None, 1)
-            if len(parts) != 2:
-                continue
-            pid_str, cmd = parts
-            if "opencode" in cmd and " serve" in cmd and needle in cmd:
-                try:
-                    pids.append(int(pid_str))
-                except ValueError:
-                    continue
-        return pids
-
-    async def _terminate_pid(self, pid: int, reason: str) -> None:
-        logger.info(f"Stopping OpenCode server pid={pid} ({reason})")
-        stopped = await asyncio.to_thread(self._terminate_pid_tree_sync, pid)
-        if not stopped and self._pid_exists(pid):
-            logger.debug("Failed to terminate OpenCode server pid=%s", pid)
-
-    async def _terminate_tracked_process(self, process: Process, reason: str) -> None:
-        """Stop a server this loop started, then let its exit be reaped."""
-        await self._terminate_pid(process.pid, reason=reason)
-        try:
-            await asyncio.wait_for(process.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            logger.warning("OpenCode server pid=%s did not exit after it was stopped", process.pid)
-
-    @staticmethod
-    def _terminate_pid_tree_sync(pid: int, timeout: float = 5.0) -> bool:
-        """Stop the OpenCode server and every process it started.
-
-        OpenCode starts each tool command detached, as the leader of a new
-        session and process group, so the server's own group never reaches it.
-        Only a live parent ties a process to the server, so the tree is walked
-        before anything is signalled and again before escalating. Every process
-        is held as a ``psutil.Process``, which refuses a pid reused since.
-        """
-        if os.name == "nt":
-            return runtime.stop_pid(pid, timeout=timeout)
-        try:
-            server = psutil.Process(pid)
-        except psutil.NoSuchProcess:
-            return True
-        except psutil.Error:
-            return not runtime.pid_alive(pid)
-
-        def running(processes: list[psutil.Process]) -> list[psutil.Process]:
-            alive = []
-            for process in processes:
-                try:
-                    # A zombie has exited; reaping it belongs to its parent.
-                    if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
-                        alive.append(process)
-                except psutil.NoSuchProcess:
-                    continue
-                except psutil.Error:
-                    alive.append(process)
-            return alive
-
-        own_group = os.getpgrp()
-        founded_groups: set[int] = set()
-        tree = [server]
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            found = dict.fromkeys(tree)
-            for process in tree:
-                try:
-                    found.update(dict.fromkeys(process.children(recursive=True)))
-                except psutil.Error:
-                    continue
-            tree = running(list(found))
-            if not tree:
-                return True
-            groups = {}
-            for process in tree:
-                try:
-                    groups[process] = os.getpgid(process.pid)
-                except OSError:
-                    continue
-            # The caller's own group is the one carrying out this stop: ``vibe
-            # stop`` run from an OpenCode tool sits inside the tree. It is never
-            # signalled, nor waited for, so the stop can finish its own work.
-            tree = [process for process in tree if groups.get(process) != own_group]
-            if not tree:
-                return True
-            # A group is the tree's when a process of the tree founded it. It is
-            # signalled only while a live process of the tree is still in it,
-            # proof that its id was not recycled, and the group signal also
-            # reaches whatever those processes started since the walk.
-            founded_groups.update(process.pid for process, pgid in groups.items() if process.pid == pgid)
-            owned_groups = (set(groups.values()) & founded_groups) - {own_group}
-            if sig == signal.SIGKILL:
-                logger.warning("Escalating to SIGKILL for %d process(es) of OpenCode server pid=%s", len(tree), pid)
-            elif len(tree) > 1:
-                logger.info("OpenCode server pid=%s has %d descendant process(es) to stop", pid, len(tree) - 1)
-            signalled_groups = set()
-            for pgid in owned_groups:
-                try:
-                    os.killpg(pgid, sig)
-                except ProcessLookupError:
-                    pass
-                except OSError:
-                    # Fall back to signalling its known members one by one.
-                    continue
-                signalled_groups.add(pgid)
-            for process in tree:
-                if groups.get(process) in signalled_groups:
-                    continue
-                try:
-                    process.send_signal(sig)
-                except psutil.NoSuchProcess:
-                    continue
-                except psutil.Error:
-                    logger.debug("Failed to signal OpenCode process pid=%s", process.pid, exc_info=True)
-            deadline = time.monotonic() + timeout
-            tree = running(tree)
-            while tree and time.monotonic() < deadline:
-                time.sleep(0.1)
-                tree = running(tree)
-            if not tree:
-                return True
-        return False
-
-    async def _cleanup_orphaned_managed_server(self) -> None:
-        info = self._read_pid_file()
-        if not info:
-            return
-
-        pid = info.get("pid")
-        port = info.get("port")
-        if not isinstance(pid, int) or port != self.port:
-            self._clear_pid_file()
-            return
-
-        if self._process and self._process.returncode is None and self._process.pid == pid:
-            return
-
-        # Check if the server is healthy before deciding to kill it.
-        # If it's healthy, we should adopt it rather than kill it.
-        if await self._is_healthy():
-            # Update PID file to reflect the actual running process.
-            # The PID in the file may be stale if OpenCode was restarted externally.
-            actual_pids = self._find_opencode_serve_pids(self.port)
-            if actual_pids:
-                actual_pid = actual_pids[0]
-                if actual_pid != pid:
-                    logger.info(f"Adopting healthy OpenCode server (updating stale PID {pid} -> {actual_pid})")
-                    self._write_pid_file(
-                        actual_pid,
-                        caller_context_path=None,
-                        owner_pid=None,
-                        runtime_policy_revision=None,
-                    )
-                else:
-                    logger.info(f"Adopting healthy OpenCode server pid={pid} from previous run")
-            else:
-                # Server is healthy but we can't find its PID - clear stale file
-                logger.info(f"Adopting healthy OpenCode server (clearing stale PID file, pid={pid} not found)")
-                self._clear_pid_file()
-            return
-
-        cmd = self._get_pid_command(pid)
-        if self._pid_exists(pid):
-            if self._runtime_activation_retire is not None:
-                self._retire_runtime_generation_for_replacement()
-            if cmd and self._is_opencode_serve_cmd(cmd, self.port):
-                await self._terminate_pid(pid, reason="orphaned and unhealthy")
-            elif cmd is None and self._pid_owns_listening_port(pid, self.port):
-                logger.info(
-                    "Trusting OpenCode pid file for orphan cleanup pid=%s because it still owns port %s",
-                    pid,
-                    self.port,
-                )
-                await self._terminate_pid(pid, reason="orphaned and unhealthy")
-        self._clear_pid_file()
-
-    async def ensure_running(self) -> str:
-        overlay_reservation = await self._prepare_model_hub_launch_boundary()
-        try:
-            return await self._ensure_running_with_current_overlay()
-        finally:
-            if overlay_reservation is not None:
-                await self.release_model_hub_overlay_reservation(
-                    overlay_reservation
-                )
-
-    async def _ensure_running_with_current_overlay(self) -> str:
-        async with self._get_lock():
-            plugin_install = ensure_plugin_installed()
-            if plugin_install.changed:
-                self._caller_context_plugin_refresh_pending = True
-            if self._auth_refresh_pending and self._active_requests == 0 and not self._has_active_run_sessions():
-                await self._restart_for_auth_refresh_locked()
-            await self._cleanup_orphaned_managed_server()
-
-            if await self._is_healthy():
-                pid_info = self._read_pid_file()
-                if not self._pid_file_references_current_server(pid_info):
-                    raise RuntimeError(
-                        f"OpenCode server is already healthy on port {self.port}, but it is not managed by Avibe. "
-                        "Stop that server or configure Avibe to use another OPENCODE_PORT so caller context "
-                        "environment variables can be injected safely."
-                    )
-                pid_info = self._reconcile_adopted_active_run_sessions(pid_info)
-                if not self._pid_file_has_caller_context_binding(pid_info):
-                    self._caller_context_plugin_refresh_pending = True
-                runtime_policy_stale = not self._pid_file_has_current_runtime_policy(pid_info)
-                if (
-                    (self._caller_context_plugin_refresh_pending or runtime_policy_stale)
-                    and self._active_requests == 0
-                    and not self._has_active_run_sessions()
-                    and (
-                        self._pid_file_was_started_by_current_process(pid_info)
-                        or self._pid_file_has_known_no_active_runs(pid_info)
-                    )
-                ):
-                    refresh_reasons = []
-                    if self._caller_context_plugin_refresh_pending:
-                        refresh_reasons.append("caller-context plugin")
-                    if runtime_policy_stale:
-                        refresh_reasons.append("managed runtime policy")
-                    logger.info(
-                        "Restarting OpenCode server to refresh %s at %s",
-                        " and ".join(refresh_reasons),
-                        plugin_install.path,
-                    )
-                    await self._restart_for_auth_refresh_locked()
-                    await self._start_server_for_current_model_hub_mode_locked()
-                    self._caller_context_plugin_refresh_pending = False
-                    return self.base_url
-                if runtime_policy_stale:
-                    raise OpenCodeManagedPolicyRefreshPendingError(
-                        "OpenCode managed runtime policy refresh is pending for an adopted or active server; "
-                        "retry after the existing OpenCode turn finishes so Avibe can restart the server "
-                        "with native Skills disabled."
-                    )
-                if self._caller_context_plugin_refresh_pending:
-                    raise RuntimeError(
-                        "OpenCode caller-context plugin refresh is pending for an adopted or active server; "
-                        "retry after the existing OpenCode turn finishes so Avibe can restart the server "
-                        "with AVIBE_* env injection."
-                    )
-                # If the server is already running (e.g., started by a previous run),
-                # record its PID so shutdown can clean it up.
-                if not self._read_pid_file():
-                    pids = self._find_opencode_serve_pids(self.port)
-                    if pids:
-                        pid = pids[0]
-                        cmd = self._get_pid_command(pid)
-                        if cmd and self._is_opencode_serve_cmd(cmd, self.port):
-                            self._write_pid_file(pid)
-                            self._apply_resource_governance(pid)
-                else:
-                    pid = (pid_info or {}).get("pid") if isinstance(pid_info, dict) else None
-                    self._apply_resource_governance(pid)
-
-                self._base_url = f"http://{self.host}:{self.port}"
-                self._observe_runtime_generation(self._read_pid_file())
-                return self.base_url
-
-            if not self._is_port_available():
-                for pid in self._find_opencode_serve_pids(self.port):
-                    await self._terminate_pid(pid, reason="port occupied but unhealthy")
-                await asyncio.sleep(0.5)
-
-            if not self._is_port_available():
-                raise RuntimeError(
-                    f"OpenCode port {self.port} is already in use but the server is not responding. "
-                    "Stop the process using this port or set OPENCODE_PORT to a free port."
-                )
-
-            if self._runtime_generation_token is not None:
-                self._retire_runtime_generation_for_replacement()
-            await self._start_server_for_current_model_hub_mode_locked()
-            self._caller_context_plugin_refresh_pending = False
-            return self.base_url
-
-    async def _is_healthy(self) -> bool:
-        try:
-            session = await self._get_http_session()
-            async with session.get(f"{self.base_url}/global/health", timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("healthy", False)
-        except Exception as e:
-            logger.debug(f"Health check failed: {e}")
-        return False
-
-    async def _start_server(self) -> None:
-        # ``self._process`` may be a stale subprocess from a previous
-        # ``asyncio.run()`` call (the Flask UI server creates a new loop
-        # per request, while ``OpenCodeServerManager`` is a singleton).
-        # ``process.wait()`` uses the transport's internal Future — that
-        # Future is bound to the loop that created the subprocess, and
-        # awaiting it from any other loop raises "got Future attached to a
-        # different loop". The OS-level pid signaling below
-        # (``_terminate_pid``) is loop-agnostic and is the correct cleanup
-        # path; just detach the dangling Python object first.
-        current_loop = asyncio.get_running_loop()
-        self._start_attempt_generation += 1
-        self._last_start_failure_pid = None
-        if (
-            self._process
-            and self._process.returncode is None
-            and self._process_loop is current_loop
-        ):
-            await self._terminate_tracked_process(self._process, reason="stale server")
-        elif self._process and self._process_loop is not current_loop:
-            # Foreign-loop subprocess. We can't trust ``returncode`` here
-            # — the transport callbacks fire on the original (now-closed)
-            # loop, so the cached ``returncode`` stays ``None`` even if
-            # the OS process exited long ago. Worse, the PID may have
-            # been reused by an unrelated process. Only OS-signal when
-            # we can confirm the PID still owns an OpenCode serve
-            # cmdline; otherwise just drop the dangling Python object.
-            # ``_find_opencode_serve_pids`` + ``_cleanup_orphaned_
-            # managed_server`` (called earlier in ``ensure_running``)
-            # pick up any true orphan from a separate, pid-file-backed
-            # path that doesn't rely on this dead reference.
-            stale_pid = getattr(self._process, "pid", None)
-            if isinstance(stale_pid, int) and self._pid_exists(stale_pid):
-                cmd = self._get_pid_command(stale_pid)
-                if cmd and self._is_opencode_serve_cmd(cmd, self.port):
-                    await self._terminate_pid(stale_pid, reason="foreign-loop cleanup")
-            self._process = None
-            self._process_loop = None
-
-        # Ensure any stale pid file is cleared before starting.
-        self._clear_pid_file()
-
-        cmd = [
-            self.binary,
-            "serve",
-            f"--hostname={self.host}",
-            f"--port={self.port}",
-        ]
-
-        logger.info(f"Starting OpenCode server: {' '.join(cmd)}")
-
-        env = os.environ.copy()
-        env[DESKTOP_ROLE_ENV] = DESKTOP_OPENCODE_ROLE
-        env["OPENCODE_ENABLE_EXA"] = "1"
-        env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
-        env.update(server_environment())
-        env["AVIBE_OPENCODE_MODEL_HUB"] = "1" if self._model_hub_overlay_path else "0"
-        if self._model_hub_overlay_path:
-            env["OPENCODE_CONFIG"] = self._model_hub_overlay_path
-            content = self._model_hub_overlay_content
-            if content is None:
-                try:
-                    raw_content = Path(self._model_hub_overlay_path).read_bytes()
-                except OSError as exc:
-                    raise RuntimeError("Model Hub OpenCode overlay is unavailable") from exc
-                content = _managed_runtime_config_content(raw_content)
-            if hashlib.sha256(content.encode()).hexdigest() != self._model_hub_overlay_hash:
-                raise RuntimeError("Model Hub OpenCode overlay content hash changed")
-            # Inline config is OpenCode's runtime-override tier, loaded after
-            # project config. Reasserting the exact overlay here prevents a
-            # checked-in opencode.json from replacing Hub provider transport.
-            env["OPENCODE_CONFIG_CONTENT"] = content
-
-        # Request-level ``tools.skill=false`` prevents native Skill calls. The
-        # runtime override adds defense in depth, while the Avibe runtime plugin
-        # removes OpenCode's independently assembled native Catalog.
-        env["OPENCODE_CONFIG_CONTENT"] = _managed_runtime_config_content(
-            env.get("OPENCODE_CONFIG_CONTENT")
-        )
-
-        try:
-            self._process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                env=env,
-                **isolated_subprocess_kwargs(),
-            )
-            # Pair the subprocess object with the loop it was created on
-            # so a future request from another loop can detach it
-            # safely before issuing ``process.wait()``.
-            self._process_loop = current_loop
-            if self._process and self._process.pid:
-                self._write_pid_file(
-                    self._process.pid,
-                    process_created_at=runtime.process_create_time(self._process.pid),
-                )
-                self._apply_resource_governance(self._process.pid)
-        except FileNotFoundError:
-            raise RuntimeError(
-                f"OpenCode CLI not found at '{self.binary}'. Please install OpenCode or set OPENCODE_CLI_PATH."
-            )
-
-        start_time = time.monotonic()
-        while time.monotonic() - start_time < SERVER_START_TIMEOUT:
-            if await self._is_healthy():
-                self._base_url = f"http://{self.host}:{self.port}"
-                self._observe_runtime_generation(self._read_pid_file())
-                logger.info(f"OpenCode server started at {self._base_url}")
-                return
-            if self._process.returncode is not None:
-                break
-            await asyncio.sleep(0.5)
-
-        process = self._process
-        exit_code = process.returncode
-        # A live process below is terminated by Avibe for timeout. Only an
-        # independently exited process may consume shared pressure evidence.
-        self._last_start_failure_pid = (
-            getattr(process, "pid", None) if exit_code is not None else None
-        )
-        if exit_code is None:
-            # A late-starting process must not become a healthy but unmanaged
-            # server after this call reports failure and clears its PID file.
-            await self._terminate_tracked_process(process, reason="startup timeout")
-        self._clear_pid_file()
-        self._process = None
-        self._process_loop = None
-        raise RuntimeError(
-            f"OpenCode server failed to start within {SERVER_START_TIMEOUT}s. Process exit code: {exit_code}"
-        )
-
-    async def stop(self) -> None:
-        async with self._get_lock():
-            await self._close_http_session_locked()
-
-            # Don't terminate OpenCode server on vibe-remote shutdown.
-            # Let it continue running so the next vibe-remote instance can adopt it.
-            # This prevents interrupting tasks that are still in progress.
-            logger.info("OpenCode server left running for next vibe-remote instance to adopt")
-
-            # Keep pid_file so next instance knows about the running server.
-            self._process = None
-            self._process_loop = None
-
-    def _close_http_session_sync(self) -> None:
-        if self._http_session and self._http_session_loop:
-            try:
-                future = asyncio.run_coroutine_threadsafe(self._http_session.close(), self._http_session_loop)
-                future.result(timeout=5)
-            except Exception as e:
-                logger.debug(f"Failed to close OpenCode HTTP session: {e}")
-            finally:
-                self._http_session = None
-                self._http_session_loop = None
-
-    def stop_sync(self) -> None:
-        self._close_http_session_sync()
-
-        # Don't terminate OpenCode server on vibe-remote shutdown.
-        # Let it continue running so the next vibe-remote instance can adopt it.
-        # This prevents interrupting tasks that are still in progress.
-        logger.info("OpenCode server left running for next vibe-remote instance to adopt")
-
-        # Keep pid_file so next instance knows about the running server.
-        # Don't clear _process reference - just let it be garbage collected.
-        self._process = None
-        self._process_loop = None
-
-    def terminate_sync(self) -> None:
-        """Terminate the managed server during an explicit Avibe shutdown."""
-        self._close_http_session_sync()
-        info = self._read_pid_file()
-        pid = info.get("pid") if isinstance(info, dict) else None
-        tracked_pid = getattr(self._process, "pid", None)
-        stopped = False
-        if isinstance(pid, int) and self._pid_exists(pid):
-            command = self._get_pid_command(pid)
-            trusted_pid_file = bool(command and self._is_opencode_serve_cmd(command, self.port)) or (
-                isinstance(info, dict)
-                and info.get("port") == self.port
-                and self._pid_owns_listening_port(pid, self.port)
-            )
-            if trusted_pid_file:
-                stopped = self._terminate_pid_tree_sync(pid)
-        if not stopped and isinstance(tracked_pid, int) and self._pid_exists(tracked_pid):
-            tracked_command = self._get_pid_command(tracked_pid)
-            if tracked_command and self._is_opencode_serve_cmd(tracked_command, self.port):
-                self._terminate_pid_tree_sync(tracked_pid)
-        self._clear_pid_file()
-        self._base_url = None
-        self._process = None
-        self._process_loop = None
-        self._runtime_generation_token = None
-        self._observed_runtime_process = None
-
-    @classmethod
-    def terminate_instance_sync(cls) -> None:
-        if cls._instance is not None:
-            cls._instance.terminate_sync()
-            return
-        pid_file = paths.get_logs_dir() / "opencode_server.json"
-        try:
-            info = json.loads(pid_file.read_text(encoding="utf-8"))
-        except Exception:
-            return
-        pid = info.get("pid") if isinstance(info, dict) else None
-        port = info.get("port") if isinstance(info, dict) else None
-        if not isinstance(pid, int) or not isinstance(port, int):
-            return
-        command = runtime.get_process_command(pid)
-        trusted_pid_file = bool(command and cls._is_opencode_serve_cmd(command, port)) or (
-            command is None and cls._pid_owns_listening_port(pid, port)
-        )
-        if trusted_pid_file:
-            cls._terminate_pid_tree_sync(pid)
-        try:
-            pid_file.unlink(missing_ok=True)
-        except OSError:
-            logger.debug("Failed to clear OpenCode pid file during shutdown", exc_info=True)
-
-    async def restart_for_auth_refresh(self, *, force: bool = False) -> None:
-        """Terminate the shared server so the next request reloads refreshed auth."""
-        async with self._get_lock():
-            if force:
-                self._active_run_sessions.clear()
-            if not force and (self._active_requests > 0 or self._has_active_run_sessions()):
-                self._auth_refresh_pending = True
-                logger.info(
-                    "Deferring OpenCode auth refresh restart until %s active request(s) and %s active run(s) finish",
-                    self._active_requests,
-                    len(self._active_run_sessions),
-                )
-                return
-            await self._restart_for_auth_refresh_locked(force=force)
-
-    @classmethod
-    def stop_instance_sync(cls) -> None:
-        if cls._instance:
-            cls._instance.stop_sync()
-            return
-
-        # Don't terminate OpenCode server on vibe-remote shutdown.
-        # Let it continue running so the next vibe-remote instance can adopt it.
-        logger.info("OpenCode server left running for next vibe-remote instance to adopt")
 
     async def ensure_directory_ready(self, directory: str) -> None:
         """Wait until OpenCode has bootstrapped its instance for ``directory``.
@@ -2559,8 +1132,6 @@ class OpenCodeServerManager:
     async def set_api_key_auth(self, provider_id: str, api_key: str) -> None:
         """Persist provider API auth via OpenCode's own auth endpoint."""
 
-        await self.ensure_running()
-
         async with self._request_scope():
             session = await self._get_http_session()
             async with session.put(
@@ -2578,8 +1149,6 @@ class OpenCodeServerManager:
         as already-removed, which we silently accept so the UI can issue
         DELETE optimistically without first checking presence.
         """
-
-        await self.ensure_running()
 
         async with self._request_scope():
             session = await self._get_http_session()
@@ -2602,8 +1171,6 @@ class OpenCodeServerManager:
         produce the per-card ``configured`` / ``oauth_available`` /
         ``local`` flags surfaced in the Settings UI.
         """
-
-        await self.ensure_running()
 
         async with self._request_scope():
             session = await self._get_http_session()
@@ -2639,7 +1206,6 @@ class OpenCodeServerManager:
         type), ``prompt_answers`` is merged into the body so the caller
         can pre-answer (e.g. ``{"deploymentType": "github.com"}``).
         """
-        await self.ensure_running()
         payload = {"method": method}
         if prompt_answers:
             payload.update(prompt_answers)
@@ -2684,7 +1250,6 @@ class OpenCodeServerManager:
         long-poll on the OAuth event loop with
         ``aiohttp.ServerDisconnectedError``.
         """
-        await self.ensure_running()
         payload = {key: value for key, value in (prompt_answers or {}).items() if key not in {"method", "code"}}
         payload["method"] = method
         if code is not None:
@@ -2764,8 +1329,6 @@ class OpenCodeServerManager:
         local providers (Ollama / LM Studio) report an empty list.
         """
 
-        await self.ensure_running()
-
         async with self._request_scope():
             session = await self._get_http_session()
             try:
@@ -2788,28 +1351,6 @@ class OpenCodeServerManager:
         """
         probe = load_first_opencode_user_config(logger_instance=logger)
         return probe.config
-
-    def _merge_global_config_snapshot(self, current_config: Dict[str, Any], user_config: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            auth_entries = read_opencode_provider_auth_entries(logger_instance=logger)
-        except Exception as exc:
-            logger.debug("Could not read OpenCode auth entries during global config merge: %s", exc)
-            auth_entries = {}
-        return OpenCodeConfigReconciler().reconcile(
-            user_config=user_config,
-            live_config=current_config,
-            auth_entries=auth_entries,
-        )
-
-    async def _get_global_config_snapshot(self) -> Optional[Dict[str, Any]]:
-        total_timeout: Optional[int] = None if self.request_timeout_seconds <= 0 else self.request_timeout_seconds
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=total_timeout)) as session:
-            async with session.get(f"{self.base_url}/global/config") as resp:
-                if resp.status != 200:
-                    await resp.read()
-                    return None
-                data = await resp.json()
-                return data if isinstance(data, dict) else None
 
     def _get_agent_config(self, config: Dict[str, Any], agent_name: Optional[str]) -> Dict[str, Any]:
         """Get agent-specific config from opencode.json with type safety."""
@@ -2871,3 +1412,970 @@ class OpenCodeServerManager:
         # Users can override via channel settings.
         # Default to the native "build" agent; Avibe supplies its model explicitly.
         return "build"
+
+
+def terminate_pid_tree_sync(pid: int, timeout: float = 5.0) -> bool:
+    """Stop the OpenCode server and every process it started.
+
+    OpenCode starts each tool command detached, as the leader of a new
+    session and process group, so the server's own group never reaches it.
+    Only a live parent ties a process to the server, so the tree is walked
+    before anything is signalled and again before escalating. Every process
+    is held as a ``psutil.Process``, which refuses a pid reused since.
+    """
+    if os.name == "nt":
+        return runtime.stop_pid(pid, timeout=timeout)
+    try:
+        server = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return True
+    except psutil.Error:
+        return not runtime.pid_alive(pid)
+
+    def running(processes: list[psutil.Process]) -> list[psutil.Process]:
+        alive = []
+        for process in processes:
+            try:
+                # A zombie has exited; reaping it belongs to its parent.
+                if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                    alive.append(process)
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.Error:
+                alive.append(process)
+        return alive
+
+    own_group = os.getpgrp()
+    founded_groups: set[int] = set()
+    tree = [server]
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        found = dict.fromkeys(tree)
+        for process in tree:
+            try:
+                found.update(dict.fromkeys(process.children(recursive=True)))
+            except psutil.Error:
+                continue
+        tree = running(list(found))
+        if not tree:
+            return True
+        groups = {}
+        for process in tree:
+            try:
+                groups[process] = os.getpgid(process.pid)
+            except OSError:
+                continue
+        # The caller's own group is the one carrying out this stop: ``vibe
+        # stop`` run from an OpenCode tool sits inside the tree. It is never
+        # signalled, nor waited for, so the stop can finish its own work.
+        tree = [process for process in tree if groups.get(process) != own_group]
+        if not tree:
+            return True
+        # A group is the tree's when a process of the tree founded it. It is
+        # signalled only while a live process of the tree is still in it,
+        # proof that its id was not recycled, and the group signal also
+        # reaches whatever those processes started since the walk.
+        founded_groups.update(process.pid for process, pgid in groups.items() if process.pid == pgid)
+        owned_groups = (set(groups.values()) & founded_groups) - {own_group}
+        if sig == signal.SIGKILL:
+            logger.warning("Escalating to SIGKILL for %d process(es) of OpenCode server pid=%s", len(tree), pid)
+        elif len(tree) > 1:
+            logger.info("OpenCode server pid=%s has %d descendant process(es) to stop", pid, len(tree) - 1)
+        signalled_groups = set()
+        for pgid in owned_groups:
+            try:
+                os.killpg(pgid, sig)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                # Fall back to signalling its known members one by one.
+                continue
+            signalled_groups.add(pgid)
+        for process in tree:
+            if groups.get(process) in signalled_groups:
+                continue
+            try:
+                process.send_signal(sig)
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.Error:
+                logger.debug("Failed to signal OpenCode process pid=%s", process.pid, exc_info=True)
+        deadline = time.monotonic() + timeout
+        tree = running(tree)
+        while tree and time.monotonic() < deadline:
+            time.sleep(0.1)
+            tree = running(tree)
+        if not tree:
+            return True
+    return False
+
+
+@dataclass(frozen=True)
+class OpenCodeLaunchSpec:
+    """Process-level inputs of one generation; equal specs have equal digests."""
+
+    digest: str
+    binary: str
+    binary_version: Optional[str] = None
+    overlay_hash: Optional[str] = None
+    overlay_provider_ids: tuple[str, ...] = ()
+    # The Hub overlay as Model Hub wrote it, and as OpenCode receives it inline.
+    overlay_file_content: Optional[bytes] = field(default=None, repr=False)
+    overlay_inline_content: Optional[str] = field(default=None, repr=False)
+
+
+class OpenCodeGeneration(OpenCodeServerClient):
+    """One ``opencode serve`` process, a runtime generation of the OpenCode instance.
+
+    Its record lets a controller adopt it after a crash, so a failed write
+    never leaves the record protecting less than the process runs. A run
+    marker or a lease is persisted before its work starts. A turn clears its
+    run marker together with its durable poll: when the record cannot be
+    written, both stay and a later restore retries. Any other change that only
+    releases protection takes effect at once; when its write fails, the record
+    stays stale until a sweep's ``flush_record`` writes it, and a crash before
+    then only keeps the process until the stale lease expires or adoption drops
+    a marker no durable poll backs.
+    """
+
+    def __init__(
+        self,
+        *,
+        generation_id: str,
+        pid: int,
+        port: int,
+        spec_digest: str,
+        process_created_at: float | None,
+        host: str = DEFAULT_OPENCODE_HOST,
+        binary: str = "",
+        binary_version: Optional[str] = None,
+        caller_context_path: Optional[str] = None,
+        model_hub_overlay_hash: Optional[str] = None,
+        model_hub_provider_ids: tuple[str, ...] = (),
+        active_run_sessions: Iterable[str] = (),
+        leases: Optional[Mapping[str, float]] = None,
+        started_at: float | None = None,
+        desktop_runtime_id: Any = None,
+        process: Optional[Process] = None,
+        request_timeout_seconds: int = 60,
+    ) -> None:
+        super().__init__(
+            f"http://{host}:{port}",
+            request_timeout_seconds=request_timeout_seconds,
+            model_hub_provider_ids=model_hub_provider_ids,
+        )
+        self.generation_id = generation_id
+        self.pid = pid
+        self.port = port
+        self.host = host
+        self.spec_digest = spec_digest
+        self.process_created_at = process_created_at
+        self.binary = binary
+        self.binary_version = binary_version
+        self.caller_context_path = caller_context_path
+        self.model_hub_overlay_hash = model_hub_overlay_hash
+        self.active_run_sessions: set[str] = set(active_run_sessions)
+        # Expiry of each lease held by a caller in another process.
+        self.leases: dict[str, float] = dict(leases or {})
+        self.started_at = time.time() if started_at is None else started_at
+        # The desktop Runtime this process serves, or None for none; a record
+        # written before Runtime ids were recorded keeps omitting it.
+        self.desktop_runtime_id = desktop_runtime_id
+        # Set when a change took effect but its record write failed.
+        self.record_stale = False
+        # Set once the process stopped and its record was removed.
+        self._record_removed = False
+        # A legacy record this record replaces once it is written.
+        self._supersedes: Optional[Path] = None
+        # The runtime activation identity the agent attached to this process.
+        self.identity: Any = None
+        # Sessions whose work a forced stop of this process already settled.
+        self.interrupted_sessions: set[str] = set()
+        self._process = process
+
+    @property
+    def record_path(self) -> Path:
+        return generation_records_dir() / f"{self.generation_id}.json"
+
+    @property
+    def overlay_path(self) -> Path:
+        return generation_records_dir() / f"{self.generation_id}.overlay.json"
+
+    def caller_context_binding_path(self) -> Path:
+        if self.caller_context_path and os.path.isabs(self.caller_context_path):
+            return Path(self.caller_context_path)
+        return Path(server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"])
+
+    def record(self) -> Dict[str, Any]:
+        return {
+            "schema": GENERATION_RECORD_SCHEMA,
+            "generation_id": self.generation_id,
+            "pid": self.pid,
+            "process_created_at": self.process_created_at,
+            "host": self.host,
+            "port": self.port,
+            "started_at": self.started_at,
+            "spec_digest": self.spec_digest,
+            "binary": {"path": self.binary, "version": self.binary_version},
+            "caller_context_path": self.caller_context_path,
+            "model_hub_overlay_hash": self.model_hub_overlay_hash,
+            "model_hub_overlay_provider_ids": list(self.model_hub_provider_ids),
+            "active_run_sessions": sorted(self.active_run_sessions),
+            "leases": dict(self.leases),
+            **(
+                {}
+                if self.desktop_runtime_id is _UNRECORDED_RUNTIME_ID
+                else {"desktop_runtime_id": self.desktop_runtime_id}
+            ),
+        }
+
+    def write_record(self) -> None:
+        """Persist this record now, raising when it cannot be written."""
+        if self._record_removed:
+            return
+        self.record_path.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(self.record_path, json.dumps(self.record()))
+        self.record_stale = False
+        if self._supersedes is not None:
+            _remove_quietly(self._supersedes)
+            # A removal that failed is retried by the next flush.
+            if not self._supersedes.exists():
+                self._supersedes = None
+
+    def write_record_or_defer(self, change: str) -> None:
+        """Persist a change that has already taken effect, or leave it to a sweep."""
+        try:
+            self.write_record()
+        except Exception:
+            log = logger.debug if self.record_stale else logger.warning
+            self.record_stale = True
+            log(
+                "Could not persist %s for OpenCode generation %s; a sweep retries",
+                change,
+                self.generation_id,
+                exc_info=True,
+            )
+
+    def flush_record(self) -> None:
+        if self.record_stale or self._supersedes is not None:
+            self.write_record_or_defer("an earlier change")
+
+    def _change_run_marker(self, session_id: str, *, active: bool) -> None:
+        previous = set(self.active_run_sessions)
+        if active:
+            self.active_run_sessions.add(session_id)
+        else:
+            self.active_run_sessions.discard(session_id)
+        if self.active_run_sessions == previous:
+            return
+        try:
+            self.write_record()
+        except Exception:
+            self.active_run_sessions = previous
+            raise
+
+    async def mark_run_active(self, session_id: str) -> None:
+        """Record a native run on this process before its first native write."""
+        async with self._get_lock():
+            self._change_run_marker(session_id, active=True)
+
+    async def mark_run_inactive(self, session_id: str) -> None:
+        async with self._get_lock():
+            self._change_run_marker(session_id, active=False)
+
+    def set_lease(self, lease_id: str, expires_at: float) -> None:
+        previous = dict(self.leases)
+        self.leases[lease_id] = expires_at
+        try:
+            self.write_record()
+        except Exception:
+            self.leases = previous
+            raise
+
+    def drop_lease(self, lease_id: str) -> None:
+        if self.leases.pop(lease_id, None) is not None:
+            self.write_record_or_defer(f"the release of lease {lease_id}")
+
+    def is_drained(self) -> bool:
+        """Whether no request or native run of this process is in flight."""
+        return not self.has_requests_in_flight() and not self.active_run_sessions
+
+    def has_requests_in_flight(self) -> bool:
+        return self._active_requests > 0
+
+    def process_alive(self) -> bool:
+        process = self._process
+        if process is not None:
+            # This controller's own child: its handle is the authority, and
+            # its pid cannot be reused before the handle reaps it.
+            return process.returncode is None
+        created_at = runtime.process_create_time(self.pid)
+        if self.process_created_at is None:
+            return created_at is not None or _pid_exists(self.pid)
+        return created_at == self.process_created_at
+
+    def observed_exit_pid(self) -> int | None:
+        """This process's pid once it has exited, never a pid reused since."""
+        return None if self.process_alive() else self.pid
+
+    async def is_healthy(self) -> bool:
+        try:
+            session = await self._get_http_session()
+            async with session.get(f"{self.base_url}/global/health", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return bool(data.get("healthy", False))
+        except Exception as e:
+            logger.debug(f"Health check failed: {e}")
+        return False
+
+
+def _remove_quietly(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Could not remove %s", path, exc_info=True)
+
+
+def apply_resource_governance(resource_governor: Any | None, pid: int | None) -> None:
+    apply_to_pid = getattr(resource_governor, "apply_to_pid", None)
+    if callable(apply_to_pid):
+        apply_to_pid(pid, label="opencode serve")
+
+
+def _launch_environment(spec: OpenCodeLaunchSpec, overlay_path: Optional[Path]) -> dict[str, str]:
+    env = os.environ.copy()
+    env[DESKTOP_ROLE_ENV] = DESKTOP_OPENCODE_ROLE
+    env["OPENCODE_ENABLE_EXA"] = "1"
+    env["OPENCODE_DISABLE_EXTERNAL_SKILLS"] = "1"
+    env.update(server_environment())
+    hub = spec.overlay_inline_content is not None
+    env["AVIBE_OPENCODE_MODEL_HUB"] = "1" if hub else "0"
+    if hub:
+        env["OPENCODE_CONFIG"] = str(overlay_path)
+        # Inline config is OpenCode's runtime-override tier, loaded after
+        # project config. Reasserting the exact overlay here prevents a
+        # checked-in opencode.json from replacing Hub provider transport.
+        env["OPENCODE_CONFIG_CONTENT"] = spec.overlay_inline_content
+    # Request-level ``tools.skill=false`` prevents native Skill calls. The
+    # runtime override adds defense in depth, while the Avibe runtime plugin
+    # removes OpenCode's independently assembled native Catalog.
+    env["OPENCODE_CONFIG_CONTENT"] = _managed_runtime_config_content(env.get("OPENCODE_CONFIG_CONTENT"))
+    return env
+
+
+async def _wait_until_ready(generation: OpenCodeGeneration, process: Process) -> str:
+    deadline = time.monotonic() + SERVER_START_TIMEOUT
+    while time.monotonic() < deadline:
+        if process.returncode is not None:
+            return "exited"
+        # A healthy answer alone may come from another process that won the
+        # port; only this process listening on it proves the generation.
+        if await generation.is_healthy() and _pid_listens_on(process.pid, generation.port):
+            return "ready"
+        await asyncio.sleep(0.25)
+    return "exited" if process.returncode is not None else "timeout"
+
+
+async def _terminate_started_process(process: Process, reason: str) -> bool:
+    """Stop a process this start spawned; return whether it has exited."""
+
+    logger.info("Stopping OpenCode server pid=%s (%s)", process.pid, reason)
+    await asyncio.to_thread(terminate_pid_tree_sync, process.pid)
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        logger.warning("OpenCode server pid=%s did not exit after it was stopped", process.pid)
+        return False
+    return True
+
+
+async def start_generation(
+    spec: OpenCodeLaunchSpec,
+    *,
+    request_timeout_seconds: int = 60,
+    resource_governor: Any | None = None,
+    on_survivor: Optional[Callable[[OpenCodeGeneration], None]] = None,
+) -> OpenCodeGeneration:
+    """Start one generation on a port of its own and wait until it serves.
+
+    A start that fails after spawning stops its process. When the process
+    survives that stop, ``on_survivor`` receives it, still owned here, so its
+    runtime keeps retrying the stop; its record and overlay stay meanwhile.
+    The process is owned here from its spawn, so even one whose record was
+    never written is stopped by this controller's shutdown.
+    """
+
+    generation_id = f"ocg_{secrets.token_hex(8)}"
+    ensure_plugin_installed()
+    caller_context_path = server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"]
+    overlay_path: Optional[Path] = None
+    if spec.overlay_inline_content is not None:
+        # Model Hub rewrites its own overlay file for every new overlay while
+        # older generations still run, so each generation keeps its own copy.
+        overlay_path = generation_records_dir() / f"{generation_id}.overlay.json"
+        overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(overlay_path, spec.overlay_file_content or spec.overlay_inline_content.encode())
+    env = _launch_environment(spec, overlay_path)
+    exited_pid: int | None = None
+    exit_code: int | None = None
+    # A process that survives its stop keeps its record and overlay; its
+    # runtime retries the stop, and ``vibe stop`` can still find it.
+    survivor: Optional[OpenCodeGeneration] = None
+    try:
+        for _attempt in range(_PORT_ATTEMPTS):
+            port = _choose_port(DEFAULT_OPENCODE_HOST)
+            cmd = [spec.binary, "serve", f"--hostname={DEFAULT_OPENCODE_HOST}", f"--port={port}"]
+            logger.info("Starting OpenCode generation %s: %s", generation_id, " ".join(cmd))
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=env,
+                    **isolated_subprocess_kwargs(),
+                )
+            except FileNotFoundError as exc:
+                raise OpenCodeGenerationStartError(
+                    f"OpenCode CLI not found at '{spec.binary}'. Please install OpenCode or set OPENCODE_CLI_PATH."
+                ) from exc
+            # Owned before anything else can fail, the record write included.
+            created_at = runtime.process_create_time(process.pid)
+            _OWNED_HERE[generation_id] = (process.pid, created_at)
+            _CHILDREN_HERE[generation_id] = process
+            generation = OpenCodeGeneration(
+                generation_id=generation_id,
+                pid=process.pid,
+                port=port,
+                spec_digest=spec.digest,
+                process_created_at=created_at,
+                binary=spec.binary,
+                binary_version=spec.binary_version,
+                caller_context_path=caller_context_path,
+                model_hub_overlay_hash=spec.overlay_hash,
+                model_hub_provider_ids=spec.overlay_provider_ids,
+                desktop_runtime_id=_this_desktop_runtime_id(),
+                process=process,
+                request_timeout_seconds=request_timeout_seconds,
+            )
+            try:
+                # Written before readiness, so a controller that dies during
+                # the start leaves a record its successor cleans up.
+                generation.write_record()
+                apply_resource_governance(resource_governor, process.pid)
+                outcome = await _wait_until_ready(generation, process)
+            except BaseException:
+                await generation.close_http_session()
+                if await _terminate_started_process(process, "start interrupted"):
+                    _disown_ended_start(generation)
+                else:
+                    survivor = generation
+                raise
+            if outcome == "ready":
+                logger.info("OpenCode generation %s serves at %s", generation_id, generation.base_url)
+                return generation
+            await generation.close_http_session()
+            if outcome == "exited":
+                # Most often another process took the port first.
+                _disown_ended_start(generation)
+                exited_pid, exit_code = process.pid, process.returncode
+                continue
+            # A late-starting process must not become a healthy server that
+            # nothing records.
+            if await _terminate_started_process(process, "startup timeout"):
+                _disown_ended_start(generation)
+            else:
+                survivor = generation
+            raise OpenCodeGenerationStartError(
+                f"OpenCode server failed to start within {SERVER_START_TIMEOUT}s."
+            )
+        raise OpenCodeGenerationStartError(
+            f"OpenCode server exited during startup. Process exit code: {exit_code}",
+            exited_pid=exited_pid,
+        )
+    except BaseException:
+        if survivor is not None and on_survivor is not None:
+            # Still owned here: the runtime that started it retries its stop.
+            on_survivor(survivor)
+        if overlay_path is not None and survivor is None:
+            _remove_quietly(overlay_path)
+        raise
+
+
+def _disown(generation_id: str) -> None:
+    _OWNED_HERE.pop(generation_id, None)
+    _CHILDREN_HERE.pop(generation_id, None)
+
+
+def _child_running(generation_id: object) -> Optional[bool]:
+    """Whether a process this controller spawned still runs; None for any other process."""
+    child = _CHILDREN_HERE.get(generation_id) if isinstance(generation_id, str) else None
+    if child is None:
+        return None
+    return child.returncode is None
+
+
+def _disown_ended_start(generation: OpenCodeGeneration) -> None:
+    """A start's process exited: it is no longer owned here, and its record goes."""
+
+    _disown(generation.generation_id)
+    _remove_quietly(generation.record_path)
+
+
+async def stop_generation(generation: OpenCodeGeneration) -> None:
+    """Stop one generation's process tree, then remove its record.
+
+    The record stays when the process survives, so adoption or ``vibe stop``
+    can try again.
+    """
+
+    await generation.close_http_session()
+    process = generation._process
+    if generation.process_alive():
+        logger.info("Stopping OpenCode generation %s pid=%s", generation.generation_id, generation.pid)
+        stopped = await asyncio.to_thread(terminate_pid_tree_sync, generation.pid)
+        if process is not None:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+        if not stopped and generation.process_alive():
+            raise RuntimeError(
+                f"OpenCode generation {generation.generation_id} pid={generation.pid} did not exit"
+            )
+    generation._record_removed = True
+    _disown(generation.generation_id)
+    _remove_quietly(generation.record_path)
+    _remove_quietly(generation.overlay_path)
+    if generation._supersedes is not None:
+        _remove_quietly(generation._supersedes)
+
+
+def _read_json_object(path: Path) -> Optional[Dict[str, Any]]:
+    """A record's content; ``None`` when it is missing or cannot be parsed."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception:
+        data = None
+    if not isinstance(data, dict):
+        # Its process may still run on a port nothing else records, so the
+        # record stays for a person to inspect rather than counting as dead.
+        logger.warning("Keeping an unreadable OpenCode process record at %s", path)
+        return None
+    return data
+
+
+# A record is read back from disk, where any field can be malformed. Readers
+# take each field only through these, so a corrupt record degrades to one that
+# lacks the field and never breaks the readers of every other record.
+
+
+def _record_pid(info: Mapping[str, Any]) -> Optional[int]:
+    pid = info.get("pid")
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) and 0 < pid < 2**32 else None
+
+
+def _record_port(info: Mapping[str, Any]) -> Optional[int]:
+    port = info.get("port")
+    return port if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536 else None
+
+
+def _record_number(value: object) -> Optional[float]:
+    """A finite number a record holds, or None for anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _record_runtime_id(info: Mapping[str, Any]) -> Any:
+    """The desktop Runtime a record names: an id, None, or unrecorded.
+
+    A record from before the field existed, or one whose value is no id at
+    all, counts as unrecorded and is judged by its live process.
+    """
+    value = info.get("desktop_runtime_id", _UNRECORDED_RUNTIME_ID)
+    return value if value is None or isinstance(value, str) else _UNRECORDED_RUNTIME_ID
+
+
+def _record_proves_process(info: Mapping[str, Any], *, require_port: bool = True) -> bool:
+    """Whether a record still names the exact ``opencode serve`` it started.
+
+    Stopping a server needs no port, so it accepts the bare legacy shape that
+    ``vibe stop`` always accepted; adopting one does.
+    """
+
+    pid = _record_pid(info)
+    port = _record_port(info)
+    if pid is None or not _pid_exists(pid):
+        return False
+    has_port = port is not None
+    if require_port and not has_port:
+        return False
+    created_at = _record_number(info.get("process_created_at"))
+    if created_at is not None:
+        # A command line alone can belong to a reused pid.
+        if runtime.process_create_time(pid) != created_at:
+            return False
+    command = _get_pid_command(pid)
+    if command:
+        if has_port:
+            return _is_opencode_serve_cmd(command, port)
+        return "opencode" in command and "serve" in command
+    return has_port and _pid_listens_on(pid, port)
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(dict.fromkeys(item for item in value if isinstance(item, str) and item))
+
+
+def _generation_from_record(
+    info: Mapping[str, Any],
+    *,
+    generation_id: str,
+    spec_digest: str,
+    request_timeout_seconds: int,
+) -> OpenCodeGeneration:
+    binary = info.get("binary") if isinstance(info.get("binary"), dict) else {}
+    pid = int(info["pid"])
+    created_at = _record_number(info.get("process_created_at"))
+    if created_at is None:
+        created_at = runtime.process_create_time(pid)
+    started_at = _record_number(info.get("started_at"))
+    leases = info.get("leases") if isinstance(info.get("leases"), dict) else {}
+    caller_context_path = info.get("caller_context_path")
+    overlay_hash = info.get("model_hub_overlay_hash")
+    host = info.get("host")
+    binary_path = binary.get("path")
+    return OpenCodeGeneration(
+        generation_id=generation_id,
+        pid=pid,
+        port=int(info["port"]),
+        host=host if isinstance(host, str) and host else DEFAULT_OPENCODE_HOST,
+        spec_digest=spec_digest,
+        process_created_at=created_at,
+        binary=binary_path if isinstance(binary_path, str) else "",
+        binary_version=binary.get("version") if isinstance(binary.get("version"), str) else None,
+        caller_context_path=caller_context_path if isinstance(caller_context_path, str) else None,
+        model_hub_overlay_hash=overlay_hash if isinstance(overlay_hash, str) else None,
+        model_hub_provider_ids=_string_tuple(info.get("model_hub_overlay_provider_ids")),
+        active_run_sessions=_string_tuple(info.get("active_run_sessions")),
+        leases={
+            str(key): expires_at
+            for key, value in leases.items()
+            if (expires_at := _record_number(value)) is not None
+        },
+        # The process's age: a record without a start time, such as the
+        # legacy one, started when its process did, never at its adoption.
+        started_at=started_at if started_at is not None else created_at,
+        # Rewritten without a malformed id, so every later read judges it alike.
+        desktop_runtime_id=_record_runtime_id(info),
+        request_timeout_seconds=request_timeout_seconds,
+    )
+
+
+def _this_desktop_runtime_id() -> Optional[str]:
+    """The one desktop Runtime this process acts for, or None."""
+
+    runtime_ids = desktop_caller_provenance()
+    return next(iter(runtime_ids)) if len(runtime_ids) == 1 else None
+
+
+def _record_is_ours(info: Mapping[str, Any], runtime_ids: frozenset[str]) -> bool:
+    """Whether a caller acting for ``runtime_ids`` may act on a record at all.
+
+    It is the one ownership gate for every path that reads or acts on records.
+    A caller with no desktop provenance acts on any record, as ``vibe stop``
+    always has. A record names the desktop Runtime whose controller wrote it;
+    a record from before Runtime ids were recorded, or whose id is malformed,
+    is judged by its live process, exactly as ``refuse_foreign_desktop_process``
+    judges one, and a record whose process is gone belongs to nobody.
+    """
+
+    if not runtime_ids:
+        return True
+    recorded = _record_runtime_id(info)
+    if recorded is not _UNRECORDED_RUNTIME_ID:
+        return runtime_ids == {recorded}
+    pid = _record_pid(info)
+    if pid is None:
+        return True
+    try:
+        runtime.refuse_foreign_desktop_process(pid, "opencode", runtime_ids)
+    except runtime.DesktopRuntimeClaimRefused:
+        return False
+    return True
+
+
+def _recorded_processes(runtime_ids: Optional[frozenset[str]] = None) -> list[tuple[Path, Dict[str, Any]]]:
+    """This caller's generation records, then the legacy single-server record.
+
+    Records of another desktop Runtime sharing this state directory are left
+    out, so nothing here adopts, stops, forgets, or cleans them.
+    ``runtime_ids`` defaults to this process's desktop provenance.
+    """
+
+    ids = desktop_caller_provenance() if runtime_ids is None else runtime_ids
+    found = _every_recorded_process()
+    ours = [(path, info) for path, info in found if _record_is_ours(info, ids)]
+    if len(ours) < len(found):
+        logger.debug("Leaving %s OpenCode record(s) of another desktop Runtime alone", len(found) - len(ours))
+    return ours
+
+
+def other_runtimes_live_records() -> list[Dict[str, Any]]:
+    """Records of another desktop Runtime whose process is proven running.
+
+    Durable state naming such a process, such as the poll of a run it
+    executes, is that Runtime's: nothing here resumes, rewrites, or settles it,
+    and its controller resumes it when it runs here again. Once the process
+    is gone, the state names nothing to protect and any controller here
+    settles it, as after a restart.
+    """
+
+    runtime_ids = desktop_caller_provenance()
+    return [
+        info
+        for _path, info in _every_recorded_process()
+        if not _record_is_ours(info, runtime_ids) and _record_proves_process(info, require_port=False)
+    ]
+
+
+def _every_recorded_process() -> list[tuple[Path, Dict[str, Any]]]:
+    found: list[tuple[Path, Dict[str, Any]]] = []
+    records_dir = generation_records_dir()
+    if records_dir.is_dir():
+        for path in sorted(records_dir.glob("*.json")):
+            if path.name.endswith(".overlay.json"):
+                continue
+            info = _read_json_object(path)
+            if info is not None:
+                # A generation's record is named for it, so its file name is
+                # the id every reader uses, whatever the content claims.
+                info["generation_id"] = path.stem
+                found.append((path, info))
+    legacy = _read_json_object(legacy_pid_file())
+    if legacy is not None:
+        found.append((legacy_pid_file(), legacy))
+    return found
+
+
+async def _serves_after_restart(generation: OpenCodeGeneration) -> bool:
+    for attempt in range(_ADOPTION_PROBES):
+        if await generation.is_healthy() and _pid_listens_on(generation.pid, generation.port):
+            return True
+        if attempt + 1 < _ADOPTION_PROBES:
+            await asyncio.sleep(_ADOPTION_PROBE_INTERVAL_SECONDS)
+    return False
+
+
+async def adopt_recorded_generations(*, request_timeout_seconds: int = 60) -> list[OpenCodeGeneration]:
+    """Adopt every recorded generation still serving after a controller restart.
+
+    A record whose process is gone or unproven is removed without signalling.
+    A proven process that no longer serves is stopped. A legacy single-server
+    record becomes a generation whose spec never matches a new turn's.
+    """
+
+    adopted: list[OpenCodeGeneration] = []
+    adopted_processes: set[tuple[int, Optional[float]]] = set()
+    legacy_path = legacy_pid_file()
+    for path, info in _recorded_processes():
+        is_legacy = path == legacy_path
+        if _owned_here(info, by_id=not is_legacy):
+            # A legacy file a runtime here already converted goes once the
+            # converted record is written.
+            continue
+        if not _record_proves_process(info):
+            _remove_quietly(path)
+            if not is_legacy and isinstance(info.get("generation_id"), str):
+                _remove_quietly(generation_records_dir() / f"{info['generation_id']}.overlay.json")
+            continue
+        if is_legacy and (int(info["pid"]), runtime.process_create_time(int(info["pid"]))) in adopted_processes:
+            # This pass adopted it from its converted record; a crash or a
+            # failed removal after the conversion left this file behind.
+            _remove_quietly(path)
+            continue
+        recorded_id = info.get("generation_id")
+        generation = _generation_from_record(
+            info,
+            generation_id=(
+                recorded_id
+                if isinstance(recorded_id, str) and recorded_id and not is_legacy
+                else f"ocg_{secrets.token_hex(8)}"
+            ),
+            spec_digest=(
+                LEGACY_SPEC_DIGEST
+                if is_legacy or not isinstance(info.get("spec_digest"), str)
+                else str(info["spec_digest"])
+            ),
+            request_timeout_seconds=request_timeout_seconds,
+        )
+        if not await _serves_after_restart(generation):
+            logger.info("Stopping recorded OpenCode server pid=%s that no longer serves", generation.pid)
+            await generation.close_http_session()
+            await asyncio.to_thread(stop_recorded_server_sync, path, info)
+            continue
+        if is_legacy:
+            # The legacy record goes once the generation record replacing it exists.
+            generation._supersedes = path
+            generation.write_record_or_defer("the record of an adopted pre-generations server")
+        logger.info("Adopted OpenCode generation %s pid=%s", generation.generation_id, generation.pid)
+        adopted.append(generation)
+        adopted_processes.add((generation.pid, generation.process_created_at))
+    # No sweep of overlays without a record: another desktop Runtime writes
+    # its overlay before it spawns and records the process.
+    return adopted
+
+
+def _owned_here(info: Mapping[str, Any], *, by_id: bool = True) -> bool:
+    """Whether a runtime of this process started or attached the recorded process."""
+
+    if not _OWNED_HERE:
+        # A CLI process, or a controller whose OpenCode never ran, owns nothing.
+        return False
+    generation_id = info.get("generation_id")
+    if by_id and isinstance(generation_id, str) and generation_id in _OWNED_HERE:
+        return True
+    pid = _record_pid(info)
+    if pid is None:
+        return False
+    return (pid, runtime.process_create_time(pid)) in _OWNED_HERE.values()
+
+
+def own_generation(generation: OpenCodeGeneration) -> None:
+    """Mark an adopted generation as attached to a runtime of this process."""
+    _OWNED_HERE[generation.generation_id] = (generation.pid, generation.process_created_at)
+
+
+def forget_record(path: Path) -> None:
+    """Remove a generation record and the overlay copy beside it.
+
+    The overlay carries the Model Hub gateway credential, so it never outlives
+    its record.
+    """
+
+    _remove_quietly(path)
+    if path.name.endswith(".json") and path.parent == generation_records_dir():
+        _remove_quietly(path.with_name(path.name.removesuffix(".json") + ".overlay.json"))
+
+
+def forget_dead_records(runtime_ids: Optional[frozenset[str]] = None) -> None:
+    """Forget every record of this caller no live process backs, with its overlay."""
+
+    for path, info in _recorded_processes(runtime_ids):
+        if not _record_proves_process(info, require_port=False):
+            forget_record(path)
+
+
+def recorded_servers(runtime_ids: Optional[frozenset[str]] = None) -> list[tuple[int, Path, Dict[str, Any]]]:
+    """This caller's live, proven OpenCode servers, for status and ``vibe stop``."""
+
+    return [
+        (int(info["pid"]), path, info)
+        for path, info in _recorded_processes(runtime_ids)
+        if _record_proves_process(info, require_port=False)
+    ]
+
+
+def stop_recorded_server_sync(path: Path, info: Mapping[str, Any]) -> StopOutcome:
+    """Stop one recorded server outside any runtime, confirming the outcome.
+
+    A record no live process of ours backs is simply forgotten. A process
+    that survives its stop keeps its record, so ``vibe stop`` or the next
+    adoption retries it.
+    """
+
+    if _record_proves_process(info, require_port=False) and not terminate_pid_tree_sync(int(info["pid"])):
+        logger.warning("Recorded OpenCode server pid=%s survived its stop", info["pid"])
+        return StopOutcome.FAILED
+    forget_record(path)
+    return StopOutcome.STOPPED
+
+
+def stop_recorded_servers_sync(runtime_ids: frozenset[str] = frozenset()) -> list[StopOutcome]:
+    """Stop every recorded server of ``runtime_ids`` no runtime of this process owns.
+
+    ``vibe stop`` runs it, as does a controller that starts with OpenCode
+    disabled: no agent there would adopt what a crashed controller left. A
+    record whose process already ended is forgotten with its overlay. A record
+    of another desktop Runtime is left alone. OpenCode starts each tool
+    command in its own session, so each stop takes the whole process tree.
+
+    The result holds one outcome per stop it ran; ``StopOutcome.FAILED`` means
+    a process survived, its record stays, and the caller should retry.
+    """
+
+    forget_dead_records(runtime_ids)
+    outcomes: list[StopOutcome] = []
+    for _pid, path, info in recorded_servers(runtime_ids):
+        if _owned_here(info):
+            continue
+        outcomes.append(stop_recorded_server_sync(path, info))
+    return outcomes
+
+
+def stop_owned_generations_sync() -> None:
+    """Stop every process a runtime of this controller started or adopted.
+
+    An explicit Avibe shutdown runs it. A recorded process stops through its
+    record. One owned here whose record is missing, such as a start whose
+    record write failed, stops by its process identity. A record no runtime
+    here owns, such as one of another desktop Runtime sharing this state
+    directory, is left alone.
+    """
+
+    recorded: set[str] = set()
+    for path, info in _recorded_processes():
+        if not _owned_here(info):
+            continue
+        generation_id = info.get("generation_id")
+        running = _child_running(generation_id)
+        if running is None:
+            stop_recorded_server_sync(path, info)
+        elif not running or terminate_pid_tree_sync(_CHILDREN_HERE[generation_id].pid):
+            # This controller's own child, stopped or already exited.
+            forget_record(path)
+            _disown(generation_id)
+        else:
+            logger.warning("OpenCode generation %s survived its stop", generation_id)
+        if isinstance(generation_id, str):
+            recorded.add(generation_id)
+    for generation_id, (pid, created_at) in list(_OWNED_HERE.items()):
+        if generation_id not in recorded:
+            _stop_unrecorded_process_sync(generation_id, pid, created_at)
+
+
+def _stop_unrecorded_process_sync(generation_id: str, pid: int, created_at: Optional[float]) -> None:
+    """Stop an owned process no record names.
+
+    This controller's own child is judged by its handle. Any other is proven by
+    its pid and create time: one whose create time is unknown or cannot be
+    read now is never signalled, since its pid may have been reused, and one
+    whose pid is gone, or now names another process, has ended and is no
+    longer owned here.
+    """
+
+    running = _child_running(generation_id)
+    if running is not None:
+        if running and not terminate_pid_tree_sync(pid):
+            logger.warning("OpenCode generation %s pid=%s survived its stop", generation_id, pid)
+            return
+    elif _pid_exists(pid):
+        current = runtime.process_create_time(pid)
+        if created_at is None or current is None:
+            logger.warning("Leaving OpenCode generation %s pid=%s: its process cannot be proven", generation_id, pid)
+            return
+        if current == created_at and not terminate_pid_tree_sync(pid):
+            logger.warning("OpenCode generation %s pid=%s survived its stop", generation_id, pid)
+            return
+    _disown(generation_id)
+    _remove_quietly(generation_records_dir() / f"{generation_id}.overlay.json")
+
+

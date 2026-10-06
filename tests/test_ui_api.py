@@ -10,6 +10,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+import modules.agents.opencode.client_manager as opencode_client_manager
+from tests.opencode_generation_fakes import lease_via
+from tests.opencode_generation_fakes import ui_lease
 from config.v2_config import (
     AgentsConfig,
     CodexConfig,
@@ -41,7 +44,7 @@ class _PopenFromRun:
         return self._stdout, self._stderr
 
 
-def test_opencode_options_closes_server_http_session(monkeypatch):
+def test_opencode_options_release_their_controller_lease(monkeypatch):
     import config.v2_compat as v2_compat
     import modules.agents.opencode as opencode_module
 
@@ -49,9 +52,6 @@ def test_opencode_options_closes_server_http_session(monkeypatch):
         def __init__(self):
             self.closed = 0
             self.closed_loop = None
-
-        async def ensure_running(self):
-            return "http://127.0.0.1:4096"
 
         async def get_available_agents(self, directory):
             return [{"name": "build", "mode": "primary", "hidden": False}]
@@ -98,7 +98,7 @@ def test_opencode_options_closes_server_http_session(monkeypatch):
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
     monkeypatch.setattr(
         opencode_module,
         "build_reasoning_effort_options",
@@ -109,8 +109,8 @@ def test_opencode_options_closes_server_http_session(monkeypatch):
 
     assert result["ok"] is True
     assert result["data"]["defaults"] == {"model": "openai/gpt-5"}
-    assert fake_manager.closed == 1
-    assert fake_manager.closed_loop is not None
+    # The UI process leases the controller's generation and gives it back.
+    assert [lease.released for lease in opencode_client_manager.lease_opencode_server.leases] == [True]
 
 
 def test_opencode_options_treats_disabled_model_hub_as_direct(monkeypatch):
@@ -120,9 +120,6 @@ def test_opencode_options_treats_disabled_model_hub_as_direct(monkeypatch):
     captured_kwargs = {}
 
     class _FakeManager:
-        async def ensure_running(self):
-            return "http://127.0.0.1:4096"
-
         async def get_available_agents(self, directory):
             return []
 
@@ -172,7 +169,7 @@ def test_opencode_options_treats_disabled_model_hub_as_direct(monkeypatch):
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
     monkeypatch.setattr(
         opencode_module,
         "build_reasoning_effort_options",
@@ -182,15 +179,11 @@ def test_opencode_options_treats_disabled_model_hub_as_direct(monkeypatch):
     result = asyncio.run(api.opencode_options_async("~/workspace"))
 
     assert result["ok"] is True
-    assert "model_hub_overlay_required" not in captured_kwargs
-    governor = captured_kwargs["resource_governor"]
-    assert governor.mode == "enabled"
-    assert governor.config["agent_group_name"] == "ui-agents"
+    assert len(opencode_client_manager.lease_opencode_server.leases) == 1
 
 
 def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypatch):
     import config.v2_compat as v2_compat
-    import modules.agents.opencode as opencode_module
 
     class _ForbiddenServerManager:
         @staticmethod
@@ -237,9 +230,9 @@ def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypa
         ),
     )
     monkeypatch.setattr(
-        opencode_module,
-        "OpenCodeServerManager",
-        _ForbiddenServerManager,
+        opencode_client_manager,
+        "lease_opencode_server",
+        lease_via(_ForbiddenServerManager.get_instance),
     )
 
     result = asyncio.run(api.opencode_options_async("~/workspace"))
@@ -273,14 +266,8 @@ def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypa
 
 def test_opencode_empty_hub_projection_does_not_poison_direct_cache(monkeypatch):
     import config.v2_compat as v2_compat
-    import modules.agents.opencode as opencode_module
 
     class _FakeManager:
-        ensure_calls = 0
-
-        async def ensure_running(self):
-            self.ensure_calls += 1
-
         async def get_available_agents(self, directory):
             return [{"name": "build"}]
 
@@ -325,7 +312,7 @@ def test_opencode_empty_hub_projection_does_not_poison_direct_cache(monkeypatch)
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
     monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", AsyncMock(return_value=set()))
     monkeypatch.setattr(api, "_read_opencode_custom_provider_ids", AsyncMock(return_value=set()))
     monkeypatch.setattr(api, "_read_opencode_user_model_index", AsyncMock(return_value={}))
@@ -340,59 +327,8 @@ def test_opencode_empty_hub_projection_does_not_poison_direct_cache(monkeypatch)
 
     assert hub_result["data"]["agents"] == []
     assert direct_result["data"]["agents"] == [{"name": "build"}]
-    assert manager.ensure_calls == 1
+    assert len(opencode_client_manager.lease_opencode_server.leases) == 1
     assert api._OPENCODE_OPTIONS_CACHE["/tmp/workspace"]["mode"] == "direct"
-
-
-def test_opencode_options_rereads_hub_mode_at_launch_boundary(monkeypatch):
-    import config.v2_compat as v2_compat
-    import modules.agents.opencode as opencode_module
-    from modules.agents.opencode import server as opencode_server_module
-
-    direct_config = V2Config(
-        mode="self_host",
-        version="v2",
-        slack=SlackConfig(),
-        agents=AgentsConfig(),
-        runtime=RuntimeConfig(default_cwd="."),
-    )
-    hub_config = V2Config(
-        mode="self_host",
-        version="v2",
-        slack=SlackConfig(),
-        agents=AgentsConfig(),
-        runtime=RuntimeConfig(default_cwd="."),
-    )
-    direct_config.model_hub.agents["opencode"].mode = "direct"
-    hub_config.model_hub.agents["opencode"].mode = "hub"
-    configs = iter((direct_config, hub_config))
-    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
-    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
-    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: next(configs)))
-    monkeypatch.setattr(
-        v2_compat,
-        "to_app_config",
-        lambda config: SimpleNamespace(
-            opencode=SimpleNamespace(
-                binary="opencode",
-                port=4096,
-                request_timeout_seconds=10,
-            )
-        ),
-    )
-    monkeypatch.setattr(opencode_module.OpenCodeServerManager, "_instance", None)
-    monkeypatch.setattr(
-        opencode_server_module,
-        "ensure_plugin_installed",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("Hub refusal must happen before server setup")
-        ),
-    )
-
-    result = asyncio.run(api.opencode_options_async("~/workspace"))
-
-    assert result["ok"] is False
-    assert "Gateway mode" in result["error"]
 
 
 def test_opencode_options_cache_tracks_current_model_hub_projection(monkeypatch):
@@ -402,9 +338,6 @@ def test_opencode_options_cache_tracks_current_model_hub_projection(monkeypatch)
     projections = []
 
     class _FakeManager:
-        async def ensure_running(self):
-            return "http://127.0.0.1:4096"
-
         async def get_available_agents(self, directory):
             return []
 
@@ -441,7 +374,7 @@ def test_opencode_options_cache_tracks_current_model_hub_projection(monkeypatch)
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
     monkeypatch.setattr(
         opencode_module,
         "build_reasoning_effort_options",
@@ -477,19 +410,12 @@ def test_opencode_options_does_not_fall_back_across_model_hub_projections(
     monkeypatch,
 ):
     import config.v2_compat as v2_compat
-    import modules.agents.opencode as opencode_module
-
-    class _FakeManager:
-        async def ensure_running(self):
-            raise RuntimeError("daemon unavailable")
-
-        async def close_http_session(self, *, loop=None):
-            pass
 
     class _FakeServerManager:
         @staticmethod
         async def get_instance(**kwargs):
-            return _FakeManager()
+            # The controller has no generation to lease.
+            raise RuntimeError("daemon unavailable")
 
     stale_projection = {"custom/old": {"id": "custom/old"}}
     current_projection = {"custom/new": {"id": "custom/new"}}
@@ -521,7 +447,7 @@ def test_opencode_options_does_not_fall_back_across_model_hub_projections(
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
 
     result = asyncio.run(
         api.opencode_options_async(
@@ -548,96 +474,15 @@ def test_sync_opencode_options_delegates_snapshot_loading(monkeypatch):
     assert calls == ["/tmp/workspace"]
 
 
-def test_opencode_get_server_passes_resource_governor_from_v2_runtime(monkeypatch):
-    import config.v2_compat as v2_compat
-    import modules.agents.opencode as opencode_module
-
-    captured_kwargs = {}
-    fake_manager = SimpleNamespace(ensure_running=AsyncMock())
-
-    class _FakeServerManager:
-        @staticmethod
-        async def get_instance(**kwargs):
-            captured_kwargs.update(kwargs)
-            return fake_manager
-
-    v2_config = V2Config(
-        mode="self_host",
-        version="v2",
-        slack=SlackConfig(),
-        agents=AgentsConfig(),
-        runtime=RuntimeConfig(
-            default_cwd=".",
-            resource_governance={
-                "mode": "enabled",
-                "agent_group_name": "provider-ui-agents",
-            },
-        )
-    )
-    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
-    monkeypatch.setattr(
-        v2_compat,
-        "to_app_config",
-        lambda config: SimpleNamespace(
-            opencode=SimpleNamespace(
-                binary="opencode",
-                port=4096,
-                request_timeout_seconds=10,
-            )
-        ),
-    )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
-
-    server = asyncio.run(api._opencode_get_server())
-
-    assert server is fake_manager
-    fake_manager.ensure_running.assert_awaited_once()
-    assert "model_hub_overlay_required" not in captured_kwargs
-    governor = captured_kwargs["resource_governor"]
-    assert governor.mode == "enabled"
-    assert governor.config["agent_group_name"] == "provider-ui-agents"
-
-
-def test_opencode_provider_settings_return_structured_hub_refusal(monkeypatch):
-    import config.v2_compat as v2_compat
-    import modules.agents.opencode as opencode_module
-
-    refusal = opencode_module.OpenCodeModelHubOverlayRequiredError(
-        "controller overlay is not ready"
-    )
-    fake_manager = SimpleNamespace(ensure_running=AsyncMock(side_effect=refusal))
-
-    class _FakeServerManager:
-        @staticmethod
-        async def get_instance(**kwargs):
-            return fake_manager
-
-    v2_config = V2Config(
-        mode="self_host",
-        version="v2",
-        slack=SlackConfig(),
-        agents=AgentsConfig(),
-        runtime=RuntimeConfig(default_cwd="."),
-    )
-    v2_config.model_hub.agents["opencode"].mode = "hub"
-    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
-    monkeypatch.setattr(
-        v2_compat,
-        "to_app_config",
-        lambda config: SimpleNamespace(
-            opencode=SimpleNamespace(
-                binary="opencode",
-                port=4096,
-                request_timeout_seconds=10,
-            )
-        ),
-    )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+def test_opencode_provider_settings_report_no_controller_generation(monkeypatch):
+    # The controller had no generation to lease, for example while the Hub
+    # engine is down; the UI process never launches one itself.
+    monkeypatch.setattr(api, "_opencode_lease", AsyncMock(return_value=None))
 
     result = asyncio.run(api.get_opencode_providers_async())
 
     assert result["ok"] is False
-    assert fake_manager.ensure_running.await_count == 1
+    api._opencode_lease.assert_awaited_once()
 
 
 def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_path):
@@ -645,9 +490,6 @@ def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_
     import modules.agents.opencode as opencode_module
 
     class _FakeManager:
-        async def ensure_running(self):
-            return "http://127.0.0.1:4096"
-
         async def get_available_agents(self, directory):
             return []
 
@@ -713,7 +555,7 @@ def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
     monkeypatch.setattr(
         opencode_module,
         "build_reasoning_effort_options",
@@ -734,9 +576,6 @@ def test_opencode_options_keeps_legacy_config_api_key_provider(monkeypatch, tmp_
     import modules.agents.opencode as opencode_module
 
     class _FakeManager:
-        async def ensure_running(self):
-            return "http://127.0.0.1:4096"
-
         async def get_available_agents(self, directory):
             return []
 
@@ -799,7 +638,7 @@ def test_opencode_options_keeps_legacy_config_api_key_provider(monkeypatch, tmp_
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
     monkeypatch.setattr(
         opencode_module,
         "build_reasoning_effort_options",
@@ -820,9 +659,6 @@ def test_opencode_options_does_not_readd_unconfigured_user_model_provider(
     import modules.agents.opencode as opencode_module
 
     class _FakeManager:
-        async def ensure_running(self):
-            return "http://127.0.0.1:4096"
-
         async def get_available_agents(self, directory):
             return []
 
@@ -891,7 +727,7 @@ def test_opencode_options_does_not_readd_unconfigured_user_model_provider(
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
     monkeypatch.setattr(
         opencode_module,
         "build_reasoning_effort_options",
@@ -911,9 +747,6 @@ def test_opencode_options_filters_catalog_provider_with_only_stale_user_model(
     import modules.agents.opencode as opencode_module
 
     class _FakeManager:
-        async def ensure_running(self):
-            return "http://127.0.0.1:4096"
-
         async def get_available_agents(self, directory):
             return []
 
@@ -988,7 +821,7 @@ def test_opencode_options_filters_catalog_provider_with_only_stale_user_model(
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
     monkeypatch.setattr(
         opencode_module,
         "build_reasoning_effort_options",
@@ -1010,9 +843,6 @@ def test_opencode_options_preserves_models_when_provider_catalog_fails(
     import modules.agents.opencode as opencode_module
 
     class _FakeManager:
-        async def ensure_running(self):
-            return "http://127.0.0.1:4096"
-
         async def get_available_agents(self, directory):
             return []
 
@@ -1052,7 +882,7 @@ def test_opencode_options_preserves_models_when_provider_catalog_fails(
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
     monkeypatch.setattr(
         opencode_module,
         "build_reasoning_effort_options",
@@ -1068,12 +898,8 @@ def test_opencode_options_preserves_models_when_provider_catalog_fails(
 
 def test_opencode_options_overlays_user_configured_models(monkeypatch, tmp_path):
     import config.v2_compat as v2_compat
-    import modules.agents.opencode as opencode_module
 
     class _FakeManager:
-        async def ensure_running(self):
-            return "http://127.0.0.1:4096"
-
         async def get_available_agents(self, directory):
             return []
 
@@ -1141,7 +967,7 @@ def test_opencode_options_overlays_user_configured_models(monkeypatch, tmp_path)
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
 
     result = asyncio.run(api.opencode_options_async("/tmp/workspace"))
 
@@ -1157,12 +983,8 @@ def test_opencode_options_overlays_user_configured_models(monkeypatch, tmp_path)
 
 def test_opencode_options_includes_custom_provider_models(monkeypatch, tmp_path):
     import config.v2_compat as v2_compat
-    import modules.agents.opencode as opencode_module
 
     class _FakeManager:
-        async def ensure_running(self):
-            return "http://127.0.0.1:4096"
-
         async def get_available_agents(self, directory):
             return []
 
@@ -1241,7 +1063,7 @@ def test_opencode_options_includes_custom_provider_models(monkeypatch, tmp_path)
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
 
     result = asyncio.run(api.opencode_options_async("/tmp/workspace"))
 
@@ -1259,12 +1081,8 @@ def test_opencode_options_includes_custom_provider_models(monkeypatch, tmp_path)
 
 def test_opencode_options_includes_keyless_custom_provider_models(monkeypatch, tmp_path):
     import config.v2_compat as v2_compat
-    import modules.agents.opencode as opencode_module
 
     class _FakeManager:
-        async def ensure_running(self):
-            return "http://127.0.0.1:4096"
-
         async def get_available_agents(self, directory):
             return []
 
@@ -1336,7 +1154,7 @@ def test_opencode_options_includes_keyless_custom_provider_models(monkeypatch, t
             )
         ),
     )
-    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(opencode_client_manager, "lease_opencode_server", lease_via(_FakeServerManager.get_instance))
 
     result = asyncio.run(api.opencode_options_async("/tmp/workspace"))
 
@@ -1396,7 +1214,7 @@ def test_opencode_provider_catalog_uses_native_models_for_provider_probes(
     )
 
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
 
     result = asyncio.run(api.get_opencode_providers_async())
 
@@ -1460,7 +1278,7 @@ def test_opencode_provider_catalog_ignores_native_default_models(
         return _FakeServer()
 
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
     monkeypatch.setattr(
         api,
         "load_config",
@@ -1534,7 +1352,7 @@ def test_opencode_provider_catalog_marks_keyless_custom_provider_configured(
     )
 
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
 
     result = asyncio.run(api.get_opencode_providers_async())
 
@@ -1592,7 +1410,7 @@ def test_opencode_provider_catalog_keeps_custom_provider_without_vibe_meta(
     )
 
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
 
     result = asyncio.run(api.get_opencode_providers_async())
 

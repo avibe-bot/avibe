@@ -10,14 +10,12 @@ Keep this module to preserve the public import path:
 
 from modules.agents.opencode import (
     OpenCodeAgent,
-    OpenCodeServerManager,
     build_codex_reasoning_options,
     build_reasoning_effort_options,
 )
 
 __all__ = [
     "OpenCodeAgent",
-    "OpenCodeServerManager",
     "build_codex_reasoning_options",
     "build_reasoning_effort_options",
 ]

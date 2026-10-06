@@ -1,4 +1,4 @@
-"""Shared backend restart barrier and bounded drain coordinator."""
+"""Backend runtime application, maintenance windows, and native credential cutovers."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DRAIN_TIMEOUT_SECONDS = 300.0
 _POLL_INTERVAL_SECONDS = 0.1
 # After an interruption only teardown remains: native processes exiting and
 # requests to a stopped runtime failing. By then the user's work is already
@@ -377,33 +376,28 @@ def native_cli_processes(binaries: Mapping[str, str]) -> tuple[int, ...]:
         raise NativeMigrationBlockedError("process_inventory_unavailable", backends) from None
 
 
-def _configured_drain_timeout() -> float:
-    raw = os.environ.get("AVIBE_BACKEND_RESTART_DRAIN_TIMEOUT_SECONDS", "")
-    try:
-        return max(0.0, float(raw)) if raw.strip() else DEFAULT_DRAIN_TIMEOUT_SECONDS
-    except ValueError:
-        logger.warning("Ignoring invalid AVIBE_BACKEND_RESTART_DRAIN_TIMEOUT_SECONDS=%r", raw)
-        return DEFAULT_DRAIN_TIMEOUT_SECONDS
-
-
 class BackendRestartCoordinator:
-    """Serialize backend cutovers without stopping Avibe's service process."""
+    """Serialize backend cutovers without stopping Avibe's service process.
+
+    ``renew(backend, config_save)`` applies persisted runtime config without
+    waiting for or interrupting work. ``refresh(backend, forced)`` tears a
+    runtime down, and only a native credential cutover uses it.
+    """
 
     def __init__(
         self,
         controller: Any,
         refresh: Callable[[str, bool], Awaitable[None]],
         *,
-        drain_timeout: float | None = None,
+        renew: Callable[[str, bool], Awaitable[Any]],
         settle_timeout: float = _INTERRUPT_SETTLE_SECONDS,
         poll_interval: float = _POLL_INTERVAL_SECONDS,
         process_inventory: Callable[[Mapping[str, str]], tuple[int, ...]] = native_cli_processes,
     ) -> None:
         self.controller = controller
         self._refresh = refresh
-        self._drain_timeout = _configured_drain_timeout() if drain_timeout is None else max(0.0, drain_timeout)
-        # Independent of the drain timeout, which only decides when a restart
-        # stops waiting and interrupts; an interrupting switch never drains.
+        self._renew = renew
+        # How long a cutover waits for the teardown of the work it interrupted.
         self._settle_timeout = max(0.0, settle_timeout)
         self._poll_interval = max(0.001, poll_interval)
         self._tasks: dict[str, asyncio.Task[Any]] = {}
@@ -561,7 +555,7 @@ class BackendRestartCoordinator:
                 # or cancellation, never cuts the teardown short.
                 for backend in targets:
                     if await self._has_active_turns(backend):
-                        restarts[backend] = self._start_restart(backend, drain_timeout=0)
+                        restarts[backend] = self._start_restart(backend)
                 loop = asyncio.get_running_loop()
                 deadline = loop.time() + self._settle_timeout
                 for backend in targets:
@@ -633,49 +627,41 @@ class BackendRestartCoordinator:
                     else:
                         lease.release()
 
-    async def request_restart(self, backend: str) -> str:
-        """Begin or join a restart and return without waiting for a long drain."""
+    def backend_lock(self, backend: str) -> asyncio.Lock:
+        """The lock every application of ``backend``'s config holds."""
+        return self._request_locks.setdefault(backend, asyncio.Lock())
+
+    async def request_restart(self, backend: str, *, config_save: bool = False) -> str:
+        """Apply a backend's persisted runtime config; nothing waits or is interrupted.
+
+        Running work finishes on the runtime it started on and new turns start
+        on the renewed one. A disabled backend's agent retires: it admits no new
+        message, and its running work still finishes. ``config_save`` marks a
+        request that only applies a saved runtime config, so a backend may skip
+        renewal when no launch input changed. Credential flows, manual
+        restarts, and installs renew always.
+        """
         self.assert_native_auth_available(backend)
         lock = self._request_locks.setdefault(backend, asyncio.Lock())
         async with lock:
             self.assert_native_auth_available(backend)
-            existing = self._tasks.get(backend)
-            if existing is not None:
-                if not existing.done():
-                    return "draining"
-                self._on_done(backend, existing)
-
-            agent_service = self.controller.agent_service
-            session_turns = self.controller.session_turns
-            agent_service.begin_backend_drain(backend)
-            session_turns.begin_backend_drain(backend)
             try:
-                await agent_service.prepare_backend_restart(backend)
-                had_active_work = await self._has_active_turns(backend)
+                await self._renew(backend, config_save)
             except BaseException as exc:
                 self._outcomes[backend] = {"state": "failed", "error": str(exc) or type(exc).__name__}
-                if backend not in self._blocked_backends():
-                    agent_service.end_backend_drain(backend)
-                    await session_turns.end_backend_drain(backend, resume_deferred=False)
                 raise
-            task = self._start_restart(backend)
-
-        # Idle refreshes remain synchronous so setup/config errors reach the
-        # runtime-command requester. Only genuinely active work makes the
-        # restart an acknowledged background drain.
-        if not had_active_work:
-            await task
-            return "restarted"
-        return "draining"
+            self._outcomes[backend] = {"state": "applied"}
+        return "restarted"
 
     async def run_when_idle(self, backend: str, operation: Callable[[], Awaitable[_T]]) -> _T | None:
         """Run ``operation`` while ``backend`` admits no turn, then refresh it.
 
-        Unattended maintenance can simply try again later, so unlike a restart
-        this never waits out or cancels work: it returns ``None`` without running
-        ``operation`` when a turn, cutover, migration, or native login already
-        holds the backend. Messages that arrive meanwhile are deferred to the
-        refreshed runtime, which also applies a restart requested during it.
+        Unattended maintenance can simply try again later, so this never waits
+        out or cancels work: it returns ``None`` without running ``operation``
+        when a turn, cutover, migration, or native login already holds the
+        backend. Admission stays closed only while ``operation`` replaces the
+        CLI, so no turn launches a half-installed binary. Messages that arrive
+        meanwhile are deferred to the renewed runtime.
         """
         lock = self._request_locks.setdefault(backend, asyncio.Lock())
         async with lock:
@@ -734,7 +720,7 @@ class BackendRestartCoordinator:
                 return await operation()
             finally:
                 # Even a failed operation may have replaced the CLI.
-                await self._refresh(backend, False)
+                await self._renew(backend, False)
                 refreshed = True
         finally:
             try:
@@ -801,15 +787,25 @@ class BackendRestartCoordinator:
             return {"state": "unavailable"}
         return {"state": "applied"}
 
-    async def _interrupt(self, backend: str) -> None:
-        """Settle every turn running on ``backend`` ahead of a forced refresh."""
+    async def interrupt_backend(self, backend: str, *, reason: str | None = None) -> None:
+        """Settle every turn and Activity running on ``backend`` ahead of a
+        forced stop or refresh.
+
+        ``reason`` is the settlement and picks the notice: a runtime refresh by
+        default, or ``SETTLED_BY_BACKEND_DISABLED`` when the user turned the
+        backend off.
+        """
+        from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
+
+        settled_by = reason or SETTLED_BY_BACKEND_REFRESH
         session_ids = self.controller.session_turns.active_runtime_session_ids_for_backend(backend)
         await self.controller.session_turns.release_for_backend_refresh(
             backend=backend,
             base_session_ids=session_ids,
+            settled_by=settled_by,
         )
         await self.controller.agent_service.force_cancel_backend_turns(backend)
-        self.controller.agent_service.force_end_backend_activities(backend)
+        self.controller.agent_service.force_end_backend_activities(backend, reason=settled_by)
 
     async def _has_active_turns(self, backend: str) -> bool:
         service = self.controller.agent_service
@@ -870,24 +866,20 @@ class BackendRestartCoordinator:
         self._handoffs.add(task)
         task.add_done_callback(self._handoffs.discard)
 
-    def _start_restart(self, backend: str, *, drain_timeout: float | None = None) -> asyncio.Task[None]:
-        task = asyncio.create_task(self._run(backend, drain_timeout), name=f"backend-restart:{backend}")
+    def _start_restart(self, backend: str) -> asyncio.Task[None]:
+        task = asyncio.create_task(self._run(backend), name=f"backend-restart:{backend}")
         self._tasks[backend] = task
         task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
         return task
 
-    async def _run(self, backend: str, drain_timeout: float | None = None) -> None:
+    async def _run(self, backend: str) -> None:
+        """Interrupt a cutover backend's work, then tear its runtime down."""
         forced = False
         refreshed = False
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + (self._drain_timeout if drain_timeout is None else drain_timeout)
         try:
-            while await self._has_active_turns(backend):
-                if loop.time() >= deadline:
-                    forced = True
-                    await self._interrupt(backend)
-                    break
-                await asyncio.sleep(self._poll_interval)
+            if await self._has_active_turns(backend):
+                forced = True
+                await self.interrupt_backend(backend)
             await self._refresh(backend, forced)
             refreshed = True
         finally:

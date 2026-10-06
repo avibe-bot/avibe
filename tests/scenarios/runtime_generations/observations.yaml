@@ -1,0 +1,59 @@
+version: 1
+capability: runtime_generations
+observations:
+  - id: RUNTIME-GEN-OBS-001
+    date: 2026-10-01
+    source: local log trace
+    result: confirmed
+    detail: >-
+      An unattended Model Hub built-in snapshot refresh requested a Claude
+      restart; the coordinator drained for 300 s and then force-interrupted a
+      running turn. A Claude CLI install job interrupted three turns the same
+      way the day before.
+  - id: RUNTIME-GEN-OBS-002
+    date: 2026-10-01
+    source: hermetic probe (Claude CLI 2.1.286, Agent SDK 0.2.158)
+    result: confirmed
+    detail: >-
+      A live Claude process whose gateway discovery listed only one model
+      accepted set_model for an id added later, validating it with one gateway
+      request, and ran the next turn on it.
+  - id: RUNTIME-GEN-OBS-003
+    date: 2026-10-01
+    source: hermetic probe (OpenCode 1.18.33)
+    result: confirmed
+    detail: >-
+      Two opencode serve processes shared one SQLite (WAL) home: sessions
+      continued across servers without stale reads and concurrent prompts on
+      different sessions completed in parallel. Simultaneous first starts on a
+      fresh home failed with "database is locked", so starts are serialized.
+  - id: RUNTIME-GEN-OBS-004
+    date: 2026-10-01
+    source: hermetic probe (codex-cli 0.159.3)
+    result: confirmed
+    detail: >-
+      Two app-servers ran in one directory with concurrent turns. A thread
+      loaded in one holds a cross-process writer lock, so another can resume it
+      only after thread/unsubscribe and thread/closed, which take about 50 ms
+      with thread_unload_delay_secs=0, or after the first exits. Neither
+      unloading nor exit appends to the thread's rollout.
+  - id: RUNTIME-GEN-OBS-020
+    date: 2026-10-01
+    source: hermetic probe (OpenCode 1.16.0, 1.17.0, 1.18.33)
+    result: confirmed
+    detail: >-
+      An older and a newer opencode serve shared one home across a version
+      change. The newer one applied its database migrations while the older
+      one streamed a prompt; the older one finished that prompt and served
+      another turn afterwards, and the session continued on the newer one.
+      1.17.0 to 1.18.33, 1.16.0 to 1.18.33, and a downgrade from 1.18.33 to
+      1.17.0 all behaved this way, so a version change can coexist.
+  - id: RUNTIME-GEN-OBS-021
+    date: 2026-10-01
+    source: hermetic probe (OpenCode 1.18.33)
+    result: confirmed
+    detail: >-
+      opencode serve --port=0 listens on the default 4096, not an ephemeral
+      port. A second server on a taken port exits at once with ServeError
+      while the first keeps serving. Session status is per process: a server
+      reports no status for a session another server is running.

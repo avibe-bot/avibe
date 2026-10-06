@@ -20,9 +20,10 @@ from config.v2_config import V2Config
 from core.agent_auth_service import AgentAuthService
 from modules.agents.base import AgentRequest
 from modules.agents.opencode.agent import OpenCodeAgent
-from modules.agents.opencode.server import OpenCodeServerManager
+from modules.agents.opencode.server import OpenCodeServerClient
 from modules.agents.opencode.session import OpenCodeSessionManager
 from modules.im import MessageContext
+from tests.opencode_generation_fakes import lease_returning, serve_opencode_agent
 
 REQUEST_TIMEOUT_SECONDS = 1
 
@@ -111,9 +112,8 @@ async def _first_turn(tmp_path, port: int, monkeypatch):
 
     monkeypatch.setattr("modules.agents.opencode.agent.emit_backend_failure", emit_backend_failure)
 
-    server = OpenCodeServerManager(port=port, request_timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     # The process is up and healthy; its lifecycle is not what this covers.
-    server.ensure_running = AsyncMock(return_value=server.base_url)
+    server = OpenCodeServerClient(f"http://127.0.0.1:{port}", request_timeout_seconds=REQUEST_TIMEOUT_SECONDS)
 
     agent = object.__new__(OpenCodeAgent)
     sessions = SimpleNamespace(
@@ -134,7 +134,7 @@ async def _first_turn(tmp_path, port: int, monkeypatch):
         get_opencode_overrides=stop_before_prompt,
     )
     agent.config = agent.controller.config
-    agent._get_server = AsyncMock(return_value=server)
+    serve_opencode_agent(agent, server)
     agent._delete_ack = AsyncMock()
     agent._remove_ack_reaction = AsyncMock()
     agent.record_model_hub_native_failure = AsyncMock()
@@ -193,17 +193,24 @@ def test_provider_probe_lists_models_after_directory_bootstrap_longer_than_reque
 
     async def scenario():
         async with _cold_opencode(bootstrap_seconds=REQUEST_TIMEOUT_SECONDS + 1) as opencode:
-            server = OpenCodeServerManager(port=opencode.port, request_timeout_seconds=REQUEST_TIMEOUT_SECONDS)
+            server = OpenCodeServerClient(
+                f"http://127.0.0.1:{opencode.port}",
+                request_timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+            )
             service = AgentAuthService(SimpleNamespace(config=SimpleNamespace(language="en")))
-            monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=server))
+            lease = lease_returning(server)
+            monkeypatch.setattr(service, "_lease_opencode_server", lease)
             try:
-                result = await service.test_opencode_provider("openai")
+                result = await service.test_opencode_provider("openai", timeout=30.0)
             finally:
                 await server.close_http_session()
-        return result, opencode.prompts
+        return result, opencode.prompts, lease.ttls
 
-    result, prompts = asyncio.run(scenario())
+    result, prompts, lease_ttls = asyncio.run(scenario())
 
     assert result["ok"] is True, result
+    # A renewal retiring the generation cannot stop it while the probe still
+    # waits for the bootstrap or for its reply.
+    assert lease_ttls and lease_ttls[0] > server_module.DIRECTORY_BOOTSTRAP_TIMEOUT + 30.0
     assert result["model"] == "gpt-cold"
     assert [prompt["model"] for prompt in prompts] == [{"providerID": "openai", "modelID": "gpt-cold"}]

@@ -9,7 +9,7 @@ import os
 import signal
 from asyncio.subprocess import Process
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Optional
 
 from core.process_diagnostics import log_process_snapshot, process_identity
 from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
@@ -59,6 +59,10 @@ AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
     "features.tool_suggest=false",
     "features.workspace_dependencies=false",
     "skills.include_instructions=false",
+    # Unload a thread as soon as Avibe unsubscribes from it while it is idle.
+    # That releases Codex's cross-process thread writer lock, so another
+    # app-server generation for the same directory can resume the thread.
+    "thread_unload_delay_secs=0",
     # Host-owned questions. Codex 0.153.2 gates the synchronous tool only;
     # asynchronous exposure still needs upstream support (openai/codex#43821).
     "tools.experimental_request_user_input.enabled=false",
@@ -109,7 +113,6 @@ class CodexTransport:
         extra_args: list[str] | None = None,
         runtime_args: list[str] | None = None,
         runtime_env: dict[str, str] | None = None,
-        runtime_fingerprint: str = "direct",
         model_hub_catalog: CodexHubCatalog | None = None,
     ) -> None:
         self._binary = binary
@@ -117,7 +120,6 @@ class CodexTransport:
         self._extra_args = extra_args or []
         self._runtime_args = runtime_args or []
         self._runtime_env = runtime_env
-        self.runtime_fingerprint = runtime_fingerprint
         self._model_hub_catalog = model_hub_catalog.retain() if model_hub_catalog is not None else None
         self._catalog_required = model_hub_catalog is not None
         self._catalog_exit_task: asyncio.Task[None] | None = None
@@ -332,6 +334,11 @@ class CodexTransport:
         return True
 
     @property
+    def runtime_env(self) -> Mapping[str, str] | None:
+        """The environment the process runs with; None inherits this process's."""
+        return self._runtime_env
+
+    @property
     def is_initialized(self) -> bool:
         return self._initialized and self.is_alive
 
@@ -396,11 +403,14 @@ class CodexTransport:
 
         try:
             await self._write_message(msg)
-        except Exception:
+        except BaseException as exc:
             # Clean up the pending future so it doesn't leak
             self._pending.pop(req_id, None)
             if not fut.done():
-                fut.set_exception(ConnectionError(f"Failed to send {method}"))
+                if isinstance(exc, Exception):
+                    fut.set_exception(ConnectionError(f"Failed to send {method}"))
+                else:
+                    fut.cancel()
             raise
 
         try:

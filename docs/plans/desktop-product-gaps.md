@@ -141,7 +141,7 @@ visibility and launch-at-login **shipped** in #1975.
 
 ## P2 — polish and reach
 
-### G8. Multi-window — deferred
+### G8. Multi-window — reopened for the desktop pet only
 
 - **Decision (2026-09-10):** do not implement native multi-window. Keep the
   current single-WebView shell wrapping the Workbench SPA. Session switching,
@@ -154,11 +154,16 @@ visibility and launch-at-login **shipped** in #1975.
   stop the Runtime). That lifecycle is unverifiable without a second
   window, so it ships in the same slice as the first extra window — not
   ahead of it.
-- Trigger to reopen: a demonstrated need to pin a Show Page on another
-  display. First slice then is "settings window + torn-out Show Page",
+- Original trigger to reopen: a demonstrated need to pin a Show Page on
+  another display. First slice then is "settings window + torn-out Show Page",
   not per-session windows. Until that trigger, Workbench split-pane (web
   + desktop) is the cheaper way to sit two sessions side by side.
 - Estimate when reopened: M–L, lifecycle invariants + two window kinds.
+- **Reopened (2026-10-01) for one window kind, the desktop pet.** The first
+  extra window is the `pet` window rather than a torn-out Show Page. It ships
+  with the lifecycle invariants above; see `2026-10-01-desktop-pet.md`.
+  Settings windows, torn-out Show Pages, and per-session windows stay
+  deferred under the original trigger.
 
 ### G9. macOS Universal Binary
 
@@ -173,6 +178,8 @@ visibility and launch-at-login **shipped** in #1975.
 - Keyboard access to the full Workbench under WKWebView/WebView2, global
   hotkey to summon the window, standard cut/copy/paste menu wiring on macOS.
 - Estimate: M, spread thin. Audit first, fix by surface.
+- The global hotkey is planned in `2026-10-01-desktop-pet.md`. It summons the
+  pet rather than the main window.
 
 ### G11. Diagnostics surface
 
@@ -194,7 +201,9 @@ visibility and launch-at-login **shipped** in #1975.
 2. G2 auto-update (needs G1; ship with the first signed release)
 3. G6 window state + G5 deep links (in flight; no G1 dependency)
 4. G4 notifications (depends on shipped tray)
-5. P2 items by demand; G8 stays deferred until a Show Page needs another display
+5. P2 items by demand; G8 ships only the pet window
+   (`2026-10-01-desktop-pet.md`), and other window kinds stay deferred until a
+   Show Page needs another display
 
 The deliberate observation from the review: every gap is shell-layer. The
 thin-shell bet held — the missing work is breadth on one boundary, not

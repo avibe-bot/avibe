@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 import asyncio
 import importlib.util
 import os
@@ -366,14 +367,16 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
         controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
         server = types.SimpleNamespace(
-            ensure_running=AsyncMock(),
             get_available_agents=AsyncMock(return_value=[{"name": "reviewer"}]),
             get_explicit_subagent_model=Mock(return_value="anthropic/claude-reviewer"),
         )
+
+        @asynccontextmanager
+        async def current_server():
+            yield server
+
         controller.agent_service.agents = {
-            "opencode": types.SimpleNamespace(
-                _get_server=AsyncMock(return_value=server)
-            )
+            "opencode": types.SimpleNamespace(current_server=current_server)
         }
         controller.get_cwd = Mock(return_value="/tmp")
         controller.resolve_vibe_agent_for_context = Mock(

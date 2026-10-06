@@ -3,7 +3,7 @@ import asyncio
 import inspect
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
 from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
 from core.session_activities import SessionActivityRegistry
@@ -52,6 +52,9 @@ class AgentService:
     ):
         self.controller = controller
         self.agents: Dict[str, BaseAgent] = {}
+        # Teardowns that must finish even after they failed once, such as a
+        # disabled backend's processes; the idle sweep retries them.
+        self._pending_operations: Dict[str, tuple[Callable[[], Awaitable[None]], Optional[asyncio.Lock]]] = {}
         self.default_agent = "claude"
         self._turn_gates: dict[str, _RuntimeTurnGate] = {}
         self.activities = activities or SessionActivityRegistry()
@@ -191,15 +194,85 @@ class AgentService:
             logger.debug("Backend active-runtime probe failed for %s", backend, exc_info=True)
             return True
 
-    def force_end_backend_activities(self, backend: str) -> list[Any]:
-        """End every Activity of a runtime the service is tearing down itself."""
+    def force_end_backend_activities(self, backend: str, *, reason: str = SETTLED_BY_BACKEND_REFRESH) -> list[Any]:
+        """End every Activity of a runtime the service is tearing down itself.
+
+        ``reason`` is the settlement: a runtime refresh, or the user disabling
+        the backend.
+        """
         # The cause rides on each Activity it ends, so a settlement retried
-        # after a transient failure or a restart still reports the refresh.
+        # after a transient failure or a restart still reports it.
         completed = self.activities.end_backend(
             backend,
             status="killed",
-            metadata={"interrupt_reason": SETTLED_BY_BACKEND_REFRESH},
+            metadata={"interrupt_reason": reason},
         )
+        for activity in completed:
+            self.on_activity_terminal(activity)
+        return completed
+
+    def force_end_runtime_activities(
+        self, backend: str, runtime_key: str, *, reason: str = SETTLED_BY_BACKEND_REFRESH
+    ) -> list[Any]:
+        """End the Activities of one runtime the service replaces or stops itself."""
+        # Retained until the Run owner settles them, like a whole-backend stop,
+        # so a transient settlement failure leaves something to retry.
+        completed = self.activities.end_runtime(
+            backend,
+            runtime_key,
+            status="killed",
+            retain_terminal_snapshots=True,
+            force=True,
+            metadata={"interrupt_reason": reason},
+        )
+        for activity in completed:
+            self.on_activity_terminal(activity)
+        return completed
+
+    def activation_has_activities(
+        self, backend: str, activation_identity: Optional[RuntimeActivationIdentity]
+    ) -> bool:
+        """Whether a process still runs an Activity it started.
+
+        A graceful stop must decline while one does: an Activity can outlive
+        its turn and its Session's move to a newer process, so no Session
+        binding names it any longer.
+        """
+        if activation_identity is None:
+            return False
+        return self.activities.has_active_for_activation(backend, activation_identity)
+
+    def force_end_activation_activities(
+        self,
+        backend: str,
+        activation_identities: Iterable[Optional[RuntimeActivationIdentity]],
+        *,
+        reason: str = SETTLED_BY_BACKEND_REFRESH,
+    ) -> list[Any]:
+        """End every Activity started under one of ``activation_identities``.
+
+        A process's Activities are found by the activation it started them
+        under, whatever runtime key they carry: an Activity can outlive the
+        turn or thread binding that named it, and after a backend is enabled
+        again a new agent's Activities can share its runtime keys. An unknown
+        identity (None) proves nothing and ends nothing.
+        """
+        completed = []
+        for identity in activation_identities:
+            if identity is None:
+                continue
+            for runtime_key in sorted(self.activities.runtime_keys_for_activation(backend, identity)):
+                # Retained until the Run owner settles them, as above.
+                completed.extend(
+                    self.activities.end_runtime(
+                        backend,
+                        runtime_key,
+                        status="killed",
+                        retain_terminal_snapshots=True,
+                        activation_identity=identity,
+                        metadata={"interrupt_reason": reason},
+                    )
+                )
         for activity in completed:
             self.on_activity_terminal(activity)
         return completed
@@ -207,6 +280,44 @@ class AgentService:
     def register(self, agent: BaseAgent):
         self.agents[agent.name] = agent
         logger.info(f"Registered agent backend: {agent.name}")
+
+    async def run_until_done(
+        self,
+        key: str,
+        operation: Callable[[], Awaitable[None]],
+        *,
+        retry_lock: Optional[asyncio.Lock] = None,
+    ) -> bool:
+        """Run an operation that must eventually finish; True once it has.
+
+        A backend lifecycle step with no other owner left to retry it uses
+        this: a disabled agent's teardown, whose agent is already gone, or the
+        poll restore of a backend enabled after its transports became ready.
+        A failure is logged and kept, and ``retry_pending`` runs it again on
+        every idle sweep until it succeeds, so it must be safe to repeat. A
+        cancelled requester never leaves it half done. A retry holds
+        ``retry_lock``, the lock the first run's caller held, so it never
+        interleaves with a later change.
+        """
+        from core.backend_restart import finish_native_operation
+
+        self._pending_operations.pop(key, None)
+        try:
+            await finish_native_operation(operation())
+        except Exception:
+            logger.warning("%s failed; the idle sweep retries it", key, exc_info=True)
+            self._pending_operations[key] = (operation, retry_lock)
+            return False
+        return True
+
+    async def retry_pending(self) -> None:
+        for key, (operation, retry_lock) in list(self._pending_operations.items()):
+            if retry_lock is None:
+                await self.run_until_done(key, operation)
+                continue
+            async with retry_lock:
+                if key in self._pending_operations:
+                    await self.run_until_done(key, operation, retry_lock=retry_lock)
 
     def _on_activity_output_settled(self, activity: Any) -> None:
         agent = self.agents.get(str(getattr(activity, "backend", "") or ""))
@@ -1099,10 +1210,56 @@ class AgentService:
 
     async def force_cancel_backend_turns(self, backend: str) -> None:
         """Cancel every foreground owner and emit a terminal outcome before cutover."""
+        await self._force_cancel_turns(lambda gate: gate.backend == backend)
+
+    async def force_end_runtime_work(
+        self,
+        backend: str,
+        *,
+        base_session_ids: set[str],
+        activation_identities: Iterable[Optional[RuntimeActivationIdentity]],
+        reason: str = SETTLED_BY_BACKEND_REFRESH,
+        agent: Optional[BaseAgent] = None,
+    ) -> None:
+        """Interrupt the work of a runtime the service stops itself.
+
+        The scoped form of a forced backend refresh: the named sessions' turns
+        and the Activities started under ``activation_identities`` (the
+        stopping processes') settle with ``reason``'s notice (a runtime update,
+        or the backend disabled), and every other session keeps running.
+
+        ``agent`` is the agent instance whose runtime stops. A Session whose
+        running turn another instance holds is left alone: after a backend is
+        enabled again, a disabled agent's retried stop names Sessions whose
+        next turn may already run on the new agent.
+        """
+        # Only the turns running now: a session's next turn, admitted while the
+        # release below awaits, runs elsewhere and is not this runtime's work.
+        gates = [
+            gate
+            for gate in self._turn_gates.values()
+            if gate.token
+            and gate.backend == backend
+            and getattr(gate.request, "base_session_id", None) in base_session_ids
+        ]
+        if agent is not None:
+            base_session_ids = set(base_session_ids) - {
+                gate.request.base_session_id for gate in gates if gate.agent is not None and gate.agent is not agent
+            }
+            gates = [gate for gate in gates if gate.agent is None or gate.agent is agent]
+        tokens = {gate.token for gate in gates}
+        manager = getattr(self.controller, "session_turns", None)
+        release = getattr(manager, "release_for_backend_refresh", None)
+        if callable(release) and base_session_ids:
+            await release(backend=backend, base_session_ids=set(base_session_ids), settled_by=reason)
+        await self._force_cancel_turns(lambda gate: gate.token in tokens)
+        self.force_end_activation_activities(backend, activation_identities, reason=reason)
+
+    async def _force_cancel_turns(self, owns: Callable[["_RuntimeTurnGate"], bool]) -> None:
         owned = [
             (runtime_key, gate, gate.token)
             for runtime_key, gate in self._turn_gates.items()
-            if gate.backend == backend and gate.token
+            if gate.token and owns(gate)
         ]
         tasks = {
             gate.task
@@ -1339,17 +1496,6 @@ class AgentService:
             return True
         finally:
             self.release_runtime_turn_tokens(runtime_tokens)
-
-    async def invalidate_model_hub_runtime(self, agent_name: str) -> bool:
-        """Invalidate future Hub-only runtime state without disturbing Direct work."""
-        agent = self.agents.get(agent_name)
-        if agent is None:
-            return False
-        invalidate = getattr(agent, "invalidate_model_hub_runtime", None)
-        if not callable(invalidate):
-            return False
-        await invalidate()
-        return True
 
 
 @dataclass

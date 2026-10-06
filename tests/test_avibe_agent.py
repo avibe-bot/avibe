@@ -2309,28 +2309,43 @@ async def test_two_recovery_passes_racing_on_one_open_call_settle_it_once(engine
 async def test_enabling_the_backend_hands_recovery_to_the_registered_adapter(
     engine, session, tmp_path, published, monkeypatch
 ) -> None:
+    import modules.agents.avibe as avibe_module
     import modules.agents.avibe.recovery as recovery_module
+    from config.v2_config import AvibeAgentConfig
     from core.agent_auth_service import AgentAuthService
     from core.controller import Controller
     from core.watches import ManagedWatchStore
+    from modules.agents.service import AgentService
 
     calls = _hand_over_failing_once(monkeypatch)
     # The detached retry would wait long; live registration must not leave it beside the new owner.
     monkeypatch.setattr(recovery_module, "RETRY_DELAYS_S", (60.0,))
     harness, running, _exited = await _two_sessions_with_open_calls(engine, tmp_path, local_tool_suite())
     controller = _disabled_controller()
+    controller.agent_service = AgentService(controller)
+    auth = AgentAuthService(controller)
+    auth._sync_builtin_default_agents = lambda: None
+    monkeypatch.setattr(avibe_module, "AvibeAgent", lambda _controller: harness.new_agent())
     try:
         # Startup with agents.avibe disabled: SESSION's hand-over fails and a retry is pending.
         await Controller._recover_avibe_agent_runtime_state(controller)
-        # agents.avibe is enabled: the config refresh registers an adapter and recovers on it.
-        controller.agent_service.agents["avibe"] = harness.new_agent()
-        await AgentAuthService._recover_after_live_registration(SimpleNamespace(controller=controller), "avibe")
+        # agents.avibe is saved enabled: applying it registers an adapter and recovers on it.
+        auth._load_backend_runtime_config = lambda _backend: AvibeAgentConfig(enabled=True)
+        await auth.renew_backend_runtime("avibe", config_save=True)
 
         # One owner: the registered adapter settled everything, and no detached retry remains.
+        assert "avibe" in controller.agent_service.agents
         pending = [task for task in asyncio.all_tasks() if task.get_name().startswith("avibe-agent-recovery")]
         assert [task for task in pending if not task.done()] == []
         assert ManagedWatchStore().find_job_watch(running) is not None
         assert len(await _results(engine, SESSION)) == 1 and calls.count(running) == 2
+
+        # Saved disabled again: the adapter leaves routing and its stop completes, leaving
+        # no teardown for the idle sweep to retry.
+        auth._load_backend_runtime_config = lambda _backend: None
+        await auth.renew_backend_runtime("avibe", config_save=True)
+        assert "avibe" not in controller.agent_service.agents and controller.config.avibe is None
+        assert controller.agent_service._pending_operations == {}
     finally:
         await controller.avibe_recovery.stop()
         for task in asyncio.all_tasks():

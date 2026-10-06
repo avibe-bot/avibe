@@ -174,10 +174,14 @@ Source-of-truth rule:
 
 - when changing persistent product behavior, align with V2 config and current Web UI flows rather than legacy assumptions
 - a successful `agents.*` runtime config save must also reconcile any live
-  controller through the backend rolling-refresh path; persisted config and
-  built-in Agent rows alone do not update the in-memory backend registry, and
-  callers must not issue a second restart after the config API accepts that
-  reconciliation
+  controller through `BackendRestartCoordinator.request_restart`; persisted
+  config and built-in Agent rows alone do not update the in-memory backend
+  registry, and callers must not issue a second restart after the config API
+  accepts that reconciliation
+- configuration changes never interrupt running work or hold new turns: each
+  runtime unit moves at its next turn. Two explicit user actions interrupt:
+  disabling a backend stops its work at once, and a native credential cutover
+  retires its runtime; see `docs/plans/runtime-generations.md`
 
 ## 5. Development Workflow
 

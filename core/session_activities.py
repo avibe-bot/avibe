@@ -983,6 +983,30 @@ class SessionActivityRegistry:
     def has_active(self, backend: str, runtime_key: str) -> bool:
         return bool(self.active_for_runtime(backend, runtime_key))
 
+    def has_active_for_activation(
+        self, backend: str, activation_identity: RuntimeActivationIdentity
+    ) -> bool:
+        """Whether an active Activity was started under ``activation_identity``."""
+        with self._lock:
+            return any(
+                key[0] == str(backend) and identity is activation_identity
+                for key, identity in self._active_identities.items()
+            )
+
+    def runtime_keys_for_activation(
+        self, backend: str, activation_identity: RuntimeActivationIdentity
+    ) -> set[str]:
+        """The runtime keys holding an Activity or connection under ``activation_identity``."""
+        with self._lock:
+            return {
+                key[1]
+                for key, identity in (
+                    *self._active_identities.items(),
+                    *self._connection_identities.items(),
+                )
+                if key[0] == str(backend) and identity is activation_identity
+            }
+
     def has_blocking_run_activity(self, run_id: str) -> bool:
         """Whether a non-detached active Activity is owned by ``run_id``."""
 

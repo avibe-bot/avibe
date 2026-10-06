@@ -13858,48 +13858,16 @@ def cmd_vibe():
 
 
 def _stop_opencode_server(runtime_ids: frozenset[str] = frozenset()):
-    """Terminate the OpenCode server if running; with ``runtime_ids``, only that Runtime's.
+    """Terminate every recorded OpenCode server; with ``runtime_ids``, only that Runtime's.
 
     A server of another Runtime is left running, as the scoped stop leaves it.
     """
-    pid_file = paths.get_logs_dir() / "opencode_server.json"
-    if not pid_file.exists():
-        return False
+    from modules.agents.opencode.server import StopOutcome, stop_recorded_servers_sync
 
-    try:
-        info = json.loads(pid_file.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.debug("Failed to parse OpenCode PID file: %s", e)
-        return False
-
-    pid = info.get("pid") if isinstance(info, dict) else None
-    if not isinstance(pid, int) or not _pid_alive(pid):
-        pid_file.unlink(missing_ok=True)
-        return False
-
-    # Verify it's actually an opencode serve process
-    cmd = runtime.get_process_command(pid)
-    if not cmd:
-        logger.debug("Failed to verify OpenCode process (pid=%s): command not available", pid)
-        return False
-    if "opencode" not in cmd or "serve" not in cmd:
-        return False
-    try:
-        runtime.refuse_foreign_desktop_process(pid, "opencode", runtime_ids)
-    except runtime.DesktopRuntimeClaimRefused as refusal:
-        logger.warning("Leaving the OpenCode server pid=%s running: %s", pid, refusal)
-        return False
-
-    # OpenCode starts each tool command in its own session, so stopping only
-    # the server pid would leave a running command behind. Stop the whole tree
-    # the way the service's own teardown does.
-    from modules.agents.opencode.server import OpenCodeServerManager
-
-    if OpenCodeServerManager._terminate_pid_tree_sync(pid, timeout=5):
-        pid_file.unlink(missing_ok=True)
-        return True
-    logger.warning("Failed to stop OpenCode server (pid=%s)", pid)
-    return False
+    # Forgetting the record of a server that already ended stops nothing.
+    outcomes = stop_recorded_servers_sync(runtime_ids)
+    # One survivor means OpenCode did not stop, however many others did.
+    return bool(outcomes) and all(outcome is StopOutcome.STOPPED for outcome in outcomes)
 
 
 def _pid_file_points_to_live_process(pid_path: Path) -> bool:

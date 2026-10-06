@@ -556,24 +556,6 @@ scenarios:
     layer: unit
     missing_layer: scenario
     test: tests/test_model_hub_runtime.py::test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started
-  - id: MH-RUNTIME-002
-    name: Matching OpenCode overlay never waits behind an unrelated active Turn
-    status: covered
-    kind: concurrency
-    layer: unit
-    test: tests/test_opencode_server.py::test_mh_runtime_002_matching_overlay_does_not_wait_for_an_unrelated_active_run
-  - id: MH-RUNTIME-003
-    name: A pending OpenCode overlay transition cannot be starved by new Turns on the old overlay
-    status: covered
-    kind: concurrency
-    layer: unit
-    test: tests/test_opencode_server.py::test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_overlay
-  - id: MH-RUNTIME-004
-    name: An OpenCode overlay selection remains reserved until its initiating Turn becomes active
-    status: covered
-    kind: concurrency
-    layer: unit
-    test: tests/test_opencode_server.py::test_mh_runtime_004_overlay_reservation_promotes_atomically_to_active_run
   - id: MH-RUNTIME-005
     name: First CLIProxyAPI cold start remains pending until both health surfaces are ready
     status: covered
@@ -586,12 +568,6 @@ scenarios:
     kind: timeout_cancel
     layer: unit
     test: tests/test_model_hub_runtime.py::test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics
-  - id: MH-RUNTIME-007
-    name: An OpenCode overlay change retires drained durable owners without replacing an active native Turn
-    status: covered
-    kind: concurrency
-    layer: unit
-    test: tests/test_runtime_activation.py::test_mh_runtime_007_opencode_overlay_restart_retires_pre_native_start_owner
   - id: MH-RUNTIME-008
     name: Avibe startup converges CPA to its packaged pin without enabling or starting Model Hub
     status: covered
@@ -618,6 +594,14 @@ scenarios:
     kind: lifecycle
     layer: unit
     test: tests/test_model_hub_api.py::test_runtime_recovery_does_not_wait_for_the_engine_download
+  - id: MH-RUNTIME-012
+    name: A Claude stream rejected before the early-commit threshold keeps the upstream HTTP status
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_model_hub_retry_lifecycle.py::test_claude_stream_rejected_within_its_first_byte_budget_keeps_the_status
+    related_tests:
+      - tests/test_model_hub_retry_lifecycle.py::test_slow_stream_resolution_keeps_claude_connected
   - id: MH-USAGE-001
     name: Tokens an upstream reported before the turn ended are still metered
     status: covered
@@ -1395,11 +1379,11 @@ scenarios:
     related_tests:
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
   - id: MH-MIG-011
-    name: Switching back to direct interrupts running gateway work instead of leaving it to fail on the Hub's refusal
+    name: A mode switch interrupts nothing, and a Hub turn admitted before a switch to Direct keeps resolving its routes
     status: covered
     kind: migration
     layer: unit
-    test: tests/test_model_hub_api.py::test_mode_switch_commits_only_inside_the_interrupting_guard
+    test: tests/test_model_hub_api.py::test_mode_switch_interrupts_nothing_and_keeps_admitted_hub_turns_served
   - id: MH-MIG-012
     name: Work interrupted by a runtime refresh is reported to the user as that interruption on every backend
     status: covered

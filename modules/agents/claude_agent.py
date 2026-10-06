@@ -9,7 +9,11 @@ from typing import Any, Callable, Literal, Optional
 from core.agent_auth_service import classify_auth_error
 from core.agent_tool_policy import runs_in_background as tool_runs_in_background
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
-from core.handlers.session_handler import ClaudeInputNotSentError, ClaudeSessionNotFoundError
+from core.handlers.session_handler import (
+    ClaudeBackendDisabledError,
+    ClaudeInputNotSentError,
+    ClaudeSessionNotFoundError,
+)
 from core.message_dispatcher import ActivityOutputDeliveryError
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -41,6 +45,7 @@ from modules.agents.claude_process_reaper import (
     get_claude_client_returncode,
     register_claude_owned_process,
 )
+from modules.agents.catalog import display_name_for_backend
 from vibe.i18n import t as i18n_t
 
 from modules.agents.base import (
@@ -103,6 +108,18 @@ class _ClaudeOutputRecoveryRecord:
     claim_pending: bool = False
     claim_metadata: dict[str, object] | None = None
 
+
+
+# Read live on every use, so changing them needs no new client.
+_CLAUDE_LIVE_CONFIG_FIELDS = frozenset({"idle_timeout_seconds"})
+
+
+def _claude_launch_inputs(claude_config: Any) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in vars(claude_config).items()
+        if key not in _CLAUDE_LIVE_CONFIG_FIELDS
+    }
 
 class ClaudeAgent(BaseAgent):
     """Existing Claude Code integration extracted into an agent backend."""
@@ -542,6 +559,20 @@ class ClaudeAgent(BaseAgent):
             session_id=composite_key,
         )
 
+    async def _refuse_disabled_turn(self, context, request) -> None:
+        language = str(getattr(getattr(self.controller, "config", None), "language", "en") or "en")
+        await emit_backend_failure(
+            self.controller,
+            context,
+            self.name,
+            "claude backend disabled",
+            display_text=(
+                f"❌ {i18n_t('error.agentRuntimeRetired', language, agent=display_name_for_backend(self.name))}"
+            ),
+            request=request,
+        )
+        await self._remove_ack_reaction(request)
+
     async def handle_message(self, request: AgentRequest) -> None:
         context = request.context
         runtime_base_session_id = request.base_session_id
@@ -556,17 +587,30 @@ class ClaudeAgent(BaseAgent):
         #     await self._handle_question_callback(request)
         #     return
 
+        if getattr(getattr(self.config, "claude", None), "enabled", True) is False:
+            # Claude stays registered while disabled, so a turn queued behind
+            # the one the disable interrupted still reaches it. It must start
+            # nothing and say why, as Codex and OpenCode do.
+            await self._refuse_disabled_turn(context, request)
+            return
+
         try:
-            client = await self.session_handler.get_or_create_claude_session(
-                context,
-                subagent_name=request.subagent_name,
-                subagent_model=request.subagent_model or getattr(request, "vibe_agent_model", None),
-                subagent_reasoning_effort=(
-                    request.subagent_reasoning_effort
-                    or getattr(request, "vibe_agent_reasoning_effort", None)
-                ),
-                agent_system_prompt=getattr(request, "vibe_agent_system_prompt", None),
-            )
+            try:
+                client = await self.session_handler.get_or_create_claude_session(
+                    context,
+                    subagent_name=request.subagent_name,
+                    subagent_model=request.subagent_model or getattr(request, "vibe_agent_model", None),
+                    subagent_reasoning_effort=(
+                        request.subagent_reasoning_effort
+                        or getattr(request, "vibe_agent_reasoning_effort", None)
+                    ),
+                    agent_system_prompt=getattr(request, "vibe_agent_system_prompt", None),
+                )
+            except ClaudeBackendDisabledError:
+                # Claude was turned off while this turn's client was being
+                # created; the client is already gone.
+                await self._refuse_disabled_turn(context, request)
+                return
             runtime_base_session_id = getattr(client, "_vibe_runtime_base_session_id", runtime_base_session_id)
             runtime_session_key = getattr(client, "_vibe_runtime_session_key", runtime_session_key)
             mark_session_active = getattr(self.session_handler, "mark_session_active", None)
@@ -1052,6 +1096,32 @@ class ClaudeAgent(BaseAgent):
 
         logger.info("Refreshed Claude auth state across %d runtime session(s)", len(session_ids))
 
+    async def adopt_model_hub_catalog(self) -> None:
+        """Nothing to apply: each turn resolves its model, limits, and efforts.
+
+        A session whose resolved launch changed moves to a new client at that
+        turn, by the same rule as any other launch-input change.
+        """
+
+    async def renew_runtime(self, claude_config, *, config_save: bool = False) -> None:
+        """Adopt persisted runtime config; each session moves to it at its next turn.
+
+        Every session owns its own process, so nothing drains or reconnects
+        here: a session's next turn starts a new client, unless background work
+        it started is still running. A config save that changes only fields read
+        live, such as the idle timeout, renews nothing.
+        """
+        previous = self.config.claude
+        self.config.claude = claude_config
+        self.controller.config.claude = claude_config
+        session_handler = getattr(self, "session_handler", None)
+        if session_handler is None:
+            return
+        session_handler.config = self.controller.config
+        if config_save and _claude_launch_inputs(previous) == _claude_launch_inputs(claude_config):
+            return
+        session_handler.renew_runtime()
+
     async def refresh_runtime_config(self, claude_config) -> None:
         """Reload persisted runtime config before reconnecting Claude sessions."""
         self.config.claude = claude_config
@@ -1530,29 +1600,70 @@ class ClaudeAgent(BaseAgent):
                 return "\n".join(texts)
         return None
 
+    @staticmethod
+    def _echoed_receipt_run(
+        receipts: list[_ClaudeInputReceipt],
+        text: str,
+    ) -> tuple[int, int] | None:
+        """Return the earliest contiguous receipt run one native echo replays.
+
+        Claude dequeues every input queued behind a running response together
+        and replays them as one top-level user message joined by newlines.
+        """
+        for start in range(len(receipts)):
+            joined = receipts[start].text
+            end = start + 1
+            while True:
+                if joined == text:
+                    return start, end
+                if end == len(receipts) or not text.startswith(f"{joined}\n"):
+                    break
+                joined = f"{joined}\n{receipts[end].text}"
+                end += 1
+        return None
+
     def _observe_native_user_input(
         self,
         composite_key: str,
         message,
-    ) -> _ClaudeInputReceipt | None:
+    ) -> list[_ClaudeInputReceipt]:
         text = self._native_user_input_text(message)
         if text is None:
-            return None
+            return []
         receipt_map = self._native_input_receipt_map()
         receipts = receipt_map.get(composite_key) or []
-        for index, receipt in enumerate(receipts):
-            if receipt.text != text:
-                continue
-            receipts.pop(index)
-            if not receipts:
-                receipt_map.pop(composite_key, None)
+        if not receipts:
+            return []
+        origin = self._result_origin_kind(message)
+        if origin not in {None, "human"}:
+            # Injected turns (task notifications, peers, ...) are never Avibe
+            # input, even when their text happens to equal a receipt.
+            return []
+        run = self._echoed_receipt_run(receipts, text)
+        if run is None:
+            # A human or origin-less replay is Avibe input in a shape the receipts
+            # do not model. The stream gives no sound boundary for which receipts
+            # it covers, so they stay pending; make the drift loud instead of
+            # guessing.
+            logger.warning(
+                "Claude replayed input that matches no pending receipt for %s; "
+                "%d input receipt(s) remain pending",
+                composite_key,
+                len(receipts),
+            )
+            return []
+        start, end = run
+        consumed = receipts[start:end]
+        del receipts[start:end]
+        if not receipts:
+            receipt_map.pop(composite_key, None)
+        for receipt in consumed:
             logger.debug(
                 "Observed Claude %s input receipt for %s",
                 receipt.kind,
                 composite_key,
             )
-            return receipt
-        return None
+        return consumed
 
     def _pending_steering_input_state(self, composite_key: str) -> str | None:
         for receipt in self._native_input_receipt_map().get(composite_key) or []:
@@ -2008,6 +2119,11 @@ class ClaudeAgent(BaseAgent):
             joined_running_client = getattr(client, "_vibe_receiver_attached", False)
             setattr(client, "_vibe_receiver_attached", True)
             turn_origin: str | None = "" if joined_running_client else None
+            # Each Result ends one native response phase. The pending human-path
+            # Assistant text belongs to a phase only if this receiver set it there.
+            response_phase = object()
+            ending_phase = None
+            pending_assistant_phase = None
             while True:
                 settling_ambiguous_primary = False
                 settling_ambiguous_assistant_text = None
@@ -2110,6 +2226,7 @@ class ClaudeAgent(BaseAgent):
                         terminal_steering_generation = None
                     if message_type == "result":
                         turn_origin = None
+                        ending_phase, response_phase = response_phase, object()
                     elif message_type == "assistant" and turn_origin is None:
                         turn_origin = ""
                     if message_type == "user":
@@ -2119,11 +2236,11 @@ class ClaudeAgent(BaseAgent):
                             # started, so its owner is unproven.
                             turn_origin = self._result_origin_kind(message) or ""
                         async with self._steering_lock(composite_key):
-                            receipt = self._observe_native_user_input(
+                            receipts = self._observe_native_user_input(
                                 composite_key,
                                 message,
                             )
-                            if receipt is not None and receipt.kind == "steer":
+                            if any(receipt.kind == "steer" for receipt in receipts):
                                 await self._retire_primary_phase_on_steer_receipt(
                                     context,
                                     composite_key,
@@ -2316,6 +2433,7 @@ class ClaudeAgent(BaseAgent):
                             continue
                         if assistant_text:
                             self._last_assistant_text[composite_key] = assistant_text
+                            pending_assistant_phase = response_phase
 
                         pending_requests = self._pending_requests.get(composite_key) or []
                         pending_request = pending_requests[0] if pending_requests else None
@@ -2343,8 +2461,12 @@ class ClaudeAgent(BaseAgent):
                             )
 
                         if text_parts:
-                            formatted_assistant = formatter.format_assistant_message(text_parts)
-                            self._pending_assistant_message[composite_key] = formatted_assistant
+                            # Claude writes Markdown; keep it as written, like the
+                            # Result and every other backend's narration.
+                            self._pending_assistant_message[composite_key] = "\n\n".join(
+                                text_parts
+                            )
+                            pending_assistant_phase = response_phase
 
                         # AskUserQuestion handling disabled - SDK cannot respond programmatically
                         # See: https://github.com/anthropics/claude-code/issues/10168
@@ -2444,6 +2566,10 @@ class ClaudeAgent(BaseAgent):
                         continue
 
                     if message_type == "result":
+                        replay_baseline = (
+                            self._pending_assistant_message.get(composite_key),
+                            self._last_assistant_text.get(composite_key),
+                        )
                         if await self._flush_buffered_assistant_messages(
                             composite_key,
                             context,
@@ -2458,6 +2584,19 @@ class ClaudeAgent(BaseAgent):
                                 reason="assistant_auth_failure",
                             )
                             return
+                        # Replayed frames belong to the phase this Result ends.
+                        # Each write stores a fresh object, so identity shows one.
+                        if any(
+                            current is not None and current is not before
+                            for current, before in zip(
+                                (
+                                    self._pending_assistant_message.get(composite_key),
+                                    self._last_assistant_text.get(composite_key),
+                                ),
+                                replay_baseline,
+                            )
+                        ):
+                            pending_assistant_phase = ending_phase
                         raw_result_text = getattr(message, "result", None)
                         result_text = raw_result_text
                         if output_mode in {"activity", "detached"}:
@@ -2468,10 +2607,23 @@ class ClaudeAgent(BaseAgent):
                             )
                             if record is None:
                                 raise RuntimeError("Claude terminal phase has no output owner")
+                            phase_text = None
+                            if pending_assistant_phase is ending_phase:
+                                # This phase streamed Assistant text on the human
+                                # path before its Result proved another owner. The
+                                # record takes it over, so it never replays as the
+                                # next turn's narration or terminal text.
+                                self._pending_assistant_message.pop(composite_key, None)
+                                phase_text = self._last_assistant_text.pop(composite_key, None)
                             self._classify_output_record(
                                 record, context,
                                 text=self._select_detached_result_text(
-                                    composite_key, message, raw_result_text, record.text,
+                                    composite_key,
+                                    message,
+                                    raw_result_text,
+                                    # The phase text stands in only for an empty body.
+                                    record.text
+                                    or (None if str(raw_result_text or "").strip() else phase_text),
                                 ),
                                 message=message,
                             )
@@ -4665,10 +4817,8 @@ class ClaudeAgent(BaseAgent):
                         parse_mode="markdown",
                         status_label=toolcall_label,
                     )
-                if formatter is not None and assistant_text:
-                    self._pending_assistant_message[composite_key] = (
-                        formatter.format_assistant_message([assistant_text])
-                    )
+                if assistant_text:
+                    self._pending_assistant_message[composite_key] = assistant_text
             except asyncio.CancelledError:
                 raise
             except Exception:

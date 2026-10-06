@@ -17,6 +17,7 @@ from modules.agents.catalog import display_name_for_backend
 from core.os_errors import format_os_errno
 
 from core.run_settlement import (
+    SETTLED_BY_BACKEND_DISABLED,
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
@@ -76,6 +77,11 @@ class HopOrigin:
         if len(value) > SERVED_HOP_HEADER_MAX_BYTES:
             raise ServedHopHeaderTooLarge("Served-hop header exceeds its transport bound")
         return {SERVED_HOP_HEADER: value}
+
+
+# The user ended the turn: a Stop, or turning its backend off. Its outcome is
+# canceled, never a provider stream failure.
+_USER_CANCELLATIONS = frozenset({SETTLED_BY_STOPPED, SETTLED_BY_BACKEND_DISABLED})
 
 
 @dataclass(frozen=True)
@@ -2220,7 +2226,7 @@ class TurnCorrelationRegistry:
             trace.admission_closed = True
             had_recovery = bool(trace.recovery_requests)
             trace.recovery_requests.clear()
-            if settled_by == SETTLED_BY_STOPPED:
+            if settled_by in _USER_CANCELLATIONS:
                 # Preserve the exact facts present at Stop. Teardown may expose
                 # a later producer success, but cannot change who ended the turn.
                 trace.outcome_frozen = True
@@ -2260,7 +2266,7 @@ class TurnCorrelationRegistry:
                 or trace.terminal_error is not None
                 or trace.served is not None
             )
-            if settled_by == SETTLED_BY_STOPPED and not terminal_history_committed:
+            if settled_by in _USER_CANCELLATIONS and not terminal_history_committed:
                 outcome = "canceled"
                 canceled_attempt = (
                     trace.pending_attempt.payload()
@@ -2269,7 +2275,7 @@ class TurnCorrelationRegistry:
                 )
                 served = None
                 terminal_error = None
-            elif settled_by == SETTLED_BY_STOPPED:
+            elif settled_by in _USER_CANCELLATIONS:
                 logger.info(
                     "Ignored stopped settlement after terminal Model Hub history was committed",
                     extra={"turn_id": normalized_turn_id},

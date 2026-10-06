@@ -8,7 +8,7 @@ import sys
 import threading
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -597,8 +597,20 @@ def test_cached_claude_rechecks_effective_reasoning_and_preserves_resume(
     asyncio.run(run())
 
 
-def test_claude_reasoning_change_waits_for_idle_before_recreation(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("change", ["reasoning_effort", "runtime_renewal", "model_hub_launch", "caller"])
+def test_claude_launch_change_keeps_a_busy_client_until_its_session_is_idle(monkeypatch, tmp_path, change) -> None:
+    """RUNTIME-GEN-001: a launch change never makes a session's turn wait.
+
+    While background work the session started still runs, its next turn stays
+    on the current client, and the first turn after the session is idle gets a
+    new client built from the changed inputs. A turn whose Model Hub launch the
+    current client cannot carry, or that comes from a different caller, replaces
+    it at once and interrupts that work.
+    """
+    from modules.agents.model_hub import ModelHubLaunch
+
     clients = []
+    tokens = ["first-launch-token"]
 
     class Client:
         def __init__(self, options):
@@ -613,6 +625,15 @@ def test_claude_reasoning_change_waits_for_idle_before_recreation(monkeypatch, t
             assert self._vibe_runtime_session_key not in handler.active_sessions
             self.disconnected = True
 
+    class Runtime:
+        async def resolve(self, backend, requested_model, **_kwargs):
+            return ModelHubLaunch(
+                backend=backend, channel="hub", requested_model=requested_model,
+                target_model=requested_model, runtime_model=requested_model,
+                source_id="src_launchfixture", gateway_base_url="http://127.0.0.1:18443/claude",
+                gateway_token=tokens[0], reasoning_efforts=("none", "medium"),
+            )
+
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
     monkeypatch.setattr(
@@ -620,35 +641,144 @@ def test_claude_reasoning_change_waits_for_idle_before_recreation(monkeypatch, t
         lambda *_args: ["none", "medium"],
     )
     controller = _Controller(tmp_path)
+    controller.model_hub_runtime = Runtime()
+    controller.agent_service = SimpleNamespace(force_end_runtime_activities=Mock())
     routing = RoutingSettings(model="claude-opus-4-6", reasoning_effort="none")
     controller.settings_manager.get_channel_routing = lambda _key: routing
     handler = SessionHandler(controller)
     context = MessageContext(user_id="U123", channel_id="C123")
+    callers = [{"AVIBE_CALLER_FIXTURE": "first"}]
+    monkeypatch.setattr(handler, "_caller_env_for_context", lambda _context: dict(callers[0]))
 
     async def run():
         first = await handler.get_or_create_claude_session(context)
         key = first._vibe_runtime_session_key
         handler.active_sessions.add(key)
-        routing.reasoning_effort = "medium"
-        entered_wait = asyncio.Event()
-        wait_for_idle = handler._wait_for_claude_session_idle
+        if change == "reasoning_effort":
+            routing.reasoning_effort = "medium"
+        elif change == "runtime_renewal":
+            handler.renew_runtime()
+        elif change == "caller":
+            callers[0] = {"AVIBE_CALLER_FIXTURE": "second"}
+        else:
+            tokens[0] = "second-launch-token"
 
-        async def observe_wait(composite_key):
-            entered_wait.set()
-            await wait_for_idle(composite_key)
+        during = await asyncio.wait_for(handler.get_or_create_claude_session(context), timeout=1)
+        if change in {"model_hub_launch", "caller"}:
+            assert during is not first and first.disconnected
+            controller.agent_service.force_end_runtime_activities.assert_called_once_with("claude", key)
+            return
+        assert during is first and not first.disconnected
+        controller.agent_service.force_end_runtime_activities.assert_not_called()
 
-        monkeypatch.setattr(handler, "_wait_for_claude_session_idle", observe_wait)
-        pending = asyncio.create_task(handler.get_or_create_claude_session(context))
-        await asyncio.wait_for(entered_wait.wait(), timeout=1)
-        assert not pending.done()
-        assert not first.disconnected
         handler.active_sessions.remove(key)
-        second = await asyncio.wait_for(pending, timeout=1)
-        assert first.disconnected
-        assert second.options.effort == "medium"
+        after = await asyncio.wait_for(handler.get_or_create_claude_session(context), timeout=1)
+        assert first.disconnected and after is not first
+        if change == "reasoning_effort":
+            assert after.options.effort == "medium"
         assert len(clients) == 2
+        assert await handler.get_or_create_claude_session(context) is after
 
     asyncio.run(run())
+
+
+def test_a_renewal_during_client_creation_leaves_one_coherent_launch_config(monkeypatch, tmp_path) -> None:
+    """RUNTIME-GEN-001: a client is launched from the config it started with.
+
+    A save that lands while the client is being created changes neither its
+    CLI path nor its epoch midway; the session's next turn moves it.
+    """
+    captured = {}
+
+    class Client:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self):
+            pass
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    build_prompt = handler._build_claude_system_prompt
+
+    async def renew_while_building(*args, **kwargs):
+        controller.config.claude = _ClaudeRuntimeConfig(cli_path="/opt/renewed/claude")
+        handler.renew_runtime()
+        return await build_prompt(*args, **kwargs)
+
+    monkeypatch.setattr(handler, "_build_claude_system_prompt", renew_while_building)
+
+    client = _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+
+    assert captured["options"].cli_path == "/usr/local/bin/claude-proxy"
+    assert client._vibe_runtime_epoch == 0
+
+
+def test_a_renewal_during_hub_launch_resolution_leaves_one_coherent_launch_config(monkeypatch, tmp_path) -> None:
+    """RUNTIME-GEN-001: a turn's whole configuration is one load at admission.
+
+    A save and renewal that land while the turn is still resolving its Model Hub
+    launch, before any client exists, change neither the CLI path nor the
+    epoch it launches with; the session's next turn moves it.
+    """
+    from modules.agents import model_hub as model_hub_module
+
+    captured = {}
+
+    class Client:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self):
+            pass
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    resolve = model_hub_module.resolve_model_hub_launch
+
+    async def renew_while_resolving(*args, **kwargs):
+        controller.config.claude = _ClaudeRuntimeConfig(cli_path="/opt/renewed/claude")
+        handler.renew_runtime()
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(model_hub_module, "resolve_model_hub_launch", renew_while_resolving)
+
+    client = _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+
+    assert captured["options"].cli_path == "/usr/local/bin/claude-proxy"
+    assert client._vibe_runtime_epoch == 0
+
+
+def test_a_config_save_that_only_changes_live_fields_renews_no_client() -> None:
+    """RUNTIME-GEN-005: an idle-timeout save keeps every cached client; other changes renew."""
+    from modules.agents.claude_agent import ClaudeAgent
+
+    def agent_with(config):
+        agent = ClaudeAgent.__new__(ClaudeAgent)
+        agent.config = SimpleNamespace(claude=config)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(claude=config), claude_runtime_epoch=0)
+        agent.session_handler = SimpleNamespace(config=None, renew_runtime=Mock())
+        return agent
+
+    base = _ClaudeRuntimeConfig()
+    cases = [
+        (_ClaudeRuntimeConfig(), True, False),
+        (_ClaudeRuntimeConfig(cli_path="/opt/other/claude"), True, True),
+        (_ClaudeRuntimeConfig(), False, True),
+    ]
+    for saved, config_save, renews in cases:
+        saved.idle_timeout_seconds = 60
+        agent = agent_with(base)
+        base.idle_timeout_seconds = 3600
+
+        asyncio.run(agent.renew_runtime(saved, config_save=config_save))
+
+        assert agent.controller.config.claude is saved
+        assert agent.session_handler.renew_runtime.called is renews
 
 
 @pytest.mark.parametrize("channel", ["hub", "native_cli"])
@@ -2389,6 +2519,241 @@ def test_session_handler_uses_scheduled_turn_source_for_dm_anchor(monkeypatch, t
     assert base_session_id == precomputed_base
     assert getattr(client, "_vibe_runtime_base_session_id") == base_session_id
     assert getattr(client, "_vibe_runtime_session_key") == f"{base_session_id}:{tmp_path}"
+
+
+def test_runtime_gen_005_a_client_from_before_a_renewal_is_reclaimed_once_idle(monkeypatch, tmp_path: Path) -> None:
+    """RUNTIME-GEN-005: a client from before a renewal stops at the first idle sweep.
+
+    It can never serve another turn, so it is disconnected as soon as a sweep
+    finds it idle, even with idle eviction off. A busy one keeps running.
+    """
+    disconnects: list[str] = []
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            disconnects.append("disconnect")
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    handler = SessionHandler(controller)
+    _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.session_last_activity[composite_key] = 1000.0
+
+    # Idle eviction is off and the client is current: it stays.
+    assert asyncio.run(handler.evict_idle_sessions(0)) == 0
+
+    handler.renew_runtime()
+    handler.active_sessions.add(composite_key)
+    # Its own background work still runs, so the stale client keeps serving it.
+    assert asyncio.run(handler.evict_idle_sessions(0)) == 0
+    assert disconnects == []
+
+    handler.active_sessions.discard(composite_key)
+    assert asyncio.run(handler.evict_idle_sessions(0)) == 1
+    assert disconnects == ["disconnect"]
+    assert composite_key not in controller.claude_sessions
+
+
+def test_runtime_gen_006_disabling_claude_closes_its_busy_clients_and_only_those(monkeypatch, tmp_path: Path) -> None:
+    """RUNTIME-GEN-006 (Claude): a disable closes every client live at that moment.
+
+    A client still running a turn is closed too, its work settled as disabled.
+    A client created after the capture, such as one of a re-enabled backend, is
+    never touched by a retry.
+    """
+    disconnects: list[str] = []
+    ended: list[tuple[str, str]] = []
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            disconnects.append("disconnect")
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    controller.agent_service = SimpleNamespace(
+        force_end_runtime_activities=lambda backend, key, *, reason: ended.append((key, reason)),
+    )
+    handler = SessionHandler(controller)
+    client = _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.active_sessions.add(composite_key)
+
+    captured = handler.capture_claude_clients()
+    asyncio.run(handler.close_captured_claude_clients(captured, reason="backend_disabled"))
+
+    assert disconnects == ["disconnect"]
+    assert composite_key not in handler.claude_sessions
+    assert ended == [(composite_key, "backend_disabled")]
+
+    fresh = _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+    asyncio.run(handler.close_captured_claude_clients(captured, reason="backend_disabled"))
+    assert handler.claude_sessions[composite_key] is fresh is not client
+    assert disconnects == ["disconnect"]
+
+
+def test_runtime_gen_006_a_disabled_claude_client_whose_disconnect_fails_still_exits(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """RUNTIME-GEN-006 (Claude): a captured client counts as closed only once its CLI has exited.
+
+    Its disconnect fails after it left ``claude_sessions``, so the close stops
+    its process directly instead of reporting the backend stopped.
+    """
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self) -> None:
+            pass
+
+        async def disconnect(self) -> None:
+            raise RuntimeError("transport wedged")
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    controller.agent_service = SimpleNamespace(force_end_runtime_activities=lambda *_args, **_kwargs: None)
+    handler = SessionHandler(controller)
+    client = _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+
+    async def scenario():
+        # A test-owned child stands in for the Claude CLI.
+        process = await asyncio.create_subprocess_exec("sleep", "30")
+        client._transport = SimpleNamespace(_process=process)
+        captured = handler.capture_claude_clients()
+        try:
+            await handler.close_captured_claude_clients(captured, reason="backend_disabled")
+            return process.returncode
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
+    assert asyncio.run(scenario()) is not None
+    assert f"slack_C123:{tmp_path}" not in handler.claude_sessions
+
+
+def test_runtime_gen_006_a_client_connecting_when_claude_is_disabled_never_serves(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """RUNTIME-GEN-006 (Claude): a client still connecting when the disable
+    captured the live clients is not among them. Once connected it finds
+    Claude disabled, stops its CLI, and refuses the turn instead of serving it."""
+    disconnects: list[str] = []
+    connecting = asyncio.Event()
+    finish_connect = asyncio.Event()
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            pass
+
+        async def connect(self) -> None:
+            connecting.set()
+            await finish_connect.wait()
+
+        async def disconnect(self) -> None:
+            disconnects.append("disconnect")
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    handler = SessionHandler(controller)
+
+    async def scenario():
+        turn = asyncio.create_task(
+            handler.get_or_create_claude_session(MessageContext(user_id="U123", channel_id="C123"))
+        )
+        await asyncio.wait_for(connecting.wait(), 1)
+        # The disable: Claude is turned off, then the live clients are captured.
+        controller.config.claude.enabled = False
+        assert handler.capture_claude_clients() == ()
+        finish_connect.set()
+        with pytest.raises(session_handler_module.ClaudeBackendDisabledError):
+            await turn
+
+    asyncio.run(scenario())
+
+    assert disconnects == ["disconnect"]
+    assert handler.claude_sessions == {}
+
+
+def test_runtime_gen_006_a_turn_cancelled_while_its_client_connects_stops_the_cli(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """RUNTIME-GEN-006 (Claude): a disable cancels a turn whose client is still
+    connecting, and so is not among the clients it captured. The connect's own
+    cleanup can drop the CLI without stopping it, so the turn stops the CLI
+    process it spawned before the cancellation reaches the caller."""
+    started = asyncio.Event()
+    spawned: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self._transport = None
+
+        async def connect(self) -> None:
+            # The CLI spawns, then the handshake waits.
+            self._transport = SimpleNamespace(_process=spawned["process"])
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except BaseException:
+                # Like the SDK before its query exists: the transport is
+                # dropped without closing the process.
+                self._transport = None
+                raise
+
+        async def disconnect(self) -> None:
+            self._transport = None
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    handler = SessionHandler(controller)
+
+    async def scenario():
+        # A test-owned child stands in for the Claude CLI.
+        process = await asyncio.create_subprocess_exec("sleep", "30")
+        spawned["process"] = process
+        try:
+            turn = asyncio.create_task(
+                handler.get_or_create_claude_session(MessageContext(user_id="U123", channel_id="C123"))
+            )
+            await asyncio.wait_for(started.wait(), 1)
+            turn.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await turn
+            return process.returncode
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
+    assert asyncio.run(scenario()) is not None
+    assert handler.claude_sessions == {}
 
 
 def test_session_handler_evicts_idle_claude_session(monkeypatch, tmp_path: Path) -> None:

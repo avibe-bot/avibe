@@ -20,6 +20,7 @@ from typing import Any, List, Tuple
 
 import pytest
 
+from tests.opencode_generation_fakes import ui_lease
 from vibe import api
 
 
@@ -132,7 +133,7 @@ def fake_save_env(monkeypatch, tmp_path):
     async def _fake_get_server():
         return server
 
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(api, "restart_backend", lambda backend: {"ok": True})
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
@@ -146,7 +147,7 @@ def fake_model_env(monkeypatch, tmp_path):
     async def _fake_get_server():
         return server
 
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(api, "restart_backend", lambda backend: {"ok": True})
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {"x": {"data": {}, "updated_at": 1}})
@@ -536,7 +537,7 @@ def test_save_provider_model_rejects_builtin_duplicate_from_list_models(monkeypa
             }
         )
 
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(api, "restart_backend", lambda backend: {"ok": True})
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
@@ -667,7 +668,7 @@ def test_save_custom_provider_rejects_reserved_id_when_catalog_unavailable(monke
     async def _fail_get_server():
         raise RuntimeError("daemon unavailable")
 
-    monkeypatch.setattr(api, "_opencode_get_server", _fail_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fail_get_server))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
     result = _save_custom(
@@ -926,7 +927,7 @@ def test_base_url_persist_failure_surfaces_to_caller(monkeypatch, tmp_path) -> N
     async def _fake_get_server():
         return server
 
-    monkeypatch.setattr(api, "_opencode_get_server", _fake_get_server)
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(_fake_get_server))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
     def _explode(*args, **kwargs):
@@ -943,3 +944,27 @@ def test_base_url_persist_failure_surfaces_to_caller(monkeypatch, tmp_path) -> N
     # Credential persistence is config-file based; the daemon auth API
     # is not called for Settings-entered API keys.
     assert server.set_calls == []
+
+
+def test_save_provider_model_fails_closed_when_an_enabled_opencode_cannot_be_leased(monkeypatch, tmp_path) -> None:
+    """OpenCode is enabled, but the controller cannot lease a generation right
+    now. Without the live catalog the save could shadow a built-in model, so it
+    fails instead of persisting as it would for a disabled OpenCode."""
+
+    import config.v2_compat as v2_compat
+    from modules.agents.opencode import client_manager
+    from vibe.opencode_config import read_opencode_provider_user_models
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: object()))
+    monkeypatch.setattr(v2_compat, "to_app_config", lambda _config: type("App", (), {"opencode": object()})())
+
+    async def unreachable(purpose, *, ttl_seconds, controller=None):
+        raise client_manager.OpenCodeRuntimeUnavailableError("controller_unavailable", "control IPC timed out")
+
+    monkeypatch.setattr(client_manager, "lease_opencode_server", unreachable)
+
+    result = _save_model("deepseek", {"model_id": "deepseek-chat"})
+
+    assert result == {"ok": False, "message": "provider model catalog is unavailable"}
+    assert read_opencode_provider_user_models("deepseek", home=tmp_path) == {}

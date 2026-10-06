@@ -159,12 +159,12 @@ def stop_env(monkeypatch):
     monkeypatch.setattr(os, "kill", recording_kill)
     monkeypatch.setattr(runtime, "stop_pid", lambda pid, timeout=5: effects["stop_pid"].append(pid) or False)
     # The OpenCode server is stopped with its tool tree; record that stop the same way.
-    from modules.agents.opencode.server import OpenCodeServerManager
+    from modules.agents.opencode import server as opencode_server
 
     monkeypatch.setattr(
-        OpenCodeServerManager,
-        "_terminate_pid_tree_sync",
-        staticmethod(lambda pid, timeout=5.0: effects["stop_pid"].append(pid) or False),
+        opencode_server,
+        "terminate_pid_tree_sync",
+        lambda pid, timeout=5.0: effects["stop_pid"].append(pid) or False,
     )
     monkeypatch.setattr(remote_access, "stop", lambda: effects["remote_access"].append(True) or {"ok": True})
     # The full stop reaps the installers of this process's own Runtime id,

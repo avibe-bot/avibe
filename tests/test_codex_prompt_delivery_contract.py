@@ -22,6 +22,7 @@ from core.prompt_registry import prompt_text
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.codex.transport import CodexTransport
 from modules.im import MessageContext
+from tests.codex_generation_support import init_generation_state
 
 
 BINARY = os.environ.get("CODEX_PROMPT_CONTRACT_BINARY")
@@ -35,7 +36,7 @@ PROMPT = "\n\n".join(
 
 
 def _agent(marker):
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent.controller = SimpleNamespace(get_codex_overrides=Mock(return_value=(None, MODEL, "high")))
     agent.codex_config = SimpleNamespace(default_model=None)
 

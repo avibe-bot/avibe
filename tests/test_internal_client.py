@@ -739,7 +739,7 @@ def test_backend_application_uses_verified_socket_and_real_projection(socket_pat
     service = _AgentService()
     service.agents = {"claude": object()}
     controller = _controller(service)
-    controller.backend_restart_coordinator = BackendRestartCoordinator(controller, AsyncMock())
+    controller.backend_restart_coordinator = BackendRestartCoordinator(controller, AsyncMock(), renew=AsyncMock())
     app = create_app(controller)
 
     async def run():

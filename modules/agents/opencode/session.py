@@ -18,7 +18,7 @@ from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvide
 from modules.agents.base import AgentRequest, BaseAgent
 from vibe.message_identity import is_input_turn
 
-from .server import OpenCodeServerManager
+from .server import OpenCodeServerClient
 
 
 class OpenCodeResumeUnavailableError(RuntimeError):
@@ -211,7 +211,7 @@ class OpenCodeSessionManager:
 
     async def _resolve_running_fork_point(
         self,
-        server: OpenCodeServerManager,
+        server: OpenCodeServerClient,
         source_session_id: str,
         directory: str,
         fork: dict,
@@ -338,7 +338,7 @@ class OpenCodeSessionManager:
     async def repair_message_order(
         self,
         request: AgentRequest,
-        server: OpenCodeServerManager,
+        server: OpenCodeServerClient,
         session_id: str,
         messages: list[Dict[str, Any]],
     ) -> str:
@@ -406,7 +406,7 @@ class OpenCodeSessionManager:
 
     async def wait_for_session_idle(
         self,
-        server: OpenCodeServerManager,
+        server: OpenCodeServerClient,
         session_id: str,
         directory: str,
         timeout_seconds: float = 15.0,
@@ -445,7 +445,7 @@ class OpenCodeSessionManager:
         if not os.path.exists(working_path):
             os.makedirs(working_path, exist_ok=True)
 
-    async def get_or_create_session_id(self, request: AgentRequest, server: OpenCodeServerManager) -> Optional[str]:
+    async def get_or_create_session_id(self, request: AgentRequest, server: OpenCodeServerClient) -> Optional[str]:
         """Get a cached OpenCode session id, or create a new session.
 
         The session anchor is the bare base (the thread's identity), independent

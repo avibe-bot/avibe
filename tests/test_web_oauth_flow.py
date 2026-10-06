@@ -20,6 +20,7 @@ from unittest.mock import ANY, AsyncMock
 
 import pytest
 
+from tests.opencode_generation_fakes import lease_returning
 from core.agent_auth_service import (
     AgentAuthService,
     ClaudeOAuthAttempt,
@@ -793,8 +794,6 @@ class _FakeOpencodeServer:
         self.messages: list[dict] = []
         self.prompt_calls: list[dict] = []
         self.abort_calls: list[tuple[str, str]] = []
-        self.active_calls: list[str] = []
-        self.inactive_calls: list[str] = []
         self.message_sent = False
         self.recent_error: str | None = None
         self.default_agent = "build"
@@ -820,12 +819,6 @@ class _FakeOpencodeServer:
     async def prompt_async(self, **kwargs):
         self.prompt_calls.append(kwargs)
         self.message_sent = True
-
-    async def mark_run_active(self, session_id):
-        self.active_calls.append(session_id)
-
-    async def mark_run_inactive(self, session_id):
-        self.inactive_calls.append(session_id)
 
     async def abort_session(self, session_id, directory):
         self.abort_calls.append((session_id, directory))
@@ -868,7 +861,7 @@ def test_start_web_setup_opencode_extracts_url_and_device_code(
         "url": "https://auth.openai.com/codex/device",
         "instructions": "Enter code: YR8I-QJJUH",
     }
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
 
     flow = _run(_start_opencode_flow_without_waiter(service, "openai"))
 
@@ -899,7 +892,7 @@ def test_start_web_setup_opencode_github_copilot_passes_prompt_answer(
         "url": "https://github.com/login/device",
         "instructions": "Enter code: 335B-09BE",
     }
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
 
     _run(_start_opencode_flow_without_waiter(service, "github-copilot"))
 
@@ -920,7 +913,7 @@ def test_start_web_setup_opencode_url_only_flow_has_no_device_code(
         "url": "https://gitlab.com/oauth/authorize?...",
         "instructions": "Your browser will open for authentication.",
     }
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
 
     flow = _run(_start_opencode_flow_without_waiter(service, "gitlab"))
     assert flow.state == "awaiting_code"
@@ -934,7 +927,7 @@ def test_start_web_setup_opencode_surfaces_server_failure(
     """When the OpenCode daemon isn't reachable, the flow lands in
     ``failed`` with a typed error string so the UI can render an
     actionable sentence rather than ``cli_failed``."""
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(None))
     flow = _run(service.start_web_setup("opencode", provider_id="openai"))
     assert flow.state == "failed"
     assert flow.error == "opencode_server_unavailable"
@@ -950,7 +943,7 @@ def test_opencode_oauth_success_clears_provider_options_key(
         "instructions": "Enter code: YR8I-QJJUH",
     }
     fake.wait_provider_oauth = AsyncMock(return_value=True)
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
     clear_key = AsyncMock()
     monkeypatch.setattr(service, "_clear_opencode_provider_options_key_for_oauth", clear_key)
     hook_calls: list[str] = []
@@ -996,7 +989,8 @@ def test_opencode_provider_test_returns_excerpt_from_non_text_part(
             ],
         }
     ]
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    leaser = lease_returning(fake)
+    monkeypatch.setattr(service, "_lease_opencode_server", leaser)
 
     result = _run(service.test_opencode_provider("anthropic"))
 
@@ -1007,9 +1001,9 @@ def test_opencode_provider_test_returns_excerpt_from_non_text_part(
         "providerID": "anthropic",
         "modelID": "claude-opus-4.8",
     }
-    assert fake.active_calls == ["sess_probe"]
     assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
-    assert fake.inactive_calls == ["sess_probe"]
+    # The probe pins its generation only while it runs.
+    assert [lease.released for lease in leaser.leases] == [True]
 
 
 def test_opencode_provider_test_uses_provider_catalog_without_agent_model(
@@ -1039,7 +1033,7 @@ def test_opencode_provider_test_uses_provider_catalog_without_agent_model(
             "parts": [{"type": "text", "text": "OK"}],
         }
     ]
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
     monkeypatch.setattr(
         service,
         "_resolve_backend_config",
@@ -1089,7 +1083,7 @@ def test_opencode_provider_test_ignores_native_default_models(
             "parts": [{"type": "text", "text": "OK"}],
         }
     ]
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
     monkeypatch.setattr(
         service,
         "_resolve_backend_config",
@@ -1139,7 +1133,7 @@ def test_opencode_provider_test_rejects_hub_only_runtime_agent_model(
             "parts": [{"type": "text", "text": "OK"}],
         }
     ]
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
     monkeypatch.setattr(
         service,
         "_resolve_backend_config",
@@ -1174,7 +1168,8 @@ def test_opencode_provider_test_surfaces_non_retryable_log_error_before_timeout(
         "AI_APICallError (model_not_found) while calling "
         'https://relay.example/v1/responses: Model "gpt-5.3-chat-latest" is not supported'
     )
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    leaser = lease_returning(fake)
+    monkeypatch.setattr(service, "_lease_opencode_server", leaser)
 
     result = _run(
         service.test_opencode_provider(
@@ -1190,7 +1185,8 @@ def test_opencode_provider_test_surfaces_non_retryable_log_error_before_timeout(
     assert "not supported" in result["detail"]
     assert result["duration_ms"] < 100
     assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
-    assert fake.inactive_calls == ["sess_probe"]
+    # The probe pins its generation only while it runs.
+    assert [lease.released for lease in leaser.leases] == [True]
 
 
 def test_opencode_provider_test_classifies_log_error_for_empty_terminal(
@@ -1220,7 +1216,7 @@ def test_opencode_provider_test_classifies_log_error_for_empty_terminal(
         "AI_APICallError (model_not_found; HTTP 404): "
         'Model "gpt-5.3-chat-latest" is not supported'
     )
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
 
     result = _run(
         service.test_opencode_provider(
@@ -1271,7 +1267,8 @@ def test_opencode_provider_test_fails_on_empty_terminal_message(
             ],
         }
     ]
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    leaser = lease_returning(fake)
+    monkeypatch.setattr(service, "_lease_opencode_server", leaser)
 
     result = _run(service.test_opencode_provider("glm", model="glm-5.2"))
 
@@ -1280,9 +1277,9 @@ def test_opencode_provider_test_fails_on_empty_terminal_message(
     assert result["model"] == "glm-5.2"
     assert "glm-5.2" in result["detail"]
     assert fake.prompt_calls[-1]["reasoning_effort"] is None
-    assert fake.active_calls == ["sess_probe"]
     assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
-    assert fake.inactive_calls == ["sess_probe"]
+    # The probe pins its generation only while it runs.
+    assert [lease.released for lease in leaser.leases] == [True]
 
 
 def test_opencode_provider_test_uses_catalog_model_casing(
@@ -1310,7 +1307,7 @@ def test_opencode_provider_test_uses_catalog_model_casing(
             "parts": [{"type": "text", "text": "OK"}],
         }
     ]
-    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
 
     result = _run(service.test_opencode_provider("glm", model="GLM-5.2"))
 
@@ -2052,7 +2049,7 @@ def test_manual_opencode_pending_callback_has_one_cancellable_owner(service, mon
             await asyncio.Event().wait()
 
         provider.wait_provider_oauth = callback
-        monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=provider))
+        monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(provider))
         commit = AsyncMock()
         monkeypatch.setattr(service, "_commit_web_login", commit)
         flow = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
@@ -2086,7 +2083,7 @@ def test_manual_opencode_expires_without_browser_and_releases_provider_slot(serv
             start_provider_oauth=AsyncMock(return_value={"method": "code", "url": "https://provider.invalid"}),
             wait_provider_oauth=AsyncMock(),
         )
-        monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=provider))
+        monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(provider))
         commit = AsyncMock()
         monkeypatch.setattr(service, "_commit_web_login", commit)
         flow = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
@@ -2118,7 +2115,7 @@ def test_manual_opencode_cancel_after_callback_completion_preserves_success(serv
             start_provider_oauth=AsyncMock(return_value={"method": "code", "url": "https://provider.invalid"}),
             wait_provider_oauth=AsyncMock(),
         )
-        monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=provider))
+        monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(provider))
         commit = AsyncMock()
         monkeypatch.setattr(service, "_commit_web_login", commit)
         flow = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
@@ -2149,7 +2146,7 @@ def test_manual_opencode_submission_does_not_extend_callback_deadline(service, m
             start_provider_oauth=AsyncMock(return_value={"method": "code", "url": "https://provider.invalid"}),
             wait_provider_oauth=callback,
         )
-        monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=provider))
+        monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(provider))
         commit = AsyncMock()
         monkeypatch.setattr(service, "_commit_web_login", commit)
         flow = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
@@ -2176,7 +2173,7 @@ def test_manual_opencode_submit_keeps_start_waiter_and_cancel_before_dispatch_wi
             start_provider_oauth=AsyncMock(return_value={"method": "code", "url": "https://provider.invalid"}),
             wait_provider_oauth=AsyncMock(),
         )
-        monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=provider))
+        monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(provider))
         commit = AsyncMock()
         monkeypatch.setattr(service, "_commit_web_login", commit)
         flow = await service.start_web_setup("opencode", provider_id="fixture", force_reset=False)
@@ -2195,3 +2192,21 @@ def test_manual_opencode_submit_keeps_start_waiter_and_cancel_before_dispatch_wi
         assert not (await service.submit_web_code(flow.flow_id, "stale"))["ok"]
 
     asyncio.run(run())
+
+
+def test_start_web_setup_opencode_releases_its_lease_when_authorize_is_unusable(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An authorize response with no URL fails setup; nothing else would ever
+    # release the generation this flow pinned for its whole budget.
+    fake = _FakeOpencodeServer()
+    fake.auth_map = {"openai": [{"type": "oauth", "label": "ChatGPT Pro/Plus"}]}
+    fake.next_authorize = {"instructions": "no url"}
+    leaser = lease_returning(fake)
+    monkeypatch.setattr(service, "_lease_opencode_server", leaser)
+
+    flow = _run(service.start_web_setup("opencode", provider_id="openai"))
+
+    assert flow.state == "failed"
+    assert [lease.released for lease in leaser.leases] == [True]
+    assert flow.opencode_lease is None

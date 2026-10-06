@@ -99,6 +99,20 @@ capabilities:
       - ui/src/components/onboarding/providers/providerStage.test.ts
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx
       - ui/scripts/scenarioCatalog.test.mjs
+  - id: runtime_generations
+    name: Configuration changes reach backend runtimes through generations
+    status: active
+    catalog: tests/scenarios/runtime_generations/catalog.yaml
+    observations: tests/scenarios/runtime_generations/observations.yaml
+    scenario_tests:
+      - tests/test_runtime_generations.py
+      - tests/test_codex_runtime_generations.py
+      - tests/e2e/test_codex_runtime_generations_contract.py
+    unit_or_contract_tests:
+      - tests/test_claude_cli_path.py
+      - tests/test_backend_restart.py
+      - tests/test_controller_idle_cleanup.py
+      - tests/test_opencode_generations.py
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery
     status: active

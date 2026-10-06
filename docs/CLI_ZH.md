@@ -602,13 +602,7 @@ Web UI (`http://127.0.0.1:5123`) 提供相同的控制功能：
 | `~/.vibe_remote/state/task_requests/` | task run 与 hook 的请求队列 |
 | `~/.vibe_remote/state/user_preferences.md` | 共享的长期用户偏好笔记 |
 | `~/.vibe_remote/logs/vibe_remote.log` | 应用日志 |
-| `~/.vibe_remote/logs/opencode_server.json` | OpenCode 服务器 PID 文件 |
-
-## 环境变量
-
-| 变量 | 说明 |
-|------|------|
-| `OPENCODE_PORT` | 覆盖 OpenCode 服务器端口（默认：4096） |
+| `~/.vibe_remote/runtime/opencode/generations/` | 每个运行中的 OpenCode 服务器代各一条记录 |
 
 ## 另请参阅
 

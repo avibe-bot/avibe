@@ -23,6 +23,7 @@ from core.backend_restart import (
     native_cli_processes,
     pending_native_backends,
 )
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 
 def controller_fixture(*, backends=("claude", "codex", "opencode"), busy=False):
@@ -52,7 +53,7 @@ def controller_fixture(*, backends=("claude", "codex", "opencode"), busy=False):
         config=SimpleNamespace(),
     )
     coordinator = BackendRestartCoordinator(
-        controller, AsyncMock(), process_inventory=Mock(return_value=()), drain_timeout=0.01, settle_timeout=0.01,
+        controller, AsyncMock(), renew=AsyncMock(), process_inventory=Mock(return_value=()), settle_timeout=0.01,
         poll_interval=0.001,
     )
     controller.backend_restart_coordinator = coordinator
@@ -175,15 +176,11 @@ async def test_guard_closes_both_admissions_before_retirement_and_retains_only_b
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("drain_timeout", [1, 0])
-async def test_busy_guard_interrupts_running_work_then_retires_and_yields(drain_timeout):
+async def test_busy_guard_interrupts_running_work_then_retires_and_yields():
     """MH-MIG-009: every caller applies an explicit user switch, so live work is
-    interrupted, not awaited; a guard that waits for idle leaves the switch spinning.
-    The settle window is independent of the drain timeout, which only decides when
-    a restart stops waiting: an immediate drain must not refuse a brief teardown."""
+    interrupted, not awaited; a guard that waits for idle leaves the switch spinning."""
     controller, coordinator, admissions, turns = controller_fixture(busy=True)
     service = controller.agent_service
-    coordinator._drain_timeout = drain_timeout
     coordinator._settle_timeout = 1
     controller.session_turns.active_runtime_session_ids_for_backend.return_value = {"session-1"}
     order = []
@@ -201,7 +198,7 @@ async def test_busy_guard_interrupts_running_work_then_retires_and_yields(drain_
         order.append("mutate")
     assert order == [("cancel", "codex"), ("refresh", "codex", True), "retire", "mutate"]
     controller.session_turns.release_for_backend_refresh.assert_awaited_once_with(
-        backend="codex", base_session_ids={"session-1"},
+        backend="codex", base_session_ids={"session-1"}, settled_by="backend_refresh",
     )
     assert not admissions and not turns
 
@@ -216,7 +213,7 @@ async def test_switch_waits_out_a_teardown_that_takes_its_bounded_worst_case(mon
     controller, _, admissions, turns = controller_fixture(busy=True)
     service = controller.agent_service
     coordinator = BackendRestartCoordinator(
-        controller, AsyncMock(), process_inventory=Mock(return_value=()), drain_timeout=0.01, poll_interval=0.001,
+        controller, AsyncMock(), renew=AsyncMock(), process_inventory=Mock(return_value=()), poll_interval=0.001,
     )
     controller.backend_restart_coordinator = coordinator
     loop = asyncio.get_running_loop()
@@ -436,15 +433,23 @@ async def test_live_auth_lease_refuses_migration_before_admission_closes():
 
 
 @pytest.mark.asyncio
-async def test_restart_task_and_migration_have_one_owner():
-    controller, coordinator, admissions, turns = controller_fixture(busy=True)
-    coordinator._drain_timeout = 1
-    assert await coordinator.request_restart("codex") == "draining"
+async def test_maintenance_and_migration_have_one_owner():
+    controller, coordinator, admissions, turns = controller_fixture()
+    installing = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def install():
+        installing.set()
+        await finish.wait()
+        return {"ok": True}
+
+    maintenance = asyncio.create_task(coordinator.run_when_idle("codex", install))
+    await installing.wait()
     with pytest.raises(NativeMigrationBlockedError, match="backend_restart_in_progress"):
         async with coordinator.migration_guard(("codex",)):
-            pytest.fail("competing restart")
-    controller.agent_service.backend_runtime_active.return_value = False
-    await coordinator.wait("codex")
+            pytest.fail("competing maintenance")
+    finish.set()
+    assert await maintenance == {"ok": True}
     assert not admissions and not turns
 
 
@@ -795,36 +800,65 @@ async def test_terminal_ttl_does_not_drop_failed_cleanup_owner(monkeypatch):
     await service._cleanup_native_flow(flow)
 
 
-@pytest.mark.asyncio
-async def test_codex_strict_retirement_propagates_stop_failure():
+def _codex_migration_agent(transport, *, activation=None):
     from modules.agents.codex.agent import CodexAgent
 
-    transport = SimpleNamespace()
-    agent = CodexAgent.__new__(CodexAgent)
-    agent._transports = {"cwd": transport}
-    agent._transport_locks = {}
-    agent._stop_and_detach_transport_generation = AsyncMock(side_effect=RuntimeError("stop failed"))
-    agent._session_mgr = SimpleNamespace(all_base_sessions=Mock(return_value=["session"]), invalidate_thread=Mock())
+    agent = init_generation_state(object.__new__(CodexAgent))
+    agent.controller = SimpleNamespace(runtime_activation=activation)
+    agent._session_mgr = SimpleNamespace(
+        all_base_sessions=Mock(return_value=["session"]),
+        sessions_for_cwd=Mock(return_value=["session"]),
+        invalidate_thread=Mock(),
+    )
+    agent._turn_registry = SimpleNamespace(get_active_turn=Mock(return_value=None), clear_session=Mock())
+    agent._ownership_snapshots = AsyncMock(
+        return_value=(SimpleNamespace(blocks_transport_replacement=False, blocks_dead_transport_replacement=False),)
+    )
+    identity = activation.attach("codex", "cwd#1") if activation is not None else None
+    install_codex_transport(agent, "cwd", transport, activation=identity, sessions={"session": "thread"})
+    return agent, identity
+
+
+@pytest.mark.asyncio
+async def test_codex_strict_retirement_propagates_stop_failure():
+    transport = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("stop failed")), _process=None)
+    agent, _identity = _codex_migration_agent(transport)
     with pytest.raises(RuntimeError, match="stop failed"):
         await agent.retire_for_native_migration()
-    assert agent._transports["cwd"] is transport
+    assert [generation.runtime.transport for generation in agent._units["cwd"].generations] == [transport]
+    assert agent.transport_for_session("session") is transport
     agent._session_mgr.invalidate_thread.assert_not_called()
 
 
 @pytest.mark.asyncio
+async def test_codex_strict_retirement_ignores_a_turn_left_on_an_exited_process():
+    # A crash mid-turn leaves the turn registered; it cannot run on, so it must
+    # not refuse the migration on every retry.
+    process = SimpleNamespace(returncode=-9, wait=AsyncMock())
+    transport = SimpleNamespace(_process=process, stop=AsyncMock(), is_alive=False)
+    agent, _identity = _codex_migration_agent(transport)
+    agent._turn_registry.get_active_turn = Mock(return_value="turn-lost-with-the-process")
+
+    await agent.retire_for_native_migration()
+
+    assert agent._units["cwd"].generations == ()
+    assert agent.transport_for_session("session") is None
+
+
+@pytest.mark.asyncio
 async def test_codex_strict_retirement_checks_exit_before_detaching():
-    from modules.agents.codex.agent import CodexAgent
+    from core.runtime_activation import RuntimeActivationRegistry
 
     process = SimpleNamespace(returncode=None, wait=AsyncMock())
     transport = SimpleNamespace(_process=process, stop=AsyncMock())
-    agent = CodexAgent.__new__(CodexAgent)
-    agent._reserve_transport_retirement = Mock(return_value="generation")
-    agent._finish_transport_retirement = Mock(return_value=True)
-    agent._detach_transport_bookkeeping = Mock(return_value=True)
+    activation = RuntimeActivationRegistry()
+    agent, identity = _codex_migration_agent(transport, activation=activation)
     with pytest.raises(RuntimeError, match="did not exit"):
-        await agent._stop_and_detach_transport_generation("cwd", transport, require_process_exit=True)
-    agent._finish_transport_retirement.assert_called_once_with("generation", retire=False)
-    agent._detach_transport_bookkeeping.assert_not_called()
+        await agent.retire_for_native_migration()
+    # The aborted retirement leaves the exact generation live and bound.
+    assert activation.is_current(identity)
+    assert agent.transport_for_session("session") is transport
+    agent._session_mgr.invalidate_thread.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -859,41 +893,51 @@ async def test_claude_retirement_never_uses_broad_reaper_or_swallows_disconnect(
 
 
 @pytest.mark.asyncio
-async def test_opencode_unproven_pid_file_is_blocker_not_kill_target():
-    from modules.agents.opencode.server import OpenCodeServerManager
+async def test_opencode_reused_pid_record_is_dropped_not_killed(tmp_path, monkeypatch):
+    from modules.agents.opencode import server as opencode_server
 
-    server = OpenCodeServerManager.__new__(OpenCodeServerManager)
-    server._get_lock = lambda: asyncio.Lock()
-    server._active_requests = 0
-    server._has_active_run_sessions = Mock(return_value=False)
-    server._runtime_activation_retire = Mock(return_value=True)
-    server._process = None
-    server.port = 4096
-    server._read_pid_file = Mock(return_value={"pid": 123})
-    server._pid_exists = Mock(return_value=True)
-    server._terminate_pid_tree_sync = Mock(side_effect=AssertionError("must not kill"))
-    server._clear_pid_file = Mock()
-    with pytest.raises(RuntimeError, match="ownership cannot be proven"):
-        await server.retire_for_native_migration()
-    server._terminate_pid_tree_sync.assert_not_called()
-    server._clear_pid_file.assert_not_called()
+    monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: tmp_path)
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: tmp_path / "legacy.json")
+    record = tmp_path / "ocg_reused.json"
+    record.write_text(
+        json.dumps({"generation_id": "ocg_reused", "pid": os.getpid(), "port": 4100, "process_created_at": 1.0}),
+        encoding="utf-8",
+    )
+    terminate = Mock(side_effect=AssertionError("must not kill"))
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", terminate)
+
+    # The pid now belongs to another process born later than the record says.
+    assert await opencode_server.adopt_recorded_generations() == []
+
+    terminate.assert_not_called()
+    assert not record.exists()
 
 
 @pytest.mark.asyncio
-async def test_opencode_strict_stop_failure_retains_tracking():
-    from modules.agents.opencode.server import OpenCodeServerManager
+async def test_opencode_strict_stop_failure_retains_tracking(tmp_path, monkeypatch):
+    from modules.agents.opencode import server as opencode_server
+    from modules.agents.opencode.client_manager import OpenCodeRuntime
 
-    server = OpenCodeServerManager.__new__(OpenCodeServerManager)
-    server._get_lock = lambda: asyncio.Lock()
-    server._active_requests = 0
-    server._has_active_run_sessions = Mock(return_value=False)
-    server._runtime_activation_retire = Mock(return_value=True)
-    process = SimpleNamespace(pid=123, returncode=None, wait=AsyncMock())
-    server._process = process
-    server._read_pid_file = Mock(return_value={"pid": 123})
-    server._terminate_pid_tree_sync = Mock(return_value=False)
-    server._clear_pid_file = Mock()
+    monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: tmp_path)
+    generation = opencode_server.OpenCodeGeneration(
+        generation_id="ocg_stuck",
+        pid=4321,
+        port=4100,
+        spec_digest="spec",
+        process_created_at=1.0,
+    )
+    generation.write_record()
+    monkeypatch.setattr(generation, "process_alive", lambda: True)
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", Mock(return_value=False))
+    runtime = OpenCodeRuntime(SimpleNamespace(binary="opencode", request_timeout_seconds=60))
+    runtime._adopted = True
+    wrapper = await runtime._generations.adopt(SimpleNamespace(digest="spec"), generation, current=True)
+    runtime._wrappers[generation.generation_id] = wrapper
+
     with pytest.raises(RuntimeError, match="did not exit"):
-        await server.retire_for_native_migration()
-    assert server._process is process
-    server._clear_pid_file.assert_not_called()
+        await runtime.retire_all_strict()
+
+    # The survivor stays tracked and recorded, never to serve again.
+    assert runtime.generations() == (generation,)
+    assert wrapper.closed
+    assert generation.record_path.exists()

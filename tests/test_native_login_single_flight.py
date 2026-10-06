@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.opencode_generation_fakes import lease_returning
 from core.agent_auth_service import (
     OPENCODE_DIRECT_SETUP_URLS,
     AgentAuthFlow,
@@ -104,7 +105,7 @@ async def test_every_web_backend_publishes_deadline_after_startup_with_waiter(
     )
     service._start_codex_process = start_codex
     service._start_claude_control_flow = start_claude
-    service._opencode_server = AsyncMock(return_value=server)
+    service._lease_opencode_server = lease_returning(server)
     service._wait_for_codex_completion_web = AsyncMock()
     service._wait_for_claude_completion_web = AsyncMock()
     service._wait_for_opencode_oauth_web = AsyncMock()
