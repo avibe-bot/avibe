@@ -711,14 +711,17 @@ start the model-output stream.
 | `network_failure.transport_after_first_byte` | stream interrupted without explicit code | `stream_started: true`; after first user-visible model output | none; the successful connection/authentication/output evidence wins | none | terminal, no replay; emit only the existing redacted `network` event |
 
 The engine answers its own failed upstream connection or read, before any upstream
-response, with its own JSON error body: a top level of only `type: "error"` and
-`error`, and an envelope of only `type` (`api_error` or `server_error`), an optional
-`code` of `internal_server_error`, and a `message` that is the transport error text,
-such as `dial tcp ...: i/o timeout` or `read tcp ...: operation timed out`. That exact
-body is the engine's label, not an upstream verdict, so the engine client projects
-it to `network_failure.transport_before_first_byte`. An upstream that answered adds
-its own fields (for example a request id or a specific code), so any other body, a
-4xx, and any streamed error event keep their own classification.
+response, with one of exactly two JSON error bodies, both produced by the pinned
+engine's error writers: the Anthropic form
+`{"type":"error","error":{"type":"api_error","message":M}}` and the OpenAI form
+`{"error":{"type":"server_error","code":"internal_server_error","message":M}}`. The
+engine always sets that `code` for a 5xx in the OpenAI form; no code-less form exists.
+When `M` is the transport error text, such as `dial tcp ...: i/o timeout` or
+`read tcp ...: operation timed out`, that exact body is the engine's label, not an
+upstream verdict, so the engine client projects it to
+`network_failure.transport_before_first_byte`. An upstream that answered adds or
+omits fields (for example a request id, a specific code, or no code), so any other
+body, a 4xx, and any streamed error event keep their own classification.
 
 Connection backoff is live execution state, never Source/configuration state. For the
 same Source, consecutive `transport_before_first_byte` decisions use delays
