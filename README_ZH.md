@@ -230,15 +230,15 @@ OpenClaw 和 Hermes 是 *agent*——一个是网关式助手，一个是会自�
 
 ---
 
-## 认识云团子（Vibey）
+## 认识歪比（Vibey）
 
 <div align="center">
-<img src="assets/mascot/cloud-tuanzi.png" alt="云团子 / Vibey——Avibe 里的那团气体意识" width="200"/>
+<img src="assets/mascot/cloud-tuanzi.png" alt="歪比 / Vibey——Avibe 里的那团气体意识" width="200"/>
 </div>
 
 住在你的 Workbench 和聊天软件里。读得懂气氛，会接你昨天没做完的活儿。不确定就先问一句，你专注的时候它不打扰，凌晨两点灵感来了就动手，第二天给你留张便条，说改了哪儿。
 
-> Avibe 是 agent 住的那个家，云团子是住在里面的那位同事。
+> Avibe 是 agent 住的那个家，歪比是住在里面的那位同事。
 
 什么都记得，有自己的脾气。你修了它的 bug，它会道谢。
 
