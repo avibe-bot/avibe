@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -37,6 +38,7 @@ from tests.scenario_harness.model_hub import (
     unlisted_model_copy,
     unlisted_model_runtime,
 )
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 
 METADATA = "x-codex-turn-metadata"
@@ -126,21 +128,21 @@ async def test_codex_shared_transport_routes_overlapping_aliases(runtime):
     assert first.gateway_token == second.gateway_token
     assert first.fingerprint == second.fingerprint
     assert first.gateway_request_metadata != second.gateway_request_metadata
-    cached = SimpleNamespace(is_initialized=True, runtime_fingerprint=first.fingerprint, stop=AsyncMock())
-    agent = object.__new__(CodexAgent)
-    agent._transports = {runtime.cwd: cached}
-    agent._transport_locks = {}
-    agent._transport_cwd_inodes = {}
-    agent._transport_last_activity = {}
-    agent._attach_transport_activation = Mock()
-    agent._has_active_turns_for_cwd = Mock(return_value=True)
-    agent._runtime_ownership_snapshot_for_cwd = Mock(
-        return_value=SimpleNamespace(blocks_transport_replacement=True),
-    )
-    assert await asyncio.wait_for(agent._get_or_create_transport(runtime.cwd, second), 1) is cached
+    agent = init_generation_state(object.__new__(CodexAgent))
+    agent.codex_config = SimpleNamespace(binary="codex-routing-fixture", extra_args=[])
+    agent.controller = SimpleNamespace()
+    catalog = SimpleNamespace(path=Path(runtime.cwd) / "catalog.json", close=Mock())
+    catalog.retain = Mock(return_value=catalog)
+    agent.prepare_model_hub_runtime = AsyncMock(return_value=catalog)
+    first_spec = await agent._launch_spec(runtime.cwd, first)
+    second_spec = await agent._launch_spec(runtime.cwd, second)
+    # Per-turn routes ride on each request, so both aliases need one process.
+    assert first_spec.digest == second_spec.digest
+    cached = SimpleNamespace(is_initialized=True, stop=AsyncMock())
+    generation = install_codex_transport(agent, runtime.cwd, cached, digest=first_spec.digest)
+    binding = await asyncio.wait_for(agent._unit(runtime.cwd).acquire(second_spec), 1)
+    assert binding.generation is generation
     cached.stop.assert_not_awaited()
-    agent._has_active_turns_for_cwd.assert_not_called()
-    agent._runtime_ownership_snapshot_for_cwd.assert_not_called()
 
     results = await asyncio.gather(_post(first), _post(second))
     assert [status for status, _ in results] == [200, 200]
@@ -303,7 +305,7 @@ async def test_codex_adapter_keeps_request_metadata_on_compatibility_retry(runti
     launch = await _launch(runtime, "adapter")
     context = SimpleNamespace(platform_specific={})
     bind_launch(context, launch)
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent.controller = SimpleNamespace()
     agent._prompt_state_agent_session_id = Mock(return_value="session")
     agent._resolve_codex_agent_settings = Mock(return_value=(None, launch.runtime_model, None, None))
@@ -349,20 +351,22 @@ async def test_codex_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(t
         base_session_id="session-1", working_path=str(tmp_path),
         context=context, session_key="settings-1", ack_message_id=None,
     )
-    agent = object.__new__(CodexAgent)
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent.controller = controller
     agent._session_locks = {}
     agent._session_mgr = SimpleNamespace(set_session_key=Mock(), set_cwd=Mock())
     agent.ensure_agent_session_id = Mock()
     agent._bind_runtime_agent_session_id = Mock()
     agent._resolve_codex_agent_settings = Mock(return_value=(None, UNLISTED_MODEL, None, None))
-    agent._get_or_create_transport = AsyncMock()
+    # Acquisition is stubbed, so the launch load it alone consumes is too.
+    agent._launch_inputs = lambda cwd, *, hub_config=None: SimpleNamespace(hub_config=hub_config)
+    agent._acquire_generation = AsyncMock()
     agent._remove_ack_reaction = AsyncMock()
     agent._event_handler = SimpleNamespace(_release_stream_turn=Mock())
 
     await agent.handle_message(request)
 
-    agent._get_or_create_transport.assert_not_awaited()
+    agent._acquire_generation.assert_not_awaited()
     controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_not_awaited()
     notify = controller.emit_agent_message.await_args_list[0]
     assert notify.args[1:3] == ("notify", f"❌ {unlisted_model_copy('codex', language)}")

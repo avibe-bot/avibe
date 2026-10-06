@@ -12,6 +12,7 @@ import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -20,7 +21,7 @@ from modules.agents.service import AgentService
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.opencode.agent import OpenCodeAgent
-from modules.agents.opencode.server import OpenCodeServerManager
+from modules.agents.opencode.server import OpenCodeGeneration
 from core.resource_governance import AgentResourceFailure
 from modules.im import MessageContext
 
@@ -74,10 +75,19 @@ class ClaudeBackendAliveTests(unittest.TestCase):
 
 class CodexBackendAliveTests(unittest.TestCase):
     def _agent(self, *, cwd_for_session, transports):
-        agent = CodexAgent.__new__(CodexAgent)  # bypass heavy __init__
+        agent = init_generation_state(object.__new__(CodexAgent))  # bypass heavy __init__
         agent._session_mgr = types.SimpleNamespace(get_cwd=lambda bid: cwd_for_session.get(bid))
-        agent._transports = transports
+        self.cwd_for_session = cwd_for_session
+        for cwd, transport in transports.items():
+            self._replace(agent, cwd, transport)
         return agent
+
+    def _replace(self, agent, cwd, transport):
+        """Start a new generation for ``cwd`` that its Sessions move to."""
+        sessions = {base: "thread" for base, mapped in self.cwd_for_session.items() if mapped == cwd}
+        install_codex_transport(
+            agent, cwd, transport, sessions=sessions, digest=f"spec-{id(transport)}"
+        )
 
     def _ctx_base(self, base_session_id):
         return MessageContext(
@@ -124,10 +134,10 @@ class CodexBackendAliveTests(unittest.TestCase):
         probe = agent.capture_backend_liveness(context)
 
         accepted.is_alive = False
-        agent._transports["/repo"] = types.SimpleNamespace(
+        self._replace(agent, "/repo", types.SimpleNamespace(
             is_alive=True,
             has_pending_notifications=False,
-        )
+        ))
 
         self.assertIs(agent.backend_alive(context), True)
         self.assertIs(probe(), False)
@@ -145,10 +155,10 @@ class CodexBackendAliveTests(unittest.TestCase):
         diagnose = agent.capture_backend_exit_failure(self._ctx_base("b1"))
         self.assertIsNotNone(diagnose)
         process.returncode = 137
-        agent._transports["/repo"] = types.SimpleNamespace(
+        self._replace(agent, "/repo", types.SimpleNamespace(
             is_alive=True,
             _process=types.SimpleNamespace(returncode=None),
-        )
+        ))
         pressure = AgentResourceFailure(
             kind="pids",
             message="shared cgroup limit event",
@@ -198,53 +208,64 @@ class CodexBackendAliveTests(unittest.TestCase):
         observe.assert_called_once_with(agent.controller)
 
 
+def _opencode_generation(generation_id: str, pid: int) -> OpenCodeGeneration:
+    return OpenCodeGeneration(
+        generation_id=generation_id,
+        pid=pid,
+        port=50000 + pid,
+        spec_digest="spec",
+        process_created_at=1000.0,
+    )
+
+
+def _opencode_agent() -> OpenCodeAgent:
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = types.SimpleNamespace()
+    agent._resource_failures = {}
+    return agent
+
+
 class OpenCodeResourceExitTests(unittest.TestCase):
-    def test_adopted_exit_consumes_pressure_only_after_original_generation_exits(self):
-        agent = OpenCodeAgent.__new__(OpenCodeAgent)
-        agent.controller = types.SimpleNamespace()
-        server = OpenCodeServerManager(binary="opencode", port=4096)
+    def test_generation_exit_consumes_pressure_only_after_its_own_process_exits(self):
+        agent = _opencode_agent()
+        generation = _opencode_generation("ocg_a", 654)
         pressure = AgentResourceFailure(kind="pids", message="shared cgroup limit event")
 
         with patch(
             "modules.agents.opencode.server.runtime.process_create_time",
-            side_effect=[1000.0, 1000.0, 2000.0],
+            # Alive, then the pid belongs to a later process.
+            side_effect=[1000.0, 2000.0],
         ), patch(
             "modules.agents.opencode.agent.observe_agent_resource_pressure",
             return_value=pressure,
         ) as observe:
-            server._observe_runtime_generation({"pid": 654, "started_at": 1.0})
-            self.assertIsNone(agent._resource_failure_for_server(server))
+            self.assertIsNone(agent._resource_failure_for_server(generation))
             observe.assert_not_called()
-            self.assertIs(agent._resource_failure_for_server(server), pressure)
+            self.assertIs(agent._resource_failure_for_server(generation), pressure)
             observe.assert_called_once_with(agent.controller)
 
-    def test_pressure_checks_are_cached_per_observed_server_generation(self):
-        agent = OpenCodeAgent.__new__(OpenCodeAgent)
-        agent.controller = types.SimpleNamespace()
-        server = OpenCodeServerManager(binary="opencode", port=4096)
-        server.observed_runtime_exit_pid = (
-            lambda: server._runtime_generation_token[0]
-        )
+    def test_pressure_checks_are_cached_per_generation(self):
+        agent = _opencode_agent()
+        first = _opencode_generation("ocg_a", 654)
+        second = _opencode_generation("ocg_b", 655)
         pressure = AgentResourceFailure(kind="pids", message="first exit")
-        later_pressure = AgentResourceFailure(kind="memory", message="third exit")
 
         with patch(
             "modules.agents.opencode.server.runtime.process_create_time",
-            return_value=1000.0,
+            return_value=None,
+        ), patch(
+            "modules.agents.opencode.server.runtime.pid_alive",
+            return_value=False,
         ), patch(
             "modules.agents.opencode.agent.observe_agent_resource_pressure",
-            side_effect=[pressure, None, later_pressure],
+            side_effect=[pressure, None],
         ) as observe:
-            server._observe_runtime_generation({"pid": 654, "started_at": 1.0})
-            self.assertIs(agent._resource_failure_for_server(server), pressure)
-            self.assertIs(agent._resource_failure_for_server(server), pressure)
-            server._observe_runtime_generation({"pid": 655, "started_at": 2.0})
-            self.assertIsNone(agent._resource_failure_for_server(server))
-            self.assertIsNone(agent._resource_failure_for_server(server))
-            server._observe_runtime_generation({"pid": 656, "started_at": 3.0})
-            self.assertIs(agent._resource_failure_for_server(server), later_pressure)
+            self.assertIs(agent._resource_failure_for_server(first), pressure)
+            self.assertIs(agent._resource_failure_for_server(first), pressure)
+            self.assertIsNone(agent._resource_failure_for_server(second))
+            self.assertIsNone(agent._resource_failure_for_server(second))
 
-        self.assertEqual(observe.call_count, 3)
+        self.assertEqual(observe.call_count, 2)
 
 
 class AgentServiceBackendAliveTests(unittest.TestCase):

@@ -1016,6 +1016,55 @@ def create_app(
             logger.exception("internal Agent backend reconcile failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+    @app.post("/internal/opencode/generation-leases")
+    async def _lease_opencode_generation(request: Request) -> Any:
+        """Pin a controller-owned OpenCode generation for a caller in another process.
+
+        The UI process never launches OpenCode itself: it leases the generation
+        that serves the current launch spec and talks to it over HTTP.
+        """
+        payload = await _safe_json(request)
+        purpose = payload.get("purpose")
+        ttl_seconds = payload.get("ttl_seconds")
+        if (
+            not isinstance(purpose, str)
+            or not purpose.strip()
+            or isinstance(ttl_seconds, bool)
+            or not isinstance(ttl_seconds, (int, float))
+            or ttl_seconds <= 0
+        ):
+            return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_lease_request"})
+        agent = getattr(getattr(controller, "agent_service", None), "agents", {}).get("opencode")
+        lease_generation = getattr(agent, "lease_generation", None)
+        if not callable(lease_generation):
+            return JSONResponse(status_code=404, content={"ok": False, "error": "opencode_disabled"})
+        try:
+            lease = await lease_generation(purpose.strip(), ttl_seconds=float(ttl_seconds))
+        except Exception as exc:
+            logger.exception("internal OpenCode generation lease failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "opencode_server_unavailable", "detail": str(exc)},
+            )
+        server = lease["server"]
+        return {
+            "ok": True,
+            "lease_id": lease["lease_id"],
+            "generation_id": server.generation_id,
+            "base_url": server.base_url,
+            "request_timeout_seconds": server.request_timeout_seconds,
+            "model_hub_provider_ids": list(server.model_hub_provider_ids),
+        }
+
+    @app.post("/internal/opencode/generation-leases/{lease_id}/release")
+    async def _release_opencode_generation_lease(lease_id: str) -> Any:
+        from modules.agents.opencode.client_manager import release_opencode_lease
+
+        released = await release_opencode_lease(lease_id, controller=controller)
+        if released is None:
+            return JSONResponse(status_code=404, content={"ok": False, "error": "opencode_disabled"})
+        return {"ok": True, "released": released}
+
     @app.post("/internal/backend-auth/test")
     async def _test_backend_auth(request: Request) -> Any:
         """Probe credentials through the controller-owned Agent runtime."""

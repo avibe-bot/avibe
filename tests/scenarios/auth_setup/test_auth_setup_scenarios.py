@@ -22,6 +22,7 @@ import pytest
 import yaml
 from aiohttp import web
 from cryptography.hazmat.primitives.asymmetric import rsa
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
@@ -41,6 +42,7 @@ from config.v2_config import (
     UiConfig,
     V2Config,
 )
+from tests.opencode_generation_fakes import ui_lease, lease_returning
 from core.agent_auth_service import AgentAuthService
 from core.handlers.model_hub.adapter import SOURCE_PROTOCOLS
 from core.handlers.model_hub.service import (
@@ -1550,20 +1552,24 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.Event().wait()
 
         controller = _ReloadingV2ConfigController()
-        agent = object.__new__(CodexAgent)
+        agent = init_generation_state(object.__new__(CodexAgent))
         agent.controller = controller
-        agent._transports = {str(home): FakeCodexTransport()}
-        agent._transport_last_activity = {}
         agent._connection_probes = {}
         agent._connection_probe_turns = {}
-        agent._connection_probe_cwds = {}
-        agent._get_or_create_transport = AsyncMock(
-            return_value=agent._transports[str(home)]
-        )
         controller.agent_service = SimpleNamespace(agents={"codex": agent})
         service = AgentAuthService(controller)
+        installed = {}
 
         async def run_connection_probe(current):
+            # The persistent app-server was started exactly as a direct launch
+            # with the saved configuration would start it now.
+            agent.codex_config = SimpleNamespace(binary="codex-probe", extra_args=[], auth_mode="oauth")
+            installed["generation"] = install_codex_transport(
+                agent,
+                str(home),
+                FakeCodexTransport(),
+                digest=(await agent._launch_spec(str(home))).digest,
+            )
             current.test_result = await probe_backend_auth_async(
                 "codex",
                 model="gpt-5.4-mini",
@@ -1586,10 +1592,9 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(harness.test_result["ok"])
         self.assertEqual(harness.test_result["excerpt"], "codex-probe-ok")
-        agent._get_or_create_transport.assert_awaited_once_with(
-            str(home),
-            allow_runtime_replacement=False,
-        )
+        # The probe borrowed the running generation and started nothing.
+        self.assertIs(agent._current_generation(str(home)), installed["generation"])
+        self.assertEqual(installed["generation"].bindings, 0)
         self.assertEqual(
             requests,
             [
@@ -1626,7 +1631,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_codex_thread_rebinds_once_after_api_key_endpoint_switch(self):
         """Scenario: AUTH-SETUP-903"""
-        agent = object.__new__(CodexAgent)
+        agent = init_generation_state(object.__new__(CodexAgent))
         agent.controller = SimpleNamespace(
             config=SimpleNamespace(platform="avibe", reply_enhancements=True)
         )
@@ -2590,9 +2595,11 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         fake_process = FakeProcess()
         runtime = _FakeCodexNextTurnRuntime()
         runner = ScenarioRunner(harness)
-        harness.controller.agent_service.agents["codex"] = SimpleNamespace(
-            refresh_auth_state=AsyncMock(side_effect=runtime.refresh)
-        )
+        async def renew(_runtime_config, **_kwargs):
+            await runtime.refresh()
+
+        harness.controller.agent_service.agents["codex"] = SimpleNamespace(renew_runtime=AsyncMock(side_effect=renew))
+        harness.service._load_backend_runtime_config = Mock(return_value=SimpleNamespace(enabled=True))
         harness.service._start_codex_process = AsyncMock(return_value=fake_process)
         harness.service._read_codex_output = AsyncMock(return_value=None)
         harness.service._verify_login = AsyncMock(return_value=(True, "Logged in using ChatGPT"))
@@ -2623,7 +2630,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        harness.controller.agent_service.agents["codex"].refresh_auth_state.assert_awaited_once()
+        harness.controller.agent_service.agents["codex"].renew_runtime.assert_awaited_once()
         ScenarioExpect.step_history(runner, ["start_setup", "emit_device_url", "next_turn_after_success"])
         ScenarioExpect.text_contains(harness, "codex login is active again")
         ScenarioExpect.flow_missing(harness, "C1:codex")
@@ -3040,12 +3047,19 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         runtime = _FakeNextTurnRuntime()
         runner = ScenarioRunner(harness)
 
-        harness.controller.agent_service.agents["opencode"] = SimpleNamespace(
-            clear_sessions=AsyncMock(side_effect=runtime.clear_sessions)
+        async def renew(_runtime_config, **_kwargs):
+            await runtime.refresh()
+
+        # The new credential reaches the runtime by renewal: the next turn
+        # starts a generation that loaded it.
+        agent = SimpleNamespace(
+            clear_sessions=AsyncMock(side_effect=runtime.clear_sessions),
+            renew_runtime=AsyncMock(side_effect=renew),
         )
+        harness.controller.agent_service.agents["opencode"] = agent
         harness.service._resolve_opencode_provider = AsyncMock(return_value="opencode")
         harness.service._install_opencode_api_key = AsyncMock()
-        harness.service._refresh_opencode_server = AsyncMock(side_effect=runtime.refresh)
+        harness.service._load_backend_runtime_config = Mock(return_value=SimpleNamespace(enabled=True))
 
         await runner.run(
             ScenarioStep(
@@ -3066,7 +3080,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         )
 
         harness.service._install_opencode_api_key.assert_awaited_once_with("opencode", "oc_live_Abcdef1234567890")
-        harness.service._refresh_opencode_server.assert_awaited_once()
+        agent.renew_runtime.assert_awaited_once()
         ScenarioExpect.step_history(runner, ["start_setup", "submit_direct_credential", "next_turn_after_success"])
         ScenarioExpect.text_contains(harness, "opencode login is active again")
         ScenarioExpect.flow_missing(harness, "C1:opencode")
@@ -4097,7 +4111,7 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
     """AUTH-SETUP-119: runtime manual-code transport -> native store -> apply -> read."""
     from core.backend_restart import BackendRestartCoordinator
     from core.internal_server import create_app
-    from modules.agents.opencode.server import OpenCodeServerManager
+    from modules.agents.opencode.server import OpenCodeServerClient
     from vibe import api, internal_client
     from vibe.opencode_config import get_opencode_auth_path, upsert_opencode_provider_api_key
     from tests.test_backend_restart import _AgentService, _controller
@@ -4121,8 +4135,8 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
         service.agents = {"opencode": object()}
         service.active = True
         controller = _controller(service)
-        refresh = AsyncMock()
-        coordinator = BackendRestartCoordinator(controller, refresh, poll_interval=0.001)
+        renew = AsyncMock()
+        coordinator = BackendRestartCoordinator(controller, AsyncMock(), renew=renew, poll_interval=0.001)
         controller.backend_restart_coordinator = coordinator
         internal_app = create_app(controller)
         callbacks = []
@@ -4143,7 +4157,7 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
         site = web.TCPSite(server, "127.0.0.1", 0)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
-        transport = SimpleNamespace(base_url=f"http://127.0.0.1:{port}", ensure_running=AsyncMock())
+        transport = SimpleNamespace(base_url=f"http://127.0.0.1:{port}")
 
         class Provider:
             async def get_provider_auth(self):
@@ -4154,11 +4168,11 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
                 return {"method": "code", "url": "https://provider.invalid/authorize"}
 
             async def wait_provider_oauth(self, provider_id, **kwargs):
-                return await OpenCodeServerManager.wait_provider_oauth(transport, provider_id, **kwargs)
+                return await OpenCodeServerClient.wait_provider_oauth(transport, provider_id, **kwargs)
 
         harness = AuthSetupScenarioHarness()
         auth = harness.service
-        monkeypatch.setattr(auth, "_opencode_server", AsyncMock(return_value=Provider()))
+        monkeypatch.setattr(auth, "_lease_opencode_server", lease_returning(Provider()))
         monkeypatch.setattr(auth, "_OPENCODE_OAUTH_PROMPT_ANSWERS", {"test-provider": {"deployment": "fixture", "method": 999, "code": "must-not-override"}})
         # No-hook consumers retain the existing coordinator application owner.
         monkeypatch.setattr(auth, "_refresh_backend_runtime", coordinator.request_restart)
@@ -4187,13 +4201,11 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
             assert h.web_flow.state == "success"
             state = await api.get_backend_connection("opencode")
             assert state["auth"] == "subscription"
-            assert state["application"] == "draining" and not state["ready"]
+            # Work still running on OpenCode never holds the new credential back.
+            assert state["application"] == "applied" and state["ready"]
 
         async def apply(h):
-            service.active = False
-            await coordinator.wait("opencode")
-            assert (await api.get_backend_connection("opencode"))["ready"]
-            refresh.assert_awaited_once_with("opencode", False)
+            renew.assert_awaited_once_with("opencode", False)
             assert len(callbacks) == 1
             assert await api._read_opencode_config_api_key("test-provider") is None
 
@@ -4312,7 +4324,7 @@ def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypa
         ]}),
         close_http_session=AsyncMock(),
     )
-    monkeypatch.setattr(api, "_opencode_get_server", AsyncMock(return_value=server))
+    monkeypatch.setattr(api, "_opencode_lease", ui_lease(AsyncMock(return_value=server)))
     monkeypatch.setattr(api, "resolve_cli_path", lambda _: str(tmp_path / "测试/bin/opencode"))
     # Isolated application evidence, never the machine's running controller.
     from vibe import internal_client

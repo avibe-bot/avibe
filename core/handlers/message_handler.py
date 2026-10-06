@@ -547,10 +547,11 @@ class MessageHandler(BaseHandler):
                     if agent_name == "opencode":
                         try:
                             opencode_agent = self.controller.agent_service.agents.get("opencode")
-                            if opencode_agent and hasattr(opencode_agent, "_get_server"):
-                                server = await opencode_agent._get_server()
-                                await server.ensure_running()
-                                opencode_agents = await server.get_available_agents(self.controller.get_cwd(context))
+                            if opencode_agent and hasattr(opencode_agent, "current_server"):
+                                async with opencode_agent.current_server() as server:
+                                    opencode_agents = await server.get_available_agents(
+                                        self.controller.get_cwd(context)
+                                    )
                                 name_map = {
                                     normalize_subagent_name(a.get("name", "")): a
                                     for a in opencode_agents

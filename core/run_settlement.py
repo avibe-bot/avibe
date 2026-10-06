@@ -64,6 +64,11 @@ SETTLED_BY_TURN_ONLY_RESULT: Final = "turn_only_result"
 #: healthy service, rather than the service itself shutting down.
 SETTLED_BY_BACKEND_REFRESH: Final = "backend_refresh"
 
+#: The user disabled the turn's Agent backend, which stops its work at once.
+#: Like a Stop it is the user's own intent, so a run ends ``canceled``; unlike a
+#: Stop the user may not be watching this session, so the turn says why.
+SETTLED_BY_BACKEND_DISABLED: Final = "backend_disabled"
+
 #: The scheduled service shut down while its exact claimed request was executing.
 #: The interrupted attempt is terminal; a later process must not replay it.
 SETTLED_BY_RESTARTED: Final = "restarted"
@@ -82,6 +87,7 @@ SETTLEMENTS_WITHOUT_RESULT: Final = frozenset(
         SETTLED_BY_STOPPED,
         SETTLED_BY_REFUSED_CONCURRENT_TURN,
         SETTLED_BY_BACKEND_REFRESH,
+        SETTLED_BY_BACKEND_DISABLED,
         SETTLED_BY_RESTARTED,
         SETTLED_BY_INTERRUPTED,
     }
@@ -97,6 +103,7 @@ INTERRUPT_REASON_NO_TERMINAL_RESULT: Final = SETTLED_BY_NO_TERMINAL_RESULT
 INTERRUPT_REASON_STOPPED: Final = SETTLED_BY_STOPPED
 INTERRUPT_REASON_REFUSED_CONCURRENT_TURN: Final = SETTLED_BY_REFUSED_CONCURRENT_TURN
 INTERRUPT_REASON_BACKEND_REFRESH: Final = SETTLED_BY_BACKEND_REFRESH
+INTERRUPT_REASON_BACKEND_DISABLED: Final = SETTLED_BY_BACKEND_DISABLED
 INTERRUPT_REASON_RESTARTED: Final = SETTLED_BY_RESTARTED
 INTERRUPT_REASON_INTERRUPTED: Final = SETTLED_BY_INTERRUPTED
 
@@ -181,6 +188,7 @@ RUN_INTERRUPTION_REASONS: Final = frozenset(
     {
         SETTLED_BY_STOPPED,
         SETTLED_BY_BACKEND_REFRESH,
+        SETTLED_BY_BACKEND_DISABLED,
         SETTLED_BY_INTERRUPTED,
         INTERRUPT_REASON_EVICTED,
         INTERRUPT_REASON_RESTARTED,
@@ -204,6 +212,7 @@ SETTLEMENT_I18N_KEYS: Final = {
     SETTLED_BY_STOPPED: "harness.run.interrupted.stopped",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "harness.run.interrupted.refusedConcurrentTurn",
     SETTLED_BY_BACKEND_REFRESH: "harness.run.interrupted.backendRefresh",
+    SETTLED_BY_BACKEND_DISABLED: "harness.run.interrupted.backendDisabled",
     SETTLED_BY_RESTARTED: "harness.run.interrupted.restarted",
     SETTLED_BY_INTERRUPTED: "harness.run.interrupted.interrupted",
 }
@@ -227,6 +236,7 @@ SETTLEMENT_TERMINAL_STATUS: Final = {
     SETTLED_BY_STOPPED: "canceled",
     SETTLED_BY_REFUSED_CONCURRENT_TURN: "failed",
     SETTLED_BY_BACKEND_REFRESH: "failed",
+    SETTLED_BY_BACKEND_DISABLED: "canceled",
     SETTLED_BY_RESTARTED: "failed",
     SETTLED_BY_INTERRUPTED: "failed",
 }
@@ -254,6 +264,7 @@ SETTLEMENT_TERMINAL_STATUS: Final = {
 NON_COMPLETING_TURN_SETTLEMENTS: Final = {
     SETTLED_BY_STOPPED: "canceled",
     SETTLED_BY_BACKEND_REFRESH: "canceled",
+    SETTLED_BY_BACKEND_DISABLED: "canceled",
 }
 
 def covered(test_node: str) -> tuple[str, str]:

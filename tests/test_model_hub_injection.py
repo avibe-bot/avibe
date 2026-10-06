@@ -138,6 +138,7 @@ def test_hub_launch_masks_inherited_claude_auth_and_injects_gateway():
     assert env["ANTHROPIC_AUTH_TOKEN"] == launch.gateway_token
     assert env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
     assert env["CLAUDE_CODE_MAX_RETRIES"] == "0"
+    assert env["CLAUDE_CODE_THINKING_DISPLAY_UPDATES"] == "0"
     assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "999999"
     assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "999999"
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""
@@ -171,6 +172,21 @@ def test_claude_hub_settings_own_connection_after_native_and_sdk_env_merges():
     assert settings["apiKeyHelper"] == ""
     settings = json.loads(claude_settings_for_launch('{"env":{"CLAUDE_CODE_MAX_RETRIES":"9"}}', launch))
     assert settings["env"]["CLAUDE_CODE_MAX_RETRIES"] == "0"
+
+
+def test_claude_hub_launch_pins_thinking_display_updates_off_above_native_choice():
+    # The CLI drops display="updates" only on an HTTP 400 naming it; a Hub
+    # stream committed as 200 before the Source rejects it would fail the turn.
+    launch = hub_launch()
+    native = '{"env":{"CLAUDE_CODE_THINKING_DISPLAY_UPDATES":"1"}}'
+    settings = json.loads(claude_settings_for_launch(native, launch))
+    env = build_claude_hub_env({"CLAUDE_CODE_THINKING_DISPLAY_UPDATES": "1"}, launch)
+
+    assert settings["env"]["CLAUDE_CODE_THINKING_DISPLAY_UPDATES"] == "0"
+    assert env["CLAUDE_CODE_THINKING_DISPLAY_UPDATES"] == "0"
+    for channel in ("direct", "native_cli"):
+        other = hub_launch(channel=channel, gateway_base_url=None, gateway_token=None)
+        assert "CLAUDE_CODE_THINKING_DISPLAY_UPDATES" not in build_claude_hub_env({}, other)
 
 
 @pytest.mark.parametrize("channel", [None, "direct", "native_cli"])
@@ -235,20 +251,25 @@ def test_claude_catalog_limits_fill_only_absent_environment_values(channel, expl
 
 
 @pytest.mark.parametrize(
-    "explicit", [{}, {"API_TIMEOUT_MS": "900000"}, {"CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS": ""}],
+    "explicit", [{}, {"API_TIMEOUT_MS": "60000"}, {"CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS": "30000"}],
 )
 def test_claude_hub_waits_out_resolution_as_one_streaming_request(explicit):
-    """MH-RUNTIME-010: the Hub owns pre-output waits, so the CLI neither aborts nor replays them."""
+    """MH-RUNTIME-010: the Hub owns pre-output waits, so the CLI neither aborts nor replays them.
+
+    The gateway withholds headers while a resolution is still short of the CLI's
+    default first-byte window, so a shorter native timeout would abort it.
+    """
     timeouts = ("API_TIMEOUT_MS", "CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS")
+    cli_maximum = dict.fromkeys(timeouts, "1800000")
     native = {**explicit, "CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK": "0"}
     launch = hub_launch()
 
     env = build_claude_hub_env(native, launch)
-    assert {key: env[key] for key in timeouts} == {key: explicit.get(key, "1800000") for key in timeouts}
+    assert {key: env[key] for key in timeouts} == cli_maximum
     assert env["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"] == "1"
 
     settings = json.loads(claude_settings_for_launch(json.dumps({"env": native}), launch))
-    assert {key: settings["env"].get(key) for key in timeouts} == {key: explicit.get(key) for key in timeouts}
+    assert {key: settings["env"].get(key) for key in timeouts} == cli_maximum
     assert settings["env"]["CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK"] == "1"
 
     official = hub_launch(channel="native_cli", gateway_base_url=None, gateway_token=None)

@@ -644,6 +644,42 @@ def test_expiry_after_mixed_real_failures_keeps_the_action_blocker_terminal(tmp_
 KEEPALIVE = b": keepalive\n\n"
 
 
+def test_claude_stream_rejected_within_its_first_byte_budget_keeps_the_status(tmp_path):
+    """MH-RUNTIME-012: a rejection after a few seconds still reaches Claude as HTTP 400.
+
+    Claude Code downgrades an unsupported request feature (a beta, or
+    thinking.display) and retries only on an HTTP 400 naming it; a rejection
+    inside a committed 200 stream ends the turn instead.
+    """
+    rejection = "thinking.adaptive.display: Input should be 'summarized', 'omitted'"
+
+    async def run() -> None:
+        source = _source("src_rejects1", "Rejects", vendor="anthropic", protocol="anthropic")
+        service, _clock, models = configured_service(tmp_path, sources=[source])
+        calls = []
+
+        async def respond(request: web.Request) -> web.Response:
+            calls.append(await request.json())
+            # Slower than a fast Source, well within Claude's first-byte window.
+            await asyncio.sleep(2.5)
+            return web.json_response(
+                {"type": "error", "error": {"type": "invalid_request_error", "message": rejection}}, status=400,
+            )
+
+        async with loopback_engine(tmp_path, service, respond) as (adapter, _engine_client):
+            async with gateway_client(service, "claude", models["claude"]) as (_gateway, client, url, headers):
+                async with client.post(
+                    url, headers=headers, json={"model": "shared-model", "stream": True},
+                ) as response:
+                    body = await response.text()
+                    assert response.status == 400, body
+                    assert rejection in json.loads(body)["error"]["message"]
+            assert adapter._active_transports == 0
+        assert len(calls) == 1
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("ending", ["served", "recovered", "exhausted", "disconnect"])
 def test_slow_stream_resolution_keeps_claude_connected(monkeypatch, tmp_path, backend, ending):

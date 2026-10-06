@@ -25,6 +25,8 @@ from core.session_turns import SessionTurnManager
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.codex.session import CodexSessionManager
 from modules.agents.opencode.agent import OpenCodeAgent
+from modules.agents.opencode.server import OpenCodeGeneration
+from tests.fake_pid_helpers import fake_pid
 from modules.agents.service import AgentService
 from storage import message_deliveries as delivery_store
 from storage import workbench_sessions_service as workbench_sessions
@@ -38,6 +40,7 @@ from storage.models import (
     runtime_records,
 )
 from storage.session_activities import ACTIVE_PHASE, AWAITING_OUTPUT_PHASE
+from tests.codex_generation_support import init_generation_state, install_codex_transport
 
 
 NOW = "2026-08-03T00:00:00+00:00"
@@ -171,9 +174,9 @@ async def test_hfr_137_new_pin_between_reclaimer_passes_wins_locked_check(
         engine,
         [("ses-a", "base-a", "/work", "route:a")],
     )
-    lock = agent._transport_locks["/work"]
-    await lock.acquire()
     first_snapshot = asyncio.Event()
+    proceed = threading.Event()
+    loop = asyncio.get_running_loop()
     delegate = agent.controller.runtime_ownership
     calls = 0
 
@@ -183,7 +186,9 @@ async def test_hfr_137_new_pin_between_reclaimer_passes_wins_locked_check(
             calls += 1
             result = delegate.snapshot(target)
             if calls == 1:
-                first_snapshot.set()
+                # Hold the reclaimer between its two passes.
+                loop.call_soon_threadsafe(first_snapshot.set)
+                assert proceed.wait(timeout=5)
             return result
 
     agent.controller.runtime_ownership = _BarrierProvider()
@@ -202,7 +207,7 @@ async def test_hfr_137_new_pin_between_reclaimer_passes_wins_locked_check(
                 dispatch_text="delivery-a",
                 attempt_id="attempt-a",
             )
-        lock.release()
+        proceed.set()
         assert await eviction == 0
     assert calls >= 2
     assert stopped == []
@@ -220,7 +225,7 @@ def test_hfr_141_repeated_wakes_do_not_refresh_progress_clocks(tmp_path: Path) -
         [("ses-a", "base-a", "/work", "route:a")],
     )
     agent._session_last_activity = {"base-a": 17.0}
-    snapshot = agent._runtime_ownership_snapshot_for_cwd("/work")
+    snapshot = asyncio.run(agent._ownership_snapshot(agent._current_generation("/work")))
     wake_runtime_ownership(agent.controller, snapshot)
     wake_runtime_ownership(agent.controller, snapshot)
     assert agent._session_last_activity == {"base-a": 17.0}
@@ -284,7 +289,7 @@ async def test_hfr_146_shared_codex_target_and_claude_mapping_use_exact_bindings
     assert target.bindings[0].session_anchor == "base-active"
     assert target.bindings[0].workdir == "/work"
     manager.set_agent_session_id("base-active", None)
-    assert agent._runtime_ownership_target_for_cwd("/work") is None
+    assert agent._runtime_ownership_target_for_generation(agent._current_generation("/work")) is None
     del claude_client._vibe_agent_session_id
     assert (
         handler._claude_runtime_ownership_target(
@@ -329,32 +334,55 @@ def test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership() -> N
         runtime_ownership=SimpleNamespace(snapshot=snapshot),
         runtime_work_supervisor=SimpleNamespace(notify=Mock()),
     )
-    opencode = object.__new__(OpenCodeAgent)
-    opencode._client_manager = SimpleNamespace(
-        _server_manager=SimpleNamespace(
-            base_url="http://127.0.0.1:4096",
-            runtime_has_active_turns=lambda: False,
+    def generation(generation_id: str, index: int) -> OpenCodeGeneration:
+        return OpenCodeGeneration(
+            generation_id=generation_id,
+            pid=fake_pid(index),
+            port=50000 + index,
+            spec_digest=generation_id,
+            process_created_at=1.0,
         )
+
+    retiring, current = generation("ocg_old", 1), generation("ocg_new", 2)
+    opencode = object.__new__(OpenCodeAgent)
+    opencode._runtime = SimpleNamespace(
+        generations=lambda: (retiring, current),
+        current=lambda: current,
+        outside_turn_acquisitions=0,
+        has_bound_work=lambda: False,
     )
+    # base-a still runs on the retiring generation; base-b is between turns.
+    opencode._session_generations = {"base-a": retiring}
     opencode._session_manager = SimpleNamespace(
-        list_all=lambda: {"base-a": ("native-a", "/work", "route:a")},
-        get_agent_session_id=lambda _base: "ses-a",
+        list_all=lambda: {
+            "base-a": ("native-a", "/work", "route:a"),
+            "base-b": ("native-b", "/work", "route:b"),
+        },
+        get_agent_session_id=lambda base: {"base-a": "ses-a", "base-b": "ses-b"}[base],
     )
     opencode._active_requests = {}
-    opencode.runtime_turn_keys = lambda: {"base-a:/work"}
     opencode.controller = controller
     service = AgentService(controller)
     service.register(opencode)
 
     assert not asyncio.run(service.backend_runtime_active("opencode"))
-    target = target_snapshots[0]
-    assert target.resource_key == "http://127.0.0.1:4096"
-    assert target.include_all_backend_sessions
-    assert target.maps_all_backend_activities
-    assert target.maps_all_backend_fallback_runs
-    assert target.bindings[0].session_id == "ses-a"
-    assert target.bindings[0].fallback_route_keys == ("route:a",)
-    assert target.known_fallback_route_keys == ("route:a",)
+    old_target, current_target = target_snapshots
+    assert old_target.resource_key == "opencode:ocg_old"
+    assert not old_target.include_all_backend_sessions
+    assert not old_target.maps_all_backend_activities
+    assert not old_target.maps_all_backend_fallback_runs
+    assert [binding.session_id for binding in old_target.bindings] == ["ses-a"]
+    assert old_target.bindings[0].fallback_route_keys == ("route:a",)
+    assert old_target.known_fallback_route_keys == ("route:a",)
+    assert old_target.known_activity_runtime_keys == ("base-a:/work",)
+    # Unbound sessions acquire the current generation, so its target keeps
+    # every backend session in view for exclusive operations.
+    assert current_target.resource_key == "opencode:ocg_new"
+    assert current_target.include_all_backend_sessions
+    assert current_target.maps_all_backend_activities
+    assert current_target.maps_all_backend_fallback_runs
+    assert [binding.session_id for binding in current_target.bindings] == ["ses-a", "ses-b"]
+    assert current_target.known_fallback_route_keys == ("route:a", "route:b")
     opencode._session_manager.get_agent_session_id = lambda _base: None
     assert opencode.runtime_ownership_snapshots() is None
 
@@ -373,13 +401,14 @@ def test_codex_ownership_probe_batches_off_the_event_loop() -> None:
         batch_sizes.append(len(targets))
         return snapshots
 
-    agent = object.__new__(CodexAgent)
-    agent._transports = {"/a": object(), "/b": object()}
+    agent = init_generation_state(object.__new__(CodexAgent))
+    install_codex_transport(agent, "/a", object())
+    install_codex_transport(agent, "/b", object())
     agent.controller = SimpleNamespace(
         runtime_ownership=SimpleNamespace(snapshot_many=snapshot_many),
     )
-    agent._runtime_ownership_target_for_cwd = Mock(
-        side_effect=lambda cwd: SimpleNamespace(resource_key=cwd)
+    agent._runtime_ownership_target_for_generation = Mock(
+        side_effect=lambda generation: SimpleNamespace(resource_key=generation.runtime.cwd)
     )
 
     result = asyncio.run(agent.runtime_ownership_snapshots())
@@ -725,12 +754,8 @@ def _codex_reclaimer(engine, bindings: list[tuple[str, str, str, str]]):
         manager.set_cwd(base_session_id, cwd)
         manager.set_session_key(base_session_id, session_key)
         manager.set_agent_session_id(base_session_id, agent_session_id)
-    agent = object.__new__(CodexAgent)
-    agent._transports = {"/work": SimpleNamespace(stop=stop_transport)}
-    agent._transport_last_activity = {"/work": 0.0}
+    agent = init_generation_state(object.__new__(CodexAgent))
     agent._session_last_activity = {}
-    agent._transport_locks = {"/work": asyncio.Lock()}
-    agent._transport_cwd_inodes = {}
     agent._session_locks = {}
     agent._session_mgr = manager
     agent._turn_registry = SimpleNamespace(
@@ -744,6 +769,9 @@ def _codex_reclaimer(engine, bindings: list[tuple[str, str, str, str]]):
             notify=lambda *lanes: wakes.append(tuple(lanes))
         ),
         model_hub_runtime=None,
+    )
+    install_codex_transport(
+        agent, "/work", SimpleNamespace(stop=stop_transport, _process=None), last_activity=0.0
     )
     return agent, manager, stopped, wakes
 
@@ -1544,7 +1572,7 @@ async def test_hfr_150_reused_route_run_blocks_codex_cwd_reclamation(
         assert await agent.evict_idle_transports(600) == 0
 
     assert stopped == []
-    assert "/work" in agent._transports
+    assert agent._current_generation("/work") is not None
     engine.dispose()
 
 

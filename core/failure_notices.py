@@ -52,6 +52,7 @@ from core.run_settlement import (
     INTERRUPT_REASON_RESTARTED,
     RUN_INTERRUPTION_REASONS,
     SETTLED_BY_BACKEND_REFRESH,
+    SETTLED_BY_BACKEND_DISABLED,
     SETTLED_BY_INTERRUPTED,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_REFUSED_CONCURRENT_TURN,
@@ -239,6 +240,7 @@ DEFERRAL_RECHECK_SECONDS = 30.0
 NOTICE_REASON_I18N_KEYS: dict[str, str] = {
     SETTLED_BY_STOPPED: "harness.notice.reason.stopped",
     SETTLED_BY_BACKEND_REFRESH: "harness.notice.reason.backendRefresh",
+    SETTLED_BY_BACKEND_DISABLED: "harness.notice.reason.backendDisabled",
     SETTLED_BY_INTERRUPTED: "harness.notice.reason.interrupted",
     INTERRUPT_REASON_EVICTED: "harness.notice.reason.evicted",
     INTERRUPT_REASON_RESTARTED: "harness.notice.reason.restarted",

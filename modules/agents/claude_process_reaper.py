@@ -34,22 +34,35 @@ class ClaudeOwnedProcess:
     started_at: float | None = None
 
 
-def get_claude_client_pid(client: object | None) -> int | None:
-    """Return the SDK-managed Claude CLI pid when the current SDK exposes it."""
-    transport = getattr(client, "_transport", None)
-    process = getattr(transport, "_process", None)
+def get_claude_client_process(client: object | None) -> object | None:
+    """Return the SDK-managed Claude CLI subprocess while the client holds it.
+
+    ``disconnect()`` drops the client's transport, so a caller that must
+    verify the process exits reads it first.
+    """
+    return getattr(getattr(client, "_transport", None), "_process", None)
+
+
+def _process_pid(process: object | None) -> int | None:
     pid = getattr(process, "pid", None)
-    return pid if isinstance(pid, int) and pid > 0 else None
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
 
 
-def get_claude_client_returncode(client: object | None) -> int | None:
-    """Return the Claude CLI exit code once its subprocess has terminated."""
-    transport = getattr(client, "_transport", None)
-    process = getattr(transport, "_process", None)
+def _process_returncode(process: object | None) -> int | None:
     returncode = getattr(process, "returncode", None)
     if isinstance(returncode, bool) or not isinstance(returncode, int):
         return None
     return returncode
+
+
+def get_claude_client_pid(client: object | None) -> int | None:
+    """Return the SDK-managed Claude CLI pid when the current SDK exposes it."""
+    return _process_pid(get_claude_client_process(client))
+
+
+def get_claude_client_returncode(client: object | None) -> int | None:
+    """Return the Claude CLI exit code once its subprocess has terminated."""
+    return _process_returncode(get_claude_client_process(client))
 
 
 def claude_process_exit_reason(returncode: int) -> str:
@@ -438,6 +451,36 @@ async def reap_duplicate_claude_resume_processes(
         len(protected_pids),
     )
     return await _reap_pid_set(target_pids, terminate_timeout=terminate_timeout, logger=logger)
+
+
+async def stop_claude_process(
+    process: object | None,
+    *,
+    logger: logging.Logger,
+    timeout: float = 5.0,
+) -> bool:
+    """Whether a Claude CLI subprocess is gone, stopping it and its tools first if not.
+
+    A failed ``disconnect()`` can leave the CLI and its tool processes running.
+    While the subprocess's returncode is unknown, its pid is still this
+    process's unreaped child, so signalling it can never reach a reused pid.
+    """
+    pid = _process_pid(process)
+    if pid is None or _process_returncode(process) is not None:
+        return True
+    try:
+        rows = _parse_ps_rows(await asyncio.to_thread(_run_ps))
+    except Exception:
+        # No process table, as on Windows: the CLI alone.
+        rows = []
+    await _reap_pid_set(_runtime_related_pids(rows, pid), terminate_timeout=timeout, logger=logger)
+    wait = getattr(process, "wait", None)
+    if callable(wait):
+        try:
+            await asyncio.wait_for(wait(), timeout=timeout)
+        except Exception:
+            logger.debug("Claude CLI pid=%s did not report its exit", pid, exc_info=True)
+    return _process_returncode(process) is not None
 
 
 async def _reap_pid_set(

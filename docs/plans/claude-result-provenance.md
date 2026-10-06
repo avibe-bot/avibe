@@ -139,9 +139,17 @@ facts 4 and 5 are why only the first frame counts. Turns started by a scheduled
 wakeup were not measured; the rule assumes that, like notifications, they do not
 replay a human-origin input.
 
-Open follow-ups outside this rule: under fact 5 the answered human request never
-receives a human Result, and under fact 6 exact-text native input receipts miss
-merged inputs. Both predate it and need their own decisions.
+Open follow-up outside this rule: under fact 5 the answered human request never
+receives a human Result. It predates the rule and needs its own decision.
+
+Fact 6 is resolved in the receipt owner (HFR-487). The merged replay is the
+queued inputs joined by newlines, so one echo consumes the matching contiguous
+FIFO run of receipts. Echoes with another explicit origin never consume receipts,
+even when their text matches. A human-origin or origin-less echo that matches no receipt is
+Avibe input in a shape the receipts do not model; it logs a warning and leaves
+the receipts pending. The stream exposes no sound boundary for which receipts
+such an echo covers, so a release heuristic would trade a loud wedge for silent
+early settlement.
 
 ## Validation
 

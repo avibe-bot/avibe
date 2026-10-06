@@ -43,6 +43,7 @@ from core.native_dispatch_phase import (
 from core.run_settlement import (
     NON_COMPLETING_TURN_SETTLEMENTS,
     SETTLEMENTS_WITHOUT_RESULT,
+    SETTLED_BY_BACKEND_DISABLED,
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_REFUSED_CONCURRENT_TURN,
@@ -4629,7 +4630,8 @@ class SessionTurnManager:
                 )
                 abandoned_start = bool(
                     abandon_unaccepted_start
-                    and outcome == "failed"
+                    # A disable cancels an unresolved start; a refresh fails it.
+                    and outcome in {"failed", "canceled"}
                     and initial_batch
                     and all(row["state"] == "claimed" for row in initial_batch)
                     and turn.get("start_receipt_outcome") != "accepted"
@@ -6545,7 +6547,11 @@ class SessionTurnManager:
         """
 
         language = self._controller_language()
-        text = i18n_t(message_key, language)
+        text = i18n_t(
+            message_key,
+            language,
+            agent=i18n_t(f"backend.{backend}", language) if backend else "",
+        )
         metadata: dict[str, Any] = {"turn_id": turn_id or None, "replayed": True}
         watch_ids = self._recovered_watch_ids(session_id, turn_id)
         handed_over = _HANDED_OVER_NOTICE_KEYS.get(message_key)
@@ -8145,8 +8151,13 @@ class SessionTurnManager:
         *,
         backend: str,
         base_session_ids: set[str],
+        settled_by: str = SETTLED_BY_BACKEND_REFRESH,
     ) -> int:
         """Release active Workbench turns whose backend runtime is being refreshed.
+
+        ``settled_by`` names why: a runtime refresh, the user disabling the
+        backend (``SETTLED_BY_BACKEND_DISABLED``), which also chooses the notice,
+        or the user ending the runtime (``SETTLED_BY_STOPPED``), which needs none.
 
         A backend refresh is a terminal runtime event: Codex/OpenCode/Claude cached
         process state can disappear underneath a Workbench turn before that turn's
@@ -8196,14 +8207,14 @@ class SessionTurnManager:
             # and needs no refresh notice.
             refresh_owns_outcome = not self._turn_outcome_decided(turn)
             if refresh_owns_outcome:
-                turn.cancel_settled_by = SETTLED_BY_BACKEND_REFRESH
+                turn.cancel_settled_by = settled_by
             turn.cancel_defers_queue_resume = True
             # The same cause for the Run this Turn's dispatch waits on: a backend
             # whose cancellation cleanup releases the waiter itself would
             # otherwise report it as a Turn that produced no result.
             mark_complete = getattr(self.controller, "mark_turn_complete", None)
             if refresh_owns_outcome and callable(mark_complete) and not turn.task.done():
-                mark_complete(turn.context, settled_by=SETTLED_BY_BACKEND_REFRESH)
+                mark_complete(turn.context, settled_by=settled_by)
             if turn.task.done():
                 self.in_flight.pop(session_id, None)
                 from core.inbox_events import bus
@@ -8215,7 +8226,11 @@ class SessionTurnManager:
             else:
                 turn.task.cancel()
                 tasks_to_settle.append(turn.task)
-                if refresh_owns_outcome and not harness_run_identity(turn.context, None):
+                if (
+                    refresh_owns_outcome
+                    and settled_by != SETTLED_BY_STOPPED
+                    and not harness_run_identity(turn.context, None)
+                ):
                     interrupted_turns.append((session_id, turn))
             if backend in self._draining_backends:
                 self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
@@ -8229,7 +8244,7 @@ class SessionTurnManager:
                 self.controller.set_agent_status(session_id, "idle")
             for session_id, turn in interrupted_turns:
                 self._notify_backend_refresh(
-                    session_id, "", turn.logical_turn_id or "", backend, context=turn.context
+                    session_id, "", turn.logical_turn_id or "", backend, context=turn.context, settled_by=settled_by
                 )
         released_restored: set[str] = set()
         for owner in restored_owners:
@@ -8240,10 +8255,13 @@ class SessionTurnManager:
             owned_by_run = bool(self.accepted_agent_run_ids_for_turn(owner_id))
             origin_message_id = self._turn_origin_native_message_id(owner_id)
             if owner["state"] == "starting":
+                # An unresolved start fails on a refresh, but a disable or an
+                # End is the user's own cancellation, whatever stage the start
+                # reached.
                 terminal = self._terminalize_durable_turn(
                     owner_id,
-                    "failed",
-                    settled_by=SETTLED_BY_BACKEND_REFRESH,
+                    "canceled" if settled_by in (SETTLED_BY_BACKEND_DISABLED, SETTLED_BY_STOPPED) else "failed",
+                    settled_by=settled_by,
                     evidence_kind="backend_refresh_start_failed",
                     evidence={
                         "backend": backend,
@@ -8261,14 +8279,17 @@ class SessionTurnManager:
                 terminal = self._terminalize_durable_turn(
                     owner_id,
                     "canceled",
-                    settled_by=SETTLED_BY_BACKEND_REFRESH,
+                    settled_by=settled_by,
                     evidence_kind="backend_refresh",
                 )
             if terminal.get("changed"):
                 released_restored.add(str(owner["session_id"]))
-                # Starting or active, the refresh retired this conversation's input.
-                if not owned_by_run and self.controller is not None:
-                    self._notify_backend_refresh(str(owner["session_id"]), origin_message_id, owner_id, backend)
+                # Starting or active, the refresh retired this conversation's
+                # input. The user's own stop needs no explanation.
+                if not owned_by_run and self.controller is not None and settled_by != SETTLED_BY_STOPPED:
+                    self._notify_backend_refresh(
+                        str(owner["session_id"]), origin_message_id, owner_id, backend, settled_by=settled_by
+                    )
         for session_id in released_restored:
             if backend in self._draining_backends:
                 self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
@@ -8311,17 +8332,23 @@ class SessionTurnManager:
         backend: str,
         *,
         context: "MessageContext | None" = None,
+        settled_by: str = SETTLED_BY_BACKEND_REFRESH,
     ) -> None:
         # Off the teardown's path: a slow platform send must not hold the
         # runtime refresh that is waiting on this release. A send that fails is
         # held and retried like a service-restart report.
+        message_key = (
+            "turn.interrupted.backendDisabled"
+            if settled_by == SETTLED_BY_BACKEND_DISABLED
+            else "turn.interrupted.backendRefresh"
+        )
         asyncio.create_task(
             self._report_interrupted_turn(
                 session_id,
                 origin_native_message_id,
                 turn_id,
                 backend,
-                message_key="turn.interrupted.backendRefresh",
+                message_key=message_key,
                 context=context,
             ),
             name=f"backend-refresh-notice:{session_id}",

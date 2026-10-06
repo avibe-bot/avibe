@@ -111,7 +111,6 @@ async def _live_poll(messages, agent):
 
 async def _restored_poll(messages, agent, results, *, emitted=()):
     server = _server(messages)
-    agent._get_server = AsyncMock(return_value=server)
     poll = ActivePollInfo(
         opencode_session_id="native-session",
         base_session_id="base",
@@ -124,7 +123,7 @@ async def _restored_poll(messages, agent, results, *, emitted=()):
         emitted_assistant_messages=list(emitted),
         prompt_started_at=time.time(),
     )
-    assert await asyncio.wait_for(OpenCodePollLoop(agent).run_restored_poll_loop(poll), timeout=2)
+    assert await asyncio.wait_for(OpenCodePollLoop(agent).run_restored_poll_loop(poll, server), timeout=2)
     assert len(results) == 1
     return results[0]
 

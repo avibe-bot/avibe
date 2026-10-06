@@ -678,7 +678,7 @@ The web UI (`http://127.0.0.1:5123`) provides the same controls:
 | `~/.vibe_remote/runtime/remote-access-cloudflared.pid` | cloudflared tunnel PID for Avibe Cloud remote access |
 | `~/.vibe_remote/screenshots/` | Default output directory for `vibe screenshot` |
 | `~/.vibe_remote/logs/vibe_remote.log` | Application logs |
-| `~/.vibe_remote/logs/opencode_server.json` | OpenCode server PID file |
+| `~/.vibe_remote/runtime/opencode/generations/` | One record per running OpenCode server generation |
 
 ### Migration Backup Lifetime
 
@@ -700,12 +700,6 @@ deadline. JSON import backups, manual archives, and unrecognized files are not
 covered by this age policy. Restoring a SQLite backup revokes the old expiry
 evidence before replacing the live database. Keep a separate manual archive
 when recovery must remain possible beyond the automatic rollback window.
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `OPENCODE_PORT` | Override OpenCode server port (default: 4096) |
 
 ## See Also
 

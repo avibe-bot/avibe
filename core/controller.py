@@ -197,6 +197,9 @@ def _refresh_status_bubble_config(controller: Any) -> None:
         refresh()
 
 
+# Idle eviction and the runtime generation sweep run on this cadence.
+_IDLE_SWEEP_INTERVAL_SECONDS = 60
+
 class Controller:
     """Main controller that coordinates all bot operations"""
 
@@ -287,6 +290,7 @@ class Controller:
         self.backend_restart_coordinator = BackendRestartCoordinator(
             self,
             self.agent_auth_service._apply_backend_runtime_refresh,
+            renew=self.agent_auth_service.renew_backend_runtime,
         )
         if self.model_hub_service is not None:
             self.model_hub_service.migration_guard = self.backend_restart_coordinator.migration_guard
@@ -506,7 +510,7 @@ class Controller:
 
         states: dict[str, str] = {}
         for backend in requested:
-            states[backend] = await self.backend_restart_coordinator.request_restart(backend)
+            states[backend] = await self.backend_restart_coordinator.request_restart(backend, config_save=True)
 
         logger.info("Hot-reconciled Agent backends: %s", states)
         return {
@@ -1007,18 +1011,37 @@ class Controller:
                     logger.debug("IM runtime could not signal the event loop to stop", exc_info=True)
 
     async def _restore_active_polls(self, platforms: set[str]) -> None:
+        try:
+            await self._restore_active_polls_or_raise(platforms)
+        except Exception as e:
+            logger.error(f"Failed to restore active polls: {e}", exc_info=True)
+
+    async def _restore_active_polls_or_raise(self, platforms: set[str]) -> None:
         coordinator = getattr(self, "backend_restart_coordinator", None)
         if coordinator is not None and "opencode" in coordinator._blocked_backends():
             coordinator.restore_migration_blocks()
             return
         opencode_agent = self.agent_service.agents.get("opencode")
         if opencode_agent and hasattr(opencode_agent, "restore_active_polls"):
-            try:
-                restored = await opencode_agent.restore_active_polls(platforms)  # type: ignore[attr-defined]
-                if restored > 0:
-                    logger.info(f"Restored {restored} active OpenCode poll(s)")
-            except Exception as e:
-                logger.error(f"Failed to restore active polls: {e}", exc_info=True)
+            restored = await opencode_agent.restore_active_polls(platforms)  # type: ignore[attr-defined]
+            if restored > 0:
+                logger.info(f"Restored {restored} active OpenCode poll(s)")
+
+    async def restore_polls_on_ready_transports(self) -> None:
+        """Restore durable OpenCode polls on every transport that can deliver now.
+
+        IM-ready events restore polls at startup. OpenCode enabled in a running
+        controller missed them, so this runs once it registers. Raises when the
+        restore fails, so its caller can retry it; a restore skips every poll
+        already running, so a retry is safe.
+        """
+        platforms = {"avibe"}
+        for platform in list(getattr(self, "im_clients", {}) or {}):
+            if self.is_im_transport_ready(platform):
+                platforms.add(platform)
+        if self.primary_platform in platforms:
+            platforms.add("")
+        await self._restore_active_polls_or_raise(platforms)
 
     async def _recover_avibe_agent_runtime_state(self) -> None:
         """Settle what the previous process left of the Avibe Agent's work (T2, T3 admission, J5).
@@ -1129,6 +1152,23 @@ class Controller:
             logger.error("Failed to start runtime command watcher: %s", e, exc_info=True)
 
         try:
+            if "opencode" not in getattr(agent_service, "agents", {}):
+                # OpenCode is disabled, so no agent will adopt the servers a
+                # crashed controller recorded; disabling stops its work. The
+                # idle sweep retries a server that survived its stop.
+                from modules.agents.opencode.server import StopOutcome, stop_recorded_servers_sync
+                from vibe.desktop_runtime import desktop_caller_provenance
+
+                async def stop_leftover_servers() -> None:
+                    outcomes = await asyncio.to_thread(stop_recorded_servers_sync, desktop_caller_provenance())
+                    if any(outcome is StopOutcome.FAILED for outcome in outcomes):
+                        raise RuntimeError("an OpenCode server a previous controller left did not stop")
+
+                await agent_service.run_until_done("disabled-startup:opencode", stop_leftover_servers)
+        except Exception as e:
+            logger.error("Failed to stop OpenCode servers a previous controller left: %s", e, exc_info=True)
+
+        try:
             self._start_model_hub_snapshot_reconcile_loop()
         except Exception as e:
             logger.error(
@@ -1138,10 +1178,7 @@ class Controller:
             )
 
         try:
-            claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
-            if (claude_timeout > 0 or codex_timeout > 0) and (
-                self.cleanup_task is None or self.cleanup_task.done()
-            ):
+            if self.cleanup_task is None or self.cleanup_task.done():
                 self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
         except Exception as e:
             logger.error("Failed to start idle session cleanup: %s", e, exc_info=True)
@@ -2210,30 +2247,40 @@ class Controller:
                     self._trace_retention_future = None
 
     async def periodic_cleanup(self):
-        """Sweep idle backend runtime state without interrupting active work."""
-        claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
-        enabled_timeouts = [timeout for timeout in (claude_timeout, codex_timeout) if timeout > 0]
-        if not enabled_timeouts:
-            logger.info("Idle cleanup disabled for Claude and Codex.")
-            return
+        """Sweep idle backend runtime state without interrupting active work.
 
-        sweep_interval = max(min(enabled_timeouts) // 6, 60)
-        logger.info(
-            "Starting idle cleanup loop (interval=%ss, claude_timeout=%ss, codex_timeout=%ss)",
-            sweep_interval,
-            claude_timeout,
-            codex_timeout,
-        )
-
+        Timeouts are read on every sweep, and the sweep interval does not depend
+        on them, so a saved change applies within one interval without a
+        backend restart.
+        """
         try:
             while True:
-                await asyncio.sleep(sweep_interval)
+                await asyncio.sleep(_IDLE_SWEEP_INTERVAL_SECONDS)
+                claude_timeout, codex_timeout = self._get_idle_cleanup_timeouts()
 
+                try:
+                    # A disabled backend's processes whose stop failed.
+                    await self.agent_service.retry_pending()
+                except Exception as e:
+                    logger.error("Teardown retry sweep failed: %s", e, exc_info=True)
+
+                # Retiring runtime generations stop once drained, whatever the
+                # idle timeouts say.
+                for agent in list(getattr(self.agent_service, "agents", {}).values()):
+                    reap = getattr(agent, "reap_runtime_generations", None)
+                    if callable(reap):
+                        try:
+                            await reap()
+                        except Exception as e:
+                            logger.error("Runtime generation sweep failed for %s: %s", agent.name, e, exc_info=True)
+
+                try:
+                    # A client from before the latest renewal is reclaimed once
+                    # idle, even with idle eviction off.
+                    await self.session_handler.evict_idle_sessions(claude_timeout)
+                except Exception as e:
+                    logger.error("Claude idle cleanup failed: %s", e, exc_info=True)
                 if claude_timeout > 0:
-                    try:
-                        await self.session_handler.evict_idle_sessions(claude_timeout)
-                    except Exception as e:
-                        logger.error("Claude idle cleanup failed: %s", e, exc_info=True)
                     try:
                         # Defense-in-depth: reconcile live claude subprocesses
                         # against tracked sessions and reap orphans (no-owner /
@@ -2370,6 +2417,13 @@ class Controller:
                 _stop_loop_coroutine(codex_agent.shutdown_runtime(), "Codex runtime")
         except Exception as e:
             logger.debug(f"Codex runtime cleanup skipped: {e}")
+        try:
+            # A disabled backend whose stop failed has no other owner: its
+            # agent is out of routing and the idle sweep that retries it is
+            # already cancelled, so shutdown makes the last attempt.
+            _stop_loop_coroutine(self.agent_service.retry_pending(), "Pending backend teardowns")
+        except Exception as e:
+            logger.debug(f"Pending backend teardowns skipped: {e}")
 
         # Cancel receiver tasks without awaiting (they may belong to other loops)
         try:
@@ -2418,14 +2472,15 @@ class Controller:
             self._im_thread.join(timeout=5)
         self._im_thread = None
 
-        # An explicit Avibe stop/restart must not leave an adopted OpenCode
-        # generation behind. Active turns have already reached shutdown cleanup.
+        # An explicit Avibe stop/restart must not leave any OpenCode generation
+        # of this controller behind; another desktop Runtime's are not ours.
+        # Active turns have already reached shutdown cleanup.
         try:
-            from modules.agents.opencode import OpenCodeServerManager
+            from modules.agents.opencode.server import stop_owned_generations_sync
 
-            OpenCodeServerManager.terminate_instance_sync()
+            stop_owned_generations_sync()
         except Exception as e:
-            logger.debug(f"OpenCode server cleanup skipped: {e}")
+            logger.warning("OpenCode server cleanup failed: %s", e)
 
         logger.info("Controller cleanup (sync) complete")
 
@@ -2686,20 +2741,12 @@ class Controller:
             except FileNotFoundError:
                 return
             self.config.model_hub = latest.model_hub
-            if latest.model_hub.agents[backend].mode != "hub":
-                if backend == "codex":
-                    agent_service = getattr(self, "agent_service", None)
-                    if agent_service is None:
-                        raise RuntimeError("Agent service is unavailable")
-                    await agent_service.invalidate_model_hub_runtime(backend)
-                return
-            runtime_config = getattr(latest.agents, backend, None)
-            if runtime_config is None:
-                return
-            coordinator = getattr(self, "backend_restart_coordinator", None)
-            if coordinator is None:
-                raise RuntimeError("Backend restart coordinator is unavailable")
-            await coordinator.request_restart(backend)
+            # Each runtime moves to the committed catalog at its next turn;
+            # nothing restarts or drains. A disabled backend has nothing to adopt.
+            agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)
+            adopt_catalog = getattr(agent, "adopt_model_hub_catalog", None)
+            if callable(adopt_catalog):
+                await adopt_catalog()
 
         async def repair_model_selections(addresses: frozenset[str]) -> int:
             # A Vibe Agent's model, a channel's routing override, and a

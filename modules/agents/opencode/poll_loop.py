@@ -25,7 +25,7 @@ from modules.im import MessageContext
 from vibe.i18n import t as i18n_t
 
 from .message_processor import is_empty_terminal_opencode_message
-from .server import OpenCodeServerManager
+from .server import OpenCodeGeneration
 
 logger = logging.getLogger(__name__)
 
@@ -280,7 +280,7 @@ class OpenCodePollLoop:
         if callable(record_failure):
             await record_failure(context, diagnostic)
 
-    def _active_turn_timeout_seconds(self) -> float:
+    def _active_turn_timeout_seconds(self, settings: Any = None) -> float:
         """The configured wall-clock bound, or ``0.0`` when it is disabled.
 
         Non-positive, missing, or non-finite values all read as disabled. The
@@ -291,7 +291,7 @@ class OpenCodePollLoop:
         """
 
         raw_timeout = getattr(
-            self._agent.opencode_config,
+            settings if settings is not None else self._agent.opencode_config,
             "active_turn_timeout_seconds",
             DEFAULT_OPENCODE_ACTIVE_TURN_TIMEOUT_SECONDS,
         )
@@ -322,7 +322,7 @@ class OpenCodePollLoop:
 
     async def _native_session_is_live(
         self,
-        server: OpenCodeServerManager,
+        server: OpenCodeGeneration,
         session_id: str,
         directory: str,
         *,
@@ -361,7 +361,7 @@ class OpenCodePollLoop:
         self,
         *,
         request: AgentRequest,
-        server: OpenCodeServerManager,
+        server: OpenCodeGeneration,
         session_id: str,
         working_path: str,
         timeout_seconds: float,
@@ -405,7 +405,7 @@ class OpenCodePollLoop:
         self,
         *,
         request: AgentRequest,
-        server: OpenCodeServerManager,
+        server: OpenCodeGeneration,
         session_id: str,
         working_path: str,
         failures: int,
@@ -578,13 +578,14 @@ class OpenCodePollLoop:
     async def run_prompt_poll(
         self,
         request: AgentRequest,
-        server: OpenCodeServerManager,
+        server: OpenCodeGeneration,
         session_id: str,
         *,
         agent_to_use: Optional[str],
         model_dict: Optional[Dict[str, str]],
         reasoning_effort: Optional[str],
         baseline_message_ids: set[str],
+        settings: Any = None,
     ) -> tuple[Optional[str], bool]:
         """Poll messages for a prompt.
 
@@ -598,14 +599,15 @@ class OpenCodePollLoop:
         seen_tool_calls: set[str] = set()
         emitted_assistant_messages: set[str] = set()
         final_text: Optional[str] = None
-        timeout_seconds = self._active_turn_timeout_seconds()
+        # The settings the turn was admitted with, never the live config.
+        timeout_seconds = self._active_turn_timeout_seconds(settings)
         deadline = (
             time.monotonic() + timeout_seconds if timeout_seconds > 0 else math.inf
         )
 
         error_retry_count = 0
         error_retry_limit = getattr(
-            self._agent.opencode_config,
+            settings if settings is not None else self._agent.opencode_config,
             "error_retry_limit",
             DEFAULT_OPENCODE_ERROR_RETRY_LIMIT,
         )
@@ -902,8 +904,8 @@ class OpenCodePollLoop:
 
         return final_text, True
 
-    async def run_restored_poll_loop(self, poll_info) -> bool:
-        """Continue a poll loop that was interrupted by restart."""
+    async def run_restored_poll_loop(self, poll_info, server: OpenCodeGeneration) -> bool:
+        """Continue a poll loop that was interrupted by restart, on its own generation."""
 
         session_id = poll_info.opencode_session_id
         restored_request = self._build_restored_ack_request(poll_info)
@@ -919,7 +921,6 @@ class OpenCodePollLoop:
             "Resuming interrupted OpenCode session after restart...",
         )
 
-        server = await self._agent._get_server()
         baseline_message_ids = set(poll_info.baseline_message_ids)
         seen_tool_calls = set(poll_info.seen_tool_calls)
         emitted_assistant_messages = set(poll_info.emitted_assistant_messages)

@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
+import json
 import logging
 import os
 import shlex
+import shutil
 import time
+from collections import OrderedDict
 from collections.abc import Mapping
-from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, Sequence
 
@@ -34,6 +38,7 @@ from core.native_dispatch_phase import (
     mark_prewrite_recovery_required,
 )
 from core.processing_indicator import STOPPED_REACTION_EMOJI
+from core.run_settlement import SETTLED_BY_BACKEND_REFRESH, SETTLED_BY_STOPPED
 from core.prompt_registry import prompt_text
 from core.services.agent_steering import (
     ActiveSteerTarget,
@@ -67,7 +72,17 @@ from modules.agents.codex.event_handler import CodexEventHandler
 from modules.agents.codex.session import CodexSessionManager
 from modules.agents.codex.transport import CodexResponseTooLargeError, CodexRPCError, CodexTransport
 from modules.agents.codex.turn_state import CodexTurnRegistry
-from vibe.codex_config import LEGACY_MANAGED_PROVIDER_IDS, MANAGED_PROVIDER_ID
+from modules.agents.runtime_generations import (
+    RuntimeBinding,
+    RuntimeGeneration,
+    RuntimeGenerationSet,
+    RuntimeUnitStopping,
+)
+from vibe.codex_config import (
+    LEGACY_MANAGED_PROVIDER_IDS,
+    MANAGED_PROVIDER_ID,
+    codex_credential_identity,
+)
 from vibe.desktop_backends import desktop_backend_subprocess_environment
 from vibe.i18n import t as i18n_t
 from vibe.message_identity import is_input_turn
@@ -89,10 +104,84 @@ CODEX_CONNECTION_PROBE_DIR = "codex-connection-probe"
 CODEX_PROMPT_STRATEGY_METADATA_KEY = "codex_prompt_strategy"
 _STEER_RECONCILIATION_TTL_SECONDS = 300.0
 _MAX_STEER_RECONCILIATION_TARGETS = 128
-# How long a runtime change waits for the shared per-cwd app-server to go idle.
-# Short waits cover a replacement prompt's own interrupted turn; a long job in
-# another Session must fail this turn visibly instead of holding it forever.
-_RUNTIME_CHANGE_WAIT_SECONDS = 30.0
+# How long a Session waits for the app-server generation it leaves to release
+# its thread. Codex bounds its own thread shutdown at 10 s.
+_THREAD_RELEASE_TIMEOUT_SECONDS = 15.0
+# Numbers agent instances: each owns the Model Hub scope of its own processes.
+_AGENT_INSTANCE_SERIALS = itertools.count(1)
+# Hub catalogs kept prepared for future launches; running generations hold
+# their own pins.
+_CACHED_HUB_CATALOGS = 2
+
+
+@dataclass(frozen=True, eq=False)
+class CodexLaunchSpec:
+    """Every process-level input of one app-server.
+
+    Two generations whose digests match were started from the same binary,
+    arguments, environment, credentials, and directory, so either can serve a
+    turn that needs this spec.
+    """
+
+    digest: str
+    cwd: str
+    binary: str
+    args: tuple[str, ...]
+    extra_args: tuple[str, ...]
+    env: Mapping[str, str] = field(repr=False)
+    hub: bool = False
+    catalog: CodexHubCatalog | None = field(default=None, repr=False)
+
+    def close(self) -> None:
+        """Release this spec's catalog pin; a started transport holds its own."""
+        if self.catalog is not None:
+            self.catalog.close()
+
+
+@dataclass(frozen=True, eq=False)
+class _LaunchInputs:
+    """A turn's whole configuration, captured in one synchronous step at admission.
+
+    Its Model Hub launch resolution, Hub catalog, launch spec digest, and
+    process all derive from this load, so a save or renewal that lands while
+    any of them is awaited changes nothing about the turn; the directory's
+    next turn moves. Nothing on the turn path reads the mutable source again.
+    """
+
+    # The Model Hub snapshot the launch resolves against; None without a router.
+    hub_config: Any = field(repr=False)
+    binary: str
+    extra_args: tuple[str, ...]
+    env: Mapping[str, str] = field(repr=False)
+    # Renewal epoch, binary and credential identity, and the cwd's inode.
+    identity: Mapping[str, Any] = field(repr=False)
+
+
+@dataclass(eq=False)
+class _CodexRuntime:
+    """One app-server process serving a working directory."""
+
+    cwd: str
+    serial: int
+    transport: CodexTransport
+    hub: bool = False
+    activation: RuntimeActivationIdentity | None = None
+    # base_session_id -> the Codex thread loaded in this process for it
+    threads: dict[str, str] = field(default_factory=dict)
+    # thread id -> set when this process reports ``thread/closed``
+    released_threads: dict[str, asyncio.Event] = field(default_factory=dict)
+    last_activity: float = field(default_factory=time.monotonic)
+    # Set once the process is gone. The shared core detaches a generation
+    # before its teardown runs, and a graceful teardown may still decline.
+    ended: bool = False
+    # Set while a teardown holds the activation fence; done when it finishes.
+    teardown: asyncio.Future[None] | None = None
+    # No unit holds this running process: it outlived its own failed start, or
+    # its setup failed after the spawn. The sweep retries its stop.
+    orphaned: bool = False
+
+
+_CodexGeneration = RuntimeGeneration[CodexLaunchSpec, _CodexRuntime]
 
 
 @dataclass(frozen=True)
@@ -104,6 +193,7 @@ class _CodexSteerReconciliationTarget:
     thread_id: str
     cwd: str
     recorded_at: float
+    runtime: _CodexRuntime | None = None
 
 
 class _CodexConnectionProbeState:
@@ -129,10 +219,10 @@ class CodexConnectionProbeRuntimeMismatchError(RuntimeError):
     """The cached transport does not represent direct Codex credentials."""
 
 
-class CodexRuntimeChangeBlockedError(RuntimeError):
-    """Another live turn owns the cwd transport that a runtime change must replace."""
+class CodexThreadReleaseUnavailableError(RuntimeError):
+    """The generation a Session leaves could not release the Session's thread."""
 
-    reason = "transport_runtime_change_blocked"
+    reason = "codex_thread_release_unavailable"
 
 
 class CodexModelHubCatalogUnavailableError(RuntimeError):
@@ -164,11 +254,12 @@ class CodexResumeUnavailableError(RuntimeError):
 
 
 class CodexAgent(BaseAgent):
-    """Codex CLI integration via persistent ``codex app-server`` subprocess.
+    """Codex CLI integration via persistent ``codex app-server`` subprocesses.
 
-    One transport (subprocess) is maintained per unique working directory.
-    Multiple Slack threads in the same channel share a transport but each
-    gets its own Codex thread.
+    Each working directory has a set of app-server generations. New turns use
+    the current one; a generation started from older launch inputs keeps
+    serving the turns already running on it and stops once they drain.
+    Sessions in one directory share a generation, each with its own thread.
     """
 
     name = "codex"
@@ -183,22 +274,31 @@ class CodexAgent(BaseAgent):
         super().__init__(controller)
         self.codex_config = codex_config
         self._registered_runtime = registered_runtime
-        self._model_hub_catalog: CodexHubCatalog | None = None
+        # (binary identity, configured models digest) -> prepared Hub catalog
+        self._model_hub_catalogs: OrderedDict[tuple[str, str], CodexHubCatalog] = OrderedDict()
         self._model_hub_catalog_lock = asyncio.Lock()
-        self._model_hub_catalog_generation = 0
 
-        # cwd → CodexTransport (one persistent process per working dir)
-        self._transports: Dict[str, CodexTransport] = {}
-        self._transport_locks: Dict[str, asyncio.Lock] = {}
-        self._transport_last_activity: Dict[str, float] = {}
+        # cwd -> the app-server generations serving that working directory.
+        # New turns use the current generation; a retiring one keeps serving
+        # the turns already running on it and stops once they drain.
+        self._units: Dict[str, RuntimeGenerationSet[CodexLaunchSpec, _CodexRuntime]] = {}
+        # base_session_id -> the generation its Codex thread is loaded in
+        self._session_generations: Dict[str, _CodexGeneration] = {}
+        self._generation_serials = itertools.count(1)
+        # cwd -> processes not yet ended, attached to their unit or not
+        self._runtimes: Dict[str, set[_CodexRuntime]] = {}
+        # Shutdown, which also serves disabling the backend, ends every
+        # process without the runtime-update notice and admits nothing more.
+        self._shutting_down = False
+        self._instance_serial = next(_AGENT_INSTANCE_SERIALS)
+        # Set by a disable's shutdown: every forced stop then settles the work
+        # bound to its generation with this reason. None shows no notice.
+        self._shutdown_settle_reason: str | None = None
+        # Part of every launch spec: renewing moves each cwd to a new process
+        # at its next turn.
+        self._runtime_epoch = 0
+        self._reap_tasks: set[asyncio.Task[None]] = set()
         self._session_last_activity: Dict[str, float] = {}
-        # cwd inode at app-server spawn time, keyed like ``_transports``. A
-        # cached app-server whose directory was deleted (even if re-created
-        # with the same path) sits in a dead inode and fails every
-        # ``thread/start`` with a misleading "failed to load configuration:
-        # No such file or directory" (#561); the inode comparison detects
-        # that staleness BEFORE paying a failed RPC.
-        self._transport_cwd_inodes: Dict[str, Optional[int]] = {}
 
         self._session_mgr = CodexSessionManager()
         self._turn_registry = CodexTurnRegistry()
@@ -232,26 +332,19 @@ class CodexAgent(BaseAgent):
         self._fork_correction_pending_base_sessions: set[str] = set()
         self._connection_probes: Dict[str, _CodexConnectionProbeState] = {}
         self._connection_probe_turns: Dict[str, str] = {}
-        self._connection_probe_cwds: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # BaseAgent interface
     # ------------------------------------------------------------------
 
     def backend_alive(self, context) -> Optional[bool]:
-        """Liveness via the CodexTransport for this turn's working directory.
+        """Liveness of the app-server generation this turn's Session is bound to.
 
-        Resolves base_session_id → cwd → transport and returns transport.is_alive.
         Returns None (unknown) when anything can't be resolved, so the status
         bubble never false-alarms ⚠️."""
         payload = getattr(context, "platform_specific", None) or {}
         base_session_id = str(payload.get("turn_base_session_id") or "").strip()
-        if not base_session_id:
-            return None
-        cwd = self._session_mgr.get_cwd(base_session_id)
-        if not cwd:
-            return None
-        transport = self._transports.get(cwd)
+        transport = self.transport_for_session(base_session_id) if base_session_id else None
         if transport is None:
             return None
         return self._transport_alive(transport)
@@ -274,8 +367,7 @@ class CodexAgent(BaseAgent):
 
         payload = getattr(context, "platform_specific", None) or {}
         base_session_id = str(payload.get("turn_base_session_id") or "").strip()
-        cwd = self._session_mgr.get_cwd(base_session_id) if base_session_id else None
-        transport = self._transports.get(cwd) if cwd else None
+        transport = self.transport_for_session(base_session_id) if base_session_id else None
         if transport is None:
             return lambda: None
         return lambda: self._transport_alive(transport)
@@ -288,8 +380,7 @@ class CodexAgent(BaseAgent):
 
         payload = getattr(context, "platform_specific", None) or {}
         base_session_id = str(payload.get("turn_base_session_id") or "").strip()
-        cwd = self._session_mgr.get_cwd(base_session_id) if base_session_id else None
-        transport = self._transports.get(cwd) if cwd else None
+        transport = self.transport_for_session(base_session_id) if base_session_id else None
         if transport is None:
             return None
 
@@ -335,14 +426,26 @@ class CodexAgent(BaseAgent):
         return diagnose
 
     def can_reuse_direct_connection_probe(self, cwd: str) -> bool:
-        """Return whether a cached transport can test direct credentials."""
+        """Return whether a live generation can test the current direct credentials."""
 
-        transport = self._transports.get(cwd)
-        return bool(
-            transport is not None
-            and getattr(transport, "runtime_fingerprint", "direct") == "direct"
-            and os.path.isdir(cwd)
-        )
+        return self._direct_probe_generation(cwd) is not None
+
+    def _direct_probe_generation(self, cwd: str) -> _CodexGeneration | None:
+        """The live generation started exactly as a direct launch would start now."""
+
+        unit = self._units.get(cwd)
+        if unit is None or not os.path.isdir(cwd):
+            return None
+        inputs = self._launch_inputs(cwd)
+        digest = self._launch_spec_digest(inputs, args=(), env=inputs.env)
+        for generation in reversed(unit.generations):
+            if (
+                not generation.closed
+                and generation.spec.digest == digest
+                and generation.runtime.transport.is_initialized
+            ):
+                return generation
+        return None
 
     async def probe_connection(
         self,
@@ -362,22 +465,20 @@ class CodexAgent(BaseAgent):
         state: _CodexConnectionProbeState | None = None
         thread_id = ""
         closed_task: asyncio.Task[None] | None = None
-        probe_cwds = self._connection_probe_cwds
-        owns_probe_cwd = False
+        binding: RuntimeBinding[CodexLaunchSpec, _CodexRuntime] | None = None
         try:
-            if (
-                getattr(self, "_registered_runtime", True)
-                and not self.can_reuse_direct_connection_probe(cwd)
-            ):
-                raise CodexConnectionProbeRuntimeMismatchError(
-                    "No cached direct Codex transport is available for the probe"
-                )
-            transport = await self._get_or_create_transport(
-                cwd,
-                allow_runtime_replacement=False,
-            )
-            probe_cwds[cwd] = probe_cwds.get(cwd, 0) + 1
-            owns_probe_cwd = True
+            if getattr(self, "_registered_runtime", True):
+                # Never start or promote a process just to probe: that would
+                # change which generation serves this directory's turns.
+                generation = self._direct_probe_generation(cwd)
+                if generation is None:
+                    raise CodexConnectionProbeRuntimeMismatchError(
+                        "No live direct Codex generation is available for the probe"
+                    )
+                binding = await self._unit(cwd).bind(generation)
+            else:
+                binding = await self._acquire_generation(cwd)
+            transport = binding.generation.runtime.transport
 
             thread_response = await transport.send_request(
                 "thread/start",
@@ -434,7 +535,7 @@ class CodexAgent(BaseAgent):
                 raise RuntimeError(result)
             if not result.strip():
                 raise RuntimeError("Codex Agent turn returned no response")
-            self._touch_transport_activity(cwd)
+            self._touch_runtime(binding.generation.runtime)
             return result
         finally:
             try:
@@ -465,15 +566,14 @@ class CodexAgent(BaseAgent):
                     self._connection_probe_turns.pop(state.turn_id, None)
                 if state is not None and not state.terminal.done():
                     state.terminal.cancel()
-                if closed_task is not None:
-                    closed_task.cancel()
-                    await asyncio.gather(closed_task, return_exceptions=True)
-                if owns_probe_cwd:
-                    remaining = probe_cwds.get(cwd, 0) - 1
-                    if remaining > 0:
-                        probe_cwds[cwd] = remaining
-                    else:
-                        probe_cwds.pop(cwd, None)
+                try:
+                    if closed_task is not None:
+                        closed_task.cancel()
+                        await asyncio.gather(closed_task, return_exceptions=True)
+                finally:
+                    # Even a cancellation landing above must not leak the binding.
+                    if binding is not None:
+                        await binding.release()
 
     async def _record_model_hub_native_failure(self, context: Any, diagnostic: str) -> bool:
         router = getattr(self.controller, "model_hub_runtime", None)
@@ -490,223 +590,287 @@ class CodexAgent(BaseAgent):
         """Process a user message by routing it through app-server.
 
         Flow:
-        1. Get or create transport for the working directory
+        1. Bind to the working directory's app-server generation for this
+           turn's launch spec, moving the Session's thread there if needed
         2. Get or create a Codex thread for this Slack thread
         3. If a turn is active → interrupt it first
         4. Start a new turn with the user's message
         """
-        # Serialize turn lifecycle per session
-        if request.base_session_id not in self._session_locks:
-            self._session_locks[request.base_session_id] = asyncio.Lock()
-
-        async with self._session_locks[request.base_session_id]:
-            launch = None
+        async with self.session_lifecycle(request.base_session_id):
+            # A binding keeps the generation this turn admits to alive until the
+            # turn is registered there or has failed; a registered turn then
+            # keeps its generation alive as idle evidence of its own.
+            bindings: list[RuntimeBinding[CodexLaunchSpec, _CodexRuntime]] = []
             try:
-                # Register a complete durable binding before any transport
-                # acquisition or resume can fail and require ownership checks.
-                self.ensure_agent_session_id(request)
-                self._session_mgr.set_session_key(request.base_session_id, request.session_key)
-                self._session_mgr.set_cwd(request.base_session_id, request.working_path)
-                self._bind_runtime_agent_session_id(request)
-                if getattr(self.controller, "model_hub_runtime", None) is not None:
-                    from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
-
-                    _, requested_model, _, _ = self._resolve_codex_agent_settings(request)
-                    launch = await resolve_model_hub_launch(
-                        self.controller,
-                        "codex",
-                        requested_model or "",
-                        process_scope=request.working_path,
-                        context=request.context,
-                    )
-                    bind_launch(request.context, launch)
-                    await self._interrupt_active_turn_before_runtime_change(request, launch)
-                    transport = await self._get_or_create_transport(request.working_path, launch)
-                else:
-                    transport = await self._get_or_create_transport(request.working_path)
-            except FileNotFoundError:
-                await emit_backend_failure(
-                    self.controller,
-                    request.context,
-                    self.name,
-                    "Codex CLI not found",
-                    display_text="❌ Codex CLI not found. Please install it or set CODEX_CLI_PATH.",
-                    request=request,
-                )
-                await self._remove_ack_reaction(request)
-                self._event_handler._release_stream_turn(request.context)
-                return
-            except Exception as e:
-                from modules.agents.model_hub import launch_refusal_copy
-
-                logger.error("Failed to start Codex transport: %s", e, exc_info=True)
-                language = str(
-                    getattr(getattr(self.controller, "config", None), "language", "en")
-                    or "en"
-                )
-                refusal = launch_refusal_copy(self.controller, e)
-                if isinstance(e, CodexRuntimeChangeBlockedError):
-                    # Not a source failure: no Hub cooldown. Hold the unwritten
-                    # input for an explicit retry once the blocking turn ends.
-                    mark_prewrite_recovery_required(request.context, e.reason)
-                    display_text = f"❌ {i18n_t('error.codexRuntimeChangeBlocked', language)}"
-                elif isinstance(e, CodexModelHubCatalogUnavailableError):
-                    await self._record_model_hub_native_failure(request.context, str(e))
-                    display_text = f"❌ {i18n_t('modelHub.errors.codex_catalog_unavailable', language)}"
-                elif refusal is not None:
-                    await self._record_model_hub_native_failure(request.context, str(e))
-                    display_text = f"❌ {refusal}"
-                else:
-                    await self._record_model_hub_native_failure(request.context, str(e))
-                    display_text = f"❌ Failed to start Codex CLI: {e}"
-                await emit_backend_failure(
-                    self.controller,
-                    request.context,
-                    self.name,
-                    str(e),
-                    display_text=display_text,
-                    request=request,
-                    cause=e,
-                )
-                await self._remove_ack_reaction(request)
-                self._event_handler._release_stream_turn(request.context)
-                return
-
-            self._touch_transport_activity(request.working_path)
-            await self._delete_ack(request)
-
-            self._turn_registry.remember_request(request)
-            developer_instructions: Optional[str] = None
-            prompt_rendered = False
-            try:
-                # Get or create thread (with resume support)
-                thread_id = self._session_mgr.get_thread_id(request.base_session_id)
-
-                if not thread_id:
-                    developer_instructions = await self._build_thread_developer_instructions(request)
-                    prompt_rendered = True
-                    thread_id = await self._start_or_resume_thread(
-                        transport, request, developer_instructions=developer_instructions
-                    )
-
-                # If a turn is active, interrupt it first
-                active_turn = self._turn_registry.get_active_turn(request.base_session_id)
-                if active_turn:
-                    try:
-                        await transport.send_request(
-                            "turn/interrupt",
-                            {"threadId": thread_id, "turnId": active_turn},
-                        )
-                    except Exception as e:
-                        if self._is_recoverable_transport_error(e):
-                            raise
-                        logger.warning("Failed to interrupt turn %s: %s", active_turn, e)
-                        await emit_backend_failure(
-                            self.controller,
-                            request.context,
-                            self.name,
-                            str(e),
-                            display_text=f"❌ Failed to interrupt previous Codex turn: {e}",
-                            request=request,
-                        )
-                        await self._remove_ack_reaction(request)
-                        self._event_handler._release_stream_turn(request.context)
-                        return
-                    interrupted_request = self._event_handler.clear_pending(active_turn)
-                    if interrupted_request:
-                        await self._remove_ack_reaction(interrupted_request)
-
-                # Render once at the actual Turn boundary. Besides keeping the
-                # payload byte-stable, this avoids repeating admission
-                # side effects while the same request refreshes and starts.
-                if not prompt_rendered:
-                    developer_instructions = await self._build_thread_developer_instructions(request)
-                    prompt_rendered = True
-                await self._refresh_thread_developer_instructions_if_needed(
-                    transport,
-                    request,
-                    thread_id,
-                )
-                self._bind_runtime_agent_session_id(request)
-                thread_id = await self._start_turn(
-                    transport,
-                    request,
-                    thread_id,
-                    developer_instructions=developer_instructions,
-                )
-
-            except Exception as e:
-                # Safety net: if the thread is stale (e.g. Codex server-side
-                # expiry, or the proactive invalidation in _get_or_create_transport
-                # was bypassed by a race), invalidate and retry once.
-                if (
-                    self._is_recoverable_transport_error(e)
-                    and backend_dispatch_attempted(request.context) is False
-                ):
-                    logger.warning(
-                        "Recoverable Codex transport failure for session %s, restarting transport and retrying: %s",
-                        request.base_session_id,
-                        e,
-                    )
-                    if await self._drop_transport_after_failure(request.working_path, transport, request):
-                        try:
-                            if launch is None:
-                                transport = await self._get_or_create_transport(request.working_path)
-                            else:
-                                transport = await self._get_or_create_transport(request.working_path, launch)
-                            self._touch_transport_activity(request.working_path)
-                            if not prompt_rendered:
-                                self.ensure_agent_session_id(request)
-                                developer_instructions = await self._build_thread_developer_instructions(request)
-                                prompt_rendered = True
-                            thread_id = await self._start_or_resume_thread(
-                                transport, request, developer_instructions=developer_instructions
-                            )
-                            self._bind_runtime_agent_session_id(request)
-                            await self._start_turn(
-                                transport,
-                                request,
-                                thread_id,
-                                developer_instructions=developer_instructions,
-                            )
-                            return  # retry succeeded
-                        except Exception as retry_err:
-                            e = retry_err  # fall through to normal error handling
-
-                # FAIL LOUD on a server-side "thread not found": the conversation is
-                # gone, so surface the error instead of silently clearing the
-                # mapping and forking a fresh thread (which hid the context loss).
-                # The mapping is kept so the failure is consistent until the user
-                # explicitly starts a new session (product decision: no silent
-                # fallbacks).
-                if isinstance(e, (CodexResumeUnavailableError, CodexResponseTooLargeError)):
-                    mark_prewrite_recovery_required(request.context, "codex_resume_unavailable")
-                elif isinstance(e, CodexRuntimeChangeBlockedError):
-                    mark_prewrite_recovery_required(request.context, e.reason)
+                await self._handle_message_locked(request, bindings)
+            except asyncio.CancelledError:
+                # A cancelled admission owns no turn, whether it was cancelled on
+                # its first attempt or on its retry; a pending start left behind
+                # would keep its generation from ever stopping.
                 self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
-                logger.error("Error in Codex handle_message: %s", e, exc_info=True)
-                if not isinstance(e, CodexRuntimeChangeBlockedError):
-                    await self._record_model_hub_native_failure(request.context, str(e))
-                # A successful replacement consumes no shared pressure evidence.
-                # Diagnose only the transport whose failure is actually reported.
-                resource_failure = self._resource_failure_for_transport(transport)
-                error_text = self._error_display_text(
-                    e,
-                    resource_failure=resource_failure,
-                )
-                await emit_backend_failure(
+                raise
+            finally:
+                for binding in bindings:
+                    await binding.release()
+
+    @asynccontextmanager
+    async def session_lifecycle(self, base_session_id: str):
+        """Serialize one Session's lifecycle.
+
+        Turn admission holds it, and so must every other operation that
+        changes the Session's thread binding or in-memory state (End,
+        ``/new``, resume preparation), so none can interleave with a turn. A
+        holder may forget the lock as its last step; a waiter that then wakes
+        on the forgotten lock retries on the current one, so two holders
+        never overlap.
+        """
+        while True:
+            lock = self._session_locks.get(base_session_id)
+            if lock is None:
+                lock = self._session_locks[base_session_id] = asyncio.Lock()
+            async with lock:
+                if self._session_locks.get(base_session_id) is lock:
+                    yield
+                    return
+
+    def _forget_session_lock(self, base_session_id: str) -> None:
+        """Forget a Session's lock unless a turn admission holds it."""
+        lock = self._session_locks.get(base_session_id)
+        if lock is not None and not lock.locked():
+            self._session_locks.pop(base_session_id, None)
+
+    async def _handle_message_locked(
+        self,
+        request: AgentRequest,
+        bindings: list[RuntimeBinding[CodexLaunchSpec, _CodexRuntime]],
+    ) -> None:
+        launch = None
+        inputs: _LaunchInputs | None = None
+        try:
+            if self._shutting_down:
+                # Past the agent lookup already: refuse before anything is
+                # recorded or a Hub launch is resolved for this turn.
+                raise RuntimeUnitStopping("runtime unit is stopping")
+            # Register a complete durable binding before any transport
+            # acquisition or resume can fail and require ownership checks.
+            self.ensure_agent_session_id(request)
+            self._session_mgr.set_session_key(request.base_session_id, request.session_key)
+            self._session_mgr.set_cwd(request.base_session_id, request.working_path)
+            self._bind_runtime_agent_session_id(request)
+            router = getattr(self.controller, "model_hub_runtime", None)
+            hub_snapshot = getattr(router, "snapshot", None)
+            # The turn's whole configuration is one load, taken here before
+            # anything awaits: its Hub launch, catalog, spec, and process all
+            # derive from it, so a concurrent save or renewal cannot split them.
+            inputs = self._launch_inputs(
+                request.working_path,
+                hub_config=hub_snapshot() if callable(hub_snapshot) else None,
+            )
+            if router is not None:
+                from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
+
+                _, requested_model, _, _ = self._resolve_codex_agent_settings(request)
+                launch = await resolve_model_hub_launch(
                     self.controller,
-                    request.context,
-                    self.name,
-                    str(e),
-                    display_text=error_text,
-                    request=request,
+                    "codex",
+                    requested_model or "",
+                    process_scope=self._hub_process_scope(request.working_path),
+                    context=request.context,
+                    config=inputs.hub_config,
                 )
-                await self._remove_ack_reaction(request)
-                # The turn never started (all retries failed) — release the
-                # web-Chat working/Stop state instead of leaving it until the
-                # fallback timeout (Codex P2).
-                self._event_handler._release_stream_turn(request.context)
+                bind_launch(request.context, launch)
+            binding = await self._acquire_generation(request.working_path, launch, inputs=inputs)
+            bindings.append(binding)
+            await self._move_session_to(binding.generation, request)
+        except FileNotFoundError:
+            await emit_backend_failure(
+                self.controller,
+                request.context,
+                self.name,
+                "Codex CLI not found",
+                display_text="❌ Codex CLI not found. Please install it or set CODEX_CLI_PATH.",
+                request=request,
+            )
+            await self._remove_ack_reaction(request)
+            self._event_handler._release_stream_turn(request.context)
+            return
+        except Exception as e:
+            from modules.agents.model_hub import launch_refusal_copy
+
+            logger.error("Failed to start Codex transport: %s", e, exc_info=True)
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            refusal = launch_refusal_copy(self.controller, e)
+            if isinstance(e, CodexThreadReleaseUnavailableError):
+                # Not a source failure: no Hub cooldown. Hold the unwritten
+                # input for an explicit retry.
+                mark_prewrite_recovery_required(request.context, e.reason)
+                display_text = f"❌ {i18n_t('error.codexThreadReleaseUnavailable', language)}"
+            elif isinstance(e, RuntimeUnitStopping):
+                # Not a source failure: no Hub cooldown.
+                display_text = (
+                    f"❌ {i18n_t('error.agentRuntimeRetired', language, agent=i18n_t('backend.codex', language))}"
+                )
+            elif isinstance(e, CodexModelHubCatalogUnavailableError):
+                await self._record_model_hub_native_failure(request.context, str(e))
+                display_text = f"❌ {i18n_t('modelHub.errors.codex_catalog_unavailable', language)}"
+            elif refusal is not None:
+                await self._record_model_hub_native_failure(request.context, str(e))
+                display_text = f"❌ {refusal}"
+            else:
+                await self._record_model_hub_native_failure(request.context, str(e))
+                display_text = f"❌ Failed to start Codex CLI: {e}"
+            await emit_backend_failure(
+                self.controller,
+                request.context,
+                self.name,
+                str(e),
+                display_text=display_text,
+                request=request,
+                cause=e,
+            )
+            await self._remove_ack_reaction(request)
+            self._event_handler._release_stream_turn(request.context)
+            return
+
+        generation = binding.generation
+        transport = generation.runtime.transport
+        self._touch_runtime(generation.runtime)
+        await self._delete_ack(request)
+
+        self._turn_registry.remember_request(request)
+        developer_instructions: Optional[str] = None
+        prompt_rendered = False
+        try:
+            # Set only while the thread is loaded in ``generation``.
+            thread_id = self._session_mgr.get_thread_id(request.base_session_id)
+
+            if not thread_id:
+                developer_instructions = await self._build_thread_developer_instructions(request)
+                prompt_rendered = True
+                thread_id = await self._open_session_thread(
+                    generation, request, developer_instructions=developer_instructions
+                )
+
+            # If a turn is active, interrupt it first
+            active_turn = self._turn_registry.get_active_turn(request.base_session_id)
+            if active_turn:
+                try:
+                    await transport.send_request(
+                        "turn/interrupt",
+                        {"threadId": thread_id, "turnId": active_turn},
+                    )
+                except Exception as e:
+                    if self._is_recoverable_transport_error(e):
+                        raise
+                    logger.warning("Failed to interrupt turn %s: %s", active_turn, e)
+                    await emit_backend_failure(
+                        self.controller,
+                        request.context,
+                        self.name,
+                        str(e),
+                        display_text=f"❌ Failed to interrupt previous Codex turn: {e}",
+                        request=request,
+                    )
+                    await self._remove_ack_reaction(request)
+                    self._event_handler._release_stream_turn(request.context)
+                    return
+                interrupted_request = self._event_handler.clear_pending(active_turn)
+                if interrupted_request:
+                    await self._remove_ack_reaction(interrupted_request)
+
+            # Render once at the actual Turn boundary. Besides keeping the
+            # payload byte-stable, this avoids repeating admission
+            # side effects while the same request refreshes and starts.
+            if not prompt_rendered:
+                developer_instructions = await self._build_thread_developer_instructions(request)
+                prompt_rendered = True
+            await self._refresh_thread_developer_instructions_if_needed(
+                transport,
+                request,
+                thread_id,
+            )
+            self._bind_runtime_agent_session_id(request)
+            thread_id = await self._start_turn(
+                transport,
+                request,
+                thread_id,
+                developer_instructions=developer_instructions,
+            )
+
+        except Exception as e:
+            # Safety net: if the app-server broke before this turn reached it,
+            # replace that generation and retry once on a working one.
+            if (
+                self._is_recoverable_transport_error(e)
+                and backend_dispatch_attempted(request.context) is False
+            ):
+                logger.warning(
+                    "Recoverable Codex transport failure for session %s, restarting transport and retrying: %s",
+                    request.base_session_id,
+                    e,
+                )
+                if await self._drop_generation_after_failure(generation, request, binding):
+                    try:
+                        # The retry keeps the turn's admission load.
+                        binding = await self._acquire_generation(
+                            request.working_path, launch, inputs=inputs
+                        )
+                        bindings.append(binding)
+                        generation = binding.generation
+                        transport = generation.runtime.transport
+                        self._touch_runtime(generation.runtime)
+                        if not prompt_rendered:
+                            self.ensure_agent_session_id(request)
+                            developer_instructions = await self._build_thread_developer_instructions(request)
+                            prompt_rendered = True
+                        thread_id = await self._open_session_thread(
+                            generation, request, developer_instructions=developer_instructions
+                        )
+                        self._bind_runtime_agent_session_id(request)
+                        await self._start_turn(
+                            transport,
+                            request,
+                            thread_id,
+                            developer_instructions=developer_instructions,
+                        )
+                        return  # retry succeeded
+                    except Exception as retry_err:
+                        e = retry_err  # fall through to normal error handling
+
+            # FAIL LOUD on a server-side "thread not found": the conversation is
+            # gone, so surface the error instead of silently clearing the
+            # mapping and forking a fresh thread (which hid the context loss).
+            # The mapping is kept so the failure is consistent until the user
+            # explicitly starts a new session (product decision: no silent
+            # fallbacks).
+            if isinstance(e, (CodexResumeUnavailableError, CodexResponseTooLargeError)):
+                mark_prewrite_recovery_required(request.context, "codex_resume_unavailable")
+            self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
+            logger.error("Error in Codex handle_message: %s", e, exc_info=True)
+            await self._record_model_hub_native_failure(request.context, str(e))
+            # A successful replacement consumes no shared pressure evidence.
+            # Diagnose only the transport whose failure is actually reported.
+            resource_failure = self._resource_failure_for_transport(transport)
+            error_text = self._error_display_text(
+                e,
+                resource_failure=resource_failure,
+            )
+            await emit_backend_failure(
+                self.controller,
+                request.context,
+                self.name,
+                str(e),
+                display_text=error_text,
+                request=request,
+            )
+            await self._remove_ack_reaction(request)
+            # The turn never started (all retries failed) — release the
+            # web-Chat working/Stop state instead of leaving it until the
+            # fallback timeout (Codex P2).
+            self._event_handler._release_stream_turn(request.context)
 
     def steering_native_turn_id(self, target: ActiveSteerTarget) -> Optional[str]:
         active_request = target.agent_request
@@ -735,6 +899,7 @@ class CodexAgent(BaseAgent):
         *,
         thread_id: str,
         cwd: str,
+        runtime: _CodexRuntime | None = None,
     ) -> None:
         if not request.attempt_id or not thread_id or not cwd:
             return
@@ -751,6 +916,7 @@ class CodexAgent(BaseAgent):
             thread_id=thread_id,
             cwd=cwd,
             recorded_at=time.monotonic(),
+            runtime=runtime,
         )
 
     def _forget_steer_reconciliation_target(self, attempt_id: str) -> None:
@@ -846,7 +1012,9 @@ class CodexAgent(BaseAgent):
 
         thread_id = self._session_mgr.get_thread_id(base_session_id)
         cwd = self._session_mgr.get_cwd(base_session_id) or active_request.working_path
-        transport = self._transports.get(cwd)
+        generation = self._generation_for_session(base_session_id)
+        runtime = generation.runtime if generation is not None else None
+        transport = runtime.transport if runtime is not None else None
         if not thread_id:
             return steer_result(SteerOutcome.NOT_ACTIVE, reason="missing_native_thread", backend=self.name)
         if transport is None or not transport.is_initialized:
@@ -856,6 +1024,7 @@ class CodexAgent(BaseAgent):
             target,
             thread_id=thread_id,
             cwd=cwd,
+            runtime=runtime,
         )
 
         steer_params = {
@@ -929,7 +1098,7 @@ class CodexAgent(BaseAgent):
                         diagnostic=diagnostic,
                     ),
                 )
-            self._touch_transport_activity(cwd)
+            self._touch_runtime(runtime)
             return steer_result(
                 SteerOutcome.UNKNOWN,
                 reason="acknowledgement_ambiguous",
@@ -937,7 +1106,7 @@ class CodexAgent(BaseAgent):
                 diagnostic=diagnostic,
             )
         except TimeoutError as exc:
-            self._touch_transport_activity(cwd)
+            self._touch_runtime(runtime)
             return steer_result(
                 SteerOutcome.UNKNOWN,
                 reason="acknowledgement_ambiguous",
@@ -945,7 +1114,7 @@ class CodexAgent(BaseAgent):
                 diagnostic=str(exc),
             )
 
-        self._touch_transport_activity(cwd)
+        self._touch_runtime(runtime)
         response_turn_id = str(response.get("turnId") or "").strip()
         if response_turn_id != request.expected_native_turn_id:
             return self._finish_steer_receipt(
@@ -989,9 +1158,12 @@ class CodexAgent(BaseAgent):
         )
         targets = getattr(self, "_steer_reconciliation_targets", None) or {}
         retained = targets.get(request.attempt_id)
+        transport: CodexTransport | None = None
         if retained is not None:
             thread_id = retained.thread_id
             cwd = retained.cwd
+            if retained.runtime is not None:
+                transport = retained.runtime.transport
         else:
             active_turn_id = self._turn_registry.get_active_turn(base_session_id)
             if active_turn_id == request.expected_native_turn_id:
@@ -999,6 +1171,7 @@ class CodexAgent(BaseAgent):
                 cwd = self._session_mgr.get_cwd(base_session_id)
                 if not cwd and active_request is not None:
                     cwd = active_request.working_path
+                transport = self.transport_for_session(base_session_id)
             else:
                 durable = self._durable_reconciliation_binding(
                     request.target_session_id,
@@ -1012,52 +1185,58 @@ class CodexAgent(BaseAgent):
                     )
                 thread_id, cwd = durable
 
-        transport = self._transports.get(cwd) if cwd else None
         if transport is not None and getattr(transport, "is_alive", True) is False:
             transport = None
-        if transport is None and cwd:
+        binding: RuntimeBinding[CodexLaunchSpec, _CodexRuntime] | None = None
+        try:
+            if transport is None and cwd:
+                try:
+                    # A timed-out request marks the transport uninitialized, but
+                    # an alive reader can still answer this read-only evidence
+                    # query, and ``thread/read`` works from any generation of
+                    # the directory. Start one only when none is live; this
+                    # never replays the original steer.
+                    binding = await self._bind_any_generation(cwd)
+                    transport = binding.generation.runtime.transport
+                except Exception as exc:
+                    return steer_result(
+                        SteerOutcome.UNKNOWN,
+                        reason="attempt_evidence_unavailable",
+                        backend=self.name,
+                        diagnostic=str(exc),
+                    )
+            if not thread_id or transport is None:
+                return steer_result(
+                    SteerOutcome.UNKNOWN,
+                    reason="attempt_evidence_unavailable",
+                    backend=self.name,
+                )
+
             try:
-                # A timed-out request marks the transport uninitialized, but an
-                # alive reader can still answer this read-only evidence query.
-                # If no usable process remains, create a fresh app-server for
-                # thread/read; this never replays the original steer.
-                transport = await self._get_or_create_transport(cwd)
-            except Exception as exc:
+                response = await transport.send_request(
+                    "thread/read",
+                    {
+                        "threadId": thread_id,
+                        "includeTurns": True,
+                    },
+                )
+            except (ConnectionError, TimeoutError) as exc:
                 return steer_result(
                     SteerOutcome.UNKNOWN,
                     reason="attempt_evidence_unavailable",
                     backend=self.name,
                     diagnostic=str(exc),
                 )
-        if not thread_id or transport is None:
-            return steer_result(
-                SteerOutcome.UNKNOWN,
-                reason="attempt_evidence_unavailable",
-                backend=self.name,
-            )
-
-        try:
-            response = await transport.send_request(
-                "thread/read",
-                {
-                    "threadId": thread_id,
-                    "includeTurns": True,
-                },
-            )
-        except (ConnectionError, TimeoutError) as exc:
-            return steer_result(
-                SteerOutcome.UNKNOWN,
-                reason="attempt_evidence_unavailable",
-                backend=self.name,
-                diagnostic=str(exc),
-            )
-        except Exception as exc:  # noqa: BLE001 - absence is not negative proof
-            return steer_result(
-                SteerOutcome.UNKNOWN,
-                reason="attempt_evidence_unavailable",
-                backend=self.name,
-                diagnostic=str(exc),
-            )
+            except Exception as exc:  # noqa: BLE001 - absence is not negative proof
+                return steer_result(
+                    SteerOutcome.UNKNOWN,
+                    reason="attempt_evidence_unavailable",
+                    backend=self.name,
+                    diagnostic=str(exc),
+                )
+        finally:
+            if binding is not None:
+                await binding.release()
 
         thread = response.get("thread") if isinstance(response, dict) else None
         turns = thread.get("turns") if isinstance(thread, dict) else None
@@ -1105,7 +1284,7 @@ class CodexAgent(BaseAgent):
             request.stop_failure_reason = "not_active"
             return False
 
-        transport = self._transports.get(request.working_path)
+        transport = self.transport_for_session(request.base_session_id)
         if not transport or not transport.is_alive:
             request.stop_failure_reason = "runtime_unavailable"
             return False
@@ -1177,22 +1356,33 @@ class CodexAgent(BaseAgent):
         return True
 
     async def clear_sessions(self, session_key: str) -> int:
-        """Clear sessions scoped to a specific session_key."""
-        self.sessions.clear_agent_sessions(session_key, self.name)
+        """Clear sessions scoped to a specific session_key.
 
-        # Use session_key index (not _threads) so sessions with
-        # invalidated threads are still cleaned up properly.
-        to_clear = self._session_mgr.get_sessions_by_session_key(session_key)
-
-        count = self._session_mgr.clear_by_session_key(session_key)
-
-        # Clean up in-memory turn state and session locks for cleared sessions
-        for bid in to_clear:
-            self._turn_registry.clear_session(bid)
-            self._session_locks.pop(bid, None)
-            self._clear_thread_developer_instructions(bid)
-
-        return count
+        Under each cleared Session's lock, its thread is released first, so a
+        cleared conversation never stays loaded in a process that keeps
+        serving other Sessions. A thread that stays loaded fails the clear
+        before anything is forgotten, so the clear stays retryable.
+        """
+        while True:
+            # Use session_key index (not _threads) so sessions with
+            # invalidated threads are still cleaned up properly.
+            to_clear = sorted(self._session_mgr.get_sessions_by_session_key(session_key))
+            async with AsyncExitStack() as held:
+                for bid in to_clear:
+                    await held.enter_async_context(self.session_lifecycle(bid))
+                for bid in to_clear:
+                    await self.release_session_runtime(bid)
+                if sorted(self._session_mgr.get_sessions_by_session_key(session_key)) != to_clear:
+                    # A Session of this key started meanwhile, and the clear
+                    # below covers the whole key: release that one too.
+                    continue
+                self.sessions.clear_agent_sessions(session_key, self.name)
+                count = self._session_mgr.clear_by_session_key(session_key)
+                for bid in to_clear:
+                    self._turn_registry.clear_session(bid)
+                    self._clear_thread_developer_instructions(bid)
+                    self._session_locks.pop(bid, None)
+                return count
 
     def runtime_turn_keys(self) -> set[str]:
         return {
@@ -1212,62 +1402,95 @@ class CodexAgent(BaseAgent):
 
     async def retire_for_native_migration(self) -> None:
         """Retire every idle app-server generation or refuse credential mutation."""
-        for cwd, transport in list(self._transports.items()):
-            async with self._transport_locks.setdefault(cwd, asyncio.Lock()):
-                detached = await self._stop_and_detach_transport_generation(
-                    cwd,
-                    transport,
-                    final_predicate=lambda: self._transport_replacement_is_safe(cwd, transport),
-                    require_process_exit=True,
-                )
-                if not detached:
+        for unit in list(self._units.values()):
+            # A teardown already in flight must answer before custody moves.
+            await unit.settled()
+            for generation in unit.generations:
+                if not await self._generation_drained(generation):
                     raise RuntimeError("Codex runtime retirement was refused")
-                self._retire_model_hub_process_scope(cwd)
-        for base_session_id in self._session_mgr.all_base_sessions():
-            self._session_mgr.invalidate_thread(base_session_id)
-            self._turn_registry.clear_session(base_session_id)
-            self._clear_thread_developer_instructions(base_session_id)
-
-    async def retire_unowned_session_transport(
-        self, cwd: str, *, ending_session_id: str | None = None
-    ) -> bool:
-        """Reclaim the exact cwd generation while retaining the ending Session on failure."""
-
-        async with self._transport_locks.setdefault(cwd, asyncio.Lock()):
-            transport = self._transports.get(cwd)
-
-            def has_other_sessions() -> bool:
-                return any(
-                    session_id != ending_session_id
-                    for session_id in self._session_mgr.sessions_for_cwd(cwd)
-                )
-
-            if transport is None or has_other_sessions():
-                return False
-
-            async def still_unowned() -> bool:
-                return (
-                    self._transports.get(cwd) is transport
-                    and not has_other_sessions()
-                    and not self._has_active_turns_for_cwd(cwd)
-                )
-
-            detached = await self._stop_and_detach_transport_generation(
-                cwd,
-                transport,
-                final_predicate=still_unowned,
-                require_process_exit=True,
+            # Re-check synchronously: work may have bound during the awaits above.
+            generations = unit.generations
+            if any(self._generation_has_live_work(generation) for generation in generations):
+                raise RuntimeError("Codex runtime retirement was refused")
+            # migration_guard interrupted the backend's work before custody
+            # moves, and the drained check above refuses any owner it missed.
+            await self._stop_generations_now(
+                unit, generations, require_process_exit=True, settle_reason=None
             )
-            if detached:
-                self._retire_model_hub_process_scope(cwd)
-            return detached
+        await self._end_unattached_runtimes(require_process_exit=True)
+        for base_session_id in self._session_mgr.all_base_sessions():
+            self._forget_stale_session(base_session_id)
+            self._turn_registry.clear_session(base_session_id)
+
+    async def release_session_runtime(self, base_session_id: str) -> None:
+        """Unload an ending Session's thread so no app-server keeps holding it.
+
+        Codex lets one process at a time hold a thread; a thread left loaded in
+        a shared app-server would block resuming that conversation elsewhere.
+        The caller holds ``session_lifecycle(base_session_id)``.
+        """
+        generation = self._generation_for_session(base_session_id)
+        if generation is None:
+            self._forget_stale_session(base_session_id)
+            return
+        await self._release_session_thread(generation, base_session_id)
+
+    async def end_session(self, base_session_id: str) -> dict[str, bool]:
+        """End one Session's live runtime, for End in Running Agents.
+
+        Under the Session's lifecycle, a Session that was the only user of its
+        directory's app-servers takes them down: its own running turn and
+        Activities settle through ``_end_bound_work`` first. Otherwise only
+        its thread is released, which interrupts its own turn first and
+        raises ``CodexThreadReleaseUnavailableError`` rather than forget a
+        turn Codex did not stop. The Session's state is cleared only after
+        that succeeded, so a failed End can be retried.
+        """
+        async with self.session_lifecycle(base_session_id):
+            interrupted = bool(self._turn_registry.get_active_turn(base_session_id))
+            generation = self._generation_for_session(base_session_id)
+            unit = self._units.get(generation.runtime.cwd) if generation is not None else None
+            process_killed = False
+            if generation is None:
+                self._forget_stale_session(base_session_id)
+            elif (
+                unit is not None
+                and generation in unit.generations
+                and not self._serves_another_session(unit, base_session_id)
+            ):
+                # End is the user's explicit request to kill, so what it ends
+                # is settled as their stop.
+                await self._stop_generations_now(
+                    unit, unit.generations, require_process_exit=True, settle_reason=SETTLED_BY_STOPPED
+                )
+                process_killed = True
+            else:
+                # A process the reconciler already detached is not End's to
+                # kill: release the thread there, which waits out its teardown.
+                await self._release_session_thread(generation, base_session_id)
+                process_killed = generation.runtime.ended
+            self._turn_registry.clear_session(base_session_id)
+            self._session_mgr.clear(base_session_id)
+            self._session_last_activity.pop(base_session_id, None)
+            self._clear_thread_developer_instructions(base_session_id)
+            # End holds this lock; forgetting it is its last step.
+            self._session_locks.pop(base_session_id, None)
+        return {"interrupted": interrupted, "process_killed": process_killed}
+
+    def _serves_another_session(
+        self,
+        unit: RuntimeGenerationSet[CodexLaunchSpec, _CodexRuntime],
+        base_session_id: str,
+    ) -> bool:
+        """Whether any process of the directory still serves another Session."""
+        return any(
+            generation.bindings
+            or any(other != base_session_id for other in generation.runtime.threads)
+            for generation in unit.generations
+        )
 
     async def refresh_auth_state(self) -> None:
-        """Drop app-server runtime state so future turns pick up fresh auth."""
-        if not hasattr(self, "_transport_last_activity"):
-            self._transport_last_activity = {}
-        if not hasattr(self, "_session_last_activity"):
-            self._session_last_activity = {}
+        """Stop every app-server generation; used by exclusive credential cutovers."""
         base_session_ids = list(self._session_mgr.all_base_sessions())
         controller = getattr(self, "controller", None)
         turn_manager = getattr(controller, "session_turns", None)
@@ -1280,65 +1503,99 @@ class CodexAgent(BaseAgent):
                 )
             except Exception:
                 logger.warning("Failed to release Workbench turns during Codex refresh", exc_info=True)
-        if not hasattr(self, "_transport_locks"):
-            self._transport_locks = {}
-        transport_items = list(self._transports.items())
         self._session_last_activity.clear()
         stopped = 0
-        for cwd, transport in transport_items:
-            lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
-            async with lock:
-                try:
-                    detached = await self._stop_and_detach_transport_generation(
-                        cwd,
-                        transport,
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to stop Codex transport during auth refresh: %s", exc)
-                    continue
-                if not detached:
-                    continue
-                self._retire_model_hub_process_scope(cwd)
-                stopped += 1
+        for unit in list(self._units.values()):
+            await unit.settled()
+            generations = unit.generations
+            try:
+                # The exclusive cutover runs after the coordinator interrupted
+                # this backend's turns and Activities.
+                await self._stop_generations_now(unit, generations, settle_reason=None)
+            except Exception as exc:
+                logger.warning("Failed to stop Codex transport during auth refresh: %s", exc)
+            stopped += sum(1 for generation in generations if generation.runtime.ended)
+        try:
+            await self._end_unattached_runtimes()
+        except Exception as exc:
+            logger.warning("Failed to stop Codex transport during auth refresh: %s", exc)
 
         for base_session_id in base_session_ids:
-            self._session_mgr.invalidate_thread(base_session_id)
+            # A Session whose process survived a failed stop stays bound to it.
+            self._forget_stale_session(base_session_id)
             self._turn_registry.clear_session(base_session_id)
-            self._clear_thread_developer_instructions(base_session_id)
 
         logger.info("Refreshed Codex auth state across %d transport(s)", stopped)
 
     async def refresh_runtime_config(self, codex_config: Any) -> None:
-        """Reload persisted runtime config before respawning app-server transports."""
+        """Reload persisted runtime config and stop every app-server generation."""
         self.codex_config = codex_config
         self.controller.config.codex = codex_config
-        await self.invalidate_model_hub_runtime()
+        await self.adopt_model_hub_catalog()
         await self.refresh_auth_state()
 
-    async def invalidate_model_hub_runtime(self) -> None:
-        """Make the next Hub launch rebuild its catalog without touching Direct transports."""
-        self._model_hub_catalog_generation += 1
-        if self._model_hub_catalog is not None:
-            self._model_hub_catalog.close()
-        self._model_hub_catalog = None
+    async def renew_runtime(self, codex_config: Any, *, config_save: bool = False) -> None:
+        """Adopt persisted runtime config; each cwd moves to it at its next turn.
 
-    async def prepare_model_hub_runtime(self) -> CodexHubCatalog:
-        """Bind Hub metadata to this Agent's exact configured Codex binary."""
+        Nothing stops or waits here. The binary and extra arguments are launch
+        spec inputs, and the other ``agents.codex`` fields are read live, so a
+        plain config save needs no renewal. Every other caller (credential
+        flows, manual Restart, installs) bumps the renewal epoch, which is part
+        of every launch spec: a cwd's next turn then starts a new app-server
+        generation while turns already running finish on theirs.
+        """
+        self.codex_config = codex_config
+        self.controller.config.codex = codex_config
+        if not config_save:
+            self._runtime_epoch += 1
+
+    async def adopt_model_hub_catalog(self) -> None:
+        """Forget prepared catalogs; each Hub turn prepares from its own snapshot.
+
+        A changed catalog changes the launch spec, so a cwd moves to a new
+        generation at its next Hub turn. Running generations keep the catalog
+        pinned for as long as they run.
+        """
+        catalogs = list(self._model_hub_catalogs.values())
+        self._model_hub_catalogs.clear()
+        for catalog in catalogs:
+            catalog.close()
+
+    async def prepare_model_hub_runtime(
+        self,
+        config: Any = None,
+        *,
+        inputs: _LaunchInputs | None = None,
+    ) -> CodexHubCatalog:
+        """Bind Hub metadata to this Agent's exact configured Codex binary.
+
+        ``config`` is the turn's Model Hub snapshot; the catalog lists exactly
+        the models that snapshot resolved against. ``inputs`` is the turn's
+        launch snapshot, so the catalog comes from the binary its process runs.
+        """
         from vibe import backend_model_catalog
 
-        async with self._model_hub_catalog_lock:
-            if self._model_hub_catalog is not None:
-                return self._model_hub_catalog
-            generation = self._model_hub_catalog_generation
+        if inputs is None:
             binary = self.codex_config.binary
-            configured_models = None
+            binary_identity = self._binary_identity(binary, self._codex_runtime_environment())
+        else:
+            binary, binary_identity = inputs.binary, inputs.identity["binary"]
+        configured_models = None
+        if config is None:
             model_hub_service = getattr(self.controller, "model_hub_service", None)
             store = getattr(model_hub_service, "store", None)
-            if store is not None:
-                configured_models = [
-                    model.to_payload()
-                    for model in store.load().agents["codex"].models
-                ]
+            config = store.load() if store is not None else None
+        if config is not None:
+            configured_models = [model.to_payload() for model in config.agents["codex"].models]
+        key = (
+            json.dumps(binary_identity, sort_keys=True),
+            hashlib.sha256(json.dumps(configured_models, sort_keys=True).encode()).hexdigest(),
+        )
+        async with self._model_hub_catalog_lock:
+            cached = self._model_hub_catalogs.get(key)
+            if cached is not None:
+                self._model_hub_catalogs.move_to_end(key)
+                return cached
             preparation = asyncio.create_task(
                 asyncio.to_thread(
                     backend_model_catalog.prepare_codex_hub_catalog,
@@ -1358,12 +1615,10 @@ class CodexAgent(BaseAgent):
                 raise CodexModelHubCatalogUnavailableError(
                     "Codex Model Hub catalog preparation failed"
                 ) from exc
-            if self._model_hub_catalog_generation != generation:
-                catalog.close()
-                raise CodexModelHubCatalogUnavailableError(
-                    "Codex Model Hub catalog generation changed during preparation"
-                )
-            self._model_hub_catalog = catalog
+            self._model_hub_catalogs[key] = catalog
+            while len(self._model_hub_catalogs) > _CACHED_HUB_CATALOGS:
+                _, evicted = self._model_hub_catalogs.popitem(last=False)
+                evicted.close()
             return catalog
 
     @staticmethod
@@ -1380,86 +1635,75 @@ class CodexAgent(BaseAgent):
         session_key: str,
         working_path: str,
     ) -> None:
-        """Restart a Codex transport only when the resumed session owns that cwd."""
-        if not hasattr(self, "_transport_locks"):
-            self._transport_locks = {}
-        lock = self._transport_locks.setdefault(working_path, asyncio.Lock())
-        async with lock:
-            transport = self._transports.get(working_path)
-            if transport is None:
-                return
+        """Release the Session's current thread before it binds another one.
 
-            affected_sessions = self._session_mgr.sessions_for_cwd(working_path)
-            other_sessions = [session_id for session_id in affected_sessions if session_id != base_session_id]
-            if other_sessions:
-                logger.info(
-                    "Skipping Codex resume preparation for %s; cwd=%s is shared by %d other session(s)",
-                    base_session_id,
-                    working_path,
-                    len(other_sessions),
-                )
-                return
-            try:
-                detached = await self._stop_and_detach_transport_generation(
-                    working_path,
-                    transport,
-                )
-            except Exception as exc:
-                logger.warning("Failed to stop Codex transport during resume preparation: %s", exc)
-                return
-            if not detached:
-                logger.warning(
-                    "Failed to retire Codex transport generation during resume preparation for cwd=%s",
-                    working_path,
-                )
-                return
-            self._retire_model_hub_process_scope(working_path)
-
-        self._session_mgr.invalidate_thread(base_session_id)
-        self._turn_registry.clear_session(base_session_id)
-        self._clear_thread_developer_instructions(base_session_id)
+        Only this Session's thread is unloaded; the app-server keeps serving
+        every other Session in the directory. Raises
+        ``CodexThreadReleaseUnavailableError`` when the thread stays loaded.
+        """
+        # Serialized with turn admission. The caller rewrites the durable
+        # mapping right after this returns, with no await in between.
+        async with self.session_lifecycle(base_session_id):
+            generation = self._generation_for_session(base_session_id)
+            if generation is None:
+                self._forget_stale_session(base_session_id)
+            else:
+                # A thread that stays loaded aborts the resume before its mapping
+                # changes; otherwise the next turn would still reach the old thread.
+                await self._release_session_thread(generation, base_session_id)
+            self._turn_registry.clear_session(base_session_id)
         logger.info("Prepared Codex runtime for resumed session %s", base_session_id)
 
-    async def shutdown_runtime(self) -> None:
-        """Stop all app-server transports during vibe-remote shutdown."""
-        await self.invalidate_model_hub_runtime()
-        if not hasattr(self, "_transport_last_activity"):
-            self._transport_last_activity = {}
-        if not hasattr(self, "_transport_locks"):
-            self._transport_locks = {}
-        if not hasattr(self, "_session_locks"):
-            self._session_locks = {}
-        if not hasattr(self, "_session_last_activity"):
-            self._session_last_activity = {}
-        transport_items = list(self._transports.items())
-        self._session_last_activity.clear()
-        stopped = 0
-        for cwd, transport in transport_items:
-            lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
-            async with lock:
-                try:
-                    detached = await self._stop_and_detach_transport_generation(
-                        cwd,
-                        transport,
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to stop Codex transport during shutdown: %s", exc)
-                    continue
-                if not detached:
-                    continue
-                self._retire_model_hub_process_scope(cwd)
-                stopped += 1
+    async def shutdown_runtime(self, settle_reason: str | None = None) -> None:
+        """Stop every app-server now: service shutdown, probe teardown, or disable.
 
+        Disabling the backend is an explicit, user-visible stop: the core has
+        removed this agent from routing and passes ``settle_reason``. Every
+        forced stop then settles the turns and Activities bound to its
+        generation with that reason before it kills the process, so this
+        agent's work is settled even if the core's own interrupt failed, and
+        no other agent's work is touched. Service shutdown and probe teardown
+        pass none and show no notice. A turn that captured the agent before
+        the routing change fails visibly and starts no process.
+
+        Raises while any app-server survives: nothing else owns it once the
+        agent leaves routing, so the caller keeps the teardown and retries
+        it. A retry stops every survivor again and settles whatever is still
+        bound to it.
+        """
+        await self.adopt_model_hub_catalog()
+        self._session_last_activity.clear()
+        self._shutting_down = True
+        self._shutdown_settle_reason = settle_reason
+        stopped = sum(len(runtimes) for runtimes in self._runtimes.values())
+        for unit in list(self._units.values()):
+            # A forced stop that fails leaves its generation attached; the
+            # pass below retries every process still running, attached or not.
+            await unit.stop_all(force=True)
+        failure: Exception | None = None
+        try:
+            await self._end_unattached_runtimes(settle_reason=settle_reason)
+        except Exception as exc:
+            failure = exc
+
+        # Shutdown ends the whole runtime: every process was just asked to end,
+        # so all Session state goes with it, including any bindings. A Session
+        # still bound to a survivor keeps its state, so a retry can settle it.
         for base_session_id in list(self._session_mgr.all_base_sessions()):
+            if self._generation_for_session(base_session_id) is not None:
+                continue
             session_key = self._session_mgr.get_session_key(base_session_id)
             if session_key:
                 self.sessions.clear_agent_session_mapping(session_key, self.name, base_session_id)
+            self._session_generations.pop(base_session_id, None)
             self._session_mgr.clear(base_session_id)
             self._turn_registry.clear_session(base_session_id)
             self._clear_thread_developer_instructions(base_session_id)
 
         self._session_locks.clear()
-        self._transport_locks.clear()
+        survivors = sum(len(runtimes) for runtimes in self._runtimes.values())
+        if failure is not None or survivors:
+            raise RuntimeError(f"{survivors} Codex app-server(s) survived shutdown") from failure
         logger.info("Stopped Codex runtime across %d transport(s)", stopped)
 
     def _bind_runtime_agent_session_id(self, request: AgentRequest) -> None:
@@ -1508,18 +1752,18 @@ class CodexAgent(BaseAgent):
                 or "en"
             )
             message = i18n_t("error.codexPromptRefreshUnavailable", language)
+        elif isinstance(error, RuntimeUnitStopping):
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            message = i18n_t("error.agentRuntimeRetired", language, agent=i18n_t("backend.codex", language))
         elif isinstance(error, CodexForkBoundaryUnavailableError):
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
                 or "en"
             )
             message = i18n_t("error.codexForkBoundaryUnavailable", language)
-        elif isinstance(error, CodexRuntimeChangeBlockedError):
-            language = str(
-                getattr(getattr(self.controller, "config", None), "language", "en")
-                or "en"
-            )
-            message = i18n_t("error.codexRuntimeChangeBlocked", language)
         else:
             message = f"Codex error: {error}"
 
@@ -1537,10 +1781,19 @@ class CodexAgent(BaseAgent):
                 message = f"{message} {i18n_t('error.agentMemoryLimit', language)}"
         return f"❌ {message}"
 
-    def _runtime_ownership_target_for_cwd(
+    def _runtime_ownership_target_for_generation(
         self,
-        cwd: str,
+        generation: _CodexGeneration,
     ) -> RuntimeResourceTarget | None:
+        """Durable ownership scope of one generation.
+
+        The current generation answers for every durable Session of its
+        directory, including ones not yet bound in memory. A retiring one
+        answers only for the Sessions whose threads it still holds; work that
+        moved to a newer generation must not keep it alive.
+        """
+        runtime = generation.runtime
+        cwd = runtime.cwd
         sessions_for_cwd = getattr(self._session_mgr, "sessions_for_cwd", None)
         all_base_sessions = getattr(self._session_mgr, "all_base_sessions", None)
         get_cwd = getattr(self._session_mgr, "get_cwd", None)
@@ -1562,8 +1815,15 @@ class CodexAgent(BaseAgent):
         ):
             return None
 
+        current = not generation.retiring and not generation.stopped
+        # A Session cleared from the manager no longer owns anything here.
+        session_ids = (
+            sessions_for_cwd(cwd)
+            if current
+            else [base_session_id for base_session_id in runtime.threads if get_cwd(base_session_id)]
+        )
         bindings: list[RuntimeSessionBinding] = []
-        for base_session_id in sessions_for_cwd(cwd):
+        for base_session_id in session_ids:
             session_key = str(get_session_key(base_session_id) or "").strip()
             agent_session_id = str(
                 get_agent_session_id(base_session_id) or ""
@@ -1603,176 +1863,90 @@ class CodexAgent(BaseAgent):
         )
         return RuntimeResourceTarget(
             backend="codex",
-            resource_key=cwd,
+            resource_key=self._generation_resource_key(runtime),
             bindings=tuple(bindings),
             known_activity_runtime_keys=known_activity_keys,
             known_fallback_route_keys=known_route_keys,
-            durable_session_workdir=cwd,
+            durable_session_workdir=cwd if current else None,
         )
 
-    def _runtime_ownership_snapshot_for_cwd(self, cwd: str):
-        target = self._runtime_ownership_target_for_cwd(cwd)
-        provider = getattr(getattr(self, "controller", None), "runtime_ownership", None)
-        snapshot = getattr(provider, "snapshot", None)
-        if target is None or not callable(snapshot):
-            logger.error(
-                "Codex runtime ownership mapping unavailable for cwd=%s",
-                cwd,
-            )
-            return None
-        result = snapshot(target)
-        wake_runtime_ownership(self.controller, result)
-        return result
+    def _generation_resource_key(self, runtime: _CodexRuntime) -> str:
+        """One generation's activation and ownership key.
 
-    async def _runtime_ownership_snapshots_for_cwds(
+        A disabled agent's retried teardown can hold its generations while a
+        re-enabled agent numbers its own from 1 in the same directory, so the
+        key names the agent instance as well.
+        """
+        return f"{runtime.cwd}#{self._instance_serial}.{runtime.serial}"
+
+    async def _ownership_snapshots(
         self,
-        cwds: tuple[str, ...],
+        generations: Sequence[_CodexGeneration],
     ) -> tuple[Any, ...] | None:
         """Read one backend snapshot batch without blocking the controller loop."""
 
-        if not cwds:
+        if not generations:
             return ()
         provider = getattr(getattr(self, "controller", None), "runtime_ownership", None)
-        snapshot_many = getattr(provider, "snapshot_many", None)
-        targets = tuple(self._runtime_ownership_target_for_cwd(cwd) for cwd in cwds)
-        if callable(snapshot_many) and all(target is not None for target in targets):
-            snapshots = await asyncio.to_thread(snapshot_many, targets)
-            for snapshot in snapshots:
-                wake_runtime_ownership(self.controller, snapshot)
-            return tuple(snapshots)
-
-        # Tests and legacy embedders can still provide the older single-target
-        # probe. Keep it off the event loop; production SQLite providers take the
-        # batched path above.
-        snapshots = await asyncio.gather(
-            *(
-                asyncio.to_thread(self._runtime_ownership_snapshot_for_cwd, cwd)
-                for cwd in cwds
-            )
+        targets = tuple(
+            self._runtime_ownership_target_for_generation(generation)
+            for generation in generations
         )
-        if any(snapshot is None for snapshot in snapshots):
+        if any(target is None for target in targets):
+            logger.error("Codex runtime ownership mapping unavailable")
             return None
-        return tuple(snapshots)
+        snapshot_many = getattr(provider, "snapshot_many", None)
+        if callable(snapshot_many):
+            snapshots = tuple(await asyncio.to_thread(snapshot_many, targets))
+        else:
+            snapshot = getattr(provider, "snapshot", None)
+            if not callable(snapshot):
+                logger.error("Codex runtime ownership provider unavailable")
+                return None
+            snapshots = tuple(
+                await asyncio.gather(*(asyncio.to_thread(snapshot, target) for target in targets))
+            )
+        if any(item is None for item in snapshots):
+            return None
+        for item in snapshots:
+            wake_runtime_ownership(self.controller, item)
+        return snapshots
 
-    async def _runtime_ownership_snapshot_for_cwd_async(self, cwd: str):
-        snapshots = await self._runtime_ownership_snapshots_for_cwds((cwd,))
+    async def _ownership_snapshot(self, generation: _CodexGeneration):
+        snapshots = await self._ownership_snapshots((generation,))
         return snapshots[0] if snapshots else None
 
     async def runtime_ownership_snapshots(self) -> tuple[Any, ...] | None:
-        return await self._runtime_ownership_snapshots_for_cwds(tuple(self._transports))
+        return await self._ownership_snapshots(self._live_generations())
 
-    @staticmethod
-    def _transport_activation_identity(
-        transport: CodexTransport | None,
-    ) -> RuntimeActivationIdentity | None:
-        identity = getattr(transport, "_vibe_runtime_activation_identity", None)
-        return identity if isinstance(identity, RuntimeActivationIdentity) else None
-
-    def _attach_transport_activation(
+    def _attach_runtime_activation(
         self,
-        cwd: str,
-        transport: CodexTransport,
+        runtime: _CodexRuntime,
     ) -> RuntimeActivationIdentity | None:
         if not getattr(self, "_registered_runtime", True):
             return None
         registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
         if registry is None:
             return None
-        existing = self._transport_activation_identity(transport)
-        if existing is not None and registry.is_current(existing):
-            return existing
-        identity = registry.attach(self.name, cwd)
-        setattr(transport, "_vibe_runtime_activation_identity", identity)
-        return identity
-
-    def _reserve_transport_retirement(
-        self,
-        cwd: str,
-        transport: CodexTransport,
-    ) -> tuple[Any, Any] | None:
-        if self._transports.get(cwd) is not transport:
-            return None
-        if not getattr(self, "_registered_runtime", True):
-            return (None, None)
-        registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
-        if registry is None:
-            return (None, None)
-        identity = self._transport_activation_identity(transport)
-        if identity is None:
-            identity = self._attach_transport_activation(cwd, transport)
-        if identity is None:
-            return None
-        reservation = registry.reserve_retirement(identity)
-        return (registry, reservation) if reservation is not None else None
-
-    @staticmethod
-    def _finish_transport_retirement(
-        reserved: tuple[Any, Any],
-        *,
-        retire: bool,
-    ) -> bool:
-        registry, reservation = reserved
-        if registry is None:
-            return True
-        return bool(registry.finish_retirement(reservation, retire=retire))
-
-    def _detach_transport_bookkeeping(
-        self,
-        cwd: str,
-        transport: CodexTransport,
-    ) -> bool:
-        """Remove only the exact transport after its process has stopped."""
-        if self._transports.get(cwd) is not transport:
-            return False
-        self._transports.pop(cwd, None)
-        if hasattr(self, "_transport_last_activity"):
-            self._transport_last_activity.pop(cwd, None)
-        self._cwd_inodes().pop(cwd, None)
-        return True
-
-    async def _stop_and_detach_transport_generation(
-        self,
-        cwd: str,
-        transport: CodexTransport,
-        *,
-        final_predicate: Callable[[], Awaitable[bool]] | None = None,
-        require_process_exit: bool = False,
-    ) -> bool:
-        """Stop one exact generation, retaining it if validation or stop fails."""
-
-        reserved = self._reserve_transport_retirement(cwd, transport)
-        if reserved is None:
-            return False
-        try:
-            if final_predicate is not None and not await final_predicate():
-                self._finish_transport_retirement(reserved, retire=False)
-                return False
-            process = getattr(transport, "_process", None)
-            await transport.stop()
-            if require_process_exit and process is not None and process.returncode is None:
-                await asyncio.wait_for(process.wait(), timeout=5)
-                if process.returncode is None:
-                    raise RuntimeError("Codex native process did not exit")
-        except BaseException:
-            self._finish_transport_retirement(reserved, retire=False)
-            raise
-        if not self._finish_transport_retirement(reserved, retire=True):
-            raise RuntimeError(
-                f"Codex transport retirement lost its exact generation for cwd={cwd}"
-            )
-        return self._detach_transport_bookkeeping(cwd, transport)
+        return registry.attach(self.name, self._generation_resource_key(runtime))
 
     def runtime_activation_identity_for_request(
         self,
         request: Any,
     ) -> RuntimeActivationIdentity | None:
+        base_session_id = str(getattr(request, "base_session_id", "") or "").strip()
+        if base_session_id:
+            generation = self._generation_for_session(base_session_id)
+            if generation is not None:
+                return generation.runtime.activation
         cwd = str(getattr(request, "working_path", "") or "").strip()
         if not cwd:
             metadata = getattr(request, "metadata", None)
             if isinstance(metadata, dict):
                 cwd = str(metadata.get("session_workdir") or "").strip()
         if cwd:
-            return self._transport_activation_identity(self._transports.get(cwd))
+            generation = self._current_generation(cwd)
+            return generation.runtime.activation if generation is not None else None
 
         session_key = str(getattr(request, "session_key", "") or "").strip()
         if not session_key:
@@ -1782,18 +1956,18 @@ class CodexAgent(BaseAgent):
         if not callable(get_sessions) or not callable(get_cwd):
             raise ValueError("Codex Session route mapping is unavailable")
 
-        live_identities: dict[str, RuntimeActivationIdentity] = {}
+        live_identities: dict[int, RuntimeActivationIdentity] = {}
         for base_session_id in get_sessions(session_key):
-            mapped_cwd = str(get_cwd(base_session_id) or "").strip()
-            if not mapped_cwd or mapped_cwd in live_identities:
+            generation = self._generation_for_session(base_session_id)
+            if generation is None:
+                mapped_cwd = str(get_cwd(base_session_id) or "").strip()
+                generation = self._current_generation(mapped_cwd) if mapped_cwd else None
+            if generation is None:
                 continue
-            transport = self._transports.get(mapped_cwd)
-            if transport is None:
-                continue
-            identity = self._transport_activation_identity(transport)
+            identity = generation.runtime.activation
             if identity is None:
                 raise ValueError("Codex runtime generation is not attached")
-            live_identities[mapped_cwd] = identity
+            live_identities[id(generation)] = identity
 
         if len(live_identities) > 1:
             raise ValueError("multiple live Codex runtime resources match Session route")
@@ -1812,10 +1986,12 @@ class CodexAgent(BaseAgent):
         bound_workdir = str(self._session_mgr.get_cwd(normalized_anchor) or "").strip()
         if bound_workdir and bound_workdir != normalized_workdir:
             raise ValueError("Codex Session binding changed workdir")
-        transport = self._transports.get(normalized_workdir)
-        if transport is None:
+        generation = self._generation_for_session(normalized_anchor)
+        if generation is None:
+            generation = self._current_generation(normalized_workdir)
+        if generation is None:
             return None
-        identity = self._transport_activation_identity(transport)
+        identity = generation.runtime.activation
         if identity is None:
             raise ValueError("Codex runtime generation is not attached")
         return identity
@@ -1828,22 +2004,833 @@ class CodexAgent(BaseAgent):
     ) -> None:
         if request is None:
             return
-        self._touch_transport_activity(request.working_path)
+        generation = self._generation_for_session(request.base_session_id)
+        if generation is not None:
+            self._touch_runtime(generation.runtime)
         self._touch_session_activity(request.base_session_id)
 
-    def _stuck_active_sessions_for_cwd(
+    # ------------------------------------------------------------------
+    # Runtime generations
+    # ------------------------------------------------------------------
+
+    def _unit(self, cwd: str) -> RuntimeGenerationSet[CodexLaunchSpec, _CodexRuntime]:
+        unit = self._units.get(cwd)
+        if unit is None:
+            if self._shutting_down:
+                # Every existing unit already refuses admission; a new
+                # directory must not start a process nobody would stop.
+                raise RuntimeUnitStopping("runtime unit is stopping")
+            unit = RuntimeGenerationSet(
+                start=self._start_generation,
+                stop=self._stop_generation,
+            )
+            self._units[cwd] = unit
+        return unit
+
+    def _current_generation(self, cwd: str) -> _CodexGeneration | None:
+        unit = self._units.get(cwd)
+        return unit.current if unit is not None else None
+
+    def _live_generations(self) -> tuple[_CodexGeneration, ...]:
+        return tuple(
+            generation
+            for unit in self._units.values()
+            for generation in unit.generations
+        )
+
+    def _generation_for_session(self, base_session_id: str) -> _CodexGeneration | None:
+        """The live generation holding this Session's thread, if any."""
+        generation = self._session_generations.get(base_session_id)
+        if generation is not None and generation.runtime.ended:
+            self._forget_stale_session(base_session_id)
+            return None
+        return generation
+
+    def _generation_holding_thread(self, thread_id: str) -> _CodexGeneration | None:
+        """The live generation that has ``thread_id`` loaded, if any."""
+        for generation in self._session_generations.values():
+            if not generation.runtime.ended and thread_id in generation.runtime.threads.values():
+                return generation
+        return None
+
+    def transport_for_session(self, base_session_id: str) -> CodexTransport | None:
+        """The app-server process serving this Session's thread, if one is live.
+
+        A pure read: the Running Agents snapshot calls it from a worker thread.
+        """
+        generation = self._session_generations.get(base_session_id)
+        if generation is None or generation.runtime.ended:
+            return None
+        return generation.runtime.transport
+
+    def _generation_running(self, transport: CodexTransport) -> _CodexGeneration | None:
+        """The attached generation whose process is ``transport``."""
+        for unit in self._units.values():
+            for generation in unit.generations:
+                if generation.runtime.transport is transport:
+                    return generation
+        return None
+
+    def _bind_session_thread(
+        self,
+        generation: _CodexGeneration,
+        base_session_id: str,
+        thread_id: str,
+    ) -> None:
+        previous = self._session_generations.get(base_session_id)
+        if previous is not None and previous is not generation:
+            previous.runtime.threads.pop(base_session_id, None)
+        generation.runtime.threads[base_session_id] = thread_id
+        self._session_generations[base_session_id] = generation
+
+    def _unbind_session(self, base_session_id: str, runtime: _CodexRuntime) -> None:
+        """Drop a Session's binding to ``runtime``; its next turn resumes the thread.
+
+        Only two owners may drop a live binding: the process ending
+        (``_forget_runtime_sessions``) and the thread being released
+        (``_release_session_thread``). Codex lets one process at a time hold a
+        thread, so forgetting a binding any other way would strand the thread's
+        writer lock in a process Avibe no longer routes to.
+        """
+        runtime.threads.pop(base_session_id, None)
+        generation = self._session_generations.get(base_session_id)
+        if generation is not None and generation.runtime is not runtime:
+            return
+        self._session_generations.pop(base_session_id, None)
+        self._session_mgr.invalidate_thread(base_session_id)
+        self._clear_thread_developer_instructions(base_session_id)
+
+    def _forget_stale_session(self, base_session_id: str) -> bool:
+        """Forget a Session's thread id when no live process holds that thread.
+
+        A Session still bound to a live process is left alone and False is
+        returned: only that process ending or the thread's release unbinds it.
+        """
+        generation = self._session_generations.get(base_session_id)
+        if generation is not None and not generation.runtime.ended:
+            return False
+        if generation is not None:
+            self._unbind_session(base_session_id, generation.runtime)
+            return True
+        self._session_mgr.invalidate_thread(base_session_id)
+        self._clear_thread_developer_instructions(base_session_id)
+        return True
+
+    def _session_has_turn(self, base_session_id: str) -> bool:
+        if self._turn_registry.get_active_turn(base_session_id):
+            return True
+        has_pending_turn_start = getattr(self._turn_registry, "has_pending_turn_start", None)
+        return bool(callable(has_pending_turn_start) and has_pending_turn_start(base_session_id))
+
+    def _launch_inputs(self, cwd: str, *, hub_config: Any = None) -> _LaunchInputs:
+        """Read every mutable launch input for ``cwd`` in one step, with no await.
+
+        The directory is created first, so its inode is the one the process
+        will run in.
+        """
+        os.makedirs(cwd, exist_ok=True)
+        codex_config = self.codex_config
+        binary = codex_config.binary
+        env = dict(self._codex_runtime_environment())
+        codex_home = env.get("CODEX_HOME") or os.path.join(
+            env.get("HOME") or os.path.expanduser("~"),
+            ".codex",
+        )
+        return _LaunchInputs(
+            hub_config=hub_config,
+            binary=binary,
+            extra_args=tuple(codex_config.extra_args),
+            env=env,
+            identity={
+                "epoch": self._runtime_epoch,
+                "binary": self._binary_identity(binary, env),
+                "credential": codex_credential_identity(Path(codex_home).expanduser()),
+                # A directory deleted and re-created under the same path leaves
+                # a running app-server in a dead inode (#561).
+                "cwd": [cwd, self._cwd_inode(cwd)],
+            },
+        )
+
+    @staticmethod
+    def _launch_spec_digest(
+        inputs: _LaunchInputs,
+        *,
+        args: Sequence[str],
+        env: Mapping[str, str],
+        catalog_path: str | None = None,
+    ) -> str:
+        identity = {
+            **inputs.identity,
+            "argv": [*args, *inputs.extra_args],
+            "catalog": catalog_path,
+            # Digest only: the environment carries the Hub gateway token.
+            "env": hashlib.sha256(
+                json.dumps(sorted(env.items()), separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+        return hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    @staticmethod
+    def _binary_identity(binary: str, env: Mapping[str, str]) -> dict[str, Any]:
+        """The executable a launch would run; any reinstall changes its stat."""
+        resolved = shutil.which(binary, path=env.get("PATH")) or binary
+        real = os.path.realpath(resolved)
+        try:
+            st = os.stat(real)
+        except OSError:
+            return {"configured": binary, "resolved": real, "stat": None}
+        return {
+            "configured": binary,
+            "resolved": real,
+            "stat": [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns],
+        }
+
+    async def _launch_spec(
         self,
         cwd: str,
+        launch: "ModelHubLaunch | None" = None,
+        *,
+        inputs: _LaunchInputs | None = None,
+    ) -> CodexLaunchSpec:
+        """Every process-level input an app-server for ``cwd`` needs, from one load.
+
+        ``inputs`` is the turn's admission snapshot. A caller outside a turn
+        passes none, and one is taken here before anything awaits.
+        """
+        if inputs is None:
+            inputs = self._launch_inputs(cwd)
+        env = dict(inputs.env)
+        args: list[str] = []
+        catalog: CodexHubCatalog | None = None
+        if launch is not None and launch.channel == "hub":
+            from modules.agents.model_hub import build_codex_hub_launch
+
+            catalog = (await self.prepare_model_hub_runtime(inputs.hub_config, inputs=inputs)).retain()
+            try:
+                args, hub_env = build_codex_hub_launch(
+                    [],
+                    env,
+                    launch,
+                    model_catalog_path=catalog.path,
+                )
+            except BaseException:
+                catalog.close()
+                raise
+            # A launch without Hub settings keeps the managed environment.
+            if hub_env is not None:
+                env = hub_env
+        digest = self._launch_spec_digest(
+            inputs,
+            args=args,
+            env=env,
+            catalog_path=str(catalog.path) if catalog is not None else None,
+        )
+        return CodexLaunchSpec(
+            digest=digest,
+            cwd=cwd,
+            binary=inputs.binary,
+            args=tuple(args),
+            extra_args=inputs.extra_args,
+            env=env,
+            hub=catalog is not None,
+            catalog=catalog,
+        )
+
+    async def _acquire_generation(
+        self,
+        cwd: str,
+        launch: "ModelHubLaunch | None" = None,
+        *,
+        inputs: _LaunchInputs | None = None,
+    ) -> RuntimeBinding[CodexLaunchSpec, _CodexRuntime]:
+        """Bind a new turn to the generation serving this turn's launch spec.
+
+        A turn passes its admission snapshot as ``inputs``; work outside a
+        turn passes none, and one is taken here before anything awaits.
+        """
+        if inputs is None:
+            inputs = self._launch_inputs(cwd)
+        unit = self._unit(cwd)
+        await self._retire_unusable_generations(unit)
+        spec = await self._launch_spec(cwd, launch, inputs=inputs)
+        try:
+            binding = await unit.acquire(spec)
+            if not binding.generation.runtime.transport.is_initialized:
+                # It became unusable while the spec was prepared.
+                await binding.release()
+                await self._retire_unusable_generations(unit)
+                binding = await unit.acquire(spec)
+            return binding
+        finally:
+            spec.close()
+
+    async def _bind_any_generation(self, cwd: str) -> RuntimeBinding[CodexLaunchSpec, _CodexRuntime]:
+        """Bind read-only work to any live generation, starting one only if none is."""
+        unit = self._unit(cwd)
+        for generation in reversed(unit.generations):
+            if generation.runtime.transport.is_initialized:
+                try:
+                    return await unit.bind(generation)
+                except RuntimeError:
+                    continue
+        return await self._acquire_generation(cwd)
+
+    async def _retire_unusable_generations(
+        self,
+        unit: RuntimeGenerationSet[CodexLaunchSpec, _CodexRuntime],
+    ) -> None:
+        """New turns must not bind to a process that can no longer serve.
+
+        Admission may promote a retiring generation whose spec matches, so
+        every attached generation is checked, not only the current one.
+        """
+        for generation in unit.generations:
+            if generation.closed or generation.runtime.transport.is_initialized:
+                continue
+            # Exited, or alive but unusable after a request timed out. New
+            # turns get a fresh process; this one stops once nothing needs it,
+            # which for an exited process is as soon as no durable owner
+            # outlives it.
+            logger.warning(
+                "Retiring unusable Codex app-server generation %s for cwd=%s",
+                generation.runtime.serial,
+                generation.runtime.cwd,
+            )
+            await unit.retire(generation)
+
+    async def _start_generation(self, spec: CodexLaunchSpec) -> _CodexRuntime:
+        transport = CodexTransport(
+            binary=spec.binary,
+            cwd=spec.cwd,
+            extra_args=list(spec.extra_args),
+            runtime_args=list(spec.args),
+            runtime_env=dict(spec.env),
+            model_hub_catalog=spec.catalog,
+        )
+        runtime = _CodexRuntime(
+            cwd=spec.cwd,
+            serial=next(self._generation_serials),
+            transport=transport,
+            hub=spec.hub,
+        )
+        transport.on_notification(
+            lambda method, params: self._on_notification(method, params, runtime=runtime)
+        )
+        transport.on_server_request(
+            lambda req_id, method, params: self._on_server_request(
+                runtime.cwd, req_id, method, params
+            )
+        )
+        # Tracked from before the spawn, so a starting Hub child keeps the
+        # directory's gateway credential and a failed start is still owned.
+        self._runtimes.setdefault(runtime.cwd, set()).add(runtime)
+        try:
+            await transport.start()
+            governor_from_controller(self.controller).apply_to_pid(
+                getattr(transport, "pid", None),
+                label="codex app-server",
+            )
+            runtime.activation = self._attach_runtime_activation(runtime)
+        except BaseException:
+            # No generation will hold this process, whatever failed: a start
+            # whose own cleanup failed, or setup after a successful spawn.
+            if self._process_exited(transport):
+                runtime.ended = True
+                self._runtimes.get(runtime.cwd, set()).discard(runtime)
+                self._retire_hub_scope_after(runtime)
+            else:
+                # The sweep, or shutdown, stops it.
+                runtime.orphaned = True
+            raise
+        logger.info(
+            "Started Codex app-server generation %s for cwd=%s",
+            runtime.serial,
+            runtime.cwd,
+        )
+        return runtime
+
+    async def _generation_drained(self, generation: _CodexGeneration) -> bool:
+        """Whether no turn and no durable owner still needs this process."""
+        runtime = generation.runtime
+        # A turn registered on an exited process can no longer progress there.
+        # A closed reader alone is not exit: the child may still be running it.
+        dead = self._process_exited(runtime.transport)
+        if not dead and any(
+            self._session_has_turn(base_session_id) for base_session_id in runtime.threads
+        ):
+            return False
+        if not dead:
+            # An Activity this process started keeps it, though no Session
+            # binding names it after its turn ended or its Session moved.
+            service = getattr(getattr(self, "controller", None), "agent_service", None)
+            holds = getattr(service, "activation_has_activities", None)
+            if callable(holds) and holds(self.name, runtime.activation):
+                return False
+        ownership = await self._ownership_snapshot(generation)
+        if ownership is None:
+            return False
+        if dead:
+            return not ownership.blocks_dead_transport_replacement
+        return not ownership.blocks_transport_replacement
+
+    async def _stop_generation(self, generation: _CodexGeneration, force: bool) -> bool:
+        """Stop one generation the shared core has detached from its unit.
+
+        A graceful stop declines while a turn or a durable owner still needs
+        the process; the core keeps it and asks again later. A forced stop
+        settles that work with the runtime-update notice and ends the process.
+        A failure propagates, so the core retries and the Sessions stay bound
+        until the process is really gone.
+        """
+        runtime = generation.runtime
+        # A child whose reader closed can never report its work again, so it
+        # is ended like a forced stop instead of waiting for that work.
+        broken = not self._process_exited(runtime.transport) and not getattr(runtime.transport, "is_alive", True)
+        kill = force or broken
+        if not kill and not await self._generation_drained(generation):
+            return False
+        # Every adapter-initiated kill settles its bound work through
+        # ``_end_bound_work`` with the runtime-update notice. A shutdown
+        # settles with its own reason: a disable's, or none at service
+        # shutdown, whose restart recovery reports interrupted work.
+        if not kill:
+            settle_reason = None
+        elif self._shutting_down:
+            settle_reason = self._shutdown_settle_reason
+        else:
+            settle_reason = SETTLED_BY_BACKEND_REFRESH
+        stopped = await self._stop_runtime(
+            runtime,
+            # The decision is repeated inside the fence, where no owner can
+            # commit to this generation any longer.
+            still_drained=None if kill else lambda: self._generation_drained(generation),
+            settle_reason=settle_reason,
+        )
+        if not stopped:
+            return False
+        self._forget_runtime_sessions(runtime)
+        logger.info(
+            "Stopped Codex app-server generation %s for cwd=%s%s",
+            runtime.serial,
+            runtime.cwd,
+            " (forced)" if force else "",
+        )
+        return True
+
+    async def _end_bound_work(self, runtime: _CodexRuntime, reason: str) -> None:
+        """Settle a force-stopped generation's work with ``reason``'s notice.
+
+        Its bound Sessions' registered turns and every Activity started under
+        its activation settle here. An Activity can outlive its foreground turn
+        or its Session's thread move and still keep this process owned, so
+        Activities are found by activation, never by Session. A turn still
+        starting holds the unit's binding inside ``handle_message`` and fails
+        or retries on its own once its process is gone. Only this agent's work
+        settles: after a re-enable, another agent can run the same Session in
+        the same directory. Settling again finds nothing left, so a retried
+        teardown may call this freely.
+        """
+        sessions = set(runtime.threads)
+        service = getattr(getattr(self, "controller", None), "agent_service", None)
+        # A turn whose gate a later turn of its Session already took was settled
+        # when that gate was released, for example by the liveness monitor after
+        # the reader closed. Settling its Session now would cancel the later turn.
+        still_owns_gate = getattr(service, "emit_matches_runtime_turn", lambda _context: True)
+        busy = set()
+        for base_session_id in sessions:
+            turn_id = self._turn_registry.get_active_turn(base_session_id)
+            request = self._turn_registry.get_request_for_turn(turn_id) if turn_id else None
+            if turn_id and (request is None or still_owns_gate(request.context)):
+                busy.add(base_session_id)
+        logger.warning(
+            "Force-stopping Codex app-server generation %s for cwd=%s with %d running turn(s)",
+            runtime.serial,
+            runtime.cwd,
+            len(busy),
+        )
+        end_work = getattr(service, "force_end_runtime_work", None)
+        if callable(end_work):
+            await end_work(
+                self.name,
+                base_session_ids=busy,
+                activation_identities={runtime.activation},
+                reason=reason,
+                agent=self,
+            )
+
+    async def _stop_runtime(
+        self,
+        runtime: _CodexRuntime,
+        *,
+        still_drained: Callable[[], Awaitable[bool]] | None = None,
+        settle_reason: str | None = None,
+        require_process_exit: bool = False,
+    ) -> bool:
+        """Tear one process down inside its activation fence.
+
+        The retirement is reserved before anything awaits, so no durable owner
+        commits to the generation while its final drained check runs, its bound
+        work settles (with ``settle_reason``), or its process stops. A failed check or
+        teardown aborts the reservation. Returns False when ``still_drained``
+        declined.
+        """
+        registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
+        reservation = (
+            registry.reserve_retirement(runtime.activation)
+            if registry is not None and runtime.activation is not None
+            else None
+        )
+        transport = runtime.transport
+        process = getattr(transport, "_process", None)
+        # A Session moving off this process meanwhile waits for the teardown,
+        # so its next turn cannot be among the work this teardown settles.
+        teardown = runtime.teardown = asyncio.get_running_loop().create_future()
+        try:
+            if still_drained is not None and not await still_drained():
+                if reservation is not None:
+                    registry.finish_retirement(reservation, retire=False)
+                return False
+            if settle_reason is not None:
+                await self._end_bound_work(runtime, settle_reason)
+            await transport.stop()
+            if require_process_exit and process is not None and process.returncode is None:
+                await asyncio.wait_for(process.wait(), timeout=5)
+                if process.returncode is None:
+                    raise RuntimeError("Codex native process did not exit")
+        except BaseException:
+            if reservation is not None:
+                registry.finish_retirement(reservation, retire=False)
+            raise
+        finally:
+            runtime.teardown = None
+            teardown.set_result(None)
+        runtime.ended = True
+        runtime.orphaned = False
+        self._runtimes.get(runtime.cwd, set()).discard(runtime)
+        if reservation is not None:
+            registry.finish_retirement(reservation, retire=True)
+        return True
+
+    def _forget_runtime_sessions(self, runtime: _CodexRuntime) -> None:
+        """Unbind every Session of a stopped generation and release its Hub scope."""
+        for base_session_id in list(runtime.threads):
+            self._unbind_session(base_session_id, runtime)
+            self._turn_registry.clear_session(base_session_id)
+        self._retire_hub_scope_after(runtime)
+
+    def _retire_hub_scope_after(self, runtime: _CodexRuntime) -> None:
+        """Revoke the directory's gateway credential once its last Hub process is gone.
+
+        Every Hub generation of a directory, a starting one included, shares
+        one request-scoped credential; only the last one may revoke it.
+        """
+        if runtime.hub and not any(other.hub for other in self._runtimes.get(runtime.cwd, ())):
+            self._retire_model_hub_process_scope(runtime.cwd)
+
+    def _generation_has_live_work(self, generation: _CodexGeneration) -> bool:
+        runtime = generation.runtime
+        # A turn registered on an exited process can no longer progress there.
+        return bool(generation.bindings) or (
+            not self._process_exited(runtime.transport)
+            and any(self._session_has_turn(base_session_id) for base_session_id in runtime.threads)
+        )
+
+    async def _stop_generations_now(
+        self,
+        unit: RuntimeGenerationSet[CodexLaunchSpec, _CodexRuntime],
+        generations: Sequence[_CodexGeneration],
+        *,
+        require_process_exit: bool = False,
+        settle_reason: str | None,
+    ) -> None:
+        """Stop generations outside the core's own decisions.
+
+        Every generation is detached before the first stop awaits, so a turn
+        arriving meanwhile starts its own generation instead of binding to one
+        about to be killed. With ``settle_reason``, each generation's bound
+        work is settled through ``_end_bound_work`` inside its activation
+        fence; callers pass None only when that work was already settled
+        upstream.
+        A process whose stop fails, or that a cancellation left unstopped, is
+        adopted back as retiring with its Sessions still bound, so a later
+        call or sweep can retry.
+        """
+        pending = list(generations)
+        for generation in pending:
+            await unit.discard(generation)  # synchronous bookkeeping
+        failure: BaseException | None = None
+        try:
+            while pending:
+                generation = pending[0]
+                try:
+                    await self._stop_runtime(
+                        generation.runtime, settle_reason=settle_reason, require_process_exit=require_process_exit
+                    )
+                except Exception as exc:
+                    failure = failure or exc
+                    await self._readopt(unit, generation)
+                else:
+                    self._forget_runtime_sessions(generation.runtime)
+                pending.pop(0)
+        finally:
+            for generation in pending:
+                await self._readopt(unit, generation)
+        if failure is not None:
+            raise failure
+
+    async def _readopt(
+        self,
+        unit: RuntimeGenerationSet[CodexLaunchSpec, _CodexRuntime],
+        generation: _CodexGeneration,
+    ) -> None:
+        """Attach a detached generation whose process still runs again, as retiring."""
+        runtime = generation.runtime
+        if runtime.ended:
+            return
+        try:
+            restored = await unit.adopt(generation.spec, runtime, current=False)
+        except RuntimeUnitStopping:
+            return  # Shutdown ends it through ``_runtimes``.
+        for base_session_id, bound in list(self._session_generations.items()):
+            if bound is generation:
+                self._session_generations[base_session_id] = restored
+
+    async def _end_unattached_runtimes(
+        self,
+        *,
+        require_process_exit: bool = False,
+        settle_reason: str | None = None,
+    ) -> None:
+        """End every process this Agent still owns that no unit holds any longer.
+
+        Migration and the exclusive refresh have already settled the backend's
+        work. A shutdown passes its own reason: a disable's, or none.
+        """
+        failure: BaseException | None = None
+        for runtimes in list(self._runtimes.values()):
+            for runtime in list(runtimes):
+                try:
+                    await self._stop_runtime(
+                        runtime, require_process_exit=require_process_exit, settle_reason=settle_reason
+                    )
+                except Exception as exc:
+                    failure = failure or exc
+                    continue
+                self._forget_runtime_sessions(runtime)
+        if failure is not None:
+            raise failure
+
+    def _schedule_reap(self, cwd: str) -> None:
+        """Stop the directory's drained retiring generations without blocking the caller."""
+        unit = self._units.get(cwd)
+        if unit is None or not any(generation.retiring for generation in unit.generations):
+            return
+        task = asyncio.create_task(unit.reap())
+        self._reap_tasks.add(task)
+        task.add_done_callback(self._reap_done)
+
+    def _reap_done(self, task: asyncio.Task[None]) -> None:
+        self._reap_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("Codex runtime generation reap failed", exc_info=task.exception())
+
+    async def reap_runtime_generations(self) -> None:
+        """Stop every retiring generation whose bound work has drained.
+
+        The sweep also retires processes that exited or stopped answering, so
+        an idle directory's dead process and its Hub scope do not linger, and
+        retries the stop of every process no unit holds.
+        """
+        for unit in list(self._units.values()):
+            await self._retire_unusable_generations(unit)
+            await unit.reap()
+        for runtimes in list(self._runtimes.values()):
+            for runtime in [runtime for runtime in runtimes if runtime.orphaned]:
+                try:
+                    await self._stop_runtime(runtime)
+                except Exception:
+                    logger.warning("Failed to stop a Codex app-server no generation holds", exc_info=True)
+                    continue
+                self._forget_runtime_sessions(runtime)
+
+    async def _move_session_to(self, generation: _CodexGeneration, request: AgentRequest) -> None:
+        """Make sure this Session's thread can be loaded in ``generation``."""
+        base_session_id = request.base_session_id
+        bound = self._generation_for_session(base_session_id)
+        if bound is generation:
+            return
+        if bound is not None:
+            logger.info(
+                "Moving Codex session %s from app-server generation %s to %s for cwd=%s",
+                base_session_id,
+                bound.runtime.serial,
+                generation.runtime.serial,
+                generation.runtime.cwd,
+            )
+            await self._release_session_thread(bound, base_session_id)
+        else:
+            # Not loaded anywhere: forget any stale thread id so the next step resumes it.
+            self._forget_stale_session(base_session_id)
+        self._turn_registry.clear_session(base_session_id)
+
+    async def _release_session_thread(self, generation: _CodexGeneration, base_session_id: str) -> None:
+        """Have ``generation`` unload this Session's thread so another can resume it.
+
+        Codex lets only one process at a time hold a thread's writer lock. This
+        returns only on proof that the thread is released: ``thread/closed``
+        from that process, Codex reporting it not loaded there, or the process
+        having exited. Anything less raises
+        ``CodexThreadReleaseUnavailableError`` and leaves the binding in place.
+        """
+        runtime = generation.runtime
+        thread_id = runtime.threads.get(base_session_id) or self._session_mgr.get_thread_id(base_session_id)
+        transport = runtime.transport
+        teardown = runtime.teardown
+        if teardown is not None:
+            # A teardown is settling this process's work and then ends it;
+            # its exit releases the thread.
+            try:
+                await asyncio.wait_for(asyncio.shield(teardown), _THREAD_RELEASE_TIMEOUT_SECONDS)
+            except TimeoutError as exc:
+                raise CodexThreadReleaseUnavailableError(
+                    f"Codex app-server generation {runtime.serial} is still stopping"
+                ) from exc
+            bound = self._generation_for_session(base_session_id)
+            if bound is None or bound.runtime is not runtime:
+                return  # The stop unbound it.
+            # The teardown declined or failed, and adopting a survivor back
+            # rebinds the Session to the same process: release it there.
+        if thread_id and not runtime.ended and not self._process_exited(transport):
+            active_turn = self._turn_registry.get_active_turn(base_session_id)
+            if active_turn:
+                await self._interrupt_turn_before_move(transport, base_session_id, thread_id, active_turn)
+            released = asyncio.Event()
+            runtime.released_threads[thread_id] = released
+            try:
+                await self._await_thread_release(transport, thread_id, released)
+            finally:
+                runtime.released_threads.pop(thread_id, None)
+        self._unbind_session(base_session_id, runtime)
+        self._schedule_reap(runtime.cwd)
+
+    @staticmethod
+    def _process_exited(transport: CodexTransport) -> bool:
+        """Whether the app-server process is gone.
+
+        A closed stdout reader is no proof: the child can outlive it and keep
+        every thread's writer lock.
+        """
+        process = getattr(transport, "_process", None)
+        if process is None:
+            return not getattr(transport, "is_alive", True)
+        return process.returncode is not None
+
+    async def _await_thread_release(
+        self,
+        transport: CodexTransport,
+        thread_id: str,
+        released: asyncio.Event,
+    ) -> None:
+        unavailable = CodexThreadReleaseUnavailableError(f"Codex app-server did not release thread {thread_id}")
+        try:
+            response = await transport.send_request("thread/unsubscribe", {"threadId": thread_id})
+        except ConnectionError:
+            # The reader is gone, so only the process exit can release the thread.
+            response = None
+        except (CodexRPCError, TimeoutError) as exc:
+            raise unavailable from exc
+        if self._process_exited(transport) or (response is not None and response.get("status") == "notLoaded"):
+            return
+        process = getattr(transport, "_process", None)
+        waits = {asyncio.create_task(released.wait())}
+        if process is not None and process.returncode is None:
+            waits.add(asyncio.create_task(process.wait()))
+        try:
+            await asyncio.wait(waits, timeout=_THREAD_RELEASE_TIMEOUT_SECONDS, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in waits:
+                task.cancel()
+            await asyncio.gather(*waits, return_exceptions=True)
+        if released.is_set() or self._process_exited(transport):
+            return
+        if response is None or not transport.is_alive:
+            raise unavailable
+        try:
+            loaded = await transport.send_request("thread/loaded/list", {})
+        except Exception as exc:  # noqa: BLE001 - unknown is not released
+            if self._process_exited(transport):
+                return
+            raise unavailable from exc
+        if thread_id in (loaded.get("data") or ()):
+            raise unavailable
+
+    async def _interrupt_turn_before_move(
+        self,
+        transport: CodexTransport,
+        base_session_id: str,
+        thread_id: str,
+        active_turn: str,
+    ) -> None:
+        """Interrupt a Session's own running turn before its thread moves.
+
+        Unsubscribing ends this connection's view of the turn, so the turn is
+        settled here, and only once Codex accepted the interrupt or the turn or
+        its process already ended. A refused interrupt changes nothing.
+        """
+        try:
+            await transport.send_request(
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": active_turn},
+            )
+        except Exception as exc:
+            if self._turn_registry.get_active_turn(base_session_id) == active_turn and not self._process_exited(
+                transport
+            ):
+                raise CodexThreadReleaseUnavailableError(
+                    f"Codex app-server did not interrupt turn {active_turn} before moving thread {thread_id}"
+                ) from exc
+        interrupted_request = self._event_handler.clear_pending(active_turn)
+        if interrupted_request:
+            await self._remove_ack_reaction(interrupted_request)
+            # Its completion never arrives here. Release is token-guarded, so
+            # it cannot close the new turn.
+            self._event_handler._release_stream_turn(interrupted_request.context)
+        self._turn_registry.clear_session(base_session_id)
+
+    async def _open_session_thread(
+        self,
+        generation: _CodexGeneration,
+        request: AgentRequest,
+        *,
+        developer_instructions: Optional[str] = None,
+    ) -> str:
+        """Start, fork, or resume the Session's thread in ``generation``."""
+        try:
+            return await self._start_or_resume_thread(
+                generation.runtime.transport,
+                request,
+                developer_instructions=developer_instructions,
+            )
+        finally:
+            # A thread may be loaded even when a later step failed.
+            thread_id = self._session_mgr.get_thread_id(request.base_session_id)
+            if thread_id:
+                self._bind_session_thread(generation, request.base_session_id, thread_id)
+
+    def _stuck_active_sessions(
+        self,
+        runtime: _CodexRuntime,
         *,
         now: float,
         cap: float | None,
     ) -> list[str]:
+        """The Sessions on ``runtime`` whose turn made no progress within ``cap``."""
         if cap is None:
             return []
-        if not hasattr(self, "_session_last_activity"):
-            self._session_last_activity = {}
         stuck = []
-        for base_session_id in self._session_mgr.sessions_for_cwd(cwd):
+        for base_session_id in list(runtime.threads):
             if not self._turn_registry.get_active_turn(base_session_id):
                 continue
             last_progress = self._session_last_activity.get(base_session_id)
@@ -1851,150 +2838,136 @@ class CodexAgent(BaseAgent):
                 stuck.append(base_session_id)
         return stuck
 
+    def _has_active_turns_on(self, runtime: _CodexRuntime) -> bool:
+        return any(self._session_has_turn(base_session_id) for base_session_id in list(runtime.threads))
+
+    async def _settle_stuck_sessions(self, generation: _CodexGeneration, stuck_sessions: Sequence[str]) -> bool:
+        """Settle each stuck turn still held by ``generation``; True if any was.
+
+        Only the exact stuck turn is forgotten: one that a new admission
+        replaced meanwhile, or that moved to another generation, is left alone.
+        """
+        runtime = generation.runtime
+        settled = False
+        for base_session_id in stuck_sessions:
+            turn_id = self._turn_registry.get_active_turn(base_session_id)
+            if not turn_id or self._session_generations.get(base_session_id) is not generation:
+                continue
+            logger.warning(
+                "Settling stuck-active Codex session %s for cwd=%s after exact progress timeout",
+                base_session_id,
+                runtime.cwd,
+            )
+            await self._settle_stuck_active_request(base_session_id)
+            # Not held across the terminal emission, which may admit the next turn.
+            async with self.session_lifecycle(base_session_id):
+                if self._turn_registry.get_active_turn(base_session_id) == turn_id:
+                    self._turn_registry.clear_session(base_session_id)
+                    self._session_last_activity.pop(base_session_id, None)
+                    settled = True
+        return settled
+
     async def evict_idle_transports(self, idle_timeout: float) -> int:
-        """Stop idle Codex transports after two exact ownership snapshots."""
+        """Retire idle app-servers and repair stuck turns on every generation.
+
+        Each generation is judged only by the Sessions whose threads it holds.
+        A directory's current generation retires once it stays idle; a
+        retiring one whose turn is stuck past the age backstop has that turn
+        settled, so it can drain. Two exact ownership snapshots gate each
+        decision, and the shared core stops a generation only if no turn bound
+        to it meanwhile.
+        """
         if idle_timeout <= 0:
             return 0
-        if not hasattr(self, "_transport_last_activity"):
-            self._transport_last_activity = {}
-        if not hasattr(self, "_transport_locks"):
-            self._transport_locks = {}
-        if not hasattr(self, "_session_locks"):
-            self._session_locks = {}
-        if not hasattr(self, "_session_last_activity"):
-            self._session_last_activity = {}
-
         stuck_active_cap = self._stuck_active_idle_eviction_cap(idle_timeout)
         now = time.monotonic()
         evicted = 0
-        initial_cwds = tuple(self._transports)
-        initial_snapshots = await self._runtime_ownership_snapshots_for_cwds(
-            initial_cwds
+        candidates = tuple(
+            generation
+            for unit in list(self._units.values())
+            for generation in unit.generations
+            if generation is unit.current
+            or self._stuck_active_sessions(generation.runtime, now=now, cap=stuck_active_cap)
         )
+        initial_snapshots = await self._ownership_snapshots(candidates)
         if initial_snapshots is None:
             return 0
-        ownership_by_cwd = dict(zip(initial_cwds, initial_snapshots, strict=True))
 
-        for cwd, last_activity in list(self._transport_last_activity.items()):
-            transport = self._transports.get(cwd)
-            if transport is None:
-                self._transport_last_activity.pop(cwd, None)
+        for generation, ownership in zip(candidates, initial_snapshots, strict=True):
+            runtime = generation.runtime
+            unit = self._units.get(runtime.cwd)
+            if unit is None or generation not in unit.generations:
                 continue
-            ownership = ownership_by_cwd.get(cwd)
-            if ownership is None:
-                continue
-            stuck_sessions = self._stuck_active_sessions_for_cwd(
-                cwd,
-                now=now,
-                cap=stuck_active_cap,
-            )
-            has_active = self._has_active_turns_for_cwd(cwd)
-            idle_for = now - last_activity
+            current = unit.current is generation
+            stuck_sessions = self._stuck_active_sessions(runtime, now=now, cap=stuck_active_cap)
+            idle_for = now - runtime.last_activity
             ordinary_candidate = (
-                not ownership.blocks_reclamation
-                and not has_active
+                current
+                and not ownership.blocks_reclamation
+                and not generation.bindings
+                and not self._has_active_turns_on(runtime)
                 and idle_for >= idle_timeout
             )
             stuck_candidate = bool(stuck_sessions) and not ownership.blocks_reclamation
             if not ordinary_candidate and not stuck_candidate:
                 continue
 
-            lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
-            async with lock:
-                current_transport = self._transports.get(cwd)
-                current_last_activity = self._transport_last_activity.get(cwd)
-                if current_transport is None or current_transport is not transport:
-                    continue
-                if current_last_activity is None:
-                    continue
-                ownership = await self._runtime_ownership_snapshot_for_cwd_async(cwd)
-                if ownership is None:
-                    continue
-                current_now = time.monotonic()
-                idle_for = current_now - current_last_activity
-                stuck_sessions = self._stuck_active_sessions_for_cwd(
-                    cwd,
-                    now=current_now,
-                    cap=stuck_active_cap,
-                )
-                # Silence cannot revoke a durable Turn or Activity owner.
-                # The age backstop only repairs stale adapter-local flags once
-                # durable ownership independently allows reclamation.
-                if ownership.blocks_reclamation:
-                    continue
+            ownership = await self._ownership_snapshot(generation)
+            moved = generation not in unit.generations or (unit.current is generation) != current
+            if ownership is None or ownership.blocks_reclamation or moved:
+                continue
+            # Silence cannot revoke a durable Turn or Activity owner. The age
+            # backstop only repairs stale adapter-local flags once durable
+            # ownership independently allows reclamation.
+            current_now = time.monotonic()
+            stuck_sessions = self._stuck_active_sessions(runtime, now=current_now, cap=stuck_active_cap)
+            if await self._settle_stuck_sessions(generation, stuck_sessions):
+                # A settled turn may still run natively. It ends with its
+                # process, which stops once nothing else needs it.
+                await unit.retire(generation)
+                await unit.reap()
+                evicted += int(runtime.ended)
+                continue
+            if not current:
+                continue
+            idle_for = time.monotonic() - runtime.last_activity
+            if (
+                unit.current is not generation
+                or self._has_active_turns_on(runtime)
+                or idle_for < idle_timeout
+            ):
+                continue
 
-                settled_stuck_sessions: set[str] = set()
-                for base_session_id in stuck_sessions:
-                    logger.warning(
-                        "Settling stuck-active Codex session %s for cwd=%s after exact progress timeout",
-                        base_session_id,
-                        cwd,
-                    )
-                    await self._settle_stuck_active_request(base_session_id)
-                    self._turn_registry.clear_session(base_session_id)
-                    settled_stuck_sessions.add(base_session_id)
-                    self._session_locks.pop(base_session_id, None)
+            sessions = list(self._session_mgr.sessions_for_cwd(runtime.cwd))
+            await unit.retire(generation)
+            await unit.settled()
+            if not runtime.ended:
+                # Work bound meanwhile; the generation stops once it drains.
+                continue
+            logger.info(
+                "Evicting idle Codex transport for cwd=%s after %.1fs idle",
+                runtime.cwd,
+                idle_for,
+            )
+            # The stop unbound every Session it served. One that bound to
+            # another generation meanwhile keeps its state.
+            for base_session_id in sessions:
+                if self._session_generations.get(base_session_id) is None:
+                    self._forget_session_lock(base_session_id)
                     self._session_last_activity.pop(base_session_id, None)
-
-                if stuck_sessions:
-                    ownership = await self._runtime_ownership_snapshot_for_cwd_async(cwd)
-                    if ownership is None or ownership.blocks_reclamation:
-                        continue
-                final: dict[str, float] = {}
-
-                async def final_reclamation_predicate() -> bool:
-                    if self._transports.get(cwd) is not transport:
-                        return False
-                    latest_activity = self._transport_last_activity.get(cwd)
-                    if latest_activity is None:
-                        return False
-                    current_ownership = (
-                        await self._runtime_ownership_snapshot_for_cwd_async(cwd)
-                    )
-                    if current_ownership is None or current_ownership.blocks_reclamation:
-                        return False
-                    current_idle_for = time.monotonic() - latest_activity
-                    final["idle_for"] = current_idle_for
-                    return bool(
-                        not self._has_active_turns_for_cwd(cwd)
-                        and current_idle_for >= idle_timeout
-                    )
-
-                try:
-                    detached = await self._stop_and_detach_transport_generation(
-                        cwd,
-                        transport,
-                        final_predicate=final_reclamation_predicate,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to stop idle Codex transport for cwd=%s: %s",
-                        cwd,
-                        exc,
-                    )
-                    continue
-                if not detached:
-                    continue
-                idle_for = final.get("idle_for", idle_for)
-
-                logger.info(
-                    "Evicting idle Codex transport for cwd=%s after %.1fs idle",
-                    cwd,
-                    idle_for,
-                )
-                self._retire_model_hub_process_scope(cwd)
-
-                for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
-                    self._session_mgr.invalidate_thread(base_session_id)
-                    if base_session_id not in settled_stuck_sessions:
-                        self._turn_registry.clear_session(base_session_id)
-                    self._session_locks.pop(base_session_id, None)
-                    self._session_last_activity.pop(base_session_id, None)
-                    self._clear_thread_developer_instructions(base_session_id)
-
-                evicted += 1
+            evicted += 1
 
         return evicted
+
+    def _hub_process_scope(self, cwd: str) -> str:
+        """The gateway credential scope of this agent's Hub processes in ``cwd``.
+
+        A disable whose teardown failed keeps the old agent's processes until
+        a retry stops them, while a re-enabled agent already runs its own in
+        the same directory. Each agent owns its scope, so the old one revoking
+        it with its last Hub process never revokes the new one's credential.
+        """
+        return f"{cwd}#{self._instance_serial}"
 
     def _retire_model_hub_process_scope(self, cwd: str) -> None:
         if not getattr(self, "_registered_runtime", True):
@@ -2003,7 +2976,7 @@ class CodexAgent(BaseAgent):
         router = getattr(controller, "model_hub_runtime", None)
         retire = getattr(router, "retire_process_scope", None)
         if callable(retire):
-            retire("codex", cwd)
+            retire("codex", self._hub_process_scope(cwd))
 
     async def _settle_stuck_active_request(self, base_session_id: str) -> None:
         """Settle a turn we are about to force-reap.
@@ -2071,33 +3044,6 @@ class CodexAgent(BaseAgent):
         floor = max(0.0, float(DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS))
         return max(idle_timeout * multiplier, floor)
 
-    def _is_transport_evictable(
-        self,
-        *,
-        has_active: bool,
-        idle_for: float,
-        idle_timeout: float,
-        stuck_active_cap: Optional[float],
-    ) -> bool:
-        """Decide whether an idle transport is eligible for eviction.
-
-        Pure decision (no lookups), so callers evaluate the active-turn flag
-        exactly once. An idle transport with no active turn is evictable once it
-        crosses the normal ``idle_timeout``. A transport with an active turn is
-        normally vetoed, but is force-evictable once it crosses
-        ``stuck_active_cap`` (the absolute-time backstop) — the only path that
-        reaps a wedged app-server whose ``turn/completed`` never arrived.
-        """
-        if has_active:
-            if stuck_active_cap is None:
-                return False
-            return idle_for >= stuck_active_cap
-        return idle_for >= idle_timeout
-
-    # ------------------------------------------------------------------
-    # Transport management
-    # ------------------------------------------------------------------
-
     def _is_recoverable_transport_error(self, error: Exception) -> bool:
         if isinstance(error, CodexResponseTooLargeError):
             return False
@@ -2119,300 +3065,36 @@ class CodexAgent(BaseAgent):
             )
         )
 
-    async def _transport_replacement_is_safe(self, cwd: str, transport: CodexTransport) -> bool:
-        """Recheck durable ownership and live turns inside retirement."""
-        ownership = await self._runtime_ownership_snapshot_for_cwd_async(cwd)
-        dead = self._transport_alive(transport) is False
-        blocked = getattr(
-            ownership,
-            "blocks_dead_transport_replacement" if dead else "blocks_transport_replacement",
-            True,
-        )
-        return bool(
-            ownership is not None
-            and not blocked
-            and (dead or not self._has_active_turns_for_cwd(cwd))
-        )
-
-    async def _drop_transport_after_failure(
+    async def _drop_generation_after_failure(
         self,
-        cwd: str,
-        transport: CodexTransport,
+        generation: _CodexGeneration,
         request: AgentRequest,
+        binding: RuntimeBinding[CodexLaunchSpec, _CodexRuntime],
     ) -> bool:
-        """Remove a broken app-server and clear stale in-memory request state."""
-        lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
-        async with lock:
-            current = self._transports.get(cwd)
-            should_invalidate_cwd_sessions = current is None or current is transport
-            if current is transport:
-                try:
-                    detached = await self._stop_and_detach_transport_generation(
-                        cwd,
-                        transport,
-                        final_predicate=lambda: self._transport_replacement_is_safe(cwd, transport),
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to stop broken Codex transport for cwd=%s: %s",
-                        cwd,
-                        exc,
-                    )
-                    return False
-                if not detached:
-                    logger.warning("Codex failure recovery cannot replace an owned transport for cwd=%s", cwd)
-                    return False
-            elif current is None:
-                identity = self._transport_activation_identity(transport)
-                registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
-                if identity is not None and registry is not None and registry.is_current(identity):
-                    logger.error(
-                        "Refusing to stop an untracked current Codex generation for cwd=%s",
-                        cwd,
-                    )
-                    return False
-                try:
-                    await transport.stop()
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to stop detached broken Codex transport for cwd=%s: %s",
-                        cwd,
-                        exc,
-                    )
-                    return False
-            else:
-                identity = self._transport_activation_identity(transport)
-                registry = getattr(
-                    getattr(self, "controller", None),
-                    "runtime_activation",
-                    None,
+        """Replace a broken app-server generation when no other work still needs it.
+
+        Retiring is atomic with admission, so no new turn binds to the broken
+        process; it stops only through the core's drained check.
+        """
+        runtime = generation.runtime
+        # Stopping the generation forgets every Session it held.
+        forgotten_by_stop = request.base_session_id in runtime.threads and not runtime.ended
+        if not runtime.ended:
+            unit = self._units.get(runtime.cwd)
+            await binding.release()  # this turn no longer needs the broken process
+            if unit is not None:
+                await unit.retire(generation)
+                await unit.settled()
+            if not runtime.ended:
+                logger.warning(
+                    "Codex failure recovery cannot replace an owned transport for cwd=%s",
+                    runtime.cwd,
                 )
-                if identity is not None and registry is not None and registry.is_current(
-                    identity
-                ):
-                    logger.error(
-                        "Refusing to stop a replaced but still-current Codex generation for cwd=%s",
-                        cwd,
-                    )
-                    return False
-                try:
-                    await transport.stop()
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to stop replaced broken Codex transport for cwd=%s: %s",
-                        cwd,
-                        exc,
-                    )
-                    return False
-
-            if should_invalidate_cwd_sessions:
-                for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
-                    if base_session_id == request.base_session_id:
-                        continue
-                    self._session_mgr.invalidate_thread(base_session_id)
-                    self._clear_thread_developer_instructions(base_session_id)
-                    self._turn_registry.clear_session(base_session_id)
-
-        self._session_mgr.invalidate_thread(request.base_session_id)
-        self._clear_thread_developer_instructions(request.base_session_id)
-        self._turn_registry.clear_session(request.base_session_id)
+                return False
+        if not forgotten_by_stop:
+            self._forget_stale_session(request.base_session_id)
+            self._turn_registry.clear_session(request.base_session_id)
         return True
-
-    async def _get_or_create_transport(
-        self,
-        cwd: str,
-        launch: "ModelHubLaunch | None" = None,
-        *,
-        allow_runtime_replacement: bool = True,
-    ) -> CodexTransport:
-        """Return an initialized transport for the given working directory."""
-        # Serialize creation per cwd
-        if cwd not in self._transport_locks:
-            self._transport_locks[cwd] = asyncio.Lock()
-
-        wait_deadline: float | None = None
-        while True:
-            wait_for_active_turns = False
-            async with self._transport_locks[cwd], AsyncExitStack() as catalog_pins:
-                # Double-check after acquiring lock
-                existing = self._transports.get(cwd)
-                desired_fingerprint = launch.fingerprint if launch is not None else "direct"
-                existing_fingerprint = getattr(existing, "runtime_fingerprint", "direct")
-                runtime_changed = existing_fingerprint != desired_fingerprint
-                if existing is not None and runtime_changed and not allow_runtime_replacement:
-                    raise CodexConnectionProbeRuntimeMismatchError(
-                        "The cached Codex transport does not use direct credentials"
-                    )
-                if existing and existing.is_initialized:
-                    # Reuse only while the directory the app-server was spawned in
-                    # is still the SAME directory (#561): after a delete (+ possible
-                    # re-create) the cached process sits in a dead inode and every
-                    # thread/start fails. Untracked legacy entries reuse as before.
-                    spawned_ino = self._cwd_inodes().get(cwd)
-                    stale_cwd = spawned_ino is not None and self._cwd_inode(cwd) != spawned_ino
-                    if not stale_cwd and not runtime_changed:
-                        self._attach_transport_activation(cwd, existing)
-                        self._touch_transport_activity(cwd)
-                        return existing
-                    if runtime_changed and self._has_active_turns_for_cwd(cwd):
-                        wait_for_active_turns = True
-                    elif stale_cwd:
-                        logger.warning(
-                            "Codex transport cwd was replaced under the cached app-server; "
-                            "restarting transport for cwd=%s",
-                            cwd,
-                        )
-                    else:
-                        logger.info("Restarting Codex transport after Model Hub channel change for cwd=%s", cwd)
-
-                if wait_for_active_turns:
-                    now = time.monotonic()
-                    if wait_deadline is None:
-                        wait_deadline = now + _RUNTIME_CHANGE_WAIT_SECONDS
-                        logger.info(
-                            "Codex runtime change waiting for active turns: cwd=%s from=%s to=%s",
-                            cwd,
-                            existing_fingerprint.split(":", 1)[0],
-                            desired_fingerprint.split(":", 1)[0],
-                        )
-                    elif now >= wait_deadline:
-                        logger.warning(
-                            "Codex runtime change blocked by active turns after %.0fs: cwd=%s",
-                            _RUNTIME_CHANGE_WAIT_SECONDS,
-                            cwd,
-                        )
-                        raise CodexRuntimeChangeBlockedError(
-                            "Another active Codex turn in this working directory uses a "
-                            "different runtime; the requested model cannot start until it finishes"
-                        )
-                else:
-                    runtime_args: list[str] = []
-                    runtime_env = dict(self._codex_runtime_environment())
-                    runtime_fingerprint = "direct"
-                    catalog = None
-                    if launch is not None:
-                        from modules.agents.model_hub import build_codex_hub_launch
-
-                        if launch.channel == "hub":
-                            # Capture the reference before any later await.
-                            # Invalidation may drop the cache while we retire
-                            # an old transport or spawn/initialize its successor.
-                            catalog = (await self.prepare_model_hub_runtime()).retain()
-                            catalog_pins.callback(catalog.close)
-                        runtime_args, runtime_env = build_codex_hub_launch(
-                            [],
-                            runtime_env,
-                            launch,
-                            model_catalog_path=catalog.path if catalog is not None else None,
-                        )
-                        runtime_fingerprint = launch.fingerprint
-
-                    # Stop stale transport if any
-                    if existing:
-                        detached = await self._stop_and_detach_transport_generation(
-                            cwd,
-                            existing,
-                            final_predicate=lambda: self._transport_replacement_is_safe(cwd, existing),
-                        )
-                        if not detached:
-                            raise RuntimeError(
-                                "Codex transport replacement blocked by a durable owner "
-                                "or changed generation"
-                            )
-                        if (
-                            runtime_changed
-                            and desired_fingerprint == "direct"
-                            and existing_fingerprint.startswith("hub:")
-                        ):
-                            self._retire_model_hub_process_scope(cwd)
-                        # The new app-server process won't know about threads/turns
-                        # from the old process. Invalidate only sessions bound to
-                        # this cwd so healthy sessions on other cwds are unaffected.
-                        affected = self._session_mgr.sessions_for_cwd(cwd)
-                        for bid in affected:
-                            self._session_mgr.invalidate_thread(bid)
-                            self._clear_thread_developer_instructions(bid)
-                            self._turn_registry.clear_session(bid)
-                        if affected:
-                            logger.info(
-                                "Invalidated %d stale Codex session(s) after transport restart for cwd=%s",
-                                len(affected),
-                                cwd,
-                            )
-
-                    transport = CodexTransport(
-                        binary=self.codex_config.binary,
-                        cwd=cwd,
-                        extra_args=list(self.codex_config.extra_args),
-                        runtime_args=runtime_args,
-                        runtime_env=runtime_env,
-                        runtime_fingerprint=runtime_fingerprint,
-                        model_hub_catalog=catalog,
-                    )
-
-                    # Wire up callbacks
-                    transport.on_notification(self._on_notification)
-                    # Bind the cwd so any server request (e.g. an auto-approval)
-                    # refreshes this transport's activity even without a turn id.
-                    transport.on_server_request(
-                        lambda req_id, method, params, _cwd=cwd: self._on_server_request(
-                            _cwd, req_id, method, params
-                        )
-                    )
-
-                    await transport.start()
-                    governor_from_controller(self.controller).apply_to_pid(
-                        getattr(transport, "pid", None),
-                        label="codex app-server",
-                    )
-                    self._attach_transport_activation(cwd, transport)
-                    self._transports[cwd] = transport
-                    self._cwd_inodes()[cwd] = self._cwd_inode(cwd)
-                    self._touch_transport_activity(cwd)
-                    return transport
-            if wait_for_active_turns:
-                await asyncio.sleep(0.05)
-
-    async def _interrupt_active_turn_before_runtime_change(
-        self,
-        request: AgentRequest,
-        launch: "ModelHubLaunch",
-    ) -> None:
-        """Let a replacement prompt interrupt its own stale-runtime turn."""
-
-        transport = self._transports.get(request.working_path)
-        if transport is None or not transport.is_initialized:
-            return
-        if getattr(transport, "runtime_fingerprint", "direct") == launch.fingerprint:
-            return
-        thread_id = self._session_mgr.get_thread_id(request.base_session_id)
-        active_turn = self._turn_registry.get_active_turn(request.base_session_id)
-        if not thread_id or not active_turn:
-            return
-        try:
-            await transport.send_request(
-                "turn/interrupt",
-                {"threadId": thread_id, "turnId": active_turn},
-            )
-        except Exception:
-            # A dead/wedged transport cannot acknowledge the interrupt. Hide
-            # and release the old turn anyway so the runtime-change path can
-            # replace that transport instead of waiting on it forever.
-            logger.warning(
-                "Codex turn interrupt failed before Model Hub runtime change; "
-                "replacing stale transport for cwd=%s",
-                request.working_path,
-                exc_info=True,
-            )
-        interrupted_request = self._event_handler.clear_pending(active_turn)
-        if interrupted_request:
-            await self._remove_ack_reaction(interrupted_request)
-            # The app-server may be replaced before its interrupted completion
-            # notification arrives. Settle the old request now; release is
-            # token-guarded, so it cannot close the replacement turn.
-            release = getattr(self._event_handler, "_release_stream_turn", None)
-            if callable(release):
-                release(interrupted_request.context)
 
     # ------------------------------------------------------------------
     # Thread management
@@ -2476,13 +3158,19 @@ class CodexAgent(BaseAgent):
         self,
         params: Dict[str, Any],
         request: AgentRequest,
+        process_env: Mapping[str, str],
         *,
         force_path: bool = False,
     ) -> tuple[str, bool]:
+        """Set the turn's shell environment on top of ``process_env``.
+
+        ``process_env`` is the environment of the app-server that runs the
+        turn, which its shell inherits; see ``_process_environment``.
+        """
         from core.git_runtime import prepend_vendored_git_to_path
 
         env = self._caller_env_for_request(request)
-        runtime_env = self._codex_runtime_environment()
+        runtime_env = process_env
         config = dict(params.get("config") or {})
         config["skills.include_instructions"] = False
         params["config"] = config
@@ -2508,10 +3196,10 @@ class CodexAgent(BaseAgent):
         params["config"] = config
         return git_path_state, path_managed
 
-    def _git_path_state_for_request(self, request: AgentRequest) -> str:
+    def _git_path_state_for_request(self, request: AgentRequest, process_env: Mapping[str, str]) -> str:
         from core.git_runtime import prepend_vendored_git_to_path
 
-        runtime_env = self._codex_runtime_environment()
+        runtime_env = process_env
         env: dict[str, str] = {}
         prepend_vendored_git_to_path(
             env,
@@ -2519,6 +3207,16 @@ class CodexAgent(BaseAgent):
             working_dir=getattr(request, "working_path", None),
         )
         return env["PATH"] if "PATH" in env else runtime_env.get("PATH", "")
+
+    @staticmethod
+    def _process_environment(transport: CodexTransport) -> Mapping[str, str]:
+        """The environment an app-server runs with, which its shell inherits.
+
+        It comes from the launch the process was started from, never from the
+        current configuration, so a save during a turn cannot split them.
+        """
+        env = getattr(transport, "runtime_env", None)
+        return env if env is not None else os.environ
 
     def _codex_runtime_environment(self) -> Mapping[str, str]:
         base_env = os.environ
@@ -2548,7 +3246,9 @@ class CodexAgent(BaseAgent):
             params["developerInstructions"] = await self._native_thread_prompt(
                 transport, request, developer_instructions
             )
-        git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
+        git_path_state, git_path_managed = self._inject_caller_env_config(
+            params, request, self._process_environment(transport)
+        )
 
         resp = await transport.send_request("thread/start", params)
         # thread/start returns Thread directly OR may nest under "thread"
@@ -2560,9 +3260,12 @@ class CodexAgent(BaseAgent):
         if not thread_id:
             raise RuntimeError("Codex thread/start returned no thread id")
 
-        self._session_mgr.set_thread_id(request.base_session_id, thread_id)
-        # Also persist for resume support
+        # Persisted first: a thread the durable mapping lacks must not serve a
+        # turn, or that conversation would vanish from resume history. A failed
+        # write leaves the new, still empty thread unused, and the retry starts
+        # another.
         self.bind_agent_session_id(request, thread_id)
+        self._session_mgr.set_thread_id(request.base_session_id, thread_id)
         if developer_instructions:
             from core.skill_observability import accept_catalog
 
@@ -2680,7 +3383,9 @@ class CodexAgent(BaseAgent):
             params["developerInstructions"] = None
         if effective_model:
             params["model"] = effective_model
-        git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
+        git_path_state, git_path_managed = self._inject_caller_env_config(
+            params, request, self._process_environment(transport)
+        )
 
         self._mark_fork_correction_pending(request.base_session_id)
         try:
@@ -2717,10 +3422,11 @@ class CodexAgent(BaseAgent):
             await self._inject_forked_session_correction(transport, request, thread_id)
         finally:
             self._clear_fork_correction_pending(request.base_session_id)
-        self._session_mgr.set_thread_id(request.base_session_id, thread_id)
+        # Persisted first, as for a new thread.
         target_agent_session_id = (
             self.bind_agent_session_id(request, thread_id) or target_agent_session_id
         )
+        self._session_mgr.set_thread_id(request.base_session_id, thread_id)
         cache_source_prompt_strategy = True
         if source_prompt_instructions is not None:
             persisted_prompt_strategy = self._persist_prompt_strategy(
@@ -2900,6 +3606,14 @@ class CodexAgent(BaseAgent):
         source_thread_id = str(fork.get("source_native_session_id") or "").strip()
         if not active_turn_id or not source_thread_id:
             return True, None
+        # Another process reads a live turn as interrupted; only the generation
+        # holding the source thread reports it in progress. ``source_session_id``
+        # is the durable Session id, not a base session, so look up the thread.
+        source_generation = self._generation_holding_thread(source_thread_id)
+        if source_generation is not None and not self._process_exited(source_generation.runtime.transport):
+            # Even one that stopped answering: reading it fails closed, while
+            # another process would report the live turn as interrupted.
+            transport = source_generation.runtime.transport
 
         cursor: Optional[str] = None
         seen_cursors: set[str] = set()
@@ -3095,6 +3809,7 @@ class CodexAgent(BaseAgent):
                 git_path_state, git_path_managed = self._inject_caller_env_config(
                     resume_params,
                     request,
+                    self._process_environment(transport),
                 )
                 model_provider = await self._resolve_resume_model_provider_override(
                     transport,
@@ -3104,6 +3819,13 @@ class CodexAgent(BaseAgent):
                 )
                 if model_provider:
                     resume_params["modelProvider"] = model_provider
+                holder = self._generation_running(transport)
+                if holder is not None:
+                    # A resume whose answer is lost may still load the thread
+                    # there. Claim it first, so it is released there before any
+                    # other process resumes it; releasing a thread that never
+                    # loaded is a cheap ``notLoaded``.
+                    self._bind_session_thread(holder, request.base_session_id, persisted)
                 resp = await transport.send_request(
                     "thread/resume",
                     resume_params,
@@ -3351,7 +4073,7 @@ class CodexAgent(BaseAgent):
         # Refresh caller environment and git path after prompt rendering,
         # without rendering the prompt a second time.
         caller_env = self._caller_env_for_request(request)
-        git_path_state = self._git_path_state_for_request(request)
+        git_path_state = self._git_path_state_for_request(request, self._process_environment(transport))
 
         if not hasattr(self, "_thread_caller_env_configs"):
             self._thread_caller_env_configs = {}
@@ -3376,6 +4098,7 @@ class CodexAgent(BaseAgent):
             git_path_state, git_path_managed = self._inject_caller_env_config(
                 resume_params,
                 request,
+                self._process_environment(transport),
                 force_path=git_path_managed,
             )
         model_provider = await self._resolve_resume_model_provider_override(transport, request, thread_id)
@@ -4214,9 +4937,14 @@ class CodexAgent(BaseAgent):
             raise RuntimeError("Codex turn/start returned no turn id")
 
         turn_state = self._turn_registry.finalize_turn_start_response(turn_id, request)
+        generation = self._generation_for_session(request.base_session_id)
         self._mark_runtime_turn_started(
             getattr(request, "context", None),
-            activation_identity=self._transport_activation_identity(transport),
+            activation_identity=(
+                generation.runtime.activation
+                if generation is not None and generation.runtime.transport is transport
+                else None
+            ),
         )
         bind_generated_image_snapshot = getattr(event_handler, "bind_generated_image_snapshot", None)
         if callable(bind_generated_image_snapshot):
@@ -4290,8 +5018,19 @@ class CodexAgent(BaseAgent):
     # Callback handlers (wired to transport)
     # ------------------------------------------------------------------
 
-    async def _on_notification(self, method: str, params: Dict[str, Any]) -> None:
-        """Route a server notification to the event handler."""
+    async def _on_notification(
+        self,
+        method: str,
+        params: Dict[str, Any],
+        *,
+        runtime: _CodexRuntime | None = None,
+    ) -> None:
+        """Route a server notification from one app-server to the event handler."""
+        if runtime is not None and method == "thread/closed":
+            released = runtime.released_threads.get(self._extract_thread_id(params))
+            if released is not None:
+                released.set()
+            return
         if self._handle_connection_probe_notification(method, params):
             return
         request = self._find_request_for_notification(method, params)
@@ -4305,11 +5044,27 @@ class CodexAgent(BaseAgent):
                 turn_id,
             )
             return
+        if runtime is not None and not self._extract_turn_id(params):
+            # Turn ids are unique across processes, so only thread-scoped
+            # events can reach the wrong turn: a Session that moved on must not
+            # receive late events from the generation it left.
+            generation = self._session_generations.get(request.base_session_id)
+            if generation is not None and generation.runtime is not runtime:
+                logger.debug(
+                    "Dropping Codex notification %s from a previous generation of session %s",
+                    method,
+                    request.base_session_id,
+                )
+                return
 
         if self._notification_is_real_progress(method):
-            self._touch_transport_activity(request.working_path)
+            if runtime is not None:
+                self._touch_runtime(runtime)
             self._touch_session_activity(request.base_session_id)
         await self._event_handler.handle_notification(method, params, request)
+        if runtime is not None and method == "turn/completed":
+            # A turn that ends on a retiring generation may be its last work.
+            self._schedule_reap(runtime.cwd)
 
     def _handle_connection_probe_notification(
         self,
@@ -4476,11 +5231,6 @@ class CodexAgent(BaseAgent):
             finally:
                 request.ack_message_id = None
 
-    def _cwd_inodes(self) -> Dict[str, Optional[int]]:
-        if not hasattr(self, "_transport_cwd_inodes"):
-            self._transport_cwd_inodes = {}
-        return self._transport_cwd_inodes
-
     @staticmethod
     def _cwd_inode(cwd: str) -> Optional[int]:
         try:
@@ -4488,11 +5238,10 @@ class CodexAgent(BaseAgent):
         except OSError:
             return None
 
-    def _touch_transport_activity(self, cwd: str) -> None:
-        if not hasattr(self, "_transport_last_activity"):
-            self._transport_last_activity = {}
-        if cwd:
-            self._transport_last_activity[cwd] = time.monotonic()
+    @staticmethod
+    def _touch_runtime(runtime: _CodexRuntime | None) -> None:
+        if runtime is not None:
+            runtime.last_activity = time.monotonic()
 
     def _touch_session_activity(self, base_session_id: str) -> None:
         if not hasattr(self, "_session_last_activity"):
@@ -4510,12 +5259,7 @@ class CodexAgent(BaseAgent):
         }
 
     def _has_active_turns_for_cwd(self, cwd: str) -> bool:
-        if cwd in getattr(self, "_connection_probe_cwds", set()):
-            return True
-        for base_session_id in self._session_mgr.sessions_for_cwd(cwd):
-            if self._turn_registry.get_active_turn(base_session_id):
-                return True
-            has_pending_turn_start = getattr(self._turn_registry, "has_pending_turn_start", None)
-            if callable(has_pending_turn_start) and has_pending_turn_start(base_session_id):
-                return True
-        return False
+        return any(
+            self._session_has_turn(base_session_id)
+            for base_session_id in self._session_mgr.sessions_for_cwd(cwd)
+        )

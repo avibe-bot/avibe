@@ -1,93 +1,36 @@
 # Backend Rolling Restart
 
-## Goal
+Status: superseded by `runtime-generations.md`.
 
-Restart Claude, Codex, and OpenCode runtime state without destabilizing the
-Avibe service, Web UI, tunnel, or Session context. A restart must never allow
-two turns to work on the same Session concurrently.
+Configuration changes, credential flows, manual Restart, CLI installs, and
+enabling a backend no longer drain or interrupt anything. Each runtime unit
+moves to the new configuration at its next turn, and running work finishes on
+the process it started on. Disabling a backend stops its work at once, because
+the user asked for that. The 300 s drain, its timeout override, and the
+drain-then-interrupt cutover are deleted.
 
-## Contract
+## What remains of the barrier
 
-The shared runtime owns a backend restart barrier with four states:
+The backend admission barrier (`begin_backend_drain` / `end_backend_drain`)
+remains for two exclusive operations only:
 
-`READY -> DRAINING -> SWITCHING -> READY`
+- **Native credential cutover** (`BackendRestartCoordinator.migration_guard`).
+  An explicit user decision moves a native credential, so the guard interrupts
+  the backend's running work and retires its runtime strictly before the move.
+  An old process could otherwise rewrite a credential file while it is moved.
+- **Unattended CLI auto-update** (`run_when_idle`). Admission is closed only
+  while the CLI is replaced, so no turn launches a half-installed binary. The
+  runtime then renews in place.
 
-- `READY`: new turns may start.
-- `DRAINING`: turns accepted before the barrier continue. New turns wait. A
-  Workbench message for a busy Session remains in its durable queue.
-- `SWITCHING`: no new turn can enter while the old runtime is terminated and
-  refreshed configuration is activated.
-- `READY`: queued work resumes through the normal Session gate.
-
-The Session FSM remains the authority. A Session changes generation only after
-its active turn reaches IDLE. Stop and send-now use the existing interruption
-path; after the old turn settles, the queued message resumes on the new runtime.
-Backend-native background Activities are a second, orthogonal liveness axis:
-the drain also waits for active Activities and their pending output to settle.
-
-## Why the barrier is shared
-
-Claude, Codex, and OpenCode have different process models, but the safety
-invariants are identical. Keeping the barrier in `AgentService` and the durable
-queue interaction in `SessionTurnManager` avoids backend-specific queue and
-locking rules.
-
-The first implementation uses a single-writer cutover for every backend.
-OpenCode must not run two servers against the same local state concurrently.
-Codex and Claude may later prepare a new generation during DRAINING, but only if
-their adapters can prove isolated ownership. That optimization does not change
-the Session protocol.
-
-Agent CLI install/upgrade jobs measure the CLI selected by the persisted
-`agents.<backend>.cli_path` before and after installation. Only an unchanged
-configured path, resolved target, and known reported version can skip the
-refresh. A changed configured path requires reconciliation even when it resolves
-to the same executable. Missing configuration, paths, or versions conservatively
-retain the existing refresh path. Measurements bypass the UI version cache.
-
-The install worker produces this decision and the existing controller restart
-coordinator remains the sole owner of any required cutover. This optimization
-does not relax the barrier for real upgrades or change manual/auth refreshes.
-
-## Timeout
-
-Draining is bounded. At the deadline, the coordinator:
-
-1. cancels matching Workbench waiters without flushing them onto the old
-   runtime;
-2. marks remaining backend Activities killed and settles their owning Runs;
-3. force-refreshes the backend runtime, which terminates the old process tree;
-4. releases stale runtime-turn tokens;
-5. reopens the backend barrier and flushes queued Sessions.
-
-The default drain timeout is five minutes and can be overridden for operations
-and tests with `AVIBE_BACKEND_RESTART_DRAIN_TIMEOUT_SECONDS`.
-
-## Invariants
+These invariants still hold for both:
 
 - At most one active turn per Session and runtime key.
-- Restart coordination never stops the Avibe service, UI, or tunnel.
-- A failed refresh reopens the barrier; it cannot deadlock future turns.
-- Concurrent restart requests for one backend coalesce into one operation.
-- Queue rows are claimed only by the existing Session queue transaction.
-- Old-turn completion and timeout force-cutover are idempotent races.
-
-## Scenarios
-
-- `BRR-001`: idle backend refreshes immediately and accepts the next turn.
-- `BRR-002`: active Session drains; its new message remains queued until IDLE.
-- `BRR-003`: another Session cannot enter the switching window.
-- `BRR-004`: Stop/send-now settles the old turn and advances cutover.
-- `BRR-005`: drain timeout cancels the old waiter, force-refreshes, then flushes.
-- `BRR-006`: refresh failure reopens the barrier and preserves queued input.
-- `BRR-007`: concurrent restart requests coalesce without duplicate process kills.
-- `BRR-008`: backend restart does not touch service, UI, or tunnel lifecycle.
+- The barrier never stops the Avibe service, UI, or tunnel.
+- A failed operation reopens the barrier and preserves queued input.
 
 ## Service restart boundary
 
-This protocol is also the prerequisite for a future service-process handoff,
-but it does not claim that a SIGTERM of the current Avibe process can preserve
-an in-memory receiver. A true service rolling restart additionally needs an
-external supervisor and cross-process ownership handoff. Until that exists,
-backend restarts use this protocol; service restart remains crash-recovery
+A SIGTERM of the Avibe process cannot preserve an in-memory receiver. A true
+service rolling restart would need an external supervisor and a cross-process
+ownership handoff. Until that exists, a service restart keeps crash-recovery
 semantics and must not pretend to be seamless.

@@ -386,18 +386,6 @@ def test_agent_service_reports_missing_runtime_refresh_contract() -> None:
     assert asyncio.run(service.refresh_runtime_config("claude", object())) is False
 
 
-def test_agent_service_dispatches_model_hub_runtime_invalidation() -> None:
-    service = AgentService(controller=SimpleNamespace())
-    agent = SimpleNamespace(name="codex", invalidate_model_hub_runtime=AsyncMock())
-    service.register(agent)
-
-    handled = asyncio.run(service.invalidate_model_hub_runtime("codex"))
-
-    assert handled is True
-    agent.invalidate_model_hub_runtime.assert_awaited_once_with()
-    assert asyncio.run(service.invalidate_model_hub_runtime("claude")) is False
-
-
 def test_agent_service_notifies_run_owner_when_activity_runtime_disconnects() -> None:
     settle = Mock()
     controller = SimpleNamespace(
@@ -719,6 +707,31 @@ def test_force_end_backend_activities_waits_for_run_settlement_before_ack() -> N
     service.activities.ack_recovered_terminal.assert_not_called()
 
 
+def test_a_runtime_force_end_keeps_the_activity_until_its_run_settles() -> None:
+    """A replaced runtime's killed Activity survives a failed Run settlement for a retry."""
+    controller = SimpleNamespace(
+        scheduled_task_service=SimpleNamespace(
+            settle_activity_runs=Mock(side_effect=RuntimeError("store unavailable")),
+        ),
+    )
+    service = AgentService(controller=controller)
+    service.activities.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="ses-1",
+        activity_id="task-active",
+        kind="background_task",
+        run_id="run-active",
+    )
+
+    completed = service.force_end_runtime_activities("claude", "runtime-1")
+
+    assert [(item.id, item.status) for item in completed] == [("task-active", "killed")]
+    assert [item.id for item in service.activities.terminal_snapshots_for_runtime("claude", "runtime-1")] == [
+        "task-active"
+    ]
+
+
 def test_force_cancel_backend_turns_emits_terminal_before_release() -> None:
     async def _run():
         controller = _Controller()
@@ -744,6 +757,108 @@ def test_force_cancel_backend_turns_emits_terminal_before_release() -> None:
             output=terminal_turn_output(),
         )
         assert service.runtime_turn_tokens_for_backend("claude") == {}
+
+    asyncio.run(_run())
+
+
+def test_a_runtime_force_end_spares_the_next_turn_admitted_while_it_settles() -> None:
+    """Only the turns running when a runtime is force-ended are its work."""
+
+    async def _run():
+        controller = _Controller()
+        controller.emit_agent_message = AsyncMock()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        agent = _RuntimeAgent()
+        running: dict[str, asyncio.Event] = {}
+
+        async def handle_message(request):
+            running[request.message] = asyncio.Event()
+            await running[request.message].wait()
+
+        agent.handle_message = handle_message
+        service.register(agent)
+        first, second = _request("first"), _request("second")
+        first.base_session_id = second.base_session_id = "s1"
+        first_task = asyncio.create_task(service.handle_message("claude", first))
+        await asyncio.sleep(0)
+        second_task = asyncio.create_task(service.handle_message("claude", second))
+        await asyncio.sleep(0)
+
+        async def release_for_backend_refresh(**_kwargs):
+            # The first turn finishes meanwhile, so the Session's next one starts.
+            service.release_runtime_turn(first.context)
+            running["first"].set()
+            await first_task
+            await asyncio.wait_for(_until_started("second"), 1)
+
+        async def _until_started(message):
+            while message not in running:
+                await asyncio.sleep(0.01)
+
+        controller.session_turns = SimpleNamespace(
+            on_running=lambda _context: None,
+            release_for_backend_refresh=release_for_backend_refresh,
+        )
+
+        await service.force_end_runtime_work("claude", base_session_ids={"s1"}, activation_identities=())
+
+        assert not second_task.done()
+        controller.emit_agent_message.assert_not_awaited()
+        assert service.runtime_turn_tokens_for_backend("claude")
+        running["second"].set()
+        await asyncio.wait_for(second_task, 1)
+
+    asyncio.run(_run())
+
+
+def test_runtime_gen_006_a_disabled_agents_retried_stop_spares_the_re_enabled_agents_turn() -> None:
+    """RUNTIME-GEN-006: a disabled agent's stop names a Session whose next turn runs on a new agent.
+
+    The backend was enabled again before the retry, and the new agent now runs
+    the Session's next turn: that turn is not the stopping agent's work.
+    """
+
+    async def _run():
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        disabled, enabled = _RuntimeAgent(), _RuntimeAgent()
+        running = asyncio.Event()
+
+        async def handle_message(_request):
+            running.set()
+            await asyncio.Event().wait()
+
+        enabled.handle_message = handle_message
+        service.register(enabled)
+        request = _request("next")
+        request.base_session_id = "s1"
+        task = asyncio.create_task(service.handle_message("claude", request))
+        await asyncio.wait_for(running.wait(), 1)
+        released = []
+
+        async def release_for_backend_refresh(**kwargs):
+            released.append(kwargs)
+
+        controller.session_turns = SimpleNamespace(
+            on_running=lambda _context: None,
+            release_for_backend_refresh=release_for_backend_refresh,
+        )
+
+        await service.force_end_runtime_work(
+            "claude",
+            base_session_ids={"s1"},
+            activation_identities=(),
+            reason="backend_disabled",
+            agent=disabled,
+        )
+        await asyncio.sleep(0)
+
+        assert released == []
+        assert not task.done()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(_run())
 
@@ -2358,3 +2473,29 @@ def test_real_child_exit_after_acceptance_recovers_runtime_fifo() -> None:
             service.release_runtime_turn(second.context)
 
     asyncio.run(_run())
+
+
+def test_a_failed_teardown_is_retried_until_it_finishes() -> None:
+    """A disabled backend's processes stop eventually even if the first stop fails.
+
+    The agent is already out of routing, so nothing else would ever stop them.
+    """
+
+    async def run() -> None:
+        attempts: list[int] = []
+
+        async def stop() -> None:
+            attempts.append(len(attempts))
+            if len(attempts) < 3:
+                raise RuntimeError("process survived its stop")
+
+        service = AgentService(controller=SimpleNamespace())
+        assert await service.run_until_done("disabled:codex", stop) is False
+        await service.retry_pending()
+        assert len(attempts) == 2
+        await service.retry_pending()
+        assert len(attempts) == 3
+        await service.retry_pending()
+        assert len(attempts) == 3
+
+    asyncio.run(run())

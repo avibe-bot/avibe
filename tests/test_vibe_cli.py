@@ -1004,19 +1004,36 @@ def test_cli_stop_process_reuses_runtime_impl(tmp_path, monkeypatch):
     assert cli._stop_process(pid_path) is True
 
 
-def test_cli_stop_opencode_server_uses_runtime_helpers(tmp_path, monkeypatch):
-    pid_file = tmp_path / "opencode_server.json"
-    pid_file.write_text('{"pid": 321}', encoding="utf-8")
+def test_cli_stop_opencode_server_stops_every_recorded_generation(tmp_path, monkeypatch):
+    from modules.agents.opencode import server as opencode_server
 
+    records = tmp_path / "generations"
+    records.mkdir()
+    monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: records)
     monkeypatch.setattr(paths, "get_logs_dir", lambda: tmp_path)
-    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 321)
-    monkeypatch.setattr(runtime, "get_process_command", lambda pid: "C:\\opencode.exe serve --port=4096")
-    from modules.agents.opencode.server import OpenCodeServerManager
-
-    monkeypatch.setattr(OpenCodeServerManager, "_terminate_pid_tree_sync", staticmethod(lambda pid, timeout=5: pid == 321))
+    for generation_id, pid, port in (("ocg_a", 321, 50001), ("ocg_b", 322, 50002)):
+        (records / f"{generation_id}.json").write_text(
+            json.dumps({"generation_id": generation_id, "pid": pid, "port": port, "process_created_at": 7.0}),
+            encoding="utf-8",
+        )
+    # A server a release before generations recorded, in its released shape.
+    legacy = tmp_path / "opencode_server.json"
+    legacy.write_text('{"pid": 323, "port": 4096}', encoding="utf-8")
+    ports = {321: 50001, 322: 50002, 323: 4096}
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in ports)
+    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 7.0)
+    monkeypatch.setattr(
+        runtime, "get_process_command", lambda pid: f"C:\\opencode.exe serve --port={ports[pid]}"
+    )
+    stopped: list[int] = []
+    monkeypatch.setattr(
+        opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5: stopped.append(pid) or True
+    )
 
     assert cli._stop_opencode_server() is True
-    assert not pid_file.exists()
+    assert sorted(stopped) == [321, 322, 323]
+    assert list(records.iterdir()) == []
+    assert not legacy.exists()
 
 
 # A server that starts its tool the way OpenCode's shell tool does (detached, so
@@ -5004,3 +5021,48 @@ def test_doctor_bare_dry_run_does_not_request_repair():
     assert args.command == "doctor"
     assert args.doctor_action is None
     assert cli._doctor_repair_requested(args) is False
+
+
+def test_cli_stop_reports_a_surviving_generation_and_drops_stopped_overlays(tmp_path, monkeypatch):
+    from modules.agents.opencode import server as opencode_server
+
+    records = tmp_path / "generations"
+    records.mkdir()
+    monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: records)
+    monkeypatch.setattr(paths, "get_logs_dir", lambda: tmp_path)
+    for generation_id, pid, port in (("ocg_a", 331, 50031), ("ocg_b", 332, 50032)):
+        (records / f"{generation_id}.json").write_text(
+            json.dumps({"generation_id": generation_id, "pid": pid, "port": port}), encoding="utf-8"
+        )
+        # A Hub generation's overlay carries the gateway credential.
+        (records / f"{generation_id}.overlay.json").write_text("{}", encoding="utf-8")
+    ports = {331: 50031, 332: 50032}
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in ports)
+    monkeypatch.setattr(runtime, "get_process_command", lambda pid: f"opencode serve --port={ports[pid]}")
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda pid, timeout=5: pid == 331)
+
+    assert cli._stop_opencode_server() is False
+    assert sorted(path.name for path in records.iterdir()) == ["ocg_b.json", "ocg_b.overlay.json"]
+
+
+def test_cli_stop_forgets_the_record_of_an_opencode_server_that_already_exited(tmp_path, monkeypatch):
+    from modules.agents.opencode import server as opencode_server
+
+    records = tmp_path / "generations"
+    records.mkdir()
+    monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: records)
+    monkeypatch.setattr(paths, "get_logs_dir", lambda: tmp_path)
+    (records / "ocg_exited.json").write_text(
+        json.dumps({"generation_id": "ocg_exited", "pid": 341, "port": 50041}), encoding="utf-8"
+    )
+    # A Hub generation's overlay carries the gateway credential.
+    (records / "ocg_exited.overlay.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: False)
+    def nothing_to_signal(pid, timeout=5):
+        raise AssertionError(f"signalled pid {pid}")
+
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", nothing_to_signal)
+
+    # Nothing was running, so the stop reports no OpenCode stop.
+    assert cli._stop_opencode_server() is False
+    assert list(records.iterdir()) == []

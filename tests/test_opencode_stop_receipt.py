@@ -29,12 +29,14 @@ from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.poll_loop import OpenCodePollLoop
 from modules.agents.opencode.session import OpenCodeSessionManager
 from modules.im.base import MessageContext
+from tests.opencode_generation_fakes import serve_opencode_agent
 
 
 def _agent():
     agent = object.__new__(OpenCodeAgent)
     agent._active_requests = {}
     agent._user_stopped_sessions = set()
+    agent._session_generations = {}
     session_lock = asyncio.Lock()
     agent._session_manager = SimpleNamespace(
         get_request_session=lambda _base: None,
@@ -230,25 +232,14 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
         self.assertEqual(agent._user_stopped_sessions, set())
 
-    async def test_prestart_cancellation_releases_overlay_and_stamps_stop_receipt(self):
+    async def test_prestart_cancellation_stamps_stop_receipt(self):
         agent = _agent()
         request = _request()
-        reservation = object()
-        server = SimpleNamespace(
-            release_model_hub_overlay_reservation=AsyncMock()
-        )
         agent._remove_ack_reaction = AsyncMock()
         mark_prewrite_user_stop(request.context)
 
-        await agent._finish_prestart_cancellation(
-            request,
-            server,
-            reservation,
-        )
+        await agent._finish_prestart_cancellation(request)
 
-        server.release_model_hub_overlay_reservation.assert_awaited_once_with(
-            reservation
-        )
         agent._remove_ack_reaction.assert_awaited_once_with(
             request,
             terminal_emoji=STOPPED_REACTION_EMOJI,
@@ -283,16 +274,12 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
             _user_stopped_sessions={"session-1"},
         )
 
-        async def _get_server():
-            return _Server()
-
         async def _remove_ack_reaction(request, *, terminal_emoji=None):
             cleanups.append((request, terminal_emoji))
 
         def _consume(session_id):
             return OpenCodeAgent.consume_user_stop_intent(agent, session_id)
 
-        agent._get_server = _get_server
         agent._remove_ack_reaction = _remove_ack_reaction
         agent.consume_user_stop_intent = _consume
         poll = ActivePollInfo(
@@ -309,7 +296,7 @@ class OpenCodeStopIntentTests(unittest.IsolatedAsyncioTestCase):
                 "message_id": "m1",
             },
         )
-        task = asyncio.create_task(OpenCodePollLoop(agent).run_restored_poll_loop(poll))
+        task = asyncio.create_task(OpenCodePollLoop(agent).run_restored_poll_loop(poll, _Server()))
         await entered.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -327,11 +314,6 @@ class _StubOpenCodeServer:
         self.block_start = block_start
         self.start_entered = asyncio.Event()
         self.aborted: list[tuple[str, str]] = []
-
-    async def ensure_running(self):
-        if self.block_start:
-            self.start_entered.set()
-            await asyncio.Event().wait()
 
     async def ensure_directory_ready(self, _directory):
         return None
@@ -403,10 +385,14 @@ def _process_message_agent(server, poll_loop=None):
     agent._delete_ack = AsyncMock()
     agent._remove_ack_reaction = AsyncMock()
 
-    async def _get_server():
-        return server
+    runtime = serve_opencode_agent(agent, server)
+    if server.block_start:
+        # The generation this turn needs is still starting.
+        async def _starting(_spec):
+            server.start_entered.set()
+            await asyncio.Event().wait()
 
-    agent._get_server = _get_server
+        runtime.acquire = _starting
     return agent
 
 
@@ -464,6 +450,9 @@ class OpenCodeProcessMessageStopReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.aborted, [("oc-session", "/tmp/work")])
         self.assertEqual(agent.sessions.get_all_active_polls(), {})
         self.assertEqual(agent._user_stopped_sessions, set())
+        # The stopped turn no longer pins its generation.
+        await asyncio.gather(*agent._lifecycle_tasks)
+        self.assertEqual([binding.released for binding in agent._runtime.bindings], [True])
 
     async def test_stop_before_the_server_starts_leaves_the_stopped_receipt(self):
         server = _StubOpenCodeServer(block_start=True)

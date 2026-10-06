@@ -875,3 +875,48 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     assert stop_order[0] == "quiesce"
     assert set(stop_order[1:3]) == {"tasks", "watch"}
     assert stop_order[3] == "supervisor"
+
+
+def test_cleanup_sync_makes_a_last_attempt_at_pending_backend_teardowns() -> None:
+    """A disabled backend's failed stop has no owner once the idle sweep is gone.
+
+    Its agent is out of routing, so service shutdown must retry it rather than
+    leave the process running without any controller.
+    """
+    from modules.agents.service import AgentService
+
+    controller = Controller.__new__(Controller)
+    loop = asyncio.new_event_loop()
+    controller._loop = loop
+
+    class _Stopper:
+        async def stop(self) -> None:
+            return None
+
+    controller.scheduled_task_service = _Stopper()
+    controller.watch_service = _Stopper()
+    controller.runtime_command_watcher = _Stopper()
+    controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
+    controller.receiver_tasks = {}
+    controller.im_client = None
+    controller._im_thread = None
+    controller.agent_service = AgentService(controller=controller)
+    attempts: list[str] = []
+
+    async def stop_disabled_codex() -> None:
+        attempts.append("stop")
+        if len(attempts) == 1:
+            raise RuntimeError("app-server survived")
+
+    loop.run_until_complete(controller.agent_service.run_until_done("disabled:codex", stop_disabled_codex))
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        controller.cleanup_sync()
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
+    assert attempts == ["stop", "stop"]
+    assert controller.agent_service._pending_operations == {}

@@ -220,41 +220,20 @@ def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
     asyncio.run(drain_refresh())
     assert service.reconcile_builtin_models.await_count == 2
 
-    runtime_config = object()
-    latest = SimpleNamespace(
-        model_hub=SimpleNamespace(
-            agents={"codex": SimpleNamespace(mode="hub")},
-        ),
-        agents=SimpleNamespace(codex=runtime_config),
-    )
-    controller.backend_restart_coordinator = SimpleNamespace(
-        request_restart=AsyncMock(return_value="restarted"),
-    )
-    controller.agent_service = SimpleNamespace(
-        invalidate_model_hub_runtime=AsyncMock(),
-        refresh_runtime_config=AsyncMock(),
-    )
+    # A catalog change moves each runtime at its next turn: the agent adopts
+    # the committed catalog, and nothing restarts.
+    latest = SimpleNamespace(model_hub=SimpleNamespace(agents={"codex": SimpleNamespace(mode="hub")}))
+    controller.backend_restart_coordinator = SimpleNamespace(request_restart=AsyncMock())
+    codex = SimpleNamespace(adopt_model_hub_catalog=AsyncMock())
+    controller.agent_service = SimpleNamespace(agents={"codex": codex})
     monkeypatch.setattr(V2Config, "load", classmethod(lambda _cls: latest))
 
     asyncio.run(captured["backend_catalog_changed"]("codex"))
+    asyncio.run(captured["backend_catalog_changed"]("opencode"))
 
     assert controller.config.model_hub is latest.model_hub
-    controller.backend_restart_coordinator.request_restart.assert_awaited_once_with(
-        "codex"
-    )
-    controller.agent_service.invalidate_model_hub_runtime.assert_not_awaited()
-    controller.agent_service.refresh_runtime_config.assert_not_awaited()
-
-    latest.model_hub.agents["codex"].mode = "direct"
-    controller.backend_restart_coordinator.request_restart.reset_mock()
-
-    asyncio.run(captured["backend_catalog_changed"]("codex"))
-
-    controller.agent_service.invalidate_model_hub_runtime.assert_awaited_once_with(
-        "codex"
-    )
+    codex.adopt_model_hub_catalog.assert_awaited_once_with()
     controller.backend_restart_coordinator.request_restart.assert_not_awaited()
-    controller.agent_service.refresh_runtime_config.assert_not_awaited()
 
 
 @pytest.mark.anyio

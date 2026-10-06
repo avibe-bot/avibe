@@ -459,6 +459,55 @@ async def backend_application(
     return {"status_code": response.status_code, "body": response.json() if response.content else {}}
 
 
+async def create_opencode_generation_lease(
+    purpose: str,
+    *,
+    ttl_seconds: float,
+    socket_path: Optional[Path] = None,
+    timeout: float = 180.0,
+) -> dict[str, Any]:
+    """Ask the controller to pin an OpenCode generation; it may start one first."""
+
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        ) as client:
+            response = await client.post(
+                "/internal/opencode/generation-leases",
+                json={"purpose": purpose, "ttl_seconds": ttl_seconds},
+            )
+            _validate_response(response, endpoint)
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    return {"status_code": response.status_code, "body": response.json() if response.content else {}}
+
+
+async def release_opencode_generation_lease(
+    lease_id: str,
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url=endpoint.base_url, headers=endpoint.headers, timeout=timeout,
+        ) as client:
+            response = await client.post(f"/internal/opencode/generation-leases/{lease_id}/release")
+            _validate_response(response, endpoint)
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": response.status_code, "body": response.json() if response.content else {}}
+
+
 async def reconcile_agent_backends(
     backends: list[str],
     *,
