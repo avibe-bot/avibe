@@ -73,27 +73,42 @@ def test_a_persisted_avibe_switch_loads_as_on_and_leaves_on_the_next_save(tmp_pa
     assert saved["agents"]["codex"]["enabled"] is True
 
 
-@pytest.mark.parametrize("earlier_row", ["absent", "disabled"])
+# Rows an earlier build may have left under the built-in's name: (backend, source, metadata, enabled).
+_BUILT_IN = {**BUILTIN_DEFAULT_AGENT_METADATA, "backend": "avibe", "backend_enabled": True}
+_EARLIER_ROWS = {
+    "absent": None,
+    "disabled": ("avibe", "builtin", _BUILT_IN, False),
+    # A metadata update could strip the built-in markers before they became the catalog's.
+    "markers-stripped": ("avibe", "builtin", {}, False),
+    "user-agent-same-backend": ("avibe", "user", {}, False),
+    "user-agent-other-backend": ("claude", "user", {}, True),
+}
+
+
+@pytest.mark.parametrize("earlier_row", list(_EARLIER_ROWS))
 @pytest.mark.parametrize("enabled_backends", [[], ["claude"], list(NATIVE_CLI_BACKENDS)])
 def test_the_startup_sync_leaves_the_built_in_avibe_agent_enabled(tmp_path, sqlite_db_factory, earlier_row, enabled_backends):
     """Controller startup runs this sync first; Model Hub then seeds the Avibe supply onto that Agent row.
 
-    Whatever backends the caller read from config, and whatever an earlier build left behind, the row exists
-    and is enabled once the sync returns.
+    Whatever backends the caller read from config, and whatever an earlier build left under the name,
+    exactly one built-in Avibe Agent exists and is enabled once the sync returns. A user's own Agent
+    keeps its name and state.
     """
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
     try:
-        if earlier_row == "disabled":
-            store.create(
-                name="avibe",
-                backend="avibe",
-                source="builtin",
-                metadata={**BUILTIN_DEFAULT_AGENT_METADATA, "backend": "avibe", "backend_enabled": True},
-                enabled=False,
-            )
+        row = _EARLIER_ROWS[earlier_row]
+        if row is not None:
+            backend, source, metadata, enabled = row
+            store.create(name="avibe", backend=backend, source=source, metadata=metadata, enabled=enabled)
         store.ensure_builtin_default_agents(enabled_backends)
-        avibe = store.get("avibe")
-        assert avibe is not None and avibe.enabled and is_always_enabled_agent(avibe)
+
+        built_in = [agent for agent in store.list_agents() if agent.backend == "avibe" and is_always_enabled_agent(agent)]
+        assert len(built_in) == 1 and built_in[0].enabled
+        assert store.get_builtin_default_agent_for_backend("avibe") == built_in[0]
+        if row is not None and row[1] == "user":
+            user_agent = store.get("avibe")
+            assert (user_agent.backend, user_agent.enabled, user_agent.source) == (row[0], row[3], "user")
+            assert built_in[0].name == "avibe-2"
     finally:
         store.close()
 

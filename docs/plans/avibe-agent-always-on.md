@@ -22,8 +22,10 @@ backend list, it is always enabled, and it cannot be turned off.
   for it.
 - **Built-in Agent.** `ensure_builtin_default_agents` always includes the built-in backend and re-enables its Agent, so
   the row exists and is enabled when controller startup's sync returns (Model Hub seeds the Avibe supply onto it
-  next). `VibeAgentStore.update` refuses to disable it (`agent_always_enabled`) and keeps its built-in markers; its
-  model, effort, prompt and description stay editable.
+  next). The row is the one carrying the built-in markers, under any name. Without one, a built-in row under the
+  backend's name whose markers an earlier metadata update stripped is restored; a user's Agent holding the name keeps
+  it, and the built-in takes the next free name (`avibe-2`). `VibeAgentStore.update` refuses to disable it
+  (`agent_always_enabled`) and keeps its built-in markers; its model, effort, prompt and description stay editable.
 - **Refusals.** `POST /api/config` with `agents.avibe` returns 400; `PATCH /api/agents/avibe` with `enabled: false`
   returns 400 `agent_always_enabled`; the CLI reports the same code.
 - **UI.** The built-in backend shows a "Built-in" badge where other backends have their enable switch, in the list and

@@ -1667,6 +1667,9 @@ class VibeAgentStore:
 
     def ensure_builtin_default_agent(self, *, backend: str, name: str | None = None) -> VibeAgent:
         backend = validate_agent_backend(backend)
+        always_enabled = is_builtin_backend(backend)
+        if always_enabled and name is None:
+            name = self._always_enabled_agent_name(backend)
         agent_name = str(name or backend).strip()
         metadata = dict(BUILTIN_DEFAULT_AGENT_METADATA)
         metadata["backend"] = backend
@@ -1677,7 +1680,7 @@ class VibeAgentStore:
                     f"agent '{agent_name}' already exists with backend '{existing.backend}', "
                     f"cannot use it as the built-in default for '{backend}'"
                 )
-            if not is_builtin_default_agent(existing):
+            if not is_builtin_default_agent(existing) and not (always_enabled and existing.source == "builtin"):
                 return existing
             merged = {**existing.metadata, **metadata}
             if existing.source != "builtin" or existing.metadata != merged:
@@ -1695,6 +1698,25 @@ class VibeAgentStore:
             metadata=metadata,
             enabled=True,
         )
+
+    def _always_enabled_agent_name(self, backend: str) -> str:
+        """Where an always-enabled backend's built-in Agent is, or is created.
+
+        It is the row carrying the built-in markers, under any name. Without one, the
+        backend's name is used: a built-in row there that an earlier metadata update
+        stripped of its markers is restored, and another Agent holding the name keeps
+        it while the built-in takes the next free name.
+        """
+        current = self.get_builtin_default_agent_for_backend(backend, enabled_only=False)
+        if current is not None:
+            return current.name
+        candidate, suffix = backend, 1
+        while (holder := self.get(candidate)) is not None and not (
+            holder.backend == backend and holder.source == "builtin"
+        ):
+            suffix += 1
+            candidate = f"{backend}-{suffix}"
+        return candidate
 
     def sync_builtin_default_agent(self, *, backend: str, backend_enabled: bool, name: str | None = None) -> VibeAgent:
         backend = validate_agent_backend(backend)
