@@ -618,27 +618,24 @@ def _seed_service(tmp_path, payload, selections):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("selections", "seeded", "order"), [
+@pytest.mark.parametrize(("selections", "seeded"), [
     # Each built-in Agent's model, in order; OpenCode's names its provider, and
-    # a model reached twice is listed once. The subscription serving that menu
-    # joins ahead of the keys.
+    # a model reached twice is listed once.
     (
         [("claude", "claude-opus-5-5"), ("codex", "gpt-5.6-sol"), ("opencode", "openai/gpt-5.6-sol")],
         ["claude-opus-5-5", "gpt-5.6-sol"],
-        [SEED_SUBSCRIPTION.id, *SEED_KEYS],
     ),
     # A model no Source lists is no start, and a menu id may carry a slash.
     (
         [("claude", "opus"), ("codex", "gpt-6-astra"), ("opencode", "custom/模型/β")],
         ["模型/β"],
-        SEED_KEYS,
     ),
     # Nothing qualifies: the list starts empty, and the picker offers every
     # provider model.
-    ([], [], SEED_KEYS),
+    ([], []),
 ])
 async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_and_models(
-    tmp_path, selections, seeded, order,
+    tmp_path, selections, seeded,
 ):
     """MH-AVIBE-007: one seed from the Sources and Agent models the user already has.
 
@@ -669,7 +666,9 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
 
     assert await service.seed_avibe_supply() == seeded
     avibe = store.payload["agents"]["avibe"]
-    assert avibe["sources"]["order"] == order
+    # Every Source Avibe may use joins, subscriptions ahead of keys, whether or
+    # not a starting model matches: like OpenCode, it reaches every vendor.
+    assert avibe["sources"]["order"] == [SEED_SUBSCRIPTION.id, *SEED_KEYS]
     assert [model["id"] for model in avibe["models"]] == seeded
     assert {backend: store.payload["agents"][backend] for backend in agents} == others
     if "claude-opus-5-5" in seeded:
@@ -678,7 +677,7 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
             "provider", "Claude Opus 5.5", 1_000_000, 128_000,
         )
     candidates = service.agent_model_candidates("avibe")
-    listed = {model.id for source in (SEED_ANTHROPIC, SEED_RESPONSES, SEED_CHAT) for model in source.models}
+    listed = {model.id for source in (SEED_ANTHROPIC, SEED_RESPONSES, SEED_CHAT, SEED_SUBSCRIPTION) for model in source.models}
     assert {candidate["id"] for candidate in candidates["providers"]} == listed - set(seeded)
     assert [candidate["id"] for candidate in candidates["in_list"]] == seeded
 
@@ -690,13 +689,16 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("selections", "seeded"), [
-    ([("claude", "claude-opus-5-5"), ("codex", "gpt-6-astra")], ["claude-opus-5-5"]),
+@pytest.mark.parametrize(("first", "selections", "seeded"), [
+    (SEED_ANTHROPIC, [("claude", "claude-opus-5-5"), ("codex", "gpt-6-astra")], ["claude-opus-5-5"]),
     # Typical of a fresh install: no Agent runs a model this Source lists, and
     # none is picked for the user.
-    ([("codex", "gpt-6-astra")], []),
+    (SEED_ANTHROPIC, [("codex", "gpt-6-astra")], []),
+    # A subscription joins even when no starting model matches it, so its
+    # catalog still reaches the picker.
+    (SEED_SUBSCRIPTION, [("codex", "gpt-6-astra")], []),
 ])
-async def test_fresh_install_seeds_avibe_with_its_first_source(tmp_path, selections, seeded):
+async def test_fresh_install_seeds_avibe_with_its_first_source(tmp_path, first, selections, seeded):
     """MH-AVIBE-007: on a fresh install the first eligible Source seeds Avibe at once.
 
     A seed with no Source to place is not a seed: counted as done, it would
@@ -712,19 +714,19 @@ async def test_fresh_install_seeds_avibe_with_its_first_source(tmp_path, selecti
     assert "avibe" not in store.payload["agents"]
     assert reconciled == []
 
-    await service._commit_new_source_locked(copy.deepcopy(SEED_ANTHROPIC))
+    await service._commit_new_source_locked(copy.deepcopy(first))
     avibe = store.payload["agents"]["avibe"]
-    assert avibe["sources"]["order"] == [SEED_ANTHROPIC.id]
+    assert avibe["sources"]["order"] == [first.id]
     assert [model["id"] for model in avibe["models"]] == seeded
     assert reconciled == [True]
     assert {candidate["id"] for candidate in service.agent_model_candidates("avibe")["providers"]} == (
-        {"claude-opus-5-5", "claude-sonnet-5-5"} - set(seeded)
+        {model.id for model in first.models} - set(seeded)
     )
 
     # Seeded once: a later Source is placed like any other, and nothing re-seeds.
-    await service._commit_new_source_locked(copy.deepcopy(SEED_RESPONSES))
+    await service._commit_new_source_locked(copy.deepcopy(SEED_CHAT))
     avibe = store.payload["agents"]["avibe"]
-    assert avibe["sources"]["order"] == [SEED_ANTHROPIC.id, SEED_RESPONSES.id]
+    assert avibe["sources"]["order"] == [first.id, SEED_CHAT.id]
     assert [model["id"] for model in avibe["models"]] == seeded
     assert reconciled == [True]
 

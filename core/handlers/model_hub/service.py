@@ -21,7 +21,6 @@ from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from config.v2_config import (
     CONFIG_LOCK,
     MODEL_HUB_BACKENDS,
-    ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
     ModelHubConfig,
@@ -2498,8 +2497,9 @@ class ModelHubService:
         """Add a new Source to eligible backend defaults without editing overrides.
 
         A subscription serves a fixed catalog, so it joins only the backends whose
-        menu that catalog serves (OpenCode reaches every vendor), ahead of the API
-        keys there. API keys stay open to every eligible backend, appended.
+        menu that catalog serves (OpenCode and the Avibe Agent reach every
+        vendor), ahead of the API keys there. API keys stay open to every
+        eligible backend, appended.
         """
 
         for backend in backends:
@@ -2532,9 +2532,13 @@ class ModelHubService:
         source: ModelHubSourceConfig,
         backend: BackendName,
     ) -> bool:
-        if backend == "opencode" or _NATIVE_VENDOR_BACKENDS.get(source.vendor) == backend:
-            # The vendor's own Agent serves its subscription even when the
-            # catalog is ahead of the backend's menu.
+        if (
+            backend not in _NATIVE_VENDOR_BACKENDS.values()
+            or _NATIVE_VENDOR_BACKENDS.get(source.vendor) == backend
+        ):
+            # A backend that is no one vendor's client (OpenCode, the Avibe
+            # Agent) reaches every vendor, and the vendor's own Agent serves its
+            # subscription even when the catalog is ahead of the backend's menu.
             return True
         if not agent.models or not any(not model.retired for model in source.models):
             return False
@@ -5151,14 +5155,11 @@ class ModelHubService:
         """
 
         agent = config.agents["avibe"]
-        eligible = [source.id for source in config.sources if self._eligible_for_agent(source, "avibe")]
-        if not eligible:
+        if not any(self._eligible_for_agent(source, "avibe") for source in config.sources):
             return False
-        # A subscription joins only a menu it serves, so the menu is chosen
-        # first, against every Source that may join.
-        reachable = replace(config, agents={**config.agents, "avibe": replace(
-            agent, sources=ModelHubAgentSourcesConfig(order=eligible),
-        )})
+        config.avibe_supply_pending = False
+        for source in config.sources:
+            self._apply_source_placement(config, source, ("avibe",))
         selections = self.builtin_agent_models_override() if self.builtin_agent_models_override else ()
         model_ids: list[str] = []
         for backend, selected in selections:
@@ -5170,7 +5171,7 @@ class ModelHubService:
                         if backend == "opencode"
                         else (selected,)
                     )
-                    if self._matching_menu_model_hops(reachable, "avibe", candidate)
+                    if self._matching_menu_model_hops(config, "avibe", candidate)
                 ),
                 None,
             )
@@ -5179,19 +5180,11 @@ class ModelHubService:
         described = self._models_dev_descriptions(model_ids)
         rows = []
         for model_id in model_ids:
-            candidate = self._provider_candidate(reachable, "avibe", model_id, described.get(model_id))
+            candidate = self._provider_candidate(config, "avibe", model_id, described.get(model_id))
             if candidate is not None:
                 rows.append(candidate[0])
         agent.models = rows
-        config.avibe_supply_pending = False
-        for source in config.sources:
-            self._apply_source_placement(config, source, ("avibe",))
-        if agent.sources.order:
-            return True
-        # Only subscriptions that serve none of the menu: nothing took.
-        agent.models = []
-        config.avibe_supply_pending = True
-        return False
+        return True
 
     def _after_avibe_seed(self) -> None:
         """Let the Agent-row owner reconcile the Avibe Agent's model after a committed seed."""

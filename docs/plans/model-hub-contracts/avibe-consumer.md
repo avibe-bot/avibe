@@ -20,7 +20,9 @@ the service reports ready for Sources that already exist (so a first models.dev
 fetch never delays startup), and otherwise inside the mutation that creates the
 first eligible Source, API key, OAuth, or native takeover alike, once that
 mutation's Sources are final, so no restart is needed. Its source order becomes every existing eligible Source, placed exactly as
-a newly created Source would be, and its catalog becomes the models the built-in
+a newly created Source would be (like OpenCode, Avibe reaches every vendor, so a
+subscription joins it whether or not a starting model matches, ahead of the API
+keys), and its catalog becomes the models the built-in
 Claude, Codex, and OpenCode Agents run, in that order, that one of those Sources
 lists, deduplicated and added as the picker adds a provider model (models.dev
 metadata included). None qualifying leaves the catalog empty; no model is picked
