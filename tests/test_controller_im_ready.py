@@ -33,9 +33,21 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
         recover_persisted_agent_run_queue=AsyncMock(return_value=[]),
     )
     controller.runtime_work_supervisor = SimpleNamespace(activate=AsyncMock())
+    seed_started = []
+
+    async def seed_avibe_supply(_selections):
+        # A first start may wait on models.dev; startup must not wait with it.
+        seed_started.append(True)
+        await asyncio.Event().wait()
+
     controller.model_hub_service = SimpleNamespace(
-        recover_runtime_intent=AsyncMock()
+        recover_runtime_intent=AsyncMock(),
+        seed_avibe_supply=seed_avibe_supply,
     )
+    controller.vibe_agent_store = SimpleNamespace(
+        get_builtin_default_agent_for_backend=lambda backend, enabled_only=True: SimpleNamespace(name=backend, model=None),
+    )
+    controller.avibe_model_supply_task = None
     controller._get_idle_cleanup_timeouts = Mock(return_value=(0, 0))
     controller.cleanup_task = None
     controller.trace_retention_task = None
@@ -46,7 +58,12 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     # the service lock, which no test process does.
     controller._im_run_exception = None
 
-    asyncio.run(controller._on_runtime_ready())
+    async def start_up():
+        await asyncio.wait_for(controller._on_runtime_ready(), timeout=5)
+        await asyncio.sleep(0)
+
+    asyncio.run(start_up())
+    assert seed_started == [True]
 
     opencode_agent.restore_active_polls.assert_awaited_once_with({"avibe"})
     codex_agent.prepare_model_hub_runtime.assert_awaited_once_with()

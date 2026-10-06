@@ -2492,6 +2492,9 @@ class ModelHubService:
         """
 
         for backend in backends:
+            if backend == "avibe" and config.avibe_supply_pending:
+                # Its seed places every Source at once (seed_avibe_supply).
+                continue
             agent = config.agents[backend]
             if not self._eligible_for_agent(source, backend) or source.id in agent.sources.order:
                 continue
@@ -4792,29 +4795,19 @@ class ModelHubService:
                     reasoning_efforts.append(effort)
         return suppliers, display_name, reasoning_efforts
 
-    def _models_dev_descriptions(
-        self,
-        model_ids: list[str],
-        *,
-        wait_for_first_copy: bool = False,
-    ) -> dict[str, dict]:
+    def _models_dev_descriptions(self, model_ids: list[str]) -> dict[str, dict]:
         """Exact models.dev matches for provider candidates; empty when unknown.
 
         The description is optional: an unreadable catalog leaves every
         candidate as its suppliers describe it rather than failing the picker.
-        Only a caller that asks waits on the network, and only while no copy
-        has been fetched yet.
         """
 
         if not model_ids:
             return {}
-        from vibe.models_dev_catalog import exact_models_dev_matches, load_models_dev_catalog
+        from vibe.models_dev_catalog import exact_models_dev_matches
 
         try:
-            catalog = dict(self.models_dev_catalog())
-            if wait_for_first_copy and not catalog:
-                catalog = load_models_dev_catalog()
-            return exact_models_dev_matches(model_ids, catalog)
+            return exact_models_dev_matches(model_ids, dict(self.models_dev_catalog()))
         except Exception as exc:  # noqa: BLE001 - optional metadata never fails a read
             logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
             return {}
@@ -5145,6 +5138,11 @@ class ModelHubService:
         as the picker adds a provider model. Returns the seeded model ids.
         """
 
+        if not self.store.load().avibe_supply_pending:
+            return []
+        # These rows are written once and then kept, so a first models.dev copy
+        # is worth one bounded wait, off the loop and outside the lock.
+        await asyncio.to_thread(self._ensure_models_dev_copy)
         async with self._mutation_lock:
             previous = self.store.load()
             if not previous.avibe_supply_pending:
@@ -5175,22 +5173,31 @@ class ModelHubService:
                 )
                 if served is not None and served not in model_ids:
                     model_ids.append(served)
-            # These rows are written once and then kept, so a first catalog
-            # copy is worth one bounded wait here, unlike a picker read.
-            described = self._models_dev_descriptions(model_ids, wait_for_first_copy=True)
+            described = self._models_dev_descriptions(model_ids)
             for model_id in model_ids:
                 candidate = self._provider_candidate(reachable, "avibe", model_id, described.get(model_id))
                 if candidate is not None:
                     agent.models.append(candidate[0])
+            config.avibe_supply_pending = False
             for source in config.sources:
                 self._apply_source_placement(config, source, ("avibe",))
-            config.avibe_supply_pending = False
             # Startup seeds before any turn needs the engine. As after an
             # explicit runtime start, the engine takes this config on its next
             # demand, so an engine that is not up yet cannot undo the seed.
             self._engine_synced = False
             self._save_config(config)
             return [model.id for model in agent.models]
+
+    def _ensure_models_dev_copy(self) -> None:
+        """Fetch models.dev once when no copy exists yet; a failure leaves none."""
+
+        from vibe.models_dev_catalog import load_models_dev_catalog
+
+        try:
+            if not self.models_dev_catalog():
+                load_models_dev_catalog()
+        except Exception as exc:  # noqa: BLE001 - optional metadata never fails a seed
+            logger.info("Avibe Agent seed has no models.dev metadata: %s", type(exc).__name__)
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"} or (backend == "avibe" and mode != "hub"):

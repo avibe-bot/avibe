@@ -634,7 +634,7 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
     agents = {backend: ModelHubAgentSupplyConfig.default(backend, mode="hub") for backend in ("claude", "codex", "opencode")}
     # The user keeps one Source for Claude; seeding Avibe must not restore the rest.
     agents["claude"].sources.order = [SEED_ANTHROPIC.id]
-    sources = [SEED_ANTHROPIC, SEED_RESPONSES, SEED_CHAT, SEED_SUBSCRIPTION, SEED_NATIVE]
+    sources = [SEED_ANTHROPIC, SEED_RESPONSES, SEED_SUBSCRIPTION, SEED_NATIVE]
     store = _PersistedStore({
         "enabled": True,
         "runtime_default_applied": True,
@@ -643,20 +643,20 @@ async def test_avibe_agent_predating_its_supply_starts_with_the_users_providers_
     })
     service = _service(tmp_path, sources=[])
     service.store = store
+    service.models_dev_catalog = lambda: {"anthropic": {"name": "Anthropic", "models": {
+        "claude-opus-5-5": {"name": "Claude Opus 5.5", "limit": {"context": 1_000_000, "output": 128_000}},
+    }}}
+    # A write ahead of the seed, here a Source created then, must neither record
+    # the empty placeholder as the user's entry nor place itself in it.
+    await service._commit_new_source_locked(copy.deepcopy(SEED_CHAT))
+    assert "avibe" not in store.payload["agents"]
 
     async def engine_not_started(_bindings):
         # Startup seeds before the engine is up; the seed must not depend on it.
         raise ModelHubError("engine_down", status=503)
 
     service.adapter.sync_sources = engine_not_started
-    service.models_dev_catalog = lambda: {"anthropic": {"name": "Anthropic", "models": {
-        "claude-opus-5-5": {"name": "Claude Opus 5.5", "limit": {"context": 1_000_000, "output": 128_000}},
-    }}}
     others = {backend: store.payload["agents"][backend] for backend in agents}
-    # An unrelated write ahead of the seed (a startup reconcile, a settings
-    # save) must not record the empty placeholder as the user's entry.
-    store.save(store.load())
-    assert "avibe" not in store.payload["agents"]
 
     assert await service.seed_avibe_supply(selections) == seeded
     avibe = store.payload["agents"]["avibe"]

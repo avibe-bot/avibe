@@ -301,7 +301,6 @@ class Controller:
         self.vibe_agent_store.ensure_builtin_default_agents(
             self._enabled_agent_backends(),
         )
-        self._seed_avibe_model_supply()
 
         # Setup callbacks
         self._setup_callbacks()
@@ -318,6 +317,7 @@ class Controller:
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
+        self.avibe_model_supply_task: Optional[asyncio.Task] = None
         from modules.agents.avibe.recovery import AvibeRecovery
 
         # The single owner of the Avibe Agent's settlement outside a Turn.
@@ -369,25 +369,23 @@ class Controller:
                 result.append(backend)
         return result
 
-    def _seed_avibe_model_supply(self) -> None:
+    async def _seed_avibe_model_supply(self) -> None:
         """Start an Avibe Agent that predates its Model Hub entry with what the user runs.
 
         The Hub seeds that entry once from the models the built-in Agents run;
         this process owns the Agent rows, so it reads those models and gives the
-        built-in Avibe Agent the first seeded one when it has none yet. The seed
-        waits for an enabled Avibe Agent to start: a disabled backend's catalog
-        would claim the Hub runtime, and its first model would have no Agent to
-        go to.
+        built-in Avibe Agent the first seeded one when it has none yet.
         """
 
-        if self.model_hub_service is None:
+        model_hub_service = getattr(self, "model_hub_service", None)
+        if model_hub_service is None:
             return
         from config.v2_config import MODEL_HUB_BACKENDS
         from vibe.authorization import instance_owner_context
 
         store = self.vibe_agent_store
         try:
-            avibe = store.get_builtin_default_agent_for_backend("avibe")
+            avibe = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
             if avibe is None:
                 return
             selections = []
@@ -397,9 +395,15 @@ class Controller:
                 model = str(getattr(agent, "model", None) or "").strip()
                 if model:
                     selections.append((backend, model))
-            seeded = asyncio.run(self.model_hub_service.seed_avibe_supply(selections))
-            if seeded and not str(avibe.model or "").strip():
-                store.update(avibe.name, model=seeded[0], user_context=instance_owner_context())
+            seeded = await model_hub_service.seed_avibe_supply(selections)
+            if seeded:
+                # The user may pick a model while the seed waits on models.dev.
+                store.update(
+                    avibe.name,
+                    model=seeded[0],
+                    only_if_model_unset=True,
+                    user_context=instance_owner_context(),
+                )
         except Exception:
             logger.warning("Avibe Agent starting model supply failed", exc_info=True)
 
@@ -1204,6 +1208,14 @@ class Controller:
                 e,
                 exc_info=True,
             )
+
+        try:
+            # Off the readiness path: on a first start the seed may wait for a
+            # models.dev copy, and nothing below needs it.
+            if getattr(self, "avibe_model_supply_task", None) is None:
+                self.avibe_model_supply_task = asyncio.create_task(self._seed_avibe_model_supply())
+        except Exception as e:
+            logger.error("Failed to start the Avibe Agent's model supply seed: %s", e, exc_info=True)
 
         try:
             if self.cleanup_task is None or self.cleanup_task.done():
@@ -2367,6 +2379,16 @@ class Controller:
                     pass
             self.cleanup_task = None
 
+        async def _cancel_avibe_model_supply_task() -> None:
+            task = getattr(self, "avibe_model_supply_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self.avibe_model_supply_task = None
+
         async def _cancel_trace_retention_task() -> None:
             cancel_event = getattr(self, "_trace_retention_cancel_event", None)
             if cancel_event is not None:
@@ -2411,6 +2433,7 @@ class Controller:
             logger.debug(f"Internal dispatch server status write skipped: {e}")
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
+        _stop_loop_coroutine(_cancel_avibe_model_supply_task(), "Avibe Agent model supply seed")
         # Retention cancellation is cooperative at a delete-batch boundary;
         # wait for that bounded join instead of abandoning the worker after
         # the generic five-second cleanup timeout.
