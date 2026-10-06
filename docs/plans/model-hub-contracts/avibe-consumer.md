@@ -31,8 +31,9 @@ built-in one takes its catalog's first model while it has none: one controller
 rule, decided under the Agent store's write lock so a chosen model stands, run
 on every Avibe catalog change (`_refresh_backend_catalog`, which each seed also
 announces) and at every start, so a lost hand-off heals on the next start. A
-seed waits once for a first models.dev copy, joining a fetch in flight, so its
-rows carry the limits the Agent budgets with. A native Source that later moves
+seed with no models.dev copy cached first fetches one in the foreground, bounded,
+so its rows usually carry the limits the Agent budgets with; a starting model is
+one a placed Source's own non-retired inventory lists, never a passthrough route. A native Source that later moves
 to the Hub joins Avibe like a new Source.
 Where a user Agent already holds the name and no built-in exists, only the
 supply is seeded.

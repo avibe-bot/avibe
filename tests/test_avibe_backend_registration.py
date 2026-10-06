@@ -318,3 +318,39 @@ async def test_the_first_model_a_user_adds_makes_the_avibe_agent_runnable(tmp_pa
         assert store.get("avibe").model == "relay-model"
     finally:
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db_factory):
+    """MH-AVIBE-007: a Source's inventory, not a route, decides a starting model.
+
+    An Anthropic key could pass any model id through, but it lists only Claude
+    models: the Codex Agent's ``gpt-6-astra`` is no starting model for Avibe,
+    and the Avibe Agent stays without a model rather than routing it there.
+    """
+    from config.v2_config import ModelHubConfig
+    from tests.test_model_hub_l3 import _service, _source
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["codex", "avibe"])
+        store.update("codex", model="gpt-6-astra")
+        service = _service(tmp_path, sources=[])
+        service.store.config = ModelHubConfig()
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        controller.model_hub_service = service
+        service.builtin_agent_models_override = controller._builtin_agent_models
+        service.backend_catalog_changed = controller._model_hub_catalog_changed
+        anthropic = _source(
+            "src_anthropic01", "Anthropic key", vendor="anthropic", protocol="anthropic", model_id="claude-opus-5-5",
+        )
+
+        async with service._mutation_lock:
+            await service._commit_new_source_locked(anthropic)
+
+        avibe = service.store.load().agents["avibe"]
+        assert (avibe.sources.order, avibe.models) == ([anthropic.id], [])
+        assert store.get("avibe").model is None
+    finally:
+        store.close()

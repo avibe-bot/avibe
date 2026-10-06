@@ -5156,11 +5156,21 @@ class ModelHubService:
         if not any(self._eligible_for_agent(source, "avibe") for source in config.sources):
             return False
         # Seeded rows keep the models.dev metadata they are written with, so a
-        # seed waits once for a first copy, joining a fetch already in flight.
+        # seed with no copy cached fetches one in the foreground, bounded; a
+        # foreground fetch already running (the startup warm-up) is shared.
         await asyncio.to_thread(self._ensure_models_dev_copy)
         config.avibe_supply_pending = False
         for source in config.sources:
             self._apply_source_placement(config, source, ("avibe",))
+        # A starting model is one a placed Source's own inventory lists; a
+        # route, passthrough included, is no evidence.
+        listed = {
+            model.id
+            for source in config.sources
+            if source.id in agent.sources.order
+            for model in source.models
+            if not model.retired
+        }
         selections = self.builtin_agent_models_override() if self.builtin_agent_models_override else ()
         model_ids: list[str] = []
         for backend, selected in selections:
@@ -5172,7 +5182,7 @@ class ModelHubService:
                         if backend == "opencode"
                         else (selected,)
                     )
-                    if self._matching_menu_model_hops(config, "avibe", candidate)
+                    if candidate in listed
                 ),
                 None,
             )
@@ -5210,8 +5220,9 @@ class ModelHubService:
         if not self.store.load().avibe_supply_pending:
             return []
         # Seeded rows are written once and then kept, so a first models.dev copy
-        # is worth one bounded wait, off the loop and outside the lock. Taken
-        # even with no Source yet, so a fresh install's first Source finds it.
+        # is worth one bounded foreground fetch, off the loop and outside the
+        # lock. Taken even with no Source yet, so a fresh install's first
+        # Source usually finds it.
         await asyncio.to_thread(self._ensure_models_dev_copy)
         async with self._mutation_lock:
             previous = self.store.load()
@@ -5231,7 +5242,11 @@ class ModelHubService:
         return [model.id for model in config.agents["avibe"].models]
 
     def _ensure_models_dev_copy(self) -> None:
-        """Fetch models.dev once when no copy exists yet; a failure leaves none."""
+        """Fetch models.dev in the foreground, bounded, when no copy is cached.
+
+        A foreground fetch already running is shared through the catalog's cache
+        lock; a background refresh is not waited for. A failure leaves no copy.
+        """
 
         from vibe.models_dev_catalog import load_models_dev_catalog
 

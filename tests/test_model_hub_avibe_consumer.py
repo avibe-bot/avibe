@@ -736,12 +736,12 @@ async def test_fresh_install_seeds_avibe_with_its_first_source(tmp_path, first, 
 
 
 @pytest.mark.asyncio
-async def test_the_first_source_seed_waits_for_a_models_dev_copy_in_flight(tmp_path, monkeypatch):
+async def test_the_first_source_seed_fetches_a_models_dev_copy_when_none_is_cached(tmp_path, monkeypatch):
     """MH-AVIBE-007: seeded rows keep the metadata they are written with.
 
-    On a fresh install the first Source can arrive while startup is still
-    fetching models.dev, so the seed joins that fetch instead of writing rows
-    without the context window and output limit the Agent budgets with.
+    On a fresh install the first Source can arrive before any models.dev copy
+    is cached, so the seed fetches one first rather than writing rows without
+    the context window and output limit the Agent budgets with.
     """
     service, store, _announced = _seed_service(
         tmp_path, ModelHubConfig().to_payload(), [("claude", "claude-opus-5-5")],
@@ -749,11 +749,11 @@ async def test_the_first_source_seed_waits_for_a_models_dev_copy_in_flight(tmp_p
     copy_on_disk = {}
     service.models_dev_catalog = lambda: copy_on_disk
 
-    def join_fetch_in_flight():
+    def fetch_first_copy():
         copy_on_disk.update(SEED_CATALOG)
         return copy_on_disk
 
-    monkeypatch.setattr("vibe.models_dev_catalog.load_models_dev_catalog", join_fetch_in_flight)
+    monkeypatch.setattr("vibe.models_dev_catalog.load_models_dev_catalog", fetch_first_copy)
     await service._commit_new_source_locked(copy.deepcopy(SEED_ANTHROPIC))
     [row] = store.payload["agents"]["avibe"]["models"]
     assert (row["id"], row["context_window"], row["max_output_tokens"]) == ("claude-opus-5-5", 1_000_000, 128_000)
