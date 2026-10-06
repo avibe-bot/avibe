@@ -641,6 +641,57 @@ def test_expiry_after_mixed_real_failures_keeps_the_action_blocker_terminal(tmp_
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("turns,slow_seconds", [(3, 0), (4, 90)])
+def test_waiters_without_an_attempt_record_blocked_supply_not_a_protocol_error(tmp_path, turns, slow_seconds):
+    """MH-RETRY-PROVENANCE-001: losing the half-open slot is blocked supply, not a gateway fault."""
+    async def run():
+        service, clock, models = configured_service(tmp_path, outcomes=[
+            _outcome(RawOutcomeKind.HTTP_ERROR, source_id="src_recovery01", status=500, code="server_error")
+            for _ in range(4 * turns)
+        ])
+        service.store = FreshStore(service.store.load())
+        original_invoke = service.adapter.invoke
+
+        async def slow_invoke(*args, **kwargs):
+            handle = await original_invoke(*args, **kwargs)
+            if slow_seconds:
+                await clock.sleep(slow_seconds)
+            return handle
+
+        service.adapter.invoke = slow_invoke
+        gateway = ModelHubTurnGateway(service)
+        source = service.store.load().sources[0]
+        endpoints = []
+        for index in range(turns):
+            base, token = await gateway.endpoint(
+                "claude", process_scope=f"scope_{index}", turn_id=f"turn_{index}",
+                requested_model_id=models["claude"], resolved_model_id="shared-model", source_id=source.id,
+            )
+            endpoints.append((f"turn_{index}", f"{base}/v1/messages", {"Authorization": f"Bearer {token}"}))
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                async def post(url, headers):
+                    async with client.post(url, headers=headers, json={"model": "shared-model"}) as response:
+                        return response.status
+                statuses = await asyncio.gather(*(post(url, headers) for _turn, url, headers in endpoints))
+            assert statuses == [424] * turns
+            records = []
+            for turn_id, _url, _headers in endpoints:
+                gateway.correlation.settle(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT)
+                records.append(service.provenance.get(turn_id))
+        finally:
+            await gateway.close()
+        for record in records:
+            assert record["terminal_error"] is None
+            if record["outcome"] == "exhausted":
+                assert record["failed_attempts"]
+            else:
+                assert (record["outcome"], record["model_supply_state"]) == ("no_candidate", "waiting")
+        # The race this covers: some waiter never owned an attempt of its own.
+        assert any(not record["failed_attempts"] or record["outcome"] == "no_candidate" for record in records)
+    asyncio.run(run())
+
+
 KEEPALIVE = b": keepalive\n\n"
 
 

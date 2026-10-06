@@ -76,6 +76,8 @@ _NETWORK_ERROR_RE = re.compile(
     r"(?:timed?\s*out|timeout|connection (?:failed|reset|refused)|network (?:error|unreachable))",
     re.IGNORECASE,
 )
+# A Hub stream that broke after output reached the backend, not content it rejected.
+_STREAM_DROPPED_RE = re.compile(r"(?:unexpected EOF|ECONNRESET|socket hang up|connection .{0,24}lost)", re.IGNORECASE)
 @dataclass(frozen=True)
 class ModelHubLaunch:
     backend: BackendName
@@ -615,21 +617,11 @@ class ModelHubRuntimeRouter:
             supply_channel=supply_channel,
             live_recovery=self.service.recovery_annotations(config),
         )
-        if (
-            self.turn_gateway is not None and resolution.source is None
-            and resolution.supply_status == "waiting"
-            and resolution.inspected_hops
-            and any(
-                hop.source is not None and hop.source.supply_channel == "hub"
-                for hop in resolution.inspected_hops
-            )
-        ):
+        waitable = resolution.self_healing_hops("hub")
+        if self.turn_gateway is not None and resolution.source is None and waitable:
             # Preflight prepares the existing native delivery. Its first model
             # request owns recovery admission; no second startup wait/window.
-            first = next(
-                hop for hop in resolution.inspected_hops
-                if hop.source is not None and hop.source.supply_channel == "hub"
-            )
+            first = waitable[0]
             resolution = replace(
                 resolution, channel="hub", source=first.source,
                 target_model=first.model_id or requested_model,
@@ -1151,7 +1143,14 @@ class ModelHubRuntimeRouter:
                 )
                 or ""
             ).strip()
-            self.turn_gateway.correlation.fail_hub_attempt(turn_id)
+            self.turn_gateway.correlation.fail_hub_attempt(
+                turn_id,
+                reason=(
+                    "stream_interrupted"
+                    if _NETWORK_ERROR_RE.search(diagnostic) or _STREAM_DROPPED_RE.search(diagnostic)
+                    else "protocol_error"
+                ),
+            )
             setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
             return False
         decision: ResolutionDecision | None

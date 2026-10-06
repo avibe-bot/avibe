@@ -252,12 +252,21 @@ def test_one_window_covers_all_fallback_passes_without_replaying_after_output(tm
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("action_sibling", [None, "before", "after"])
 @pytest.mark.parametrize("backend", ["codex", "claude", "opencode"])
-def test_startup_passes_temporary_hub_supply_without_spending_another_window(tmp_path, backend):
+def test_startup_passes_temporary_hub_supply_without_spending_another_window(tmp_path, backend, action_sibling):
     async def run():
-        service, clock = clock_service(tmp_path)
+        cooling = _source("src_recovery01", "Recovering")
+        sources = [cooling]
+        if action_sibling is not None:
+            action = _source("src_backup001", "Backup")
+            action.state = ModelHubSourceStateConfig(
+                status="needs_action", detail_key="models.source.needs_action.credential_revoked",
+            )
+            sources = [action, cooling] if action_sibling == "before" else [cooling, action]
+        service, clock = clock_service(tmp_path, sources=sources)
         models = _canonicalize_fixed_test_routes(service)
-        source = service.store.load().sources[0]
+        source = next(item for item in service.store.load().sources if item.id == cooling.id)
         await fail(service, source)
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway, overlay_path=tmp_path / "overlay.json")
@@ -512,22 +521,31 @@ def test_permissive_success_releases_admission_without_verified_recovery(tmp_pat
     asyncio.run(run())
 
 
-def test_draft_preview_does_not_clear_live_health_and_mixed_action_blocks_waiting(tmp_path):
+@pytest.mark.parametrize("action_first", [False, True])
+def test_draft_preview_does_not_clear_live_health_and_mixed_chain_waits_for_the_healing_hop(
+    tmp_path, action_first,
+):
+    """MH-RETRY-MIXED-001: an action owed elsewhere cannot end the wait for a healing hop."""
     async def run():
-        first, second = _source("src_primary01", "Primary"), _source("src_backup001", "Backup")
-        service, clock = clock_service(tmp_path, sources=[first, second])
-        await fail(service, first)
+        cooling, action = _source("src_primary01", "Primary"), _source("src_backup001", "Backup")
+        service, clock = clock_service(
+            tmp_path,
+            sources=[action, cooling] if action_first else [cooling, action],
+            outcomes=[_outcome(RawOutcomeKind.SUCCESS, source_id=cooling.id, stream_started=True)],
+        )
+        await fail(service, cooling)
         draft = copy.deepcopy(service.store.load())
-        draft.sources[0].credential_ref = "cred_draft"
-        assert first.id not in service.recovery_annotations(draft)
-        assert first.id in service.recovery_annotations(service.store.load())
-        second.state = ModelHubSourceStateConfig(
+        draft.sources[1 if action_first else 0].credential_ref = "cred_draft"
+        assert cooling.id not in service.recovery_annotations(draft)
+        assert cooling.id in service.recovery_annotations(service.store.load())
+        action.state = ModelHubSourceStateConfig(
             status="needs_action", detail_key="models.source.needs_action.credential_revoked",
         )
-        with pytest.raises(ModelHubError) as failed:
-            await service.resolve_with_recovery(backend="codex", model_id="shared-model", request={})
-        assert failed.value.supply_state == "interrupted"
-        assert clock.delays == [] and service.adapter.invocations == []
+        assert service.agent_chain("codex", "shared-model")["supply_state"] == "interrupted"
+        result = await service.resolve_with_recovery(backend="codex", model_id="shared-model", request={})
+        assert result.source_id == cooling.id and result.outcome.kind is RawOutcomeKind.SUCCESS
+        assert clock.delays == [1]
+        assert [source_id for source_id, *_ in service.adapter.invocations] == [cooling.id]
     asyncio.run(run())
 
 

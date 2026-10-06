@@ -145,6 +145,47 @@ def test_native_failure_callback_consumes_exact_hub_terminal_copy(tmp_path, term
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("diagnostic,reason", [
+    ("API Error: read tcp 192.0.2.3:56860->198.51.100.7:443: read: operation timed out", "stream_interrupted"),
+    ("API Error: unexpected EOF", "stream_interrupted"),
+    ("API Error: Stream idle timeout - no chunks received", "stream_interrupted"),
+    ("API Error: Connection to the API was lost (ECONNRESET). This is usually temporary.", "stream_interrupted"),
+    ("API Error: tool_use ids must be unique", "protocol_error"),
+])
+def test_native_failure_after_hub_output_names_a_broken_stream(tmp_path, diagnostic, reason):
+    """MH-RETRY-PROVENANCE-002: a dropped stream is not recorded as rejected content."""
+    async def run():
+        source = _source("src_callback01", (MODEL,))
+        service, _store, _ = _service(tmp_path, _config([source], model=MODEL))
+        registry = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "records.json"))
+        token = registry.credentials("claude", "fixture", "turn-dropped")
+        registry.begin_gateway_request(backend="claude", token=token, requested_model_id=MODEL)
+        registry.begin_attempt(
+            "turn-dropped", source_id=source.id, resolved_model_id=MODEL, channel="hub", via_mapping=False,
+        )
+        served = RawCallOutcome(
+            kind=RawOutcomeKind.SUCCESS, http_status=200, error_code=None, redacted_message=None,
+            stream_started=True, model_id=MODEL, source_id=source.id,
+        )
+        registry.finish_attempt("turn-dropped", outcome=served, decision=classify_outcome(served))
+        router = ModelHubRuntimeRouter(
+            service=service, turn_gateway=SimpleNamespace(correlation=registry),
+            overlay_path=tmp_path / "overlay.json",
+        )
+        context = SimpleNamespace(platform_specific={"turn_token": "turn-dropped"})
+        bind_launch(context, ModelHubLaunch(
+            backend="claude", channel="hub", requested_model=MODEL,
+            target_model=MODEL, runtime_model=MODEL, source_id=source.id,
+        ))
+        assert await router.record_native_failure(context, diagnostic) is False
+        registry.settle("turn-dropped", settled_by=SETTLED_BY_TERMINAL_RESULT)
+        record = registry.store.get("turn-dropped")
+        assert record["outcome"] == "failed_terminal"
+        assert record["terminal_error"]["reason"] == reason
+        assert record["terminal_error"]["stream_started"] is True
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("status", [100, 503, 599, None, True, 99, 600])
 def test_failed_attempt_http_status_is_additive_strict_and_history_safe(tmp_path, status):
     import jsonschema

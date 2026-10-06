@@ -2026,8 +2026,17 @@ class TurnCorrelationRegistry:
                 {**identity.payload(), "reason": reason}
             )
 
-    def fail_hub_attempt(self, turn_id: Optional[str]) -> None:
-        """Replace a gateway success rejected by the backend terminal result."""
+    def fail_hub_attempt(
+        self,
+        turn_id: Optional[str],
+        *,
+        reason: Literal["protocol_error", "stream_interrupted"] = "protocol_error",
+    ) -> None:
+        """Replace a gateway success rejected by the backend terminal result.
+
+        ``stream_interrupted`` records a backend whose stream broke after output;
+        ``protocol_error`` one that rejected what the gateway delivered.
+        """
 
         normalized = str(turn_id or "").strip()
         if not normalized:
@@ -2054,7 +2063,7 @@ class TurnCorrelationRegistry:
             trace.served = None
             trace.terminal_error = {
                 **payload,
-                "reason": "protocol_error",
+                "reason": reason,
                 "stream_started": True,
             }
 

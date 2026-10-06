@@ -97,6 +97,20 @@ class ModelHubTurnResolution:
     recoverable_source_ids: tuple[str, ...] = ()
     supply_status: SupplyStatus | None = None
 
+    def self_healing_hops(self, supply_channel: str | None) -> tuple[ExactHopInspection, ...]:
+        """Blocked hops that may become runnable unattended, for recovery control.
+
+        ``supply_status`` answers whether the user owes an action, so one revoked
+        key makes a chain ``interrupted``. Whether a request may wait is a
+        different question: any of these hops lets it wait for recovery.
+        """
+
+        return tuple(
+            hop for hop in self.inspected_hops
+            if hop.temporary_blocker
+            and (supply_channel is None or hop.source.supply_channel == supply_channel)
+        )
+
     @property
     def structural_blocker_reason(self) -> str | None:
         if self.route_reason == "route_unconfigured":

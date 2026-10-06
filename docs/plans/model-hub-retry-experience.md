@@ -82,7 +82,7 @@ not change a running installation.
 | --- | --- |
 | Existing Turn / Delivery manager | Own input, native acceptance, queue order, cancellation, final settlement, and explicit user Retry. A waiting subphase is not a new Turn or Delivery. |
 | Existing Model Hub service and resolver | Own classification, configured fallback, per-Source eligibility, backoff, and a shared in-memory recovery admission coordinator. |
-| Gateway and runtime router | Gateway consumes the service policy. Router launches an all-temporary Hub chain without pre-native waiting; only the arriving gateway request owns a recovery window. Neither owns a second retry counter. |
+| Gateway and runtime router | Gateway consumes the service policy. Router launches a blocked Hub chain with a self-healing hop without pre-native waiting; only the arriving gateway request owns a recovery window. Neither owns a second retry counter. |
 | CPA | Execute the selected attempt. Keep inference request retries disabled; preserve the existing bounded credential-refresh exception. |
 | Native backend | Execute the agent and any supported continuation. For `channel=hub`, redundant whole-HTTP-request retry must be reconciled with Hub ownership. For `native_cli`, Hub cannot control unobserved provider requests. |
 | Web / IM | Render controller-owned progress and terminal facts. Never retry model requests from a view timer. |
@@ -109,14 +109,14 @@ model, restart a backend, or change credentials implicitly.
 
 ### One bounded automatic recovery window
 
-Approved default: **120 seconds per pending model request**, starting
-at its first retryable failure or first blocked admission. The same window
-covers fallback passes, cooldown waits, and recovery admission; it never resets
-because another Source was tried. For an all-temporary Hub chain, preflight
-constructs the gateway launch immediately without waiting, starting a recovery
-clock, or reserving a half-open slot. The first gateway request then owns its
-window. Dispatch acknowledgement and native acceptance retain their existing
-owners and deadlines.
+Approved default: **120 seconds per pending model request**, starting at its
+first retryable failure or first blocked admission. The same window covers
+fallback passes, cooldown waits, and recovery admission; it never resets
+because another Source was tried. For a blocked Hub chain with a hop that may
+heal unattended, preflight constructs the gateway launch immediately without
+waiting, starting a recovery clock, or reserving a half-open slot. The first
+gateway request then owns its window. Dispatch acknowledgement and native
+acceptance retain their existing owners and deadlines.
 
 This is an admission limit, not an inference timeout:
 
@@ -132,9 +132,11 @@ This is an admission limit, not an inference timeout:
 - If the next permitted attempt is beyond the remaining window, end automatic
   recovery now and show the next eligible time as advisory. Do not spend two
   minutes waiting when the recorded quota reset is five minutes away.
-- Only an all-temporary blocked chain is an automatic waiting case. Preserve
-  `interrupted` and its remedies if any blocker needs user action; do not hide
-  it behind a cooling Source.
+- A blocked chain waits while any hop may heal unattended. A blocker that
+  needs user action keeps the chain `interrupted`, stays in its live and
+  terminal blockers, and its remedy is shown when automatic recovery ends; it
+  does not end the wait for a cooling Source. A request that itself observes
+  such a failure ends at once with it.
 
 Two minutes allows two recovery opportunities after typical 30-second and
 60-second transient delays while bounding unattended outage waits. It is a

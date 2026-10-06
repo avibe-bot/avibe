@@ -15,6 +15,7 @@ capability:
     - tests/test_model_hub_retry_advice.py
     - tests/test_model_hub_retry_policy.py
     - tests/test_model_hub_retry_lifecycle.py
+    - tests/test_model_hub_provenance.py
     - tests/test_model_hub_recovery_evidence.py
     - tests/test_model_hub_progress.py
     - tests/test_model_hub_failure_presentation.py
@@ -193,6 +194,32 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_retry_lifecycle.py::test_expiry_after_mixed_real_failures_keeps_the_action_blocker_terminal
+  - id: MH-RETRY-MIXED-001
+    name: A chain waits for a self-healing hop while another hop already owes user action
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_draft_preview_does_not_clear_live_health_and_mixed_chain_waits_for_the_healing_hop
+    related_tests:
+      - tests/test_model_hub_retry_policy.py::test_startup_passes_temporary_hub_supply_without_spending_another_window
+  - id: MH-RETRY-TRANSPORT-001
+    name: The engine's generic 5xx for its own failed upstream connection takes network recovery
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_runtime.py::test_engine_reported_upstream_transport_failure_takes_network_recovery
+  - id: MH-RETRY-PROVENANCE-001
+    name: A waiter that never admits an attempt records blocked supply, not a gateway protocol error
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_waiters_without_an_attempt_record_blocked_supply_not_a_protocol_error
+  - id: MH-RETRY-PROVENANCE-002
+    name: A backend stream broken after Hub output is recorded as interrupted, not rejected content
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_provenance.py::test_native_failure_after_hub_output_names_a_broken_stream
   - id: MH-RETRY-ADVICE-001
     name: Failed HTTP advice retains the receipt clock across delayed or broken bodies
     status: covered
