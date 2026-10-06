@@ -549,6 +549,30 @@ def test_draft_preview_does_not_clear_live_health_and_mixed_chain_waits_for_the_
     asyncio.run(run())
 
 
+def test_a_request_that_attempted_keeps_exhausted_after_a_peer_takes_the_slot(tmp_path):
+    """MH-RETRY-PROVENANCE-001: attempts from an earlier walk are still this request's own."""
+    async def run():
+        service, clock = clock_service(tmp_path, outcomes=[
+            _outcome(RawOutcomeKind.HTTP_ERROR, source_id="src_recovery01", status=500, code="server_error"),
+        ])
+        source_id = service.store.load().sources[0].id
+        wait_for_eligibility = service.recovery.sleep
+
+        async def a_peer_claims_on_eligibility(seconds):
+            await wait_for_eligibility(seconds)
+            # A concurrent request wins the half-open slot and keeps it.
+            source = next(item for item in service.store.load().sources if item.id == source_id)
+            service.recovery.claim(source, service._reserve_settlement_generation(source_id))
+
+        service.recovery.sleep = a_peer_claims_on_eligibility
+        with pytest.raises(ModelHubError) as ended:
+            await service.resolve_with_recovery(backend="codex", model_id="shared-model", request={})
+        assert ended.value.code == RECOVERY_EXHAUSTED_CODE
+        assert ended.value.turn_outcome.outcome == "exhausted"
+        assert len(service.adapter.invocations) == 1
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("read", ["agent_chain", "agent_chains", "get_agent_sources", "list_agents"])
 def test_public_live_reads_capture_config_and_health_once(tmp_path, read):
     async def run():

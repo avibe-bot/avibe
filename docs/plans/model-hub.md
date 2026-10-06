@@ -710,15 +710,15 @@ start the model-output stream.
 | `network_failure.shaped_after_first_byte` | explicit closed code/classification arrives only after model output began | `stream_started: true`; after first user-visible model output | apply that existing non-permanent family and its unchanged recovery rule | none | terminal, no replay; emit only the existing redacted event |
 | `network_failure.transport_after_first_byte` | stream interrupted without explicit code | `stream_started: true`; after first user-visible model output | none; the successful connection/authentication/output evidence wins | none | terminal, no replay; emit only the existing redacted `network` event |
 
-The engine answers its own failed upstream connection or read with a generic
-server-class envelope (`api_error`, or `server_error` / `internal_server_error`)
-whose message is the transport error text, such as `dial tcp ...: i/o timeout`,
-`read tcp ...: operation timed out`, or `unexpected EOF`. That envelope is the
-engine's label, not an upstream verdict, so the engine client projects it to the
-transport rows above. A relay reporting its own failed upstream connection in the
-same generic shape is the same transport fact one hop further and takes the same
-row. A 4xx, a specific machine code, or any other message keeps its own
-classification.
+The engine answers its own failed upstream connection or read, before any upstream
+response, with its own JSON error body: a top level of only `type: "error"` and
+`error`, and an envelope of only `type` (`api_error` or `server_error`), an optional
+`code` of `internal_server_error`, and a `message` that is the transport error text,
+such as `dial tcp ...: i/o timeout` or `read tcp ...: operation timed out`. That exact
+body is the engine's label, not an upstream verdict, so the engine client projects
+it to `network_failure.transport_before_first_byte`. An upstream that answered adds
+its own fields (for example a request id or a specific code), so any other body, a
+4xx, and any streamed error event keep their own classification.
 
 Connection backoff is live execution state, never Source/configuration state. For the
 same Source, consecutive `transport_before_first_byte` decisions use delays

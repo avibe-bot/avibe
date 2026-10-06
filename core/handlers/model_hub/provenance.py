@@ -810,7 +810,7 @@ class GatewayTurnTerminalizer:
         """Keep the settlement projection attached to the correlated turn event."""
 
         if self.turn_id is not None:
-            self._registry.record_turn_outcome(self.turn_id, turn_outcome)
+            self._registry.record_turn_outcome(self.turn_id, turn_outcome, request_id=self._request_id)
 
     def mark_downstream_canceled(self) -> None:
         """Clear a prepared-only attempt before the outer stopped settlement."""
@@ -1845,8 +1845,7 @@ class TurnCorrelationRegistry:
                     **({"local_error_detail": local_error_detail} if local_error_detail else {}),
                 }
                 return
-            if any(key != request_id for key in trace.pending_attempts):
-                # A peer request of this turn is still open; this exit is its own.
+            if self._peer_request_open(trace, request_id):
                 trace.pending_attempts.pop(request_id, None)
                 return
             identity = trace.pending_attempts.get(request_id)
@@ -1955,12 +1954,11 @@ class TurnCorrelationRegistry:
         with self._lock:
             trace = self._traces.get(turn_id)
             if trace is not None and not trace.outcome_frozen:
-                # Only this request found nothing to call; a peer still
-                # awaiting an upstream result keeps its identity, and its
-                # result, not this one, is what the turn settles on.
-                trace.pending_attempts.pop(request_id, None)
-                if trace.pending_attempts:
+                # Only this request found nothing to call.
+                if self._peer_request_open(trace, request_id):
+                    trace.pending_attempts.pop(request_id, None)
                     return
+                trace.pending_attempts.pop(request_id, None)
                 trace.served = None
                 trace.terminal_error = None
                 trace.model_supply_state = supply_state
@@ -1970,13 +1968,18 @@ class TurnCorrelationRegistry:
         self,
         turn_id: Optional[str],
         turn_outcome: TurnOutcomeProjectionInput | None,
+        *,
+        request_id: str | None = None,
     ) -> None:
         if turn_id is None:
             return
         with self._lock:
             trace = self._traces.get(turn_id)
-            if trace is not None and not trace.outcome_frozen:
-                trace.terminal_outcome = turn_outcome
+            if trace is None or trace.outcome_frozen:
+                return
+            if request_id is not None and self._peer_request_open(trace, request_id):
+                return
+            trace.terminal_outcome = turn_outcome
 
     def begin_attempt(
         self,
@@ -2035,6 +2038,18 @@ class TurnCorrelationRegistry:
             trace.failed_attempts.append(
                 {**identity.payload(), "reason": reason}
             )
+
+    @staticmethod
+    def _peer_request_open(trace: TurnTrace, request_id: str) -> bool:
+        """Whether another request of this turn is still open.
+
+        Every gateway request arms an identity on arrival, so this covers a
+        peer that is waiting as well as one awaiting its upstream result. A
+        request ending beside it records only its own exit: the turn settles
+        on whichever request ends last.
+        """
+
+        return any(key != request_id for key in trace.pending_attempts)
 
     def mark_attempt_output_started(self, turn_id: Optional[str], *, request_id: str) -> None:
         if turn_id is None:

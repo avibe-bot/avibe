@@ -683,12 +683,50 @@ def test_waiters_without_an_attempt_record_blocked_supply_not_a_protocol_error(t
             await gateway.close()
         for record in records:
             assert record["terminal_error"] is None
-            if record["outcome"] == "exhausted":
-                assert record["failed_attempts"]
+            # Each turn has one request, so its attempts are that request's own.
+            if record["failed_attempts"]:
+                assert (record["outcome"], record["model_supply_state"]) == ("exhausted", None)
             else:
                 assert (record["outcome"], record["model_supply_state"]) == ("no_candidate", "waiting")
         # The race this covers: some waiter never owned an attempt of its own.
         assert any(not record["failed_attempts"] or record["outcome"] == "no_candidate" for record in records)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("backend", ["codex", "claude"])
+def test_a_waiter_ending_beside_the_slot_owner_leaves_no_turn_projection(tmp_path, backend):
+    """MH-RETRY-PROVENANCE-003: the gateway commits a peer-scoped ending only for its own request."""
+    async def run():
+        service, clock, models = configured_service(tmp_path, outcomes=[
+            _outcome(RawOutcomeKind.SUCCESS, source_id="src_recovery01"),
+        ])
+        source = service.store.load().sources[0]
+        await fail(service, source, "server_error")
+        clock.advance(31)
+        release = asyncio.Event()
+        original_invoke = service.adapter.invoke
+
+        async def owner_waits_upstream(*args, **kwargs):
+            handle = await original_invoke(*args, **kwargs)
+            await release.wait()
+            return handle
+
+        service.adapter.invoke = owner_waits_upstream
+        async with gateway_client(service, backend, models[backend]) as (gateway, client, url, headers):
+            async def post():
+                async with client.post(url, headers=headers, json={"model": "shared-model"}) as response:
+                    return response.status
+
+            owner = asyncio.create_task(post())
+            while not service.adapter.invocations:
+                await asyncio.sleep(0.01)
+            assert await post() == (400 if backend == "codex" else 424)
+            release.set()
+            assert await owner == 200
+            assert gateway.correlation.terminal_projection("turn_lifecycle", backend=backend) is None
+            gateway.correlation.settle("turn_lifecycle", settled_by=SETTLED_BY_TERMINAL_RESULT)
+            record = service.provenance.get("turn_lifecycle")
+            assert record["outcome"] == "served" and record["model_supply_state"] is None
     asyncio.run(run())
 
 

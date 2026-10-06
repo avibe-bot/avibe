@@ -54,10 +54,9 @@ from vibe.model_hub_runtime.state import SourceRecord
 _STREAM_CHUNK_BYTES = 64 * 1024
 # Upper bound on upstream error text shown to the user in a terminal message.
 _UPSTREAM_DETAIL_CHARS = 400
-# The engine answers a failed upstream connection itself: a generic server-class
-# error whose message is Go's transport error text. That is a network fact, not
-# an upstream server verdict, so it must take the network recovery schedule.
-_ENGINE_TRANSPORT_ERROR_TYPES = frozenset({"api_error", "server_error"})
+# The engine answers a failed upstream connection itself, before any upstream
+# response, with exactly its own generic envelope and Go's transport error text.
+# That is a network fact, not an upstream server verdict.
 _ENGINE_TRANSPORT_FAILURE = re.compile(
     r"\b(?:dial|read|write) (?:tcp|udp)\b|i/o timeout|connection reset by peer|"
     r"connection refused|broken pipe|\bunexpected EOF\b|: EOF$|TLS handshake timeout|"
@@ -1601,11 +1600,9 @@ def _reduce_protocol_observation(
             )
         )
         if (
-            not (http_status is not None and 400 <= http_status < 500)
-            and candidates
-            and set(candidates) <= _ENGINE_TRANSPORT_ERROR_TYPES
-            and upstream_detail is not None
-            and _ENGINE_TRANSPORT_FAILURE.search(upstream_detail)
+            http_status is not None and http_status >= 500
+            and observation.error_payload
+            and _engine_transport_failure(observation.error_payload, observation.error_envelope_paths)
         ):
             # The generic type is the engine's label for its own failure, so no
             # machine code is carried that could outrank the network fact.
@@ -1644,6 +1641,31 @@ def _reduce_protocol_observation(
         usage=observation.usage,
         recovery_verified=observation.recovery_verified,
     )
+
+
+def _engine_transport_failure(payload: bytes, envelope_paths: tuple[ErrorEnvelopePath, ...]) -> bool:
+    """Whether an error body is exactly the engine's own envelope for a transport failure.
+
+    An upstream that answered adds its own fields (a request id, a specific code),
+    so only a body equal to one of the engine's two shapes qualifies.
+    """
+
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, ValueError):
+        return False
+    for path in envelope_paths or (("error",),):
+        message: object = document
+        for key in (*path, "message"):
+            message = message.get(key) if isinstance(message, dict) else None
+        if not isinstance(message, str) or not _ENGINE_TRANSPORT_FAILURE.search(message):
+            continue
+        if document in (
+            {"type": "error", "error": {"type": "api_error", "message": message}},
+            {"error": {"type": "server_error", "code": "internal_server_error", "message": message}},
+        ):
+            return True
+    return False
 
 
 def _protocol_error_outcome(

@@ -7311,14 +7311,29 @@ _ANTHROPIC_OUTPUT_STARTED = (
             )}},
             RawOutcomeKind.NETWORK_ERROR, False, "network",
         ),
-        # The upstream connection drops after model output reached the caller.
+        # After output the turn is already lost; the stream keeps its class.
         (
             "anthropic", True, 200,
             _ANTHROPIC_OUTPUT_STARTED + (
                 b'event: error\ndata: {"type":"error","error":{"type":"api_error",'
                 b'"message":"unexpected EOF"}}\n\n'
             ),
-            RawOutcomeKind.NETWORK_ERROR, True, "network",
+            RawOutcomeKind.HTTP_ERROR, True, "server_error",
+        ),
+        # An upstream that answered adds its own fields beyond the engine's shape.
+        (
+            "anthropic", False, 500,
+            {"type": "error", "request_id": "req_011", "error": {"type": "api_error", "message": (
+                "read tcp 10.0.0.2:443: read: connection reset by peer"
+            )}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
+        (
+            "openai_responses", False, 500,
+            {"error": {"type": "server_error", "code": "vendor_backend_down", "message": (
+                "dial tcp 203.0.113.7:443: i/o timeout"
+            )}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
         ),
         # An upstream that answered keeps its own server verdict.
         (
@@ -7347,6 +7362,8 @@ _ANTHROPIC_OUTPUT_STARTED = (
         "anthropic-read-timeout",
         "responses-dial-timeout",
         "anthropic-mid-stream-eof",
+        "anthropic-upstream-request-id",
+        "responses-unknown-specific-code",
         "anthropic-upstream-500",
         "anthropic-overloaded",
         "responses-request-error",

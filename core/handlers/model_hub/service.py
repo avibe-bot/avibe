@@ -8161,7 +8161,13 @@ class ModelHubService:
                     backend=cast(BackendName, backend),
                     model_id=model_id,
                 )
-            turn_outcome = self._produce_no_candidate_terminal_outcome(
+            # A request that attempted in an earlier walk exhausted those attempts.
+            attempted = recovery_request is not None and recovery_request.attempt_count > 0
+            turn_outcome = (
+                self._produce_exhausted_terminal_outcome
+                if attempted
+                else self._produce_no_candidate_terminal_outcome
+            )(
                 config=projection_config,
                 resolution=projection_resolution,
             )
@@ -8460,9 +8466,10 @@ class ModelHubService:
             backend=cast(BackendName, backend),
             model_id=model_id,
         )
-        # A walk that admitted nothing (another waiter held the half-open slot,
-        # or the window closed first) found every hop blocked; it exhausted no
-        # attempt of its own.
+        # A request that admitted nothing in any walk (another waiter held the
+        # half-open slot, or the window closed first) found every hop blocked;
+        # it exhausted no attempt of its own.
+        attempted = attempted or (recovery_request is not None and recovery_request.attempt_count > 0)
         produce_outcome = (
             self._produce_exhausted_terminal_outcome
             if attempted
@@ -8477,7 +8484,7 @@ class ModelHubService:
             raise AssertionError("exhausted outcome must carry supply facts")
         raise ModelHubError(
             RECOVERY_EXHAUSTED_CODE if window_closed else "mapping_target_unavailable",
-            status=503 if attempted else 409,
+            status=503,
             supply_state=final_facts.supply_state,
             blockers=exact_hop_blockers(final_resolution),
             turn_outcome=turn_outcome,

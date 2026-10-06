@@ -214,6 +214,8 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_retry_lifecycle.py::test_waiters_without_an_attempt_record_blocked_supply_not_a_protocol_error
+    related_tests:
+      - tests/test_model_hub_retry_policy.py::test_a_request_that_attempted_keeps_exhausted_after_a_peer_takes_the_slot
   - id: MH-RETRY-PROVENANCE-002
     name: A backend stream broken after Hub output is recorded as interrupted, not rejected content
     status: covered
@@ -226,6 +228,8 @@ scenarios:
     kind: contract
     layer: unit
     test: tests/test_model_hub_l3.py::test_a_request_ending_beside_an_open_peer_leaves_the_turn_to_that_peer
+    related_tests:
+      - tests/test_model_hub_retry_lifecycle.py::test_a_waiter_ending_beside_the_slot_owner_leaves_no_turn_projection
   - id: MH-RETRY-ADVICE-001
     name: Failed HTTP advice retains the receipt clock across delayed or broken bodies
     status: covered
