@@ -220,6 +220,12 @@ scenarios:
     kind: contract
     layer: unit
     test: tests/test_model_hub_provenance.py::test_native_failure_after_hub_output_names_a_broken_stream
+  - id: MH-RETRY-PROVENANCE-003
+    name: A request ending beside an open peer request leaves the turn's outcome to that peer
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_a_request_ending_beside_an_open_peer_leaves_the_turn_to_that_peer
   - id: MH-RETRY-ADVICE-001
     name: Failed HTTP advice retains the receipt clock across delayed or broken bodies
     status: covered

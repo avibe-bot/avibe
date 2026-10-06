@@ -1845,6 +1845,10 @@ class TurnCorrelationRegistry:
                     **({"local_error_detail": local_error_detail} if local_error_detail else {}),
                 }
                 return
+            if any(key != request_id for key in trace.pending_attempts):
+                # A peer request of this turn is still open; this exit is its own.
+                trace.pending_attempts.pop(request_id, None)
+                return
             identity = trace.pending_attempts.get(request_id)
             if identity is None and (
                 trace.gateway_source_id is not None
@@ -1952,8 +1956,11 @@ class TurnCorrelationRegistry:
             trace = self._traces.get(turn_id)
             if trace is not None and not trace.outcome_frozen:
                 # Only this request found nothing to call; a peer still
-                # awaiting an upstream result keeps its identity.
+                # awaiting an upstream result keeps its identity, and its
+                # result, not this one, is what the turn settles on.
                 trace.pending_attempts.pop(request_id, None)
+                if trace.pending_attempts:
+                    return
                 trace.served = None
                 trace.terminal_error = None
                 trace.model_supply_state = supply_state

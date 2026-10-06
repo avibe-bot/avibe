@@ -1943,6 +1943,57 @@ def test_a_canceled_turn_reports_the_attempt_it_waited_on_longest(
     }
 
 
+@pytest.mark.parametrize("peer_result", ["served", "exhausted"])
+@pytest.mark.parametrize("loser_exit", ["no_candidate", "gateway_exit"])
+def test_a_request_ending_beside_an_open_peer_leaves_the_turn_to_that_peer(
+    tmp_path: Path,
+    loser_exit: str,
+    peer_result: str,
+) -> None:
+    """MH-RETRY-PROVENANCE-003: one request's blocked or unclassified exit is not the turn's.
+
+    A waiter that lost the half-open slot ends while the request that won it is
+    still awaiting upstream. The winner's result is what the turn settles on.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "routing-peer.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_peer01")
+    live_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_peer01",
+        requested="caller-live",
+        resolved="hub-live",
+    )
+
+    with registry.gateway_terminalizer(backend="claude", token=live_token) as winner:
+        assert winner.resolution_model("hub-live") == "caller-live"
+        winner.begin_attempt(
+            source_id="src_primary01",
+            resolved_model_id="hub-live",
+            channel="hub",
+            via_mapping=True,
+        )
+        with registry.gateway_terminalizer(backend="claude", token=live_token) as loser:
+            assert loser.resolution_model("hub-live") == "caller-live"
+            if loser_exit == "no_candidate":
+                loser.mark_no_candidate("waiting")
+        result = (
+            _outcome(RawOutcomeKind.SUCCESS)
+            if peer_result == "served"
+            else _outcome(RawOutcomeKind.HTTP_ERROR, status=500, code="server_error")
+        )
+        winner.finish_attempt(outcome=result, decision=classify_outcome(result))
+    registry.settle("turn_peer01", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+
+    record = store.get("turn_peer01")
+    assert record is not None
+    assert record["outcome"] == peer_result
+    assert record["terminal_error"] is None
+    assert record["model_supply_state"] is None
+
+
 def test_an_unclaimed_request_leaves_no_attempt_on_the_live_turn(
     tmp_path: Path,
 ) -> None:
