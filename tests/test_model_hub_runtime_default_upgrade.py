@@ -16,13 +16,6 @@ from config import v2_config
 from config.v2_config import ModelHubConfig, V2Config, update_config_fields
 
 
-EMPTY_AVIBE_SUPPLY = {
-    "backend": "avibe", "mode": "hub", "menu_kind": "fixed",
-    "sources": {"order": []}, "routes": {}, "menu": None,
-    "models": [], "removed_model_ids": [],
-}
-
-
 def legacy_payload(tmp_path, *, enabled=False):
     fixture_path = tmp_path / "fixture-default.json"
     V2Config.default().save(config_path=fixture_path)
@@ -54,9 +47,8 @@ def read_config(path):
 
 def assert_no_native_change(original, upgraded):
     assert upgraded["agents"] == original["agents"]
-    assert upgraded["model_hub"]["agents"] == {
-        **original["model_hub"]["agents"], "avibe": EMPTY_AVIBE_SUPPLY,
-    }
+    # The Avibe row stays absent until startup seeds it (MH-AVIBE-007).
+    assert upgraded["model_hub"]["agents"] == original["model_hub"]["agents"]
     assert upgraded["model_hub"]["sources"] == original["model_hub"]["sources"]
     assert {key: value for key, value in upgraded.items() if key != "model_hub"} == {
         key: value for key, value in original.items() if key != "model_hub"
@@ -207,9 +199,7 @@ def test_service_runtime_stop_round_trips_real_store_with_fake_runtime(tmp_path,
         assert loaded.model_hub.runtime_default_applied is True
         assert path.read_bytes() == persisted
     assert read_config(path)["agents"] == payload["agents"]
-    assert read_config(path)["model_hub"]["agents"] == {
-        **payload["model_hub"]["agents"], "avibe": EMPTY_AVIBE_SUPPLY,
-    }
+    assert read_config(path)["model_hub"]["agents"] == payload["model_hub"]["agents"]
 
 
 def test_new_explicit_stop_is_not_reinterpreted_as_old_default(tmp_path):

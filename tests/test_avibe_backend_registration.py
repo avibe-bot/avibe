@@ -210,3 +210,35 @@ def test_avibe_model_options_come_from_configured_hub_catalog(monkeypatch):
     ]
     config.model_hub.agents["avibe"].models = []
     assert api.agent_model_options("avibe")["models"] == []
+
+
+@pytest.mark.parametrize("avibe_model", [None, "chosen-model"])
+def test_avibe_agent_starts_on_the_first_seeded_model_it_lacks(tmp_path, sqlite_db_factory, avibe_model):
+    """MH-AVIBE-007: the built-in Agents' models feed the Hub seed, in order.
+
+    The Hub chooses which of them it can route; this process owns the Agent
+    rows, so it alone reads those models and gives the Avibe Agent a model, and
+    never replaces one it already has.
+    """
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["opencode", "claude", "codex", "avibe"])
+        store.create(name="reviewer", backend="claude", model="claude-sonnet-5-5")
+        for name, model in (("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol")):
+            store.update(name, model=model)
+        if avibe_model:
+            store.update("avibe", model=avibe_model)
+        requested = []
+
+        async def seed_avibe_supply(selections):
+            requested.append(list(selections))
+            return ["gpt-5.5", "claude-opus-5-5"]
+
+        controller = Controller.__new__(Controller)
+        controller.model_hub_service = SimpleNamespace(seed_avibe_supply=seed_avibe_supply)
+        controller.vibe_agent_store = store
+        controller._seed_avibe_model_supply()
+        assert requested == [[("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol")]]
+        assert store.get("avibe").model == (avibe_model or "gpt-5.5")
+    finally:
+        store.close()

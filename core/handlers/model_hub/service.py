@@ -21,6 +21,7 @@ from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from config.v2_config import (
     CONFIG_LOCK,
     MODEL_HUB_BACKENDS,
+    ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
     ModelHubConfig,
@@ -2481,6 +2482,7 @@ class ModelHubService:
         self,
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
+        backends: Iterable[str] = MODEL_HUB_BACKENDS,
     ) -> None:
         """Add a new Source to eligible backend defaults without editing overrides.
 
@@ -2489,7 +2491,7 @@ class ModelHubService:
         keys there. API keys stay open to every eligible backend, appended.
         """
 
-        for backend in MODEL_HUB_BACKENDS:
+        for backend in backends:
             agent = config.agents[backend]
             if not self._eligible_for_agent(source, backend) or source.id in agent.sources.order:
                 continue
@@ -4790,19 +4792,29 @@ class ModelHubService:
                     reasoning_efforts.append(effort)
         return suppliers, display_name, reasoning_efforts
 
-    def _models_dev_descriptions(self, model_ids: list[str]) -> dict[str, dict]:
+    def _models_dev_descriptions(
+        self,
+        model_ids: list[str],
+        *,
+        wait_for_first_copy: bool = False,
+    ) -> dict[str, dict]:
         """Exact models.dev matches for provider candidates; empty when unknown.
 
         The description is optional: an unreadable catalog leaves every
         candidate as its suppliers describe it rather than failing the picker.
+        Only a caller that asks waits on the network, and only while no copy
+        has been fetched yet.
         """
 
         if not model_ids:
             return {}
-        from vibe.models_dev_catalog import exact_models_dev_matches
+        from vibe.models_dev_catalog import exact_models_dev_matches, load_models_dev_catalog
 
         try:
-            return exact_models_dev_matches(model_ids, dict(self.models_dev_catalog()))
+            catalog = dict(self.models_dev_catalog())
+            if wait_for_first_copy and not catalog:
+                catalog = load_models_dev_catalog()
+            return exact_models_dev_matches(model_ids, catalog)
         except Exception as exc:  # noqa: BLE001 - optional metadata never fails a read
             logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
             return {}
@@ -5118,6 +5130,67 @@ class ModelHubService:
                 view=agent.menu.view if agent.menu else "featured",
                 checked=[model.id for model in agent.models],
             )
+
+    async def seed_avibe_supply(
+        self,
+        selections: Iterable[tuple[BackendName, str]],
+    ) -> list[str]:
+        """Start an Avibe Agent that predates its supply entry with what the user runs.
+
+        Runs once: only an entry absent from the persisted config is seeded, and
+        the commit persists it, so later starts and the user's edits never meet
+        a second seed. Its Sources are every existing one this backend may use,
+        placed as a newly created Source would be. Its models are the given
+        Agent selections, in order, that one of those Sources lists, each added
+        as the picker adds a provider model. Returns the seeded model ids.
+        """
+
+        async with self._mutation_lock:
+            previous = self.store.load()
+            if not previous.avibe_supply_pending:
+                return []
+            config = self._clone_config(previous)
+            agent = config.agents["avibe"]
+            # A subscription joins only a menu it serves, so the menu is chosen
+            # first, against every Source that may join.
+            reachable = replace(config, agents={**config.agents, "avibe": replace(
+                agent,
+                sources=ModelHubAgentSourcesConfig(order=[
+                    source.id for source in config.sources if self._eligible_for_agent(source, "avibe")
+                ]),
+            )})
+            model_ids: list[str] = []
+            for backend, selected in selections:
+                served = next(
+                    (
+                        candidate
+                        for candidate in (
+                            opencode_menu_model_candidates(selected)
+                            if backend == "opencode"
+                            else (selected,)
+                        )
+                        if self._matching_menu_model_hops(reachable, "avibe", candidate)
+                    ),
+                    None,
+                )
+                if served is not None and served not in model_ids:
+                    model_ids.append(served)
+            # These rows are written once and then kept, so a first catalog
+            # copy is worth one bounded wait here, unlike a picker read.
+            described = self._models_dev_descriptions(model_ids, wait_for_first_copy=True)
+            for model_id in model_ids:
+                candidate = self._provider_candidate(reachable, "avibe", model_id, described.get(model_id))
+                if candidate is not None:
+                    agent.models.append(candidate[0])
+            for source in config.sources:
+                self._apply_source_placement(config, source, ("avibe",))
+            config.avibe_supply_pending = False
+            # Startup seeds before any turn needs the engine. As after an
+            # explicit runtime start, the engine takes this config on its next
+            # demand, so an engine that is not up yet cannot undo the seed.
+            self._engine_synced = False
+            self._save_config(config)
+            return [model.id for model in agent.models]
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"} or (backend == "avibe" and mode != "hub"):

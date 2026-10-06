@@ -301,6 +301,7 @@ class Controller:
         self.vibe_agent_store.ensure_builtin_default_agents(
             self._enabled_agent_backends(),
         )
+        self._seed_avibe_model_supply()
 
         # Setup callbacks
         self._setup_callbacks()
@@ -367,6 +368,35 @@ class Controller:
             if bool(getattr(cfg, "enabled", False)):
                 result.append(backend)
         return result
+
+    def _seed_avibe_model_supply(self) -> None:
+        """Start an Avibe Agent that predates its Model Hub entry with what the user runs.
+
+        The Hub seeds that entry once from the models the built-in Agents run;
+        this process owns the Agent rows, so it reads those models and gives the
+        built-in Avibe Agent the first seeded one when it has none yet.
+        """
+
+        if self.model_hub_service is None:
+            return
+        from config.v2_config import MODEL_HUB_BACKENDS
+        from vibe.authorization import instance_owner_context
+
+        store = self.vibe_agent_store
+        try:
+            selections = []
+            # The native CLI backends, in the Model Hub's backend order.
+            for backend in (item for item in MODEL_HUB_BACKENDS if item in NATIVE_CLI_BACKENDS):
+                agent = store.get_builtin_default_agent_for_backend(backend)
+                model = str(getattr(agent, "model", None) or "").strip()
+                if model:
+                    selections.append((backend, model))
+            seeded = asyncio.run(self.model_hub_service.seed_avibe_supply(selections))
+            avibe = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
+            if seeded and avibe is not None and not str(avibe.model or "").strip():
+                store.update(avibe.name, model=seeded[0], user_context=instance_owner_context())
+        except Exception:
+            logger.warning("Avibe Agent starting model supply failed", exc_info=True)
 
     def get_native_session_service(self):
         if self.native_session_service is None:

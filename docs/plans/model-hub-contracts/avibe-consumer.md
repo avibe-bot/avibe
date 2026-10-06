@@ -12,10 +12,18 @@ the existing `resolve("avibe", ...)`; `ModelHubLaunch.to_hop_resolution()` proje
 that launch. There is no second planner, credential store, or upstream client.
 
 The backend id is `avibe`. It has a fixed catalog (ordinary editable model rows),
-no native protocol pin, no native CLI, and no Direct mode. Its default catalog and
-source order are empty. Old configurations acquire only that empty Hub row;
-existing backend modes, model metadata, routes, source order, and runtime intent
-remain unchanged. An empty Avibe catalog does not prevent an explicit runtime Stop.
+no native protocol pin, no native CLI, and no Direct mode. A fresh configuration
+starts with an empty catalog and source order. A configuration written before the
+Avibe Agent existed reads the same empty Hub row, but writes leave that row absent
+until the controller seeds it once at startup, after the built-in Agents exist:
+its source order becomes every existing eligible Source, placed exactly as a newly
+created Source would be, and its catalog becomes the models the built-in Claude,
+Codex, and OpenCode Agents run, in that order, that one of those Sources lists,
+deduplicated and added as the picker adds a provider model (models.dev metadata
+included). The built-in Avibe Agent takes the first seeded model when it has none.
+The persisted row then belongs to the user and is never seeded again. Existing
+backend modes, model metadata, routes, source order, and runtime intent remain
+unchanged. An empty Avibe catalog does not prevent an explicit runtime Stop.
 
 The primary currently selected hop owns `protocol`, `provider` (the Source's vendor
 identity), and `source_id`. `base_url` is the loopback gateway's `/avibe/v1` API root;
@@ -164,6 +172,9 @@ The header needs no upstream credentials and is never forwarded upstream.
 
 - Released-shape loading: old modes/routes/capabilities survive without mutation;
   the new row is empty Hub, and native-cli Sources remain ineligible.
+- Starting supply (MH-AVIBE-007): an unrelated write keeps the unseeded row absent;
+  the seed places existing Sources for Avibe alone and keeps only routable Agent
+  models; a second start leaves the persisted row, including removed Sources, alone.
 - Real loopback gateway requests through the existing service, with hermetic engine
   fixtures: primary protocol resolution, cross-protocol failover, non-ASCII origin,
   slow Anthropic resolution, buffered/streamed bodies, and concurrent requests.

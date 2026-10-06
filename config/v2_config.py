@@ -3019,6 +3019,13 @@ class ModelHubConfig:
     # retain a pending false marker until lock-owning startup commits promotion;
     # an unrelated save must not acknowledge an upgrade it did not perform.
     runtime_default_applied: bool = True
+    # Not persisted, like ``V2Config.load_warnings``. A file without an Avibe
+    # entry predates the Avibe Agent, and the empty entry read in its place
+    # waits for its starting supply (see ``ModelHubService.seed_avibe_supply``).
+    # Until that seed, or any other edit, touches it, ``to_payload`` keeps the
+    # entry absent, so an unrelated write cannot record an empty supply as the
+    # user's choice.
+    avibe_supply_pending: ClassVar[bool] = False
 
     def __post_init__(self) -> None:
         # Existing in-process config producers may still supply the released
@@ -3128,6 +3135,7 @@ class ModelHubConfig:
             agents=agents,
             runtime_default_applied=runtime_default_applied,
         )
+        config.avibe_supply_pending = "avibe" not in agents_payload
         for backend in MODEL_HUB_BACKENDS:
             configured_sources = agents[backend].sources
             invalid_id = next(
@@ -3161,11 +3169,18 @@ class ModelHubConfig:
         return config
 
     def to_payload(self) -> dict:
+        unseeded = self.avibe_supply_pending and self.agents["avibe"] == ModelHubAgentSupplyConfig.default(
+            "avibe", mode="hub"
+        )
         return {
             "enabled": self.enabled,
             "runtime_default_applied": self.runtime_default_applied,
             "sources": [source.to_payload() for source in self.sources],
-            "agents": {backend: self.agents[backend].to_payload() for backend in MODEL_HUB_BACKENDS},
+            "agents": {
+                backend: self.agents[backend].to_payload()
+                for backend in MODEL_HUB_BACKENDS
+                if not (backend == "avibe" and unseeded)
+            },
         }
 
 
