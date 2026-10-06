@@ -46,6 +46,9 @@ RUN SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION} \
 # Runtime config
 ENV AVIBE_HOME=/data/avibe
 ENV PYTHONUNBUFFERED=1
+# The entrypoint supervises the Web UI here, including while the service is
+# stopped, so the service leaves UI recovery to it (core/web_ui_watchdog.py).
+ENV AVIBE_WEB_UI_SUPERVISOR=docker-entrypoint
 
 EXPOSE 5123
 

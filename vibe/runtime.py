@@ -2327,7 +2327,7 @@ def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
     return _ui_server_readiness(host, port, timeout=timeout) is True
 
 
-def _ui_server_compatible(
+def ui_server_compatible(
     host: str,
     port: int,
     timeout: float = UI_ADOPTION_PROBE_TIMEOUT_SECONDS,
@@ -2358,6 +2358,21 @@ def _pid_matches_ui_server(pid: int) -> bool:
 def ui_pid_file_points_to_running_ui(pid_path: Path | None = None) -> bool:
     pid = _read_pid_file(pid_path or paths.get_runtime_ui_pid_path())
     return bool(pid and pid_alive(pid) and _pid_matches_ui_server(pid))
+
+
+def recorded_ui_is_gone(pid_path: Path | None = None) -> bool:
+    """Whether no UI runs under the recorded pid, as far as can be known.
+
+    Gone means no record, a dead pid, or a pid now running another program. A
+    live pid whose command cannot be read is not gone: it may be the UI, and one
+    started beside it would only die on its port.
+    """
+
+    pid = _read_pid_file(pid_path or paths.get_runtime_ui_pid_path())
+    if not pid or not pid_alive(pid):
+        return True
+    command = get_process_command(pid)
+    return command is not None and not _is_ui_server_command(command)
 
 
 def resolve_localhost_family() -> str:
@@ -2446,7 +2461,7 @@ def start_ui(
             existing_pid = 0
         if existing_pid and pid_alive(existing_pid):
             is_ui_server = _claim_recorded_ui(existing_pid)
-            if is_ui_server and _ui_server_compatible(host, port):
+            if is_ui_server and ui_server_compatible(host, port):
                 if start_info is not None:
                     start_info.capture(existing_pid, reused=True)
                 return existing_pid
