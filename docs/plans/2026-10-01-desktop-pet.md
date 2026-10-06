@@ -481,7 +481,7 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 
 ### Rendering and idle cost
 
-- **v1 art is the existing mascot, Vibey (云团子).** `assets/mascot/` already
+- **v1 art is the existing mascot, Vibey (歪比).** `assets/mascot/` already
   holds one pose per state, each a 1024 px PNG with a transparent background,
   so no new art is drawn:
 
