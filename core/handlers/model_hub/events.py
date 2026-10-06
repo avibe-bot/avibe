@@ -140,28 +140,34 @@ def redact_untrusted_text(value: str) -> str:
 
 FAILURE_DETAIL_CHARS = 400
 
-# OAuth grant material in a callback address or form body (``?code=…&state=…``,
-# ``code_verifier=…``). A sign-in failure can echo the very address the user
-# pasted, and its code may still be exchangeable. Only ``name=value`` parameters
-# match: a JSON ``"code": "token_expired"`` is the provider's error code and
-# stays readable.
-_OAUTH_GRANT_PARAMETER_PATTERN = re.compile(
+# OAuth grant material, matched two independent ways so that missing one form
+# of echo does not expose the grant:
+#
+# * by name: the value of any grant field (``code``, ``state``, verifiers,
+#   tokens), whether written as a URL/form parameter (``code=…``), a JSON member
+#   (``"code": "…"``) or prose (``authorization code: …``). A value that is a
+#   multi-word snake_case identifier (``"code": "token_expired"``) is the
+#   provider's error code, not a grant, and stays readable.
+# * by shape: any run of 20+ characters from the URL/base64 alphabet that mixes
+#   letters and digits, wherever it appears. Prose, error identifiers, status
+#   codes, host names and IP addresses do not match; codes, states, verifiers,
+#   JWTs and keys do. Request ids and UUIDs are redacted as well.
+_GRANT_FIELD_PATTERN = re.compile(
     r"(?i)(?<![a-z0-9_])"
-    r"(code|state|code_verifier|device_code|id_token|access_token|refresh_token)"
-    r"=[^&#\s\"'<>]*"
+    r"(code|state|code_verifier|device_code|id_token|access_token|refresh_token|authorization code)"
+    r"(\"?\s*[:=]\s*\"?)"
+    r"([^\s\"'&#<>,;)}\]]+)"
 )
-
-
-# Any long opaque value, whatever surrounds it. Grant material is not reliably
-# labelled — a provider or CLI may echo it as ``{"code": "…"}``, ``authorization
-# code: …``, or bare — so beyond the label and parameter rules this one decides
-# by the value itself: a run of token characters at least 20 long that mixes
-# letters and digits. Prose, error identifiers (``token_expired``,
-# ``rate_limit_exceeded``), host names and IP addresses do not; codes, states,
-# verifiers, JWTs and keys do. Request ids and UUIDs are redacted too.
-_OPAQUE_VALUE_PATTERN = re.compile(r"[A-Za-z0-9_\-.+=~]{20,}")
+_ERROR_IDENTIFIER = re.compile(r"[a-z]+(?:_[a-z]+)+")
+_OPAQUE_VALUE_PATTERN = re.compile(r"[A-Za-z0-9_\-.+/=~%]{20,}")
 _HAS_LETTER = re.compile(r"[A-Za-z]")
 _HAS_DIGIT = re.compile(r"\d")
+
+
+def _redact_grant_field(match: re.Match[str]) -> str:
+    if _ERROR_IDENTIFIER.fullmatch(match.group(3)):
+        return match.group(0)
+    return f"{match.group(1)}{match.group(2)}[redacted]"
 
 
 def _redact_opaque_value(match: re.Match[str]) -> str:
@@ -197,14 +203,14 @@ def _redact_failure_text(text: str) -> str:
 def bounded_failure_detail(value: object) -> str | None:
     """One line of untrusted failure text that is safe to show and copy.
 
-    OAuth grant parameters, long opaque values and credential shapes are
+    OAuth grant fields, long opaque values and credential shapes are
     redacted first, then the text is bounded, so a cut can never expose the
     tail of a secret. Blank or non-text input has no detail.
     """
 
     if not isinstance(value, str):
         return None
-    text = _OAUTH_GRANT_PARAMETER_PATTERN.sub(r"\1=[redacted]", " ".join(value.split()))
+    text = _GRANT_FIELD_PATTERN.sub(_redact_grant_field, " ".join(value.split()))
     text = _OPAQUE_VALUE_PATTERN.sub(_redact_opaque_value, text)
     text = _redact_failure_text(text)
     if not text:

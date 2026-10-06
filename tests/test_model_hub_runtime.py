@@ -8887,6 +8887,13 @@ def test_oauth_engine_failure_names_what_the_user_can_do(
             ("ac_V8kQ2mZp4XrT7nLw9bYc3HdF6sJ1",),
             "authorization code: [redacted] was rejected",
         ),
+        # A grant split by base64 separators, or too short or too plain for the
+        # shape rule, is still caught by its field name.
+        (
+            'Authentication failed: {"code":"Abc123Def456/Ghi789Jkl012", "state": "abcdefghij"}',
+            ("Abc123Def456", "Ghi789Jkl012", "abcdefghij"),
+            '{"code":"[redacted]", "state": "[redacted]"}',
+        ),
         # A field path that ends like a label still guards the value after it.
         (
             "Failed to exchange authorization code for tokens: provider rejected /token: opaquevalue123456789",
