@@ -1602,6 +1602,7 @@ def _reduce_protocol_observation(
         )
         if (
             not (http_status is not None and 400 <= http_status < 500)
+            and candidates
             and set(candidates) <= _ENGINE_TRANSPORT_ERROR_TYPES
             and upstream_detail is not None
             and _ENGINE_TRANSPORT_FAILURE.search(upstream_detail)

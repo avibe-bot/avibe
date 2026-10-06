@@ -76,8 +76,12 @@ _NETWORK_ERROR_RE = re.compile(
     r"(?:timed?\s*out|timeout|connection (?:failed|reset|refused)|network (?:error|unreachable))",
     re.IGNORECASE,
 )
-# A Hub stream that broke after output reached the backend, not content it rejected.
-_STREAM_DROPPED_RE = re.compile(r"(?:unexpected EOF|ECONNRESET|socket hang up|connection .{0,24}lost)", re.IGNORECASE)
+# Transport-drop wording only; a generic timeout (for example a tool's) is not one.
+_STREAM_DROPPED_RE = re.compile(
+    r"(?:\b(?:read|write) tcp\b|unexpected EOF|ECONNRESET|connection reset|socket hang up|"
+    r"connection .{0,24}lost|stream idle timeout|i/o timeout)",
+    re.IGNORECASE,
+)
 @dataclass(frozen=True)
 class ModelHubLaunch:
     backend: BackendName
@@ -1145,11 +1149,7 @@ class ModelHubRuntimeRouter:
             ).strip()
             self.turn_gateway.correlation.fail_hub_attempt(
                 turn_id,
-                reason=(
-                    "stream_interrupted"
-                    if _NETWORK_ERROR_RE.search(diagnostic) or _STREAM_DROPPED_RE.search(diagnostic)
-                    else "protocol_error"
-                ),
+                transport_dropped=_STREAM_DROPPED_RE.search(diagnostic) is not None,
             )
             setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
             return False

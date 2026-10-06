@@ -7336,6 +7336,12 @@ _ANTHROPIC_OUTPUT_STARTED = (
             {"error": {"type": "invalid_request_error", "message": "image fetch failed: connection refused"}},
             RawOutcomeKind.HTTP_ERROR, False, None,
         ),
+        # Without the engine's generic type the body is not the engine's own label.
+        (
+            "openai_responses", False, 500,
+            {"error": {"message": "connection refused"}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
     ],
     ids=[
         "anthropic-read-timeout",
@@ -7344,6 +7350,7 @@ _ANTHROPIC_OUTPUT_STARTED = (
         "anthropic-upstream-500",
         "anthropic-overloaded",
         "responses-request-error",
+        "responses-untyped-500",
     ],
 )
 def test_engine_reported_upstream_transport_failure_takes_network_recovery(

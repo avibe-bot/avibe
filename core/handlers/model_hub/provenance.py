@@ -597,6 +597,8 @@ class TurnTrace:
     admission_closed: bool = False
     outcome_frozen: bool = False
     recovery_requests: dict[str, dict] = field(default_factory=dict)
+    # Requests whose forwarded stream carried model output to the backend.
+    output_started_requests: set[str] = field(default_factory=set)
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -790,6 +792,7 @@ class GatewayTurnTerminalizer:
 
     def mark_stream_started(self) -> None:
         self._stream_started = True
+        self._registry.mark_attempt_output_started(self.turn_id, request_id=self._request_id)
 
     def update_recovery(self, snapshot: dict | None) -> None:
         if self._recovery_closed:
@@ -2026,16 +2029,20 @@ class TurnCorrelationRegistry:
                 {**identity.payload(), "reason": reason}
             )
 
-    def fail_hub_attempt(
-        self,
-        turn_id: Optional[str],
-        *,
-        reason: Literal["protocol_error", "stream_interrupted"] = "protocol_error",
-    ) -> None:
+    def mark_attempt_output_started(self, turn_id: Optional[str], *, request_id: str) -> None:
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is not None and request_id in trace.pending_attempts:
+                trace.output_started_requests.add(request_id)
+
+    def fail_hub_attempt(self, turn_id: Optional[str], *, transport_dropped: bool = False) -> None:
         """Replace a gateway success rejected by the backend terminal result.
 
-        ``stream_interrupted`` records a backend whose stream broke after output;
-        ``protocol_error`` one that rejected what the gateway delivered.
+        A backend reporting a dropped transport while a Hub request was still
+        forwarding model output records ``stream_interrupted``; anything else,
+        including a drop with no forwarded output, is ``protocol_error``.
         """
 
         normalized = str(turn_id or "").strip()
@@ -2050,7 +2057,15 @@ class TurnCorrelationRegistry:
                 # failure, not rejecting content that the gateway served.
                 return
             trace.outcome_frozen = True
-            identity = trace.pending_attempt
+            streaming = next(
+                (
+                    identity for request_id, identity in trace.pending_attempts.items()
+                    if identity.channel == "hub" and request_id in trace.output_started_requests
+                ),
+                None,
+            )
+            interrupted = transport_dropped and streaming is not None
+            identity = streaming if interrupted else trace.pending_attempt
             payload = (
                 identity.payload()
                 if identity is not None and identity.channel == "hub"
@@ -2063,7 +2078,7 @@ class TurnCorrelationRegistry:
             trace.served = None
             trace.terminal_error = {
                 **payload,
-                "reason": reason,
+                "reason": "stream_interrupted" if interrupted else "protocol_error",
                 "stream_started": True,
             }
 

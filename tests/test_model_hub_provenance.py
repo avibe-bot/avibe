@@ -145,14 +145,23 @@ def test_native_failure_callback_consumes_exact_hub_terminal_copy(tmp_path, term
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("diagnostic,reason", [
-    ("API Error: read tcp 192.0.2.3:56860->198.51.100.7:443: read: operation timed out", "stream_interrupted"),
-    ("API Error: unexpected EOF", "stream_interrupted"),
-    ("API Error: Stream idle timeout - no chunks received", "stream_interrupted"),
-    ("API Error: Connection to the API was lost (ECONNRESET). This is usually temporary.", "stream_interrupted"),
-    ("API Error: tool_use ids must be unique", "protocol_error"),
+_DROPPED = "API Error: read tcp 192.0.2.3:56860->198.51.100.7:443: read: operation timed out"
+
+
+@pytest.mark.parametrize("diagnostic,attempt,reason", [
+    (_DROPPED, "forwarding_output", "stream_interrupted"),
+    ("API Error: unexpected EOF", "forwarding_output", "stream_interrupted"),
+    ("API Error: Stream idle timeout - no chunks received", "forwarding_output", "stream_interrupted"),
+    ("API Error: Connection to the API was lost (ECONNRESET). This is usually temporary.",
+     "forwarding_output", "stream_interrupted"),
+    # A generic timeout is not a transport drop.
+    ("MCP tool timed out after 60s", "forwarding_output", "protocol_error"),
+    ("API Error: tool_use ids must be unique", "forwarding_output", "protocol_error"),
+    # A drop is only an interrupted stream once output was actually forwarded.
+    (_DROPPED, "awaiting_output", "protocol_error"),
+    (_DROPPED, "served", "protocol_error"),
 ])
-def test_native_failure_after_hub_output_names_a_broken_stream(tmp_path, diagnostic, reason):
+def test_native_failure_after_hub_output_names_a_broken_stream(tmp_path, diagnostic, attempt, reason):
     """MH-RETRY-PROVENANCE-002: a dropped stream is not recorded as rejected content."""
     async def run():
         source = _source("src_callback01", (MODEL,))
@@ -161,13 +170,20 @@ def test_native_failure_after_hub_output_names_a_broken_stream(tmp_path, diagnos
         token = registry.credentials("claude", "fixture", "turn-dropped")
         registry.begin_gateway_request(backend="claude", token=token, requested_model_id=MODEL)
         registry.begin_attempt(
-            "turn-dropped", source_id=source.id, resolved_model_id=MODEL, channel="hub", via_mapping=False,
+            "turn-dropped", source_id=source.id, resolved_model_id=MODEL, channel="hub",
+            via_mapping=False, request_id="request-1",
         )
-        served = RawCallOutcome(
-            kind=RawOutcomeKind.SUCCESS, http_status=200, error_code=None, redacted_message=None,
-            stream_started=True, model_id=MODEL, source_id=source.id,
-        )
-        registry.finish_attempt("turn-dropped", outcome=served, decision=classify_outcome(served))
+        if attempt == "forwarding_output":
+            registry.mark_attempt_output_started("turn-dropped", request_id="request-1")
+        elif attempt == "served":
+            registry.mark_attempt_output_started("turn-dropped", request_id="request-1")
+            served = RawCallOutcome(
+                kind=RawOutcomeKind.SUCCESS, http_status=200, error_code=None, redacted_message=None,
+                stream_started=True, model_id=MODEL, source_id=source.id,
+            )
+            registry.finish_attempt(
+                "turn-dropped", outcome=served, decision=classify_outcome(served), request_id="request-1",
+            )
         router = ModelHubRuntimeRouter(
             service=service, turn_gateway=SimpleNamespace(correlation=registry),
             overlay_path=tmp_path / "overlay.json",
@@ -182,7 +198,6 @@ def test_native_failure_after_hub_output_names_a_broken_stream(tmp_path, diagnos
         record = registry.store.get("turn-dropped")
         assert record["outcome"] == "failed_terminal"
         assert record["terminal_error"]["reason"] == reason
-        assert record["terminal_error"]["stream_started"] is True
     asyncio.run(run())
 
 
