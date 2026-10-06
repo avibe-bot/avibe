@@ -597,8 +597,6 @@ class TurnTrace:
     admission_closed: bool = False
     outcome_frozen: bool = False
     recovery_requests: dict[str, dict] = field(default_factory=dict)
-    # Per request, whether its exit was decided as scoped to itself.
-    exit_scoped_requests: dict[str, bool] = field(default_factory=dict)
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -689,6 +687,9 @@ class GatewayTurnTerminalizer:
         self._attempt_started = False
         self._downstream_canceled = False
         self._recovery_closed = False
+        # This request's exit, staged so it commits as one registry write.
+        self._staged_exit: dict | None = None
+        self._exit_committed = False
         self.on_attribution_released: Callable[[], None] | None = None
 
     def __enter__(self) -> "GatewayTurnTerminalizer":
@@ -696,6 +697,11 @@ class GatewayTurnTerminalizer:
 
     def __exit__(self, exc_type, _exc, _traceback) -> None:
         if self._downstream_canceled or exc_type is asyncio.CancelledError:
+            return
+        self.commit_exit()
+        if self._exit_committed:
+            # A classified exit is this request's whole ending; the
+            # unclassified fallback below is only for requests without one.
             return
         self._registry._terminalize_gateway_exit(
             self.turn_id,
@@ -724,13 +730,7 @@ class GatewayTurnTerminalizer:
         self,
         reason: Literal["invalid_parameter", "protocol_error"],
     ) -> None:
-        self._registry._terminalize_gateway_exit(
-            self.turn_id,
-            request_id=self._request_id,
-            reason=reason,
-            stream_started=self._stream_started,
-            force=True,
-        )
+        self._staged_exit = {**(self._staged_exit or {}), "fail_reason": reason}
 
     def engine_down(self, *, local_error_detail: str | None = None) -> None:
         self._registry._terminalize_gateway_exit(
@@ -747,12 +747,9 @@ class GatewayTurnTerminalizer:
         supply_state: SupplyState,
         blockers: Iterable[ExactHopBlocker] = (),
     ) -> None:
-        self._registry.mark_gateway_no_candidate(
-            self.turn_id,
-            supply_state,
-            blockers,
-            request_id=self._request_id,
-        )
+        self._staged_exit = {
+            **(self._staged_exit or {}), "no_candidate": (supply_state, tuple(blockers)),
+        }
 
     def begin_attempt(
         self,
@@ -808,8 +805,28 @@ class GatewayTurnTerminalizer:
     ) -> None:
         """Keep the settlement projection attached to the correlated turn event."""
 
-        if self.turn_id is not None:
-            self._registry.record_turn_outcome(self.turn_id, turn_outcome, request_id=self._request_id)
+        self.commit_exit(turn_outcome, has_outcome=True)
+
+    def commit_exit(
+        self,
+        turn_outcome: TurnOutcomeProjectionInput | None = None,
+        *,
+        has_outcome: bool = False,
+    ) -> None:
+        """Commit this request's staged exit and projection as one write."""
+
+        staged, self._staged_exit = self._staged_exit, None
+        if staged is None and not has_outcome:
+            return
+        self._exit_committed = True
+        self._registry.commit_gateway_exit(
+            self.turn_id,
+            request_id=self._request_id,
+            stream_started=self._stream_started,
+            turn_outcome=turn_outcome,
+            has_outcome=has_outcome,
+            **(staged or {}),
+        )
 
     def mark_downstream_canceled(self) -> None:
         """Clear a prepared-only attempt before the outer stopped settlement."""
@@ -1967,18 +1984,50 @@ class TurnCorrelationRegistry:
         self,
         turn_id: Optional[str],
         turn_outcome: TurnOutcomeProjectionInput | None,
-        *,
-        request_id: str | None = None,
     ) -> None:
         if turn_id is None:
             return
         with self._lock:
             trace = self._traces.get(turn_id)
-            if trace is None or trace.outcome_frozen:
+            if trace is not None and not trace.outcome_frozen:
+                trace.terminal_outcome = turn_outcome
+
+    def commit_gateway_exit(
+        self,
+        turn_id: Optional[str],
+        *,
+        request_id: str,
+        stream_started: bool,
+        turn_outcome: TurnOutcomeProjectionInput | None = None,
+        has_outcome: bool = False,
+        no_candidate: tuple[SupplyState, tuple[ExactHopBlocker, ...]] | None = None,
+        fail_reason: Literal["invalid_parameter", "protocol_error"] | None = None,
+    ) -> None:
+        """Commit one gateway request's whole exit under one lock.
+
+        Beside an open peer the exit drops only this request's identity, so
+        one exit is either wholly this request's or wholly the turn's.
+        """
+
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is None:
                 return
-            if request_id is not None and self._peer_request_open(trace, request_id):
+            if self._peer_request_open(trace, request_id):
+                if not trace.outcome_frozen:
+                    trace.pending_attempts.pop(request_id, None)
                 return
-            trace.terminal_outcome = turn_outcome
+            if no_candidate is not None:
+                self.mark_gateway_no_candidate(turn_id, no_candidate[0], no_candidate[1], request_id=request_id)
+            if fail_reason is not None:
+                self._terminalize_gateway_exit(
+                    turn_id, request_id=request_id, reason=fail_reason,
+                    stream_started=stream_started, force=True,
+                )
+            if has_outcome:
+                self.record_turn_outcome(turn_id, turn_outcome)
 
     def begin_attempt(
         self,
@@ -2040,21 +2089,15 @@ class TurnCorrelationRegistry:
 
     @staticmethod
     def _peer_request_open(trace: TurnTrace, request_id: str) -> bool:
-        """Whether this request's exit is scoped to itself beside an open peer.
+        """Whether another request of this turn is still open.
 
         Every gateway request arms an identity on arrival, so this covers a
         peer that is waiting as well as one awaiting its upstream result. A
         request ending beside it records only its own exit: the turn settles
-        on whichever request ends last. One exit spans several separately
-        locked writes, so the first write decides and the rest reuse it; a
-        peer finishing in between cannot turn a later write turn-wide.
+        on whichever request ends last.
         """
 
-        scoped = trace.exit_scoped_requests.get(request_id)
-        if scoped is None:
-            scoped = any(key != request_id for key in trace.pending_attempts)
-            trace.exit_scoped_requests[request_id] = scoped
-        return scoped
+        return any(key != request_id for key in trace.pending_attempts)
 
     def fail_hub_attempt(self, turn_id: Optional[str]) -> None:
         """Replace a gateway success rejected by the backend terminal result."""

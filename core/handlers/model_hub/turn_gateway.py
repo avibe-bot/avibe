@@ -1435,9 +1435,12 @@ class ModelHubTurnGateway:
         """Commit terminal history before deriving any user-visible copy."""
 
         if execution.settlement_recorded:
+            terminalizer.commit_exit()
             return execution.rendered_turn_outcome or _RenderedTurnOutcome(None, None)
         if turn_outcome is not None:
             terminalizer.record_turn_outcome(turn_outcome)
+        else:
+            terminalizer.commit_exit()
         language = self._language_provider() or "en"
         copy = project_turn_outcome_copy(turn_outcome) if turn_outcome is not None else None
         message = render_turn_outcome_copy(turn_outcome, language) if turn_outcome is not None else None

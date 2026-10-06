@@ -1943,20 +1943,20 @@ def test_a_canceled_turn_reports_the_attempt_it_waited_on_longest(
     }
 
 
-@pytest.mark.parametrize("peer_ends", ["after_loser", "between_loser_writes"])
+@pytest.mark.parametrize("peer", ["open_at_commit", "closed_before_commit", "opened_before_commit"])
 @pytest.mark.parametrize("peer_result", ["served", "exhausted"])
 @pytest.mark.parametrize("loser_exit", ["no_candidate", "gateway_exit"])
 def test_a_request_ending_beside_an_open_peer_leaves_the_turn_to_that_peer(
     tmp_path: Path,
     loser_exit: str,
     peer_result: str,
-    peer_ends: str,
+    peer: str,
 ) -> None:
-    """MH-RETRY-PROVENANCE-003: one request's blocked or unclassified exit is not the turn's.
+    """MH-RETRY-PROVENANCE-003: one request's exit is wholly its own or wholly the turn's.
 
-    A waiter that lost the half-open slot ends while the request that won it is
-    still awaiting upstream. The winner's result is what the turn settles on,
-    even when the winner finishes between the waiter's separate exit writes.
+    A waiter that lost the half-open slot ends beside the request that won it.
+    Its staged exit commits as one write: beside an open peer it leaves the
+    turn to that peer; as the last request to end it is the turn's ending.
     """
 
     store = BoundedProvenanceStore(tmp_path / "routing-peer.json")
@@ -1969,40 +1969,51 @@ def test_a_request_ending_beside_an_open_peer_leaves_the_turn_to_that_peer(
         requested="caller-live",
         resolved="hub-live",
     )
+    result = (
+        _outcome(RawOutcomeKind.SUCCESS)
+        if peer_result == "served"
+        else _outcome(RawOutcomeKind.HTTP_ERROR, status=500, code="server_error")
+    )
+    projection = produce_turn_outcome("turn.engine_down")
 
-    with registry.gateway_terminalizer(backend="claude", token=live_token) as winner:
-        assert winner.resolution_model("hub-live") == "caller-live"
-        winner.begin_attempt(
-            source_id="src_primary01",
-            resolved_model_id="hub-live",
-            channel="hub",
-            via_mapping=True,
+    def open_peer():
+        terminalizer = registry.gateway_terminalizer(backend="claude", token=live_token)
+        assert terminalizer.resolution_model("hub-live") == "caller-live"
+        terminalizer.begin_attempt(
+            source_id="src_primary01", resolved_model_id="hub-live", channel="hub", via_mapping=True,
         )
-        result = (
-            _outcome(RawOutcomeKind.SUCCESS)
-            if peer_result == "served"
-            else _outcome(RawOutcomeKind.HTTP_ERROR, status=500, code="server_error")
-        )
-        with registry.gateway_terminalizer(backend="claude", token=live_token) as loser:
-            assert loser.resolution_model("hub-live") == "caller-live"
-            if loser_exit == "no_candidate":
-                loser.mark_no_candidate("waiting")
-            else:
-                loser.fail("protocol_error")
-            if peer_ends == "between_loser_writes":
-                winner.finish_attempt(outcome=result, decision=classify_outcome(result))
-            loser.record_turn_outcome(produce_turn_outcome("turn.engine_down"))
-        if peer_ends == "after_loser":
+        return terminalizer
+
+    winner = open_peer() if peer != "opened_before_commit" else None
+    with registry.gateway_terminalizer(backend="claude", token=live_token) as loser:
+        assert loser.resolution_model("hub-live") == "caller-live"
+        if loser_exit == "no_candidate":
+            loser.mark_no_candidate("waiting")
+        else:
+            loser.fail("protocol_error")
+        if peer == "closed_before_commit":
             winner.finish_attempt(outcome=result, decision=classify_outcome(result))
-        # No stale projection of the loser can stand in for the winner's result.
+            winner.__exit__(None, None, None)
+        elif peer == "opened_before_commit":
+            winner = open_peer()
+        loser.record_turn_outcome(projection)
+    if peer != "closed_before_commit":
+        # The loser left the turn to its peer: no projection of its own remains.
         assert registry.terminal_projection("turn_peer01", backend="claude") is None
+        winner.finish_attempt(outcome=result, decision=classify_outcome(result))
+        winner.__exit__(None, None, None)
     registry.settle("turn_peer01", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
 
     record = store.get("turn_peer01")
     assert record is not None
-    assert record["outcome"] == peer_result
-    assert record["terminal_error"] is None
-    assert record["model_supply_state"] is None
+    if peer == "closed_before_commit":
+        # The loser ended last, so its whole exit is the turn's.
+        assert record["outcome"] == ("no_candidate" if loser_exit == "no_candidate" else "failed_terminal")
+        assert (record["model_supply_state"] is not None) is (loser_exit == "no_candidate")
+    else:
+        assert record["outcome"] == peer_result
+        assert record["terminal_error"] is None
+        assert record["model_supply_state"] is None
 
 
 def test_an_unclaimed_request_leaves_no_attempt_on_the_live_turn(
