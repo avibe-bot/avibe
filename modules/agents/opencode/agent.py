@@ -81,6 +81,7 @@ from modules.agents.model_hub import (
     persisted_launch_identity,
     resolve_opencode_overlay_launch,
 )
+from modules.agents.catalog import display_name_for_backend
 from vibe.i18n import t as i18n_t
 
 from .caller_context import (
@@ -1227,7 +1228,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             message = i18n_t(
                 "error.agentRuntimeRetired",
                 language,
-                agent=i18n_t("backend.opencode", language),
+                agent=display_name_for_backend(self.name),
             )
         else:
             message = f"Failed to start OpenCode server: {error}"

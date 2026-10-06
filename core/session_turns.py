@@ -88,6 +88,7 @@ from core.runtime_activation import (
     RuntimeActivationRegistry,
     RuntimeActivationResolution,
 )
+from modules.agents.catalog import display_name_for_backend
 from vibe.i18n import t as i18n_t
 
 if TYPE_CHECKING:
@@ -6550,7 +6551,7 @@ class SessionTurnManager:
         text = i18n_t(
             message_key,
             language,
-            agent=i18n_t(f"backend.{backend}", language) if backend else "",
+            agent=display_name_for_backend(backend) if backend else "",
         )
         metadata: dict[str, Any] = {"turn_id": turn_id or None, "replayed": True}
         watch_ids = self._recovered_watch_ids(session_id, turn_id)

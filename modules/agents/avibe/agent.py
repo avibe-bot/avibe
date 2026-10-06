@@ -432,8 +432,12 @@ class AvibeAgent(BaseAgent):
             ).scalars()
             return any((moment := instant(value)) is not None and moment >= created for value in committed)
 
-    async def shutdown_runtime(self) -> None:
-        """Disabling the backend ends its runs; the rolling refresh drains Turns before this."""
+    async def shutdown_runtime(self, settle_reason: Optional[str] = None) -> None:
+        """Disabling the backend ends its runs now.
+
+        The core settles their Turns and Activities with ``settle_reason``. The
+        runs live in this process, so ending them is all this adapter stops.
+        """
         for runtime in list(self._runtimes.values()):
             if runtime.run is not None:
                 runtime.run.stop_requested = True

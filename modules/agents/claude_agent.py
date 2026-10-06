@@ -45,6 +45,7 @@ from modules.agents.claude_process_reaper import (
     get_claude_client_returncode,
     register_claude_owned_process,
 )
+from modules.agents.catalog import display_name_for_backend
 from vibe.i18n import t as i18n_t
 
 from modules.agents.base import (
@@ -566,7 +567,7 @@ class ClaudeAgent(BaseAgent):
             self.name,
             "claude backend disabled",
             display_text=(
-                f"❌ {i18n_t('error.agentRuntimeRetired', language, agent=i18n_t('backend.claude', language))}"
+                f"❌ {i18n_t('error.agentRuntimeRetired', language, agent=display_name_for_backend(self.name))}"
             ),
             request=request,
         )

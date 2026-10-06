@@ -84,6 +84,7 @@ from vibe.codex_config import (
     codex_credential_identity,
 )
 from vibe.desktop_backends import desktop_backend_subprocess_environment
+from modules.agents.catalog import display_name_for_backend
 from vibe.i18n import t as i18n_t
 from vibe.message_identity import is_input_turn
 
@@ -711,7 +712,7 @@ class CodexAgent(BaseAgent):
             elif isinstance(e, RuntimeUnitStopping):
                 # Not a source failure: no Hub cooldown.
                 display_text = (
-                    f"❌ {i18n_t('error.agentRuntimeRetired', language, agent=i18n_t('backend.codex', language))}"
+                    f"❌ {i18n_t('error.agentRuntimeRetired', language, agent=display_name_for_backend(self.name))}"
                 )
             elif isinstance(e, CodexModelHubCatalogUnavailableError):
                 await self._record_model_hub_native_failure(request.context, str(e))
@@ -1757,7 +1758,7 @@ class CodexAgent(BaseAgent):
                 getattr(getattr(self.controller, "config", None), "language", "en")
                 or "en"
             )
-            message = i18n_t("error.agentRuntimeRetired", language, agent=i18n_t("backend.codex", language))
+            message = i18n_t("error.agentRuntimeRetired", language, agent=display_name_for_backend(self.name))
         elif isinstance(error, CodexForkBoundaryUnavailableError):
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
