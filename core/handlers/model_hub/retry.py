@@ -70,6 +70,8 @@ class RecoveryRequest:
     source_id: str | None = None
     reason: str | None = None
     observer: Callable[[dict | None], None] | None = None
+    # A hard failure this request itself observed ends it with that verdict.
+    non_retryable_failure: bool = False
 
     def start(self) -> None:
         if self.started is None:

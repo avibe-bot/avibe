@@ -7282,6 +7282,154 @@ def test_engine_buffered_2xx_error_envelope_carries_upstream_detail() -> None:
     assert outcome.upstream_detail == "model retired"
 
 
+_ANTHROPIC_OUTPUT_STARTED = (
+    b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message",'
+    b'"role":"assistant","content":[],"model":"model-a","usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
+    b'event: content_block_start\ndata: {"type":"content_block_start","index":0,'
+    b'"content_block":{"type":"text","text":""}}\n\n'
+    b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+    b'"delta":{"type":"text_delta","text":"partial"}}\n\n'
+)
+
+
+@pytest.mark.parametrize(
+    "protocol,stream,status,body,kind,stream_started,reason",
+    [
+        # CPA's own Anthropic-shaped answer when the upstream read times out.
+        (
+            "anthropic", False, 500,
+            {"type": "error", "error": {"type": "api_error", "message": (
+                "read tcp 192.168.2.3:56860->47.131.95.123:443: read: operation timed out"
+            )}},
+            RawOutcomeKind.NETWORK_ERROR, False, "network",
+        ),
+        # CPA's OpenAI-shaped answer when the upstream connection cannot be made.
+        (
+            "openai_responses", False, 500,
+            {"error": {"type": "server_error", "code": "internal_server_error", "message": (
+                'Post "https://relay.example.test/v1/responses": dial tcp 203.0.113.7:443: i/o timeout'
+            )}},
+            RawOutcomeKind.NETWORK_ERROR, False, "network",
+        ),
+        # After output the turn is already lost; the stream keeps its class.
+        (
+            "anthropic", True, 200,
+            _ANTHROPIC_OUTPUT_STARTED + (
+                b'event: error\ndata: {"type":"error","error":{"type":"api_error",'
+                b'"message":"unexpected EOF"}}\n\n'
+            ),
+            RawOutcomeKind.HTTP_ERROR, True, "server_error",
+        ),
+        # An upstream that answered adds its own fields beyond the engine's shape.
+        (
+            "anthropic", False, 500,
+            {"type": "error", "request_id": "req_011", "error": {"type": "api_error", "message": (
+                "read tcp 10.0.0.2:443: read: connection reset by peer"
+            )}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
+        (
+            "openai_responses", False, 500,
+            {"error": {"type": "server_error", "code": "vendor_backend_down", "message": (
+                "dial tcp 203.0.113.7:443: i/o timeout"
+            )}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
+        # An upstream that answered keeps its own server verdict.
+        (
+            "anthropic", False, 500,
+            {"type": "error", "error": {"type": "api_error", "message": "Internal server error"}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
+        (
+            "anthropic", False, 529,
+            {"type": "error", "error": {"type": "overloaded_error", "message": "read tcp: connection reset by peer"}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
+        (
+            "openai_responses", False, 400,
+            {"error": {"type": "invalid_request_error", "message": "image fetch failed: connection refused"}},
+            RawOutcomeKind.HTTP_ERROR, False, None,
+        ),
+        # Without the engine's generic type the body is not the engine's own label.
+        (
+            "openai_responses", False, 500,
+            {"error": {"message": "connection refused"}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
+    ],
+    ids=[
+        "anthropic-read-timeout",
+        "responses-dial-timeout",
+        "anthropic-mid-stream-eof",
+        "anthropic-upstream-request-id",
+        "responses-unknown-specific-code",
+        "anthropic-upstream-500",
+        "anthropic-overloaded",
+        "responses-request-error",
+        "responses-untyped-500",
+    ],
+)
+def test_engine_reported_upstream_transport_failure_takes_network_recovery(
+    protocol: str,
+    stream: bool,
+    status: int,
+    body: object,
+    kind: RawOutcomeKind,
+    stream_started: bool,
+    reason: str | None,
+) -> None:
+    """MH-RETRY-TRANSPORT-001: the engine's own transport failure takes network recovery."""
+
+    from aiohttp import web
+
+    async def run():
+        async def respond(_request: web.Request) -> web.Response:
+            if isinstance(body, bytes):
+                return web.Response(status=status, body=body, content_type="text/event-stream")
+            return web.json_response(body, status=status)
+
+        app = web.Application()
+        app.router.add_post("/{path:.*}", respond)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        try:
+            handle = await EngineClient(
+                EngineConnection(
+                    base_url=f"http://127.0.0.1:{runner.addresses[0][1]}",
+                    management_key="management-key",
+                    gateway_token="gateway-token",
+                )
+            ).invoke(
+                SourceRecord(
+                    source_id="src_fixture123",
+                    vendor="custom",
+                    protocol=protocol,
+                    base_url="https://api.example.test",
+                    credential_ref="cred_fixture123",
+                    allowed_origins=(),
+                    model_ids=("model-a",),
+                    prefix="source-fixture123",
+                ),
+                "model-a",
+                {"stream": stream},
+                stream=stream,
+            )
+            if handle.stream is not None:
+                async for _chunk in handle.stream:
+                    pass
+            return await handle.outcome()
+        finally:
+            await runner.cleanup()
+
+    outcome = asyncio.run(run())
+
+    assert outcome.kind is kind
+    assert outcome.stream_started is stream_started
+    assert classify_outcome(outcome).reason == reason
+
+
 @pytest.mark.parametrize(
     "payload",
     [

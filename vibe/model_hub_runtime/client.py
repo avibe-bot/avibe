@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 import socket
 import tempfile
 import time
@@ -53,6 +54,16 @@ from vibe.model_hub_runtime.state import SourceRecord
 _STREAM_CHUNK_BYTES = 64 * 1024
 # Upper bound on upstream error text shown to the user in a terminal message.
 _UPSTREAM_DETAIL_CHARS = 400
+# The engine answers a failed upstream connection itself, before any upstream
+# response, with exactly its own generic envelope and Go's transport error text.
+# That is a network fact, not an upstream server verdict.
+_ENGINE_TRANSPORT_FAILURE = re.compile(
+    r"\b(?:dial|read|write) (?:tcp|udp)\b|i/o timeout|connection reset by peer|"
+    r"connection refused|broken pipe|\bunexpected EOF\b|: EOF$|TLS handshake timeout|"
+    r"Client\.Timeout exceeded|context deadline exceeded|timeout awaiting response headers|"
+    r"http2: (?:client connection lost|server sent GOAWAY)|server closed idle connection|"
+    r"no such host|network is unreachable|proxyconnect"
+)
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
@@ -1580,6 +1591,32 @@ def _reduce_protocol_observation(
                 observation.error_payload or b"",
                 observation.error_envelope_paths,
             )
+        upstream_detail = (
+            _bounded_upstream_detail(observation.error_message)
+            if observation.error_message is not None
+            else _upstream_error_detail(
+                observation.error_payload or b"",
+                observation.error_envelope_paths or (("error",),),
+            )
+        )
+        if (
+            http_status is not None and http_status >= 500
+            and observation.error_payload
+            and _engine_transport_failure(observation.error_payload, observation.error_envelope_paths)
+        ):
+            # The generic type is the engine's label for its own failure, so no
+            # machine code is carried that could outrank the network fact.
+            return _outcome(
+                kind=RawOutcomeKind.NETWORK_ERROR,
+                source=source,
+                model_id=model_id,
+                http_status=http_status,
+                message="engine could not reach the upstream",
+                stream_started=stream_started,
+                usage=observation.usage,
+                recovery_verified=observation.recovery_verified,
+                upstream_detail=upstream_detail,
+            )
         return _outcome(
             kind=RawOutcomeKind.HTTP_ERROR,
             source=source,
@@ -1592,14 +1629,7 @@ def _reduce_protocol_observation(
             stream_started=stream_started,
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
-            upstream_detail=(
-                _bounded_upstream_detail(observation.error_message)
-                if observation.error_message is not None
-                else _upstream_error_detail(
-                    observation.error_payload or b"",
-                    observation.error_envelope_paths or (("error",),),
-                )
-            ),
+            upstream_detail=upstream_detail,
         )
     return _outcome(
         kind=RawOutcomeKind.PROTOCOL_ERROR,
@@ -1611,6 +1641,31 @@ def _reduce_protocol_observation(
         usage=observation.usage,
         recovery_verified=observation.recovery_verified,
     )
+
+
+def _engine_transport_failure(payload: bytes, envelope_paths: tuple[ErrorEnvelopePath, ...]) -> bool:
+    """Whether an error body is exactly the engine's own envelope for a transport failure.
+
+    An upstream that answered adds its own fields (a request id, a specific code),
+    so only a body equal to one of the engine's two shapes qualifies.
+    """
+
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, ValueError):
+        return False
+    for path in envelope_paths or (("error",),):
+        message: object = document
+        for key in (*path, "message"):
+            message = message.get(key) if isinstance(message, dict) else None
+        if not isinstance(message, str) or not _ENGINE_TRANSPORT_FAILURE.search(message):
+            continue
+        if document in (
+            {"type": "error", "error": {"type": "api_error", "message": message}},
+            {"error": {"type": "server_error", "code": "internal_server_error", "message": message}},
+        ):
+            return True
+    return False
 
 
 def _protocol_error_outcome(
