@@ -374,7 +374,10 @@ class Controller:
 
         The Hub seeds that entry once from the models the built-in Agents run;
         this process owns the Agent rows, so it reads those models and gives the
-        built-in Avibe Agent the first seeded one when it has none yet.
+        built-in Avibe Agent the first seeded one when it has none yet. The seed
+        waits for an enabled Avibe Agent to start: a disabled backend's catalog
+        would claim the Hub runtime, and its first model would have no Agent to
+        go to.
         """
 
         if self.model_hub_service is None:
@@ -384,6 +387,9 @@ class Controller:
 
         store = self.vibe_agent_store
         try:
+            avibe = store.get_builtin_default_agent_for_backend("avibe")
+            if avibe is None:
+                return
             selections = []
             # The native CLI backends, in the Model Hub's backend order.
             for backend in (item for item in MODEL_HUB_BACKENDS if item in NATIVE_CLI_BACKENDS):
@@ -392,8 +398,7 @@ class Controller:
                 if model:
                     selections.append((backend, model))
             seeded = asyncio.run(self.model_hub_service.seed_avibe_supply(selections))
-            avibe = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
-            if seeded and avibe is not None and not str(avibe.model or "").strip():
+            if seeded and not str(avibe.model or "").strip():
                 store.update(avibe.name, model=seeded[0], user_context=instance_owner_context())
         except Exception:
             logger.warning("Avibe Agent starting model supply failed", exc_info=True)

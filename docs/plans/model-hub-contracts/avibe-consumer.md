@@ -15,7 +15,9 @@ The backend id is `avibe`. It has a fixed catalog (ordinary editable model rows)
 no native protocol pin, no native CLI, and no Direct mode. A fresh configuration
 starts with an empty catalog and source order. A configuration written before the
 Avibe Agent existed reads the same empty Hub row, but writes leave that row absent
-until the controller seeds it once at startup, after the built-in Agents exist:
+until the controller seeds it once, at the first startup where the built-in
+Avibe Agent exists and is enabled (a disabled backend's catalog would claim the
+Hub runtime with no Agent to use it):
 its source order becomes every existing eligible Source, placed exactly as a newly
 created Source would be, and its catalog becomes the models the built-in Claude,
 Codex, and OpenCode Agents run, in that order, that one of those Sources lists,
