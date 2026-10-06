@@ -209,6 +209,32 @@ signal path, before it changes it.
 
 ## Open questions
 
+Review of this plan raised the points below. The owner decided on 2026-10-06
+that findings on this plan are advisory, so they are recorded here rather than
+resolved. Each one must be settled in the implementation PR it affects.
+
+- **No atomic signal on macOS.** A pidfd on Linux and a process handle on
+  Windows bind a signal to one process. macOS has neither, so re-proving
+  identity just before `kill(pid, ...)` still leaves a window in which the
+  process can exit and its pid be reused. The trade-off: either accept that
+  window, with strong identity evidence immediately before the signal, or
+  refuse to signal on macOS, which would leave leaked processes there unstopped.
+  The plan leans toward accepting the window; the first PR that signals on
+  macOS decides and records it.
+- **A marker names a tree, not a process.** Every descendant inherits it. A
+  consumer that must find one exact process, rather than act on a whole tree,
+  needs a proof specific to that process, such as a handle, or a marker the
+  root alone carries that its children do not inherit.
+- **A role is not an owner.** `runtime.is_desktop_ui` shows that a process is a
+  UI of that desktop Runtime, not that it is the UI an installer owner record
+  names. The desktop installer migration needs an owner-specific proof.
+- **The current controller's own shutdown still compares birth times.**
+  `modules/agents/opencode/server.py::terminate_pid_tree_sync` and
+  `vibe/runtime.py::_stop_desktop_processes` keep `psutil.Process` objects whose
+  reuse guard compares the birth time cached at the scan. A clock step during
+  the TERM wait can make a surviving process look gone. They belong in the
+  consumer inventory.
+
 - Whether a process's initial environment is readable under the service user
   for every backend binary on macOS and Windows: a hardened or signed binary
   might refuse it. Measure before each consumer relies on it. An unreadable
