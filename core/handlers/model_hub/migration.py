@@ -1866,6 +1866,10 @@ async def _prepare_takeover(
                 source = ModelHubSourceConfig.from_payload(replacement)
                 updated.sources = [source if value.id == source.id else value for value in updated.sources]
                 _ensure_takeover_placement(updated, source, item.backend)
+                # Now on the Hub, it is new to the Avibe Agent, which reaches every
+                # Hub Source: placed like a new Source (a pending entry is seeded
+                # below instead).
+                host._apply_source_placement(updated, source, ("avibe",))
             else:
                 updated.sources.append(source)
                 host._apply_source_placement(updated, source)

@@ -29,7 +29,11 @@ metadata included). None qualifying leaves the catalog empty; no model is picked
 on the user's behalf. An Avibe Agent without a model cannot run a turn, so the
 built-in one takes its catalog's first model while it has none: one controller
 rule, decided under the Agent store's write lock so a chosen model stands, run
-after each seed and at every start, so a lost hand-off heals on the next start.
+on every Avibe catalog change (`_refresh_backend_catalog`, which each seed also
+announces) and at every start, so a lost hand-off heals on the next start. A
+seed waits once for a first models.dev copy, joining a fetch in flight, so its
+rows carry the limits the Agent budgets with. A native Source that later moves
+to the Hub joins Avibe like a new Source.
 Where a user Agent already holds the name and no built-in exists, only the
 supply is seeded.
 The persisted row then belongs to the user and is never seeded again. Existing

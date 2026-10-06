@@ -92,14 +92,15 @@ def test_oauth_is_not_exposed_until_native_cleanup_and_mode_commit(monkeypatch, 
     assert "refresh_token" not in service.migration_journal.path.with_name("last-completed.json").read_text()
 
 
-@pytest.mark.parametrize("batch", ["two new Sources", "a reused native Source"])
+@pytest.mark.parametrize("batch", ["two new Sources", "a reused native Source", "a reused native Source after the seed"])
 def test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch(monkeypatch, tmp_path, batch):
     """MH-AVIBE-007: a takeover seeds Avibe once its Sources are final.
 
     A batch importing several Sources seeds from all of them, so a starting
     model only a later Source serves still arrives; a native Source converted
     to the Hub in place seeds too. The takeover commits through its journal,
-    so its own save announces the Avibe catalog change like any other.
+    so its own save announces the Avibe catalog change like any other. Once
+    seeded, a native Source moving to the Hub is new to Avibe and joins it.
     """
     home = tmp_path / "native"
     _write_claude_oauth(home)
@@ -122,7 +123,10 @@ def test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch(monkeypatch, 
         store.config.sources.append(native)
         store.config.agents["claude"].sources.order = [native.id]
         selections = [("claude", "claude-opus-5-5")]
-    assert store.config.avibe_supply_pending
+    if batch == "a reused native Source after the seed":
+        store.config.avibe_supply_pending = False
+    else:
+        assert store.config.avibe_supply_pending
     service.builtin_agent_models_override = lambda: selections
     announced = []
 
@@ -144,6 +148,10 @@ def test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch(monkeypatch, 
     ]
     avibe = store.config.agents["avibe"]
     assert not store.config.avibe_supply_pending
+    if batch == "a reused native Source after the seed":
+        # Placed like a new Source; the user's catalog is not seeded again.
+        assert (avibe.sources.order, avibe.models, announced) == (serving, [], [])
+        return
     assert (avibe.sources.order, [model.id for model in avibe.models]) == (serving, starting)
     assert announced == ["avibe"]
 
