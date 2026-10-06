@@ -15,9 +15,12 @@ backend list, it is always enabled, and it cannot be turned off.
   processing meaning), the Agent create picker, the Agents page groups and filter, the Global prompts tabs (the UI's
   `BACKEND_ORDER`, derived from the catalog; the separate `agentOrder` is gone), and IM routing pickers. Native
   backends therefore read OpenCode, Claude Code, Codex everywhere a backend list is shown.
-- **Not the default.** `DEFAULT_AGENT_BACKEND` stays `opencode`. Every fallback that picks a backend or Agent nobody
-  chose ranks the built-in backend last (`_implicit_default_rank` in `core/vibe_agents.py`, the IM routing modal's
-  fallback selection), so it is chosen only when nothing else is enabled.
+- **Not the default.** `DEFAULT_AGENT_BACKEND` stays `opencode`. `implicit_default_rank` (`modules/agents/catalog.py`) is the
+  one rule for a backend or Agent nobody chose: the built-in backend comes last, so it is chosen only when nothing else
+  is enabled. Every implicit pick goes through it: the built-in sync's default, the effective-default fallbacks
+  (`resolve_effective_default_agent`, `_effective_default_agent`), the per-principal fallback
+  (`resolve_usable_default_agent`), the archived default's replacement after its same-backend preference, and the
+  IM routing modal's fallback selection.
 - **Always on, by construction.** `agents.avibe` no longer exists: `AvibeAgentConfig`, its compat projection and every
   branch reading it are removed. A config written by an earlier build loads unchanged otherwise and drops the key on
   its next save. The controller registers the adapter at startup and never unregisters it; runtime renewal is a no-op
@@ -36,8 +39,10 @@ backend list, it is always enabled, and it cannot be turned off.
   same code.
 - **UI.** The built-in backend shows a "Built-in" badge where other backends have their enable switch, in the list and
   on its page. The built-in Avibe Agent's enable switch is locked on.
-- **Model Hub cannot supply.** `hub_supply_refusal` (`modules/agents/model_hub.py`) owns the cause; the shared model gate
-  and the adapter's preflight both use it. The backend stays listed and enabled in both cases.
+- **Model Hub cannot supply.** `hub_supply_block(backend, hub_config)` (`config/v2_config.py`) is the one owner of why
+  the Model Hub leaves a backend no model to run on now. The shared model gate and the adapter's preflight render its
+  copy (`hub_supply_refusal`), `get_backend_connection` reports such a backend unready, and `GET /api/config` carries
+  it as `agent_supply_blocks`, which the Backends pages show. The backend stays listed and enabled in both cases.
   - Gateway off (Models → Start/Stop): its row says "Gateway off", its page links to Models, and a Turn refuses with
     `errors.modelGatewayOff`.
   - Model Hub disabled on the instance (`VIBE_MODEL_HUB_ENABLED=0`): a backend without its own CLI gets every model

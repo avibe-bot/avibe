@@ -58,11 +58,11 @@ export function SettingsBackendPage({ backend }: { backend: AgentBackendId }) {
             extraSlot={supplyBlock && (
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-gold/40 bg-gold/10 px-3 py-2.5">
                 <p className="text-[12px] text-gold-ink">
-                  {supplyBlock === 'hubDisabled'
+                  {supplyBlock === 'hub_disabled'
                     ? t('settings.backends.hubDisabledNotice', { name: meta.label })
                     : t('settings.backends.gatewayOff', { name: meta.label })}
                 </p>
-                {supplyBlock === 'gatewayOff' && <Link
+                {supplyBlock === 'gateway_off' && <Link
                   to="/settings/models"
                   className="model-hub-action-mint inline-flex shrink-0 items-center gap-1 text-[13px] font-medium transition-colors"
                 >

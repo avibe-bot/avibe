@@ -109,10 +109,11 @@ describe('backend attention', () => {
       named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-5-5', supply_status: 'ok' }],
     },
   ] as AgentSupply[];
+  // GET /api/config carries the server's answer for each blocked backend.
   const modelHubConfig = (enabled: boolean) => ({
     agents: {},
     capabilities: { model_hub: { enabled: true } },
-    model_hub: { enabled, agents: { avibe: { mode: 'hub' }, claude: { mode: 'direct' } } },
+    agent_supply_blocks: enabled ? {} : { avibe: 'gateway_off' },
   });
 
   it('flags the always-on backend whose Agent has no model', async () => {
@@ -147,7 +148,9 @@ describe('backend attention', () => {
   // and there is no Models page to open.
   it('says Model Hub is disabled when the instance turns it off', async () => {
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(withoutModel);
-    mocks.api.getConfig.mockResolvedValue({ agents: {}, capabilities: { model_hub: { enabled: false } } });
+    mocks.api.getConfig.mockResolvedValue({
+      agents: {}, capabilities: { model_hub: { enabled: false } }, agent_supply_blocks: { avibe: 'hub_disabled' },
+    });
     renderBackends();
 
     const avibe = await rowOf('Avibe Agent');

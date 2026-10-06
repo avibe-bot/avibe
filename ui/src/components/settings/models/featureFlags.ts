@@ -1,5 +1,3 @@
-import { AGENT_BACKENDS } from '@/lib/agentBackends';
-
 // Model Hub UI capability projection. Availability is owned by the backend and
 // arrives in GET /api/config; the browser has no independent release switch.
 
@@ -15,24 +13,15 @@ export const modelHubEnabledFromConfig = (config: unknown): boolean => {
   );
 };
 
-export type HubSupplyBlock = 'gatewayOff' | 'hubDisabled';
+export type HubSupplyBlock = 'hub_disabled' | 'gateway_off';
 
-// Backends left with no model to run on by the Model Hub's state, and why. A
-// backend without its own CLI gets every model through the Hub, so the Hub being
-// disabled on this instance leaves it none; a Hub-supplied backend has none while
-// the user has turned the gateway off (Models → Start/Stop).
+// Backends left with no model to run on by the Model Hub's state, and why. The
+// server decides (``hub_supply_block``) and GET /api/config carries the answer.
 export const hubSupplyBlocks = (config: unknown): ReadonlyMap<string, HubSupplyBlock> => {
-  if (!modelHubEnabledFromConfig(config)) {
-    return new Map(
-      AGENT_BACKENDS.filter((backend) => !backend.capabilities.supports_cli).map((backend) => [backend.id, 'hubDisabled']),
-    );
-  }
-  const hub = (config as { model_hub?: { enabled?: unknown; agents?: Record<string, { mode?: unknown } | null> } })
-    .model_hub;
-  if (!hub || hub.enabled !== false) return new Map();
+  const blocks = (config as { agent_supply_blocks?: unknown } | null)?.agent_supply_blocks;
+  if (!blocks || typeof blocks !== 'object') return new Map();
   return new Map(
-    Object.entries(hub.agents ?? {})
-      .filter(([, agent]) => agent?.mode === 'hub')
-      .map(([backend]) => [backend, 'gatewayOff']),
+    Object.entries(blocks).filter((entry): entry is [string, HubSupplyBlock] =>
+      entry[1] === 'hub_disabled' || entry[1] === 'gateway_off'),
   );
 };

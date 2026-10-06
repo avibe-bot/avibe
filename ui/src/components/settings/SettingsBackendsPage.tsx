@@ -193,7 +193,7 @@ export const SettingsBackendsPage: React.FC = () => {
                   <>
                     {supplyBlocks.has(meta.id) ? (
                       <Badge variant="warning">
-                        {supplyBlocks.get(meta.id) === 'hubDisabled'
+                        {supplyBlocks.get(meta.id) === 'hub_disabled'
                           ? t('settings.backends.hubDisabled')
                           : t('settings.models.shell.stopped')}
                       </Badge>

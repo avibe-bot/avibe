@@ -35,7 +35,7 @@ from config.platform_registry import (
     supported_platform_ids,
     supported_platform_set,
 )
-from modules.agents.catalog import AGENT_BACKENDS, AgentBackend, DEFAULT_AGENT_BACKEND
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, AgentBackend, DEFAULT_AGENT_BACKEND
 from modules.im.base import BaseIMConfig
 from vibe.i18n import normalize_language
 from vibe.trace_retention_policy import validate_retention_days
@@ -1601,6 +1601,24 @@ def is_model_hub_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
 
     source = os.environ if environ is None else environ
     return source.get(MODEL_HUB_ENABLED_ENV, "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+HubSupplyBlock = Literal["hub_disabled", "gateway_off"]
+
+
+def hub_supply_block(backend: str, hub: Optional["ModelHubConfig"]) -> Optional[HubSupplyBlock]:
+    """Why the Model Hub leaves ``backend`` no model to run on now, or ``None``: the one owner of that answer.
+
+    A backend without its own CLI gets every model through the Hub, so the operator's
+    Model Hub switch (``VIBE_MODEL_HUB_ENABLED``) leaves it none. Any backend the Hub
+    supplies has none while the user has turned the gateway off in Models.
+    """
+
+    if not is_model_hub_enabled():
+        return None if backend in NATIVE_CLI_BACKENDS else "hub_disabled"
+    if hub is not None and not hub.enabled and hub.agents[backend].mode == "hub":
+        return "gateway_off"
+    return None
 
 
 def _validate_optional_datetime(value: object, field_path: str) -> Optional[str]:

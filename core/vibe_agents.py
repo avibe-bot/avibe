@@ -17,7 +17,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
-from modules.agents.catalog import AGENT_BACKENDS, BUILTIN_AGENT_BACKENDS, is_builtin_backend
+from modules.agents.catalog import AGENT_BACKENDS, BUILTIN_AGENT_BACKENDS, implicit_default_rank, is_builtin_backend
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
@@ -545,7 +545,7 @@ def resolve_effective_default_agent(connection, *, enabled_only: bool = True) ->
     if not enabled_only:
         return None
     rows = connection.execute(select(agents).where(agents.c.enabled == 1).order_by(agents.c.name)).mappings().all()
-    return min((VibeAgentStore._from_row(row) for row in rows), key=_implicit_default_rank, default=None)
+    return _implicit_default(VibeAgentStore._from_row(row) for row in rows)
 
 
 # Default routing surfaces -- the instance-wide default Agent and a project's
@@ -609,7 +609,7 @@ def resolve_usable_default_agent(
     candidates = [VibeAgentStore._from_row(row) for row in rows]
     # Builtins first: they are the shape every install has and the one a caller
     # is most likely to be entitled to. A built-in backend's Agents still come last.
-    candidates.sort(key=lambda item: (_implicit_default_rank(item), 0 if item.source == "builtin" else 1))
+    candidates.sort(key=lambda item: (implicit_default_rank(item.backend), 0 if item.source == "builtin" else 1))
     for candidate in candidates:
         if agent is not None and candidate.id == agent.id:
             continue
@@ -1580,7 +1580,7 @@ class VibeAgentStore:
         for candidate in candidates:
             if candidate.backend == archived.backend:
                 return candidate
-        return candidates[0] if candidates else None
+        return _implicit_default(candidates)
 
     @staticmethod
     def _effective_default_agent(conn: Any) -> Optional[VibeAgent]:
@@ -1606,14 +1606,13 @@ class VibeAgentStore:
         if fallback is not None:
             return VibeAgentStore._from_row(fallback)
 
-        first_enabled = conn.execute(
+        enabled = conn.execute(
             select(agents)
             .where(agents.c.enabled == 1)
             .where(agents.c.archived_at.is_(None))
             .order_by(agents.c.name)
-            .limit(1)
-        ).mappings().first()
-        return VibeAgentStore._from_row(first_enabled) if first_enabled is not None else None
+        ).mappings()
+        return _implicit_default(VibeAgentStore._from_row(row) for row in enabled)
 
     def import_candidates(
         self,
@@ -1765,7 +1764,7 @@ class VibeAgentStore:
         enabled_ensured = [agent for agent in ensured if agent.enabled]
         if (default_agent is None or not default_agent.enabled) and enabled_ensured:
             self.set_default_agent_name(
-                min(enabled_ensured, key=_implicit_default_rank).name,
+                _implicit_default(enabled_ensured).name,
                 user_context=instance_owner_context(),
             )
         return ensured
@@ -1936,13 +1935,9 @@ def is_always_enabled_agent(agent: VibeAgent) -> bool:
     return is_builtin_default_agent(agent) and is_builtin_backend(agent.backend)
 
 
-def _implicit_default_rank(agent: VibeAgent) -> int:
-    """Order Agents for a default nobody chose: a built-in backend's Agents come last.
-
-    Making the Avibe Agent the default for new chats is its own decision, so no fallback
-    picks it while another enabled Agent exists.
-    """
-    return 1 if is_builtin_backend(agent.backend) else 0
+def _implicit_default(candidates: Iterable[VibeAgent]) -> Optional[VibeAgent]:
+    """The first candidate by ``implicit_default_rank``, keeping the given order among equals."""
+    return min(candidates, key=lambda agent: implicit_default_rank(agent.backend), default=None)
 
 
 def iter_global_agent_files(source: str) -> list[tuple[Path, str]]:

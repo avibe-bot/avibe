@@ -34,6 +34,7 @@ from config.v2_config import (
     config_file_lock,
     AGENT_CREDENTIAL_SECTIONS,
     config_recovery_refusal,
+    hub_supply_block,
 )
 from config.v2_settings import (
     SettingsStore,
@@ -10021,8 +10022,6 @@ def _hub_backend_connection_auth(config: V2Config, backend: str) -> str:
     from vibe.model_hub_runtime.state import EngineStateStore
 
     hub = config.model_hub
-    if not hub.enabled:
-        return "none"
     source_ids = list(dict.fromkeys([
         *hub.effective_source_order(backend),
         *(hop.source_id for route in hub.agents[backend].routes.values() for hop in route.hops),
@@ -10122,7 +10121,11 @@ async def get_backend_connection(name: str) -> dict:
         return result
     try:
         if supply_mode == "hub":
-            result["auth"] = await asyncio.to_thread(_hub_backend_connection_auth, config, name)
+            # A backend the Hub cannot supply now has no credential to run on, whatever is saved.
+            result["auth"] = (
+                "none" if hub_supply_block(name, config.model_hub) is not None
+                else await asyncio.to_thread(_hub_backend_connection_auth, config, name)
+            )
         elif name == "opencode":
             if not enabled:
                 return result

@@ -4512,10 +4512,17 @@ def _config_payload_for_context(config: Any, authorization_context: Any) -> dict
 def _config_api_payload_for_context(config: Any, authorization_context: Any) -> dict[str, Any]:
     """Return the complete payload exposed by the config API."""
 
-    from config.v2_config import is_model_hub_enabled
+    from config.v2_config import hub_supply_block, is_model_hub_enabled
+    from modules.agents.catalog import AGENT_BACKENDS
 
     payload = _config_payload_for_context(config, authorization_context)
     payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
+    # Read-only, like ``capabilities``: why the Model Hub leaves a backend no model to run on.
+    payload["agent_supply_blocks"] = {
+        backend: block
+        for backend in AGENT_BACKENDS
+        if (block := hub_supply_block(backend, config.model_hub)) is not None
+    }
     return payload
 
 

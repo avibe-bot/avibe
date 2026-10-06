@@ -156,6 +156,15 @@ def is_builtin_backend(name: str) -> bool:
     return name in BUILTIN_AGENT_BACKENDS
 
 
+def implicit_default_rank(name: str) -> int:
+    """The one rule for a default nobody chose, among backends or their Agents: a built-in backend comes last.
+
+    Making the Avibe Agent the default for new chats is its own decision, so no fallback
+    picks it while another candidate exists.
+    """
+    return 1 if is_builtin_backend(name) else 0
+
+
 def display_name_for_backend(name: str) -> str:
     """Return the user-facing display name for *name*."""
     if name in AGENT_BACKEND_REGISTRY:

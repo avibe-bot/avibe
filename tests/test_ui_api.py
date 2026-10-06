@@ -4032,6 +4032,30 @@ def test_a_default_nobody_chose_is_not_the_built_in_avibe_agent(tmp_path, monkey
         store.close()
 
 
+@pytest.mark.parametrize("explicit_default", [True, False])
+def test_archiving_the_default_never_hands_new_chats_to_the_built_in_agent(tmp_path, monkeypatch, explicit_default):
+    """The replacement for an archived default, chosen or implicit, ranks the built-in backend last."""
+    from core.vibe_agents import BUILTIN_DEFAULT_AGENT_METADATA
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    store = VibeAgentStore()
+    try:
+        store.create(
+            name="avibe", backend="avibe", source="builtin",
+            metadata={**BUILTIN_DEFAULT_AGENT_METADATA, "backend": "avibe"},
+        )
+        store.create(name="omega", backend="claude")
+        store.create(name="zeta", backend="opencode")
+        if explicit_default:
+            store.set_default_agent_name("omega")
+        # Archiving the default (explicit, or implicit when none was chosen) needs a replacement;
+        # with no other Claude Agent, it is the first non-built-in one.
+        assert api.remove_vibe_agent("omega")["ok"] is True
+        assert store.get_default_agent_name() == "zeta"
+    finally:
+        store.close()
+
+
 def test_the_built_in_avibe_agent_cannot_be_disabled_and_stays_editable(tmp_path, monkeypatch):
     """Turning it off would turn off the backend; its model, prompt and metadata stay editable."""
     from core.vibe_agents import AgentAlwaysEnabledError
