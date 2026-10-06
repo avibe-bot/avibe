@@ -5181,11 +5181,13 @@ class ModelHubService:
             config.avibe_supply_pending = False
             for source in config.sources:
                 self._apply_source_placement(config, source, ("avibe",))
-            # Startup seeds before any turn needs the engine. As after an
-            # explicit runtime start, the engine takes this config on its next
-            # demand, so an engine that is not up yet cannot undo the seed.
-            self._engine_synced = False
-            self._save_config(config)
+            try:
+                # An engine that is not up must not undo the seed: the config is
+                # saved first, and the engine takes it on its next demand.
+                await self._commit_synced(previous, config, rollback_on_sync_failure=False)
+            except ModelHubError:
+                if self.store.load().avibe_supply_pending:
+                    raise
             return [model.id for model in agent.models]
 
     def _ensure_models_dev_copy(self) -> None:
