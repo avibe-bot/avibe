@@ -12,20 +12,22 @@ the existing `resolve("avibe", ...)`; `ModelHubLaunch.to_hop_resolution()` proje
 that launch. There is no second planner, credential store, or upstream client.
 
 The backend id is `avibe`. It has a fixed catalog (ordinary editable model rows),
-no native protocol pin, no native CLI, and no Direct mode. A fresh configuration
-starts with an empty catalog and source order. A configuration written before the
-Avibe Agent existed reads the same empty Hub row, but writes leave that row absent
-until the controller seeds it once, in the background after the service reports
-ready (so a first models.dev fetch never delays startup):
-its source order becomes every existing eligible Source, placed exactly as a newly
-created Source would be, and its catalog becomes the models the built-in Claude,
-Codex, and OpenCode Agents run, in that order, that one of those Sources lists,
-deduplicated and added as the picker adds a provider model (models.dev metadata
-included). The built-in Avibe Agent takes the first seeded model when it has none, decided
-under the Agent store's write lock so a model chosen meanwhile stands; where a
-user Agent already holds the name and no built-in exists, only the supply is
-seeded. A Source
-created before the seed is placed by the seed, not by itself.
+no native protocol pin, no native CLI, and no Direct mode. Until its starting
+supply is seeded, the Avibe row is pending: a fresh configuration, or one written
+before the Avibe Agent existed, reads an empty Hub row that writes leave absent.
+The seed runs once, when a Source it can place exists: in the background after
+the service reports ready for Sources that already exist (so a first models.dev
+fetch never delays startup), and otherwise inside the mutation that creates the
+first eligible Source, API key, OAuth, or native takeover alike, so no restart is
+needed. Its source order becomes every existing eligible Source, placed exactly as
+a newly created Source would be, and its catalog becomes the models the built-in
+Claude, Codex, and OpenCode Agents run, in that order, that one of those Sources
+lists, deduplicated and added as the picker adds a provider model (models.dev
+metadata included). None qualifying leaves the catalog empty; no model is picked
+on the user's behalf. The built-in Avibe Agent takes the first seeded model when
+it has none, decided under the Agent store's write lock so a model chosen
+meanwhile stands; where a user Agent already holds the name and no built-in
+exists, only the supply is seeded.
 The persisted row then belongs to the user and is never seeded again. Existing
 backend modes, model metadata, routes, source order, and runtime intent remain
 unchanged. An empty Avibe catalog does not prevent an explicit runtime Stop.

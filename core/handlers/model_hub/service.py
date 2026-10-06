@@ -5211,13 +5211,11 @@ class ModelHubService:
         Sources that predate the Avibe Agent. Returns the seeded model ids.
         """
 
-        current = self.store.load()
-        if not current.avibe_supply_pending or not any(
-            self._eligible_for_agent(source, "avibe") for source in current.sources
-        ):
+        if not self.store.load().avibe_supply_pending:
             return []
-        # These rows are written once and then kept, so a first models.dev copy
-        # is worth one bounded wait, off the loop and outside the lock.
+        # Seeded rows are written once and then kept, so a first models.dev copy
+        # is worth one bounded wait, off the loop and outside the lock. Taken
+        # even with no Source yet, so a fresh install's first Source finds it.
         await asyncio.to_thread(self._ensure_models_dev_copy)
         async with self._mutation_lock:
             previous = self.store.load()

@@ -87,6 +87,31 @@ def test_oauth_is_not_exposed_until_native_cleanup_and_mode_commit(monkeypatch, 
     assert "refresh_token" not in service.migration_journal.path.with_name("last-completed.json").read_text()
 
 
+def test_takeover_seeds_a_pending_avibe_entry_and_offers_its_first_model(monkeypatch, tmp_path):
+    """MH-AVIBE-007: a Source a native takeover creates seeds Avibe like any other.
+
+    The takeover commits through its journal rather than the Source-create
+    path, so its own save must hand the seeded model to the Avibe Agent.
+    """
+    home = tmp_path / "native"
+    _write_claude_oauth(home)
+    _isolate_native_home(monkeypatch, home)
+    service, store, _adapter = _service(tmp_path, migration_home=home)
+    store.config.agents["claude"].mode = "direct"
+    assert store.config.avibe_supply_pending
+    service.builtin_agent_models_override = lambda: [("claude", "claude-opus-5-5")]
+    service.avibe_model_handoff = (handed := []).append
+    item_ids = [item["id"] for item in service.migration_scan()["items"]]
+
+    assert asyncio.run(service.migration_apply(item_ids, clean_api_keys=True))["applied"] == 1
+
+    [source] = store.config.sources
+    avibe = store.config.agents["avibe"]
+    assert not store.config.avibe_supply_pending
+    assert (avibe.sources.order, [model.id for model in avibe.models]) == ([source.id], ["claude-opus-5-5"])
+    assert handed == ["claude-opus-5-5"]
+
+
 def test_failure_after_possible_rotation_retains_current_owner_and_retries(monkeypatch, tmp_path):
     home = tmp_path / "native"
     _write_codex_oauth(home)

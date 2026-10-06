@@ -136,13 +136,16 @@ scenarios:
     layer: contract
     test: tests/test_model_hub_avibe_consumer.py::test_released_config_adds_only_empty_avibe_supply
   - id: MH-AVIBE-007
-    name: An Avibe Agent older than its Hub entry starts once with the user's Sources and built-in Agent models
+    name: The Avibe Agent starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered
     kind: compatibility
     layer: contract
     test: tests/test_model_hub_avibe_consumer.py::test_avibe_agent_predating_its_supply_starts_with_the_users_providers_and_models
     related_tests:
+      - tests/test_model_hub_avibe_consumer.py::test_fresh_install_seeds_avibe_with_its_first_source
+      - tests/test_model_hub_native_takeover.py::test_takeover_seeds_a_pending_avibe_entry_and_offers_its_first_model
       - tests/test_avibe_backend_registration.py::test_avibe_agent_starts_on_the_first_seeded_model_it_lacks
+      - tests/test_controller_im_ready.py::test_runtime_services_start_when_post_update_notification_fails
   - id: MH-AVIBE-004
     name: Avibe refuses native CLI sources and Direct mode
     status: covered
