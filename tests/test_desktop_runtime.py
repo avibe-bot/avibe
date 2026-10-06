@@ -768,7 +768,7 @@ def test_ui_server_compatibility_accepts_versioned_not_ready_identity(monkeypatc
     monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
 
     assert runtime.ui_server_healthy("100.97.103.112", 5123) is False
-    assert runtime._ui_server_compatible("100.97.103.112", 5123) is True
+    assert runtime.ui_server_compatible("100.97.103.112", 5123) is True
 
 
 @pytest.mark.parametrize(
@@ -814,7 +814,7 @@ def test_ui_server_compatibility_rejects_invalid_not_ready_identity(monkeypatch,
 
     monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
 
-    assert runtime._ui_server_compatible("100.97.103.112", 5123) is False
+    assert runtime.ui_server_compatible("100.97.103.112", 5123) is False
 
 
 def test_ui_server_compatibility_rejects_a_valid_runtime_identity_invalid_response(monkeypatch):
@@ -850,7 +850,7 @@ def test_ui_server_compatibility_rejects_a_valid_runtime_identity_invalid_respon
 
     monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
 
-    assert runtime._ui_server_compatible("100.97.103.112", 5123) is False
+    assert runtime.ui_server_compatible("100.97.103.112", 5123) is False
 
 
 def test_start_ui_replaces_a_ui_with_an_invalid_runtime_identity(tmp_path, monkeypatch):

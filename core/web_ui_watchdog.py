@@ -17,12 +17,28 @@ from collections.abc import Callable
 
 from core.services.settings import load_config_or_default
 from vibe import runtime
-from vibe.upgrade import restart_is_pending
+from vibe.upgrade import RestartState, restart_record_is_pending
 
 logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL_SECONDS = 10.0
 MAX_RETRY_DELAY_SECONDS = 600.0
+
+
+def _restart_job_replacing_the_runtime() -> bool:
+    """Whether a restart job is stopping and starting the runtime right now.
+
+    A job still waiting out its delay has touched nothing yet, so a UI that dies
+    meanwhile is not the job's to bring back.
+    """
+
+    path = runtime.get_restart_status_path()
+    record = runtime.read_json(path)
+    return (
+        isinstance(record, dict)
+        and record.get("state") == RestartState.RUNNING.value
+        and restart_record_is_pending(record, path)
+    )
 
 
 class WebUiWatchdog:
@@ -32,6 +48,7 @@ class WebUiWatchdog:
         self._stopping = stopping
         self._gone_checks = 0
         self._attempts_without_recovery = 0
+        self._retry_delay = CHECK_INTERVAL_SECONDS
         self._retry_at = 0.0
 
     def check(self, now: float) -> int | None:
@@ -40,6 +57,7 @@ class WebUiWatchdog:
         if not runtime.recorded_ui_is_gone():
             self._gone_checks = 0
             self._attempts_without_recovery = 0
+            self._retry_delay = CHECK_INTERVAL_SECONDS
             self._retry_at = 0.0
             return None
         # A stop, a restart, and a start replacing a stale UI each pass through
@@ -50,24 +68,26 @@ class WebUiWatchdog:
             return None
         # Every deliberate stop takes the service down with the UI, and a
         # restart job brings the UI back itself.
-        if self._stopping() or not runtime.current_process_owns_service_instance() or restart_is_pending():
+        if (
+            self._stopping()
+            or not runtime.current_process_owns_service_instance()
+            or _restart_job_replacing_the_runtime()
+        ):
             return None
 
         self._gone_checks = 0
         self._attempts_without_recovery += 1
         # A UI that keeps dying is retried less and less often instead of
         # being respawned every few seconds for as long as the service runs.
-        self._retry_at = now + min(
-            CHECK_INTERVAL_SECONDS * 2**self._attempts_without_recovery,
-            MAX_RETRY_DELAY_SECONDS,
-        )
+        self._retry_delay = min(self._retry_delay * 2, MAX_RETRY_DELAY_SECONDS)
+        self._retry_at = now + self._retry_delay
         config = load_config_or_default()
         host = runtime.effective_ui_bind_host(config)
         port = config.ui.setup_port
-        if runtime.ui_server_healthy(host, port):
-            # A UI serves the port without being the recorded one. Another
-            # would only die on the port, and its pid record would then name
-            # the dead replacement instead of the UI still serving.
+        if runtime.ui_server_compatible(host, port):
+            # An Avibe UI, ready or not, holds the port without being the
+            # recorded one. Another would only die on the port, and its pid
+            # record would then name the dead replacement instead of it.
             logger.warning("Web UI on port %s is serving but is not the recorded UI process; leaving it", port)
             return None
         logger.warning(

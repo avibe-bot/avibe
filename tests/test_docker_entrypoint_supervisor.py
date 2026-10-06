@@ -320,5 +320,93 @@ class DockerEntrypointSupervisorTests(unittest.TestCase):
             self.assertNotIn("Service exited unexpectedly", stderr)
 
 
+    def test_full_mode_leaves_ui_recovery_to_a_running_service(self):
+        """One owner restarts a dead UI: the service while it runs, the entrypoint while it is stopped."""
+
+        for service, expect_restart in (("running", False), ("stopped", True)):
+            with self.subTest(service=service), tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                fake_python = tmp_path / "python"
+                fake_python.write_text(
+                    textwrap.dedent(
+                        """\
+                        #!/usr/bin/env python3
+                        import json
+                        import os
+                        import sys
+                        import time
+                        from pathlib import Path
+
+                        args = sys.argv[1:]
+                        runtime_dir = Path(os.environ["AVIBE_HOME"]) / "runtime"
+                        runtime_dir.mkdir(parents=True, exist_ok=True)
+                        status_path = runtime_dir / "status.json"
+
+                        if args and args[0] == "main.py":
+                            if os.environ["FAKE_SERVICE"] == "running":
+                                time.sleep(30)
+                            else:
+                                time.sleep(0.5)
+                                status_path.write_text(json.dumps({"state": "stopped"}), encoding="utf-8")
+                            sys.exit(0)
+
+                        if args and args[0] == "-":
+                            try:
+                                payload = json.loads(Path(args[1]).read_text(encoding="utf-8"))
+                            except Exception:
+                                sys.exit(1)
+                            print(payload.get("state", ""))
+                            sys.exit(0)
+
+                        if len(args) >= 2 and args[0] == "-c":
+                            code = args[1]
+                            if "get_runtime_dir" in code:
+                                print(runtime_dir)
+                            elif "run_ui_server" in code:
+                                # Every UI dies as soon as it starts.
+                                with (runtime_dir.parent / "ui-starts").open("a") as starts:
+                                    starts.write("start\\n")
+                            elif "write_status" in code:
+                                state = "stopped" if "'stopped'" in code else "running"
+                                status_path.write_text(json.dumps({"state": state}), encoding="utf-8")
+                        sys.exit(0)
+                        """
+                    ),
+                    encoding="utf-8",
+                )
+                fake_python.chmod(fake_python.stat().st_mode | stat.S_IEXEC)
+
+                env = os.environ.copy()
+                env["PATH"] = f"{tmp_path}{os.pathsep}{env.get('PATH', '')}"
+                env["AVIBE_HOME"] = str(tmp_path / "home")
+                env["FAKE_SERVICE"] = service
+
+                proc = subprocess.Popen(
+                    ["bash", str(ENTRYPOINT), "full"],
+                    cwd=REPO_ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                try:
+                    time.sleep(9)
+                    self.assertIsNone(proc.poll())
+                finally:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    try:
+                        proc.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.communicate(timeout=5)
+
+                starts = (tmp_path / "home" / "ui-starts").read_text(encoding="utf-8").count("start")
+                if expect_restart:
+                    self.assertGreaterEqual(starts, 2)
+                else:
+                    self.assertEqual(starts, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -48,7 +48,7 @@ def host(monkeypatch, tmp_path):
     processes = Processes()
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in processes.commands)
     monkeypatch.setattr(runtime, "get_process_command", lambda pid: processes.commands.get(pid))
-    monkeypatch.setattr(runtime, "ui_server_healthy", lambda host, port, **kwargs: processes.serving)
+    monkeypatch.setattr(runtime, "ui_server_compatible", lambda host, port, **kwargs: processes.serving)
     monkeypatch.setattr(runtime, "current_process_owns_service_instance", lambda: True)
     monkeypatch.setattr(runtime, "start_ui", processes.start_ui)
     return processes
@@ -100,12 +100,12 @@ def test_only_a_ui_known_to_be_gone_is_started_again(host, recorded, command, st
     assert bool(host.starts) is started
 
 
-def _restart_job_running() -> None:
+def _restart_job(state: str) -> None:
     runtime.write_json(
         runtime.get_restart_status_path(),
         {
             "ok": None,
-            "state": "running",
+            "state": state,
             "supervisor_pid": os.getpid(),
             "supervisor_started_at": runtime.process_create_time(os.getpid()),
         },
@@ -118,7 +118,8 @@ def _restart_job_running() -> None:
         pytest.param(True, True, False, False, id="service-stopping"),
         pytest.param(False, False, False, False, id="no-longer-the-service"),
         pytest.param(False, True, True, False, id="restart-job-owns-the-ui"),
-        pytest.param(False, True, False, True, id="port-already-served"),
+        # An Avibe UI holds the port, ready or not, without being recorded.
+        pytest.param(False, True, False, True, id="port-already-held"),
     ],
 )
 def test_no_ui_is_started_where_it_would_fight_another_owner(
@@ -127,7 +128,7 @@ def test_no_ui_is_started_where_it_would_fight_another_owner(
     monkeypatch.setattr(runtime, "current_process_owns_service_instance", lambda: owner)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == os.getpid() or pid in host.commands)
     if restart_job:
-        _restart_job_running()
+        _restart_job("running")
     host.serving = serving
     watchdog = WebUiWatchdog(stopping=lambda: stopping)
 
@@ -135,6 +136,16 @@ def test_no_ui_is_started_where_it_would_fight_another_owner(
         assert watchdog.check(tick * CHECK_INTERVAL_SECONDS) is None
 
     assert host.starts == []
+
+
+def test_a_restart_still_waiting_out_its_delay_does_not_hold_the_ui_down(monkeypatch, host) -> None:
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == os.getpid() or pid in host.commands)
+    _restart_job("scheduled")
+    watchdog = WebUiWatchdog(stopping=lambda: False)
+
+    watchdog.check(0.0)
+
+    assert watchdog.check(CHECK_INTERVAL_SECONDS) == 301
 
 
 def test_a_ui_that_keeps_dying_is_retried_less_often_until_it_stays_up(host) -> None:

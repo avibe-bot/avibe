@@ -2327,7 +2327,7 @@ def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
     return _ui_server_readiness(host, port, timeout=timeout) is True
 
 
-def _ui_server_compatible(
+def ui_server_compatible(
     host: str,
     port: int,
     timeout: float = UI_ADOPTION_PROBE_TIMEOUT_SECONDS,
@@ -2460,7 +2460,7 @@ def start_ui(
             existing_pid = 0
         if existing_pid and pid_alive(existing_pid):
             is_ui_server = _claim_recorded_ui(existing_pid)
-            if is_ui_server and _ui_server_compatible(host, port):
+            if is_ui_server and ui_server_compatible(host, port):
                 if start_info is not None:
                     start_info.capture(existing_pid, reused=True)
                 return existing_pid
