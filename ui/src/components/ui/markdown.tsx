@@ -23,7 +23,12 @@ import {
 import { inAppChatPath } from '@/lib/applicationRoutes';
 import { isProxyMediaUrl, readMediaDims } from '@/lib/mediaProxy';
 import { isAbsoluteWindowsFileHref, resolveLocalFileLink, type LocalFileLinkTarget } from '@/lib/localFileLinks';
-import { bindMarkdownSource, rehypeSourceSpans, sourceSpanProps } from '@/lib/markdownSource';
+import {
+  bindMarkdownSource,
+  rehypeSourceSpans,
+  remarkDefinitionSpans,
+  sourceSpanProps,
+} from '@/lib/markdownSource';
 import {
   MENTION_LINK_SCHEME,
   linkifyMentions,
@@ -367,7 +372,7 @@ function withSourceSpan<P extends { node?: unknown }>(render: (props: P) => Reac
 // relatively-positioned wrapper (not the <pre>, which scrolls horizontally) so
 // it stays pinned top-right while the code scrolls. The code text is read from
 // the rendered <pre> (textContent) rather than re-derived from the markdown AST.
-const CodeBlock: React.FC<{ children?: React.ReactNode; sourceSpan: Record<string, number> }> = ({
+const CodeBlock: React.FC<{ children?: React.ReactNode; sourceSpan: Record<string, string | number> }> = ({
   children,
   sourceSpan,
 }) => {
@@ -555,6 +560,8 @@ export const Markdown: React.FC<{
       // Unconditional: which destinations were written with a bracketed host is
       // a fact about this text, not about whether it carries citations.
       remarkLiteralAuthority,
+      // Unconditional too: a copied reference needs its definition (lib/markdownSource).
+      remarkDefinitionSpans,
       ...(softBreaks ? [remarkBreaks] : []),
       ...(annotateCitations ? [remarkCitationSpans] : []),
     ],

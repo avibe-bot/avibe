@@ -6,27 +6,46 @@ import type { TextEdit } from '@/lib/citations';
 // the source the bubble was rendered from: `**b**`, not `b`. The renderer
 // therefore marks every element it draws with the source range it came from
 // (`data-md-start` / `data-md-end`, UTF-16 offsets into the text ReactMarkdown
-// parsed) and binds each rendered root to that text. A selection is mapped back
-// by finding, for each endpoint, the innermost marked element and aligning the
-// rendered text before the endpoint against that element's source.
+// parsed), marks the text blocks among them (paragraphs, headings, list items,
+// code blocks, tables, rules), and binds each rendered root to that text.
 //
-// A cut in the middle of a paragraph, heading, list or quote is still Markdown;
-// a cut through the middle of a link, emphasis, code span, code block or table
-// is not. So an element of the second kind that the selection only partly
-// covers is copied whole — selecting from the middle of a bold phrase onwards
-// copies the whole `**phrase**`, not a dangling `phrase**`.
+// A selection inside one text block — or one table cell — is cut at the
+// characters selected, found by aligning the rendered text before each endpoint
+// against the source. Only formatting is faithful enough to cut through: its
+// rendering is its source minus the delimiters. So emphasis or a code span is cut
+// only while the selection stays inside it, and anything else inline — a link,
+// image, mention chip, citation badge or file card, whose rendering is not its
+// source text — is copied whole. Container syntax a cut carries on its
+// continuation lines (a quote's `>`, a list item's indentation) is not part of
+// what was selected and is dropped.
+//
+// A selection that crosses blocks copies every block it touches, whole and with
+// the container syntax on its lines, so a list item keeps its `- ` and a quote
+// its `>`. A selection that reaches a bubble's edge reaches its source's edge,
+// so a whole bubble copies byte for byte. A reference-style link or footnote
+// brings its definition along when the copy would otherwise lose it.
 
 const START = 'data-md-start';
 const END = 'data-md-end';
+const BLOCK = 'data-md-block';
+const DEF_START = 'data-md-def-start';
+const DEF_END = 'data-md-def-end';
 const ROOT = 'data-md-root';
 const MARKED = `[${START}]`;
+const BLOCKS = `[${BLOCK}]`;
+// Where an in-block cut is measured: a text block, or one cell of a table.
+const LEAVES = `td, th, ${BLOCKS}`;
 
-// Elements a selection may begin or end inside of and still leave valid
-// Markdown. Everything else is copied whole when the selection crosses its edge.
-const CUTTABLE = new Set(['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'UL', 'OL', 'BLOCKQUOTE']);
-// Rows and cells are not Markdown on their own: a table is copied whole as soon
-// as a selection spans more than one cell, even when it stays inside the table.
-const TABLE_PARTS = new Set(['THEAD', 'TBODY', 'TR', 'TH', 'TD']);
+const BLOCK_TAGS = new Set(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'pre', 'table', 'hr']);
+const FORMATTING = new Set(['STRONG', 'EM', 'DEL', 'CODE']);
+// The properties these plugins write, and the attributes they render as.
+const ATTRIBUTES = [
+  ['dataMdStart', START],
+  ['dataMdEnd', END],
+  ['dataMdBlock', BLOCK],
+  ['dataMdDefStart', DEF_START],
+  ['dataMdDefEnd', DEF_END],
+] as const;
 
 /** What a rendered Markdown root was rendered from. */
 type MarkdownSource = {
@@ -56,6 +75,19 @@ type HastNode = {
   children?: HastNode[];
 };
 
+type MdastNode = {
+  type?: string;
+  identifier?: unknown;
+  position?: { start?: { offset?: number }; end?: { offset?: number } };
+  data?: { hProperties?: Record<string, unknown> };
+  children?: MdastNode[];
+};
+
+function eachNode<T extends { children?: T[] }>(node: T, visit: (node: T) => void): void {
+  visit(node);
+  node.children?.forEach((child) => eachNode(child, visit));
+}
+
 // A fenced block's code is the lines between its fences — what the reader sees
 // and selects — so the `code` inside a `pre` is marked with that interior. An
 // indented block has no fence lines and keeps its whole range.
@@ -70,7 +102,38 @@ function codeInterior(source: string, start: number, end: number): [number, numb
   return [start + open + 1, close > open && closing.test(raw.slice(close + 1)) ? start + close + 1 : end];
 }
 
-/** Mark every element with the source range it was rendered from. */
+/** Point each reference at the definition it needs, which renders nowhere near it. */
+export function remarkDefinitionSpans() {
+  return (tree: unknown) => {
+    const kind = (type?: string) => {
+      if (type === 'definition' || type === 'linkReference' || type === 'imageReference') return 'link';
+      if (type === 'footnoteDefinition' || type === 'footnoteReference') return 'note';
+      return null;
+    };
+    const definitions = new Map<string, [number, number]>();
+    eachNode(tree as MdastNode, (node) => {
+      const start = node.position?.start?.offset;
+      const end = node.position?.end?.offset;
+      if (node.type !== 'definition' && node.type !== 'footnoteDefinition') return;
+      if (typeof node.identifier !== 'string' || typeof start !== 'number' || typeof end !== 'number') return;
+      // The first definition of an identifier is the one a reference resolves to.
+      const key = `${kind(node.type)}:${node.identifier}`;
+      if (!definitions.has(key)) definitions.set(key, [start, end]);
+    });
+    eachNode(tree as MdastNode, (node) => {
+      if (node.type === 'definition' || node.type === 'footnoteDefinition') return;
+      const type = kind(node.type);
+      if (!type || typeof node.identifier !== 'string') return;
+      const span = definitions.get(`${type}:${node.identifier}`);
+      if (!span) return;
+      const properties = ((node.data ??= {}).hProperties ??= {});
+      properties.dataMdDefStart = span[0];
+      properties.dataMdDefEnd = span[1];
+    });
+  };
+}
+
+/** Mark every element with the source range it was rendered from, and each text block as one. */
 export function rehypeSourceSpans() {
   return (tree: unknown, file: { value?: unknown }) => {
     const source = typeof file.value === 'string' ? file.value : '';
@@ -84,6 +147,7 @@ export function rehypeSourceSpans() {
         const properties = (node.properties ??= {});
         properties.dataMdStart = from;
         properties.dataMdEnd = to;
+        if (BLOCK_TAGS.has(node.tagName ?? '')) properties.dataMdBlock = 'true';
       }
       node.children?.forEach((child) => visit(child, node));
     };
@@ -92,11 +156,14 @@ export function rehypeSourceSpans() {
 }
 
 /** The marks for the element a custom component renders in place of hast `node`. */
-export function sourceSpanProps(node: unknown): Record<string, number> {
-  const properties = (node as HastNode | undefined)?.properties;
-  const start = properties?.dataMdStart;
-  const end = properties?.dataMdEnd;
-  return typeof start === 'number' && typeof end === 'number' ? { [START]: start, [END]: end } : {};
+export function sourceSpanProps(node: unknown): Record<string, string | number> {
+  const properties = (node as HastNode | undefined)?.properties ?? {};
+  const props: Record<string, string | number> = {};
+  for (const [property, attribute] of ATTRIBUTES) {
+    const value = properties[property];
+    if (typeof value === 'string' || typeof value === 'number') props[attribute] = value;
+  }
+  return props;
 }
 
 type Point = { node: Node; offset: number };
@@ -105,6 +172,9 @@ type Side = 'start' | 'end';
 const spanStart = (el: Element) => Number(el.getAttribute(START));
 const spanEnd = (el: Element) => Number(el.getAttribute(END));
 const blank = (text: string) => text.trim() === '';
+const lineStart = (text: string, offset: number) => text.lastIndexOf('\n', offset - 1) + 1;
+const hostOf = (point: Point) =>
+  point.node.nodeType === Node.ELEMENT_NODE ? (point.node as Element) : point.node.parentElement;
 
 function textBetween(root: Element, set: (range: Range) => void): string {
   const range = root.ownerDocument.createRange();
@@ -112,15 +182,10 @@ function textBetween(root: Element, set: (range: Range) => void): string {
   return range.toString();
 }
 
-// Marked elements enclosing `point`, innermost first, ending with the root.
-function markedChain(point: Point, root: Element): Element[] {
-  const chain: Element[] = [];
-  const host = point.node.nodeType === Node.ELEMENT_NODE ? (point.node as Element) : point.node.parentElement;
-  for (let el = host?.closest(MARKED) ?? null; el; el = el.parentElement?.closest(MARKED) ?? null) {
-    chain.push(el);
-    if (el === root) break;
-  }
-  return chain;
+// The innermost element matching `selector` that holds `point`, below `root`.
+function enclosing(point: Point, root: Element, selector: string): Element | null {
+  const el = hostOf(point)?.closest(selector) ?? null;
+  return el && el !== root && root.contains(el) ? el : null;
 }
 
 // Marked descendants with no marked element between them and `host`.
@@ -180,40 +245,64 @@ function offsetIn(text: string, host: Element, point: Point, side: Side): number
   return at >= 0 && at < to ? at : cursor;
 }
 
-function sourceOffset(root: Element, text: string, point: Point, side: Side, other: Point | null): number {
-  const chain = markedChain(point, root);
-  const holdsOther = (el: Element) => other !== null && el.contains(other.node);
-  const cell = chain.find((el) => el.tagName === 'TD' || el.tagName === 'TH');
-  const spansCells = !cell || !holdsOther(cell);
-  // An element that is not cuttable and that the selection leaves is copied whole.
-  for (let index = chain.length - 1; index >= 0; index -= 1) {
-    const el = chain[index];
-    if (el === root || CUTTABLE.has(el.tagName)) continue;
-    const table = !TABLE_PARTS.has(el.tagName) && TABLE_PARTS.has(chain[index - 1]?.tagName ?? '');
-    if (!holdsOther(el) || (table && spansCells)) {
-      return side === 'start' ? spanStart(el) : spanEnd(el);
+// Where a cut inside `leaf` falls for `point`. An inline element that is not
+// formatting, or formatting the selection leaves, is taken whole.
+function cutOffset(text: string, leaf: Element, point: Point, side: Side, other: Point): number {
+  const chain: Element[] = [];
+  for (
+    let el = hostOf(point)?.closest(MARKED) ?? null;
+    el && el !== leaf && leaf.contains(el);
+    el = el.parentElement?.closest(MARKED) ?? null
+  ) {
+    chain.unshift(el);
+  }
+  const whole = chain.find((el) => !FORMATTING.has(el.tagName) || !el.contains(other.node));
+  if (whole) return side === 'start' ? spanStart(whole) : spanEnd(whole);
+  return offsetIn(text, chain[chain.length - 1] ?? leaf, point, side);
+}
+
+// What each container around `leaf` repeats at the start of its continuation
+// lines, outermost first: a quote's `>`, a list item's indentation.
+function continuationPrefixes(leaf: Element, root: Element, text: string): RegExp[] {
+  const prefixes: RegExp[] = [];
+  for (let el: Element | null = leaf; el && el !== root; el = el.parentElement) {
+    if (el.tagName === 'BLOCKQUOTE') {
+      prefixes.unshift(/^[ \t]{0,3}>[ \t]?/);
+    } else if (el.tagName === 'LI' && el.hasAttribute(START)) {
+      const marker = /^(?:[-*+]|\d{1,9}[.)])[ \t]*/.exec(text.slice(spanStart(el)))?.[0].length ?? 0;
+      prefixes.unshift(new RegExp(`^ {0,${marker}}`));
     }
   }
-  let offset = offsetIn(text, chain[0] ?? root, point, side);
-  // A selection that leaves an element from its very edge takes that element's
-  // own syntax too: a whole list item keeps its `- `, a whole heading its `##`.
-  // The bubble's own edge is its source's edge, whatever the selection holds, so
-  // a whole bubble copies whole — reference definitions that render nothing included.
-  for (const el of chain) {
-    if (el !== root && holdsOther(el)) break;
-    const outside = textBetween(root, (range) => {
-      if (side === 'start') {
-        range.setStart(el, 0);
-        range.setEnd(point.node, point.offset);
-      } else {
-        range.setStart(point.node, point.offset);
-        range.setEnd(el, el.childNodes.length);
-      }
-    });
-    if (!blank(outside)) break;
-    offset = side === 'start' ? spanStart(el) : spanEnd(el);
-  }
-  return offset;
+  return prefixes;
+}
+
+function selectsAllOf(el: Element, start: Point, end: Point): boolean {
+  return blank(textBetween(el, (range) => {
+    range.setStart(el, 0);
+    range.setEnd(start.node, start.offset);
+  })) && blank(textBetween(el, (range) => {
+    range.setStart(end.node, end.offset);
+    range.setEnd(el, el.childNodes.length);
+  }));
+}
+
+// The blocks a selection crossing blocks copies: the innermost block holding
+// each endpoint, when the selection takes any of its text, and every block
+// between them.
+function selectedBlocks(range: Range, root: Element, start: Point, end: Point): Element[] {
+  const startBlock = enclosing(start, root, BLOCKS);
+  const endBlock = enclosing(end, root, BLOCKS);
+  return Array.from(root.querySelectorAll(BLOCKS)).filter((block) => {
+    if (block !== startBlock && block !== endBlock) {
+      return range.intersectsNode(block) && !block.contains(start.node) && !block.contains(end.node);
+    }
+    return !blank(textBetween(root, (taken) => {
+      if (block === startBlock) taken.setStart(start.node, start.offset);
+      else taken.setStart(block, 0);
+      if (block === endBlock) taken.setEnd(end.node, end.offset);
+      else taken.setEnd(block, block.childNodes.length);
+    }));
+  });
 }
 
 // An offset in the parsed text, carried back through the rewrite passes into
@@ -239,6 +328,72 @@ function toContent(source: MarkdownSource, offset: number, side: Side): number {
   return at;
 }
 
+// `text[from, to)` as the caller wrote it, followed by any definition a
+// reference in it needs and it does not already hold.
+function copyOf(
+  source: MarkdownSource,
+  root: Element,
+  from: number,
+  to: number,
+  tidy: (markdown: string) => string = (markdown) => markdown,
+): string {
+  const slice = (start: number, end: number) =>
+    source.content.slice(toContent(source, start, 'start'), toContent(source, end, 'end'));
+  const definitions = new Map<number, number>();
+  for (const el of root.querySelectorAll(`[${DEF_START}]`)) {
+    const start = Number(el.getAttribute(DEF_START));
+    const end = Number(el.getAttribute(DEF_END));
+    const used = el.hasAttribute(START) && spanStart(el) >= from && spanEnd(el) <= to;
+    if (used && (start < from || end > to)) definitions.set(start, end);
+  }
+  const needed = [...definitions].sort(([left], [right]) => left - right);
+  return [tidy(slice(from, to)), ...needed.map(([start, end]) => slice(start, end))].join('\n\n');
+}
+
+function copyFromRoot(range: Range, root: Element, start: Point, end: Point): string {
+  const source = sources.get(root)!;
+  const { text } = source;
+  const startsInside = root.contains(start.node);
+  const endsInside = root.contains(end.node);
+
+  const leaf = startsInside && endsInside ? enclosing(start, root, LEAVES) : null;
+  const wholeBlock = leaf?.hasAttribute(BLOCK) && selectsAllOf(leaf, start, end);
+  if (leaf && leaf === enclosing(end, root, LEAVES) && !wholeBlock) {
+    const from = cutOffset(text, leaf, start, 'start', end);
+    const to = cutOffset(text, leaf, end, 'end', start);
+    if (to <= from) return '';
+    const prefixes = continuationPrefixes(leaf, root, text);
+    const strip = (line: string) => prefixes.reduce((rest, prefix) => rest.replace(prefix, ''), line);
+    const fromLineStart = from === lineStart(text, from);
+    return copyOf(source, root, from, to, (markdown) =>
+      markdown
+        .split('\n')
+        .map((line, index) => (index > 0 || fromLineStart ? strip(line) : line))
+        .join('\n'),
+    );
+  }
+
+  const before = startsInside && !blank(textBetween(root, (taken) => {
+    taken.setStart(root, 0);
+    taken.setEnd(start.node, start.offset);
+  }));
+  const after = endsInside && !blank(textBetween(root, (taken) => {
+    taken.setStart(end.node, end.offset);
+    taken.setEnd(root, root.childNodes.length);
+  }));
+  if (!before && !after) return source.content;
+  const blocks = selectedBlocks(range, root, start, end);
+  if (!blocks.length) return '';
+  const from = before ? Math.min(...blocks.map((block) => lineStart(text, spanStart(block)))) : 0;
+  const to = after ? Math.max(...blocks.map(spanEnd)) : text.length;
+  // Lines copied from inside a nested container keep their indentation relative
+  // to the first one, not to a document they are no longer in.
+  return copyOf(source, root, from, to, (markdown) => {
+    const indent = before ? /^ */.exec(markdown)![0].length : 0;
+    return indent ? markdown.replace(new RegExp(`^ {0,${indent}}`, 'gm'), '') : markdown;
+  });
+}
+
 // The rendered Markdown roots `range` reaches inside `container`, in document order.
 function markdownRoots(range: Range, container: Element): Element[] {
   return Array.from(container.querySelectorAll(`[${ROOT}]`)).filter(
@@ -255,21 +410,8 @@ function markdownRoots(range: Range, container: Element): Element[] {
 export function selectedMarkdown(range: Range, container: Element): string | null {
   const start: Point = { node: range.startContainer, offset: range.startOffset };
   const end: Point = { node: range.endContainer, offset: range.endOffset };
-  const parts = markdownRoots(range, container).map((root) => {
-    const source = sources.get(root)!;
-    const startsInside = root.contains(start.node);
-    const endsInside = root.contains(end.node);
-    const from = startsInside
-      ? sourceOffset(root, source.text, start, 'start', endsInside ? end : null)
-      : 0;
-    const to = endsInside
-      ? sourceOffset(root, source.text, end, 'end', startsInside ? start : null)
-      : source.text.length;
-    if (to <= from) return '';
-    return source.content.slice(toContent(source, from, 'start'), toContent(source, to, 'end'));
-  });
-  const markdown = parts.filter((part) => !blank(part)).join('\n\n').replace(/^\n+|\s+$/g, '');
-  return markdown || null;
+  const parts = markdownRoots(range, container).map((root) => copyFromRoot(range, root, start, end));
+  return parts.filter((part) => !blank(part)).join('\n\n') || null;
 }
 
 /** `range` widened to cover every bubble it reaches, or null when it reaches none. */
