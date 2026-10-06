@@ -3,6 +3,7 @@ import { createRef } from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { Markdown } from '../ui/markdown';
 import { SelectionQuoteToolbar } from './SelectionQuoteToolbar';
 
 vi.mock('react-i18next', () => ({
@@ -101,6 +102,27 @@ function mountToolbar() {
   return containerRef.current!;
 }
 
+const BUBBLE = 'Use **bold** now';
+
+function mountBubble() {
+  const containerRef = createRef<HTMLDivElement>();
+  render(
+    <>
+      <div ref={containerRef}>
+        <Markdown content={BUBBLE} />
+        <Markdown content="Another bubble" />
+      </div>
+      <SelectionQuoteToolbar containerRef={containerRef} onQuote={quote} />
+    </>,
+  );
+  return containerRef.current!;
+}
+
+function settle() {
+  fireEvent(document, new Event('selectionchange'));
+  act(() => vi.advanceTimersByTime(150));
+}
+
 function selectContainer(container: HTMLDivElement) {
   const range = document.createRange();
   range.selectNodeContents(container);
@@ -150,10 +172,54 @@ describe('chat selection action gesture lifetime', () => {
       await Promise.resolve();
     });
 
+    // No rendered Markdown under the selection: the plain text is copied, and
+    // there is no bubble to select all of.
     expect(writeText).toHaveBeenCalledExactlyOnceWith(TEXT);
+    expect(screen.queryByRole('button', { name: 'chat.selection.selectAll' })).toBeNull();
     expect(screen.queryByRole('toolbar')).not.toBeNull();
     act(() => vi.advanceTimersByTime(800));
     expect(screen.queryByRole('toolbar')).toBeNull();
+  });
+
+  it('copies the Markdown the selection was rendered from', async () => {
+    const container = mountBubble();
+    const range = document.createRange();
+    range.selectNodeContents(container.querySelector('.vr-markdown')!);
+    window.getSelection()!.addRange(range);
+    settle();
+
+    await act(async () => {
+      const button = screen.getByRole('button', { name: 'chat.selection.copy' });
+      fireEvent.pointerDown(button, press);
+      fireEvent.pointerUp(button, press);
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(BUBBLE);
+  });
+
+  it('selects the whole bubble on desktop and stays up over the new selection', async () => {
+    coarsePointer = false;
+    const container = mountBubble();
+    const range = document.createRange();
+    range.selectNodeContents(container.querySelector('strong')!);
+    window.getSelection()!.addRange(range);
+    settle();
+
+    const selectAll = screen.getByRole('button', { name: 'chat.selection.selectAll' });
+    fireEvent.pointerDown(selectAll, { ...press, pointerType: 'mouse' });
+    fireEvent.pointerUp(selectAll, { ...press, pointerType: 'mouse' });
+    settle();
+
+    expect(window.getSelection()!.toString()).toBe('Use bold now');
+    expect(screen.queryByRole('toolbar')).not.toBeNull();
+    await act(async () => {
+      const copy = screen.getByRole('button', { name: 'chat.selection.copy' });
+      fireEvent.pointerDown(copy, { ...press, pointerType: 'mouse' });
+      fireEvent.pointerUp(copy, { ...press, pointerType: 'mouse' });
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(BUBBLE);
   });
 
   it('keeps a complete gesture alive when the selection clears before release', () => {

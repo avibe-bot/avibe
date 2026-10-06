@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { Check, Copy, GitFork, TextQuote } from 'lucide-react';
+import { Check, Copy, GitFork, TextQuote, TextSelect } from 'lucide-react';
 
 import { Button } from '../ui/button';
+import { selectedMarkdown, wholeMarkdownRange } from '../../lib/markdownSource';
 import { copyTextToClipboard } from '../../lib/utils';
 
 type SelectionRect = {
@@ -17,6 +18,11 @@ type SelectionRect = {
 
 type SelectionState = {
   text: string;
+  // What Copy writes: the selected Markdown source, or the plain text when the
+  // selection reaches no rendered Markdown.
+  copyText: string;
+  // The selection widened to the whole bubble(s); null outside any bubble.
+  whole: Range | null;
   top: number;
   bottom: number;
   left: number;
@@ -47,7 +53,8 @@ const toSelectionRect = (rect: DOMRect | DOMRectReadOnly): SelectionRect => ({
 // transcript. "Quote" appends the (quoted) selection to the current composer
 // (only offered when the composer can accept it); "Ask in a new session" forks +
 // prefills the fork's draft (only offered when the session is forkable); "Copy"
-// (touch only) is a fallback for when the OS selection menu doesn't cooperate. It
+// copies the Markdown the selected part of the bubble was written in; "Select
+// all" widens the selection to the whole bubble and keeps the toolbar up. It
 // follows the selection through scrolling (hides while scrolling, re-shows at the
 // new spot) and only disappears when the selection is cleared — so the user can
 // scroll to dodge the OS menu.
@@ -75,7 +82,7 @@ export const SelectionQuoteToolbar: React.FC<{
   const [width, setWidth] = useState(0);
   const [height, setHeight] = useState(TOOLBAR_H);
   // Touch (coarse pointer — phones AND tablets/iPads) is where the OS selection
-  // menu coexists; it drives the stagger-positioning + the touch-only Copy.
+  // menu coexists; it drives the stagger-positioning.
   const [isTouch] = useState(
     () => typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches,
   );
@@ -104,6 +111,8 @@ export const SelectionQuoteToolbar: React.FC<{
     }
     setSel({
       text,
+      copyText: selectedMarkdown(range, container) ?? text,
+      whole: wholeMarkdownRange(range, container),
       top: rect.top,
       bottom: rect.bottom,
       left: rect.left + rect.width / 2,
@@ -191,9 +200,6 @@ export const SelectionQuoteToolbar: React.FC<{
   }, [sel, onQuote, onAskInNew, isTouch]);
 
   if (!sel) return null;
-  // Nothing left to offer (read-only transcript on a pointer device, where the
-  // OS already provides copy) — render no chrome rather than an empty bar.
-  if (!onQuote && !onAskInNew && !isTouch) return null;
 
   const dismiss = () => {
     clearPress(false);
@@ -210,13 +216,20 @@ export const SelectionQuoteToolbar: React.FC<{
     dismiss();
   };
   const runCopy = () => {
-    const text = sel.text;
-    void copyTextToClipboard(text).then((ok) => {
+    void copyTextToClipboard(sel.copyText).then((ok) => {
       if (ok) {
         setCopied(true);
         window.setTimeout(dismiss, 800);
       }
     });
+  };
+  // The widened selection fires selectionchange, which re-places the toolbar
+  // over it; nothing dismisses, since the bubble is still selected.
+  const runSelectAll = () => {
+    const selection = window.getSelection();
+    if (!sel.whole || !selection) return;
+    selection.removeAllRanges();
+    selection.addRange(sel.whole.cloneRange());
   };
 
   // Activate on pointerup (mouse + touch) and Enter/Space (keyboard). The
@@ -372,18 +385,29 @@ export const SelectionQuoteToolbar: React.FC<{
           </Button>
         </>
       )}
-      {isTouch && (
+      {(onQuote || onAskInNew) && <span className="h-5 w-px bg-border" />}
+      <Button
+        variant="ghost"
+        className={itemClass}
+        onPointerDown={handlePointerDown}
+        onPointerUp={(e) => handlePointerUp(e, runCopy)}
+        onKeyDown={(e) => handleKeyDown(e, runCopy)}
+      >
+        {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5 text-muted" />}
+        {t('chat.selection.copy')}
+      </Button>
+      {sel.whole && (
         <>
-          {(onQuote || onAskInNew) && <span className="h-5 w-px bg-border" />}
+          <span className="h-5 w-px bg-border" />
           <Button
             variant="ghost"
             className={itemClass}
             onPointerDown={handlePointerDown}
-            onPointerUp={(e) => handlePointerUp(e, runCopy)}
-            onKeyDown={(e) => handleKeyDown(e, runCopy)}
+            onPointerUp={(e) => handlePointerUp(e, runSelectAll)}
+            onKeyDown={(e) => handleKeyDown(e, runSelectAll)}
           >
-            {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5 text-muted" />}
-            {t('chat.selection.copy')}
+            <TextSelect className="size-3.5 text-muted" />
+            {t('chat.selection.selectAll')}
           </Button>
         </>
       )}
