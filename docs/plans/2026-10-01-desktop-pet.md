@@ -787,7 +787,12 @@ The code and its tests are the contract; this section records why.
   physical desktop, and the pet window's scale changes as it crosses
   displays, so the saved anchor is that desktop divided by the primary
   display's scale, both when saving and restoring, and the restored window is
-  positioned in physical pixels. The anchor saved after a drag settles
+  positioned in physical pixels. In that space each display carries a `unit`,
+  the length of one of its own points: the pet's extent, its default margin,
+  its centre and the window's padding are all scaled by the unit of the
+  display they are measured on, so a pet clamped onto a denser display stays
+  whole. (Review found positions normalized but the extent not; every
+  quantity measured in the stored space now goes through the unit.) The anchor saved after a drag settles
   (400 ms) is the pet's own top-left corner, rounded, with the display's name;
   it is clamped back onto a connected display when the window is built.
 - **`⌃⌥Space` can collide with macOS input-source switching.** It is the

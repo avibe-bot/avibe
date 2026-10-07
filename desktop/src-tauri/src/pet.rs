@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
-    anchor_from_window, choose_layout, clamp_anchor, default_anchor, rescale, shortcut_label, valid_session_id,
-    window_origin, window_size, LogicalRect, PetAnchor, PetBinding, PetIntent, PetLayout, PetReady, PetStore, WorkArea,
-    PET_SIZE, SHORTCUT_PRESETS,
+    anchor_from_window, area_for, choose_layout, clamp_anchor, default_anchor, rescale, restored_window_origin,
+    shortcut_label, valid_session_id, window_origin, window_size, LogicalRect, PetAnchor, PetBinding, PetIntent,
+    PetLayout, PetReady, PetStore, WorkArea, SHORTCUT_PRESETS,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
@@ -327,7 +327,9 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
         layout,
     };
     let (width, height) = window_size(false);
-    let (x, y) = window_origin((anchor.x, anchor.y), false, layout);
+    let at = (anchor.x, anchor.y);
+    let unit = area_for(&areas, at).map_or(1.0, |area| area.unit);
+    let (x, y) = restored_window_origin(at, unit);
     pet.store().page_loading();
     let builder = WebviewWindowBuilder::new(app, PET_WINDOW, WebviewUrl::External(url))
         .initialization_script(DESKTOP_SHELL_MARKER)
@@ -511,11 +513,12 @@ fn work_areas(app: &AppHandle, scale: f64) -> Vec<WorkArea> {
 }
 
 fn logical_work_area(monitor: &Monitor, scale: f64) -> WorkArea {
-    // macOS reports each display in its own pixels.
-    let scale = if cfg!(target_os = "macos") {
-        monitor.scale_factor()
+    // macOS reports each display in its own pixels and shares one space of
+    // points; off macOS a display's points are its own scale over `scale`.
+    let (scale, unit) = if cfg!(target_os = "macos") {
+        (monitor.scale_factor(), 1.0)
     } else {
-        scale
+        (scale, monitor.scale_factor() / scale)
     };
     let area = monitor.work_area();
     WorkArea {
@@ -526,20 +529,8 @@ fn logical_work_area(monitor: &Monitor, scale: f64) -> WorkArea {
             width: f64::from(area.size.width) / scale,
             height: f64::from(area.size.height) / scale,
         },
+        unit,
     }
-}
-
-fn area_for(areas: &[WorkArea], anchor: (f64, f64)) -> Option<&WorkArea> {
-    let center = (anchor.0 + PET_SIZE / 2.0, anchor.1 + PET_SIZE / 2.0);
-    areas
-        .iter()
-        .find(|area| {
-            center.0 >= area.area.x
-                && center.0 < area.area.x + area.area.width
-                && center.1 >= area.area.y
-                && center.1 < area.area.y + area.area.height
-        })
-        .or_else(|| areas.first())
 }
 
 const UNAVAILABLE: &str = "This command is only available to the Avibe desktop pet.";

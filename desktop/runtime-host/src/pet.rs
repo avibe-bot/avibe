@@ -321,11 +321,30 @@ impl LogicalRect {
     }
 }
 
-/// A display's work area and the name the shell knows it by.
+/// A display's work area and the name the shell knows it by, in the space the
+/// anchor is stored in. `unit` is how long one of the display's own points is
+/// in that space: the pet is `PET_SIZE` points on whichever display shows it,
+/// so its extent there is `PET_SIZE * unit`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkArea {
     pub name: Option<String>,
     pub area: LogicalRect,
+    pub unit: f64,
+}
+
+impl WorkArea {
+    fn pet_extent(&self) -> f64 {
+        PET_SIZE * self.unit
+    }
+
+    fn pet_at(&self, anchor: (f64, f64)) -> LogicalRect {
+        LogicalRect {
+            x: anchor.0,
+            y: anchor.1,
+            width: self.pet_extent(),
+            height: self.pet_extent(),
+        }
+    }
 }
 
 // These match the `/pet` route's layout: an 88 px avatar inside `p-2`, a
@@ -450,11 +469,34 @@ pub fn choose_layout(anchor: (f64, f64), work_area: LogicalRect) -> PetLayout {
 
 /// The place for a pet that has none: the work area's bottom-right corner.
 pub fn default_anchor(work_area: &WorkArea) -> PetAnchor {
+    let inset = (PET_SIZE + DEFAULT_MARGIN) * work_area.unit;
     PetAnchor {
-        x: work_area.area.right() - PET_SIZE - DEFAULT_MARGIN,
-        y: work_area.area.bottom() - PET_SIZE - DEFAULT_MARGIN,
+        x: work_area.area.right() - inset,
+        y: work_area.area.bottom() - inset,
         monitor: work_area.name.clone(),
     }
+}
+
+/// The display the pet's centre is on, else the first one (the primary).
+pub fn area_for(areas: &[WorkArea], anchor: (f64, f64)) -> Option<&WorkArea> {
+    areas
+        .iter()
+        .find(|area| {
+            let half = area.pet_extent() / 2.0;
+            let center = (anchor.0 + half, anchor.1 + half);
+            center.0 >= area.area.x
+                && center.0 < area.area.right()
+                && center.1 >= area.area.y
+                && center.1 < area.area.bottom()
+        })
+        .or_else(|| areas.first())
+}
+
+/// Where a collapsed pet window starts so the pet sits on `anchor`, on a
+/// display whose points are `unit` long in the anchor's space.
+pub fn restored_window_origin(anchor: (f64, f64), unit: f64) -> (f64, f64) {
+    let (dx, dy) = pet_offset(false, PetLayout::default());
+    (anchor.0 - dx * unit, anchor.1 - dy * unit)
 }
 
 /// Keeps a restored pet whole on a connected display. A pet already inside a
@@ -462,17 +504,12 @@ pub fn default_anchor(work_area: &WorkArea) -> PetAnchor {
 /// overlaps most; with no overlap, into its own display if that is still
 /// connected, else the first area (the primary display).
 pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
-    let pet = LogicalRect {
-        x: anchor.x,
-        y: anchor.y,
-        width: PET_SIZE,
-        height: PET_SIZE,
-    };
+    let at = (anchor.x, anchor.y);
     let usable: Vec<&WorkArea> = work_areas
         .iter()
-        .filter(|area| area.area.width >= PET_SIZE && area.area.height >= PET_SIZE)
+        .filter(|area| area.area.width >= area.pet_extent() && area.area.height >= area.pet_extent())
         .collect();
-    if let Some(home) = usable.iter().find(|area| area.area.contains(&pet)) {
+    if let Some(home) = usable.iter().find(|area| area.area.contains(&area.pet_at(at))) {
         return PetAnchor {
             monitor: home.name.clone().or_else(|| anchor.monitor.clone()),
             ..anchor.clone()
@@ -480,7 +517,7 @@ pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
     }
     let overlapping = usable
         .iter()
-        .map(|area| (area.area.overlap(&pet), *area))
+        .map(|area| (area.area.overlap(&area.pet_at(at)), *area))
         .filter(|(overlap, _)| *overlap > 0.0)
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, area)| area);
@@ -494,8 +531,10 @@ pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
         return anchor.clone();
     };
     PetAnchor {
-        x: anchor.x.clamp(target.area.x, target.area.right() - PET_SIZE),
-        y: anchor.y.clamp(target.area.y, target.area.bottom() - PET_SIZE),
+        x: anchor.x.clamp(target.area.x, target.area.right() - target.pet_extent()),
+        y: anchor
+            .y
+            .clamp(target.area.y, target.area.bottom() - target.pet_extent()),
         monitor: target.name.clone(),
     }
 }
@@ -562,6 +601,7 @@ mod tests {
         WorkArea {
             name: Some(name.to_owned()),
             area: LogicalRect { x, y, width, height },
+            unit: 1.0,
         }
     }
 
@@ -889,7 +929,10 @@ mod tests {
         let saved = rescale(in_window_points, window, primary);
         let areas = [
             area("primary", 0.0, 0.0, 2560.0 / primary, 1440.0 / primary),
-            area("side", 2560.0 / primary, 0.0, 3840.0 / primary, 2160.0 / primary),
+            WorkArea {
+                unit: window / primary,
+                ..area("side", 2560.0 / primary, 0.0, 3840.0 / primary, 2160.0 / primary)
+            },
         ];
         let restored = clamp_anchor(
             &PetAnchor {
@@ -902,5 +945,55 @@ mod tests {
         let physical = rescale((restored.x, restored.y), primary, 1.0);
         assert!((physical.0 - 3000.0).abs() < 1e-9 && (physical.1 - 200.0).abs() < 1e-9);
         assert_eq!(restored.monitor.as_deref(), Some("side"));
+        assert_eq!(
+            area_for(&areas, saved).and_then(|area| area.name.as_deref()),
+            Some("side")
+        );
+        // The window starts the pet's 8-point padding, at the side display's
+        // scale, above and left of it.
+        let window_at = rescale(restored_window_origin(saved, window / primary), primary, 1.0);
+        assert!((window_at.0 - (3000.0 - 12.0)).abs() < 1e-9 && (window_at.1 - (200.0 - 12.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_pet_clamped_onto_a_denser_display_stays_whole_in_its_own_points() {
+        // A 100% primary and a 150% display to its right, in primary points.
+        // There the 88-point pet is 132 units wide.
+        let side = WorkArea {
+            unit: 1.5,
+            ..area("side", 1920.0, 0.0, 2560.0, 1440.0)
+        };
+        let areas = [area("primary", 0.0, 0.0, 1920.0, 1080.0), side.clone()];
+        let edge = (side.area.right() - 132.0, side.area.bottom() - 132.0);
+        // Overlapping the right edge: pulled in by its scaled extent, not 88.
+        let past_edge = PetAnchor {
+            x: side.area.right() - 100.0,
+            y: 300.0,
+            monitor: Some("side".to_owned()),
+        };
+        let pulled = clamp_anchor(&past_edge, &areas);
+        assert_eq!((pulled.x, pulled.y), (edge.0, 300.0));
+        // Inside by 88 but not by 132 is not whole.
+        let almost = PetAnchor {
+            x: side.area.right() - 100.0,
+            y: side.area.bottom() - 100.0,
+            monitor: Some("side".to_owned()),
+        };
+        assert_eq!(clamp_anchor(&almost, &areas).x, edge.0);
+        // The display is gone from its saved place: it lands whole inside.
+        let lost = PetAnchor {
+            x: 9000.0,
+            y: 9000.0,
+            monitor: Some("side".to_owned()),
+        };
+        let home = clamp_anchor(&lost, &areas);
+        assert_eq!((home.x, home.y), edge);
+        // A pet with no place keeps the margin in the display's own points.
+        let corner = default_anchor(&side);
+        assert_eq!(
+            (corner.x, corner.y),
+            (side.area.right() - 168.0, side.area.bottom() - 168.0)
+        );
+        assert_eq!(clamp_anchor(&corner, &areas), corner);
     }
 }
