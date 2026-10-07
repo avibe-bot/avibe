@@ -437,9 +437,9 @@ exchange, live activity, and a composer. It is off by default.
 - **`pet.json`** sits next to `notifications.json` in the app's local data
   directory: `{ "version": 1, "enabled", "shortcut", "anchor": { "x", "y",
   "monitor" }, "binding" }`, every field but `version` optional. `anchor` is
-  where the user last dragged the pet, in logical points, and is clamped back
-  onto a connected display on the next start. `binding` is the shown session
-  id. A file the shell cannot read, or with another `version`, keeps the pet
+  where the user last dragged the pet, in points (on Windows and Linux, at the
+  primary display's scale), and is clamped back onto a connected display on
+  the next start. `binding` is the shown session id. A file the shell cannot read, or with another `version`, keeps the pet
   off for that run and is never overwritten by a drag or a binding; turning
   the pet on from the tray replaces it.
 

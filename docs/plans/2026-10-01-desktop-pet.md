@@ -761,12 +761,16 @@ The code and its tests are the contract; this section records why.
   instance editor who is a project viewer therefore sees state but no composer
   or quick replies; POST remains rejected by project-role middleware.
 
-- **The shell's window has one owner.** `reconcile_now` alone creates and
-  destroys `pet`: the window exists exactly when the pet is on and the
-  Workbench handoff has a ready Runtime, at that Runtime's origin. The
-  Workbench handoff, the return to bootstrap and an explicit stop report the
-  Runtime to it; nothing else builds the window. Every wake runs on the main
-  thread and checks the switch first. `pet_bind` and `pet_open` move their
+- **The shell's window has one owner, and the pet keeps no copy of the
+  Runtime.** `reconcile_now` alone creates and destroys `pet`: the window
+  exists exactly when the pet is on and the Workbench shows a Runtime, at that
+  Runtime's origin. The Shell's `active_origin` is the one record of that
+  Runtime, and `set_active_origin`, its only writer, reconciles the pet, so
+  every path that hands the Workbench a Runtime or takes it away (handoff,
+  return to bootstrap, explicit stop, `main` recreated) moves the pet with
+  it. The first review rounds found two call sites that forgot to tell an
+  earlier pet-side copy; removing the copy closes that class rather than the
+  instances. Every wake runs on the main thread and checks the switch first. `pet_bind` and `pet_open` move their
   window work off the IPC callback, because creating a window inside one
   deadlocks on Windows.
 - **Commands check their caller twice.** The `pet` capability (and
@@ -778,11 +782,14 @@ The code and its tests are the contract; this section records why.
 - **The shortcut plugin is pinned to 2.3.** `tauri-plugin-global-shortcut`
   2.4 requires Tauri 2.12; `~2.3` keeps the locked Tauri 2.11 and adds only
   the hotkey crates to the lock file. Lift the pin with the Tauri upgrade.
-- **Placement is in logical points per display.** macOS reports each display
-  in its own scale; Windows and Linux report one physical desktop, which the
-  window's scale converts. The anchor saved after a drag settles (400 ms) is
-  the pet's own top-left corner, rounded, with the display's name; it is
-  clamped back onto a connected display when the window is built.
+- **Placement has one coordinate space per platform.** macOS places every
+  window in one space of points. Windows and Linux place windows on one
+  physical desktop, and the pet window's scale changes as it crosses
+  displays, so the saved anchor is that desktop divided by the primary
+  display's scale, both when saving and restoring, and the restored window is
+  positioned in physical pixels. The anchor saved after a drag settles
+  (400 ms) is the pet's own top-left corner, rounded, with the display's name;
+  it is clamped back onto a connected display when the window is built.
 - **`⌃⌥Space` can collide with macOS input-source switching.** It is the
   default "Select next source in Input menu" shortcut, which many users with
   a second input method keep. The default stays as specified; a refused

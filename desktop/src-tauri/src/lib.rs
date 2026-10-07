@@ -711,9 +711,9 @@ fn stop_runtime(app: AppHandle, quit: bool) {
             CliOutcome::Failed { .. } | CliOutcome::Unrunnable => (BootstrapNoticeCode::RuntimeStopFailed, true),
         };
         let _ = return_to_bootstrap(&app);
-        // Whether or not the window could leave the Workbench, the Runtime the
-        // pet was built for is no longer one the shell vouches for.
-        pet::runtime_gone(&app);
+        // Whether or not the window could leave the Workbench, the shell no
+        // longer vouches for the Runtime it showed.
+        let _ = set_active_origin(&app, None);
         let mut status = BootstrapStatus::rejected(code, true);
         if let Some(previous) = previous_status {
             status.origin = previous.origin;
@@ -892,12 +892,17 @@ fn is_runtime_rebind_target(url: &Url) -> bool {
         && url.fragment().is_none()
 }
 
+/// Records the Runtime the Workbench shows, or that it shows none. This is the
+/// only writer, so the pet, which follows it, is reconciled here.
 fn set_active_origin(app: &AppHandle, origin: Option<LoopbackOrigin>) -> bool {
-    app.state::<Shell>()
+    let recorded = app
+        .state::<Shell>()
         .active_origin
         .lock()
         .map(|mut active| *active = origin)
-        .is_ok()
+        .is_ok();
+    pet::reconcile(app);
+    recorded
 }
 
 /// The current bootstrap status, or `null` before the first one is published.
@@ -1061,7 +1066,6 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
             WorkbenchHandoff::Monitor => {
                 commit_deep_link_navigation(app, &navigation, true, observed_generation);
                 apply_pending_deep_link(app);
-                pet::runtime_ready(app, origin.clone());
                 start_runtime_monitor(app.clone(), origin, activity);
                 return;
             }
@@ -1192,7 +1196,6 @@ fn restore_bootstrap_view(app: &AppHandle) -> bool {
         return false;
     }
     let _ = set_active_origin(app, None);
-    pet::runtime_gone(app);
     true
 }
 

@@ -4,8 +4,10 @@
 //! `avibe_runtime_host::pet`; see `docs/plans/2026-10-01-desktop-pet.md`.
 //!
 //! Lifecycle in one sentence: the window exists exactly when the pet is
-//! enabled and a Runtime is ready, and [`reconcile_now`] is the only code that
-//! creates or destroys it.
+//! enabled and the Workbench shows a Runtime, at that Runtime's origin, and
+//! [`reconcile_now`] is the only code that creates or destroys it. The Shell's
+//! `active_origin` is the one record of that Runtime; the pet keeps no copy
+//! and is reconciled whenever that record is written.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,15 +16,16 @@ use std::time::Duration;
 
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
-    anchor_from_window, choose_layout, clamp_anchor, default_anchor, shortcut_label, valid_session_id, window_origin,
-    window_size, LogicalRect, PetAnchor, PetBinding, PetIntent, PetLayout, PetReady, PetStore, WorkArea, PET_SIZE,
-    SHORTCUT_PRESETS,
+    anchor_from_window, choose_layout, clamp_anchor, default_anchor, rescale, shortcut_label, valid_session_id,
+    window_origin, window_size, LogicalRect, PetAnchor, PetBinding, PetIntent, PetLayout, PetReady, PetStore, WorkArea,
+    PET_SIZE, SHORTCUT_PRESETS,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{CheckMenuItem, MenuItem, Submenu};
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, PhysicalPosition, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use url::Url;
@@ -64,9 +67,8 @@ struct Frame {
 
 pub struct Pet {
     store: Mutex<PetStore>,
-    /// The Runtime the Workbench is showing. The pet may load only this origin.
-    runtime: Mutex<Option<LoopbackOrigin>>,
-    /// The origin the current pet window was built for.
+    /// The origin the current pet window was built for. The pet may load only
+    /// this origin.
     window_origin: Mutex<Option<LoopbackOrigin>>,
     frame: Mutex<Frame>,
     /// The accelerator the OS refused, shown in the tray until a registration succeeds.
@@ -78,7 +80,6 @@ impl Pet {
     pub fn new(path: PathBuf) -> Self {
         Self {
             store: Mutex::new(PetStore::load(path)),
-            runtime: Mutex::new(None),
             window_origin: Mutex::new(None),
             frame: Mutex::new(Frame {
                 expanded: false,
@@ -222,30 +223,21 @@ pub fn toggle(app: &AppHandle) {
 
 /// A shortcut preset from the tray.
 pub fn choose_shortcut(app: &AppHandle, id: &str) {
-    let Some(preset) = id
-        .strip_prefix(SHORTCUT_MENU_PREFIX)
-        .and_then(|choice| SHORTCUT_PRESETS.iter().find(|preset| **preset == choice))
-    else {
+    let Some(preset) = preset_for_menu(id) else {
         return;
     };
     app.state::<Pet>().store().set_shortcut(preset);
     apply_shortcut(app);
 }
 
-/// The Workbench is showing a ready Runtime at `origin`.
-pub fn runtime_ready(app: &AppHandle, origin: LoopbackOrigin) {
-    *lock(&app.state::<Pet>().runtime) = Some(origin);
-    reconcile(app);
+/// Presets only: the tray never registers an accelerator it did not offer.
+fn preset_for_menu(id: &str) -> Option<&'static str> {
+    let choice = id.strip_prefix(SHORTCUT_MENU_PREFIX)?;
+    SHORTCUT_PRESETS.iter().copied().find(|preset| *preset == choice)
 }
 
-/// The Workbench no longer shows a Runtime the shell vouches for.
-pub fn runtime_gone(app: &AppHandle) {
-    if let Some(pet) = app.try_state::<Pet>() {
-        *lock(&pet.runtime) = None;
-        reconcile(app);
-    }
-}
-
+/// Brings the window in line with the switch and the Runtime the Workbench
+/// shows. The Shell calls this whenever it records or clears that Runtime.
 pub fn reconcile(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -253,25 +245,56 @@ pub fn reconcile(app: &AppHandle) {
     });
 }
 
-/// Makes the window exist exactly when the pet is enabled and a Runtime is
-/// ready, at that Runtime's origin. The only creator and destroyer of `pet`.
-fn reconcile_now(app: &AppHandle) -> Option<WebviewWindow> {
-    let pet = app.state::<Pet>();
-    let desired = if pet.enabled() {
-        lock(&pet.runtime).clone()
-    } else {
-        None
-    };
-    let current = lock(&pet.window_origin).clone();
-    if let Some(window) = app.get_webview_window(PET_WINDOW) {
-        if desired.is_some() && desired == current {
-            return Some(window);
-        }
-        let _ = window.destroy();
-        *lock(&pet.window_origin) = None;
-        pet.store().window_gone();
+/// What the window must become: `destroy` the existing one, then `build` one
+/// for an origin.
+#[derive(Debug, PartialEq, Eq)]
+struct WindowChange {
+    destroy: bool,
+    build: Option<LoopbackOrigin>,
+}
+
+/// The window shows `/pet` from the Workbench's Runtime while the pet is on,
+/// and does not exist otherwise. `existing` is `None` without a window, else
+/// the origin that window was built for.
+fn window_change(
+    enabled: bool,
+    workbench: Option<&LoopbackOrigin>,
+    existing: Option<Option<&LoopbackOrigin>>,
+) -> WindowChange {
+    let desired = workbench.filter(|_| enabled);
+    match existing {
+        Some(built_for) if desired.is_some() && built_for == desired => WindowChange {
+            destroy: false,
+            build: None,
+        },
+        _ => WindowChange {
+            destroy: existing.is_some(),
+            build: desired.cloned(),
+        },
     }
-    let origin = desired?;
+}
+
+/// The only creator and destroyer of `pet`; see [`window_change`].
+fn reconcile_now(app: &AppHandle) -> Option<WebviewWindow> {
+    let (pet, shell) = (app.try_state::<Pet>()?, app.try_state::<Shell>()?);
+    let workbench = lock(&shell.active_origin).clone();
+    let built_for = lock(&pet.window_origin).clone();
+    let window = app.get_webview_window(PET_WINDOW);
+    let change = window_change(
+        pet.enabled(),
+        workbench.as_ref(),
+        window.as_ref().map(|_| built_for.as_ref()),
+    );
+    match window {
+        Some(window) if !change.destroy => return Some(window),
+        Some(window) => {
+            let _ = window.destroy();
+            *lock(&pet.window_origin) = None;
+            pet.store().window_gone();
+        }
+        None => {}
+    }
+    let origin = change.build?;
     // The navigation hook also judges the window's first load, so the origin
     // it may load is recorded before the webview starts loading it.
     *lock(&pet.window_origin) = Some(origin.clone());
@@ -286,7 +309,8 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
     let pet = app.state::<Pet>();
     let mut url = origin.navigation_url();
     url.set_path(PET_PATH);
-    let areas = work_areas(app, None);
+    let scale = anchor_scale(app, None);
+    let areas = work_areas(app, scale);
     let saved = pet.store().anchor().cloned();
     let anchor = match (saved, areas.first()) {
         (Some(saved), _) => clamp_anchor(&saved, &areas),
@@ -324,7 +348,15 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
     #[cfg(target_os = "macos")]
     let builder = builder.accept_first_mouse(true);
     match builder.build() {
-        Ok(window) => Some(window),
+        Ok(window) => {
+            // Off macOS the builder's points use a scale this code does not
+            // choose, so the window is put on the saved physical spot.
+            if !cfg!(target_os = "macos") {
+                let (x, y) = rescale((x, y), scale, 1.0);
+                let _ = window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+            }
+            Some(window)
+        }
         Err(error) => {
             eprintln!("The desktop pet window could not be created: {error}");
             pet.store().window_gone();
@@ -415,11 +447,13 @@ pub fn window_moved(app: &AppHandle) {
             let Some(window) = handle.get_webview_window(PET_WINDOW) else {
                 return;
             };
-            let Some(anchor) = current_anchor(&handle, &window) else {
+            let (Some(anchor), Ok(window_scale)) = (current_anchor(&handle, &window), window.scale_factor()) else {
                 return;
             };
-            let areas = work_areas(&handle, window.scale_factor().ok());
-            let monitor = area_for(&areas, (anchor.0, anchor.1)).and_then(|area| area.name.clone());
+            let scale = anchor_scale(&handle, Some(window_scale));
+            let anchor = rescale(anchor, window_scale, scale);
+            let areas = work_areas(&handle, scale);
+            let monitor = area_for(&areas, anchor).and_then(|area| area.name.clone());
             handle.state::<Pet>().store().set_anchor(PetAnchor {
                 x: anchor.0.round(),
                 y: anchor.1.round(),
@@ -440,8 +474,27 @@ fn current_anchor(app: &AppHandle, window: &WebviewWindow) -> Option<(f64, f64)>
     ))
 }
 
-/// Each display's work area in logical points, the primary display first.
-fn work_areas(app: &AppHandle, window_scale: Option<f64>) -> Vec<WorkArea> {
+/// The scale `pet.json`'s anchor is stored in. macOS places every window in
+/// one space of points, which the window's own scale reaches. Windows and Linux
+/// place windows on one physical desktop, and the pet window's scale changes
+/// as it crosses displays, so the anchor uses the primary display's scale both
+/// when it is saved and when it is restored.
+fn anchor_scale(app: &AppHandle, window_scale: Option<f64>) -> f64 {
+    let primary = || {
+        app.primary_monitor()
+            .ok()
+            .flatten()
+            .map_or(1.0, |monitor| monitor.scale_factor())
+    };
+    match window_scale {
+        Some(scale) if cfg!(target_os = "macos") => scale,
+        _ => primary(),
+    }
+}
+
+/// Each display's work area in points, the primary display first. Off macOS,
+/// `scale` turns the one physical desktop into points.
+fn work_areas(app: &AppHandle, scale: f64) -> Vec<WorkArea> {
     let primary = app
         .primary_monitor()
         .ok()
@@ -451,19 +504,18 @@ fn work_areas(app: &AppHandle, window_scale: Option<f64>) -> Vec<WorkArea> {
         .available_monitors()
         .unwrap_or_default()
         .iter()
-        .map(|monitor| logical_work_area(monitor, window_scale))
+        .map(|monitor| logical_work_area(monitor, scale))
         .collect();
     areas.sort_by_key(|area| area.name != primary);
     areas
 }
 
-fn logical_work_area(monitor: &Monitor, window_scale: Option<f64>) -> WorkArea {
-    // macOS reports each display in its own pixels; Windows and Linux report
-    // one physical desktop, which the window's scale turns into its points.
+fn logical_work_area(monitor: &Monitor, scale: f64) -> WorkArea {
+    // macOS reports each display in its own pixels.
     let scale = if cfg!(target_os = "macos") {
         monitor.scale_factor()
     } else {
-        window_scale.unwrap_or_else(|| monitor.scale_factor())
+        scale
     };
     let area = monitor.work_area();
     WorkArea {
@@ -497,11 +549,15 @@ const UNAVAILABLE: &str = "This command is only available to the Avibe desktop p
 fn ensure_pet_page(window: &WebviewWindow) -> Result<(), String> {
     let pet = window.state::<Pet>();
     let url = window.url().map_err(|_| UNAVAILABLE.to_owned())?;
-    if window.label() == PET_WINDOW && is_pet_page(lock(&pet.window_origin).as_ref(), &url) {
+    if is_pet_caller(window.label(), lock(&pet.window_origin).as_ref(), &url) {
         Ok(())
     } else {
         Err(UNAVAILABLE.to_owned())
     }
+}
+
+fn is_pet_caller(label: &str, built_for: Option<&LoopbackOrigin>, url: &Url) -> bool {
+    label == PET_WINDOW && is_pet_page(built_for, url)
 }
 
 /// The Workbench in `main`, on the Runtime the shell navigated it to.
@@ -510,10 +566,13 @@ fn is_workbench(window: &WebviewWindow) -> bool {
         return false;
     };
     let active = lock(&shell.active_origin).clone();
-    window.label() == MAIN_WINDOW
-        && window
-            .url()
-            .is_ok_and(|url| active.is_some_and(|origin| origin.matches_url_origin(&url)))
+    window
+        .url()
+        .is_ok_and(|url| is_workbench_caller(window.label(), active.as_ref(), &url))
+}
+
+fn is_workbench_caller(label: &str, active: Option<&LoopbackOrigin>, url: &Url) -> bool {
+    label == MAIN_WINDOW && active.is_some_and(|origin| origin.matches_url_origin(url))
 }
 
 /// Called once the `/pet` page has its listeners installed.
@@ -544,7 +603,7 @@ fn set_expanded(window: &WebviewWindow, expanded: bool) -> Result<PetLayout, Str
     let pet = app.state::<Pet>();
     let previous = *lock(&pet.frame);
     let layout = if expanded {
-        let areas = work_areas(app, window.scale_factor().ok());
+        let areas = work_areas(app, window.scale_factor().unwrap_or(1.0));
         match area_for(&areas, anchor) {
             Some(area) => choose_layout(anchor, area.area),
             None => PetLayout::default(),
@@ -651,9 +710,90 @@ mod tests {
         }
     }
 
+    fn origin(raw: &str) -> LoopbackOrigin {
+        LoopbackOrigin::parse(raw).unwrap()
+    }
+
     #[test]
-    fn the_workbench_marker_is_top_level_only() {
+    fn the_window_follows_the_switch_and_the_runtime_the_workbench_shows() {
+        let (a, b) = (origin("http://127.0.0.1:5123"), origin("http://127.0.0.1:6174"));
+        let change = |destroy, build: Option<&LoopbackOrigin>| WindowChange {
+            destroy,
+            build: build.cloned(),
+        };
+        // The Workbench reaches a Runtime: the pet appears there.
+        assert_eq!(window_change(true, Some(&a), None), change(false, Some(&a)));
+        assert_eq!(window_change(true, Some(&a), Some(Some(&a))), change(false, None));
+        // The Runtime moves: the old window goes and one is built for the new origin.
+        assert_eq!(window_change(true, Some(&b), Some(Some(&a))), change(true, Some(&b)));
+        // The Workbench no longer shows a Runtime (stopped, lost, or `main`
+        // recreated): the pet goes with it.
+        assert_eq!(window_change(true, None, Some(Some(&a))), change(true, None));
+        assert_eq!(window_change(true, None, None), change(false, None));
+        // The switch is off: no window, whatever the Workbench shows.
+        assert_eq!(window_change(false, Some(&a), Some(Some(&a))), change(true, None));
+        assert_eq!(window_change(false, Some(&a), None), change(false, None));
+    }
+
+    #[test]
+    fn pet_commands_answer_only_the_pet_page_and_the_workbench() {
+        let (a, b) = (origin("http://127.0.0.1:5123"), origin("http://127.0.0.1:6174"));
+        let url = |raw: &str| Url::parse(raw).unwrap();
+        assert!(is_pet_caller(PET_WINDOW, Some(&a), &url("http://127.0.0.1:5123/pet")));
+        assert!(!is_pet_caller(MAIN_WINDOW, Some(&a), &url("http://127.0.0.1:5123/pet")));
+        assert!(!is_pet_caller(
+            PET_WINDOW,
+            Some(&a),
+            &url("http://127.0.0.1:5123/chat/abc")
+        ));
+        assert!(!is_pet_caller(PET_WINDOW, Some(&b), &url("http://127.0.0.1:5123/pet")));
+        assert!(!is_pet_caller(PET_WINDOW, None, &url("http://127.0.0.1:5123/pet")));
+
+        assert!(is_workbench_caller(
+            MAIN_WINDOW,
+            Some(&a),
+            &url("http://127.0.0.1:5123/chat/abc")
+        ));
+        assert!(!is_workbench_caller(
+            PET_WINDOW,
+            Some(&a),
+            &url("http://127.0.0.1:5123/pet")
+        ));
+        assert!(!is_workbench_caller(
+            MAIN_WINDOW,
+            Some(&b),
+            &url("http://127.0.0.1:5123/")
+        ));
+        assert!(!is_workbench_caller(MAIN_WINDOW, None, &url("http://127.0.0.1:5123/")));
+        assert!(!is_workbench_caller(MAIN_WINDOW, Some(&a), &url("tauri://localhost/")));
+    }
+
+    #[test]
+    fn the_tray_registers_only_the_presets_it_offers() {
+        for preset in SHORTCUT_PRESETS {
+            assert_eq!(
+                preset_for_menu(&format!("{SHORTCUT_MENU_PREFIX}{preset}")),
+                Some(preset)
+            );
+        }
+        assert_eq!(preset_for_menu(&format!("{SHORTCUT_MENU_PREFIX}Super+KeyQ")), None);
+        assert_eq!(preset_for_menu(SHORTCUT_PRESETS[0]), None);
+        assert_eq!(preset_for_menu(MENU_ID), None);
+    }
+
+    #[test]
+    fn the_page_listens_for_the_events_and_marker_the_shell_sends() {
+        let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui/src");
+        let read = |path: &str| std::fs::read_to_string(ui.join(path)).unwrap();
+        let bridge = read("pet/petBridge.ts");
+        for event in [SUMMON_EVENT, BOUND_EVENT] {
+            assert!(
+                bridge.contains(&format!("'{event}'")),
+                "the pet page must listen for {event}"
+            );
+        }
         assert!(DESKTOP_PET_MARKER.starts_with("if (window.self === window.top)"));
         assert!(DESKTOP_PET_MARKER.contains("'__AVIBE_DESKTOP_PET__'"));
+        assert!(read("lib/desktopShell.ts").contains("window.__AVIBE_DESKTOP_PET__ === true"));
     }
 }

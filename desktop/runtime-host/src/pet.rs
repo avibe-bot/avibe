@@ -405,6 +405,15 @@ pub fn anchor_from_window(origin: (f64, f64), expanded: bool, layout: PetLayout)
     (origin.0 + dx, origin.1 + dy)
 }
 
+/// Moves a point between two views of one physical desktop, each that desktop
+/// divided by a scale. The pet window's own scale changes as it crosses
+/// displays, so a saved anchor uses one fixed scale that the next restore
+/// shares; scale 1 is the physical desktop itself.
+pub fn rescale(point: (f64, f64), from_scale: f64, to_scale: f64) -> (f64, f64) {
+    let factor = from_scale / to_scale;
+    (point.0 * factor, point.1 * factor)
+}
+
 /// Opens the panel toward the room it has: left and above by default, flipped
 /// near the left or top edge, and toward the larger room when neither fits.
 pub fn choose_layout(anchor: (f64, f64), work_area: LogicalRect) -> PetLayout {
@@ -869,5 +878,29 @@ mod tests {
         assert_eq!(shortcut_label("Alt+Shift+Space", true), "⌥⇧Space");
         assert_eq!(shortcut_label("Super+Shift+KeyP", false), "Win+Shift+P");
         assert_eq!(SHORTCUT_PRESETS[0], DEFAULT_SHORTCUT);
+    }
+
+    #[test]
+    fn a_drag_on_a_scaled_secondary_display_restores_to_the_same_physical_spot() {
+        // One physical desktop: a 125% primary and a 150% display to its right.
+        // The pet sits at physical (3000, 200) on the second one.
+        let (primary, window) = (1.25, 1.5);
+        let in_window_points = rescale((3000.0, 200.0), 1.0, window);
+        let saved = rescale(in_window_points, window, primary);
+        let areas = [
+            area("primary", 0.0, 0.0, 2560.0 / primary, 1440.0 / primary),
+            area("side", 2560.0 / primary, 0.0, 3840.0 / primary, 2160.0 / primary),
+        ];
+        let restored = clamp_anchor(
+            &PetAnchor {
+                x: saved.0,
+                y: saved.1,
+                monitor: Some("side".to_owned()),
+            },
+            &areas,
+        );
+        let physical = rescale((restored.x, restored.y), primary, 1.0);
+        assert!((physical.0 - 3000.0).abs() < 1e-9 && (physical.1 - 200.0).abs() < 1e-9);
+        assert_eq!(restored.monitor.as_deref(), Some("side"));
     }
 }
