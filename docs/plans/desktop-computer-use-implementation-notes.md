@@ -163,7 +163,7 @@ Candidate 4 was built from
 isolated lane command only to obtain its PID and verify origin. It was stopped
 before any toggle, permission request, child capture, TCC record, or `D` write.
 A source review then found the remaining permission-level feedback path:
-after a daemon reported `missing_grant`, the one-second tick could see a stale
+after a daemon reported `missing_grant`, the five-second tick could see a stale
 shell all-granted preflight and spawn again indefinitely. Candidate 4 is
 therefore pre-fix evidence only and is not permission-acceptance evidence.
 
