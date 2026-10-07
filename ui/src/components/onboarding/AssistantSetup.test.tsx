@@ -13,6 +13,7 @@ import type { Source } from '../settings/models/types';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import type { SetupAction, SetupScreenHandle } from './setupFlow';
 import { INITIAL_SETUP_FLOW_STATE } from './setupFlow';
+import { SETUP_LINEUP } from './collaborationTimeline';
 
 const mock = vi.hoisted(() => ({ api: {
   detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(), saveClaudeAuth: vi.fn(),
@@ -107,7 +108,7 @@ describe('assistant installation presentation', () => {
     const install = pending<{ ok: boolean; path: string; message: string }>();
     mock.api.installAgent.mockReturnValue(install.promise);
     render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length));
     fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
     await act(async () => install.resolve({ ok: true, path: '/isolated/bin/codex', message: '' }));
     expect(row('Codex').getByRole('switch').getAttribute('aria-checked')).toBe('false');
@@ -125,7 +126,7 @@ describe('assistant installation presentation', () => {
     const install = pending<{ ok: boolean; path: string; message: string }>();
     mock.api.installAgent.mockReturnValue(install.promise);
     render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length));
     expect(row('Codex').queryByRole('button', { name: 'Install and enable' })).toBeNull();
     fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
     await act(async () => install.resolve({ ok: true, path: '/isolated/bin/codex', message: '' }));
@@ -209,9 +210,12 @@ describe('assistant installation presentation', () => {
       ? new Promise((resolve) => { finishClaude = resolve; })
       : Promise.resolve({ ok: true, path: '/isolated/bin/codex' }));
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} />));
-    // The three cards are the whole section: the design keeps each assistant's name at
-    // the top of its own card and gives the section no heading of its own.
-    expect(screen.getAllByRole('heading', { level: 3 }).map((node) => node.textContent)).toEqual(['Claude Code', 'Codex', 'OpenCode']);
+    // The cards are the whole section: the design keeps each assistant's name at the top
+    // of its own card and gives the section no heading of its own. The built-in one
+    // stands first, with no switch: it is always on.
+    expect(screen.getAllByRole('heading', { level: 3 }).map((node) => node.textContent)).toEqual(['Vibey', 'Claude Code', 'Codex', 'OpenCode']);
+    expect(within(row('Vibey').getByRole('heading', { name: 'Vibey' }).closest('.onboarding-card-identity') as HTMLElement)
+      .queryByRole('switch')).toBeNull();
     // "Connection state replaces roles with enable switches": the switch belongs to the
     // same identity header as the name, not to a separate strip.
     for (const name of ['Claude Code', 'Codex', 'OpenCode']) {
@@ -260,7 +264,7 @@ describe('assistant installation presentation', () => {
   it('a failed install settlement refreshes connection state without admitting stale readiness', async () => {
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({ ok: true, backend, installed: false, enabled: true, auth: 'none', application: 'applied', ready: false, entry_eligible: false }));
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} />));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length));
     mock.api.installAgent.mockResolvedValue({ ok: false, path: '/fixture/new-cli', message: 'fixture apply failed' });
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({ ok: true, backend, installed: true, enabled: true, auth: 'api_key', application: 'failed', ready: false, entry_eligible: false }));
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
@@ -292,7 +296,7 @@ describe('assistant installation presentation', () => {
       entry_eligible: false,
     }));
     const view = render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />, false));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length));
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({
       ok: true,
       backend,
@@ -304,7 +308,7 @@ describe('assistant installation presentation', () => {
       entry_eligible: true,
     }));
     view.rerender(wrap(<AgentDetection data={saved} onNext={vi.fn()} />, true));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(6));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length * 2));
     expect(await row('Claude Code').findByRole('button', { name: 'API Key connected' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false);
   });
@@ -673,7 +677,7 @@ describe('Hub route refresh', () => {
     const view = render(wrap(<AgentDetection {...props} />));
     await waitFor(() => expect(mock.models.listSources).toHaveBeenCalled());
     expect(screen.queryByRole('button', { name: 'Add model source' })).toBeNull();
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length));
     const pendingEntry = screen.getByRole<HTMLButtonElement>('button', { name: 'Enter workspace' });
     expect(pendingEntry.disabled).toBe(true);
     fireEvent.click(pendingEntry);

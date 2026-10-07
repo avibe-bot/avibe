@@ -1,39 +1,43 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { Check, CodeXml, FileText, ListChecks } from 'lucide-react';
+import { ArrowRight, Check, CodeXml, ListChecks, ScanEye, Split, type LucideIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { getBackendUiMeta } from '@/lib/agentBackends';
 import { BackendIcon } from '../visual';
 import { Card } from '../ui/card';
-import { ASSISTANT_ORDER, WORK_LINES, collaborationFrame } from './collaborationTimeline';
+import { ASSISTANT_ORDER, RETURN_WIRE, SETUP_LINEUP, WORK_LINES, collaborationFrame } from './collaborationTimeline';
 import { useOnboardingMotion } from './motion';
 
 /**
- * Handoff geometry in the 976x350 wire box, which the stylesheet sizes at the card's
- * height times 350/300 — the reference's own proportion (271 around 232, 306 around
- * 262, 385 around 330 all read that way). Taking the box's height from the card and
- * putting the handoffs at y=150 of 350 is what keeps them on the cards' shared
- * midline at every tier rather than only at the authored one. The x coordinates are
- * the card tracks' own edges in 976 space, so the stretched viewBox keeps every port
- * on a card edge at every width. The return loop is not in this box: see `ReturnWire`.
+ * Handoff geometry in the 1040x350 wire box, which the stylesheet sizes at the card's
+ * height times 350/300 — the reference's own proportion. Taking the box's height
+ * from the card and putting the handoffs at y=150 of 350 is what keeps them on the
+ * cards' shared midline at every tier rather than only at the authored one. The x
+ * coordinates are the card tracks' own edges in 1040 space — 242-wide cards with 24
+ * between them, which is `--ob-track-gap` in onboarding.css — so the stretched viewBox
+ * keeps every port on a card edge at every width, for however many cards the lineup
+ * holds. The return loop is not in this box: see `ReturnWire`.
  */
-const WIRES = ['M299 150H339', 'M637 150H677'];
-/** The wire index the timeline gives the return from the third card to the first. */
-const RETURN_WIRE = 2;
-/** The return loop's legs and corner radius, in the same 976 space as the handoffs. */
-const RETURN_LEGS = { from: 826, to: 149, radius: 16 };
-/** Only the four handoff ends are drawn: the return loop leaves its cards unmarked. */
-const PORTS: [number, number][] = [[299, 150], [339, 150], [637, 150], [677, 150]];
-const ICONS = [FileText, CodeXml, ListChecks];
-// Every skeleton line as its share of the block it is measured in, so the three cards
-// draw the widths design_desktop.pen draws at any scale. The card's content box is 198
-// wide; a document line is a share of that, a test line too (the checkbox and its gap
-// are laid beside it, not out of it), and a code line is a share of the bar column that
-// starts after the line number — which is why those two sets have different bases.
-const DOCUMENT_BARS = [55.1, 94.9, 79.3, 36.9, 89.4, 65.7];
-const CODE_INDENT = [0, 10, 20, 20, 10, 0];
-const CODE_BARS: [number, number][] = [[24.3, 30.4], [18.1, 43.3], [29.2, 23], [21.7, 33.5], [31.6, 14.6], [14.4, 0]];
-const TEST_BARS = [73.2, 61.6, 82.3, 54.5];
+const BOX = 1040;
+const GAP = 24;
+const TRACK = (BOX - GAP * (SETUP_LINEUP.length - 1)) / SETUP_LINEUP.length;
+const left = (index: number) => index * (TRACK + GAP);
+const right = (index: number) => left(index) + TRACK;
+const middle = (index: number) => left(index) + TRACK / 2;
+const WIRES = SETUP_LINEUP.slice(1).map((_, index) => `M${right(index)} 150H${left(index + 1)}`);
+/** The return loop's legs and corner radius, in the same 1040 space as the handoffs. */
+const RETURN_LEGS = { from: middle(SETUP_LINEUP.length - 1), to: middle(0), radius: 16 };
+/** Only the handoff ends are drawn: the return loop leaves its cards unmarked. */
+const PORTS: [number, number][] = SETUP_LINEUP.slice(1).flatMap((_, index) => [[right(index), 150], [left(index + 1), 150]]);
 
+type StoryWork = 'handoffs' | 'code' | 'review' | 'tests';
+/** What each assistant is shown doing: the coordinator hands the work out, then it is
+ *  built, reviewed and tested. A backend the story has no part for draws nothing. */
+const STORY: Partial<Record<string, { icon: LucideIcon; work: StoryWork }>> = {
+  vibey: { icon: Split, work: 'handoffs' },
+  claude: { icon: CodeXml, work: 'code' },
+  codex: { icon: ScanEye, work: 'review' },
+  opencode: { icon: ListChecks, work: 'tests' },
+};
 function Bar({ width, tone, revealed }: { width: number; tone?: string; revealed?: boolean }) {
   const reveal = revealed === undefined ? ''
     : `onboarding-write-line ${revealed ? 'onboarding-write-visible' : ''}`;
@@ -63,34 +67,57 @@ function WorkStatus({ active, done, progress }: { active: boolean; done: boolean
   );
 }
 
-function Skeleton({ backend, done, written }: { backend: string; done: boolean; written: number }) {
-  if (backend === 'claude') {
-    return (
-      <div className="onboarding-skeleton onboarding-skeleton-document">
-        <Bar width={DOCUMENT_BARS[0]} tone="onboarding-bar-heading" revealed={written > 0} />
-        <Bar width={DOCUMENT_BARS[1]} revealed={written > 1} />
-        <Bar width={DOCUMENT_BARS[2]} revealed={written > 2} />
-        <div className="onboarding-skeleton-paragraph">
-          <Bar width={DOCUMENT_BARS[3]} tone="onboarding-bar-subheading" revealed={written > 3} />
-          <Bar width={DOCUMENT_BARS[4]} revealed={written > 4} />
-          <Bar width={DOCUMENT_BARS[5]} revealed={written > 5} />
+// Every skeleton line as its share of the block it is measured in, so the cards draw
+// the widths design_desktop.pen draws at any scale. A code line is a share of the bar
+// column that starts after the line number, a test line a share of the content box
+// (the checkbox and its gap are laid beside it, not out of it).
+const CODE_INDENT = [0, 10, 20, 20, 10, 0];
+const CODE_BARS: [number, number][] = [[24.3, 30.4], [18.1, 43.3], [29.2, 23], [21.7, 33.5], [31.6, 14.6], [14.4, 0]];
+/** The review reads a diff: the second line removed, the two after it added. */
+const REVIEW_DIFF: Partial<Record<number, 'removed' | 'added'>> = { 1: 'removed', 2: 'added', 3: 'added' };
+const TEST_BARS = [73.2, 61.6, 82.3, 54.5];
+
+function CodeRows({ written, diff }: { written: number; diff?: typeof REVIEW_DIFF }) {
+  return (
+    <>
+      {CODE_BARS.map(([first, second], line) => (
+        <div key={line} data-diff={diff?.[line]}
+          className={`onboarding-code-row onboarding-write-line ${written > line ? 'onboarding-write-visible' : ''}`}>
+          <span className="onboarding-code-number">{line + 1}</span>
+          {/* The indent is geometry, not type, so it scales with the diagram. */}
+          <div className="onboarding-code-bars" style={{ paddingLeft: `calc(${CODE_INDENT[line]} * var(--ob-u))` }}>
+            <Bar width={first} tone={line % 2 ? 'onboarding-bar-violet' : 'onboarding-bar-cyan'} />
+            <Bar width={second} />
+          </div>
         </div>
+      ))}
+    </>
+  );
+}
+
+function Skeleton({ work, active, done, written }: { work: StoryWork; active: boolean; done: boolean; written: number }) {
+  const { t } = useTranslation();
+  if (work === 'handoffs') {
+    // One row per assistant the coordinator hands a part to, revealed as it plans.
+    return (
+      <div className="onboarding-skeleton onboarding-skeleton-handoffs">
+        {ASSISTANT_ORDER.map((backend, index) => (
+          <div key={backend} className={`onboarding-handoff-row onboarding-write-line ${written > index * 2 ? 'onboarding-write-visible' : ''}`}>
+            <span className="onboarding-handoff-step">{t(`onboarding.story.${backend}.step`)}</span>
+            <ArrowRight size={12} strokeWidth={1.8} className="onboarding-handoff-arrow" />
+            <span className="onboarding-handoff-name">{getBackendUiMeta(backend).label}</span>
+          </div>
+        ))}
       </div>
     );
   }
-  if (backend === 'codex') {
+  if (work === 'code' || work === 'review') {
     return (
-      <div className="onboarding-skeleton onboarding-skeleton-code">
-        {CODE_BARS.map(([first, second], line) => (
-          <div key={line} className={`onboarding-code-row onboarding-write-line ${written > line ? 'onboarding-write-visible' : ''}`}>
-            <span className="onboarding-code-number">{line + 1}</span>
-            {/* The indent is geometry, not type, so it scales with the diagram. */}
-            <div className="onboarding-code-bars" style={{ paddingLeft: `calc(${CODE_INDENT[line]} * var(--ob-u))` }}>
-              <Bar width={first} tone={line % 2 ? 'onboarding-bar-violet' : 'onboarding-bar-cyan'} />
-              <Bar width={second} />
-            </div>
-          </div>
-        ))}
+      <div className={`onboarding-skeleton onboarding-skeleton-code ${work === 'review' ? 'onboarding-skeleton-review' : ''}`}>
+        {/* The reviewer is handed finished code: it arrives whole with the work, and the
+            sweep across it is the review. */}
+        <CodeRows written={work === 'review' ? (active || done ? WORK_LINES : 0) : written}
+          diff={work === 'review' ? REVIEW_DIFF : undefined} />
       </div>
     );
   }
@@ -130,7 +157,7 @@ function Glow({ id }: { id: string }) {
 function Circuit({ handoff }: { handoff: Handoff }) {
   const glowId = useId();
   return (
-    <svg className="onboarding-wires" viewBox="0 0 976 350" fill="none" preserveAspectRatio="none" aria-hidden="true">
+    <svg className="onboarding-wires" viewBox={`0 0 ${BOX} 350`} fill="none" preserveAspectRatio="none" aria-hidden="true">
       <Glow id={glowId} />
       {WIRES.map((d, index) => (
         <g key={d}>
@@ -148,7 +175,7 @@ function Circuit({ handoff }: { handoff: Handoff }) {
  * cards' floor down to the line the other setup screens set their summary on, which is
  * the stage's floor rather than the diagram's — so its height is whatever the window
  * leaves, and a stretched viewBox would bend the corners differently at every size.
- * The path is drawn in the box's own pixels instead: the legs keep their 976-space
+ * The path is drawn in the box's own pixels instead: the legs keep their 1040-space
  * tracks and the corners stay round.
  */
 function ReturnWire({ handoff, returning, caption }: { handoff: Handoff; returning: boolean; caption: string }) {
@@ -169,7 +196,7 @@ function ReturnWire({ handoff, returning, caption }: { handoff: Handoff; returni
     return () => observer.disconnect();
   }, []);
   const { width, height } = size;
-  const scale = width / 976;
+  const scale = width / BOX;
   const from = RETURN_LEGS.from * scale;
   const to = RETURN_LEGS.to * scale;
   const radius = Math.min(RETURN_LEGS.radius * scale, height);
@@ -217,33 +244,39 @@ export function CollaborationStory({ active = true }: { active?: boolean }) {
         data-motion={running ? 'running' : 'paused'}>
         <Circuit handoff={frame.handoff} />
         <div className="onboarding-collaboration-cards">
-          {ASSISTANT_ORDER.map((backend, index) => {
+          {SETUP_LINEUP.map((backend, index) => {
             const done = frame.done[index];
             const active = frame.active === index;
             const state = done ? 'complete' : active ? 'working' : 'waiting';
             const summary = index === 0 && frame.summary;
-            const caption = summary ? t('onboarding.story.claude.summary')
-              : t(`onboarding.story.${backend}.${done ? 'complete' : 'working'}`);
-            const Icon = ICONS[index];
+            const handedOff = { count: ASSISTANT_ORDER.length };
+            const caption = summary ? t('onboarding.story.summary')
+              : t(`onboarding.story.${backend}.${done ? 'complete' : 'working'}`, handedOff);
+            const part = STORY[backend];
+            const Icon = part?.icon;
             return (
               <Card key={backend} className="onboarding-collaboration-card" data-active={active}
-                data-state={state} aria-label={getBackendUiMeta(backend).label}>
+                data-state={state} data-backend={backend} aria-label={getBackendUiMeta(backend).label}>
                 {/* The same identity header the connection step wears, in the same
-                    place: logo, name, and the trailing slot this step fills with the
-                    assistant's role and the next one with its enable switch. */}
+                    place: logo, then the name — with the assistant's role under it
+                    here, and the next step's enable switch beside it there. Four
+                    cards leave no room for a name and a role on one line. */}
                 <div className="onboarding-card-identity">
                   <span className="onboarding-card-logo"><BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" /></span>
-                  <strong className="onboarding-card-name">{getBackendUiMeta(backend).label}</strong>
-                  <span className="onboarding-card-role">{t(`onboarding.story.${backend}.role`)}</span>
+                  <span className="onboarding-card-title">
+                    <strong className="onboarding-card-name">{getBackendUiMeta(backend).label}</strong>
+                    <span className="onboarding-card-role">{t(`onboarding.story.${backend}.role`)}</span>
+                  </span>
                 </div>
                 <div className="onboarding-story-status" aria-hidden="true">
-                  <Icon size={13} strokeWidth={1.7} className="onboarding-status-icon" />
+                  {Icon && <Icon size={13} strokeWidth={1.7} className="onboarding-status-icon" />}
                   <span key={caption} className="onboarding-status-text onboarding-status-enter">
                     {caption}
                   </span>
                   <WorkStatus active={active} done={done} progress={frame.progress[index]} />
                 </div>
-                <Skeleton backend={backend} done={done} written={reducedMotion ? WORK_LINES : frame.written[index]} />
+                {part && <Skeleton work={part.work} active={active} done={done}
+                  written={reducedMotion ? WORK_LINES : frame.written[index]} />}
               </Card>
             );
           })}

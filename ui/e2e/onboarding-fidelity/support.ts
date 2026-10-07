@@ -4,22 +4,25 @@ export const ORIGIN = 'http://127.0.0.1:5212';
 
 export const isRetiredMemoryPath = (pathname: string) => pathname === '/api/memory' || pathname.startsWith('/api/memory/');
 
-/** Every phase of the authored 8.9s loop, addressed by the elapsed time it freezes at. */
+/** Every phase of the authored 11.15s loop, addressed by the elapsed time it freezes at. */
 export const PHASES = {
-  'pm-working': 600,
-  'handoff-to-codex': 1875,
-  'codex-working': 3000,
-  'handoff-to-opencode': 4125,
-  'tests-running': 5200,
-  'return-to-pm': 6500,
-  'pm-summary': 8000,
+  'coordinator-planning': 600,
+  'handoff-to-claude': 1875,
+  'claude-building': 3000,
+  'handoff-to-codex': 4125,
+  'codex-working': 5200,
+  'handoff-to-opencode': 6375,
+  'tests-running': 7400,
+  'return-to-coordinator': 8750,
+  'coordinator-summary': 10000,
 } as const;
 
 /**
  * The accepted responsive matrix, plus the two widths between its rows that the
  * composition actually changes at. 1920 and 1440 are the wide desktop that takes the
- * 1200 content box; 1366 and 1200 are the standard desktop on 976; 1024 and 768 are
- * where the diagram stops following its proportion; 390, 375 and 320 are the phones.
+ * 1200 content box; 1366 and 1200 are the standard desktop on 1040; 1024 is the last
+ * width the lineup stands in one row, 768 folds it into two; 390, 375 and 320 are the
+ * phones.
  */
 export const VIEWPORTS = [
   { width: 1920, height: 1080 },

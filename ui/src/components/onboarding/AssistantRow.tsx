@@ -50,6 +50,45 @@ export interface AssistantRowProps {
 }
 
 /**
+ * The model a card's route resolves to: a label over the model, and — when `live` — the
+ * way into that route, with the chevron that says a dialog is behind it.
+ *
+ * Off, a card still shows the model the assistant would call, so switching it on has no
+ * surprise in it. It is a statement then, not a control: no chevron, nothing to press.
+ */
+export function RouteChoice({ name, route, live, disabled = false, pending = false, onOpen }: {
+  name: string;
+  route?: AssistantRouteView;
+  live: boolean;
+  disabled?: boolean;
+  pending?: boolean;
+  onOpen: () => void;
+}) {
+  const { t } = useTranslation();
+  const model = route?.kind === 'route' ? route.model : null;
+  const unknown = route?.kind === 'pending' || route?.kind === 'failed';
+  const lead = route?.kind === 'route' && route.backups
+    ? t('onboarding.setup.defaultModelWithBackups', { count: route.backups })
+    : t('onboarding.setup.defaultModel');
+  return (
+    <button type="button" className="onboarding-model-choice" onClick={live ? onOpen : undefined}
+      aria-label={t('onboarding.setup.defaultModelNamed', { name })}
+      aria-disabled={live ? undefined : true}
+      disabled={!live || disabled}>
+      <span>
+        <small>{unknown ? t('onboarding.setup.defaultModel') : lead}</small>
+        {unknown
+          ? <strong className="onboarding-model-choice-pending" aria-hidden="true" />
+          : <strong>{model}</strong>}
+      </span>
+      {live && !unknown && (pending
+        ? <RefreshCw size={17} className="motion-safe:animate-spin" />
+        : <ChevronRight size={17} />)}
+    </button>
+  );
+}
+
+/**
  * One assistant, drawn as the card the welcome already showed it in.
  *
  * The frame, the column it sits in and the identity header at its top are the story
@@ -78,34 +117,18 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
         : 'checking';
   const routeModel = route?.kind === 'route' ? route.model : null;
   const routeUnknown = route?.kind === 'pending' || route?.kind === 'failed';
-  const routeLead = () => (route?.kind === 'route' && route.backups ? t('onboarding.setup.defaultModelWithBackups', { count: route.backups })
-      : t('onboarding.setup.defaultModel'));
-  // Off, the card still shows the model the assistant would call, so switching it on
-  // has no surprise in it. It is a statement then, not a control: no chevron, nothing
-  // to press, and the switch above is the only thing that changes it.
+  // Switched off, the switch above is the only thing that changes the model shown.
   const routeChoice = (live: boolean) => (
-    <button type="button" className="onboarding-model-choice" onClick={live ? onConfigure : undefined}
-      aria-label={t('onboarding.setup.defaultModelNamed', { name: label })}
-      aria-disabled={live ? undefined : true}
-      disabled={!live || configuringDisabled || installing || detecting || !!connectionPending}>
-      <span>
-        <small>{routeUnknown ? t('onboarding.setup.defaultModel') : routeLead()}</small>
-        {routeUnknown
-          ? <strong className="onboarding-model-choice-pending" aria-hidden="true" />
-          : <strong>{routeModel}</strong>}
-      </span>
-      {live && !routeUnknown && (connectionPending
-        ? <RefreshCw size={17} className="motion-safe:animate-spin" />
-        : <ChevronRight size={17} />)}
-    </button>
+    <RouteChoice name={label} route={route} live={live} onOpen={onConfigure} pending={!!connectionPending}
+      disabled={configuringDisabled || installing || detecting || !!connectionPending} />
   );
   return (
-    <Card className="onboarding-assistant" aria-label={label}>
+    <Card className="onboarding-assistant" data-backend={backend} aria-label={label}>
       <div className="onboarding-card-identity">
         <span className="onboarding-card-logo"><BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" /></span>
-        {/* A heading here and a `strong` on the welcome: the setup's three cards are
-            a real document structure a person navigates, the welcome's are an
-            illustration the card already labels. Same class, so same geometry. */}
+        {/* A heading here and a `strong` on the welcome: the setup's cards are a real
+            document structure a person navigates, the welcome's are an illustration
+            the card already labels. Same class, so same geometry. */}
         <h3 className="onboarding-card-name">{label}</h3>
         <div className="onboarding-assistant-enable">{enabledControl}</div>
       </div>

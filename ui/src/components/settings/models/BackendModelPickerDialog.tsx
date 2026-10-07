@@ -75,8 +75,10 @@ export const BackendModelPickerDialog: React.FC<{
   /** The picks, each carrying the projection its row displayed. */
   onAdd: (chosen: ChosenCandidate[]) => void;
   /** Hand off to the custom-model editor, seeding the id with the query when the
-   *  action the user pressed named it. */
-  onCustom: (seedId: string) => void;
+   *  action the user pressed named it. A host with no editor to hand off to — setup
+   *  picking a built-in assistant's first model — omits it, and the action is not
+   *  offered. */
+  onCustom?: (seedId: string) => void;
 }> = ({ open, backend, listedIds, seedPicked, onCancel, onAdd, onCustom }) => {
   const { t } = useTranslation();
   const [readState, setReadState] = React.useState<ReadState>('loading');
@@ -211,7 +213,7 @@ export const BackendModelPickerDialog: React.FC<{
                 {/* Only when the query is the thing the action would name. With an
                     empty one the footer already offers the same editor, and the
                     label would quote nothing. */}
-                {filtering && (
+                {filtering && onCustom && (
                   <Button
                     type="button"
                     variant="ghost"
@@ -241,16 +243,19 @@ export const BackendModelPickerDialog: React.FC<{
             order — ghost row first, then Cancel/Confirm at the very bottom —
             and the `sm:` half of the primitive still owns the one-row desktop
             layout. */}
-        <DialogFooter className="model-hub-catalog-foot shrink-0 items-center border-t border-border max-sm:flex-col sm:justify-between">
-          <Button
-            type="button"
-            variant="ghost"
-            className="model-hub-catalog-control shrink-0 rounded-md px-2.5 text-[12.5px] font-semibold text-muted-foreground max-sm:w-full"
-            onClick={() => onCustom('')}
-          >
-            <Plus aria-hidden="true" />
-            {t('settings.models.gateway.picker.custom')}
-          </Button>
+        <DialogFooter className={cn('model-hub-catalog-foot shrink-0 items-center border-t border-border max-sm:flex-col',
+          onCustom ? 'sm:justify-between' : 'sm:justify-end')}>
+          {onCustom && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="model-hub-catalog-control shrink-0 rounded-md px-2.5 text-[12.5px] font-semibold text-muted-foreground max-sm:w-full"
+              onClick={() => onCustom('')}
+            >
+              <Plus aria-hidden="true" />
+              {t('settings.models.gateway.picker.custom')}
+            </Button>
+          )}
           <div className="flex w-full gap-2 sm:w-auto">
             <Button
               type="button"

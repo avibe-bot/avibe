@@ -54,11 +54,13 @@ backend list, it is always enabled, and it cannot be turned off.
 
 ## Known by design
 
-- The setup wizard lists only native CLIs here. Its Vibey card (built-in, model picker, providers destination)
-  is a follow-up owner decision, delivered separately as `feat/avibe-agent-setup-wizard`.
-- The setup wizard keeps its own native setup sequence (Claude Code, Codex, OpenCode: `nativeOrder`). It is an
-  ordered onboarding flow, not a backend list: its intro geometry is indexed and its first ready backend decides the
-  default Agent after setup, which this lane leaves unchanged.
+- The setup wizard draws Vibey first, as the coordinator, ahead of the native setup sequence (Claude Code, Codex,
+  OpenCode: `nativeOrder`), and Vibey alone can complete setup. That is the owner's follow-up decision, delivered by
+  `feat/vibey-setup-wizard`; see `setup-three-screen/contracts.md` §C4 (D3). The default Agent after setup still
+  follows `implicit_default_rank`, so Vibey becomes it only when no native assistant can run.
+- Setup onboarding is therefore not CLI-only (owner override, 2026-10-07, of the registration contract's "native setup
+  onboarding remains CLI-only"): the built-in backend is a setup card with no CLI to detect, install or enable. Native
+  import and the global native prompt files remain CLI-only.
 - The Agents page detail panel mirrors `is_builtin_default_agent` from the Agent's `source` and markers;
   `setupTargets.isBuiltinAgent` reads the markers, which callers can no longer write.
 - Making Vibey the default for new chats is a separate owner decision.

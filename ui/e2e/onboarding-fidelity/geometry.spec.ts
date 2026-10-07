@@ -16,11 +16,11 @@ import {
  * frame against (DESIGN_FRAME below).
  *
  * What is asserted is the RULE, not a row of copied numbers. The composition is one
- * content column whose width is `clamp(976px, 62.5vw, 1200px)` inside the shell's gutter,
+ * content column whose width is `clamp(1040px, 62.5vw, 1200px)` inside the shell's gutter,
  * and one card height taken from the window; everything else is a ratio of those two. So
  * the helpers below re-derive the column and the card from what the browser reports, and
  * the tests check that every dependent box is the share of them the design draws. A test
- * that hard-coded 976 and 299 would pass on a layout that had stopped deriving them.
+ * that hard-coded 1040 and 242 would pass on a layout that had stopped deriving them.
  */
 const DESIGN_FRAME = { width: 1200, height: 756 };
 /**
@@ -33,9 +33,12 @@ const DESIGN_FRAME = { width: 1200, height: 756 };
 const CAPTURE_PHASE = 'codex-working';
 const CAPTURE_STATES = ['complete', 'working', 'waiting'];
 
-/** The card's share of the content column: three 299s and two 39.5 gaps in 976, which is
- *  the same fraction as three 367s in 1200. One percentage, both authored rows. */
-const CARD_SHARE = 0.306352;
+/** The setup lineup: the built-in coordinator first, then the three CLI assistants. */
+const LINEUP = ['Vibey', 'Claude Code', 'Codex', 'OpenCode'];
+/** The gap's and the card's shares of the content column: four 242s and three 24 gaps in
+ *  1040. One percentage, every authored row. */
+const GAP_SHARE = 24 / 1040;
+const CARD_SHARE = (1 - GAP_SHARE * (LINEUP.length - 1)) / LINEUP.length;
 /** The wire box is the card times the reference's own 350/300, so the handoffs stay on
  *  the cards' midline at every tier. */
 const WIRE_RATIO = 350 / 300;
@@ -111,12 +114,14 @@ async function frame(page: Page) {
       available: step ? step.getBoundingClientRect().width : content.getBoundingClientRect().width,
     };
   });
-  const clamp = Math.min(Math.max(976, 0.625 * window.vw), 1200);
+  const clamp = Math.min(Math.max(1040, 0.625 * window.vw), 1200);
   // The card height is the tier the design authored for this window: 232 under an
   // 800px-tall one, 262 under 900, 300 above 1000, 330 at the large 1920x1080 reading.
-  // Stacked, the three cards ARE the composition, so the phone band gives them the
-  // height the reference draws rather than a share of a window that should scroll.
+  // Stacked, the cards ARE the composition, so the phone band gives them the height the
+  // reference draws rather than a share of a window that should scroll. Between the
+  // phone and 1024 the lineup folds into two columns of two.
   const stacked = window.vw < 760;
+  const folded = !stacked && window.vw < 1024;
   const card = stacked ? 258
     : window.vw >= 1600 && window.vh >= 950 ? 330
       : window.vh <= 800 ? 232
@@ -126,37 +131,38 @@ async function frame(page: Page) {
     column: Math.min(clamp, window.available),
     card,
     stacked,
+    folded,
   };
 }
 
 test.describe('desktop reference geometry', () => {
   test.use({ viewport: { width: 1200, height: 800 } });
 
-  test('the welcome draws the content column, its three card tracks and their handoff gaps', async ({ page }, info) => {
+  test('the welcome draws the content column, its card tracks and their handoff gaps', async ({ page }, info) => {
     const denied = await serveProduct(page);
     await openOnboarding(page);
     await freezeAt(page, PHASES['codex-working']);
     const reference = await frame(page);
-    // The reference's own numbers, reached by the rule at its own frame size: a 976
-    // column of three 299 cards with 39.5 between them. Stated once, here, so a reader
-    // can see that the ratios below are the design and not an arbitrary proportion.
-    expect(round(reference.column)).toBe(976);
+    // The reference's own numbers, reached by the rule at its own frame size: a 1040
+    // column of four 242 cards with 24 between them. Stated once, here, so a reader can
+    // see that the ratios below are the design and not an arbitrary proportion.
+    expect(round(reference.column)).toBe(1040);
     expect(round(reference.card)).toBe(232);
 
     const welcome = await box(page, '.onboarding-welcome');
     expect(welcome.width).toBeCloseTo(reference.column, 1);
 
     const cards = await boxes(page, '.onboarding-collaboration-card');
-    expect(cards).toHaveLength(3);
+    expect(cards).toHaveLength(LINEUP.length);
     for (const card of cards) {
       expect(card.width).toBeCloseTo(reference.column * CARD_SHARE, 1);
       expect(card.height).toBeCloseTo(reference.card, 1);
     }
-    const gaps = [1, 2].map((index) => cards[index].x - (cards[index - 1].x + cards[index - 1].width));
-    for (const gap of gaps) expect(gap).toBeCloseTo((reference.column - 3 * cards[0].width) / 2, 1);
-    // 39.5, to the tenth: the track is a percentage, so the browser's own rounding of it
+    const gaps = cards.slice(1).map((card, index) => card.x - (cards[index].x + cards[index].width));
+    for (const gap of gaps) expect(gap).toBeCloseTo(reference.column * GAP_SHARE, 1);
+    // 24, to the tenth: the gap is a percentage, so the browser's own rounding of it
     // lands a hundredth away and a stricter claim would only be testing that.
-    expect(gaps[0]).toBeCloseTo(39.5, 1);
+    expect(gaps[0]).toBeCloseTo(24, 1);
 
     // The diagram is the card plus the return band the stage floors, and the wire box
     // inside it takes its own height from the card — which is what keeps the handoff
@@ -172,12 +178,12 @@ test.describe('desktop reference geometry', () => {
     // the pixel — a card sized by a percentage has edges on halves, so a tighter claim
     // would be about which way the browser rounded rather than about where the wire is.
     const ports = await boxes(page, '.onboarding-port');
-    expect(ports).toHaveLength(4);
+    expect(ports).toHaveLength((LINEUP.length - 1) * 2);
     const onPixel = (value: number, target: number) => expect(Math.abs(value - target)).toBeLessThanOrEqual(1);
-    onPixel(ports[0].x + ports[0].width / 2, cards[0].x + cards[0].width);
-    onPixel(ports[1].x + ports[1].width / 2, cards[1].x);
-    onPixel(ports[2].x + ports[2].width / 2, cards[1].x + cards[1].width);
-    onPixel(ports[3].x + ports[3].width / 2, cards[2].x);
+    for (let wire = 0; wire < LINEUP.length - 1; wire += 1) {
+      onPixel(ports[wire * 2].x + ports[wire * 2].width / 2, cards[wire].x + cards[wire].width);
+      onPixel(ports[wire * 2 + 1].x + ports[wire * 2 + 1].width / 2, cards[wire + 1].x);
+    }
     // The story's caption is authored per tier like the rest of the card's type —
     // 12 on the standard desktops, 15 at the large reading — so a fixed 10 that
     // reads small against the frame is caught here.
@@ -196,7 +202,7 @@ test.describe('desktop reference geometry', () => {
       expect(logo.height).toBeCloseTo(logoSize, 0);
     }
 
-    // In the band that still draws three columns on a narrow window, the identity
+    // In a band that draws the cards side by side on a narrow window, the identity
     // row has less room than its logo, switch and label want; the name yields
     // before anything spills through the card edge.
     if (reference.column <= 768 + 1) {
@@ -254,15 +260,15 @@ test.describe('desktop reference geometry', () => {
   });
 
   /**
-   * "Align Get started and Enter Workbench at identical coordinates and dimensions,
-   * centered under the Codex column on desktop and as wide as its card."
+   * "Align Get started and Enter Workbench at identical coordinates and dimensions",
+   * centred on the composition at the reference's 299 of 1040.
    *
-   * Three claims, each measured: the action is the middle card's column, the cards are the
-   * same boxes in both steps, and the action does not move between them. The last one is
+   * Three claims, each measured: the action is centred at that share of the column, the
+   * cards are the same boxes in both steps, and the action does not move between them. The last one is
    * what a person actually feels — a button that shifts under a pointer when the screen
    * changes — so it is asserted as exact box equality, not as a tolerance.
    */
-  test('both steps put the same action under the same middle card', async ({ page }, info) => {
+  test('both steps put the same action on the same centre line', async ({ page }, info) => {
     const denied = await serveProduct(page);
     await openOnboarding(page);
     await freezeAt(page, PHASES['codex-working']);
@@ -271,12 +277,13 @@ test.describe('desktop reference geometry', () => {
     const introIdentities = await boxes(page, '.onboarding-card-identity');
     const introAction = await box(page, '.onboarding-primary-action');
     const introHeader = await box(page, '.onboarding-shell > header');
-    // Centred on the middle card, and exactly its width.
-    expect(introAction.x).toBeCloseTo(introCards[1].x, 1);
-    expect(introAction.width).toBeCloseTo(introCards[1].width, 1);
+    // Centred on the column the cards span, at 299 of its 1040.
+    const span = introCards.at(-1)!.x + introCards.at(-1)!.width - introCards[0].x;
+    expect(introAction.x + introAction.width / 2).toBeCloseTo(introCards[0].x + span / 2, 1);
+    expect(introAction.width).toBeCloseTo(span * 299 / 1040, 1);
     expect(round(introAction.height)).toBe(52);
-    // The introduction's trailing slot is the assistant's role.
-    await expect(page.locator('.onboarding-card-role')).toHaveCount(3);
+    // The introduction states each assistant's role under its name.
+    await expect(page.locator('.onboarding-card-role')).toHaveCount(LINEUP.length);
 
     await openSetup(page, 'en');
     const setupCards = await boxes(page, '.onboarding-assistant');
@@ -289,8 +296,8 @@ test.describe('desktop reference geometry', () => {
     for (const key of ['x', 'y', 'width', 'height'] as const) {
       expect(round(setupAction[key])).toBeCloseTo(round(introAction[key]), 1);
     }
-    // Same three columns, so the cards read as taking on work rather than being replaced.
-    for (let index = 0; index < 3; index += 1) {
+    // Same columns, so the cards read as taking on work rather than being replaced.
+    for (let index = 0; index < LINEUP.length; index += 1) {
       expect(setupCards[index].x).toBeCloseTo(introCards[index].x, 1);
       expect(setupCards[index].width).toBeCloseTo(introCards[index].width, 1);
       expect(setupCards[index].y).toBeCloseTo(introCards[index].y, 1);
@@ -303,8 +310,9 @@ test.describe('desktop reference geometry', () => {
         .toBeCloseTo(introIdentities[index].y - introCards[index].y, 1);
       expect(setupIdentities[index].x).toBeCloseTo(introIdentities[index].x, 1);
     }
-    // …and the trailing slot is now the enable switch, in the header rather than below it.
-    await expect(page.locator('.onboarding-card-identity .onboarding-assistant-enable')).toHaveCount(3);
+    // …and the trailing slot is now the enable switch, in the header rather than below it —
+    // on every card but the built-in one, which is always on.
+    await expect(page.locator('.onboarding-card-identity .onboarding-assistant-enable')).toHaveCount(LINEUP.length - 1);
     expect(spread(setupIdentities.map((one) => one.y))).toBeLessThanOrEqual(1);
 
     // The way back is the same object one row down, per the reference.
@@ -418,7 +426,7 @@ test.describe('desktop reference geometry', () => {
     for (const [name, elapsed] of Object.entries(PHASES)) {
       await freezeAt(page, elapsed - clock);
       clock = elapsed;
-      const travelling = name.startsWith('handoff') || name === 'return-to-pm';
+      const travelling = name.startsWith('handoff') || name === 'return-to-coordinator';
       await expect(page.getByTestId('handoff-pulse')).toHaveCount(travelling ? 1 : 0);
       await settleEffects(page);
       await page.locator('.onboarding-story').screenshot({ path: info.outputPath(`phase-${name}.png`) });
@@ -447,6 +455,12 @@ test.describe('capped fluid width', () => {
         // Stacked: one column, and each card the height the reference draws.
         expect(spread(cards.map((card) => card.x))).toBeLessThanOrEqual(1);
         for (const card of cards) expect(card.height).toBeGreaterThanOrEqual(reference.card - 1);
+      } else if (reference.folded) {
+        // Folded: two columns of two, each card the tier's height, and no wires to draw
+        // across the fold.
+        expect(new Set(cards.map((card) => Math.round(card.x))).size).toBe(2);
+        for (const card of cards) expect(card.height).toBeCloseTo(reference.card, 1);
+        await expect(page.locator('.onboarding-wires')).toBeHidden();
       } else {
         const collaboration = await box(page, '.onboarding-collaboration');
         for (const card of cards) {
@@ -994,8 +1008,8 @@ test.describe('completion recovery in the slot', () => {
  * Narrow widths are where a card stops being a scaled copy of the design and becomes an
  * adaptation, so the thing to check is that the adaptation is ONE arrangement rather than
  * whichever one each label's length happens to produce. Every assertion here reads real
- * bounding boxes: three identity headers that start and end together, three status rows
- * that do, and no label clipped or truncated to make that true.
+ * bounding boxes: identity headers that start and end together, status rows that do, and
+ * no label clipped or truncated to make that true.
  */
 test.describe('narrow identity alignment', () => {
   for (const viewport of [
@@ -1006,7 +1020,7 @@ test.describe('narrow identity alignment', () => {
     { width: 768, height: 1024 },
   ]) {
     for (const lang of ['en', 'zh'] as const) {
-      test(`${size(viewport)} ${lang} keeps the three cards on one grid`, async ({ page }, info) => {
+      test(`${size(viewport)} ${lang} keeps the lineup on one grid`, async ({ page }, info) => {
         await page.setViewportSize(viewport);
         const denied = await serveProduct(page);
         await openOnboarding(page, { lang });
@@ -1021,17 +1035,21 @@ test.describe('narrow identity alignment', () => {
             const statuses = await boxes(page, '.onboarding-story-status');
             const skeletons = await boxes(page, '.onboarding-skeleton');
             const cards = await boxes(page, '.onboarding-collaboration-card');
-            expect([identities.length, statuses.length, skeletons.length]).toEqual([3, 3, 3]);
+            expect([identities.length, statuses.length, skeletons.length]).toEqual([LINEUP.length, LINEUP.length, LINEUP.length]);
             // The header and status boundaries belong to the arrangement, not to whichever
-            // caption happens to be short enough at this point in the animation. Below 760
-            // the three cards stack, so the boundary they share is the offset INSIDE the
+            // caption happens to be short enough at this point in the animation. Folded or
+            // stacked, the cards are not one row, so the boundary they share is the offset INSIDE the
             // card: the same claim, and on one row the same measurement.
             for (const row of [identities, statuses, skeletons]) {
               expect(spread(row.map((one, index) => one.y - cards[index].y))).toBeLessThanOrEqual(1);
               expect(spread(row.map((one) => one.height))).toBeLessThanOrEqual(1);
             }
-            // Side by side, that offset is also one screen row; stacked, it cannot be.
-            expect(spread(cards.map((card) => card.y)) <= 1).toBe(viewport.width >= 760);
+            // Side by side, that offset is also one screen row: the whole lineup on a
+            // desktop, each pair of the fold, and each card alone when stacked.
+            const perRow = viewport.width >= 1024 ? cards.length : viewport.width >= 760 ? 2 : 1;
+            for (let start = 0; start < cards.length; start += perRow) {
+              expect(spread(cards.slice(start, start + perRow).map((card) => card.y))).toBeLessThanOrEqual(1);
+            }
             for (let index = 0; index < cards.length; index++) {
               for (const row of [identities, statuses, skeletons]) {
                 expect(row[index].x).toBeGreaterThanOrEqual(cards[index].x);
@@ -1066,7 +1084,7 @@ test.describe('narrow identity alignment', () => {
         }
         // …and the labels are still the product's own words at a readable size.
         const names = await page.locator('.onboarding-card-name').filter({ visible: true }).allInnerTexts();
-        expect(names.map((name) => name.replace(/\s+/g, ' ').trim())).toEqual(['Claude Code', 'Codex', 'OpenCode']);
+        expect(names.map((name) => name.replace(/\s+/g, ' ').trim())).toEqual(LINEUP);
         const smallest = await page.locator('.onboarding-card-role')
           .evaluateAll((nodes) => Math.min(...nodes.map((node) => parseFloat(getComputedStyle(node).fontSize))));
         expect(smallest).toBeGreaterThanOrEqual(10);
@@ -1141,7 +1159,7 @@ test.describe('motion lifecycle', () => {
     expect(resumed.some((effect) => effect.state === 'running')).toBe(true);
 
     // And it is genuinely running again, rather than merely unpaused.
-    await freezeAt(page, PHASES['pm-summary'] - PHASES['codex-working']);
+    await freezeAt(page, PHASES['coordinator-summary'] - PHASES['codex-working']);
     expect(await renderedPhase(page)).not.toEqual(before);
   });
 
