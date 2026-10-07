@@ -4,6 +4,7 @@
 // screen puts it. Hermetic: every read is answered here and every write is refused.
 import { expect, test, type Page } from '@playwright/test';
 import { PHASES, freezeAt, openOnboarding, openSetup, serveProduct } from './support';
+import { CONTRACT_VERSION } from '../../src/components/settings/models/types';
 
 const LINEUP = ['vibey', 'claude', 'codex', 'opencode'];
 const NATIVE_MODELS: Record<string, string> = { claude: 'claude-opus-5-5', codex: 'gpt-5.6-sol', opencode: 'openai/gpt-5.6-sol' };
@@ -32,7 +33,7 @@ async function serveLineup(page: Page, { permitted = true } = {}) {
     const backend = new URL(route.request().url()).pathname.split('/')[4];
     const model = models[backend];
     return route.fulfill({ json: { chains: model ? [{
-      contract_version: 12, backend, model_id: model, manual_override: null, route_origin: 'automatic',
+      contract_version: CONTRACT_VERSION, backend, model_id: model, manual_override: null, route_origin: 'automatic',
       current: { source_id: 'src_setup_fixture', model_id: model },
       chain: [{ source_id: 'src_setup_fixture', model_id: model, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
       supply_state: 'ok',
