@@ -1,0 +1,125 @@
+import { describe, expect, it } from 'vitest';
+
+import type { WorkbenchMessage } from '@/context/ApiContext';
+
+import { derivePetState, latestExchange, openQuickReplies, type PetStateInputs } from './petState';
+
+let nextId = 0;
+const row = (overrides: Partial<WorkbenchMessage>): WorkbenchMessage => ({
+  id: `m${(nextId += 1)}`,
+  scope_id: 'scope',
+  session_id: 'S',
+  platform: 'avibe',
+  author: 'agent',
+  type: 'result',
+  source: 'agent',
+  author_id: null,
+  author_name: null,
+  native_message_id: null,
+  parent_native_message_id: null,
+  text: 'text',
+  content: {},
+  metadata: {},
+  created_at: '2026-10-04T00:00:00Z',
+  updated_at: '2026-10-04T00:00:00Z',
+  delivered_at: null,
+  read_at: '2026-10-04T00:00:01Z',
+  ...overrides,
+});
+
+const user = (text = 'hi') => row({ author: 'user', type: 'user', source: 'user', text });
+const result = (overrides: Partial<WorkbenchMessage> = {}) => row(overrides);
+const asking = (chosen?: string) => result({
+  content: { quick_replies: ['Yes', 'No'], ...(chosen ? { quick_reply_chosen: chosen } : {}) },
+});
+
+const quiet: PetStateInputs = {
+  session: { agent_status: 'idle' },
+  messages: [user(), result()],
+  turn: { foreground: 'idle', in_flight: false },
+  pendingVaultRequests: 0,
+  unreadCount: 0,
+};
+
+describe('derivePetState', () => {
+  it.each<[string, Partial<PetStateInputs>, ReturnType<typeof derivePetState>]>([
+    ['nothing is happening', {}, 'idle'],
+    ['the agent is working', { turn: { foreground: 'running', in_flight: true } }, 'running'],
+    ['a turn is in flight before the foreground flips', { turn: { foreground: 'idle', in_flight: true } }, 'running'],
+    ['a reply is unread and the agent is idle', { unreadCount: 2 }, 'ready'],
+    ['the last run failed', { session: { agent_status: 'failed' } }, 'blocked'],
+    ['a vault request is pending', { pendingVaultRequests: 1 }, 'needs_input'],
+    ['the latest result asks a quick-reply question', { messages: [user(), asking()] }, 'needs_input'],
+  ])('is %s → %s', (_case, override, expected) => {
+    expect(derivePetState({ ...quiet, ...override })).toBe(expected);
+  });
+
+  it('orders Needs input > Blocked > Ready > Running > Idle', () => {
+    const everything: PetStateInputs = {
+      session: { agent_status: 'failed' },
+      messages: [user(), asking()],
+      turn: { foreground: 'running', in_flight: true },
+      pendingVaultRequests: 1,
+      unreadCount: 3,
+    };
+    expect(derivePetState(everything)).toBe('needs_input');
+    expect(derivePetState({ ...everything, messages: [user(), result()], pendingVaultRequests: 0 })).toBe('blocked');
+    expect(derivePetState({
+      ...everything, messages: [], pendingVaultRequests: 0, session: { agent_status: 'idle' }, turn: null,
+    })).toBe('ready');
+    // A running turn is not Ready even with unread replies: the reply is not final yet.
+    expect(derivePetState({
+      ...everything, messages: [], pendingVaultRequests: 0, session: { agent_status: 'idle' },
+    })).toBe('running');
+  });
+
+  it('clears Needs input once the question is answered', () => {
+    expect(derivePetState({ ...quiet, messages: [user(), asking('Yes')] })).toBe('idle');
+  });
+
+  it('ignores an older unanswered group once a newer result exists', () => {
+    const messages = [user(), asking(), user('free text'), result()];
+    expect(openQuickReplies(messages)).toBeNull();
+    expect(derivePetState({ ...quiet, messages })).toBe('idle');
+  });
+});
+
+describe('latestExchange', () => {
+  it('shows the last user message and the last result when nothing is unread', () => {
+    const last = result({ text: 'latest' });
+    const exchange = latestExchange([user('old'), result(), user('ask'), last], true);
+    expect(exchange.user?.text).toBe('ask');
+    expect(exchange.results).toEqual([last]);
+    expect(exchange.unreadComplete).toBe(true);
+  });
+
+  it('shows every unread result, oldest first', () => {
+    const first = result({ read_at: null, text: 'one' });
+    const second = result({ read_at: null, text: 'two' });
+    const exchange = latestExchange([result(), user(), first, second], true);
+    expect(exchange.results).toEqual([first, second]);
+    expect(exchange.unreadComplete).toBe(true);
+  });
+
+  it('is incomplete when unread results may reach past the loaded tail', () => {
+    const tail = [result({ read_at: null }), user(), result({ read_at: null })];
+    expect(latestExchange(tail, true).unreadComplete).toBe(false);
+    // The tail already starts at the session's first row.
+    expect(latestExchange(tail, false).unreadComplete).toBe(true);
+  });
+
+  it('is incomplete when the inbox count is ahead of the loaded unread results', () => {
+    const visible = result({ read_at: null, text: 'visible' });
+    expect(latestExchange([visible], true, 3).unreadComplete).toBe(false);
+    expect(latestExchange([visible], true, 3).results).toEqual([visible]);
+    // Inbox says unread, the loaded tail is all read: those replies sit past it.
+    expect(latestExchange([result({ text: 'read' })], true, 2).unreadComplete).toBe(false);
+    // A leftover count on a fully loaded session is stale.
+    expect(latestExchange([result({ text: 'read' })], false, 2).unreadComplete).toBe(true);
+  });
+
+  it('leaves out process rows', () => {
+    const exchange = latestExchange([user(), row({ type: 'tool_call' }), result({ text: 'done' })], false);
+    expect(exchange.results.map((message) => message.text)).toEqual(['done']);
+  });
+});

@@ -355,6 +355,88 @@ def test_authorized_config_envelope_and_completion_persistence_closed_loop(monke
         SettingsStore.reset_instance()
 
 
+def test_pet_window_reads_setup_finished_in_the_main_window_closed_loop(monkeypatch, tmp_path):
+    """Scenarios: AUTH-SETUP-128 producer — the desktop pet leaves setup-pending once setup is
+    finished in the main window.
+
+    Two clients share one signed-in principal, as the pet and main windows share one
+    session. The `/pet` document is the non-sensitive SPA shell, served without a
+    session like every client route; what it shows is decided by `/api/config`, which
+    refuses an unauthenticated read and, for the signed-in pet, reports setup pending
+    with the `mode` and `setup_state` fields `isSetupComplete()` reads. The main window
+    then finishes setup through the same narrow CSRF-gated POSTs as the wizard, with no
+    message to the pet, and the pet's next read reports setup complete.
+
+    What this proves is the server half the pet relies on: its re-read is answered per
+    call, so a re-read after the main window's write sees it. When the pet re-reads
+    (summon, focus, visibility), its exemption from the setup redirect, and how it
+    orders overlapping reads are browser rules, asserted against controlled responses
+    in `ui/src/pet/PetPage.test.tsx` and `ui/src/lib/remoteAuth.test.ts`. Neither layer
+    runs the two real windows; that journey stays with the desktop shell PR.
+    """
+    from config.v2_settings import SettingsStore
+    from vibe import internal_client
+
+    config = _save_config(tmp_path, paired=True, instance_kind="personal")
+    ui_dist = tmp_path / "dist"
+    ui_dist.mkdir()
+    (ui_dist / "index.html").write_text("<html>avibe</html>", encoding="utf-8")
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda *_args: None)
+    monkeypatch.setattr(
+        internal_client, "reconcile_platforms",
+        AsyncMock(return_value={"status_code": 200, "body": {"ok": True}}),
+    )
+    # Finishing setup may not reach a real runtime action.
+    monkeypatch.setattr(remote_access, "reconcile", Mock(side_effect=AssertionError("pairing changed")))
+    monkeypatch.setattr(
+        ui_server, "_schedule_service_restart_for_config_fallback",
+        Mock(side_effect=AssertionError("unexpected restart")),
+    )
+    base_url = "https://alex.avibe.bot"
+    peer = {"REMOTE_ADDR": "203.0.113.44"}
+
+    def signed_in():
+        client = app.test_client()
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            remote_session_cookie(config, "owner@example.com", "owner-1", role="owner", access_source="owner"),
+            domain="alex.avibe.bot",
+        )
+        return client
+
+    SettingsStore.reset_instance()
+    try:
+        anonymous = app.test_client()
+        shell = anonymous.get("/pet", base_url=base_url, environ_base=peer, headers={"Accept": "text/html"})
+        assert shell.status_code == 200
+        assert shell.headers["Cache-Control"] == "no-store, private"
+        refused = anonymous.get("/api/config", base_url=base_url, environ_base=peer)
+        assert refused.status_code == 401
+        assert refused.get_json()["error"] == "remote_access_login_required"
+
+        pet, main = signed_in(), signed_in()
+        pending = pet.get("/api/config", base_url=base_url, environ_base=peer)
+        assert pending.status_code == 200
+        assert pending.get_json()["mode"]
+        assert pending.get_json()["setup_state"]["needs_setup"] is True
+
+        headers = csrf_headers(main, base_url=base_url)
+        for payload in (
+            {"slack": {"bot_token": "xoxb-pet-fixture", "app_token": "xapp-pet-fixture"}},
+            {"setup_completed": True},
+        ):
+            response = main.post("/api/config", json=payload, headers=headers, base_url=base_url, environ_base=peer)
+            assert response.status_code == 200, response.get_json()
+
+        reread = pet.get("/api/config", base_url=base_url, environ_base=peer)
+        assert reread.status_code == 200
+        assert reread.get_json()["mode"]
+        assert reread.get_json()["setup_state"]["needs_setup"] is False
+    finally:
+        SettingsStore.reset_instance()
+
+
 def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-404"""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))

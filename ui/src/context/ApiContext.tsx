@@ -512,7 +512,9 @@ export type TunnelConnectivityDiagnostics = {
 };
 
 export type ApiContextType = {
-  getConfig: () => Promise<any>;
+  /** `cache: false` reads past the 30-second config cache, for a surface (the
+   *  desktop pet) that must see a setup another window just finished. */
+  getConfig: (options?: { cache?: boolean }) => Promise<any>;
   getPlatformCatalog: () => Promise<any>;
   mutateConfig: (mutations: readonly ConfigMutation[]) => Promise<any>;
   waitForAgentActivityConfigMutations: () => Promise<void>;
@@ -964,7 +966,22 @@ export type WorkbenchSession = {
 export type WorkbenchSessionReadResult = {
   status: number;
   session: WorkbenchSession | null;
+  /** Project-level chat grant; omitted when the payload has no usable flag. */
+  capabilities?: { can_chat: boolean };
 };
+
+/** GET /api/sessions/:id carries capabilities as a sibling of the row fields. */
+function sessionCanChatFromPayload(payload: { capabilities?: { can_chat?: unknown } } | null): { can_chat: boolean } | undefined {
+  return payload?.capabilities && typeof payload.capabilities.can_chat === 'boolean'
+    ? { can_chat: payload.capabilities.can_chat }
+    : undefined;
+}
+
+function sessionRowFromPayload(payload: WorkbenchSession & { capabilities?: unknown }): WorkbenchSession {
+  if (!payload || typeof payload !== 'object') return payload;
+  const { capabilities: _capabilities, ...row } = payload;
+  return row;
+}
 
 export type WorkbenchSessionCreate = {
   project_id: string;
@@ -3359,7 +3376,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // is correct (cached error messages would otherwise stay in the
   // old language).
   const value: ApiContextType = useMemo(() => ({
-    getConfig: () => getCachedJson('/api/config', CONFIG_CACHE_TTL_MS),
+    getConfig: (options) => (options?.cache === false
+      ? getJson('/api/config')
+      : getCachedJson('/api/config', CONFIG_CACHE_TTL_MS)),
     getPlatformCatalog: () => getJson('/api/platforms'),
     mutateConfig: (mutations) => {
       const save = async () => {
@@ -3700,16 +3719,22 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     createSession: (payload) => postJson('/api/sessions', payload),
     forkSession: (sessionId) =>
       postJson(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {}),
-    getSession: (sessionId, params) =>
-      params?.cache === false
-        ? getJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { handleError: params?.handleError })
-        : getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}`, undefined, { handleError: params?.handleError }),
+    getSession: async (sessionId, params) => {
+      const payload = params?.cache === false
+        ? await getJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { handleError: params?.handleError })
+        : await getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}`, undefined, { handleError: params?.handleError });
+      return sessionRowFromPayload(payload);
+    },
     getSessionResult: async (sessionId) => {
       const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
       const payload = await res.json().catch(() => null);
+      if (!(res.ok && payload && typeof payload.id === 'string')) {
+        return { status: res.status, session: null };
+      }
       return {
         status: res.status,
-        session: res.ok && payload && typeof payload.id === 'string' ? payload : null,
+        session: sessionRowFromPayload(payload),
+        capabilities: sessionCanChatFromPayload(payload),
       };
     },
     getSessionBootstrap: async (sessionId) => {
