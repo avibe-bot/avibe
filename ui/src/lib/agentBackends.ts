@@ -8,6 +8,7 @@ type BackendDescriptor = (typeof BACKEND_CATALOG)[number];
 export type AgentBackendId = BackendDescriptor['id'];
 export type NativeCliBackend = Extract<BackendDescriptor, { capabilities: { supports_cli: true } }>['id'];
 export type WebOAuthBackend = Extract<BackendDescriptor, { capabilities: { supports_web_oauth: true } }>['id'];
+export type BuiltinBackend = Extract<BackendDescriptor, { builtin: true }>['id'];
 export type BackendId = string;
 type BackendCapabilities = { [K in keyof BackendDescriptor['capabilities']]: boolean };
 
@@ -109,6 +110,15 @@ export const NATIVE_CLI_BACKENDS = BACKEND_CATALOG
 
 export const NATIVE_SETUP_BACKENDS = [...NATIVE_CLI_BACKENDS]
   .sort((left, right) => BACKEND_VISUALS[left].nativeOrder - BACKEND_VISUALS[right].nativeOrder);
+
+/** Backends that are part of the platform: no CLI to install, always enabled. */
+export const BUILTIN_BACKENDS = BACKEND_CATALOG
+  .filter((backend): backend is Extract<BackendDescriptor, { builtin: true }> => backend.builtin)
+  .map((backend) => backend.id);
+
+export function isBuiltinBackend(id: string): id is BuiltinBackend {
+  return (BUILTIN_BACKENDS as readonly string[]).includes(id);
+}
 
 export function isNativeCliBackend(id: string): id is NativeCliBackend {
   return (NATIVE_CLI_BACKENDS as readonly string[]).includes(id);

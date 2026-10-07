@@ -10,11 +10,11 @@
  * at 1920x1080 and 258 stacked on a phone — each with its own header height, heading
  * type, card interior and action size. The bands below are exactly those readings:
  * nothing interpolates between them because the design never does. One content column
- * of `clamp(976px, 62.5vw, 1200px)` still caps the width between the gutters and the
+ * of `clamp(1040px, 62.5vw, 1200px)` still caps the width between the gutters and the
  * cap, and the card tracks, handoff gaps and stretched wire viewBox stay percentages of
  * it, so the horizontal composition is fluid while the vertical rhythm is authored.
  *
- * The welcome and the setup are one composition seen twice. The three cards keep the
+ * The welcome and the setup are one composition seen twice. The cards keep the
  * same frame, the same tracks and the same identity header in both — logo, name, and
  * a right-hand slot the introduction fills with a role and the connection with an
  * enable switch — so moving between them changes what a card holds and never where it
@@ -43,6 +43,10 @@
   --ob-line-number: #585c71;
   --ob-code-violet: #a496e15c;
   --ob-code-cyan: #67c2b75c;
+  /* The review's diff tints, taken from the theme's own destructive and mint so each
+     theme draws its own pair without a second set of literals. */
+  --ob-diff-removed: color-mix(in srgb, var(--destructive) 8%, transparent);
+  --ob-diff-added: color-mix(in srgb, var(--mint) 6%, transparent);
   --ob-check-bg: #ffffff05;
   --ob-check-border: #5bffa044;
   --ob-check-done: #5bffa012;
@@ -108,14 +112,18 @@
      type: 12 on the standard desktops, 15 at the large reading, 13 stacked. */
   --ob-cap-fs: 12px;
 
-  /* One content width for the story and the assistant cards, written as the
-     rule the reference's four rows describe rather than as four numbers: 976 on
-     a standard desktop, growing only once the window can spend 62.5% of itself
-     on it, and stopping at 1200. That reaches exactly 976 at both 1366 and 1440
-     and exactly 1200 at 1920 — the three authored desktop rows — with no
-     breakpoint between them. The header is full-bleed instead: its logo and
-     language button sit at the window's own gutter, not at the column's edge. */
-  --ob-content-w: clamp(976px, 62.5vw, 1200px);
+  /* One content width for the story and the assistant cards, written as a rule
+     rather than as a number per window: 1040 on a standard desktop — the four
+     242-wide cards and their 24 gaps the reference draws at 1200x800 — growing
+     only once the window can spend 62.5% of itself on it, and stopping at 1200.
+     The header is full-bleed instead: its logo and language button sit at the
+     window's own gutter, not at the column's edge. */
+  --ob-content-w: clamp(1040px, 62.5vw, 1200px);
+  /* The gap between two card tracks, as the reference's 24 of 1040. One track per
+     card, however many the lineup holds, so the share is the only number the
+     story, the destinations and the assistants agree on — and `CollaborationStory`
+     draws its wires in the same 1040 space. */
+  --ob-track-gap: calc(100% * 24 / 1040);
   --ob-gutter: 48px;
   /* One design unit for the story's interior, taken from the card it is drawn
      in: the skeletons, wires and status glyph scale with the card while the
@@ -137,20 +145,25 @@
      this tier's numbers: its frame, its padding, the identity row, the state row,
      the note at its clamp, and the two method rows. A tier that restates its
      padding or its rows restates this with them. */
-  --ob-assistant-wrap: 0px;
   --ob-assistant-h: calc(2px + var(--ob-card-pv) + var(--ob-card-ph) + var(--ob-id-h) + var(--ob-card-gap) * 2
     + var(--ob-life-h) + var(--ob-note-lh) * 2 + var(--ob-spacer-2)
-    + var(--ob-method-h) * 2 + var(--ob-method-gap) + var(--ob-assistant-wrap));
+    + var(--ob-method-h) * 2 + var(--ob-method-gap));
+  /* The built-in card offering its models: the same card with the two method rows
+     replaced by the offer — three candidates and "All models" two short of a method
+     row each, its 4 inset and 1 border on both sides, and the hairline above the last.
+     Every band reserves it at its worst reading — the note at its two-line clamp —
+     because whether the note wraps is the platform's fonts' answer, not the design's. */
+  --ob-offer-h: calc(var(--ob-assistant-h) + var(--ob-method-h) * 2 - var(--ob-method-gap) + 3px);
   /* One floor under the cards, so a card that grows while its step is read — a
-     sentence that wraps in one language, a state row that arrives with detection —
-     cannot move the action. It reserves the cards only; whatever a step draws under
-     them adds its own height on top, and the shared cell (see `.onboarding-screens`)
-     is what then holds the three steps level. */
-  --ob-stage-h: max(var(--ob-diagram-h), var(--ob-assistant-h));
+     sentence that wraps in one language, a state row that arrives with detection, the
+     built-in card opening its model offer — cannot move the action. It reserves the
+     cards only; whatever a step draws under them adds its own height on top, and the
+     shared cell (see `.onboarding-screens`) is what then holds the three steps level. */
+  --ob-stage-h: max(var(--ob-diagram-h), var(--ob-assistant-h), var(--ob-offer-h));
   /* The diagram keeps the box the reference draws it in: the story's card plus the
-     band the return wire needs under it — 296 around a 232-tall card, 326 around a
-     262, 394 around a 330, the card plus 64 at every reading. A reservation that
-     has to hold a wrapped sentence on another step does not redraw the story. */
+     band the return wire needs under it — the card plus 64 at every reading. A
+     reservation that has to hold a wrapped sentence on another step does not
+     redraw the story. */
   --ob-story-band: 64px;
   --ob-diagram-h: calc(var(--ob-card-h) + var(--ob-story-band));
 
@@ -535,13 +548,15 @@
   height: var(--ob-diagram-h);
   container-type: inline-size;
 }
-/* Three 299-wide cards in a 976 box, which is the same fraction as three 367 in 1200 —
-   so one percentage draws the reference's own tracks and its own 39.5 / 49.5 handoff
-   gaps without either being typed in. */
-.onboarding-collaboration-cards {
+/* One equal track per card, `--ob-track-gap` apart: four 242-wide cards in the 1040
+   box, the same fractions at every width, and the count is the markup's own. */
+.onboarding-collaboration-cards, .onboarding-assistants-list, .setup-destinations {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 30.6352%));
-  justify-content: space-between;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  column-gap: var(--ob-track-gap);
+}
+.onboarding-collaboration-cards {
   height: var(--ob-card-h);
   position: relative;
   z-index: 1;
@@ -567,8 +582,8 @@
 }
 /* The story's cards are cut from a box whose height the diagram already fixed; the
    connection's take that height as a floor, because an error or a wrapped action has
-   to be readable rather than clipped. Growing is a grid row, so the three grow as one
-   and their identity headers stay level. */
+   to be readable rather than clipped. The cards stand top-aligned, so one that grows
+   keeps its identity header level with the others. */
 .onboarding-collaboration-card { height: 100%; overflow: hidden; }
 .onboarding-assistant { min-height: var(--ob-card-h); }
 .onboarding-collaboration-card[data-active="true"],
@@ -579,8 +594,8 @@
 /* The card's identity, at its head — "the assistant logo and name stay at the top in
    both states; connection state replaces roles with enable switches", which is the one
    rule the whole intro/connection invariant rests on. Both steps draw this from the same
-   class and the same three slots: logo, name, and a trailing slot the introduction fills
-   with a role and the connection with an enable switch. There is one identity header in
+   class: logo, then the name — with the role under it in the introduction, and the
+   enable switch in a trailing slot in the connection. There is one identity header in
    the stylesheet, so the two steps cannot place it differently, and the body underneath
    takes every difference between them.
    The reference rules this header off from the body with a hairline in both steps, so
@@ -614,23 +629,33 @@
   font-weight: 550;
   letter-spacing: -0.3px;
   line-height: 1.5;
-  /* At the tall tier's still-three-column band a card can be narrower than its
+  /* At the tall tier's narrow side-by-side band a card can be narrower than its
      logo, switch and an unbreakable name; the name yields first — wrapping or
      ellipsising — before the row spills through the card edge. */
   min-width: 0;
   overflow-wrap: anywhere;
 }
-/* The trailing slot. The role is text; the connection puts its switch here instead, and
-   both are pushed to the card's inner edge by the same rule. */
-.onboarding-card-role, .onboarding-card-identity > .onboarding-assistant-enable {
+/* The trailing slot: the connection puts its switch here, pushed to the card's inner
+   edge. The story has no trailing slot — its role sits under the name instead. */
+.onboarding-card-identity > .onboarding-assistant-enable {
   margin-left: auto;
   font-size: 11px;
   color: var(--muted);
   white-space: nowrap;
 }
+.onboarding-card-title { display: flex; flex-direction: column; min-width: 0; }
+.onboarding-card-title > .onboarding-card-name { line-height: 1.4; }
 /* The reference sets the role in bold (`.flow-role`, 700): at 11px on a muted grey it
-   is the one label on the card that has to read as a tag rather than as running text. */
-.onboarding-card-role { font-weight: 700; }
+   is the one label on the card that has to read as a tag rather than as running text.
+   It sits under the name — four cards leave no room for both on one line — and the two
+   lines fit the identity row's own height. */
+.onboarding-card-role {
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+}
 .onboarding-assistant-enable { display: flex; align-items: center; }
 /* The enable switch: a real `role="switch"` in the reference's own geometry — a 42x24
    track, a 2px border and a 16px thumb that travels 18px. The invisible ring around it
@@ -672,7 +697,7 @@
 .onboarding-enable-switch:focus-visible { outline: 2px solid var(--mint); outline-offset: 4px; }
 
 /* The story's status line keeps its authored share of the card in design units, which
-   keeps the three cards' status lines level even when one caption is longer than
+   keeps the cards' status lines level even when one caption is longer than
    another, and leaves the skeleton as the flexible row. */
 .onboarding-story-status {
   display: flex;
@@ -738,16 +763,6 @@
   background: var(--ob-skeleton);
   flex-shrink: 0;
 }
-/* h5qtNn's own rhythm inside its 119 box: 17 above the heading, then 12 / 8 / 14 / 7 / 7
-   between the six lines, leaving 14 below the last one. The heading is excluded here
-   rather than left to lose: a class selector cannot outrank a child selector, so the
-   generic 8 silently ate the 12 this rule is the reason for. 14 is written as the
-   paragraph's own margin because it collapses with the 8 above it — the larger wins,
-   which is the gap the design draws between the two blocks. */
-.onboarding-skeleton-document > .onboarding-bar:not(.onboarding-bar-heading) { margin-bottom: calc(8 * var(--ob-u)); }
-.onboarding-bar-heading { height: calc(9 * var(--ob-u)); margin-bottom: calc(12 * var(--ob-u)); background: var(--ob-skeleton-strong); }
-.onboarding-skeleton-paragraph { display: flex; flex-direction: column; gap: calc(7 * var(--ob-u)); margin-top: calc(14 * var(--ob-u)); }
-.onboarding-bar-subheading { height: calc(7 * var(--ob-u)); background: var(--ob-card-border); }
 .onboarding-collaboration-card[data-state="working"] .onboarding-skeleton::after {
   content: "";
   position: absolute;
@@ -760,6 +775,25 @@
 }
 @keyframes onboarding-shimmer { to { transform: translateX(110%); } }
 
+/* The coordinator's plan: one row per assistant it hands a part to — the step, an
+   arrow, and the assistant's name — 26 tall on a 6 gap, 10 below the status line. */
+.onboarding-skeleton-handoffs { display: flex; flex-direction: column; gap: calc(6 * var(--ob-u)); padding-top: calc(10 * var(--ob-u)); }
+.onboarding-handoff-row {
+  display: flex;
+  align-items: center;
+  gap: calc(8 * var(--ob-u));
+  min-height: calc(26 * var(--ob-u));
+  padding: 0 calc(10 * var(--ob-u));
+  border-radius: 8px;
+  background: var(--ob-well);
+  border: 1px solid var(--ob-divider);
+  font-size: var(--ob-cap-fs);
+  white-space: nowrap;
+}
+.onboarding-handoff-step { min-width: calc(48 * var(--ob-u)); color: var(--muted); }
+.onboarding-handoff-arrow { flex-shrink: 0; color: var(--mint-ink); }
+.onboarding-handoff-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--foreground); }
+
 /* u3bGM: six 11-tall rows on a 16 pitch, 14 below the box top — and, like the document,
    14 left under the last one. The row is 11 because that is what its line number
    occupies; the bars inside it are 6 and centre against that. */
@@ -769,6 +803,12 @@
 .onboarding-code-bars { display: flex; align-items: center; gap: calc(6 * var(--ob-u)); flex: 1; min-width: 0; }
 .onboarding-bar-cyan { background: var(--ob-code-cyan); }
 .onboarding-bar-violet { background: var(--ob-code-violet); }
+/* The reviewer reads a diff rather than writing one: the code is there from the start,
+   a removed line and two added ones are tinted across the row, and the working card's
+   sweep is what reads as the review passing over it. */
+.onboarding-skeleton-review .onboarding-code-row { margin: 0 calc(-4 * var(--ob-u)); padding: 0 calc(4 * var(--ob-u)); border-radius: 3px; }
+.onboarding-code-row[data-diff="removed"] { background: var(--ob-diff-removed); }
+.onboarding-code-row[data-diff="added"] { background: var(--ob-diff-added); }
 
 /* xyNG1: four 12-tall rows on a 23 pitch, 17 below the box top. Fewer rows than the
    other two, so this skeleton ends higher — the design's own asymmetry, not slack. */
@@ -845,7 +885,7 @@
   92%, 100% { stroke-dashoffset: -100; opacity: 0; }
 }
 
-/* The return loop runs from the third card's floor to the first's along the line the
+/* The return loop runs from the last card's floor to the first's along the line the
    other setup screens set their bottom text on: half a summary row above the stage's
    floor. The diagram is centred in the story, so the cards' floor is the story's middle
    less half the diagram plus a card; the box spans the diagram's width, and its bottom
@@ -963,16 +1003,15 @@
 
 /* ---- Primary action ------------------------------------------------------ */
 
-/* Both steps put their action under the middle column of the composition above, and at
-   exactly that column's width: 299 of 976, which is the same fraction as the 367 of
-   1200 the reference draws on a large screen. Expressing it as that fraction — not a
-   fixed 299px — is what keeps the intro's "Get started" and the connection step's
-   "Enter Workbench" on the same coordinates at every width, since both live in the same
-   capped box and take the same percentage of it. The 144 floor still applies once the
-   fraction falls under a comfortable target. Height, type and arrow follow the tier:
-   52 under an 800px window, 56 above it, 54 on a phone. */
+/* Every step puts its action on the composition's centre line at the reference's 299 of
+   1040. Expressing it as that fraction — not a fixed 299px — is what keeps the intro's
+   "Get started" and the connection step's "Enter Workbench" on the same coordinates at
+   every width, since both live in the same capped box and take the same percentage of
+   it. The 144 floor still applies once the fraction falls under a comfortable target.
+   Height, type and arrow follow the tier: 52 under an 800px window, 56 above it, 54 on
+   a phone. */
 .onboarding-action-w {
-  width: calc(100% * 299 / 976);
+  width: calc(100% * 299 / 1040);
   max-width: 100%;
   min-width: 144px;
   height: var(--ob-action-h);
@@ -1010,17 +1049,17 @@
 /* ---- Assistant setup ----------------------------------------------------- */
 
 /* The connection step has no section bar above its cards: the page heading already
-   names what the three are, and the reference draws them directly under it. */
+   names what the cards are, and the reference draws them directly under it. */
 .onboarding-assistants { width: 100%; display: flex; flex-direction: column; }
-/* The three assistants keep the identity the intro gave them: this is the story's own
-   grid, track for track, so Claude/Codex/OpenCode occupy the same x and the same width
-   on both steps and the transition between them reads as the cards staying put while
-   their contents change. The container makes `--ob-card-h`'s width guard resolve
-   against this box, exactly as the story's resolves against the diagram. */
+/* The assistants keep the identity the intro gave them: this is the story's own grid,
+   track for track, so every assistant occupies the same x and the same width on both
+   steps and the transition between them reads as the cards staying put while their
+   contents change. The container makes `--ob-card-h`'s width guard resolve against
+   this box, exactly as the story's resolves against the diagram.
+   Top-aligned rather than stretched: the built-in card grows to offer its models while
+   the others keep the card's own height, as the reference draws it. */
 .onboarding-assistants-list {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 30.6352%));
-  justify-content: space-between;
+  align-items: start;
   container-type: inline-size;
 }
 /* The state row is where the story puts its caption: the lifecycle pill on the left
@@ -1087,14 +1126,14 @@
   cursor: pointer;
 }
 /* The label is the only visible description of a settled connection, so in the
-   narrow band that still draws three columns it wraps rather than truncates; the
+   narrow band that still draws the cards side by side it wraps rather than truncates; the
    card's min-height absorbs the extra line the way it absorbs an error line. */
 .onboarding-method-row > span, .onboarding-method-connected > span { min-width: 0; }
 .onboarding-method-connected > svg { color: var(--mint-ink); flex-shrink: 0; }
 /* The shared route, drawn on the card: a label over the model it currently resolves
    to, and the chevron that says the dialog is behind it. Two lines of type where the
    method rows carry one, so it takes the method row's height plus a line — still
-   inside the two rows the card's floor reserves, which is what keeps the three cards
+   inside the two rows the card's floor reserves, which is what keeps the cards
    and the action below them where they were. */
 .onboarding-model-choice {
   display: flex;
@@ -1148,6 +1187,48 @@
   text-overflow: ellipsis;
 }
 .onboarding-model-choice > svg { flex-shrink: 0; color: var(--muted); }
+/* A built-in assistant with no model yet offers the first models it could run on, in
+   one framed list with the way to the rest under a hairline. Each row is a method row's
+   height: the model on the left, who supplies it on the right. */
+.onboarding-model-offer {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--ob-card);
+}
+.onboarding-model-offer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: calc(var(--ob-method-h) - 2px);
+  padding: 0 8px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  font-family: inherit;
+  font-size: var(--ob-method-fs);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+span.onboarding-model-offer-row { cursor: default; }
+.onboarding-model-offer-row:hover:not(:disabled), .onboarding-model-offer-row:focus-visible { background: var(--ob-tile-hover); }
+.onboarding-model-offer-row:focus-visible { outline: 2px solid var(--mint); outline-offset: -2px; }
+.onboarding-model-offer-row:disabled { cursor: default; }
+.onboarding-model-offer-row > svg { flex-shrink: 0; color: var(--muted); }
+.onboarding-model-offer-id { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.onboarding-model-offer-supplier { flex-shrink: 0; font-size: 11px; font-weight: 400; color: var(--muted); }
+.onboarding-model-offer-all {
+  border-top: 1px solid var(--ob-divider);
+  border-radius: 0 0 6px 6px;
+  color: var(--muted);
+}
+.onboarding-model-offer-empty { padding: 8px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+/* A note that says why the assistant cannot run is the card's one error line. */
+.onboarding-assistant-note[data-tone="error"] { color: var(--destructive-ink); }
 /* Installed but off: a line, not a control. The switch above is the only thing to
    press, and this says the binary is already there. */
 .onboarding-method-receipt {
@@ -1161,7 +1242,7 @@
 .onboarding-method-receipt > svg { color: var(--mint-ink); flex-shrink: 0; }
 /* The card's body reads top to bottom the way the story's does: the identity header,
    then the state line, then the note and the work. The body is the flexible one, so an
-   error or a wrapped action grows downward and the three identity headers stay level
+   error or a wrapped action grows downward and the identity headers stay level
    with each other and with the intro's. */
 .onboarding-assistant-body {
   flex: 1;
@@ -1189,7 +1270,7 @@
    chips competing for one line. */
 /* On the card's bottom edge, which is where the reference draws them: the note above
    is what varies in length — one line in Chinese, two in English — and letting that
-   decide where the methods start leaves three cards with three different floors. */
+   decide where the methods start leaves the cards with different floors. */
 .onboarding-assistant-actions {
   margin-top: auto;
   display: flex;
@@ -1208,7 +1289,7 @@
   gap: 8px;
   justify-content: flex-start;
   text-align: left;
-  /* The shared button base forbids wrapping; in the narrow three-column band the
+  /* The shared button base forbids wrapping; in the narrow side-by-side band the
      label is the only description of the method, so wrapping wins over clipping. */
   white-space: normal !important;
 }
@@ -1228,20 +1309,31 @@
    reference's desktop rows to adapt: the content box stops growing on its own, and the
    card answers to the window rather than to a breakpoint, so 1366, 1440 and 1920 are
    three readings of one rule rather than three layouts. */
+/* Below 1024 the cards cannot stand side by side without breaking an assistant's name
+   mid-word, so the story and the assistants fold into two columns of two. The wires go
+   with the single row — a handoff drawn across a fold describes nothing — exactly as
+   they go on a phone, and the cards keep the frame they have on a desktop. The phone
+   band below folds them once more, into one column. */
 @media (max-width: 1023px) {
   .onboarding-shell {
     --ob-gutter: 24px;
-    /* Three columns in this much window is the narrowest reading the composition has,
-       and the connection card answers for it twice: "Claude Code" takes a second line
-       in the identity header, and the first method label takes one in its row. Two
-       line boxes of the card's own type — 24 for the name, 11 for the row — so the
-       step that has to draw them and the step that does not still end at the same
-       action. */
-    --ob-assistant-wrap: 35px;
+    --ob-stack-gap: 16px;
+    /* The fold's rows, the first holding the built-in card at its tallest. The shell
+       states the row count from the lineup. */
+    --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-offer-h))
+      + (max(var(--ob-card-h), var(--ob-assistant-h)) + var(--ob-stack-gap)) * (var(--ob-fold-rows) - 1));
   }
+  .onboarding-collaboration-cards, .onboarding-assistants-list {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--ob-stack-gap);
+  }
+  .onboarding-collaboration { height: auto; }
+  .onboarding-collaboration-cards { height: auto; grid-auto-rows: var(--ob-card-h); }
+  .onboarding-wires, .onboarding-return { display: none; }
 }
 
-/* "Stack the three assistant cards below 760px and allow natural scrolling."
+/* "Stack the assistant cards below 760px and allow natural scrolling."
    Both steps stack, not only the connection's. That is the same rule the rest of this
    sheet is built on — the two steps are one composition seen twice — and it is also
    what lets the shared reservation keep working here: the reference reaches the same
@@ -1254,7 +1346,7 @@
     --ob-header-h: 82px;
     --ob-header-pad: 22px;
     /* A stacked card is as tall as the reference draws it, not a share of the window:
-       stacked, the three cards ARE the composition, and a short phone should scroll
+       stacked, the cards ARE the composition, and a short phone should scroll
        them rather than compress them. */
     --ob-card-h: 258px;
     --ob-card-pv: 21px;
@@ -1280,14 +1372,12 @@
     --ob-h1-min: calc(2 * var(--ob-h1-lh));
     --ob-p-min: var(--ob-sub-lh);
     --ob-band-gap: 27px;
-    /* Stacked, the cards are one above another and nothing is narrow enough to
-       wrap a name or a method row: the card's own composition answers for the
-       tier again. */
-    --ob-assistant-wrap: 0px;
     --ob-stack-gap: 16px;
-    /* The same reservation as the desktop rows, re-derived from the stack: three
-       of the taller card and the two gaps between them. */
-    --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-assistant-h)) * 3 + var(--ob-stack-gap) * 2);
+    /* The same reservation as the desktop rows, re-derived from the stack: the built-in
+       card at its tallest, then one of the taller card per other assistant, and the
+       gaps between them. `--ob-cards` is the lineup's own count, which the shell states. */
+    --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-offer-h))
+      + (max(var(--ob-card-h), var(--ob-assistant-h)) + var(--ob-stack-gap)) * (var(--ob-cards) - 1));
     --ob-main-top: 0px;
     --ob-access-w: 100%;
     --ob-access-pad: 24px;
@@ -1304,22 +1394,17 @@
      size here is a tier variable rather than a number. The block's own reserve gives
      way to these, which are the ones that can wrap. */
 
-  /* The story becomes the stack the connection already is. The wires go with the
-     columns — there is no handoff to draw between cards that are above one another —
-     and so do the return loop and the caption it carries.
-     The cards take the rest of the reserved height in three equal rows, which is how
-     the introduction reaches the same floor as the connection. */
+  /* The story becomes the stack the connection already is, one card per row. The wires
+     and the return loop are already gone with the side-by-side row (the 1023 band).
+     The cards take the rest of the reserved height in equal rows, which is how the
+     introduction reaches the same floor as the connection. */
   .onboarding-story { flex: 1; align-items: stretch; }
   .onboarding-collaboration { height: auto; display: flex; flex-direction: column; gap: 16px; }
+  .onboarding-collaboration-cards, .onboarding-assistants-list { grid-template-columns: minmax(0, 1fr); }
   .onboarding-collaboration-cards {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: repeat(3, minmax(0, 1fr));
-    gap: var(--ob-stack-gap);
-    height: auto;
+    grid-auto-rows: minmax(0, 1fr);
     flex: 1;
   }
-  .onboarding-wires, .onboarding-return { display: none; }
-  .onboarding-assistants-list { grid-template-columns: minmax(0, 1fr); gap: var(--ob-stack-gap); }
   /* Six 52px logos cannot sit on one 350px row, so the row folds into two of three —
      the reference's own mobile arrangement — and gives up the fixed 560 span with it. */
   .onboarding-access-grid { width: min(300px, 100%); grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 12px; }
@@ -1382,6 +1467,11 @@
   .onboarding-screens > [data-setup-screen-root][hidden] { display: block !important; }
 }
 .onboarding-screens > [data-setup-screen-root][hidden] { visibility: hidden; pointer-events: none; }
+/* A screen nobody is reading draws nothing, so nothing in it plays either — a pending
+   read's pulse included. It resumes with the screen. */
+.onboarding-screens > [data-setup-screen-root][hidden] *,
+.onboarding-screens > [data-setup-screen-root][hidden] *::before,
+.onboarding-screens > [data-setup-screen-root][hidden] *::after { animation-play-state: paused !important; }
 .onboarding-screens [hidden]:not([data-setup-screen-root]), .onboarding-access[hidden] { display: none !important; }
 .onboarding-handoff-layer { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
 .onboarding-handoff-layer * { animation-play-state: paused !important; }
@@ -1438,6 +1528,23 @@
 }
 @media (max-width: 759px) {
   .onboarding-step[data-setup-screen="assistants"] { --ob-aside-max: 48px; }
+}
+/* The built-in card offering its models is taller than any card the band above was
+   measured for, and it reaches into it. While it does, the aside hangs under the pair
+   instead — out of flow, so the action stays where every screen puts it and nothing
+   it says is drawn over a card. Picking a model closes the offer, and the aside goes
+   back to its band. */
+/* Positioned from the cell it lives in: the pair under the cell is two action rows
+   and the footer's 10 between them. */
+.onboarding-step[data-setup-screen="assistants"]:has(.onboarding-model-offer) > .onboarding-screens > .onboarding-action-aside:not(:empty) {
+  position: absolute;
+  top: calc(100% + var(--ob-action-h) * 2 + 10px + 16px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  min-height: 0;
+  max-height: none;
+  overflow: visible;
 }
 .onboarding-setup-hint { width: 100%; text-align: center; }
 /* Sentence centred on the action's axis, rescan beside it: equal flanking columns put

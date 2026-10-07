@@ -3,13 +3,15 @@ import type { BackendConnectionState, VibeAgentBrief } from '../../context/ApiCo
 import { CONTRACT_VERSION, type AgentSupply, type RuntimeDependency } from '../settings/models/types';
 import {
   admitEntry,
+  chooseEntryDefault,
   configuredCliPath,
   entryCandidates,
   readEntryEvidence,
   type EntryEvidence,
   type EntryGateDeps,
 } from './entryGate';
-import type { AssistantId } from './collaborationTimeline';
+import type { AgentBackendId } from '@/lib/agentBackends';
+import { SETUP_LINEUP } from './collaborationTimeline';
 
 const RUNTIME_OK: RuntimeDependency = {
   contract_version: CONTRACT_VERSION,
@@ -30,7 +32,7 @@ const claudeSupply = (overrides: Partial<AgentSupply> = {}): AgentSupply => ({
 });
 
 const connection = (
-  backend: AssistantId,
+  backend: AgentBackendId,
   overrides: Partial<BackendConnectionState> = {},
 ): BackendConnectionState => ({
   ok: true, backend, enabled: true, installed: true, auth: 'none', ready: false,
@@ -76,7 +78,7 @@ describe('B2 stopped recovery independent of IPC', () => {
     expect(read).not.toBeNull();
     expect(read!.suppliesRead).toBe(false);
     expect(read!.runtime).toBeNull();
-    expect(read!.connections).toHaveLength(3);
+    expect(read!.connections).toHaveLength(SETUP_LINEUP.length);
     expect(admitEntry(read!)).toMatchObject({ kind: 'refused', startable: true });
     expect(entryCandidates(read!)).toEqual([]);
   });
@@ -173,5 +175,75 @@ describe('C4 configured-path CLI evidence', () => {
       detectCli: vi.fn(async () => ({ found: true, path: '/opt/custom/claude' })),
     });
     expect(await readEntryEvidence(gate, { config: { agents: { claude: { cli_path: '/opt/custom/claude' } } } })).toBeNull();
+  });
+});
+
+describe('D3 a built-in assistant completes setup on its own', () => {
+  const VIBEY: VibeAgentBrief = { ...CLAUDE, id: 'vb-1', name: 'vibey', backend: 'vibey', display_name: 'vibey' };
+  const vibeySupply = (overrides: Partial<AgentSupply> = {}): AgentSupply => ({
+    backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed',
+    named_agents: [{ name: 'vibey', effective_model_id: 'gpt-5.6-sol', supply_status: 'ok' }],
+    ...overrides,
+  });
+  const applied = (backend: AgentBackendId) => connection(backend, { ready: true, entry_eligible: true, application: 'applied' });
+  const vibeyOnly = (overrides: Partial<EntryEvidence> = {}) => evidence({
+    agents: [CLAUDE, VIBEY],
+    connections: [applied('vibey')],
+    supplies: [vibeySupply()],
+    cliFound: { claude: false, codex: false, opencode: false },
+    ...overrides,
+  });
+
+  it('admits the built-in Agent with no CLI on disk', () => {
+    expect(entryCandidates(vibeyOnly())).toEqual([{ agent: VIBEY, backend: 'vibey', modelId: 'gpt-5.6-sol' }]);
+    expect(admitEntry(vibeyOnly())).toMatchObject({ kind: 'admitted' });
+  });
+
+  it('still needs its applied connection and a runnable route', () => {
+    expect(entryCandidates(vibeyOnly({ connections: [connection('vibey', { ready: false, entry_eligible: true, application: 'applied' })] }))).toEqual([]);
+    expect(entryCandidates(vibeyOnly({ supplies: [vibeySupply({ named_agents: [{ name: 'vibey', effective_model_id: null, supply_status: null }] })] }))).toEqual([]);
+    expect(entryCandidates(vibeyOnly({ supplies: [vibeySupply({ named_agents: [{ name: 'vibey', effective_model_id: 'gpt-5.6-sol', supply_status: 'interrupted' }] })] }))).toEqual([]);
+  });
+
+  it('reads the built-in connection with the others and detects only CLIs', async () => {
+    const getBackendConnection = vi.fn(async (backend: AgentBackendId) => applied(backend));
+    const detectCli = vi.fn(async (binary: string) => ({ found: true, path: binary }));
+    await readEntryEvidence(deps({ getBackendConnection, detectCli }));
+    expect(getBackendConnection.mock.calls.map(([backend]) => backend).sort()).toEqual([...SETUP_LINEUP].sort());
+    expect(detectCli.mock.calls.map(([binary]) => binary)).not.toContain('vibey');
+  });
+
+  it('ranks the built-in assistant last, so a runnable CLI assistant stays the default', () => {
+    const both = evidence({
+      agents: [CLAUDE, VIBEY],
+      connections: [applied('claude'), applied('vibey')],
+      supplies: [claudeSupply(), vibeySupply()],
+      targets: [VIBEY, CLAUDE],
+    });
+    expect(entryCandidates(both).map((candidate) => candidate.backend)).toEqual(['claude', 'vibey']);
+    expect(chooseEntryDefault(entryCandidates(both), both)?.agent.name).toBe('claude-agent');
+    const alone = vibeyOnly({ targets: [VIBEY], defaultAgentName: 'claude-agent' });
+    expect(chooseEntryDefault(entryCandidates(alone), alone)?.agent.name).toBe('vibey');
+  });
+
+  it('prefers a runnable custom CLI Agent over the built-in one, whose own Agent is a target', () => {
+    // Claude Code's own Agent cannot run; a custom Agent on it can, and so can Vibey's own.
+    const custom = evidence({
+      agents: [CLAUDE, VIBEY],
+      connections: [applied('claude'), applied('vibey')],
+      supplies: [claudeSupply(), vibeySupply()],
+      targets: [VIBEY, { ...CLAUDE, name: 'claude' }],
+    });
+    expect(chooseEntryDefault(entryCandidates(custom), custom)?.agent.name).toBe('claude-agent');
+  });
+
+  it('keeps a saved built-in default that can run', () => {
+    const saved = evidence({
+      agents: [CLAUDE, VIBEY],
+      connections: [applied('claude'), applied('vibey')],
+      supplies: [claudeSupply(), vibeySupply()],
+      defaultAgentName: 'vibey',
+    });
+    expect(chooseEntryDefault(entryCandidates(saved), saved)).toBeNull();
   });
 });

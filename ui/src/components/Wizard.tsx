@@ -1,6 +1,6 @@
 import { desktopDragRegion } from '../lib/desktopShell';
 import { DesktopDragRegion } from './DesktopDragRegion';
-import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type Ref } from 'react';
+import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type Ref } from 'react';
 import { ArrowLeft, ArrowRight, LoaderCircle, RefreshCw } from 'lucide-react';
 import { Button } from './ui/button';
 import { AccessTiles } from './onboarding/AccessTiles';
@@ -30,7 +30,7 @@ import { LanguageSwitcher } from './LanguageSwitcher';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { setConfigField } from '../lib/configMutations';
-import { ASSISTANT_ORDER } from './onboarding/collaborationTimeline';
+import { ASSISTANT_ORDER, SETUP_LINEUP } from './onboarding/collaborationTimeline';
 import { createAgentCollectionReadAuthority } from './settings/models/collectionReadAuthority';
 import { admitEntry, chooseEntryDefault, readEntryEvidence, type EntryGateDeps, type EntryRefusal } from './onboarding/entryGate';
 
@@ -548,7 +548,10 @@ export function Wizard() {
       navigate('/', { state: { onboardingCompleted: true } });
     } finally { completing.current = false; }
   };
-  return <div className="onboarding-shell">
+  // The stylesheet's stacked and folded reservations count the cards; the lineup is
+  // the one place that count lives.
+  return <div className="onboarding-shell"
+    style={{ '--ob-cards': SETUP_LINEUP.length, '--ob-fold-rows': Math.ceil(SETUP_LINEUP.length / 2) } as CSSProperties}>
     <SetupHeader />
     <main className="onboarding-shell-content">
       <SetupFlowShell sequence={SETUP_REGISTERED_SCREENS} capability={capability} gatewayEnabled={gatewayEnabled}

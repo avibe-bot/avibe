@@ -10,7 +10,7 @@ import { useRef, useState, type ComponentProps } from 'react';
 import { useTranslation } from 'react-i18next';
 import { SETUP_SCREENS, type SetupAction, type SetupScreenHandle } from './setupFlow';
 import { SETUP_REGISTERED_SCREENS } from './setupScreenRegistry';
-import { ASSISTANT_ORDER } from './collaborationTimeline';
+import { ASSISTANT_ORDER, SETUP_LINEUP } from './collaborationTimeline';
 import { RouteSurfaceActiveContext } from '@/lib/routeSurfaceActivity';
 import { CollaborationStory } from './CollaborationStory';
 import { AccessTiles } from './AccessTiles';
@@ -238,7 +238,7 @@ describe('collaboration lifecycle and access interaction', () => {
   it('shows completed work and stops all timers for reduced motion', () => {
     vi.useFakeTimers(); mocks.reduced = true;
     const { container } = render(wrap(<Intro onNext={vi.fn()} />));
-    expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(3);
+    expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(SETUP_LINEUP.length);
     expect(screen.queryByTestId('handoff-pulse')).toBeNull();
     // Get started is the only button on the screen.
     expect(screen.getAllByRole('button').map((node) => node.textContent?.trim())).toEqual(['Get started']);

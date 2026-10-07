@@ -1094,6 +1094,9 @@
         "picker": {
           "title": "添加 {{backend}} 模型",
           "description": "挑选要加入这个后端模型列表的模型。",
+          "chooseTitle": "选择 {{backend}} 的模型",
+          "chooseDescription": "选择要使用的模型。",
+          "use": "使用此模型",
           "search": "搜索模型或供应商",
           "groupBuiltin": "{{backend}} 内置",
           "groupProviders": "来自你的供应商",
@@ -5194,30 +5197,38 @@
     "welcome": {
       "getStarted": "立即开始",
       "title": "各有所长，接力完成",
-      "subtitle": "让 Claude Code、Codex、OpenCode 一起工作",
+      "subtitle": "由 Vibey 统筹，Claude Code、Codex、OpenCode 接力完成",
       "detecting": "检测中…",
       "detectionFailed": "未能检测助手，请重试"
     },
     "details": "查看详情",
     "story": {
       "label": "助手接力协作",
-      "description": "Claude Code 规划任务，Codex 编写代码，OpenCode 执行测试，最后由 Claude Code 汇总交付",
-      "caption": "规划 · 开发 · 测试 · 交付",
-      "returnCaption": "测试通过，回传 PM",
-      "claude": {
-        "role": "PM",
-        "working": "编写需求文档",
-        "complete": "需求文档已就绪",
-        "summary": "汇总结果，完成交付"
+      "description": "Vibey 规划任务，并通过 Harness 把各部分交给其他助手：Claude Code 编写代码，Codex 评审改动，OpenCode 执行测试，最后由 Vibey 汇总交付",
+      "caption": "规划 · 开发 · 评审 · 测试 · 交付",
+      "returnCaption": "测试通过，回传 Vibey",
+      "summary": "汇总结果，完成交付",
+      "vibey": {
+        "role": "统筹",
+        "working": "规划任务",
+        "complete": "已分派 {{count}} 项任务"
       },
-      "codex": {
+      "claude": {
         "role": "开发",
+        "step": "开发",
         "working": "编写功能代码",
         "complete": "功能代码已就绪"
       },
+      "codex": {
+        "role": "评审",
+        "step": "评审",
+        "working": "评审代码改动",
+        "complete": "评审通过"
+      },
       "opencode": {
         "role": "测试",
-        "working": "编写并执行用例",
+        "step": "测试",
+        "working": "执行测试用例",
         "complete": "测试全部通过"
       }
     },
@@ -5263,7 +5274,17 @@
       "defaultModelWithBackups_other": "默认模型 · 另有 {{count}} 个备选",
       "noteNoModels": "还没有可用的模型",
       "ownershipChanged": "连接状态已变化，请刷新后继续",
-      "noteModelUnset": "尚未设置模型，可稍后在模型网关中设置"
+      "noteModelUnset": "尚未设置模型，可稍后在模型网关中设置",
+      "builtinAlwaysOn": "内置 · 始终开启",
+      "noteBuiltinUnset": "还没有模型，选一个即可开始",
+      "noteGatewayOff": "模型网关已关闭，{{name}} 需要它才能运行",
+      "noteHubDisabled": "本实例已停用模型网关，{{name}} 需要它才能运行",
+      "pickModelNamed": "为 {{name}} 选择模型",
+      "allModels": "全部模型…",
+      "modelsUnreadable": "未能读取模型",
+      "noModelsToPick": "还没有供应商提供模型",
+      "suppliersChanged": "该模型的供应商已变化，请重新选择",
+      "modelPickFailed": "未能保存模型，请重试"
     },
     "connection": {
       "method": "连接方式",
@@ -5345,7 +5366,9 @@
       "modelUnavailable": "还没有助手能用上模型，请检查连接后重试",
       "credentialType": "凭据类型",
       "apiKeyLabel": "API Key",
-      "authTokenLabel": "Auth Token"
+      "authTokenLabel": "Auth Token",
+      "builtinModelHint": "为 {{name}} 选择模型或启用一个助手，即可进入工作台",
+      "builtinChoiceHint": "完成 {{name}} 的模型选择后即可进入工作台"
     },
     "brand": {
       "name": "Avibe",

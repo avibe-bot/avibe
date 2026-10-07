@@ -472,4 +472,21 @@ scenarios:
       - ui/src/components/onboarding/WizardCompletion.test.tsx
       - ui/src/components/onboarding/AssistantSetup.test.tsx
       - ui/e2e/onboarding-fidelity/provider-gate.spec.ts
+  - id: AUTH-SETUP-127
+    name: Built-in Vibey takes its first model in setup and completes setup without a CLI
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: vibey
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_builtin_vibey_model_pick_completes_setup_without_a_cli
+    # The scenario owns the server boundary the setup card calls: the candidates read, the
+    # catalog write that refuses a moved supplier projection and commits nothing, the
+    # built-in Agent's model, the runnable named route, the default and completion. The
+    # browser side — which candidates the card offers, the order of the two writes, and
+    # the entry gate ranking the built-in backend after any runnable CLI assistant — is
+    # the supporting tests below, against controlled responses.
+    supporting_tests:
+      - ui/src/components/onboarding/BuiltinAssistant.test.tsx
+      - ui/src/components/onboarding/entryGate.test.ts
+      - ui/e2e/onboarding-fidelity/lineup.spec.ts
 next_priority: []

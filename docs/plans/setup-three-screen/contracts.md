@@ -234,6 +234,20 @@ literal colors anywhere: values come from the `index.css` token scale or from `-
 `var(--ob-active-shadow)`, already backed by `--shadow-glow-onboarding-mint`; its theme-specific
 values stay in the shared tokens. Hover has no translate or scale.
 
+**Lineup.** The story cards, the provider destinations and the assistant cards are one
+row of the setup lineup (`SETUP_LINEUP`): the built-in backend first, then the CLI
+assistants in C6 order. Each takes one equal track `--ob-track-gap` (24 of 1040) apart in a
+`clamp(1040px, 62.5vw, 1200px)` column, so the count comes from the markup and the story's
+wires are drawn in the same 1040 space. Below 1024 the story and the assistants fold into
+two columns without wires; below 760 they stack. The intro card states its role under the
+name, inside the same `--ob-card-h` box as the assistant card, so both steps keep one card
+box. The built-in card on screen 3 may grow to offer models while the others keep
+`--ob-card-h`, top-aligned. Every band's stage floor reserves that card at its worst
+reading (`--ob-offer-h`), so opening the offer cannot move the action; while it is open,
+the shell's aside hangs under the action pair instead of resting on the band the card
+reaches into. The action and the gateway card are
+299 of 1040, centred.
+
 **Motion bail-out.** Under `prefers-reduced-motion`, a hidden page, or an explicit pause the
 handoff is skipped and the screen changes instantly; on phones the view scrolls to top
 before the change. The primary action stays disabled and unmoved for the whole transition.
@@ -256,7 +270,7 @@ and Agent name** to backend connection/CLI reads and `AgentSupply.named_agents`.
 
 | Condition for the same candidate | Authoritative read / rule |
 | --- | --- |
-| installed and backend enabled | `api.detectCli(cli_path)`, freshly corroborated `AgentSupply.cli_present` through `createAgentCollectionReadAuthority.refresh()` and `getBackendConnection(backend).enabled`; stale/failed refresh or read cannot prove readiness |
+| installed and backend enabled | `api.detectCli(cli_path)`, freshly corroborated `AgentSupply.cli_present` through `createAgentCollectionReadAuthority.refresh()` and `getBackendConnection(backend).enabled`; stale/failed refresh or read cannot prove readiness. A built-in backend has no CLI: for it this row is `getBackendConnection(backend).enabled` and a current supply row alone (D3) |
 | Hub runtime running | `getRuntimeStatus()` with health `ok` or `degraded`; mode alone is not runtime readiness |
 | model and route runnable | backend mode `hub`; that candidate's `named_agents` row has nonempty `effective_model_id`, `supply_status` in `ok` / `degraded`, and no `route_unconfigured` reason. `waiting`, `interrupted`, null or absent rows do not pass |
 | application and custody | `getBackendConnection.ready === true` (including permission and matching credential ownership) and `application === 'applied'` are required alongside this candidate's route. Confirmed `stopped` permits bootstrap/recovery, never workspace readiness; draining/failed/unknown cannot enable entry |
@@ -289,23 +303,47 @@ ensure/start. Startup
 has no assistant/source readiness prerequisite. Do not restart after an enable/config write.
 
 Preserve `default_agent_name` if it remains in the available set, including a usable custom
-Agent outside the cards' designated builtin Agents. Otherwise prefer a runnable designated
-builtin Agent in card order, then an available named Agent in stable backend/name order; call
-`setDefaultVibeAgent` and verify a fresh Agent read. Write `setup_completed` last through
+Agent outside the cards' designated builtin Agents. Otherwise take the first rank that can run —
+the CLI assistants before a built-in backend, the server's `implicit_default_rank` — and
+within it prefer a runnable designated builtin Agent in card order, then an available named
+Agent in stable backend/name order. The built-in assistant therefore becomes the default
+only when no CLI assistant's Agent, its own or a custom one, can run (D3). Call `setDefaultVibeAgent` and verify a fresh Agent read. Write `setup_completed` last through
 `api.mutateConfig` with an explicit field mutation, then validate a fresh uncached
 `apiFetch('/api/config', {cache:'no-store'})` readback before navigating. Use that same
 read/parse path after an unknown/failed write; cached pre-write data cannot settle it.
 Unknown writes are reconciled by reads, not treated as success or blindly retried. Existing
 invalid IM configuration remains saved for later repair in Settings and does not gate Model
 Hub setup completion. `SetupModelRecovery` is the shipped **Direct OpenCode**
-recovery; it does not repair Hub models. A missing Hub Agent model is repaired in existing
-Agent/Model Hub settings, not chosen or written by Setup.
+recovery; it does not repair Hub models. A missing Hub Agent model on a CLI assistant is
+repaired in existing Agent/Model Hub settings, not chosen or written by Setup. The built-in
+backend's own Agent is the exception (owner override, 2026-10-07): Setup offers the models it
+can run on and writes the pick, because that assistant has no other setup path and Setup may
+finish on it alone. See **Owner override — the built-in assistant (D3)** below.
 
 The new Hub route predicate replaces credential readiness / `entry_eligible` as the *route*
 criterion, not the confirmed application-state or backend permission guard. Today's `Wizard.complete()` only
 filters OpenCode routes; the all-backend named-Agent join is new L3 orchestration, not a
 helper that already exists. Cards with a confirmed Hub model can edit its route even when
 the chain is empty; cards without a model show a hint instead of creating a route target.
+
+**Owner override — the built-in assistant (D3), 2026-10-07.** The built-in backend (Vibey)
+is one of the setup cards and can complete setup alone. It is usable with an applied
+connection and a runnable route; no CLI is detected, installed or enabled for it, and it has
+no switch because it is always on. Its gate row is the table above with the CLI conditions
+removed. When its designated builtin Agent has no model, its card reads
+`GET /api/models/agents/{backend}/models/candidates` and offers the supplied candidates
+inline, with the existing `BackendModelPickerDialog` in its single-choice mode for the rest. A pick that is not in the
+backend's catalog yet is added through `PUT /api/models/agents/{backend}/models` with the
+`expected_suppliers` the card displayed (a `candidate_suppliers_changed` refusal re-reads
+and asks again), and then becomes the Agent's `model` through `PATCH /api/agents/{name}`.
+The server's own reconciliation fills an Agent that has no model with the list's first row,
+so a failure between the two writes can leave the Agent on a model nobody chose. The choice
+is therefore settled by an uncached read of the Agent, not by the writes' answers: until
+that read shows the chosen model with an effort it takes, and the reads the choice sets off
+have settled, the card keeps the offer open with Retry and the screen
+holds the whole entry on it, even when a CLI assistant is ready. One hook (`useBuiltinModelChoice`) owns the offer's read, its freshness
+per screen showing, the conflict re-read and this write. Nothing else about another
+backend's route or Agent changes.
 
 **Known by design — setup requires Model Hub.** Owner decision, 2026-09-21 12:56 +08:
 “setup的契约是默认使用模型网关”; users who later need to disable it do so in Settings.
@@ -603,10 +641,11 @@ the default journey. Read failures authorize neither lifecycle writes nor comple
 | install | explicit `api.installAgent(name)` then detect the returned/configured path and await the collection authority refresh/current result. Path/agent-config changes have the same refresh requirement. Pending/stale/failed refresh holds completion and exposes Retry; retain install output and one loading indicator |
 | enabled | existing Switch config write, followed by `getBackendConnection` and Agent reads. Saved config reconciles live backends; no second restart |
 | upgrade | `BackendLifecycleChip.onVisual` still owns probe/write, activity-gated; update coexists with enabled state |
-| route control | Confirmed Hub cards with a designated builtin Agent model show that model's first chain hop and backup count. Enabled cards open `RouteChainDialog` for only `(backend, menu model)`; disabled cards preview the same route but cannot edit it. A current successful route read is required to open the editor; pending or failed reads do not infer an empty model or authorize editing. Route-read failure has its own Retry. A Hub card with no model shows a hint to repair it later in Agent/Model Hub settings; Setup does not choose or write an Agent model. Direct cards retain native connection actions, but Direct cannot satisfy setup completion. Unknown or conflicting Hub/Direct ownership disables configuration until a fresh read. A disabled Hub configuration retains C2 recovery, never a Direct setup-completion bypass |
+| route control | Confirmed Hub cards with a designated builtin Agent model show that model's first chain hop and backup count. Enabled cards open `RouteChainDialog` for only `(backend, menu model)`; disabled cards preview the same route but cannot edit it. A current successful route read is required to open the editor; pending or failed reads do not infer an empty model or authorize editing. Route-read failure has its own Retry. A CLI assistant's Hub card with no model shows a hint to repair it later in Agent/Model Hub settings; Setup does not choose or write that Agent's model. The built-in card is the D3 exception (C4). Direct cards retain native connection actions, but Direct cannot satisfy setup completion. Unknown or conflicting Hub/Direct ownership disables configuration until a fresh read. A disabled Hub configuration retains C2 recovery, never a Direct setup-completion bypass |
 | candidate identity | for each backend, read its current designated builtin Agent, including disabled Agents, and use its saved menu model; custom Agents or the global default do not substitute as that card's route target. C4 may preserve a runnable custom default independently |
 | route close | close/commit refreshes the card's server-backed route and connection; `RouteChainDialog` owns the edit draft and save lifecycle, not `SetupFlowState` |
-| all uninstalled | three install actions, workspace entry disabled, Back still available |
+| built-in card | first in the lineup, no switch and no lifecycle: an always-on badge, its route as above once its Agent has a model, otherwise the inline model offer of C4's D3 override. A Hub supply block (`agent_supply_blocks`: gateway off, Hub disabled) is stated on the card and holds its model row still; the shell keeps its own gateway alert and Retry |
+| all uninstalled | one install action per CLI assistant, Back still available; workspace entry stays disabled unless the built-in card is ready |
 
 ### Per-assistant Model Hub route mapping
 
@@ -614,7 +653,7 @@ Each card reads its designated builtin Agent's saved menu model, including when 
 is disabled, and the matching chain from `GET /api/models/agents/{backend}/chains`. Read
 the backend supply and sources once per refresh, not once per card. The card displays that
 chain's actual first upstream model (display name when available, otherwise ID) and the
-remaining hop count. The three cards may legitimately show different routes. A route on
+remaining hop count. The cards may legitimately show different routes. A route on
 another menu model, another backend, or an unrelated custom Agent is not substituted.
 
 Only a current, successful read for the active screen may supply an editor selection. A
@@ -624,8 +663,9 @@ route inventory. A confirmed Hub card with a saved menu model opens the existing
 `RouteChainDialog` for exactly that `(backend, menu model)`, including when its chain is
 empty. The dialog owns its own draft, preview, save guards, unknown-write reconciliation
 and readback; Setup refreshes the card after commit or close. It does not write other
-backends' chains. If the Agent has no model, Setup shows a hint and leaves model selection
-and catalog repair to existing Agent/Model Hub settings.
+backends' chains. If a CLI assistant's Agent has no model, Setup shows a hint and leaves model
+selection and catalog repair to existing Agent/Model Hub settings; the built-in Agent is the
+D3 exception in C4.
 
 Installing or enabling an assistant never adopts another assistant's route or changes its
 Agent model. An install offers automatic enablement only when the click-time action promised

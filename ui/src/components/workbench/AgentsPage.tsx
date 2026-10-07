@@ -51,7 +51,7 @@ import { onPageReactivated } from '../../lib/pageActivity';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
 import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
-import { resolveEffortOptions } from '../../lib/effortOptions';
+import { compatibleEffort, resolveEffortOptions } from '../../lib/effortOptions';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
 // Backend order / labels / accent classes live in lib/backendAccent, shared
@@ -2444,10 +2444,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
               // keeps an effort the model can't run (Codex P2).
               const opts = resolveEffortOptions(agent.backend, value, reasoningOptions);
               if (effort && !opts.includes(effort)) {
-                // No valid option is itself a valid answer: a model whose catalog
-                // row states no efforts must clear the field, not keep the old
-                // value because there was nothing to replace it with.
-                const fallback = opts.includes('medium') ? 'medium' : opts[0] ?? null;
+                const fallback = compatibleEffort(effort, opts);
                 markFieldEdit('effort');
                 markFieldSubmitted('effort');
                 setEffort(fallback);

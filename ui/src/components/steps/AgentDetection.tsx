@@ -16,7 +16,9 @@ import { useToast } from '../../context/ToastContext';
 import { BackendIcon } from '../visual';
 import { InstallOutcome, type InstallOutcomeResult } from '../shared/InstallOutcome';
 import { AssistantRow } from '../onboarding/AssistantRow';
-import { ASSISTANT_ORDER } from '../onboarding/collaborationTimeline';
+import { BuiltinAssistantRow } from '../onboarding/BuiltinAssistantRow';
+import { useBuiltinModelChoice } from '../onboarding/useBuiltinModelChoice';
+import { ASSISTANT_ORDER, SETUP_LINEUP } from '../onboarding/collaborationTimeline';
 import '../onboarding/onboarding.css';
 import type { BackendId } from '../visual';
 import { BackendLifecycleChip, type BackendLifecycleVisual } from '../settings/BackendLifecycleChip';
@@ -25,9 +27,11 @@ import { BackendConnectionDialog } from '../onboarding/BackendConnectionDialog';
 import type { BackendConnectionState } from '@/context/ApiContext';
 import { setConfigField } from '@/lib/configMutations';
 import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSetup';
-import { modelHubEnabledFromConfig } from '../settings/models/featureFlags';
+import { hubSupplyBlocks, modelHubEnabledFromConfig } from '../settings/models/featureFlags';
 import type { SetupAction, SetupFlowState, SetupScreenHandle, SetupScreenId } from '../onboarding/setupFlow';
-import type { NativeCliBackend as RuntimeBackendId } from '@/lib/agentBackends';
+import {
+  BUILTIN_BACKENDS, isBuiltinBackend, isNativeCliBackend, type AgentBackendId, type BuiltinBackend, type NativeCliBackend as RuntimeBackendId,
+} from '@/lib/agentBackends';
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
 import { Button } from '../ui/button';
 import { DEFAULT_NATIVE_AGENT_STATE, NATIVE_CLI_BACKENDS, getBackendUiMeta } from '@/lib/agentBackends';
@@ -35,7 +39,10 @@ import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
 import { RouteChainDialog, type RouteChainSelection } from '../settings/models/RouteChainDialog';
 import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
-import type { AgentChain, AgentSupply, Source } from '../settings/models/types';
+import type { AgentChain, AgentSupply, ModelCandidate, Source } from '../settings/models/types';
+import { BackendModelPickerDialog } from '../settings/models/BackendModelPickerDialog';
+import { chosenCandidate } from '../settings/models/backendCatalog';
+import { routeRunnable } from '../onboarding/entryGate';
 import type { AssistantRouteView } from '../onboarding/AssistantRow';
 import { isBuiltinAgent } from '../onboarding/setupTargets';
 import { readyRegion } from '../settings/models/regionRead';
@@ -63,9 +70,10 @@ type AgentState = {
   status?: 'unknown' | 'ok' | 'missing';
 };
 
-type NativeRouteChainSelection = RouteChainSelection & {
-  agent: AgentSupply & { backend: RuntimeBackendId };
-};
+/** Choosing a built-in assistant's model, a model its list already holds is as much a
+ *  choice as one it does not: the pick only adds what is missing. So the picker is
+ *  told nothing is listed, and every supplied model stays selectable. */
+const NOTHING_LISTED: ReadonlySet<string> = new Set();
 
 /**
  * The verdict of the latest settled enable write, and the intent that earned it.
@@ -141,7 +149,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     setInstallResults((prev) => (prev[name] ? { ...prev, [name]: undefined } : prev));
   // Which backend's "Configure provider" modal is open (wizard mode only).
   const [providerModal, setProviderModal] = useState<{ backend: RuntimeBackendId; method: 'oauth' | 'api_key' } | null>(null);
-  const [routeSelection, setRouteSelection] = useState<NativeRouteChainSelection | null>(null);
+  const [routeSelection, setRouteSelection] = useState<RouteChainSelection | null>(null);
   const committedRouteRefresh = useRef(false);
   const canEditSetupRoute = Boolean(onNavigate && agentReads);
   const [routeRead, setRouteRead] = useState<{
@@ -149,12 +157,14 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     failed: boolean;
     confirmed: { epoch: number; token: number } | null;
     failure: { epoch: number; token: number } | null;
-    chains: Partial<Record<RuntimeBackendId, AgentChain | null>>;
-    models: Partial<Record<RuntimeBackendId, string | null>>;
-    backendReads: Partial<Record<RuntimeBackendId, 'ready' | 'failed'>>;
+    chains: Partial<Record<AgentBackendId, AgentChain | null>>;
+    models: Partial<Record<AgentBackendId, string | null>>;
+    /** The card's own Agent, by name, where the store has one. */
+    targets: Partial<Record<AgentBackendId, string | null>>;
+    backendReads: Partial<Record<AgentBackendId, 'ready' | 'failed'>>;
     sources: Source[];
     supplies: AgentSupply[];
-  }>({ done: false, failed: false, confirmed: null, failure: null, chains: {}, models: {}, backendReads: {}, sources: [], supplies: [] });
+  }>({ done: false, failed: false, confirmed: null, failure: null, chains: {}, models: {}, targets: {}, backendReads: {}, sources: [], supplies: [] });
   const routeReadToken = useRef(0);
   const sharedRouteReady = () => active && activeRef.current && routeRead.done && !routeRead.failed
     && routeRead.confirmed?.epoch === activation.current
@@ -162,11 +172,20 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const sharedRouteFailed = () => active && activeRef.current && routeRead.failed
     && routeRead.failure?.epoch === activation.current
     && routeRead.failure?.token === routeReadToken.current;
-  const routeTargetReady = (backend: RuntimeBackendId) => sharedRouteReady() && routeRead.backendReads[backend] === 'ready';
-  const routeFailureCurrent = (backend: RuntimeBackendId) => active && activeRef.current && (
+  const routeTargetReady = (backend: AgentBackendId) => sharedRouteReady() && routeRead.backendReads[backend] === 'ready';
+  const routeFailureCurrent = (backend: AgentBackendId) => active && activeRef.current && (
     sharedRouteFailed()
     || (sharedRouteReady() && routeRead.backendReads[backend] === 'failed'));
-  const readCardRoutes = useCallback(async (target?: RuntimeBackendId) => {
+  // The built-in card's model choice — its candidates, the write and both ways they go
+  // stale or half-done — has one owner; see `useBuiltinModelChoice`.
+  const choice = useBuiltinModelChoice({
+    api, models: modelsApi, agentReads,
+    epoch: () => activation.current,
+    target: (backend) => routeRead.targets[backend],
+    onSettled: (backend) => refreshRouteOwnership(backend),
+  });
+  const readOffer = choice.read;
+  const readCardRoutes = useCallback(async (target?: AgentBackendId) => {
     if (!agentReads) return false;
     const token = ++routeReadToken.current;
     const epoch = activation.current;
@@ -181,8 +200,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       const supplies = supplyRead.value;
       if (token !== routeReadToken.current || epoch !== activation.current) return false;
       setRouteRead({ done: true, failed: false, confirmed: { epoch, token }, failure: null,
-        chains: {}, models: {}, backendReads: {}, sources: listed, supplies });
-      const backendPromises = ASSISTANT_ORDER.map(async (backend) => {
+        chains: {}, models: {}, targets: {}, backendReads: {}, sources: listed, supplies });
+      const backendPromises = SETUP_LINEUP.map(async (backend) => {
         try {
           const candidates = vibeAgents.agents.filter((row) => !row.archived && row.backend === backend)
             .sort((left, right) => {
@@ -212,8 +231,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           setRouteRead((current) => ({ ...current,
             models: { ...current.models, [backend]: model },
             chains: { ...current.chains, [backend]: chain },
+            targets: { ...current.targets, [backend]: selected?.name ?? null },
             backendReads: { ...current.backendReads, [backend]: 'ready' },
           }));
+          if (isBuiltinBackend(backend) && selected && !model) void readOffer(backend);
           return true;
         } catch {
           if (token !== routeReadToken.current || epoch !== activation.current) return false;
@@ -223,14 +244,14 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           return false;
         }
       });
-      return target ? backendPromises[ASSISTANT_ORDER.indexOf(target)]
+      return target ? backendPromises[SETUP_LINEUP.indexOf(target)]
         : Promise.all(backendPromises).then(() => true);
     } catch {
       if (token !== routeReadToken.current || epoch !== activation.current) return false;
       setRouteRead((current) => ({ ...current, done: true, failed: true, confirmed: null, failure: { epoch, token } }));
       return false;
     }
-  }, [agentReads, api]);
+  }, [agentReads, api, readOffer]);
   useEffect(() => {
     if (!active || !modelHubEnabled || !canEditSetupRoute) return;
     void readCardRoutes();
@@ -240,7 +261,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     const model = source?.models?.find((row) => row.id === hop.model_id);
     return model?.display_name?.trim() || hop.model_id;
   };
-  const routeViewFor = (backend: RuntimeBackendId): AssistantRouteView => {
+  const routeViewFor = (backend: AgentBackendId): AssistantRouteView => {
     if (!canEditSetupRoute || !modelHubEnabled) return { kind: 'unavailable' };
     if (!routeTargetReady(backend)) return { kind: routeFailureCurrent(backend) ? 'failed' : 'pending' };
     if (!routeRead.models[backend]) return { kind: 'no-agent-model' };
@@ -252,28 +273,28 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       backups: Math.max(0, (chain?.chain.length ?? 0) - 1),
     };
   };
-  const [connections, setConnections] = useState<Partial<Record<RuntimeBackendId, BackendConnectionState>>>({});
-  const [connectionConfirmed, setConnectionConfirmed] = useState<Partial<Record<RuntimeBackendId, { epoch: number; token: number }>>>({});
-  const [connectionPending, setConnectionPending] = useState<Partial<Record<RuntimeBackendId, boolean>>>({});
-  const [connectionErrors, setConnectionErrors] = useState<Partial<Record<RuntimeBackendId, string>>>({});
-  const [pendingWrites, setPendingWrites] = useState<Partial<Record<RuntimeBackendId, boolean>>>({});
+  const [connections, setConnections] = useState<Partial<Record<AgentBackendId, BackendConnectionState>>>({});
+  const [connectionConfirmed, setConnectionConfirmed] = useState<Partial<Record<AgentBackendId, { epoch: number; token: number }>>>({});
+  const [connectionPending, setConnectionPending] = useState<Partial<Record<AgentBackendId, boolean>>>({});
+  const [connectionErrors, setConnectionErrors] = useState<Partial<Record<AgentBackendId, string>>>({});
+  const [pendingWrites, setPendingWrites] = useState<Partial<Record<AgentBackendId, boolean>>>({});
   const [entering, setEntering] = useState(false);
   const [entryError, setEntryError] = useState('');
-  const connectionTokens = useRef<Partial<Record<RuntimeBackendId, number>>>({});
+  const connectionTokens = useRef<Partial<Record<AgentBackendId, number>>>({});
   const previousRouteSurfaceActive = useRef(routeSurfaceActive);
   const enableQueue = useRef(Promise.resolve());
-  const enableIntent = useRef<Partial<Record<RuntimeBackendId, number>>>({});
-  const pendingEnable = useRef<Partial<Record<RuntimeBackendId, number>>>({});
+  const enableIntent = useRef<Partial<Record<AgentBackendId, number>>>({});
+  const pendingEnable = useRef<Partial<Record<AgentBackendId, number>>>({});
   // What the latest settled write still owes this screen, held until someone who can
   // answer for it reports it — see EnableReceipt.
-  const enableReceipt = useRef<Partial<Record<RuntimeBackendId, EnableReceipt>>>({});
-  const confirmedConnectionMode = (backend: RuntimeBackendId) => {
+  const enableReceipt = useRef<Partial<Record<AgentBackendId, EnableReceipt>>>({});
+  const confirmedConnectionMode = (backend: AgentBackendId) => {
     const confirmed = connectionConfirmed[backend];
     if (!active || !activeRef.current || connections[backend]?.ok !== true || connectionPending[backend]
       || confirmed?.epoch !== activation.current || confirmed.token !== connectionTokens.current[backend]) return undefined;
     return connections[backend]?.supply_mode ?? (!modelHubEnabled ? 'direct' : undefined);
   };
-  const confirmedSupplyMode = (backend: RuntimeBackendId) => sharedRouteReady()
+  const confirmedSupplyMode = (backend: AgentBackendId) => sharedRouteReady()
     ? routeRead.supplies.find((row) => row.backend === backend)?.mode
     : undefined;
   const installMode = (backend: RuntimeBackendId) => {
@@ -295,7 +316,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const detectionTokens = useRef<Record<string, number>>({});
   const isMissing = (agent: AgentState) => agent.status === 'missing';
 
-  const refreshConnection = useCallback(async (name: RuntimeBackendId, { acknowledge = false }: ConnectionRefresh = {}) => {
+  const refreshConnection = useCallback(async (name: AgentBackendId, { acknowledge = false }: ConnectionRefresh = {}) => {
     if (!activeRef.current || pendingEnable.current[name] !== undefined) return;
     const epoch = activation.current;
     const intent = enableIntent.current[name];
@@ -317,7 +338,11 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       if (!result.ok) throw new Error(result.message || t('onboarding.connection.readFailed'));
       setConnections((current) => ({ ...current, [name]: result }));
       setConnectionConfirmed((current) => ({ ...current, [name]: { epoch, token } }));
-      setAgents((current) => ({ ...current, [name]: { ...current[name], enabled: result.enabled } }));
+      // Only a CLI assistant is detected, installed and switched; a built-in one is
+      // always on and never enters that state.
+      if (isNativeCliBackend(name)) {
+        setAgents((current) => ({ ...current, [name]: { ...current[name], enabled: result.enabled } }));
+      }
       // Spending the verdict takes all three: this read still owns the screen, the
       // caller is an operation that actually answers for it, and the verdict in hand
       // is the one that was there when the read began. A newer write that landed
@@ -339,7 +364,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       if (connectionTokens.current[name] === token) setConnectionPending((current) => ({ ...current, [name]: false }));
     }
   }, [api, t]);
-  const refreshRouteOwnership = (name: RuntimeBackendId) => Promise.all([
+  const refreshRouteOwnership = (name: AgentBackendId) => Promise.all([
     readCardRoutes(name), refreshConnection(name),
   ]).then(([routeReady]) => routeReady);
   // Being read again is one event with one owner, however it arrives: the shell
@@ -350,13 +375,13 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     const leftSurface = previousRouteSurfaceActive.current && !routeSurfaceActive;
     previousRouteSurfaceActive.current = routeSurfaceActive;
     // Returning also collects what a write settled while there was nobody to tell.
-    if (!isPage && active && !leftSurface) for (const name of ASSISTANT_ORDER) {
+    if (!isPage && active && !leftSurface) for (const name of SETUP_LINEUP) {
       void refreshConnection(name);
     }
     // Leaving drops in-flight READS only. A queued enable intent is a write the person
     // already asked for; invalidating it here would strand `pendingEnable` behind a
     // completion whose intent check can never pass again.
-    return () => { for (const name of ASSISTANT_ORDER) {
+    return () => { for (const name of SETUP_LINEUP) {
       connectionTokens.current[name] = (connectionTokens.current[name] || 0) + 1;
     } };
   }, [refreshConnection, isPage, active, routeSurfaceActive]);
@@ -602,18 +627,48 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     }
   };
 
+  const [pickerFor, setPickerFor] = useState<BuiltinBackend | null>(null);
+  const supplyBlocks = hubSupplyBlocks(data);
+  /** Opens the card's route in the route editor, once the read that names it is current. */
+  const openRoute = (name: AgentBackendId) => {
+    if (!routeTargetReady(name)) return;
+    const supply = routeRead.supplies.find((row) => row.backend === name);
+    const modelId = routeRead.models[name];
+    if (supply?.mode === 'hub' && modelId) {
+      setRouteSelection({ agent: supply, modelId,
+        read: routeRead.chains[name] ? readyRegion(routeRead.chains[name]) : undefined });
+    }
+  };
+  // A built-in backend is ready when the server can route one of its Agents now — the
+  // entry gate's own rule, read from the same named-Agent rows — so the card's Agent
+  // and any other runnable Agent on it are judged alike.
+  const builtinReady = (backend: BuiltinBackend) => {
+    const supply = sharedRouteReady() ? routeRead.supplies.find((row) => row.backend === backend) : undefined;
+    return !!supply?.named_agents?.some((row) => routeRunnable(supply, row.name) !== null)
+      && !supplyBlocks.get(backend) && !choice.holds(backend)
+      && !connectionPending[backend] && !connectionErrors[backend] && !!connections[backend]?.entry_eligible;
+  };
+  const builtinUnset = BUILTIN_BACKENDS.some((backend) => routeViewFor(backend).kind === 'no-agent-model');
+  // A model choice that has not stood holds the whole entry, not only its own backend:
+  // entering on another assistant would leave Vibey on a model nobody chose.
+  const choiceHeld = BUILTIN_BACKENDS.some((backend) => choice.holds(backend));
+
   const opencodeAgent = agents['opencode'];
   const requiresSource = canEditSetupRoute && modelHubEnabled;
   const hasSource = sharedRouteReady() && routeRead.sources.some(usableSource);
   const needsSource = requiresSource && sharedRouteReady() && !hasSource;
   const sourceReadFailed = requiresSource && sharedRouteFailed();
   const sourceReadPending = requiresSource && !sharedRouteReady() && !sourceReadFailed;
-  const readyBackends = ASSISTANT_ORDER.filter((name) => agents[name].enabled && agents[name].status === 'ok'
-    && !installingAgents[name] && !detectingAgents[name] && !connectionPending[name]
-    && !pendingWrites[name] && !refreshingAgents[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
+  const readyBackends: AgentBackendId[] = [
+    ...ASSISTANT_ORDER.filter((name) => agents[name].enabled && agents[name].status === 'ok'
+      && !installingAgents[name] && !detectingAgents[name] && !connectionPending[name]
+      && !pendingWrites[name] && !refreshingAgents[name] && !connectionErrors[name] && connections[name]?.entry_eligible),
+    ...(isPage ? [] : BUILTIN_BACKENDS.filter(builtinReady)),
+  ];
   const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled)
-    : (!requiresSource || hasSource) && readyBackends.length > 0;
-  const actionBusy = syncing || entering || isAnyInstalling || Object.values(pendingWrites).some(Boolean) || Object.values(refreshingAgents).some(Boolean);
+    : (!requiresSource || hasSource) && readyBackends.length > 0 && !choiceHeld;
+  const actionBusy = syncing || entering || isAnyInstalling || BUILTIN_BACKENDS.some((backend) => !!choice.picking(backend))
+    || Object.values(pendingWrites).some(Boolean) || Object.values(refreshingAgents).some(Boolean);
   const primaryPending = useRef(false);
   const handlePrimaryAction = async () => {
     if (!active || !canContinue || actionBusy || primaryPending.current) return;
@@ -677,7 +732,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         <p className="onboarding-setup-hint-line text-muted">
           <span>{t(sourceReadPending ? 'onboarding.providers.actionChecking'
             : sourceReadFailed ? 'onboarding.connection.readFailed'
-              : needsSource ? 'onboarding.connection.sourceRequired' : 'onboarding.connection.entryHint')}</span>
+              : needsSource ? 'onboarding.connection.sourceRequired'
+                : choiceHeld ? 'onboarding.connection.builtinChoiceHint'
+                  : builtinUnset ? 'onboarding.connection.builtinModelHint' : 'onboarding.connection.entryHint',
+          { name: getBackendUiMeta(BUILTIN_BACKENDS[0]).label })}</span>
           {needsSource ? (
             <Button type="button" variant="link" size="xs" className="h-auto p-0"
               disabled={actionBusy} onClick={() => onNavigate?.('providers')}>
@@ -903,13 +961,30 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           coordinates as the intro's — see `.onboarding-stage` in onboarding.css. */}
       <div className="onboarding-stage">
       <div className="onboarding-assistants">
-        {/* No section bar above the cards: the page heading already names the three,
-            and a second title here pushed them below the line the intro left them on.
+        {/* No section bar above the cards: the page heading already names them, and a
+            second title here pushed them below the line the intro left them on.
             Rescanning moved to the footer hint, which is where a person looks once the
             cards have not told them what they expected. */}
-        {/* The intro's three tracks, reused rather than restated — see
-            `.onboarding-assistants-list` in onboarding.css. */}
+        {/* The intro's tracks, reused rather than restated — see
+            `.onboarding-assistants-list` in onboarding.css — in the lineup's order:
+            the built-in assistant first, then the CLI assistants. */}
         <div className="onboarding-assistants-list">
+        {BUILTIN_BACKENDS.map((name) => (
+          <BuiltinAssistantRow key={name} backend={name} route={routeViewFor(name)}
+            block={supplyBlocks.get(name)} offer={choice.offer(name)}
+            picking={choice.picking(name)} failure={choice.failure(name)} onRetryChoice={() => choice.retry(name)}
+            connectionPending={connectionPending[name]}
+            connectionError={connectionErrors[name] || connections[name]?.message}
+            onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
+            routeError={canEditSetupRoute && modelHubEnabled && routeFailureCurrent(name)
+              ? t('settings.models.routeDialog.fail.reconcileRead') : undefined}
+            onRetryRoute={() => void readCardRoutes(name)}
+            configuringDisabled={syncing || !canEditSetupRoute || !routeTargetReady(name)}
+            onConfigure={() => openRoute(name)}
+            onPick={(candidate: ModelCandidate) => void choice.choose(name, chosenCandidate(candidate))}
+            onAllModels={() => setPickerFor(name)}
+            onRetryOffer={() => void readOffer(name)} />
+        ))}
         {ASSISTANT_ORDER.map((name) => {
           const agent = agents[name];
           const result = installResults[name];
@@ -922,24 +997,13 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             : ownershipConflict ? undefined
               : connectionMode ?? supplyMode;
           const hubRoute = mode === 'hub';
-          const openRoute = () => {
-            if (mode !== 'hub' || !routeTargetReady(name)) return;
-            const supply = routeRead.supplies.find(
-              (row): row is NativeRouteChainSelection['agent'] => row.backend === name,
-            );
-            const modelId = routeRead.models[name];
-            if (supply?.mode === 'hub' && modelId) {
-              setRouteSelection({ agent: supply, modelId,
-                read: routeRead.chains[name] ? readyRegion(routeRead.chains[name]) : undefined });
-            }
-          };
           return <AssistantRow key={name} backend={name} status={agent.status || 'unknown'}
             installing={!!installingAgents[name]} detecting={!!detectingAgents[name]} error={error}
             onInstall={() => void installAgent(name, mode === 'hub')} onDetect={() => void detect(name, agent.cli_path)}
             onConfigure={() => {
               if (!mode) return;
               if (hubRoute) {
-                if (canEditSetupRoute) { openRoute(); return; }
+                if (canEditSetupRoute) { openRoute(name); return; }
                 navigate(MODEL_HUB_SETTINGS_PATH);
                 return;
               }
@@ -948,7 +1012,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             onAddKey={() => {
               if (!mode) return;
               if (hubRoute) {
-                if (canEditSetupRoute) { openRoute(); return; }
+                if (canEditSetupRoute) { openRoute(name); return; }
                 navigate(MODEL_HUB_SETTINGS_PATH);
                 return;
               }
@@ -1013,6 +1077,15 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       {!onActionChange && permissionNode}
       </div>
       {providerDialog}
+      {pickerFor && (
+        <BackendModelPickerDialog open backend={pickerFor} listedIds={NOTHING_LISTED} choose="one"
+          onCancel={() => setPickerFor(null)}
+          onAdd={(chosen) => {
+            const backend = pickerFor;
+            setPickerFor(null);
+            if (chosen[0]) void choice.choose(backend, chosen[0]);
+          }} />
+      )}
       {canEditSetupRoute && agentReads && (
         <RouteChainDialog selection={routeSelection} sources={routeRead.sources}
           onClose={() => {
