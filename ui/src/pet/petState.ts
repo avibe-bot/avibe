@@ -71,8 +71,14 @@ export const derivePetState = (inputs: PetStateInputs): PetState => {
  * The rows the panel shows as the latest exchange: the last user message, then
  * every unread agent result (oldest first), or the last agent result when none
  * is unread. `hasOlder` says the server has rows before the loaded tail.
+ * `unreadCount` is the inbox's session count: when it is ahead of the tail,
+ * unread rows may sit past what is loaded even if every loaded result is read.
  */
-export const latestExchange = (messages: WorkbenchMessage[], hasOlder: boolean): {
+export const latestExchange = (
+  messages: WorkbenchMessage[],
+  hasOlder: boolean,
+  unreadCount = 0,
+): {
   user: WorkbenchMessage | null;
   results: WorkbenchMessage[];
   /** False when unread results may reach past the loaded tail, so the pet
@@ -91,10 +97,13 @@ export const latestExchange = (messages: WorkbenchMessage[], hasOlder: boolean):
   const unread = results.filter((message) => message.read_at === null);
   if (unread.length === 0) {
     const last = results[results.length - 1];
-    return { user, results: last ? [last] : [], unreadComplete: true };
+    // Inbox says something is unread, but the tail has no unread result: those
+    // replies sit past the loaded window. A fully-loaded session treats a
+    // leftover count as stale.
+    return { user, results: last ? [last] : [], unreadComplete: unreadCount <= 0 || !hasOlder };
   }
-  // Unread rows are complete when a read result precedes them in the tail, or
-  // when the tail already starts at the first row of the session.
-  const unreadComplete = !hasOlder || results[0].read_at !== null;
+  // Unread rows reach past the tail when the oldest loaded result is itself
+  // unread, or when the inbox count is ahead of the unread results we have.
+  const unreadComplete = !hasOlder || (results[0].read_at !== null && unread.length >= unreadCount);
   return { user, results: unread, unreadComplete };
 };

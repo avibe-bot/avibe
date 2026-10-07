@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { Activity, ArrowUp, ExternalLink, KeyRound, Shuffle } from 'lucide-react';
@@ -26,6 +26,7 @@ import {
   vaultRequestLink,
   type PetIntent,
 } from './petBridge';
+import { petComposer, usePetComposer } from './petComposer';
 import { petPanel, usePetPanel } from './petPanel';
 import { petShell, useOnSummon, usePetBinding } from './petShell';
 import { derivePetState, latestExchange, openQuickReplies } from './petState';
@@ -48,11 +49,6 @@ const sendRefused = (error: unknown) => error instanceof ApiError && REFUSED_SEN
  * setup redirect; see docs/plans/2026-10-01-desktop-pet.md.
  */
 export const PetPage: React.FC = () => {
-  useLayoutEffect(() => {
-    document.documentElement.classList.add('pet-window');
-    return () => document.documentElement.classList.remove('pet-window');
-  }, []);
-
   // Listen to the shell from the first frame, before setup is known.
   usePetBinding();
   const { setup, recheck } = usePetSetup();
@@ -107,30 +103,9 @@ const PetSurface: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const { expanded, layout, setPanel } = usePetPanel();
   const [switcherOpen, setSwitcherOpen] = useState(false);
-  const [draft, setDraft] = useState('');
-  // A draft belongs to the session it was typed for: changing the binding
-  // starts empty, so text meant for A can never be sent to B. Adjusted during
-  // render, React's pattern for state that follows a prop.
-  const [draftFor, setDraftFor] = useState(binding);
-  if (draftFor !== binding) {
-    setDraftFor(binding);
-    setDraft('');
-  }
-  const [sending, setSending] = useState(false);
-  // Sessions whose last send may or may not have been admitted. Resending
-  // could start a second turn, so input stays closed in each of them until the
-  // user has looked at that conversation in Avibe. A ref as well, so a send in
-  // the same tick sees it.
-  const uncertainRef = useRef<ReadonlySet<string>>(new Set());
-  const [uncertainSessions, setUncertainSessions] = useState<ReadonlySet<string>>(() => new Set());
-  const setUncertain = useCallback((sessionId: string, value: boolean) => {
-    const next = new Set(uncertainRef.current);
-    if (value) next.add(sessionId);
-    else next.delete(sessionId);
-    uncertainRef.current = next;
-    setUncertainSessions(next);
-  }, []);
-  const uncertain = Boolean(binding) && uncertainSessions.has(binding ?? '');
+  // Draft, in-flight send and per-session uncertainty live for the document,
+  // so an AuthGuard recheck cannot drop a lock or the text that belongs to it.
+  const { draft, uncertain, sending, setDraft, setUncertain } = usePetComposer(binding);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const data = usePetSession(binding, petShell.unbind);
@@ -199,22 +174,23 @@ const PetSurface: React.FC = () => {
   }, [state, binding]);
   const pose: PetPose = state === 'idle' && asleep ? 'sleeping' : state;
 
-  const exchange = useMemo(() => latestExchange(data.messages, data.hasOlder), [data.messages, data.hasOlder]);
+  const exchange = useMemo(
+    () => latestExchange(data.messages, data.hasOlder, unreadCount),
+    [data.messages, data.hasOlder, unreadCount],
+  );
   const quickReplies = openQuickReplies(data.messages);
 
   const { markRead } = inbox;
 
   // One message in flight at a time, from any entry point (text or a quick
-  // reply): a second turn must not race the first. A ref, so two sends in one
-  // tick are also one.
-  const sendingRef = useRef(false);
+  // reply): a second turn must not race the first. The document store, so two
+  // sends in one tick are also one, and a remount cannot start a second turn.
   const send = useCallback(async (text: string, metadata?: Record<string, unknown>) => {
     // Only a session this page has validated as writable accepts input; a
     // restored or just-picked binding waits for its first successful read.
     if (!canChat || !binding || data.session?.id !== binding || !text.trim()) return false;
-    if (sendingRef.current || uncertainRef.current.has(binding)) return false;
-    sendingRef.current = true;
-    setSending(true);
+    if (petComposer.isSending() || petComposer.isUncertain(binding)) return false;
+    petComposer.setSending(true);
     try {
       const row = await api.sendSessionMessage(binding, { text, ...(metadata ? { metadata } : {}) });
       // The binding may have changed while the POST was pending: the reply
@@ -227,8 +203,7 @@ const PetSurface: React.FC = () => {
       if (!sendRefused(error)) setUncertain(binding, true);
       return false;
     } finally {
-      sendingRef.current = false;
-      setSending(false);
+      petComposer.setSending(false);
     }
   }, [api, binding, canChat, data, setUncertain]);
 
@@ -243,7 +218,7 @@ const PetSurface: React.FC = () => {
     if (!text) return;
     if (!(await send(text))) return;
     if (petShell.currentBinding() !== submittedFor) return;
-    setDraft((current) => (current === submitted ? '' : current));
+    petComposer.clearDraftIf(submitted);
   };
 
   // QuickReplies locks the group locally; the Runtime's message.updated for the

@@ -108,6 +108,16 @@ describe('latestExchange', () => {
     expect(latestExchange(tail, false).unreadComplete).toBe(true);
   });
 
+  it('is incomplete when the inbox count is ahead of the loaded unread results', () => {
+    const visible = result({ read_at: null, text: 'visible' });
+    expect(latestExchange([visible], true, 3).unreadComplete).toBe(false);
+    expect(latestExchange([visible], true, 3).results).toEqual([visible]);
+    // Inbox says unread, the loaded tail is all read: those replies sit past it.
+    expect(latestExchange([result({ text: 'read' })], true, 2).unreadComplete).toBe(false);
+    // A leftover count on a fully loaded session is stale.
+    expect(latestExchange([result({ text: 'read' })], false, 2).unreadComplete).toBe(true);
+  });
+
   it('leaves out process rows', () => {
     const exchange = latestExchange([user(), row({ type: 'tool_call' }), result({ text: 'done' })], false);
     expect(exchange.results.map((message) => message.text)).toEqual(['done']);

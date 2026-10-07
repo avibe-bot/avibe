@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 
 import { AuthGuard } from './App';
+import { PetWindow } from './pet/PetWindow';
 import { Summary } from './components/steps/Summary';
 import { useInstanceAuthorization } from './context/InstanceAuthorizationContext';
 import { DENIED_INSTANCE_CAPABILITIES, OWNER_INSTANCE_CAPABILITIES } from './lib/sessionInfo';
@@ -255,6 +256,24 @@ describe('AuthGuard on the desktop pet route', () => {
 
     expect(await screen.findByText('owner-shell')).toBeTruthy();
     expect(screen.queryByText('setup-wizard')).toBeNull();
+  });
+
+  it('keeps the transparent pet style while authorization is still loading', async () => {
+    api.getAuthSession.mockReturnValue(new Promise(() => undefined));
+
+    render(
+      <MemoryRouter initialEntries={['/pet']}>
+        <PetWindow>
+          <AuthGuard>
+            <CapabilityProbe />
+          </AuthGuard>
+        </PetWindow>
+      </MemoryRouter>,
+    );
+
+    expect(document.documentElement.classList.contains('pet-window')).toBe(true);
+    expect(screen.queryByText('common.loading')).toBeNull();
+    expect(document.querySelector('.bg-bg')).toBeNull();
   });
 
   it('does not render the pet without a session, and checks again when the page comes back', async () => {

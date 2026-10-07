@@ -1,13 +1,6 @@
 /* Desktop pet motion: CSS only, one pose per state. See
    docs/plans/2026-10-01-desktop-pet.md ("Rendering and idle cost"). */
 
-/* The pet window is transparent: nothing but the pet and its panel paints. */
-html.pet-window,
-html.pet-window body,
-html.pet-window #root {
-  background: transparent;
-}
-
 .pet-avatar {
   position: relative;
   width: 88px;

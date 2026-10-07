@@ -11,6 +11,7 @@ import {
 import { Wizard } from './components/Wizard';
 import { AppShell } from './components/AppShell';
 import { ErrorBoundary } from './components/ui/error-boundary';
+import { PetWindow } from './pet/PetWindow';
 import { Workbench } from './components/Workbench';
 import { InboxPage } from './components/workbench/InboxPage';
 import { SearchPage } from './components/workbench/SearchPage';
@@ -498,8 +499,14 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         return onPageReactivated(() => setAuthCheckVersion((version) => version + 1));
     }, [awaitingExemptSession]);
 
+    // `/pet` is a transparent native window. An opaque loading surface would
+    // show as a solid square for the whole recheck; leave the frame empty.
+    const guardLoading = setupRedirectExempt
+        ? null
+        : <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+
     if (guardStatus === 'loading') {
-        return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+        return guardLoading;
     }
     if (guardStatus === 'remote-login-required') {
         return <RemoteLoginGate target={guardTarget} />;
@@ -542,7 +549,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // (which owns the re-render) flips `guardStatus` to loading.
         // eslint-disable-next-line react-hooks/refs -- Deliberate one-frame bridge; see above.
         if (previousIsSetupRouteRef.current) {
-            return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+            return guardLoading;
         }
         return <Navigate to="/setup" replace />;
     }
@@ -551,7 +558,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // unfinished install can still inspect doctor output. Once the session
         // lands, wrap it so AppShell does not treat the owner as denied.
         if (bypassSetupGuard) return children;
-        return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+        return guardLoading;
     }
     return (
         <>
@@ -832,9 +839,11 @@ const router = createBrowserRouter(
       path="/pet"
       element={(
         <ErrorBoundary variant="page">
-          <AuthGuard>
-            <Suspense fallback={null}><PetPage /></Suspense>
-          </AuthGuard>
+          <PetWindow>
+            <AuthGuard>
+              <Suspense fallback={null}><PetPage /></Suspense>
+            </AuthGuard>
+          </PetWindow>
         </ErrorBoundary>
       )}
     />

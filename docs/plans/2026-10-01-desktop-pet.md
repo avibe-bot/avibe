@@ -220,7 +220,13 @@ as it does for the Workbench.
 `/pet` is a new route in the same SPA.
 
 - It sits inside `AuthGuard` and the existing providers (Api, Inbox), but
-  outside `AppShell`, so it has no sidebar or chrome.
+  outside `AppShell`, so it has no sidebar or chrome. The transparent
+  `pet-window` style is installed by a route shell around the guard, so a
+  loading or authorization recheck never paints an opaque body into the
+  native window. AuthGuard itself returns nothing, not its usual loading
+  surface, while `/pet` is waiting on a session. Draft, in-flight send, and
+  per-session send-uncertainty live in a document store so the same recheck
+  cannot drop a lock or the text that belongs to it.
 - `/pet` is exempt from `AuthGuard`'s setup redirect. Before setup is
   complete, it renders its own setup-pending state ("Finish setting up in
   Avibe", which calls `pet_open("avibe://settings")`; `main`'s own guard then
@@ -377,9 +383,10 @@ comes from an API the Workbench already uses:
     Workbench together.
   - A result that lands after rendering, for example from a queued turn,
     stays unread and keeps the badge.
-  - If the unread rows reach past the loaded tail, the panel does not mark
-    read at all. It shows "More in Avibe" (`pet_open` with the session link)
-    and leaves reading to the Workbench.
+  - If the unread rows reach past the loaded tail — including when the
+    inbox count is ahead of the unread results in that tail — the panel
+    does not mark read at all. It shows "More in Avibe" (`pet_open` with
+    the session link) and leaves reading to the Workbench.
 
 **Only the latest agent result's quick replies mean Needs input.** This is a
 deliberate difference from the Workbench, which keeps every unanswered group
@@ -549,8 +556,9 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     opened on, and a restore onto a missing monitor is clamped on screen;
   - `pet_set_expanded` returns the layout it applied, near each screen edge,
     and calls are applied in the order they were made, so a late collapse
-    cannot overtake a later expand (the page also keeps only the answer to
-    its latest request);
+    cannot overtake a later expand. The page sends `pet_set_expanded` one
+    at a time in that same order, and still keeps only the answer to its
+    latest request;
   - `pet_bind` persists to `pet.json` and emits `pet:bound`, and the binding
     survives a Runtime origin change; every change raises the revision by
     one, and `pet_ready`, `pet_bind`, `pet_unbind` and `pet:bound` all carry
@@ -706,9 +714,13 @@ The code and its tests are the contract; this section records why.
   in Avibe"; opening the session there is how the user finds out, and lifts it.
   Each session keeps its own lock, so inspecting B does not reopen A.
   The lock lifts only after `pet_open` succeeds; a failed open leaves it.
+  Draft, in-flight send, and those locks live outside React so an AuthGuard
+  recheck cannot drop them.
 - **The panel opens after the shell grows the frame.** Closing hides it at
   once; opening waits for `pet_set_expanded` to succeed, so replies are never
-  marked read while still clipped. A failed request restores the last
+  marked read while still clipped. Native resizes are sent one at a time in
+  the order they were asked, matching the shell's call-order contract, and
+  only the latest request updates React. A failed request restores the last
   confirmed expansion, so a redundant expand of an already-open panel cannot
   hide it. Expansion lives in `petPanel` so the setup-pending card grows the
   native frame too; until it confirms, only the avatar is shown. The

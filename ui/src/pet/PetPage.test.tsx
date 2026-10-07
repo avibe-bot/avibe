@@ -1145,3 +1145,83 @@ describe('PetPage live convergence', () => {
     expect(api.listSessionMessages.mock.calls.filter(([id]) => id === 'S')).toHaveLength(reads + 1);
   });
 });
+
+describe('PetPage review fixes, round 14', () => {
+  it('does not mark read when the inbox count is ahead of the loaded unread results', async () => {
+    tails.S = [message('r1', 'S')];
+    unreadBySession = { S: 2 };
+    api.listSessionMessages.mockImplementationOnce(async (id: string) => ({
+      messages: tails[id] ?? [], next_after_id: null, next_before_id: 'older',
+    }));
+    devBind('S');
+    render(<PetPage />);
+    summon('show');
+    expect(await screen.findByText('pet.moreInAvibe')).toBeTruthy();
+    expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it('keeps an in-flight send locked across a page remount', async () => {
+    const pending = deferred<WorkbenchMessage>();
+    api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
+    devBind('S');
+    const first = render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await userEvent.type(input, 'hello{Enter}');
+    await waitFor(() => expect(api.sendSessionMessage).toHaveBeenCalledTimes(1));
+    first.unmount();
+    render(<PetPage />);
+    summon('listen');
+    const again = await screen.findByLabelText('pet.inputPlaceholder');
+    await userEvent.type(again, 'again{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
+    await act(async () => pending.resolve(message('sent', 'S', { author: 'user', type: 'user' })));
+  });
+
+  it('keeps an uncertain send locked across a page recheck', async () => {
+    api.sendSessionMessage.mockRejectedValueOnce(new ApiError('dispatch pending', 504, null));
+    devBind('S');
+    const first = render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await userEvent.type(input, 'hello{Enter}');
+    expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
+    first.unmount();
+    render(<PetPage />);
+    summon('listen');
+    expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
+    const again = await screen.findByLabelText('pet.inputPlaceholder');
+    await userEvent.type(again, 'again{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends overlapping native resizes in the order they were asked', async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    const order: boolean[] = [];
+    const invoke = vi.fn((command: string, args?: { expanded?: boolean }) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
+      if (command === 'pet_set_expanded') {
+        order.push(Boolean(args?.expanded));
+        return order.length === 1 ? first.promise : second.promise;
+      }
+      return Promise.resolve(null);
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' })];
+    render(<PetPage />);
+    summon('show');
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
+    expect(order).toEqual([true]);
+    // Collapse while expand is still in flight: Esc is not listening yet
+    // (the panel is hidden until the frame grows), so the avatar toggle is
+    // the overlapping command. The native collapse waits its turn.
+    await userEvent.click(screen.getByLabelText('pet.toggle'));
+    expect(order).toEqual([true]);
+    await act(async () => first.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
+    await waitFor(() => expect(order).toEqual([true, false]));
+    await act(async () => second.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
+  });
+});
+
