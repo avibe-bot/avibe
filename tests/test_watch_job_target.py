@@ -63,7 +63,7 @@ def _job_session():
         conn.execute(
             insert(agent_sessions).values(
                 id=SESSION_ID,
-                agent_backend="avibe",
+                agent_backend="vibey",
                 agent_variant="default",
                 session_anchor=SESSION_ID,
                 native_session_id=SESSION_ID,

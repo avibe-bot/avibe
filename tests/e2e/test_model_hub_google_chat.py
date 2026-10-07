@@ -5,7 +5,7 @@ round trip or the exact finish/usage fields a Chat consumer must interpret.
 Only the Gemini upstream is a fixture; router, gateway, adapter and CPA are real.
 This is a characterization of CPA c404af96, including its lossy behavior, not
 an assertion that it is a lossless substitute for a native Google adapter.
-It extends MH-AVIBE-001/002 with Google-primary/Chat-ingress evidence, without
+It extends MH-VIBEY-001/002 with Google-primary/Chat-ingress evidence, without
 claiming coverage of their CLI-overlay or cross-hop-failover cases.
 """
 
@@ -26,7 +26,7 @@ from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from modules.agents.model_hub import ModelHubRuntimeRouter
 from tests.e2e.test_model_hub_runtime import _isolated_engine_adapter
 from tests.scenario_harness.model_hub import MemoryModelHubStore, service_for
-from tests.test_model_hub_avibe_consumer import _avibe_service
+from tests.test_model_hub_vibey_consumer import _vibey_service
 from tests.test_model_hub_google import _server, _sse
 from tests.test_model_hub_l3 import _source
 
@@ -92,17 +92,17 @@ async def _chat_gateway(tmp_path, monkeypatch, upstream, *, model="gemini-3-pro-
             source.credential_ref = adapter.state_store.store_api_key(
                 "synthetic-google-chat-key", vendor="custom", protocol="google", base_url=root,
             )
-            config = _avibe_service(tmp_path, [source]).store.config
+            config = _vibey_service(tmp_path, [source]).store.config
             service = service_for(tmp_path, MemoryModelHubStore(config), adapter)
             await service.runtime_start()
             gateway = ModelHubTurnGateway(service)
             router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
             try:
                 hop = await router.resolve_hop(
-                    "menu-alias", process_scope="avibe:chat-gemini", turn_id="chat-gemini",
+                    "menu-alias", process_scope="vibey:chat-gemini", turn_id="chat-gemini",
                 )
                 assert hop["protocol"] == "google"
-                assert hop["base_url"].endswith("/avibe/v1beta")
+                assert hop["base_url"].endswith("/vibey/v1beta")
                 # The frontend is a caller choice; do not append Chat's route
                 # to the native /v1beta base returned for the Google primary.
                 endpoint = hop["base_url"].rsplit("/", 1)[0] + "/v1/chat/completions"
@@ -204,7 +204,7 @@ async def test_chat_google_tool_round_trip_loses_signature_but_explicit_carrier_
 ):
     """Replay the actual first response, not a fake that supplies CPA's missing fields.
 
-    The separate input-carrier control complements MH-AVIBE-005: it proves
+    The separate input-carrier control complements MH-VIBEY-005: it proves
     whether the Hub strips a signature when the frontend differs but the
     provider/api/model origin is unchanged, without claiming a failover test.
     """

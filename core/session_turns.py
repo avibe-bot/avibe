@@ -211,8 +211,8 @@ _EXECUTION_ROUTING_KEYS = _FLUSH_REBUILT_KEYS | frozenset(
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
 # Runtimes bound to the controller process: an accepted Turn cannot survive a
-# service restart. ``avibe`` runs its loop in this process.
-_NON_RESTORABLE_RUNTIME_BACKENDS = frozenset({"claude", "codex", "avibe"})
+# service restart. ``vibey`` runs its loop in this process.
+_NON_RESTORABLE_RUNTIME_BACKENDS = frozenset({"claude", "codex", "vibey"})
 _MAX_AUTOMATIC_UNKNOWN_START_REPLAYS = 1
 _MAX_PREWRITE_START_ATTEMPTS = 3
 # A lost Turn whose running commands recovery handed to Watches (recovery.md T2) gets

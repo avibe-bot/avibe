@@ -2746,7 +2746,7 @@ def test_legacy_configs_stay_direct_while_fresh_configs_default_to_gateway():
     legacy = V2Config.from_payload(payload)
 
     assert {legacy.model_hub.agents[backend].mode for backend in ("claude", "codex", "opencode")} == {"direct"}
-    assert legacy.model_hub.agents["avibe"].mode == "hub"
+    assert legacy.model_hub.agents["vibey"].mode == "hub"
     assert {agent.mode for agent in default_config().model_hub.agents.values()} == {"hub"}
     assert default_config().model_hub.enabled is True
     assert default_config().model_hub.runtime_default_applied is True
@@ -3167,7 +3167,7 @@ def test_invalid_empty_route_key_keeps_v2_recovery_fence(tmp_path, backend, bad_
     assert "model_hub" in loaded.recovered_sections
     assert loaded.model_hub.sources == []
     assert all(loaded.model_hub.agents[backend].mode == "direct" for backend in ("claude", "codex", "opencode"))
-    assert loaded.model_hub.agents["avibe"].mode == "hub"
+    assert loaded.model_hub.agents["vibey"].mode == "hub"
     assert path.read_bytes() == before
     # #2079: the fence is on the recovered section, not on every save.
     loaded.save(config_path=path)

@@ -93,8 +93,8 @@ def test_oauth_is_not_exposed_until_native_cleanup_and_mode_commit(monkeypatch, 
 
 
 @pytest.mark.parametrize("batch", ["two new Sources", "a reused native Source", "a reused native Source after the seed"])
-def test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch(monkeypatch, tmp_path, batch):
-    """MH-AVIBE-007: a takeover seeds Avibe once its Sources are final.
+def test_takeover_seeds_a_pending_vibey_entry_from_its_whole_batch(monkeypatch, tmp_path, batch):
+    """MH-VIBEY-007: a takeover seeds Avibe once its Sources are final.
 
     A batch importing several Sources seeds from all of them, so a starting
     model only a later Source serves still arrives; a native Source converted
@@ -124,9 +124,9 @@ def test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch(monkeypatch, 
         store.config.agents["claude"].sources.order = [native.id]
         selections = [("claude", "claude-opus-5-5")]
     if batch == "a reused native Source after the seed":
-        store.config.avibe_supply_pending = False
+        store.config.vibey_supply_pending = False
     else:
-        assert store.config.avibe_supply_pending
+        assert store.config.vibey_supply_pending
     service.builtin_agent_models_override = lambda: selections
     announced = []
 
@@ -146,14 +146,14 @@ def test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch(monkeypatch, 
         source.id for model in starting for source in store.config.sources
         if source.supply_channel == "hub" and any(item.id == model for item in source.models)
     ]
-    avibe = store.config.agents["avibe"]
-    assert not store.config.avibe_supply_pending
+    vibey = store.config.agents["vibey"]
+    assert not store.config.vibey_supply_pending
     if batch == "a reused native Source after the seed":
         # Placed like a new Source; the user's catalog is not seeded again.
-        assert (avibe.sources.order, avibe.models, announced) == (serving, [], [])
+        assert (vibey.sources.order, vibey.models, announced) == (serving, [], [])
         return
-    assert (avibe.sources.order, [model.id for model in avibe.models]) == (serving, starting)
-    assert announced == ["avibe"]
+    assert (vibey.sources.order, [model.id for model in vibey.models]) == (serving, starting)
+    assert announced == ["vibey"]
 
 
 def test_failure_after_possible_rotation_retains_current_owner_and_retries(monkeypatch, tmp_path):

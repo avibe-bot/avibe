@@ -93,8 +93,8 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
   const { t } = useTranslation();
 
   const routedName = value.routing.agent_name;
-  // Routing saved while built-in Agents were named after their backend holds that
-  // backend id; with no Agent of that name it means the backend's built-in Agent.
+  // Routing can hold a backend id (the built-in takes the next free name while a user's
+  // Agent holds the id); with no Agent of that name it means the backend's built-in Agent.
   const selectedVibeAgent = vibeAgents.find((agent) => agent.name === routedName)
     ?? vibeAgents.find((agent) => !agent.archived && agent.source === 'builtin' && agent.backend === routedName)
     ?? null;

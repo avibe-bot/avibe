@@ -1,6 +1,6 @@
-"""Model routing for the Avibe Agent over Model Hub hop resolution (C-2, C-6).
+"""Model routing for Vibey over Model Hub hop resolution (C-2, C-6).
 
-Model Hub answers "how should the ``avibe`` backend call model M now" with a
+Model Hub answers "how should the ``vibey`` backend call model M now" with a
 ``HopResolution`` (``ModelHubRuntimeRouter.resolve_hop``). ``selection_from_hop``
 turns it into the loop's ``ModelEndpoint`` and ``ModelCapabilities`` and keeps
 unknown capabilities ``None``; the loop applies the conservative defaults.
@@ -46,8 +46,8 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
     built from; a ``google`` hop needs it, because its ``base_url`` is the
     ``/v1beta`` Gemini surface and the agent speaks Chat to ``/v1``.
     """
-    if hop.get("backend") != "avibe":
-        raise HopResolutionError(f"hop resolved for backend {hop.get('backend')!r}, not avibe")
+    if hop.get("backend") != "vibey":
+        raise HopResolutionError(f"hop resolved for backend {hop.get('backend')!r}, not vibey")
     protocol = hop.get("protocol")
     if protocol not in PROTOCOLS:
         raise HopResolutionError(f"hop protocol {protocol!r} is not supported")
@@ -132,7 +132,7 @@ class HubModelRouter:
             try:
                 await close()
             except Exception:
-                logger.warning("Avibe Agent could not close its %s provider adapter", protocol, exc_info=True)
+                logger.warning("Vibey could not close its %s provider adapter", protocol, exc_info=True)
 
 
 def registry_providers(*, media_loader: Any, client: Any = None) -> ProviderFactory:

@@ -105,7 +105,7 @@ class ModelHubLaunch:
         """Project C-6 from the same launch that owns routing and credentials."""
 
         if (
-            self.backend != "avibe" or self.channel != "hub"
+            self.backend != "vibey" or self.channel != "hub"
             or not self.protocol or not self.provider or not self.source_id
             or not self.gateway_base_url or not self.gateway_token
         ):
@@ -230,7 +230,7 @@ def bind_persisted_launch(context: Any, payload: object) -> ModelHubLaunch | Non
     if (
         backend not in MODEL_HUB_BACKENDS
         or channel not in {"native_cli", "hub"}
-        or (backend == "avibe" and channel != "hub")
+        or (backend == "vibey" and channel != "hub")
         or not isinstance(source_id, str)
         or not source_id
         or not isinstance(target_model, str)
@@ -261,7 +261,7 @@ def claude_settings_for_launch(base_settings: str, launch: ModelHubLaunch | None
     keeps the user's own Claude preferences while the Hub owns the connection.
     """
 
-    if launch is None or launch.backend == "avibe" or launch.channel != "hub":
+    if launch is None or launch.backend == "vibey" or launch.channel != "hub":
         return base_settings
     settings = json.loads(base_settings)
     connection_env = build_claude_hub_env({}, launch)
@@ -307,7 +307,7 @@ async def resolve_model_hub_launch(
             )
             _hold_unrunnable_input(context, failure)
             raise failure from None
-    if backend == "avibe":
+    if backend == "vibey":
         raise ModelHubError("engine_down", status=503, turn_outcome=ENGINE_DOWN_TURN_OUTCOME)
     return ModelHubLaunch(
         backend=backend,
@@ -431,7 +431,7 @@ def build_claude_hub_env(
 ) -> dict[str, str]:
     """Return Claude environment overrides for the resolved Hub launch."""
 
-    if launch.backend == "avibe" or launch.channel == "direct":
+    if launch.backend == "vibey" or launch.channel == "direct":
         return dict(base_env)
     if launch.channel == "hub":
         if not launch.gateway_base_url or not launch.gateway_token:
@@ -485,7 +485,7 @@ def build_codex_hub_launch(
 ) -> tuple[list[str], dict[str, str] | None]:
     """Return app-server global overrides and environment for a Hub turn."""
 
-    if launch.backend == "avibe" or launch.channel != "hub" or not launch.gateway_base_url or not launch.gateway_token:
+    if launch.backend == "vibey" or launch.channel != "hub" or not launch.gateway_base_url or not launch.gateway_token:
         return list(base_args), None
     if model_catalog_path is None:
         raise ValueError("Codex Model Hub launches require a provider-safe model catalog")
@@ -581,7 +581,7 @@ class ModelHubRuntimeRouter:
         *,
         verified_oauth: bool = False,
     ) -> bool:
-        if backend == "avibe":
+        if backend == "vibey":
             return False
         runtime_config = getattr(load_config_or_default().agents, backend)
         cli_path = str(getattr(runtime_config, "cli_path", "") or "").strip()
@@ -1019,7 +1019,7 @@ class ModelHubRuntimeRouter:
     ) -> ModelHubLaunch:
         requested_model = str(requested_model or "").strip()
         config = config if config is not None else self.service.store.load()
-        if backend == "avibe" and (
+        if backend == "vibey" and (
             config.agents[backend].mode != "hub" or self.turn_gateway is None
         ):
             # An in-process consumer requires the routing gateway, including
@@ -1121,7 +1121,7 @@ class ModelHubRuntimeRouter:
                 gateway_request_model_id=runtime_model,
                 primary_origin=(
                     HopOrigin(source.vendor, source.protocol, target_model)
-                    if backend == "avibe" else None
+                    if backend == "vibey" else None
                 ),
             )
             if self.turn_gateway is None:
@@ -1172,10 +1172,10 @@ class ModelHubRuntimeRouter:
         process_scope: str,
         turn_id: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Resolve the Avibe Agent endpoint without any native CLI overlay."""
+        """Resolve Vibey's endpoint without any native CLI overlay."""
 
         launch = await self.resolve(
-            "avibe", requested_model, process_scope=process_scope, turn_id=turn_id,
+            "vibey", requested_model, process_scope=process_scope, turn_id=turn_id,
         )
         return launch.to_hop_resolution()
 

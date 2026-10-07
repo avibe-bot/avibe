@@ -622,7 +622,7 @@ def test_gather_routing_modal_data_hides_disabled_backends() -> None:
 
     data = asyncio.run(handler._gather_routing_modal_data(context))
 
-    assert data.registered_backends == ["avibe", "opencode"]
+    assert data.registered_backends == ["vibey", "opencode"]
     assert server.calls == [
         "current_server",
         "agents:/tmp/workspace",
@@ -646,7 +646,7 @@ def test_gather_routing_modal_data_falls_back_to_visible_backend_when_current_is
 
     # Listed first, the built-in backend is still not the fallback while another is enabled.
     assert data.current_backend == "opencode"
-    assert data.registered_backends == ["avibe", "opencode", "codex"]
+    assert data.registered_backends == ["vibey", "opencode", "codex"]
     assert data.opencode_agents == [{"name": "build"}]
     assert server.calls == [
         "current_server",

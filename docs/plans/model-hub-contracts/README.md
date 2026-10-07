@@ -2,7 +2,7 @@
 
 Status: **contract_version 12**, 2026-10-02: Google protocol vocabulary and Gemini
 gateway frontend, with API/config-only Source admission. See
-[`google-protocol.md`](google-protocol.md) and [`avibe-consumer.md`](avibe-consumer.md).
+[`google-protocol.md`](google-protocol.md) and [`vibey-consumer.md`](vibey-consumer.md).
 The approved routing contract is
 `../model-hub-routing-modes.md`, including the owner-approved Empty Route Inheritance
 correction `352486374`; API-key-only scope remains unchanged.
@@ -113,7 +113,7 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    Sources.
 8. Direct mode and a Native hop are distinct. Direct bypasses Gateway for the backend;
    Native is one configured hop inside Gateway mode.
-9. The `avibe` backend is Hub-only and never consumes a native CLI Source or launch
+9. The `vibey` backend is Hub-only and never consumes a native CLI Source or launch
    overlay. Its empty catalog added on upgrade changes no existing backend intent.
    Response origin is captured at admission and shared with the recorded attempt.
 
@@ -249,9 +249,9 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `opencode-overlay.md` | Stable OpenCode provider/model identifiers and effective-hop overlay behavior. |
 | `adapter-interface.py` | Adapter protocol, observation, credential, discovery, invocation, cleanup, and classification boundary. |
 | `mirror-registry.json` | Executable authority/mirror registry and terminal contract version. |
-| `avibe-consumer.md` | C-6 launch projection, capability authority, served-hop response headers, and delivery boundaries. |
+| `vibey-consumer.md` | C-6 launch projection, capability authority, served-hop response headers, and delivery boundaries. |
 | `google-protocol.md` | Google API/config admission, native gateway paths, discovery, stream facts, and pinned-engine translation boundary. |
-| `avibe-boundary-matrix.json` | Executable Avibe backend/channel audit: all declared schema shapes, runtime admission owners, and Hub-only refusal cases. |
-| `hop-resolution.schema.json` | Ephemeral in-process Avibe consumer result, including gateway-only credentials and nullable capabilities. |
+| `vibey-boundary-matrix.json` | Executable Vibey backend/channel audit: all declared schema shapes, runtime admission owners, and Hub-only refusal cases. |
+| `hop-resolution.schema.json` | Ephemeral in-process Vibey consumer result, including gateway-only credentials and nullable capabilities. |
 | `hop-origin.schema.json` | Non-secret response origin shared by the HTTP response header and provenance attempt. |
 | `README.md` | This ownership, version-closure, and contract-index document. |

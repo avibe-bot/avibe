@@ -30,7 +30,7 @@ at-least-once, and that is stated where it applies.
 
 ## Delivery (adapter wave)
 
-D1 and D2 are withdrawn (owner decision, 2026-10-03, PR #2345). The Avibe Agent delivers each committed response
+D1 and D2 are withdrawn (owner decision, 2026-10-03, PR #2345). Vibey delivers each committed response
 through the same emit path as the other backends: splitting, file upload, failure handling, and narration settings
 are the dispatcher's. The one difference is persistence: the response row already exists, so the dispatcher writes
 its display columns instead of inserting a second row (`transcript.md` §2). A crash or send failure between commit

@@ -495,7 +495,7 @@
   },
   "settings": {
     "backends": {
-      "avibeDescription": "Avibe's built-in agent, powered by models configured in Model Hub."
+      "vibeyDescription": "Avibe's built-in agent, powered by models configured in Model Hub."
     },
     "personalizationTitle": "Personalization Settings",
     "personalizationDesc": "Configure how {agent} messages appear in your Slack workspace.",
@@ -1538,7 +1538,7 @@
       "cancelled": "Retention stopped at a batch boundary; no completion was recorded."
     }
   },
-  "avibeAgent": {
+  "vibeyAgent": {
     "error": {
       "refusal": "The model declined to answer this request.",
       "safety": "The model stopped this reply for safety reasons.",

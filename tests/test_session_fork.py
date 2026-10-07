@@ -201,11 +201,11 @@ def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path)
     assert metadata["fork_trim_latest_running_turn"] is False
 
 
-def test_reserve_forked_avibe_session_records_its_context_anchor(tmp_path: Path) -> None:
+def test_reserve_forked_vibey_session_records_its_context_anchor(tmp_path: Path) -> None:
     # The Avibe Agent's context is the source's rows up to the anchor (C-5 section 4):
     # resolved once at reservation, so rows the source commits later never enter the prefix.
     db_path = tmp_path / "vibe.sqlite"
-    source_id = _seed_source_session(db_path, tmp_path, backend="avibe")
+    source_id = _seed_source_session(db_path, tmp_path, backend="vibey")
     engine = create_sqlite_engine(db_path)
     try:
         with engine.begin() as conn:
@@ -233,7 +233,7 @@ def test_reserve_forked_avibe_session_records_its_context_anchor(tmp_path: Path)
     finally:
         engine.dispose()
     metadata = json.loads(row["metadata_json"])
-    assert result.fork.source_backend == "avibe"
+    assert result.fork.source_backend == "vibey"
     # With no running Turn the child inherits the whole settled context, as a native fork does.
     assert metadata["fork_source_context_seq"] == 4
 

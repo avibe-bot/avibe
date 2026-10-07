@@ -35,8 +35,8 @@ const directAgent = (backend: AgentBackend): AgentSupply => ({
   menu_kind: backend === 'opencode' ? 'open' : 'fixed',
 });
 
-const emptyAvibeAgent: AgentSupply = {
-  backend: 'avibe', cli_present: false, mode: 'hub', menu_kind: 'fixed', catalog_models: [],
+const emptyVibeyAgent: AgentSupply = {
+  backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed', catalog_models: [],
 };
 
 // Named separately from `runtime` so it keeps the arm of `RuntimeManifest` it
@@ -267,7 +267,7 @@ const renderPage = (
     directAgent('claude'),
     directAgent('codex'),
     directAgent('opencode'),
-    emptyAvibeAgent,
+    emptyVibeyAgent,
   ]);
   vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtimeValue);
   vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
@@ -918,7 +918,7 @@ describe('SettingsModelsPage surface branches', () => {
 
   // The in-process catalog is configurable even when empty and without a CLI.
   // Runtime Stop still depends on whether that catalog actually owns models.
-  it.each([false, true])('MH-AVIBE-003 derives runtime use from Avibe catalog presence: %s', async (configured) => {
+  it.each([false, true])('MH-VIBEY-003 derives runtime use from Avibe catalog presence: %s', async (configured) => {
     const catalogModel: BackendModel = {
       id: 'menu-alias', display_name: null, origin: 'manual', models_dev_id: null,
       context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
@@ -926,16 +926,16 @@ describe('SettingsModelsPage surface branches', () => {
     };
     renderPage([], [
       directAgent('claude'), directAgent('codex'), directAgent('opencode'),
-      { ...emptyAvibeAgent, catalog_models: configured ? [catalogModel] : [] },
+      { ...emptyVibeyAgent, catalog_models: configured ? [catalogModel] : [] },
     ]);
     const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue({ ...runtime, enabled: false });
     const toggle = await screen.findByRole('switch', {
       name: configured ? /Vibey's models use|Vibey 的模型通过/i : /Turn model gateway off|关闭模型网关/i,
     });
     expect((toggle as HTMLButtonElement).disabled).toBe(configured);
-    const avibeCard = (await screen.findByText('Vibey')).closest('[data-agent-backend]') as HTMLElement;
-    expect(within(avibeCard).getAllByRole('button', { name: /^Manage models$|^管理模型$/i }).length).toBeGreaterThan(0);
-    await userEvent.click(within(avibeCard).getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
+    const vibeyCard = (await screen.findByText('Vibey')).closest('[data-agent-backend]') as HTMLElement;
+    expect(within(vibeyCard).getAllByRole('button', { name: /^Manage models$|^管理模型$/i }).length).toBeGreaterThan(0);
+    await userEvent.click(within(vibeyCard).getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
     const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
     expect(within(modeGroup).queryByRole('button', { name: /Switch to direct|切到直连/i })).toBeNull();
     await userEvent.click(within(modeGroup).getByRole('button', { pressed: true }));

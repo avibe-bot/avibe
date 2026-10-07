@@ -27,7 +27,7 @@ from sqlalchemy.engine import Engine
 from core.agent_core.harness.projection import context_view
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import AssistantMessage, ToolResultMessage, UserMessage
-from modules.agents.avibe.prompt import (
+from modules.agents.vibey.prompt import (
     EnvironmentValue,
     displayed_environment,
     environment_delta,

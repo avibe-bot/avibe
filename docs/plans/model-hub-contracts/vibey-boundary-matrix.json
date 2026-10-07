@@ -20,7 +20,7 @@
       "schema": "probe-result.schema.json", "pointer": "", "backend": "backend",
       "policy": "hub-only", "runtime": "ModelHubService.probe_agent -> inspected runnable hop",
       "runtime_cases": ["probe"],
-      "refusals": [{"fixture": "probe", "path": ["backend"], "value": "avibe"}]
+      "refusals": [{"fixture": "probe", "path": ["backend"], "value": "vibey"}]
     },
     {
       "schema": "turn-provenance.schema.json", "pointer": "", "backend": "agent",
@@ -67,7 +67,7 @@
     {
       "schema": "source.schema.json", "pointer": "/properties/adopted_by/items", "backend": "backend",
       "policy": "reference", "runtime": "ModelHubService Source adoption -> effective_model_route",
-      "notes": "Source.supply_channel is source-global, not the channel of a reference. Avibe references are created only through eligible Hub routes."
+      "notes": "Source.supply_channel is source-global, not the channel of a reference. Vibey references are created only through eligible Hub routes."
     },
     {
       "schema": "resolution-event.schema.json", "pointer": "", "backend": "agent",
@@ -77,7 +77,7 @@
     {
       "schema": "migration-scan.schema.json", "pointer": "/properties/items/items", "backend": "backend",
       "policy": "native-only", "runtime": "ModelHubService native migration scanner",
-      "refusals": [{"fixture": "migration", "path": ["backend"], "value": "avibe"}]
+      "refusals": [{"fixture": "migration", "path": ["backend"], "value": "vibey"}]
     }
   ]
 }

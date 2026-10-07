@@ -90,7 +90,7 @@
       "required": ["backend", "menu_model", "source_id", "model_id", "position"],
       "additionalProperties": false,
       "properties": {
-        "backend": { "enum": ["claude", "codex", "opencode", "avibe"] },
+        "backend": { "enum": ["claude", "codex", "opencode", "vibey"] },
         "menu_model": { "type": "string", "minLength": 1 },
         "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
         "model_id": { "type": "string", "minLength": 1 },
@@ -102,7 +102,7 @@
       "required": ["backend", "model_id", "agents"],
       "additionalProperties": false,
       "properties": {
-        "backend": { "enum": ["claude", "codex", "opencode", "avibe"] },
+        "backend": { "enum": ["claude", "codex", "opencode", "vibey"] },
         "model_id": { "type": "string", "minLength": 1 },
         "agents": {
           "type": "array",

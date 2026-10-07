@@ -1,6 +1,6 @@
 # C-5 Transcript rows
 
-The Avibe Agent's model context is stored in the existing `messages` and `agent_events` tables; there is no other
+Vibey's model context is stored in the existing `messages` and `agent_events` tables; there is no other
 copy (plan §5.1). Row payload shapes: [`transcript-rows.schema.json`](transcript-rows.schema.json).
 
 ## 1. Membership and order
@@ -87,7 +87,7 @@ The child Session's metadata already records its parent as top-level keys `fork_
 - `anchor_seq` is resolved once, when the fork is reserved, as the largest `context_seq` in the source Session among
   rows at or before the anchor message, and persisted as the top-level metadata key `fork_source_context_seq`. Rows
   that receive a `context_seq` later can never move into or out of the prefix. A released fork without that key
-  (forked from a non-`avibe` Session) has no Avibe Agent context to inherit and starts empty.
+  (forked from a non-`vibey` Session) has no Vibey context to inherit and starts empty.
 - The child's context = the source's context rows with `context_seq <= anchor_seq` (recursively through the source's
   own fork), then the child's rows.
 - The child's `context_seq` continues from `anchor_seq + 1`, so the combined order stays total.

@@ -93,8 +93,8 @@ CONTEXT_VISIBILITY = "context"
 AUDIT_VISIBILITY = "audit"
 AuditKind = Literal["attempt", "checkpoint_turn"]
 _AUDIT_EVENT_TYPE: dict[str, str] = {"attempt": "model_attempt", "checkpoint_turn": "context_checkpoint_turn"}
-# Only the Avibe Agent writes context rows; the Session's routed backend may change mid-Turn.
-CONTEXT_WRITER = "avibe"
+# Only Vibey writes context rows; the Session's routed backend may change mid-Turn.
+CONTEXT_WRITER = "vibey"
 PAYLOAD_VERSION = 1
 
 PayloadKind = Literal["compaction", "context_edit", "agent_state"]

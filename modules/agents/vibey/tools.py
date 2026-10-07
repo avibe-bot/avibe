@@ -1,4 +1,4 @@
-"""The Avibe Agent's tools: Pi's coding tools over a Watch-backed job host (C-7).
+"""Vibey's tools: Pi's coding tools over a Watch-backed job host (C-7).
 
 ``ToolSuite`` is the adapter's whole dependency on ``core.agent_core.tools``:
 the job host, the tools built over the loop's tracking wrapper (``Agent.jobs``,

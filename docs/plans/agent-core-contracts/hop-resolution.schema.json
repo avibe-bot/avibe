@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "agent-core/hop-resolution.schema.json",
   "title": "HopResolution",
-  "description": "C-6 answer to 'how should the avibe backend call model M now'. Produced by Model Hub; consumed by the adapter, which builds C-2 ModelEndpoint from it. The token is in-memory only.",
+  "description": "C-6 answer to 'how should the vibey backend call model M now'. Produced by Model Hub; consumed by the adapter, which builds C-2 ModelEndpoint from it. The token is in-memory only.",
   "type": "object",
   "required": [
     "backend",
@@ -19,11 +19,11 @@
   "additionalProperties": false,
   "properties": {
     "backend": {
-      "const": "avibe"
+      "const": "vibey"
     },
     "requested_model": {
       "type": "string",
-      "description": "Caller-facing model id from the Avibe Agent settings."
+      "description": "Caller-facing model id from the Vibey Agent's settings."
     },
     "protocol": {
       "$ref": "message.schema.json#/definitions/Protocol",
@@ -120,10 +120,10 @@
   },
   "examples": [
     {
-      "backend": "avibe",
+      "backend": "vibey",
       "requested_model": "claude-opus-5-5",
       "protocol": "anthropic",
-      "base_url": "http://127.0.0.1:47311/avibe/v1",
+      "base_url": "http://127.0.0.1:47311/vibey/v1",
       "token": "<in-memory>",
       "runtime_model": "claude-opus-5-5",
       "source_id": "src_anthropic_main",

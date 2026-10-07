@@ -28,11 +28,11 @@ The shared envelope and every versioned nested contract carry `contract_version`
 terminal value. Supported persisted config shapes and historical TurnProvenance
 remain readable; ephemeral envelopes use only the terminal version.
 
-The backend vocabulary includes `avibe`. It is always Hub mode, has no native CLI
+The backend vocabulary includes `vibey`. It is always Hub mode, has no native CLI
 (`cli_present: false`), and accepts no `native_cli` Source. Its runtime consumer
 API and `x-avibe-served-hop` response header are specified in
-[`avibe-consumer.md`](avibe-consumer.md); these are not new management endpoints.
-The empty Avibe catalog added for older configurations does not hold the shared
+[`vibey-consumer.md`](vibey-consumer.md); these are not new management endpoints.
+The empty Vibey catalog added for older configurations does not hold the shared
 runtime open. Once models are configured it participates in the runtime Stop guard.
 
 ## Route table

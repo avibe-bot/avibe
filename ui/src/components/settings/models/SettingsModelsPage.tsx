@@ -1178,7 +1178,7 @@ export const SettingsModelsPage: React.FC = () => {
   const runtimeSwitchLabel = stopBlocked
     ? supplyRead.kind === 'ready'
       ? builtinHubBackend
-        ? t('settings.models.shell.toggle.stopAvibeBlocked', { name: getBackendUiMeta(builtinHubBackend).label })
+        ? t('settings.models.shell.toggle.stopVibeyBlocked', { name: getBackendUiMeta(builtinHubBackend).label })
         : t('settings.models.shell.toggle.stopBlocked', { names: hubBackends.join(', ') })
       : t('settings.models.shell.toggle.stopUnavailable')
     : runtimeEnabled

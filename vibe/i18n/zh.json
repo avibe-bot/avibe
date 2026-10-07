@@ -495,7 +495,7 @@
   },
   "settings": {
     "backends": {
-      "avibeDescription": "Avibe 内置智能体，使用 Model Hub 中配置的模型。"
+      "vibeyDescription": "Avibe 内置智能体，使用 Model Hub 中配置的模型。"
     },
     "personalizationTitle": "个性化设置",
     "personalizationDesc": "配置 {agent} 的消息在你的 Slack 工作区中的展示方式。",
@@ -1538,7 +1538,7 @@
       "cancelled": "保留清理已在批次边界停止；未记录完成状态。"
     }
   },
-  "avibeAgent": {
+  "vibeyAgent": {
     "error": {
       "refusal": "模型拒绝回答这个请求。",
       "safety": "模型出于安全原因停止了这次回复。",

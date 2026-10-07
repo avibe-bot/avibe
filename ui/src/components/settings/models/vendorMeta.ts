@@ -74,7 +74,7 @@ export const BACKEND_IDENTITY_ACCENT = {
   claude: 'cyan',
   codex: 'mint',
   opencode: 'violet',
-  avibe: 'muted',
+  vibey: 'muted',
 } as const satisfies Record<AgentBackend, Accent>;
 
 // The icon is the backend's own, from the one backend visuals table.

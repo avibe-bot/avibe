@@ -57,7 +57,7 @@ def _session(conn, session_id: str, scope_id: str, metadata: dict | None = None)
     conn.exec_driver_sql(
         "insert into agent_sessions (id, scope_id, agent_name, agent_backend, agent_variant, session_anchor, "
         "workdir, native_session_id, status, visibility, pinned, agent_status, metadata_json, created_at, "
-        "updated_at, last_active_at) values (?, ?, 'avibe', 'avibe', 'avibe', ?, '/tmp', ?, 'active', "
+        "updated_at, last_active_at) values (?, ?, 'vibey', 'vibey', 'vibey', ?, '/tmp', ?, 'active', "
         "'foreground', 0, 'idle', ?, ?, ?, ?)",
         (session_id, scope_id, session_id, session_id, json.dumps(metadata or {}), NOW, NOW, NOW),
     )
@@ -107,7 +107,7 @@ def _accepted_turn(conn, session_id: str, scope_id: str, body: str, turn_id: str
         now=NOW,
     )
     claimed = message_deliveries.claim_start_batch(
-        conn, turn_id=turn_id, session_id=session_id, backend="avibe", deliveries=[delivery], dispatch_text=body
+        conn, turn_id=turn_id, session_id=session_id, backend="vibey", deliveries=[delivery], dispatch_text=body
     )
     assert message_deliveries.bind_native_start(
         conn,
@@ -288,7 +288,7 @@ async def test_an_audit_row_is_kept_outside_the_context(engine, kind, event_type
     entry = await store.consume_input("ses_main", consumed, _user("go"))
     payload = {"version": 1, "usage": {"input_tokens": 9, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}, "error": "rate_limit: busy"}
 
-    row_id = await store.append_audit("ses_main", kind, payload, agent_name="avibe")
+    row_id = await store.append_audit("ses_main", kind, payload, agent_name="vibey")
 
     assert list(await store.load("ses_main")) == [entry]
     with engine.connect() as conn:

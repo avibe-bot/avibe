@@ -25,22 +25,23 @@ const agent = (name: string, backend: string, source: string): VibeAgentBrief =>
 describe('RoutingConfigPanel', () => {
   afterEach(() => { cleanup(); pickerValues.length = 0; });
 
-  // Routing saved while the built-in was named after its backend holds the id "avibe".
-  it('shows a legacy backend-id route as that backend’s built-in Agent', () => {
+  // Routing that holds a backend id means that backend's built-in Agent, which takes the
+  // next free name (vibey-2) while a user's Agent holds the id.
+  it('shows a backend-id route as that backend’s built-in Agent', () => {
     render(<RoutingConfigPanel
-      value={{ custom_cwd: '', routing: { agent_name: 'avibe' }, show_message_types: [] }}
+      value={{ custom_cwd: '', routing: { agent_name: 'vibey' }, show_message_types: [] }}
       onChange={() => {}} onBrowseDirectory={() => {}} globalConfig={{}}
-      vibeAgents={[agent('vibey', 'avibe', 'builtin'), agent('claude', 'claude', 'builtin')]}
+      vibeAgents={[agent('vibey-2', 'vibey', 'builtin'), agent('claude', 'claude', 'builtin')]}
     />);
-    expect(pickerValues.at(-1)).toMatchObject({ agent_backend: 'avibe', agent_name: 'vibey', model: 'vibey-model' });
+    expect(pickerValues.at(-1)).toMatchObject({ agent_backend: 'vibey', agent_name: 'vibey-2', model: 'vibey-2-model' });
   });
 
   it('prefers an Agent that really has the name', () => {
     render(<RoutingConfigPanel
-      value={{ custom_cwd: '', routing: { agent_name: 'avibe' }, show_message_types: [] }}
+      value={{ custom_cwd: '', routing: { agent_name: 'vibey' }, show_message_types: [] }}
       onChange={() => {}} onBrowseDirectory={() => {}} globalConfig={{}}
-      vibeAgents={[agent('vibey', 'avibe', 'builtin'), agent('avibe', 'claude', 'custom')]}
+      vibeAgents={[agent('vibey-2', 'vibey', 'builtin'), agent('vibey', 'claude', 'custom')]}
     />);
-    expect(pickerValues.at(-1)).toMatchObject({ agent_backend: 'claude', agent_name: 'avibe' });
+    expect(pickerValues.at(-1)).toMatchObject({ agent_backend: 'claude', agent_name: 'vibey' });
   });
 });

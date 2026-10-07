@@ -1,4 +1,4 @@
-"""``AvibeAgent``: the Avibe Agent engine (``core.agent_core``) as an Avibe backend.
+"""``VibeyAgent``: the Avibe Agent engine (``core.agent_core``) as the ``vibey`` backend.
 
 One Turn is one ``Agent.run`` (plan section 4). The adapter
 
@@ -11,12 +11,12 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
   of persisting a second row (``MessageOutput.persisted_row_id``);
 * steers the running loop with P1 deliveries and lets a refused steer fall back
   to the P3 queue; Stop aborts the run;
-* runs every Turn with C-9 context management (``AvibeContextHost``), within
+* runs every Turn with C-9 context management (``VibeyContextHost``), within
   the route's Model Hub limits;
 * before any run of a Session in this process, under the Session writer lock,
   settles open tool calls (T2) and admits accepted inputs that were never
   consumed (T3); at startup it settles every Session's open calls eagerly. The
-  Turn a restart interrupted is settled by the Turn owner (T4; ``avibe`` is a
+  Turn a restart interrupted is settled by the Turn owner (T4; ``vibey`` is a
   process-bound runtime).
 """
 
@@ -76,17 +76,17 @@ from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 from core.skill_observability import accept_catalog
-from modules.agents.avibe.context import (
-    AvibeContextHost,
+from modules.agents.vibey.context import (
+    VibeyContextHost,
     budgeted,
     mark_skill_loads,
 )
-from modules.agents.avibe.errors import error_text
-from modules.agents.avibe.media import MediaSnapshots
-from modules.agents.avibe.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
-from modules.agents.avibe.prompt import EnvironmentValue, current_environment, system_prompt
-from modules.agents.avibe.store import AdapterTranscriptStore
-from modules.agents.avibe.tools import ToolSuite, local_tool_suite
+from modules.agents.vibey.errors import error_text
+from modules.agents.vibey.media import MediaSnapshots
+from modules.agents.vibey.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
+from modules.agents.vibey.prompt import EnvironmentValue, current_environment, system_prompt
+from modules.agents.vibey.store import AdapterTranscriptStore
+from modules.agents.vibey.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
 from modules.agents.catalog import display_name_for_backend
 from modules.im.base import FileAttachment
@@ -104,7 +104,7 @@ from storage.models import agent_events, agent_sessions, message_deliveries, mes
 
 logger = logging.getLogger(__name__)
 
-BACKEND = "avibe"
+BACKEND = "vibey"
 # Final responses whose empty text is explained by the stop itself (loop-control.md section 2).
 _EXPLAINED_STOPS = ("refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
@@ -157,7 +157,7 @@ class _Run:
 
     @property
     def native_turn_id(self) -> str:
-        """``avibe:<adapter instance>:<turn>``: the instance that runs the Turn, for steer reconcile."""
+        """``vibey:<adapter instance>:<turn>``: the instance that runs the Turn, for steer reconcile."""
         return f"{BACKEND}:{self.instance}:{self.turn_id}"
 
 
@@ -172,8 +172,8 @@ class _SessionRuntime:
     holders: int = 0
 
 
-class AvibeAgent(BaseAgent):
-    """Backend ``avibe``: the first-party agent loop over Avibe's own transcript rows."""
+class VibeyAgent(BaseAgent):
+    """Backend ``vibey``: the first-party agent loop over Avibe's own transcript rows."""
 
     name = BACKEND
 
@@ -199,7 +199,7 @@ class AvibeAgent(BaseAgent):
         )
         self._providers = providers or registry_providers(media_loader=self.media)
         # C-9: the Session parts a checkpoint carries (context.md section 9).
-        self.context_host = AvibeContextHost(self._engine, environment=self._environment)
+        self.context_host = VibeyContextHost(self._engine, environment=self._environment)
         self._tool_suite = tool_suite
         # Per-Session state lives only while a caller holds the Session (``_held``);
         # the last holder retires it, together with the store's per-Session state.
@@ -244,7 +244,7 @@ class AvibeAgent(BaseAgent):
                     # Raised during or after settlement (its emits, or a failure notice): the
                     # shared owner's fallback releases the runtime gate, so it must see it.
                     raise
-                logger.exception("Avibe Agent turn failed for Session %s", session_id)
+                logger.exception("Vibey turn failed for Session %s", session_id)
                 turn.settled = True
                 await self._fail(request, "generic", f"turn failed: {error}", cause=error)
             finally:
@@ -363,7 +363,7 @@ class AvibeAgent(BaseAgent):
         Sessions with accepted inputs no run consumed. Each runs the same resume a Turn
         runs (T2 and T3, no model call). A Session a run holds is skipped: its own resume
         settles it. J5 pruning follows a pass that settled everything. Never reports
-        success over a failure; ``AvibeRecovery`` owns the retries.
+        success over a failure; ``VibeyRecovery`` owns the retries.
         """
         candidates = await asyncio.to_thread(self._recovery_candidates)
         unsettled: list[str] = []
@@ -374,7 +374,7 @@ class AvibeAgent(BaseAgent):
                 try:
                     await self._resume(runtime)
                 except Exception:
-                    logger.exception("Avibe Agent could not settle Session %s outside a Turn", session_id)
+                    logger.exception("Vibey could not settle Session %s outside a Turn", session_id)
                     unsettled.append(session_id)
         if not unsettled:
             await self._prune_settled_jobs()
@@ -385,7 +385,7 @@ class AvibeAgent(BaseAgent):
 
     def _schedule_recovery(self) -> None:
         """Hand what this Turn could not settle to the process's recovery owner."""
-        recovery = getattr(self.controller, "avibe_recovery", None)
+        recovery = getattr(self.controller, "vibey_recovery", None)
         if recovery is not None:
             recovery.ensure()
 
@@ -395,7 +395,7 @@ class AvibeAgent(BaseAgent):
             return
         if self._prune_task is not None and not self._prune_task.done():
             return
-        self._prune_task = asyncio.create_task(self._prune_settled_jobs(), name="avibe-agent-job-prune")
+        self._prune_task = asyncio.create_task(self._prune_settled_jobs(), name="vibey-agent-job-prune")
 
     async def _prune_settled_jobs(self) -> None:
         """J5: remove finished jobs whose call has a durable result and whose Watch settled."""
@@ -405,9 +405,9 @@ class AvibeAgent(BaseAgent):
             if suite.prune is not None:
                 removed = await asyncio.to_thread(suite.prune, self._job_call_settled)
                 if removed:
-                    logger.info("Avibe Agent pruned %d settled job(s)", len(removed))
+                    logger.info("Vibey pruned %d settled job(s)", len(removed))
         except Exception:
-            logger.exception("Avibe Agent job pruning failed")
+            logger.exception("Vibey job pruning failed")
 
     def _job_call_settled(self, meta: Any) -> bool:
         """Whether the job's tool call has a durable ``tool_result`` row (the adapter's half of J5).
@@ -466,7 +466,7 @@ class AvibeAgent(BaseAgent):
                 request.target_session_id, request.text, request.files, request.input_metadata
             )
         except Exception:
-            logger.exception("Avibe Agent could not prepare a steer for Session %s", request.target_session_id)
+            logger.exception("Vibey could not prepare a steer for Session %s", request.target_session_id)
             return steer_result(SteerOutcome.REFUSED, reason="preparation_failed")
         if run.agent is not None and await run.agent.steer(AgentInput(message_id, message)):
             run.accepted_steers.add(request.attempt_id)
@@ -675,7 +675,7 @@ class AvibeAgent(BaseAgent):
         except Exception:
             # The rows stay accepted and unconsumed: the recovery owner admits them (T3)
             # without waiting for the Session's next message.
-            logger.exception("Avibe Agent could not admit returned inputs for Session %s", run.session_id)
+            logger.exception("Vibey could not admit returned inputs for Session %s", run.session_id)
             self._schedule_recovery()
 
     # --- resume (recovery.md T2, T3) -------------------------------------------
@@ -706,7 +706,7 @@ class AvibeAgent(BaseAgent):
         except Exception:
             # The input is admitted regardless (T3 never drops one): a recovered input whose
             # sender facts cannot be rebuilt must not stop every later Turn of the Session.
-            logger.exception("Avibe Agent could not rebuild sender facts for input %s", delivery.get("id"))
+            logger.exception("Vibey could not rebuild sender facts for input %s", delivery.get("id"))
             return None
 
     async def _settle_left_open(self, runtime: _SessionRuntime) -> None:
@@ -719,7 +719,7 @@ class AvibeAgent(BaseAgent):
             await self._settle_open_calls(runtime)
         except Exception:
             # The calls stay open, and the recovery owner settles them once this Turn releases the Session.
-            logger.exception("Avibe Agent could not settle the calls a run left open in Session %s", runtime.session_id)
+            logger.exception("Vibey could not settle the calls a run left open in Session %s", runtime.session_id)
             self._schedule_recovery()
 
     async def _settle_open_calls(self, runtime: _SessionRuntime) -> None:
@@ -883,7 +883,7 @@ class AvibeAgent(BaseAgent):
             return {row_id: moment for row_id, created in rows if (moment := instant(created)) is not None}
 
     def _unconsumed_inputs(self, session_id: str) -> list[tuple[str, str, list[FileAttachment], dict[str, Any]]]:
-        """Inputs accepted into an ``avibe`` Turn but never consumed, in acceptance order.
+        """Inputs accepted into a ``vibey`` Turn but never consumed, in acceptance order.
 
         Only Turns this backend ran count, so history from an earlier backend of the
         same Session never enters the context.
@@ -969,7 +969,7 @@ class AvibeAgent(BaseAgent):
                     continue
                 except OSError:
                     # Unreadable now: listed by path, as the native backends pass every attachment.
-                    logger.warning("Avibe Agent lists an image it could not snapshot: %s", attachment.local_path)
+                    logger.warning("Vibey lists an image it could not snapshot: %s", attachment.local_path)
             size = f", {attachment.size} bytes" if attachment.size else ""
             listed.append(f"- File: {attachment.local_path} ({attachment.mimetype}{size})")
         body = message or ""
@@ -1078,7 +1078,7 @@ class AvibeAgent(BaseAgent):
         try:
             watches = list_watches()
         except Exception:
-            logger.debug("Avibe Agent could not list Watches", exc_info=True)
+            logger.debug("Vibey could not list Watches", exc_info=True)
             return []
         lines = []
         for watch in watches:
@@ -1108,7 +1108,7 @@ class AvibeAgent(BaseAgent):
                 output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=row_id),
             )
         except Exception:
-            logger.exception("Avibe Agent could not show narration %s", row_id)
+            logger.exception("Vibey could not show narration %s", row_id)
 
     async def _emit_tool_started(self, run: _Run, event: ToolStarted) -> None:
         call = run.tool_calls.get(event.tool_call_id)
@@ -1123,7 +1123,7 @@ class AvibeAgent(BaseAgent):
                 status_label=formatter.format_toolcall_label(event.name, arguments, get_relative_path=relative),
             )
         except Exception:
-            logger.exception("Avibe Agent could not show tool %s", event.name)
+            logger.exception("Vibey could not show tool %s", event.name)
 
     def _on_response(self, session_id: str, row_id: str, message: AssistantMessage) -> None:
         """A response committed for the Session's run: keep what its delivery and tool events need."""
@@ -1148,7 +1148,7 @@ class AvibeAgent(BaseAgent):
         try:
             note(run.request.context, total=total)
         except Exception:
-            logger.debug("Avibe Agent token note failed", exc_info=True)
+            logger.debug("Vibey token note failed", exc_info=True)
 
     async def _fail(
         self,
@@ -1181,7 +1181,7 @@ class AvibeAgent(BaseAgent):
     async def _fail_preflight(self, request: AgentRequest, error: BaseException) -> None:
         from modules.agents.model_hub import hub_supply_refusal, launch_refusal_copy
 
-        logger.warning("Avibe Agent could not resolve its model route: %s", error)
+        logger.warning("Vibey could not resolve its model route: %s", error)
         language = self._language()
         # Every route runs through the Model Hub: when it is disabled or its gateway is off, that explains the failure.
         refusal = (
@@ -1319,7 +1319,7 @@ class AvibeAgent(BaseAgent):
         return sorted(candidates)
 
     def _sessions_with_unconsumed_inputs(self) -> list[str]:
-        """Sessions with inputs accepted into an ``avibe`` Turn that no run consumed (T3)."""
+        """Sessions with inputs accepted into a ``vibey`` Turn that no run consumed (T3)."""
         with self._engine.connect() as conn:
             return sorted(
                 conn.execute(

@@ -7,7 +7,7 @@
   "required": ["backend", "requested_model", "protocol", "base_url", "token", "runtime_model", "source_id", "provider", "request_headers", "capabilities"],
   "additionalProperties": false,
   "properties": {
-    "backend": { "const": "avibe" },
+    "backend": { "const": "vibey" },
     "requested_model": { "type": "string" },
     "protocol": { "$ref": "source.schema.json#/properties/protocol" },
     "base_url": { "type": "string", "format": "uri" },

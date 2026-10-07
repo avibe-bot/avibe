@@ -1,6 +1,6 @@
-"""What the Avibe Agent supplies to C-9 context management (``agent-core-contracts/context.md`` sections 7 and 9).
+"""What Vibey supplies to C-9 context management (``agent-core-contracts/context.md`` sections 7 and 9).
 
-``AvibeContextHost`` is the loop's ``ContextHost``:
+``VibeyContextHost`` is the loop's ``ContextHost``:
 
 * ``earlier_record`` is the short hint a checkpoint carries in ``<earlier-record>``:
   where the earlier messages are stored and how far they go, one runnable example
@@ -26,7 +26,7 @@ from sqlalchemy.engine import Engine
 
 from core.agent_core.harness.context import StateRequest, display
 from core.agent_core.tools.base import Tool, ToolContext, ToolResult, ToolSpec
-from modules.agents.avibe.prompt import EnvironmentValue, render_environment
+from modules.agents.vibey.prompt import EnvironmentValue, render_environment
 
 #: The tags of the block ``vibe skill load`` writes for each skill it loads (``render_skill_content``).
 _SKILL_TAG = re.compile(r'<skill_content name="([^"]*)"[^>]*>|</skill_content>')
@@ -58,8 +58,8 @@ def budgeted(selection: Any) -> Any:
     return _replace(selection, capabilities=_replace(capabilities, max_output_tokens=output_budget(capabilities)))
 
 
-class AvibeContextHost:
-    """The loop's ``ContextHost`` for the Avibe Agent."""
+class VibeyContextHost:
+    """The loop's ``ContextHost`` for Vibey."""
 
     def __init__(self, engine: Engine, *, environment: Callable[[str], Mapping[str, EnvironmentValue]]) -> None:
         self._engine = engine

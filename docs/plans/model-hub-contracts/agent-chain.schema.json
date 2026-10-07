@@ -8,7 +8,7 @@
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 12 },
-    "backend": { "enum": ["claude", "codex", "opencode", "avibe"] },
+    "backend": { "enum": ["claude", "codex", "opencode", "vibey"] },
     "model_id": { "type": "string" },
     "manual_override": {
       "description": "Normalized nonempty manual override, or null for inherited routing. Valid empty saved values and preview inputs normalize to null without a read-time write. Preview reports normalized draft intent. Nonempty equality with generated hops never determines intent; there is no empty-disable state.",
@@ -162,7 +162,7 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "backend": { "const": "avibe" } }, "required": ["backend"] },
+      "if": { "properties": { "backend": { "const": "vibey" } }, "required": ["backend"] },
       "then": { "properties": { "chain": { "items": { "properties": { "channel": { "const": "hub" } } } } } }
     },
     {

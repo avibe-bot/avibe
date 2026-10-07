@@ -1045,19 +1045,19 @@ def test_runtime_stop_requires_native_backends_to_be_direct(tmp_path):
     assert adapter.stop_runtime_calls == 0
 
 
-def test_runtime_stop_protects_configured_avibe_models(tmp_path):
+def test_runtime_stop_protects_configured_vibey_models(tmp_path):
     # The new empty Hub row must not strand old installations in the runtime,
     # but adding a consumer model makes its engine dependency real.
     service, store, adapter = _service(tmp_path)
     for backend in ("claude", "codex", "opencode"):
         store.config.agents[backend].mode = "direct"
-    store.config.agents["avibe"].models = [ModelHubBackendModelConfig(id="agent-model")]
+    store.config.agents["vibey"].models = [ModelHubBackendModelConfig(id="agent-model")]
 
     with pytest.raises(ModelHubError) as exc_info:
         asyncio.run(service.runtime_stop())
 
     assert exc_info.value.code == "runtime_in_use"
-    assert exc_info.value.data == {"backends": ["avibe"]}
+    assert exc_info.value.data == {"backends": ["vibey"]}
     assert adapter.stop_runtime_calls == 0
 
 
@@ -4485,7 +4485,7 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
         "claude": True,
         "codex": True,
         "opencode": False,
-        "avibe": False,
+        "vibey": False,
     }
 
 
@@ -4875,7 +4875,7 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
         "claude": [("pm", "claude-sonnet-4-6"), ("reviewer", "claude-opus-4-6")],
         "codex": [("codex", "gpt-5.3-codex")],
         "opencode": [],
-        "avibe": [],
+        "vibey": [],
     }[backend]
     store.config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
         hops=[

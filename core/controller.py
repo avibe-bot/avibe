@@ -317,11 +317,11 @@ class Controller:
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
-        self.avibe_model_supply_task: Optional[asyncio.Task] = None
-        from modules.agents.avibe.recovery import AvibeRecovery
+        self.vibey_model_supply_task: Optional[asyncio.Task] = None
+        from modules.agents.vibey.recovery import VibeyRecovery
 
-        # The single owner of the Avibe Agent's settlement outside a Turn.
-        self.avibe_recovery = AvibeRecovery(self)
+        # The single owner of Vibey's settlement outside a Turn.
+        self.vibey_recovery = VibeyRecovery(self)
         self.trace_retention_task: Optional[asyncio.Task] = None
         self._trace_retention_executor: Optional[Any] = None
         self._trace_retention_cancel_event: Optional[threading.Event] = None
@@ -381,12 +381,12 @@ class Controller:
                 selections.append((backend, model))
         return selections
 
-    def _reconcile_avibe_agent_model(self) -> None:
-        """Give the built-in Avibe Agent its catalog's first model while it has none.
+    def _reconcile_vibey_agent_model(self) -> None:
+        """Give the built-in Vibey Agent its catalog's first model while it has none.
 
-        An Avibe Agent without a model cannot run a turn, so this only makes an
+        A Vibey Agent without a model cannot run a turn, so this only makes an
         unrunnable Agent runnable. Decided under the store's write lock, it never
-        replaces a model the user chose. It runs whenever the Avibe catalog
+        replaces a model the user chose. It runs whenever the Vibey catalog
         changes (``backend_catalog_changed``) and at every start, so a hand-off a
         failed write or an exit lost heals on the next one. No built-in exists
         when a user Agent already holds the name.
@@ -394,15 +394,15 @@ class Controller:
 
         from vibe.authorization import instance_owner_context
 
-        models = self.model_hub_service.store.load().agents["avibe"].models
+        models = self.model_hub_service.store.load().agents["vibey"].models
         if not models:
             return
         store = self.vibe_agent_store
-        avibe = store.get_builtin_default_agent_for_backend("avibe", enabled_only=False)
-        if avibe is None or str(avibe.model or "").strip():
+        vibey = store.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
+        if vibey is None or str(vibey.model or "").strip():
             return
         store.update(
-            avibe.name,
+            vibey.name,
             model=models[0].id,
             only_if_model_unset=True,
             user_context=instance_owner_context(),
@@ -413,12 +413,12 @@ class Controller:
 
         from config.v2_config import V2Config
 
-        if backend == "avibe":
+        if backend == "vibey":
             try:
-                self._reconcile_avibe_agent_model()
+                self._reconcile_vibey_agent_model()
             except Exception:
                 # The catalog change stands; the next start reconciles again.
-                logger.warning("Avibe Agent model reconciliation failed", exc_info=True)
+                logger.warning("Vibey Agent model reconciliation failed", exc_info=True)
         try:
             latest = V2Config.load()
         except FileNotFoundError:
@@ -431,20 +431,20 @@ class Controller:
         if callable(adopt_catalog):
             await adopt_catalog()
 
-    async def _seed_avibe_model_supply(self) -> None:
-        """Seed the Avibe Agent's Model Hub entry from existing Sources, then reconcile its model."""
+    async def _seed_vibey_model_supply(self) -> None:
+        """Seed Vibey's Model Hub entry from existing Sources, then reconcile its built-in Agent's model."""
 
         model_hub_service = getattr(self, "model_hub_service", None)
         if model_hub_service is None:
             return
         try:
-            await model_hub_service.seed_avibe_supply()
+            await model_hub_service.seed_vibey_supply()
         except Exception:
-            logger.warning("Avibe Agent starting model supply failed", exc_info=True)
+            logger.warning("Vibey starting model supply failed", exc_info=True)
         try:
-            self._reconcile_avibe_agent_model()
+            self._reconcile_vibey_agent_model()
         except Exception:
-            logger.warning("Avibe Agent model reconciliation failed", exc_info=True)
+            logger.warning("Vibey Agent model reconciliation failed", exc_info=True)
 
     def get_native_session_service(self):
         if self.native_session_service is None:
@@ -811,7 +811,7 @@ class Controller:
 
     def _init_agents(self):
         from core.session_activities import SessionActivityRegistry
-        from modules.agents.avibe import AvibeAgent
+        from modules.agents.vibey import VibeyAgent
         from modules.agents.claude_agent import ClaudeAgent
         from modules.agents.codex import CodexAgent
         from modules.agents.opencode import OpenCodeAgent
@@ -839,7 +839,7 @@ class Controller:
             except Exception as e:
                 logger.error(f"Failed to initialize OpenCode agent: {e}")
         # Built in: always registered, never unregistered.
-        self.agent_service.register(AvibeAgent(self))
+        self.agent_service.register(VibeyAgent(self))
 
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
@@ -1116,12 +1116,12 @@ class Controller:
             platforms.add("")
         await self._restore_active_polls_or_raise(platforms)
 
-    async def _recover_avibe_agent_runtime_state(self) -> None:
-        """Settle what the previous process left of the Avibe Agent's work (T2, T3 admission, J5).
+    async def _recover_vibey_agent_runtime_state(self) -> None:
+        """Settle what the previous process left of Vibey's work (T2, T3 admission, J5).
 
-        ``avibe_recovery`` is the single owner, retrying until every Session has settled.
+        ``vibey_recovery`` is the single owner, retrying until every Session has settled.
         """
-        await self.avibe_recovery.start()
+        await self.vibey_recovery.start()
 
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
@@ -1251,10 +1251,10 @@ class Controller:
         try:
             # Off the readiness path: on a first start the seed may wait for a
             # models.dev copy, and nothing below needs it.
-            if getattr(self, "avibe_model_supply_task", None) is None:
-                self.avibe_model_supply_task = asyncio.create_task(self._seed_avibe_model_supply())
+            if getattr(self, "vibey_model_supply_task", None) is None:
+                self.vibey_model_supply_task = asyncio.create_task(self._seed_vibey_model_supply())
         except Exception as e:
-            logger.error("Failed to start the Avibe Agent's model supply seed: %s", e, exc_info=True)
+            logger.error("Failed to start Vibey's model supply seed: %s", e, exc_info=True)
 
         try:
             if self.cleanup_task is None or self.cleanup_task.done():
@@ -1288,13 +1288,13 @@ class Controller:
                 if coordinator is not None:
                     coordinator.restore_migration_blocks()
 
-        # recovery.md: T2 before T4. The Avibe Agent hands the commands a restart left running
+        # recovery.md: T2 before T4. Vibey hands the commands a restart left running
         # to their Watches first, so the interruption notice of their Turn can say so instead
         # of asking for a resend. Best effort: its single owner retries what it could not settle.
         try:
-            await self._recover_avibe_agent_runtime_state()
+            await self._recover_vibey_agent_runtime_state()
         except Exception:
-            logger.exception("Failed to recover the Avibe Agent's runtime state")
+            logger.exception("Failed to recover Vibey's runtime state")
 
         recover_deliveries = getattr(
             self.session_turns,
@@ -2418,15 +2418,15 @@ class Controller:
                     pass
             self.cleanup_task = None
 
-        async def _cancel_avibe_model_supply_task() -> None:
-            task = getattr(self, "avibe_model_supply_task", None)
+        async def _cancel_vibey_model_supply_task() -> None:
+            task = getattr(self, "vibey_model_supply_task", None)
             if task is not None and not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
-            self.avibe_model_supply_task = None
+            self.vibey_model_supply_task = None
 
         async def _cancel_trace_retention_task() -> None:
             cancel_event = getattr(self, "_trace_retention_cancel_event", None)
@@ -2472,7 +2472,7 @@ class Controller:
             logger.debug(f"Internal dispatch server status write skipped: {e}")
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
-        _stop_loop_coroutine(_cancel_avibe_model_supply_task(), "Avibe Agent model supply seed")
+        _stop_loop_coroutine(_cancel_vibey_model_supply_task(), "Vibey model supply seed")
         # Retention cancellation is cooperative at a delete-batch boundary;
         # wait for that bounded join instead of abandoning the worker after
         # the generic five-second cleanup timeout.
@@ -2496,10 +2496,10 @@ class Controller:
         if show_git_checkpoint_service is not None:
             show_git_checkpoint_service.stop()
 
-        # The Avibe Agent's recovery retries end with the service; the next start recovers again.
-        avibe_recovery = getattr(self, "avibe_recovery", None)
-        if avibe_recovery is not None:
-            _stop_loop_coroutine(avibe_recovery.stop(), "Avibe Agent recovery")
+        # Vibey's recovery retries end with the service; the next start recovers again.
+        vibey_recovery = getattr(self, "vibey_recovery", None)
+        if vibey_recovery is not None:
+            _stop_loop_coroutine(vibey_recovery.stop(), "Vibey recovery")
 
         try:
             codex_agent = self.agent_service.agents.get("codex")

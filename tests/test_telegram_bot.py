@@ -1355,7 +1355,7 @@ def test_routing_state_marks_current_backend_in_first_row() -> None:
     _, keyboard = bot._render_routing_state(state)
 
     assert [button.callback_data for button in keyboard.buttons[0]] == [
-        "tg_route:backend:avibe",
+        "tg_route:backend:vibey",
         "tg_route:backend:opencode",
         "tg_route:backend:claude",
     ]
@@ -1459,7 +1459,7 @@ def test_routing_callback_backend_switches_without_nested_picker() -> None:
     edit_mock.assert_awaited_once()
 
 
-@pytest.mark.parametrize("extra_backend", ["avibe", "extra"])
+@pytest.mark.parametrize("extra_backend", ["vibey", "extra"])
 def test_routing_state_keeps_backend_picker_entry_for_extra_backends(extra_backend) -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     state = SimpleNamespace(
@@ -1478,18 +1478,18 @@ def test_routing_state_keeps_backend_picker_entry_for_extra_backends(extra_backe
     )
 
     text, keyboard = bot._render_routing_state(state)
-    if extra_backend == "avibe":
+    if extra_backend == "vibey":
         assert "Vibey" in text
 
     assert [button.callback_data for button in keyboard.buttons[0]] == [
-        "tg_route:backend:avibe",
+        "tg_route:backend:vibey",
         "tg_route:backend:opencode",
         "tg_route:backend:claude",
     ]
     assert keyboard.buttons[1][0].callback_data == "tg_route:field:backend"
 
 
-@pytest.mark.parametrize("extra_backend", ["avibe", "extra"])
+@pytest.mark.parametrize("extra_backend", ["vibey", "extra"])
 def test_routing_callback_backend_picker_can_select_extra_backend(extra_backend) -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     context = MessageContext(

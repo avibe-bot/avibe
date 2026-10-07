@@ -37,9 +37,9 @@ A user-requested saved-model probe uses a Gemini `contents` request.
 ## Consumer and transport
 
 `ModelHubLaunch.to_hop_resolution()` and the runtime router return `protocol: "google"`
-and the gateway frontend Base URL ending in `/avibe/v1beta`. Required
+and the gateway frontend Base URL ending in `/vibey/v1beta`. Required
 `request_headers`, gateway token, runtime model, Source identity, provider identity
-and nullable capabilities have exactly the same owners as in `avibe-consumer.md`.
+and nullable capabilities have exactly the same owners as in `vibey-consumer.md`.
 
 The gateway accepts:
 
@@ -64,7 +64,7 @@ The engine remains v7.3.16 at upstream `c404af96` with the existing Avibe patch.
 
 ### Pinned-engine limitations and admission skips
 
-For **Avibe streaming only**, a Google frontend request cannot admit an
+For **Vibey streaming only**, a Google frontend request cannot admit an
 `openai_responses` Source hop: the pinned CPA Responses/Codex-to-Gemini translator
 does not emit `finishReason` for `response.completed`. Before transport/recovery
 admission, skip that hop with stable reason
@@ -76,7 +76,7 @@ is fabricated. If all selectable hops were skipped without an upstream attempt,
 return local HTTP 422 with that same machine reason and no served-hop header.
 If actual upstream attempts failed too, ordinary exhaustion still owns the turn.
 
-For **Avibe Google-frontend requests**, buffered or streaming, a selected original
+For **Vibey Google-frontend requests**, buffered or streaming, a selected original
 model id containing `:` is also unsupported: CPA splits the decoded Google action
 on every colon, so percent-encoding does not preserve that identity. Skip exactly
 that hop with reason `google_model_path_unsupported` before transport, recovery
@@ -89,7 +89,7 @@ An explicit Agent probe still tests only its selected hop: an unsupported
 Google model returns the same controlled 422 reason instead of retrying a
 permanent local limitation as a changed route.
 
-Saved-Source probes are an explicit exception to the Avibe-only consumer
+Saved-Source probes are an explicit exception to the Vibey-only consumer
 scope: they test one exact inventory model with a buffered request in the
 Source's protocol. A Google Source model containing `:` returns local HTTP 422
 with `google_model_path_unsupported`, not an upstream/model failure. It does not
@@ -98,7 +98,7 @@ credential, meter usage, or attach a served origin. The internal `opencode`
 adapter-dispatch marker does not make this Model Hub operation a native CLI call.
 
 One pure predicate owns the two engine limitations, from frontend protocol,
-Source protocol, original model id and streaming mode. Avibe routing/Agent
+Source protocol, original model id and streaming mode. Vibey routing/Agent
 probes and saved-Source probes explicitly apply it before engine preparation
 and to the locked, revalidated snapshot immediately before adapter admission.
 A request already known to be unsupported at preflight does not start/reconcile
@@ -137,7 +137,7 @@ the v11 response-origin policy: `x-avibe-served-hop` comes only from the immutab
 admitted invocation that actually supplied the response. Pre-admission/local
 failures have no origin header.
 
-Avibe fallback compares each admitted hop with the launch's primary origin.
+Vibey fallback compares each admitted hop with the launch's primary origin.
 For a different or unverifiable origin, Google `contents[].parts` lose opaque
 signatures and visible thought text becomes ordinary text; tool arguments and
 results are user data and remain intact. Same-origin requests retain signatures.

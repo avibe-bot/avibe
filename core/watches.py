@@ -3111,7 +3111,7 @@ class ManagedWatchService:
 
 
 def agent_jobs_dir() -> Path:
-    """Where the Avibe Agent's jobs live (plan section 5.3): the adapter's ``LocalJobHost`` hosts them here."""
+    """Where Vibey's jobs live (plan section 5.3): the adapter's ``LocalJobHost`` hosts them here."""
 
     return paths.get_state_dir() / "agent_core" / "jobs"
 
