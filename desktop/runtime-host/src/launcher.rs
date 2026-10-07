@@ -64,7 +64,7 @@ const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
 const HAND_OVER_ARG: &str = "--hand-over";
 const ENDPOINT_ARGS: [&str; 3] = ["desktop", "endpoint", "--json"];
 const REMOVE_BACKENDS_ARGS: [&str; 2] = ["desktop", "remove-backends"];
-/// How long the shell waits for the Runtime to name its own address.
+/// How long one run of the endpoint helper may take before it is killed.
 ///
 /// Sized for a *cold* first launch, not a warm one. The bundle has just been
 /// extracted, so nothing in the runtime tree has been paged in or evaluated by
@@ -78,9 +78,25 @@ const REMOVE_BACKENDS_ARGS: [&str; 2] = ["desktop", "remove-backends"];
 /// This is the last step on the cold path that still held a warm number --
 /// readiness already allows 120s (`DEFAULT_READY_TIMEOUT`). Staying under that
 /// keeps discovery from dominating the launch, while 3x the worst measurement
-/// leaves room for slower hardware. The budget is only spent in full when the
-/// endpoint is genuinely broken, and that failure is already retryable.
+/// leaves room for slower hardware. Slower storage than that is what
+/// `ENDPOINT_ATTEMPTS` is for.
 const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How many runs of the endpoint helper may time out before discovery fails.
+///
+/// No fixed budget fits every disk: an update on an IO-starved machine (#2316)
+/// spent 50.7s on this call in one run and was killed at 60s in another, and
+/// the window then showed a failure page while the previous Runtime kept
+/// serving. A timeout alone cannot tell a cold tree from a hung helper, but a
+/// second run can: what made the first one slow -- first reads, and the
+/// system's first scan of each new executable -- is paid once and survives the
+/// kill, while a hang repeats. So a timed-out run is run once more, and only a
+/// second timeout counts as a failure. A helper that exits or answers badly
+/// failed for a reason a repeat would not change, so it is never repeated.
+///
+/// `run_isolated_probe` in `core/install_integrity.py` applies the same rule
+/// to the CLI's probes of a freshly installed tree.
+const ENDPOINT_ATTEMPTS: u32 = 2;
 
 /// How much of a helper's stderr the shell keeps: the bootstrap log's
 /// diagnostic, and a lifecycle verb's closing JSON verdict.
@@ -679,6 +695,8 @@ struct EndpointDescriptor {
 /// carry: how long it took, what it printed on stderr, and the exit status it
 /// actually had rather than the fact that it was not zero.
 struct EndpointAttempt {
+    /// 1 for the first run of this discovery, 2 for its one repeat.
+    number: u32,
     result: Result<LoopbackOrigin, LaunchError>,
     status: Option<std::process::ExitStatus>,
     stderr: Option<Vec<u8>>,
@@ -697,6 +715,21 @@ fn query_endpoint_within(
     log: &BootstrapLog,
     timeout: Duration,
 ) -> Result<LoopbackOrigin, LaunchError> {
+    let mut attempt = 1;
+    loop {
+        match query_endpoint_once(runtime, log, timeout, attempt) {
+            Err(LaunchError::EndpointTimeout) if attempt < ENDPOINT_ATTEMPTS => attempt += 1,
+            result => return result,
+        }
+    }
+}
+
+fn query_endpoint_once(
+    runtime: &RuntimeCommand,
+    log: &BootstrapLog,
+    timeout: Duration,
+    attempt: u32,
+) -> Result<LoopbackOrigin, LaunchError> {
     let started = Instant::now();
     let mut status = None;
     let mut stderr_reader = None;
@@ -704,14 +737,15 @@ fn query_endpoint_within(
     // Collected after the query returns, so a timeout that had to kill the child
     // still reports what that child said before it was killed.
     let stderr = stderr_reader.and_then(|reader| reader.recv_timeout(STDERR_DRAIN).ok());
-    let attempt = EndpointAttempt {
+    let run = EndpointAttempt {
+        number: attempt,
         result,
         status,
         stderr,
         elapsed: started.elapsed(),
     };
-    record_endpoint_attempt(log, &attempt);
-    attempt.result
+    record_endpoint_attempt(log, &run);
+    run.result
 }
 
 fn endpoint_descriptor(
@@ -812,6 +846,7 @@ fn record_endpoint_attempt(log: &BootstrapLog, attempt: &EndpointAttempt) {
     let mut fields = vec![
         ("outcome", endpoint_outcome(&attempt.result).to_owned()),
         ("ms", attempt.elapsed.as_millis().to_string()),
+        ("attempt", attempt.number.to_string()),
     ];
     if let Some(status) = attempt.status {
         fields.push((
@@ -2050,7 +2085,16 @@ mod tests {
 
         assert!(matches!(failure, Err(LaunchError::EndpointTimeout)));
         let written = std::fs::read_to_string(dir.join("bootstrap.log")).expect("the attempt is recorded");
-        assert!(written.contains("outcome=\"timeout\""), "{written}");
+        let records: Vec<&str> = written.lines().collect();
+        assert_eq!(
+            records.len(),
+            2,
+            "a hang is repeated once, then reported, never retried without end: {written}"
+        );
+        for (record, attempt) in records.iter().zip(["1", "2"]) {
+            assert!(record.contains("outcome=\"timeout\""), "{written}");
+            assert!(record.contains(&format!("attempt=\"{attempt}\"")), "{written}");
+        }
         assert!(
             !written.contains(" exit="),
             "a child that was killed has no exit status to report: {written}"
@@ -2058,6 +2102,62 @@ mod tests {
         assert!(
             written.contains("still importing"),
             "output from before the kill is still worth having: {written}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #2316: on an IO-starved disk the first run of a freshly extracted tree
+    /// outlived the whole budget, and the update stopped on a failure page. What
+    /// made that run slow is paid once, so the run after the kill answers.
+    ///
+    /// The fixture's first query stands in for the cold run: it leaves the flag
+    /// behind and then blocks past the deadline. Every later query finds the flag
+    /// and answers. The warm-up run (no arguments) pays this executable's own
+    /// first-exec cost outside the deadline, for the reason given in the test
+    /// above.
+    #[cfg(unix)]
+    #[test]
+    fn a_cold_endpoint_killed_at_its_deadline_answers_on_the_repeat() {
+        let dir = scratch_dir("endpoint-cold-repeat");
+        let paid = dir.join("paid");
+        let executable = write_fake_runtime(
+            &dir,
+            &format!(
+                "#!/bin/sh\n[ \"$1\" = desktop ] || exit 0\nif [ -e {flag} ]; then printf '%s\\n' '{{\"schema_version\":1,\"origin\":\"http://127.0.0.1:6123\"}}'; exit 0; fi\n: > {flag}\nexec sleep 30\n",
+                flag = paid.display()
+            ),
+        );
+        let warm_up = Command::new(&executable)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("the fixture runs");
+        assert!(
+            warm_up.success() && !paid.exists(),
+            "the warm-up run must not pay the cold run"
+        );
+        let log = BootstrapLog::at(dir.join("bootstrap.log"));
+
+        let endpoint = query_endpoint_within(
+            &RuntimeCommand::installed(executable),
+            &log,
+            Duration::from_millis(1_500),
+        )
+        .expect("the run after a timed-out cold run answers");
+
+        assert_eq!(endpoint.as_str(), "http://127.0.0.1:6123");
+        let written = std::fs::read_to_string(dir.join("bootstrap.log")).expect("both runs are recorded");
+        let records: Vec<&str> = written.lines().collect();
+        assert_eq!(records.len(), 2, "{written}");
+        assert!(
+            records[0].contains("outcome=\"timeout\"") && records[0].contains("attempt=\"1\""),
+            "{written}"
+        );
+        assert!(
+            records[1].contains("outcome=\"ok\"") && records[1].contains("attempt=\"2\""),
+            "{written}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
