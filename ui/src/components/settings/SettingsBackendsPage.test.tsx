@@ -38,7 +38,6 @@ beforeEach(async () => {
   await i18n.changeLanguage('en');
   mocks.api.getConfig.mockResolvedValue({ agents: {} });
   mocks.api.detectCli.mockImplementation(async (binary: string) => ({ found: true, path: binary }));
-  mocks.api.mutateConfig.mockResolvedValue({ agents: { vibey: { enabled: true } } });
 });
 
 afterEach(() => {

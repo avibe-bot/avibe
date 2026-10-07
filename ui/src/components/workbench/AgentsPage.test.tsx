@@ -234,7 +234,7 @@ describe('AgentsPage load requests follow the rank that can serve them', () => {
 
 describe('AgentsPage contextual selection', () => {
   it('marks an enabled Agent the gateway reports without a model, as the Models page does', async () => {
-    // Enabling the Avibe backend creates its built-in Agent before any model is selected.
+    // The built-in Vibey Agent exists before Model Hub gives it a model.
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
       {
         backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed',
