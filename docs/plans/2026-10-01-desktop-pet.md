@@ -707,7 +707,9 @@ The code and its tests are the contract; this section records why.
   marked read while still clipped. A failed request restores the last
   confirmed expansion, so a redundant expand of an already-open panel cannot
   hide it. Expansion lives in `petPanel` so the setup-pending card grows the
-  native frame too; until it confirms, only the avatar is shown.
+  native frame too; until it confirms, only the avatar is shown. The
+  setup-pending summon listener is stable, so a still-pending summon is not
+  replayed into an expand/recheck loop.
 - **Read-marking waits for a tail snapshot.** Live rows that arrive before the
   first tail read lands say nothing about older unread rows, so the pet treats
   the tail as having older rows until a read has landed. A live row or unread

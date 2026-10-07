@@ -3,6 +3,8 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { PET_SUMMON_EVENT } from './petBridge';
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }));
@@ -55,7 +57,12 @@ describe('setup-pending expansion', () => {
     const grow = new Promise((resolve) => { resolveGrow = resolve; });
     const invoke = vi.fn((command: string) => {
       if (command === 'pet_ready') return Promise.resolve({ binding: null, revision: 0, summon_pending: null });
-      if (command === 'pet_set_expanded') return grow;
+      if (command === 'pet_set_expanded') {
+        if (invoke.mock.calls.filter(([c]) => c === 'pet_set_expanded').length > 8) {
+          throw new Error('pet_set_expanded loop');
+        }
+        return grow;
+      }
       return Promise.resolve(null);
     });
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
@@ -65,5 +72,11 @@ describe('setup-pending expansion', () => {
     expect(screen.queryByText('pet.setupPending')).toBeNull();
     await act(async () => resolveGrow({ panel_side: 'left', panel_edge: 'bottom' }));
     expect(await screen.findByText('pet.setupPending')).toBeTruthy();
+    const expands = invoke.mock.calls.filter(([command]) => command === 'pet_set_expanded').length;
+    act(() => {
+      window.dispatchEvent(new CustomEvent(PET_SUMMON_EVENT, { detail: { intent: 'show' } }));
+    });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 40)));
+    expect(invoke.mock.calls.filter(([command]) => command === 'pet_set_expanded')).toHaveLength(expands + 1);
   });
 });

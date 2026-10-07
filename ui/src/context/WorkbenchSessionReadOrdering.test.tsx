@@ -1093,6 +1093,57 @@ describe('Workbench session read ownership', () => {
     return holder;
   };
 
+  it('does not let a mark-read overwrite a newer unread event for the same session', async () => {
+    const mark = deferred({ unread_by_session: {} as Record<string, number> });
+    let handlers: WorkbenchEventHandlers | null = null;
+    apiRef.current = {
+      listInbox: vi.fn().mockResolvedValue({
+        sessions: [inboxRow],
+        next_cursor: null,
+        unread_by_session: { [session.id]: 1 },
+      }),
+      markSessionRead: vi.fn().mockReturnValue(mark.promise),
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    };
+    const holder: { inbox: ReturnType<typeof useWorkbenchInbox> | null } = { inbox: null };
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        holder.inbox = value;
+      }, [value]);
+      return null;
+    };
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      void holder.inbox?.markRead(session.id, 'msg_old');
+    });
+    await settle();
+    act(() => {
+      handlers?.onInboxUnreadChanged?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        delta: 1,
+        unread_counts: { agent: 1 },
+        unread_by_session: { [session.id]: 1, [sessionB.id]: 2 },
+      });
+    });
+    await act(async () => {
+      mark.resolve({ unread_by_session: {} });
+      await mark.promise;
+    });
+    await settle();
+
+    expect(holder.inbox?.unreadBySession).toEqual({ [session.id]: 1, [sessionB.id]: 2 });
+  });
+
   it('lets a newer mark-read for the same session land after an older one that finished first', async () => {
     const older = deferred({ unread_by_session: {} as Record<string, number> });
     const newer = deferred({ unread_by_session: {} as Record<string, number> });

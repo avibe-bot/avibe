@@ -68,10 +68,14 @@ const PetSetupPending: React.FC<{ recheck: () => void }> = ({ recheck }) => {
   // is the page, and again on a summon (which also re-reads setup so the pet
   // surface can take over once setup is complete).
   useEffect(() => { void setPanel(true); }, [setPanel]);
-  useOnSummon(() => {
+  // Stable: `useOnSummon` replays a still-pending summon on each new
+  // listener, and this view must not take it — PetSurface acts on it once
+  // setup is complete.
+  const onSetupSummon = useCallback(() => {
     recheck();
     void setPanel(true);
-  });
+  }, [recheck, setPanel]);
+  useOnSummon(onSetupSummon);
   const card = expanded ? (
     <div className="max-w-[220px] rounded-xl border border-border bg-card p-3 text-[12px] text-foreground shadow-lg">
       <p className="mb-2">{t('pet.setupPending')}</p>

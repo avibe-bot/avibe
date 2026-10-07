@@ -465,6 +465,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         || laterMarkStarted
         || !readOwnershipRef.current.isMutationCurrent(operation, [
           `inbox-session:${sessionId}`,
+          `inbox-unread-session:${sessionId}`,
         ])
       ) {
         return applied;
@@ -852,7 +853,17 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       onInboxUnreadChanged: (data) => {
         if (data?.unread_by_session) {
           // The event IS the newest whole map: fence the reads in flight, then adopt it.
-          acceptUnreadMutation();
+          // Include the session slice when the event names one, so an in-flight
+          // mark-read for that session cannot merge its older count over this map.
+          if (data.session_id) {
+            readOwnershipRef.current.acceptMutation([
+              'inbox-unread',
+              'inbox-unread-all',
+              `inbox-unread-session:${data.session_id}`,
+            ]);
+          } else {
+            acceptUnreadMutation();
+          }
           applyUnreadMap(data.unread_by_session);
           return;
         }
