@@ -40,7 +40,7 @@
       "additionalProperties": false,
       "properties": {
         "type": { "const": "error" },
-        "kind": { "enum": ["overflow", "rate_limit", "overloaded", "network", "server", "auth", "invalid_request", "aborted", "unknown"] },
+        "kind": { "enum": ["overflow", "rate_limit", "overloaded", "network", "stalled", "server", "auth", "invalid_request", "aborted", "unknown"] },
         "retryable": { "type": "boolean" },
         "retry_after_s": { "type": "number", "minimum": 0 },
         "status": { "type": "integer", "description": "HTTP status, when there was one." },

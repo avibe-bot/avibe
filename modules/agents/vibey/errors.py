@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from core.agent_core.ai._common import PROVIDER_SILENCE_TIMEOUT_S
 from modules.agents.catalog import display_name_for_backend
 from vibe.i18n import t as i18n_t
 
@@ -28,6 +29,7 @@ _KIND_KEYS: dict[str, str] = {
     "rate_limit": "rateLimit",
     "overloaded": "overloaded",
     "network": "network",
+    "stalled": "stalled",
     "server": "server",
     "auth": "auth",
     "invalid_request": "invalidRequest",
@@ -51,4 +53,9 @@ def error_key(kind: Optional[str], *, reason: Optional[str] = None) -> str:
 
 
 def error_text(kind: Optional[str], lang: str, *, reason: Optional[str] = None) -> str:
-    return i18n_t(error_key(kind, reason=reason), lang, backend=display_name_for_backend("vibey"))
+    return i18n_t(
+        error_key(kind, reason=reason),
+        lang,
+        backend=display_name_for_backend("vibey"),
+        minutes=f"{PROVIDER_SILENCE_TIMEOUT_S / 60:g}",
+    )

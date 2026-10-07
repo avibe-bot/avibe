@@ -75,7 +75,7 @@ Error classification is part of the contract because the loop branches on it:
 | `kind` | Meaning | Loop action |
 | --- | --- | --- |
 | `overflow` | the request exceeded the model's context (Pi's overflow patterns, HTTP 413, `context_length_exceeded`) | overflow recovery (plan §5.2) |
-| `rate_limit`, `overloaded`, `network`, `server` | transient | retry with backoff, honoring `retry_after_s`, only when nothing was streamed (no deltas, no `partial`), at most 3 retries within 120 s; then the run ends with that error. After streamed output the error is terminal for the request, matching Model Hub's first-byte rule |
+| `rate_limit`, `overloaded`, `network`, `stalled`, `server` | transient (`network`: the provider could not be reached; `stalled`: a connected provider sent nothing for the silence bound) | retry with backoff, honoring `retry_after_s`, only when nothing was streamed (no deltas, no `partial`), at most 3 retries within 120 s; then the run ends with that error. After streamed output the error is terminal for the request, matching Model Hub's first-byte rule |
 | `auth`, `invalid_request` | not retryable | end the run with the error |
 | `aborted` | cancelled by the caller | end the run as aborted |
 | `unknown` | anything else | end the run with the error |

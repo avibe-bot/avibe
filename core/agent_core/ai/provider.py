@@ -15,9 +15,18 @@ from core.agent_core.messages import AssistantMessage, Message, ProtocolName
 from core.agent_core.tools.base import ToolSpec
 
 ErrorKind = Literal[
-    "overflow", "rate_limit", "overloaded", "network", "server", "auth", "invalid_request", "aborted", "unknown"
+    "overflow",
+    "rate_limit",
+    "overloaded",
+    "network",
+    "stalled",
+    "server",
+    "auth",
+    "invalid_request",
+    "aborted",
+    "unknown",
 ]
-RETRYABLE_ERROR_KINDS: frozenset[str] = frozenset({"rate_limit", "overloaded", "network", "server"})
+RETRYABLE_ERROR_KINDS: frozenset[str] = frozenset({"rate_limit", "overloaded", "network", "stalled", "server"})
 
 
 @dataclass(frozen=True)

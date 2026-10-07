@@ -1134,6 +1134,23 @@ async def test_a_failed_run_shows_localized_copy_and_a_refusal_shows_its_explana
     assert len(reported) == 2
 
 
+@pytest.mark.parametrize("language", ["en", "zh"])
+async def test_a_provider_stall_is_not_shown_as_a_connection_failure(
+    engine, session, tmp_path, published, language
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    stall = ProviderError("stalled", "provider sent no data for 300s", False)
+    harness = _Harness(engine, tmp_path, "telegram", [[stall]], language=language)
+
+    await harness.agent.handle_message(harness.request("write the page"))
+
+    # The copy names the 300-second silence bound in minutes.
+    stalled_copy = i18n_t("vibeyAgent.error.stalled", language, minutes="5")
+    assert harness.controller.im_client.sent == [f"❌ {stalled_copy}"]
+    assert stalled_copy != i18n_t("vibeyAgent.error.network", language)
+
+
 async def test_a_run_failure_is_reported_to_model_hub_like_the_other_backends(engine, session, tmp_path, published) -> None:
     from core.agent_core.ai.provider import ProviderError
 
