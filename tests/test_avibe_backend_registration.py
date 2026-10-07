@@ -357,3 +357,55 @@ async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db
         assert store.get("vibey").model is None
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("name_taken", [False, True])
+def test_choosing_the_built_in_backend_in_an_im_picker_routes_to_its_agent(tmp_path, sqlite_db_factory, name_taken):
+    """An IM picker chooses a backend; the routing it saves names that backend's built-in Agent.
+
+    The built-in is no longer named after its backend id, so saving the id would leave a
+    reference no Agent answers to, and every message on that channel would fail to resolve.
+    """
+    from core.handlers.settings_handler import SettingsHandler
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        if name_taken:
+            store.create(name="vibey", backend="claude")
+        store.ensure_builtin_default_agents(["claude"])
+        built_in = store.get_builtin_default_agent_for_backend("avibe")
+        assert built_in.name == ("vibey-2" if name_taken else "vibey")
+
+        saved: dict[str, RoutingSettings] = {}
+        settings_manager = SimpleNamespace(
+            get_channel_routing=lambda key: saved.get(key),
+            set_channel_routing=lambda key, routing: saved.__setitem__(key, routing),
+        )
+        config = V2Config.from_payload(_full_config_payload())
+        controller = Controller.__new__(Controller)
+        controller.primary_platform = "slack"
+        controller.sqlite_engine = store.engine
+        controller.config = to_app_config(config, resolve_agent_paths=False)
+        controller.agent_service = SimpleNamespace(agents={"avibe": object(), "claude": object()})
+        controller.vibe_agent_store = store
+        controller.settings_manager = settings_manager
+        controller._get_settings_key = lambda context: context.channel_id
+        controller.get_settings_manager_for_context = lambda _context: settings_manager
+        controller.im_client = SimpleNamespace(send_message=AsyncMock())
+        controller._get_lang = lambda: "en"
+        handler = SettingsHandler(controller)
+        handler._get_settings_key = lambda context: context.channel_id
+        handler._get_settings_manager = lambda context: settings_manager
+
+        for backend, expected in (("avibe", built_in.name), ("claude", "claude")):
+            asyncio.run(handler.handle_routing_update(
+                user_id="U1", channel_id="C-test", backend=backend,
+                opencode_agent=None, opencode_model=None, claude_agent=None, claude_model=None,
+                notify_user=False, platform="slack",
+            ))
+            assert saved["C-test"].agent_name == expected
+            context = MessageContext(user_id="U1", channel_id="C-test", platform="slack")
+            assert controller.resolve_vibe_agent_for_context(context).name == expected
+            assert controller.resolve_agent_for_context(context) == backend
+    finally:
+        store.close()
