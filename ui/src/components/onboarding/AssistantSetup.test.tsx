@@ -18,7 +18,9 @@ import { SETUP_LINEUP } from './collaborationTimeline';
 const mock = vi.hoisted(() => ({ api: {
   detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(), saveClaudeAuth: vi.fn(),
   listVibeAgents: vi.fn(), getVibeAgent: vi.fn(),
-}, showToast: vi.fn(), models: { getAgentChain: vi.fn(), getAgentChains: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn(), listSources: vi.fn() } }));
+}, showToast: vi.fn(), permission: { permissionAllowed: true, statusLoaded: true, state: 'idle', message: '', setupPermission: vi.fn() } as {
+  permissionAllowed: boolean; statusLoaded: boolean; state: string; message: string; setupPermission: ReturnType<typeof vi.fn>;
+}, models: { getAgentChain: vi.fn(), getAgentChains: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn(), listSources: vi.fn() } }));
 vi.mock('../../context/ApiContext', () => ({ useApi: () => mock.api }));
 vi.mock('../settings/models/modelsApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../settings/models/modelsApi')>();
@@ -26,7 +28,7 @@ vi.mock('../settings/models/modelsApi', async (importOriginal) => {
 });
 vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: mock.showToast }) }));
 vi.mock('../settings/models/useModelHubCapability', () => ({ useModelHubCapability: () => false }));
-vi.mock('../settings/shared/useOpencodePermission', () => ({ useOpencodePermission: () => ({ permissionAllowed: true, statusLoaded: true }) }));
+vi.mock('../settings/shared/useOpencodePermission', () => ({ useOpencodePermission: () => mock.permission }));
 vi.mock('../settings/providers/BackendProviderConfig', () => ({ BackendProviderConfig: ({ backend }: { backend: string }) => <div>Existing provider: {backend}</div> }));
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en } }, interpolation: { escapeValue: false } });
@@ -67,6 +69,7 @@ const setupSource: Source = {
 };
 beforeEach(() => {
   vi.resetAllMocks();
+  mock.permission = { permissionAllowed: true, statusLoaded: true, state: 'idle', message: '', setupPermission: vi.fn(async () => undefined) };
   mock.api.getConfig.mockResolvedValue(data());
   mock.api.mutateConfig.mockResolvedValue({});
   mock.api.getBackendConnection.mockImplementation((backend) => Promise.resolve({ ok: true, backend, installed: true, enabled: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true }));
@@ -661,6 +664,43 @@ describe('assistant installation presentation', () => {
     expect(screen.getByText(note)).toBeTruthy();
     expect(screen.queryByRole('button', { name: en.onboarding.setup.configureRoute })).toBeNull();
     expect(configure).not.toHaveBeenCalled();
+  });
+});
+
+describe('OpenCode tool-call permission', () => {
+  it('is asked for in OpenCode\'s own card, and granting it re-reads the connection', async () => {
+    mock.permission = { ...mock.permission, permissionAllowed: false };
+    const saved = data(); saved.agents.opencode.status = 'ok';
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    const card = row('OpenCode');
+    expect(await card.findByText(en.onboarding.setup.notePermission.replace('{{name}}', 'OpenCode'))).toBeTruthy();
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.allowToolCalls })).toBeNull();
+    const reads = mock.api.getBackendConnection.mock.calls.length;
+    fireEvent.click(card.getByRole('button', { name: en.onboarding.setup.allowToolCalls }));
+    expect(mock.permission.setupPermission).toHaveBeenCalledOnce();
+    await waitFor(() => expect(mock.api.getBackendConnection.mock.calls.length).toBeGreaterThan(reads));
+    expect(mock.api.getBackendConnection).toHaveBeenLastCalledWith('opencode');
+  });
+
+  it('reports a refused write in the note\'s place, with the server\'s sentence behind it', () => {
+    mock.permission = { ...mock.permission, permissionAllowed: false, state: 'error', message: 'opencode.json is not writable' };
+    const saved = data(); saved.agents.opencode.status = 'ok';
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    const refusal = row('OpenCode').getByRole('alert');
+    expect(refusal.tagName).toBe('DETAILS');
+    expect(within(refusal).getByText(en.onboarding.setup.permissionFailed)).toBeTruthy();
+    expect(refusal.textContent).toContain('opencode.json is not writable');
+  });
+
+  it('asks nothing of an assistant that is not installed, or once it is allowed', () => {
+    mock.permission = { ...mock.permission, permissionAllowed: false };
+    render(wrap(<AgentDetection data={data()} onNext={vi.fn()} />));
+    expect(row('OpenCode').queryByRole('button', { name: en.onboarding.setup.allowToolCalls })).toBeNull();
+    cleanup();
+    mock.permission = { ...mock.permission, permissionAllowed: true };
+    const saved = data(); saved.agents.opencode.status = 'ok';
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    expect(row('OpenCode').queryByRole('button', { name: en.onboarding.setup.allowToolCalls })).toBeNull();
   });
 });
 

@@ -154,12 +154,24 @@
      Every band reserves it at its worst reading — the note at its two-line clamp —
      because whether the note wraps is the platform's fonts' answer, not the design's. */
   --ob-offer-h: calc(var(--ob-assistant-h) + var(--ob-method-h) * 2 - var(--ob-method-gap) + 3px);
+  /* The assistants' readiness caption is a row of their own grid, under the cards: one
+     line of the caption's type and the gap above it. The built-in card offering its
+     models spans it, so the offer and the caption share the height rather than stack. */
+  --ob-hint-gap: 16px;
+  --ob-hint-row: calc(var(--ob-hint-gap) + var(--ob-cap-fs) * 1.5);
+  /* An installed OpenCode that still needs its tool-call permission asks for it in its
+     card: one more action row and its gap over the two the card formula counts — the
+     connection rows a card shows while its route is still being read — and the identity
+     header's hairline the formula leaves out. One card at a time can be in this state,
+     so the lineup reserves it once. */
+  --ob-permission-extra: calc(var(--ob-method-h) + var(--ob-method-gap) + 1px);
   /* One floor under the cards, so a card that grows while its step is read — a
      sentence that wraps in one language, a state row that arrives with detection, the
      built-in card opening its model offer — cannot move the action. It reserves the
      cards only; whatever a step draws under them adds its own height on top, and the
      shared cell (see `.onboarding-screens`) is what then holds the three steps level. */
-  --ob-stage-h: max(var(--ob-diagram-h), var(--ob-assistant-h), var(--ob-offer-h));
+  --ob-stage-h: max(var(--ob-diagram-h),
+    var(--ob-assistant-h) + var(--ob-permission-extra) + var(--ob-hint-row), var(--ob-offer-h));
   /* The diagram keeps the box the reference draws it in: the story's card plus the
      band the return wire needs under it — the card plus 64 at every reading. A
      reservation that has to hold a wrapped sentence on another step does not
@@ -1057,10 +1069,40 @@
    contents change. The container makes `--ob-card-h`'s width guard resolve against
    this box, exactly as the story's resolves against the diagram.
    Top-aligned rather than stretched: the built-in card grows to offer its models while
-   the others keep the card's own height, as the reference draws it. */
+   the others keep the card's own height, as the reference draws it.
+   Its last row is the readiness caption (`.onboarding-setup-aside`), in flow under the
+   cards it explains, so it can never be drawn over one. The row is there whether or
+   not it has something to say, so the cards stay put when it starts or stops. */
 .onboarding-assistants-list {
   align-items: start;
+  row-gap: var(--ob-hint-gap);
   container-type: inline-size;
+}
+.onboarding-setup-aside {
+  grid-column: 1 / -1;
+  min-height: calc(var(--ob-cap-fs) * 1.5);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* A screen nobody is reading has no caption to give, and before its first showing its
+   cards sit in their tallest, not-yet-checked state; the row would only add to the share
+   of the shared cell that screen holds. It is there from the moment the screen is the
+   current one — the handoff measures it — so the cards never move on arrival. */
+[data-setup-screen-root][hidden] .onboarding-setup-aside { display: none; }
+/* Side by side, the cards are one row of the lineup's own count, which the shell
+   states. The built-in card offering its models spans the caption's row too, and the
+   caption takes the columns beside it: the offer and the caption share the height the
+   stage reserves instead of stacking. The built-in card stands first in the lineup. */
+@media (min-width: 1024px) {
+  .onboarding-assistants-list {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(var(--ob-cards), minmax(0, 1fr));
+  }
+  .onboarding-assistants-list > .onboarding-assistant:has(.onboarding-model-offer) { grid-row: span 2; }
+  .onboarding-assistants-list:has(> .onboarding-assistant .onboarding-model-offer) > .onboarding-setup-aside {
+    grid-column: 2 / -1;
+  }
 }
 /* The state row is where the story puts its caption: the lifecycle pill on the left
    and, opposite it, the one action the pill offers — update or install — on the right.
@@ -1229,6 +1271,9 @@ span.onboarding-model-offer-row { cursor: default; }
 .onboarding-model-offer-empty { padding: 8px; font-size: 12px; line-height: 1.5; color: var(--muted); }
 /* A note that says why the assistant cannot run is the card's one error line. */
 .onboarding-assistant-note[data-tone="error"] { color: var(--destructive-ink); }
+/* A note with more to say behind it is a disclosure: one line closed, all of it open. */
+details.onboarding-assistant-note { display: block; overflow: visible; }
+details.onboarding-assistant-note > summary { cursor: pointer; }
 /* Installed but off: a line, not a control. The switch above is the only thing to
    press, and this says the binary is already there. */
 .onboarding-method-receipt {
@@ -1296,6 +1341,7 @@ span.onboarding-model-offer-row { cursor: default; }
 .onboarding-assistant-error { font-size: 12px; color: var(--destructive-ink); overflow-wrap: anywhere; margin-top: 8px; }
 .onboarding-assistant-error pre { margin-top: 8px; max-height: 160px; overflow: auto; white-space: pre-wrap; }
 .onboarding-assistant-error summary { margin-top: 8px; cursor: pointer; color: inherit; }
+details.onboarding-assistant-error > summary { margin-top: 0; }
 /* "Open workspace and Back to introduction share a width and stack vertically." The
    full width is what makes that true: without it this column shrink-wraps its widest
    child, and the action's own `299/976` then resolves against that shrunken box and
@@ -1321,7 +1367,8 @@ span.onboarding-model-offer-row { cursor: default; }
     /* The fold's rows, the first holding the built-in card at its tallest. The shell
        states the row count from the lineup. */
     --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-offer-h))
-      + (max(var(--ob-card-h), var(--ob-assistant-h)) + var(--ob-stack-gap)) * (var(--ob-fold-rows) - 1));
+      + (max(var(--ob-card-h), var(--ob-assistant-h)) + var(--ob-stack-gap)) * (var(--ob-fold-rows) - 1)
+      + var(--ob-permission-extra) + var(--ob-hint-row));
   }
   .onboarding-collaboration-cards, .onboarding-assistants-list {
     grid-auto-flow: row;
@@ -1377,7 +1424,8 @@ span.onboarding-model-offer-row { cursor: default; }
        card at its tallest, then one of the taller card per other assistant, and the
        gaps between them. `--ob-cards` is the lineup's own count, which the shell states. */
     --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-offer-h))
-      + (max(var(--ob-card-h), var(--ob-assistant-h)) + var(--ob-stack-gap)) * (var(--ob-cards) - 1));
+      + (max(var(--ob-card-h), var(--ob-assistant-h)) + var(--ob-stack-gap)) * (var(--ob-cards) - 1)
+      + var(--ob-permission-extra) + var(--ob-hint-row));
     --ob-main-top: 0px;
     --ob-access-w: 100%;
     --ob-access-pad: 24px;
@@ -1492,7 +1540,9 @@ span.onboarding-model-offer-row { cursor: default; }
    lifted out of flow and offset back over the footer. The slot itself costs nothing
    when no screen is contributing one; the caption brings its own gap. */
 /* The slot sits in the screens' shared cell, on its bottom edge, and grows upward into
-   the room the screen leaves above the action.
+   the room the screen leaves above the action. The introduction's detection failure is
+   what uses it; the assistants' caption is a row of their own grid, and OpenCode's
+   permission request is in OpenCode's card.
    It is in the cell rather than in the column because the column is centred in the
    window: a caption in the flow moves the heading, the cards and the action by half of
    its own height, which is exactly how the assistants step came to sit 9px above the
@@ -1511,40 +1561,6 @@ span.onboarding-model-offer-row { cursor: default; }
   display: flex;
   flex-direction: column;
   gap: 16px;
-}
-/* The assistants step leaves more room than the band gap — 76 clear at the narrowest
-   desktop tier, 60 on a phone — and it is the step that carries the OpenCode permission
-   block, the tallest thing the slot ever holds. 48 is what every tier can give it
-   without reaching the cards; the block scrolls inside that. */
-@media (min-width: 760px) {
-  /* The hint grows around the caption line inside the room above the action. */
-  .onboarding-step[data-setup-screen="assistants"] > .onboarding-screens > .onboarding-action-aside:not(:empty) {
-    --ob-aside-half: calc(var(--ob-card-h) * 38 / 300 - 8px);
-    margin-bottom: calc(var(--ob-band-gap) + var(--ob-summary-h) / 2 - var(--ob-aside-half));
-    min-height: calc(var(--ob-aside-half) * 2);
-    max-height: calc(var(--ob-aside-half) * 2);
-    justify-content: center;
-  }
-}
-@media (max-width: 759px) {
-  .onboarding-step[data-setup-screen="assistants"] { --ob-aside-max: 48px; }
-}
-/* The built-in card offering its models is taller than any card the band above was
-   measured for, and it reaches into it. While it does, the aside hangs under the pair
-   instead — out of flow, so the action stays where every screen puts it and nothing
-   it says is drawn over a card. Picking a model closes the offer, and the aside goes
-   back to its band. */
-/* Positioned from the cell it lives in: the pair under the cell is two action rows
-   and the footer's 10 between them. */
-.onboarding-step[data-setup-screen="assistants"]:has(.onboarding-model-offer) > .onboarding-screens > .onboarding-action-aside:not(:empty) {
-  position: absolute;
-  top: calc(100% + var(--ob-action-h) * 2 + 10px + 16px);
-  left: 0;
-  right: 0;
-  margin: 0;
-  min-height: 0;
-  max-height: none;
-  overflow: visible;
 }
 .onboarding-setup-hint { width: 100%; text-align: center; }
 /* Sentence centred on the action's axis, rescan beside it: equal flanking columns put

@@ -9,9 +9,11 @@ import { CONTRACT_VERSION } from '../../src/components/settings/models/types';
 const LINEUP = ['vibey', 'claude', 'codex', 'opencode'];
 const NATIVE_MODELS: Record<string, string> = { claude: 'claude-opus-5-5', codex: 'gpt-5.6-sol', opencode: 'openai/gpt-5.6-sol' };
 
-/** Every backend on the Hub with a runnable route, except the built-in one: it has no model yet. */
-async function serveLineup(page: Page, { permitted = true } = {}) {
-  const models = NATIVE_MODELS;
+/** Every backend on the Hub with a runnable route, except the built-in one unless it is
+ *  given a model. `ready: false` leaves every connection unready, so entry is held and
+ *  the caption has something to say. */
+async function serveLineup(page: Page, { permitted = true, vibey = null as string | null, ready = true } = {}) {
+  const models: Record<string, string> = { ...NATIVE_MODELS, ...(vibey ? { vibey } : {}) };
   const supply = (backend: string) => ({
     backend, cli_present: backend !== 'vibey', mode: 'hub', menu_kind: 'fixed',
     named_agents: [{ name: backend, effective_model_id: models[backend] ?? null, supply_status: models[backend] ? 'ok' : null }],
@@ -46,7 +48,7 @@ async function serveLineup(page: Page, { permitted = true } = {}) {
   } } }));
   await page.route('**/api/backend/*/connection', (route) => route.fulfill({ json: {
     ok: true, backend: new URL(route.request().url()).pathname.split('/').at(-2), installed: true, enabled: true,
-    auth: 'api_key', application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    auth: 'api_key', application: 'applied', ready, entry_eligible: ready, supply_mode: 'hub',
   } }));
   await page.route('**/api/opencode/permission-status', (route) => route.fulfill({ json: { ok: true, permission_allowed: permitted } }));
 }
@@ -54,6 +56,10 @@ async function serveLineup(page: Page, { permitted = true } = {}) {
 type Box = { x: number; y: number; width: number; height: number };
 const boxes = (page: Page, selector: string): Promise<Box[]> => page.locator(selector).evaluateAll((nodes) =>
   nodes.map((node) => { const { x, y, width, height } = node.getBoundingClientRect(); return { x, y, width, height }; }));
+/** Where the action sits in the shell's own scroll space: a click Playwright makes may
+ *  scroll the shell, and that moves the viewport, not the layout. */
+const actionTop = (page: Page) => page.locator('.onboarding-primary-action').evaluate((node) =>
+  node.getBoundingClientRect().top + (node.closest('.onboarding-shell') as HTMLElement).scrollTop);
 const overlaps = (a: Box, b: Box) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 
 test('the lineup stands the built-in assistant first, on the reference tracks of every screen', async ({ page }) => {
@@ -92,29 +98,93 @@ test('the lineup stands the built-in assistant first, on the reference tracks of
 });
 
 /**
- * Every band reserves the offer at its worst reading, so opening it moves nothing: the
- * aside is never drawn over a card and the action keeps the introduction's y.
+ * The caption is a row of the assistants' own grid and OpenCode asks for its permission in
+ * its own card, so nothing is drawn over a card at any band; every band reserves both and
+ * the offer, so the action keeps the introduction's y. Walked with the caption speaking
+ * beside the open offer, and silent beside a Vibey that already has its model.
  */
-for (const [width, height] of [[1200, 800], [1440, 900], [1920, 1080], [1024, 768], [800, 1000], [390, 844]] as const) {
-  test(`${width}x${height}: the built-in offer is never drawn under the aside, and the action holds still`, async ({ page }) => {
+for (const [width, height] of [[1200, 800], [1440, 900], [1920, 1080], [1280, 1024], [1024, 768], [800, 1000], [390, 844]] as const) {
+  for (const state of ['held', 'ready'] as const) {
+    test(`${width}x${height} ${state}: the caption is in flow under the cards, and the action holds still`, async ({ page }) => {
+      await page.setViewportSize({ width, height });
+      await serveProduct(page);
+      await serveLineup(page, state === 'held' ? { permitted: false, ready: false } : { permitted: false, vibey: 'gpt-5.6-sol' });
+      await openOnboarding(page);
+      await freezeAt(page, PHASES['codex-working']);
+      const introAction = await actionTop(page);
+      await openSetup(page, 'en');
+      await page.clock.runFor(2000);
+      const opencode = page.locator('.onboarding-assistant[data-backend="opencode"]');
+      await expect(opencode.getByRole('button', { name: 'Allow tool calls' })).toBeVisible();
+      const caption = page.locator('[data-setup-screen="assistants"] .onboarding-setup-aside');
+      if (state === 'held') {
+        await expect(page.locator('.onboarding-assistant[data-backend="vibey"] .onboarding-model-offer')).toBeVisible();
+        await expect(caption).toContainText('Pick a model for Vibey');
+      }
+      const captionBox = (await boxes(page, '[data-setup-screen="assistants"] .onboarding-setup-aside'))[0];
+      const footer = (await boxes(page, '.onboarding-setup-footer'))[0];
+      for (const card of await boxes(page, '[data-setup-screen="assistants"] .onboarding-assistant')) {
+        expect(overlaps(card, captionBox)).toBe(false);
+      }
+      expect(overlaps(footer, captionBox)).toBe(false);
+      expect(await actionTop(page)).toBeCloseTo(introAction, 0);
+    });
+  }
+}
+
+/** OpenCode's permission write, held open so the card's loading, refusal and success are
+ *  three observable moments rather than one settled render. */
+async function deferredPermission(page: Page) {
+  const waiting: (() => void)[] = [];
+  let failing = true;
+  await page.route('**/api/opencode/setup-permission', async (route) => {
+    await new Promise<void>((resolve) => { waiting.push(resolve); });
+    return route.fulfill({ json: failing
+      ? { ok: false, message: 'opencode.json could not be written: the configuration directory is owned by another user', config_path: '/fixture/opencode.json' }
+      : { ok: true, message: 'Allowed', config_path: '/fixture/opencode.json' } });
+  });
+  return {
+    settle: async () => { await expect.poll(() => waiting.length).toBeGreaterThan(0); waiting.shift()!(); },
+    succeed: () => { failing = false; },
+  };
+}
+
+for (const [width, height] of [[1366, 768], [1920, 1080]] as const) {
+  test(`${width}x${height}: OpenCode asks for its permission in its card, and the pair holds through the write`, async ({ page }) => {
     await page.setViewportSize({ width, height });
     await serveProduct(page);
     await serveLineup(page, { permitted: false });
+    const permission = await deferredPermission(page);
     await openOnboarding(page);
-    await freezeAt(page, PHASES['codex-working']);
-    const introAction = (await boxes(page, '.onboarding-primary-action'))[0];
+    const introAction = await actionTop(page);
     await openSetup(page, 'en');
     await page.clock.runFor(2000);
-    await expect(page.locator('.onboarding-assistant[data-backend="vibey"] .onboarding-model-offer')).toBeVisible();
-    const aside = page.locator('[data-setup-screen="assistants"] .onboarding-action-aside');
-    await expect(aside).not.toBeEmpty();
-    const asideBox = (await boxes(page, '[data-setup-screen="assistants"] .onboarding-action-aside'))[0];
-    const footer = (await boxes(page, '.onboarding-setup-footer'))[0];
-    for (const card of await boxes(page, '[data-setup-screen="assistants"] .onboarding-assistant')) {
-      expect(overlaps(card, asideBox)).toBe(false);
-    }
-    expect(overlaps(footer, asideBox)).toBe(false);
-    const action = (await boxes(page, '.onboarding-primary-action'))[0];
-    expect(action.y).toBeCloseTo(introAction.y, 0);
+    const card = page.locator('.onboarding-assistant[data-backend="opencode"]');
+    await expect(card.getByText('OpenCode stops to approve every tool call')).toBeVisible();
+    const allow = card.getByRole('button', { name: 'Allow tool calls' });
+    const holds = async () => {
+      expect(await actionTop(page)).toBeCloseTo(introAction, 0);
+      const caption = (await boxes(page, '[data-setup-screen="assistants"] .onboarding-setup-aside'))[0];
+      for (const one of await boxes(page, '[data-setup-screen="assistants"] .onboarding-assistant')) {
+        expect(overlaps(one, caption)).toBe(false);
+      }
+    };
+    await holds();
+    // Unanswered: the row says so and nothing moves.
+    await allow.click();
+    await expect(allow).toBeDisabled();
+    await holds();
+    // Refused: in the note's place; the server's sentence is a click away.
+    await permission.settle();
+    const refusal = card.locator('details.onboarding-assistant-note');
+    await expect(refusal).toContainText('Could not allow tool calls');
+    await holds();
+    // Granted: the request is not a cleared message but an absent one.
+    permission.succeed();
+    await allow.click();
+    await permission.settle();
+    await expect(allow).toHaveCount(0);
+    await expect(refusal).toHaveCount(0);
+    await holds();
   });
 }

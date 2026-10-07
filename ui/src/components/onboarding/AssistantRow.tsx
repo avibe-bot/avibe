@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Check, ChevronRight, Download, KeyRound, RefreshCw, SlidersHorizontal } from 'lucide-react';
+import { Check, ChevronRight, Download, KeyRound, RefreshCw, Settings, SlidersHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { BackendIcon } from '../visual';
 import { Button } from '../ui/button';
@@ -47,6 +47,9 @@ export interface AssistantRowProps {
   enabled?: boolean;
   /** The route read's evidence; pending and failed reads cannot assert absence. */
   route?: AssistantRouteView;
+  /** A tool-call permission this assistant needs before it can work (OpenCode's
+      opencode.json). The card says so and offers the write itself. */
+  permission?: { required: boolean; pending: boolean; error?: string; onAllow: () => void };
 }
 
 /**
@@ -102,7 +105,7 @@ export function RouteChoice({ name, route, live, disabled = false, pending = fal
  */
 export function AssistantRow({ backend, status, installing, detecting, error, lifecycle, upgrade, enabledControl,
   onInstall, onDetect, onConfigure, configuringDisabled = false, connection, onAddKey, onRefreshConnection, onRetryRoute, connectionPending, connectionError, routeError,
-  hubManaged = false, enabled = false, route }: AssistantRowProps) {
+  hubManaged = false, enabled = false, route, permission }: AssistantRowProps) {
   const { t } = useTranslation();
   const label = getBackendUiMeta(backend).label;
   // With Model Hub holding the credentials, a card has three things it can be, and
@@ -117,6 +120,9 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
         : 'checking';
   const routeModel = route?.kind === 'route' ? route.model : null;
   const routeUnknown = route?.kind === 'pending' || route?.kind === 'failed';
+  // A permission the installed assistant still needs is the card's most pressing note:
+  // without it the assistant stalls on its first tool call, whatever its route says.
+  const permissionNeeded = status === 'ok' && !!permission?.required;
   // Switched off, the switch above is the only thing that changes the model shown.
   const routeChoice = (live: boolean) => (
     <RouteChoice name={label} route={route} live={live} onOpen={onConfigure} pending={!!connectionPending}
@@ -166,8 +172,15 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
             hub-owned credential is managed — rather than a static description of the
             assistant. The frames keep it to one line at every tier, which a
             per-state sentence is short enough to honour in both languages. */}
-        <p className="onboarding-assistant-note">
-          {hubState
+        {/* A refused permission write is the guidance for the state the card is in, so it
+            takes the note's place — the slot the card already reserves — and keeps the
+            server's own sentence one click away. */}
+        {permissionNeeded && permission?.error ? (
+          <details className="onboarding-assistant-note" data-tone="error" role="alert">
+            <summary>{t('onboarding.setup.permissionFailed')}</summary>{permission.error}
+          </details>
+        ) : <p className="onboarding-assistant-note">
+          {permissionNeeded ? t('onboarding.setup.notePermission', { name: label }) : hubState
             ? t(hubState === 'missing' ? 'onboarding.setup.noteNotInstalled'
               : hubState === 'enabled' || hubState === 'idle'
                 ? (route?.kind === 'no-agent-model' ? 'onboarding.setup.noteModelUnset'
@@ -179,10 +192,17 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
               : native
                 ? t(`onboarding.setup.${native}ConnectedHint`)
                 : t(`onboarding.setup.${backend}Guide`)}
-        </p>
+        </p>}
         {/* One full-width row per connection method, subscription above API Key, and
             the connected state wearing the same row with a mint check. */}
         <div className="onboarding-assistant-actions">
+          {permissionNeeded && permission && (
+            <Button type="button" variant="secondary" className="onboarding-method-row onboarding-method-row--attention"
+              onClick={permission.onAllow} disabled={permission.pending || installing || detecting}>
+              {permission.pending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <Settings size={16} />}
+              {t('onboarding.setup.allowToolCalls')}
+            </Button>
+          )}
           {hubState === 'checking' ? null : hubState === 'missing' ? (
             <Button type="button" variant="secondary" className="onboarding-method-row" onClick={onInstall} disabled={installing || detecting}>
               {installing ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <Download size={16} />}
