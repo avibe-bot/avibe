@@ -26,6 +26,14 @@ product logic.
    window onto the Workbench; plain `vibe start` honours
    `config.ui.open_browser` and would leave the user with a second,
    browser-hosted view of the same Runtime.
+
+   On macOS that start inherits the `PATH` of the user's login shell rather than
+   launchd's minimal application `PATH`, so tools installed through nvm, npm, or
+   Homebrew resolve exactly as they do in a terminal. The shell runs `$SHELL -l
+   -i -c` once per start, reads only `PATH`, and keeps its own `PATH` when that
+   shell fails or takes longer than 10 seconds. A private Runtime still puts its
+   own `bin` and Node directories first. Discovery and the lifecycle verbs do
+   not consult the login shell, so adopting a running Runtime never waits on it.
 5. Polls until the Runtime is ready or the bound expires, then navigates. The
    window never leaves the bootstrap page before combined readiness succeeds.
    If the launcher it started exits non-zero, it gives up immediately instead of
