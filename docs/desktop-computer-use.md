@@ -13,7 +13,7 @@ Avibe desktop shell is running.
    Recording**. Older macOS versions call the second permission **Screen
    Recording**.
 5. Return to Avibe after granting access. Avibe silently checks the grants
-   while it is active and every few seconds. If the menu still says a
+   while it is active and every five seconds. If the menu still says a
    permission is needed, turn **Computer Use** off and on once.
 6. If macOS requires **Quit & Reopen**, or the same fixed app still reports a
    missing permission, quit and reopen that exact installed app without
@@ -28,9 +28,14 @@ not start a permission retry.
 
 An ad-hoc app update can change the app's code identity, so macOS may no longer
 apply the old grants. Turn on the updated installed app in the same two Privacy
-& Security panes. If the updated app is absent from a pane, turn Computer Use
-off and on once so macOS can register that exact build, then grant it. Avibe
-will remain in **Needs Permission** until the updated app has both grants.
+& Security panes. On some macOS 26 ad-hoc builds, ScreenCaptureKit can be
+denied while macOS refuses to create the Screen Recording row. In that case
+Avibe remains in **Needs Permission** and does not keep retrying in the
+background. If an owner or support procedure provides a manual System Settings
+add/grant recovery for the exact installed app, follow that procedure without
+rebuilding the app; manual addition is a documented workaround for the OS
+limitation, not proof that automatic registration succeeded. Avibe remains in
+**Needs Permission** until the updated app has both grants.
 
 ## Stop computer use
 

@@ -174,6 +174,73 @@ shell missing → granted edge or an explicit off/on can start another daemon.
 This completes the feedback-loop repair without a timer, throttle, or retry
 budget side effect.
 
+### Candidate 5 automatic registration result
+
+Candidate 5 was built from `4ea184f98033c1bb9bc761441599f569618372e2` and held
+byte-for-byte fixed throughout the permission attempt:
+
+- app: `/Users/max/Applications/Avibe CUA Candidate 5.app`
+- bundle identifier: `bot.avibe.desktop.cua.candidate5`
+- outer cdhash: `b58c51f7eabae717640cb2732784eb19dea1dd37`
+- helper cdhash: `794bd1e41b44e7f483c2b22587f11aa48da5a6c3`
+- installed tree-manifest SHA-256:
+  `f90671bd8f9b204350a737ff4059abd23373df098af6cb55a4421e2b89d98937`
+
+After the source handoff confirmed that the owner was present and the console
+was unlocked, the lane performed exactly one direct PID-bound AXPress at
+`2026-10-07 18:56:01` UTC+8. The fixed shell was PID `66045`, the isolated
+Runtime was on port `15177`, and the pre-action status was
+`{"status":"off","reason":"never_enabled"}`. No consent click, manual add, or
+grant was performed.
+
+The explicit toggle started exactly one bounded registration child:
+
+- PID `15202`, PPID `66045`
+- `/Users/max/Applications/Avibe CUA Candidate 5.app/Contents/Helpers/cua-driver`
+- `mcp --direct --embedded --no-overlay --host-bundle-id
+  bot.avibe.desktop.cua.candidate5`
+
+During a `44.62` second observation spanning multiple five-second ticks, the
+child count was one, the persistent daemon count was zero, and no respawn
+occurred. `D` stayed at `needs_permission` with reason `screen_recording` and
+generation `0`; the status API stayed
+`{"status":"needs_permission","reason":"screen_recording"}`. The bounded child
+recorded a ScreenCaptureKit rejection (`-3801`). That result is not evidence
+that a person clicked a denial control.
+
+The retained TCC stream provides the complete responsibility boundary for this
+attempt. At `2026-10-07 18:56:01.801330` UTC+8, TCC handled
+`kTCCServiceScreenCapture` for subject
+`bot.avibe.desktop.cua.candidate5` with responsible PID `66045` and the
+Candidate 5 shell path. At `18:56:01.801579`, TCC notified the same target and
+responsible PID. The WindowServer attribution names the accessor as
+`cua-driver` PID `15202` at the fixed `Contents/Helpers` path. TCC then logged
+`Service kTCCServiceScreenCapture does not allow prompting; returning denied.`
+The helper therefore no longer checks in under the host bundle identity, while
+the host remains the responsible app.
+
+The source reopened **System Settings → Privacy & Security → Screen & System
+Audio Recording** without input at about `2026-10-07 19:05` UTC+8. The
+Candidate 5 row was absent. The screenshot is
+`/tmp/avibe-computer-use-phase1-sesbn6xrdnd8p/source-c5/screen-recording-list-1905.png`.
+Candidate 5 automatic Screen Recording registration therefore failed even
+with the corrected helper layout, direct child responsibility chain, stable
+permission lifecycle, and no driver foreground assertion. Candidate iteration
+is stopped; do not build a Candidate 6 until the owner decides whether the
+documented manual `+`/drag recovery is acceptable as a limitation.
+
+One unannounced state change must remain separate from the lane action: at
+`2026-10-07 18:56:14.57`, TCC recorded Accessibility as
+`Allowed (System Set)` for Candidate 5. The request came from the
+System Settings `SecurityPrivacyExtension.appex` PID `15214`, not from the
+lane's AXPress or registration child. The available evidence does not establish
+which person accepted that prompt, so it must not be described as a lane action
+or as proof that Screen Recording registration succeeded.
+
+This result closes the live evidence for the activation and focus fixes and
+records the remaining macOS registration defect. The owner-assisted manual
+addition path is a workaround and is not product request-path acceptance.
+
 Primary diagnostics:
 
 - `screen-registration-diagnostics.log`, SHA-256
@@ -250,15 +317,21 @@ This is mechanism evidence with explicit limits:
 
 ## Remaining native acceptance
 
-A separate fixed candidate with a new bundle identity must prove:
+Candidate 5 failed the automatic Screen Recording registration gate. No further
+candidate should be built until the owner decides the documented manual
+`+`/drag recovery boundary. The failed registration evidence is separate from
+the live validation that passed:
 
-1. toggle-on automatically registers the app in the Screen Recording pane;
-2. `bootstrap.log` records a main-thread request and bounded capture
-   completion;
-3. grant, parent-liveness, shell-death cleanup, idle focus/pointer/cursor, and
-   Claude operation all use unchanged installed bytes;
-4. the normal isolated Runtime session injects the computer server while
-   preserving native user MCP configuration;
-5. an ad-hoc update that changes the cdhash settles at
-   `needs_permission` with a usable re-grant path, without `error`, repeated
-   prompts, or retry churn.
+1. the shell and helper have a stable parent/child relationship;
+2. the helper no longer acquires the outer app identity or foreground status;
+3. the activation and permission-level feedback loops do not respawn a child;
+4. missing permission settles at `needs_permission` without error or retry
+   churn; and
+5. the TCC request is attributed to the outer Candidate 5 shell while the
+   helper is the capture accessor.
+
+After the owner decision and an actually granted fixed artifact, the remaining
+native evidence still needs the persistent serve path, visible cursor overlay,
+idle focus and pointer checks, parent-liveness cleanup, and the normal isolated
+Runtime Claude session with native user MCP configuration preserved. A direct
+no-overlay registration child does not satisfy those later checks.
