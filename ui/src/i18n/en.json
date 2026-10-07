@@ -1968,7 +1968,8 @@
         },
         "callback": {
           "hint": "After signing in, paste the callback URL your browser landed on",
-          "rejected": "That isn't the callback address. Paste the full address from the browser bar after you approve (it contains code=), then submit again."
+          "rejected": "That isn't the callback address. Paste the full address from the browser bar after you approve (it contains code=), then submit again.",
+          "otherAttempt": "This address comes from an earlier sign-in link and can't be used here. Sign in with the current link in step 1 above, then paste the full address it leads to."
         },
         "deviceCode": {
           "hint": "Enter the device code on that page; this continues automatically"
@@ -1984,7 +1985,11 @@
           "timeout": "Authorization timed out, please reconnect",
           "generic": "Connection failed, please retry",
           "finalize": "Authorized, but couldn't create the source — please retry",
-          "finalizeReauth": "Signed in, but this source still isn't working — please retry"
+          "finalizeReauth": "Signed in, but this source still isn't working — please retry",
+          "details": {
+            "show": "Show details",
+            "hide": "Hide details"
+          }
         }
       },
       "toast": {
@@ -2413,9 +2418,13 @@
       "engine_unavailable": "The Hub isn't responding, please retry",
       "submission_failed": "Couldn't submit what you pasted, please retry",
       "ambiguous_engine_binding": "Couldn't tell which account signed in — do one at a time, then retry",
-      "binding_failed": "That account is already used by another source",
+      "binding_failed": "Signed in, but couldn't attach this account to the source (another source may already use it). Please retry.",
       "account_already_added": "This account is already added. Sign in with a different account to add another subscription.",
-      "expired": "Authorization timed out, please reconnect"
+      "expired": "Authorization timed out, please reconnect",
+      "code_rejected": "The provider rejected this authorization code: the pasted address may be incomplete, come from an earlier sign-in link, or already be used or expired. Retry to get a new sign-in link, then paste the address it leads to.",
+      "exchange_failed": "Got the authorization code, but couldn't exchange it with the provider — a network or proxy problem, or the code is no longer valid. Retry to get a new sign-in link.",
+      "callback_mismatch": "The callback doesn't match this sign-in; it may come from an earlier link. Retry, then sign in only with the new link.",
+      "provider_denied": "The provider declined this authorization — it was cancelled, or this account can't use it. Retry to sign in again."
     },
     "probe": {
       "native_cli_unavailable": "Can't use the CLI's sign-in",

@@ -919,6 +919,7 @@
       "flow_not_found": "Authorization flow not found.",
       "flow_expired": "Authorization flow expired.",
       "submission_rejected": "That is not the authorization callback address. Paste the full address shown after authorizing.",
+      "submission_rejected_other_attempt": "That address answers an earlier sign-in link. Sign in with the link in this dialog, then paste the address it leads to.",
       "discovery_failed": "Could not validate or discover this source.",
       "ambiguous_source": "Connected, but we could not identify the model interface.",
       "inventory_unavailable": "The interface was confirmed, but its model list is unavailable.",

@@ -919,6 +919,7 @@
       "flow_not_found": "未找到授权流程。",
       "flow_expired": "授权流程已过期。",
       "submission_rejected": "这不是授权完成后的回调地址，请粘贴授权后地址栏里的完整网址。",
+      "submission_rejected_other_attempt": "这个地址来自之前的登录链接。请用当前弹窗里的链接登录，再粘贴登录后的地址。",
       "discovery_failed": "无法验证或识别此供应商。",
       "ambiguous_source": "已连接，但无法确认这是哪种模型接口。",
       "inventory_unavailable": "接口已确认，但暂时无法获取模型清单。",

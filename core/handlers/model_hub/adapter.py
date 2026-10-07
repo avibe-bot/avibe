@@ -107,7 +107,19 @@ class OriginNotAllowedError(Exception):
 class OAuthSubmissionRejectedError(Exception):
     """Raised by ``submit_oauth`` when the provider refuses the pasted value
     before touching the flow. Nothing was written and the flow still awaits a
-    submission, so the user can paste again on the same flow."""
+    submission, so the user can paste again on the same flow.
+
+    ``reason`` names what to paste instead: ``no_answer`` is an address that
+    carries no provider answer; ``other_attempt`` answers a different sign-in
+    link than this flow's, whose code this flow can never exchange."""
+
+    def __init__(
+        self,
+        flow_id: str,
+        reason: Literal["no_answer", "other_attempt"] = "no_answer",
+    ) -> None:
+        super().__init__(flow_id)
+        self.reason = reason
 
 
 class InvokeCancelledError(asyncio.CancelledError):
@@ -391,6 +403,10 @@ class OAuthFlowState:
     channel: Literal["hub", "native_cli"] = "hub"
     retained_material_disposition: RetainedMaterialDisposition = RetainedMaterialDisposition.NONE
     retained_credential_ref: str | None = None
+    # What the provider, engine, or native CLI said when the flow failed,
+    # verbatim on one bounded line, for display beside ``error_key``. Null in
+    # every other state and whenever there is nothing to add to the key.
+    error_detail: str | None = None
 
 
 class InvokeHandle(Protocol):

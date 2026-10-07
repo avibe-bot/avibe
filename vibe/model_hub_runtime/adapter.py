@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 
 import aiohttp
 
@@ -38,6 +38,7 @@ from core.handlers.model_hub.adapter import (
     make_source_observation,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.oauth import oauth_failure_detail
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from core.handlers.model_hub.quota import (
     CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS,
@@ -1323,6 +1324,7 @@ class _OAuthFlow:
     credential_ref: str | None = None
     retained_material_disposition: RetainedMaterialDisposition = RetainedMaterialDisposition.NONE
     retained_credential_ref: str | None = None
+    error_detail: str | None = None
     grant_write_possible: bool = False
     retained_material_decided: bool = False
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -1343,6 +1345,7 @@ class _OAuthFlow:
             channel="hub",
             retained_material_disposition=self.retained_material_disposition,
             retained_credential_ref=self.retained_credential_ref,
+            error_detail=self.error_detail,
         )
 
 
@@ -2693,11 +2696,12 @@ class CLIProxyEngineAdapter:
                 if status == "ok":
                     await self._complete_oauth(flow, client)
                 elif status == "error":
-                    self._fail_flow(flow, "models.oauth.upstream_failed")
+                    reason = str(payload.get("error") or "")
+                    self._fail_flow(flow, _oauth_engine_failure_key(reason), detail=reason)
                 elif flow.state != "verifying":
                     flow.state = "awaiting_action"
-            except (EngineClientError, EngineUnavailableError):
-                self._fail_flow(flow, "models.oauth.engine_unavailable")
+            except (EngineClientError, EngineUnavailableError) as error:
+                self._fail_flow(flow, "models.oauth.engine_unavailable", detail=str(error))
             return flow.snapshot()
 
     async def submit_oauth(self, flow_id: str, value: str) -> OAuthFlowState:
@@ -2711,23 +2715,33 @@ class CLIProxyEngineAdapter:
             submitted = value.strip()
             if not submitted:
                 raise EngineStateError("OAuth submission is empty")
-            is_redirect = submitted.startswith(("http://", "https://"))
-            if is_redirect and not any(
-                answer.strip()
-                for key, answer in urllib.parse.parse_qsl(urllib.parse.urlsplit(submitted).query)
-                if key in {"code", "error", "error_description"}
-            ):
-                # The one rejection that provably writes nothing and leaves the
-                # session waiting: an address carrying no answer at all, which
-                # the engine would refuse before reading its session. Decided
-                # here, where the value is known, not from an engine status
-                # that several different refusals share.
-                logger.info(
-                    "OAuth submission carries no code: flow=%s provider=%s",
-                    flow.flow_id,
-                    flow.callback_provider,
-                )
-                raise OAuthSubmissionRejectedError(flow_id)
+            address = _oauth_callback_address(submitted)
+            if address is not None:
+                answers = {
+                    key: answer.strip()
+                    for key, answer in urllib.parse.parse_qsl(urllib.parse.urlsplit(address).query)
+                }
+                # The rejections that provably write nothing and leave the
+                # session waiting, decided here where the value is known rather
+                # than from an engine status several refusals share. An address
+                # without an answer is refused by the engine before it reads its
+                # session. An answer to another sign-in link would reach the
+                # provider, which refuses its code for this flow's verifier —
+                # and that refusal ends the session the user could have pasted
+                # the right address into.
+                rejection: Literal["no_answer", "other_attempt"] | None = None
+                if not any(answers.get(key) for key in ("code", "error", "error_description")):
+                    rejection = "no_answer"
+                elif answers.get("state") and answers["state"] != flow.engine_state:
+                    rejection = "other_attempt"
+                if rejection is not None:
+                    logger.info(
+                        "OAuth submission rejected before the engine: flow=%s provider=%s reason=%s",
+                        flow.flow_id,
+                        flow.callback_provider,
+                        rejection,
+                    )
+                    raise OAuthSubmissionRejectedError(flow_id, rejection)
             # Any failure after submission begins cannot prove whether the
             # engine wrote grant material.
             flow.grant_write_possible = True
@@ -2735,8 +2749,8 @@ class CLIProxyEngineAdapter:
                 "provider": flow.callback_provider,
                 "state": flow.engine_state,
             }
-            if is_redirect:
-                payload["redirect_url"] = submitted
+            if address is not None:
+                payload["redirect_url"] = address
             else:
                 payload["code"] = submitted
             try:
@@ -2747,11 +2761,8 @@ class CLIProxyEngineAdapter:
                     "/oauth-callback",
                     payload=payload,
                 )
-            except EngineClientError:
-                self._fail_flow(flow, "models.oauth.submission_failed")
-                return flow.snapshot()
-            except EngineUnavailableError:
-                self._fail_flow(flow, "models.oauth.submission_failed")
+            except (EngineClientError, EngineUnavailableError) as error:
+                self._fail_flow(flow, "models.oauth.submission_failed", detail=str(error))
                 return flow.snapshot()
             flow.state = "verifying"
             return flow.snapshot()
@@ -3077,10 +3088,19 @@ class CLIProxyEngineAdapter:
             raise EngineStateError("OAuth flow is unknown")
         return flow
 
-    def _fail_flow(self, flow: _OAuthFlow, error_key: str) -> None:
+    def _fail_flow(self, flow: _OAuthFlow, error_key: str, *, detail: str | None = None) -> None:
         self._mark_retention_unknown_if_needed(flow)
         flow.state = "failed"
         flow.error_key = error_key
+        flow.error_detail = oauth_failure_detail(detail)
+        if flow.error_detail is not None:
+            logger.warning(
+                "OAuth flow failed: flow=%s provider=%s error_key=%s detail=%s",
+                flow.flow_id,
+                flow.callback_provider,
+                error_key,
+                flow.error_detail,
+            )
         self._release_provider(flow)
 
     @staticmethod
@@ -3133,6 +3153,63 @@ class CLIProxyEngineAdapter:
             flow.state = "failed"
             flow.error_key = "models.oauth.expired"
             self._active_oauth_providers.discard(flow.auth_provider)
+
+
+# A browser that cannot load the loopback callback page often copies its address
+# without the scheme (``localhost:1455/auth/callback?code=…``). That value is an
+# address, not a code: sent as a code, the provider refuses it and the refusal
+# ends the session. A host followed by a port, path or query marks an address; a
+# provider code carries none of them (Google's ``4/0A…`` has no host before its
+# slash, and Anthropic's ``code#state`` has no path or query).
+_SCHEMELESS_CALLBACK_ADDRESS = re.compile(
+    r"^(?:"
+    # A loopback or IP host is an address on its own, with or without a port.
+    r"(?:localhost|\[[0-9a-f:.]+\]|\d{1,3}(?:\.\d{1,3}){3})(?::\d{1,5})?(?:[/?]|$)"
+    # A named host needs a port, path or query: ``a.b.c`` alone may be a code.
+    r"|(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d{1,5}(?:[/?]|$)|[/?])"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _oauth_callback_address(submitted: str) -> str | None:
+    """Return a pasted OAuth value as a callback address, or None for a bare code."""
+
+    if submitted.lower().startswith(("http://", "https://")):
+        return submitted
+    if "?" in submitted or _SCHEMELESS_CALLBACK_ADDRESS.match(submitted):
+        return "http://" + submitted.lstrip("/")
+    return None
+
+
+# The pinned engine's OAuth session errors, verbatim and lower-cased, mapped to
+# what the user can do about each. A closed table: anything the engine says that
+# is not here, including a future rewording, keeps the generic key rather than
+# borrowing a cause it did not state.
+_OAUTH_ENGINE_SESSION_ERRORS = {
+    "timeout waiting for oauth callback": "models.oauth.expired",
+    "oauth flow timed out": "models.oauth.expired",
+    "state code error": "models.oauth.callback_mismatch",
+    "authentication failed: state mismatch": "models.oauth.callback_mismatch",
+    "bad request": "models.oauth.provider_denied",
+    "authentication failed": "models.oauth.provider_denied",
+    "failed to exchange token": "models.oauth.exchange_failed",
+}
+# The one session error that carries its cause after the phrase.
+_OAUTH_ENGINE_EXCHANGE_FAILURE = "failed to exchange authorization code for tokens"
+
+
+def _oauth_engine_failure_key(reason: str) -> str:
+    """Map the engine's session error to what the user can do about it."""
+
+    text = " ".join(reason.split()).lower()
+    if text == _OAUTH_ENGINE_EXCHANGE_FAILURE or text.startswith(_OAUTH_ENGINE_EXCHANGE_FAILURE + ":"):
+        # Only the provider's answers about the grant itself blame the pasted
+        # code; a proxy (407), a throttle (429) or any other refusal does not.
+        if re.search(r"\bstatus 40[01]\b", text) or "invalid_grant" in text:
+            return "models.oauth.code_rejected"
+        return "models.oauth.exchange_failed"
+    return _OAUTH_ENGINE_SESSION_ERRORS.get(text, "models.oauth.upstream_failed")
 
 
 def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:

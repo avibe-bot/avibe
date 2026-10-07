@@ -909,6 +909,8 @@ def _oauth_payload(
     }
     if client_nonce is not None:
         payload["client_nonce"] = client_nonce
+    if flow.state == "failed" and flow.error_detail:
+        payload["error_detail"] = flow.error_detail
     return payload
 
 
@@ -1261,8 +1263,16 @@ class ModelHubService:
                 status=409,
                 detail="modelHub.errors.native_login_in_progress",
             ) from None
-        except OAuthSubmissionRejectedError:
-            raise ModelHubError("submission_rejected", status=422) from None
+        except OAuthSubmissionRejectedError as error:
+            raise ModelHubError(
+                "submission_rejected",
+                status=422,
+                detail=(
+                    "modelHub.errors.submission_rejected_other_attempt"
+                    if error.reason == "other_attempt"
+                    else None
+                ),
+            ) from None
         except ModelHubError:
             raise
         except Exception as error:

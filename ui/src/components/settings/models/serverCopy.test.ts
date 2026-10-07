@@ -19,6 +19,7 @@ import {
   NATIVE_SUBSCRIPTION_EXISTS_FAILURE,
   oauthFailureKey,
   PASTE_REJECTED_KEY,
+  pasteRejectedKey,
   oauthStartFailureKey,
   serverText,
   TIER_EDIT_MANAGED_FAILURE,
@@ -299,6 +300,16 @@ describe('pasted OAuth callback value', () => {
     expect(callbackValueCarriesResult('http://localhost:1455/auth/callback?code=abc&state=s')).toBe(true);
     expect(callbackValueCarriesResult('http://localhost:1455/auth/callback?error=access_denied')).toBe(true);
     expect(callbackValueCarriesResult('  abc#state  ')).toBe(true);
+    expect(callbackValueCarriesResult('4/0AbCd-code')).toBe(true);
+  });
+
+  // Browsers that fail to load the loopback page copy its address without the
+  // scheme; it is still an address and is judged as one.
+  it('judges a scheme-less address by its answer, not as a bare code', () => {
+    expect(callbackValueCarriesResult('localhost:1455/auth/callback?code=abc&state=s')).toBe(true);
+    expect(callbackValueCarriesResult('127.0.0.1:54545/callback?code=abc&state=s')).toBe(true);
+    expect(callbackValueCarriesResult('localhost:1455/auth/callback?state=s')).toBe(false);
+    expect(callbackValueCarriesResult('chatgpt.com/')).toBe(false);
   });
 
   it('refuses a page address that carries no answer', () => {
@@ -308,9 +319,16 @@ describe('pasted OAuth callback value', () => {
     expect(callbackValueCarriesResult('http://[broken')).toBe(false);
   });
 
-  it('explains the refusal in both bundles', () => {
+  it('says what to paste instead, by why the server refused it, in both bundles', () => {
+    const otherAttempt = pasteRejectedKey('modelHub.errors.submission_rejected_other_attempt');
+    expect(otherAttempt).not.toBe(PASTE_REJECTED_KEY);
+    for (const detail of [undefined, 'modelHub.errors.submission_rejected']) {
+      expect(pasteRejectedKey(detail)).toBe(PASTE_REJECTED_KEY);
+    }
     for (const lng of ['en', 'zh'] as const) {
-      expect(t(lng)(PASTE_REJECTED_KEY)).not.toBe(PASTE_REJECTED_KEY);
+      for (const key of [PASTE_REJECTED_KEY, otherAttempt]) {
+        expect(t(lng)(key)).not.toBe(key);
+      }
     }
   });
 });

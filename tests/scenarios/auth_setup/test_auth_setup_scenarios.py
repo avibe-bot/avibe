@@ -3971,6 +3971,128 @@ def test_hub_oauth_model_free_observation_closed_loop(
     ScenarioExpect.step_history(runner, ["start_login", "complete_consent", "materialize_source"])
 
 
+def test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-127
+
+    A user on another device pastes the callback address back. The first paste
+    answers an earlier sign-in link; the second is the right address with its
+    scheme dropped by the browser. Neither may end the flow: the first is refused
+    before it reaches the provider, and the second signs in and materializes the
+    subscription Source.
+    """
+    from core.handlers.model_hub.service import ModelHubError
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    auth_name = "codex-account-test-plus.json"
+    engine = SimpleNamespace(files=[], callbacks=[], fields=[], signed_in=False)
+
+    # The engine's side of the browser flow: it exchanges a callback only when
+    # the address carries the code its own authorization issued, then saves
+    # the grant as an auth file, the way CLIProxyAPI does.
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {"files": list(engine.files)}
+        if path == "/codex-auth-url":
+            return {
+                "state": "browser-state",
+                "url": "https://auth.openai.com/oauth/authorize?state=browser-state",
+            }
+        if path == "/get-auth-status":
+            assert query == {"state": "browser-state"}
+            return {"status": "ok" if engine.signed_in else "wait"}
+        if path == "/oauth-callback":
+            engine.callbacks.append(dict(payload))
+            query_code = urllib.parse.parse_qs(urllib.parse.urlsplit(payload.get("redirect_url", "")).query).get("code")
+            code = query_code[0] if query_code else payload.get("code")
+            if code == "ac_issued":
+                state_store._secure_write_json(
+                    state_store.auth_dir / auth_name,
+                    {"type": "codex", "access_token": "test-access", "refresh_token": "test-refresh"},
+                )
+                engine.files.append({
+                    "id": auth_name,
+                    "auth_index": "auth-index-test",
+                    "name": auth_name,
+                    "provider": "codex",
+                    "account": "user@example.test",
+                    "id_token": {"chatgpt_account_id": "account-test"},
+                })
+                engine.signed_in = True
+            return {"status": "ok"}
+        if (method, path) == ("PATCH", "/auth-files/fields"):
+            engine.fields.append(dict(payload))
+            return {"status": "ok"}
+        raise AssertionError((method, path))
+
+    client = Mock()
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    for method in ("start_oauth", "oauth_status", "submit_oauth", "cancel_oauth"):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+    harness = SimpleNamespace()
+    runner = ScenarioRunner(harness)
+
+    async def start_login(h):
+        started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
+        h.flow_id = started["flow"]["flow_id"]
+        h.source_id = started["flow"]["source_id"]
+        assert started["flow"]["presentation"]["expects"] == "paste_callback_url"
+
+    async def paste_earlier_link_address(h):
+        with pytest.raises(ModelHubError) as rejected:
+            await service.oauth_submit({
+                "flow_id": h.flow_id,
+                "value": "http://localhost:1455/auth/callback?code=ac_old&state=earlier-state",
+            })
+        assert (rejected.value.code, rejected.value.status) == ("submission_rejected", 422)
+        assert rejected.value.detail == "modelHub.errors.submission_rejected_other_attempt"
+        assert engine.callbacks == []
+        assert (await service.oauth_status(h.flow_id))["flow"]["state"] == "awaiting_action"
+
+    async def paste_schemeless_address(h):
+        await service.oauth_submit({
+            "flow_id": h.flow_id,
+            "value": "localhost:1455/auth/callback?code=ac_issued&scope=openid&state=browser-state",
+        })
+        assert engine.callbacks == [{
+            "provider": "codex",
+            "state": "browser-state",
+            "redirect_url": "http://localhost:1455/auth/callback?code=ac_issued&scope=openid&state=browser-state",
+        }]
+
+    async def materialize_source(h):
+        terminal = await service.oauth_status(h.flow_id)
+        assert terminal["flow"]["state"] == "success"
+        source = terminal["source"]
+        assert source["id"] == h.source_id
+        assert (source["vendor"], source["kind"], source["supply_channel"]) == ("openai", "subscription", "hub")
+        credential_ref = state_store.oauth_credential_ref(auth_name)
+        assert source["credential_ref"] == credential_ref
+        assert engine.fields == [{
+            "name": auth_name,
+            "prefix": state_store.credential_metadata(credential_ref)["prefix"],
+        }]
+        assert [listed["id"] for listed in service.list_sources()] == [h.source_id]
+
+    asyncio.run(runner.run(
+        ScenarioStep("start_login", start_login),
+        ScenarioStep("paste_earlier_link_address", paste_earlier_link_address),
+        ScenarioStep("paste_schemeless_address", paste_schemeless_address),
+        ScenarioStep("materialize_source", materialize_source),
+    ))
+    ScenarioExpect.step_history(
+        runner,
+        ["start_login", "paste_earlier_link_address", "paste_schemeless_address", "materialize_source"],
+    )
+
+
 @pytest.mark.parametrize("status", [401, 403])
 @pytest.mark.parametrize("policy_body", ["<html>Request blocked</html>", '{"message":"Regional policy"}'])
 @pytest.mark.parametrize("competing_protocol", [False, True])

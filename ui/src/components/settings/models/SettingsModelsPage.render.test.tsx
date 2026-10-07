@@ -1197,6 +1197,46 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(reauth).toHaveBeenCalledTimes(2));
   });
 
+  // The sentence says what to do; the provider's own words are what the user
+  // passes on when that is not enough. They stay folded until asked for, and
+  // the copy control takes exactly what the server sent.
+  it('folds the provider reason of a failed sign-in behind a copyable details control', async () => {
+    const detail = 'Failed to exchange authorization code for tokens: token exchange failed with status 401: token_expired';
+    const failed = {
+      flow_id: 'flow_reauth',
+      intent: 'reauth' as const,
+      vendor: 'openai',
+      channel: 'hub' as const,
+      state: 'failed' as const,
+      presentation: { expects: 'paste_callback_url' as const },
+      error_key: 'models.oauth.code_rejected',
+      error_detail: detail,
+    };
+    vi.spyOn(modelsApi, 'reauthSource').mockResolvedValue(failed);
+    vi.spyOn(modelsApi, 'getOAuthStatus').mockResolvedValue({ flow: failed, created: null, repaired: null });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    try {
+      renderPage([blockedSubscription]);
+
+      await userEvent.click(await screen.findByRole('button', { name: /Claude native login/i }));
+      await userEvent.click(await screen.findByRole('button', { name: /^Sign in$|^重新登录$/i }));
+      await userEvent.click(await screen.findByRole('button', { name: /^Start sign-in$|^开始登录$/i }));
+
+      const toggle = await screen.findByRole('button', { name: /^Show details$|^查看详情$/i });
+      expect(screen.getByText(/rejected this authorization code|拒绝了这个授权码/)).toBeTruthy();
+      expect(screen.queryByText(detail)).toBeNull();
+      await userEvent.click(toggle);
+      expect(screen.getByText(detail)).toBeTruthy();
+      await userEvent.click(screen.getByRole('button', { name: /^Copy$|^复制$/i }));
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(detail));
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  });
+
   it('lands the operational overview without reading hidden event history', async () => {
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
