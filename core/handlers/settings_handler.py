@@ -547,8 +547,7 @@ class SettingsHandler(BaseHandler):
     def _routing_agent_name(self, backend: str) -> str:
         """A backend choice routes to that backend's built-in Agent, under whatever name the row holds."""
         store = getattr(self.controller, "vibe_agent_store", None)
-        agent = store.get_builtin_default_agent_for_backend(backend, enabled_only=False) if store is not None else None
-        return agent.name if agent is not None else builtin_agent_name_for_backend(backend)
+        return store.routing_name_for_backend(backend) if store is not None else builtin_agent_name_for_backend(backend)
 
     def _resolve_route_backend(self, agent_name: Optional[str]) -> Optional[str]:
         if not agent_name:

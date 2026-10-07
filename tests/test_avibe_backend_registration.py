@@ -409,3 +409,31 @@ def test_choosing_the_built_in_backend_in_an_im_picker_routes_to_its_agent(tmp_p
             assert controller.resolve_agent_for_context(context) == backend
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("user_holds_avibe", [False, True])
+def test_routing_saved_as_the_backend_id_still_resolves(tmp_path, sqlite_db_factory, user_holds_avibe):
+    """Routing saved while the built-in was named ``avibe`` holds that id: it means the built-in.
+
+    An Agent that really has the name keeps it, as any name lookup does.
+    """
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        if user_holds_avibe:
+            store.create(name="avibe", backend="claude")
+        store.ensure_builtin_default_agents([])
+        built_in = store.get_builtin_default_agent_for_backend("avibe")
+        assert built_in.name == "vibey"
+        controller = Controller.__new__(Controller)
+        controller.primary_platform = "slack"
+        controller.vibe_agent_store = store
+        controller._get_settings_key = lambda context: context.channel_id
+        controller.get_settings_manager_for_context = lambda _context: SimpleNamespace(
+            get_channel_routing=lambda _key: RoutingSettings(agent_name="avibe"),
+        )
+        resolved = controller.resolve_vibe_agent_for_context(MessageContext(user_id="U1", channel_id="C1", platform="slack"))
+        assert (resolved.name, resolved.backend) == (("avibe", "claude") if user_holds_avibe else ("vibey", "avibe"))
+        with pytest.raises(Exception, match="not found"):
+            store.require_reference("opencode")  # A backend with no built-in row names nothing.
+    finally:
+        store.close()

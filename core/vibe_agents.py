@@ -901,9 +901,23 @@ class VibeAgentStore:
         return agent
 
     def require_reference(self, name: str) -> VibeAgent:
-        """Resolve a durable Agent reference, including a disabled archive."""
+        """Resolve a durable Agent reference, including a disabled archive.
 
-        return self._require_reference_agent(self.require(name))
+        Routing saved while built-in Agents were named after their backend holds that
+        backend id: when no Agent has the name, it means the backend's built-in Agent.
+        """
+
+        agent = self.get(name)
+        backend = str(name or "").strip()
+        if agent is None and backend in AGENT_BACKENDS:
+            agent = self.get_builtin_default_agent_for_backend(backend, enabled_only=False)
+        return self._require_reference_agent(agent if agent is not None else self.require(name))
+
+    def routing_name_for_backend(self, backend: str) -> str:
+        """The Agent name a backend choice routes to: its built-in Agent's, whatever the row is called."""
+
+        agent = self.get_builtin_default_agent_for_backend(backend, enabled_only=False)
+        return agent.name if agent is not None else builtin_agent_name_for_backend(backend)
 
     def require_reference_by_id(self, agent_id: str) -> VibeAgent:
         """Resolve a durable Agent identity across rename/archive operations."""

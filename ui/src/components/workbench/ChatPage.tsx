@@ -158,7 +158,7 @@ import {
 } from '../../lib/agentActivity';
 import { errorMessage } from '@/lib/errorMessage';
 import { pendingInitialMessageHandoff } from '@/lib/chatInitialMessage';
-import { sessionAgentDisplayName } from './sessionAgentName';
+import { sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
 import { useModelHubRecovery } from '../../lib/modelHubRecovery';
 import { getBackendUiMeta } from '@/lib/agentBackends';
 
@@ -2858,6 +2858,8 @@ export const ChatPage: React.FC = () => {
   }
 
   const agentDisplayName = sessionAgentDisplayName(session, agents);
+  // A runtime-owned row never inherits the default Agent, so it borrows no avatar from it.
+  const agentBackend = sessionAgentBackend(session, agents, readOnlyReason === 'system' ? null : defaultAgentName);
 
   return (
     // Fill the viewport so the transcript is the only scrolling region and
@@ -2976,6 +2978,7 @@ export const ChatPage: React.FC = () => {
           messages={messages}
           session={session}
           agentDisplayName={agentDisplayName}
+          agentBackend={agentBackend}
           working={working}
           modelRecovery={runtimeState.model_recovery}
           hasOlder={!!olderCursor}
@@ -3931,6 +3934,8 @@ interface TranscriptProps {
   messages: WorkbenchMessage[];
   session: WorkbenchSession;
   agentDisplayName: string | null;
+  /** The backend the replies come from, resolved through an inherited default. */
+  agentBackend?: string | null;
   working: boolean;
   modelRecovery?: SessionRuntimeState['model_recovery'];
   hasOlder: boolean;
@@ -3995,6 +4000,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   messages,
   session,
   agentDisplayName,
+  agentBackend = null,
   working,
   modelRecovery,
   hasOlder,
@@ -4540,6 +4546,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
                   message={message}
                   session={session}
                   agentDisplayName={agentDisplayName}
+                  agentBackend={agentBackend}
                   messageFontSize={messageFontSize}
                   onQuickReply={onQuickReply}
                   onFailureRetry={onFailureRetry}
@@ -4571,6 +4578,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
             <ThinkingBubble
               session={session}
               agentDisplayName={agentDisplayName}
+              agentBackend={agentBackend}
               onShowActivity={!activity?.enabled ? activity?.onEnable : undefined}
               statusLabel={recovery.label}
             />
@@ -4629,9 +4637,10 @@ const ForkSourceBanner: React.FC<{ sourceSessionId: string; sourceTitle: string 
 export const ThinkingBubble: React.FC<{
   session: WorkbenchSession;
   agentDisplayName: string | null;
+  agentBackend?: string | null;
   onShowActivity?: () => void;
   statusLabel?: string | null;
-}> = ({ session, agentDisplayName, onShowActivity, statusLabel }) => {
+}> = ({ session, agentDisplayName, agentBackend = null, onShowActivity, statusLabel }) => {
   const { t } = useTranslation();
   const dots = (
     <div className="flex items-center gap-1 py-0.5">
@@ -4644,7 +4653,7 @@ export const ThinkingBubble: React.FC<{
     <div className="flex w-full justify-start">
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
-          <RoleAvatar tone="mint"><BackendAvatar backend={session.agent_backend ?? ''} /></RoleAvatar>
+          <RoleAvatar tone="mint"><BackendAvatar backend={agentBackend ?? session.agent_backend ?? ''} /></RoleAvatar>
           <span className="text-[11px] font-medium text-muted">
             {statusLabel || agentDisplayName || session.agent_name || t('chat.thinking')}
           </span>
@@ -4673,6 +4682,8 @@ type MessageRowProps = {
   message: WorkbenchMessage;
   session: WorkbenchSession;
   agentDisplayName?: string | null;
+  /** The backend the replies come from, resolved through an inherited default. */
+  agentBackend?: string | null;
   messageFontSize: number;
   onQuickReply?: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
   onFailureRetry?: (messageId: string) => Promise<boolean>;
@@ -4705,6 +4716,7 @@ export const MessageRow = memo(function MessageRow({
   message,
   session,
   agentDisplayName,
+  agentBackend = null,
   messageFontSize,
   onQuickReply,
   onFailureRetry,
@@ -5038,7 +5050,7 @@ export const MessageRow = memo(function MessageRow({
     <div data-message-id={message.id} className={rowClass('justify-start')}>
       <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
         <div className="flex items-center gap-2 px-0.5">
-          <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{agentIdentity ? <BackendAvatar backend={session.agent_backend ?? ''} /> : <Info />}</RoleAvatar>
+          <RoleAvatar tone={isAgent ? 'mint' : 'muted'}>{agentIdentity ? <BackendAvatar backend={agentBackend ?? session.agent_backend ?? ''} /> : <Info />}</RoleAvatar>
           {name && <span className="text-[11px] font-medium text-muted">{name}</span>}
         </div>
         {bodyNode || attachmentsNode ? (
