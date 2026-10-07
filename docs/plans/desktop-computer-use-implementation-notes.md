@@ -51,28 +51,61 @@ retry or prompt.
 
 ### Screen Recording registration failure
 
-The fixed artifact did not appear automatically in **System Settings →
-Privacy & Security → Screen & System Audio Recording**. Unified logs proved
-that `CGRequestScreenCaptureAccess` and the one-pixel
-`SCScreenshotManager` call ran and were attributed to the shell bundle, but
-the old implementation invoked them outside the AppKit main thread and
-discarded the asynchronous capture result. The owner manually dragged the app
-into the pane to continue the vertical-slice investigation. That was an
-owner-assisted workaround and is not acceptance of the product request path.
+Two fixed candidates failed to appear automatically in **System Settings →
+Privacy & Security → Screen & System Audio Recording**.
 
-The corrected implementation dispatches the Accessibility request, Screen
-Recording request, and capture probe to the AppKit main thread. It bounds the
-capture completion wait and writes the thread, current grants, completion
-class, and `NSError` detail to the existing `bootstrap.log`. A new bundle
-identity must still prove that toggle-on creates the Settings row before a
-manual add.
+The `89a0634a` acceptance artifact called
+`CGRequestScreenCaptureAccess` and `captureImageInRect`, but the permission
+path was not dispatched to the AppKit main thread and ignored the asynchronous
+capture result. The owner manually dragged that app into the pane so the
+vertical-slice investigation could continue. That was an owner-assisted
+workaround and is not acceptance of the product request path.
 
-Primary old-artifact diagnostics:
+Candidate 2 was built from
+`7ddb10741411b290469e39d6a7922a987755405b` and held byte-for-byte fixed at:
+
+- app: `/Users/max/Applications/Avibe CUA Candidate 2.app`
+- bundle identifier: `bot.avibe.desktop.cua.candidate2`
+- outer cdhash: `5180ece1bc73874b19e5378eec73600c845360ed`
+- installed tree-manifest SHA-256:
+  `843b0aa5bef45d89319bb370f972b79524ae408535913a3beda61420ad24c1a5`
+
+Candidate 2 moved Accessibility, `CGRequestScreenCaptureAccess`, and the
+capture probe onto the AppKit main thread and recorded the asynchronous
+result. The capture callback reported an image, but the Settings row was still
+absent. Unified logs show that TCC received the explicit non-preflight request
+from the correct shell PID and bundle, returned `authValue=0` /
+`authReason=5`, and took `DB Action:None`. The following
+`captureImageInRect` path only produced preflight checks and no persisted
+ScreenCapture row. An image callback therefore does not establish either a
+grant or registration.
+
+The historical Phase 0 comparison used the same AX request followed by
+`CGRequestScreenCaptureAccess`. Its persistent serve-only mode also failed to
+register. The run that next entered ordinary `SCShareableContent` enumeration
+and a filter-based capture did create the denied TCC record that exposed the
+grant path. This is the smallest observed behavioral difference.
+
+The next candidate therefore replaces `captureImageInRect` with ordinary
+`SCShareableContent` enumeration followed by a display-filtered capture. Both
+the source rectangle in the selected display's logical coordinate system and
+the output are explicitly 1 x 1. Enumeration and capture share one 5 s
+deadline; a denied enumeration ends with its concrete `NSError`, and a late
+enumeration callback cannot start capture. The image is discarded, and no
+window or application enumeration is logged or retained. This remains a
+testable hypothesis until a new bundle identity appears in Settings before any
+manual add or grant.
+
+Primary diagnostics:
 
 - `screen-registration-diagnostics.log`, SHA-256
   `0d929f482959283eb74b7cfe98f0f2a6d40a69ee3b4daeb93f5bb2b5d689a973`
 - `capture-call-full.log`, SHA-256
   `63eacc4a4ab2048653104b15dcb636ebc239f32ebec58e6f00e36fff74b6935e`
+- `candidate2-tcc-history.log`, SHA-256
+  `723a65110073da6a9b9e7c749c8215c974dd572eccc3f826cb07adf29c027e2e`
+- `phase0-historical-ExampleAgentHarness.swift`, SHA-256
+  `fb7e7662bee1cc65647e6d85bd69f1b4c8feebc93eab367881a7d9cebca18e30`
 
 ### macOS Quit & Reopen and test isolation
 

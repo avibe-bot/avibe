@@ -18,10 +18,13 @@ use avibe_runtime_host::computer_use::{
 };
 use avibe_runtime_host::{BootstrapLog, LoopbackOrigin, BOOTSTRAP_LOG_NAME};
 use block2::RcBlock;
+use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{msg_send, sel, MainThreadMarker};
 use objc2_app_kit::NSApplicationDidBecomeActiveNotification;
-use objc2_foundation::{NSError, NSNotification, NSNotificationCenter, NSOperationQueue, NSPoint, NSRect, NSSize};
+use objc2_foundation::{
+    NSArray, NSError, NSNotification, NSNotificationCenter, NSOperationQueue, NSPoint, NSRect, NSSize,
+};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
@@ -29,7 +32,7 @@ use tauri::{AppHandle, Manager, RunEvent};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{sleep, timeout};
+use tokio::time::{sleep, timeout, timeout_at};
 
 const STATE_DIR_ENV: &str = "AVIBE_COMPUTER_USE_STATE_DIR";
 const DRIVER_PATH_ENV: &str = "AVIBE_COMPUTER_USE_DRIVER_PATH";
@@ -937,14 +940,17 @@ struct PermissionRequestChecks {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CaptureProbeOutcome {
     Image,
-    Error {
+    NativeError {
+        stage: CaptureProbeStage,
         domain: String,
         code: isize,
         description: String,
     },
-    EmptyResult,
-    ClassUnavailable,
-    SelectorUnavailable,
+    EmptyResult(CaptureProbeStage),
+    NoDisplay,
+    ObjectCreationFailed(&'static str),
+    ClassUnavailable(&'static str),
+    SelectorUnavailable(&'static str),
     CallbackTimedOut,
     CallbackDropped,
     MainThreadDispatchFailed(String),
@@ -957,10 +963,20 @@ impl CaptureProbeOutcome {
     fn code(&self) -> &'static str {
         match self {
             Self::Image => "image",
-            Self::Error { .. } => "error",
-            Self::EmptyResult => "empty_result",
-            Self::ClassUnavailable => "class_unavailable",
-            Self::SelectorUnavailable => "selector_unavailable",
+            Self::NativeError {
+                stage: CaptureProbeStage::ShareableContent,
+                ..
+            } => "shareable_content_error",
+            Self::NativeError {
+                stage: CaptureProbeStage::Capture,
+                ..
+            } => "capture_error",
+            Self::EmptyResult(CaptureProbeStage::ShareableContent) => "shareable_content_empty",
+            Self::EmptyResult(CaptureProbeStage::Capture) => "capture_empty",
+            Self::NoDisplay => "display_unavailable",
+            Self::ObjectCreationFailed(_) => "object_creation_failed",
+            Self::ClassUnavailable(_) => "class_unavailable",
+            Self::SelectorUnavailable(_) => "selector_unavailable",
             Self::CallbackTimedOut => "callback_timed_out",
             Self::CallbackDropped => "callback_dropped",
             Self::MainThreadDispatchFailed(_) => "main_thread_dispatch_failed",
@@ -972,15 +988,26 @@ impl CaptureProbeOutcome {
 
     fn detail(&self) -> Option<String> {
         match self {
-            Self::Error {
+            Self::NativeError {
                 domain,
                 code,
                 description,
+                ..
             } => Some(format!("{domain}({code}): {description}")),
+            Self::ObjectCreationFailed(class_name) | Self::ClassUnavailable(class_name) => {
+                Some((*class_name).to_owned())
+            }
+            Self::SelectorUnavailable(selector) => Some((*selector).to_owned()),
             Self::MainThreadDispatchFailed(error) => Some(error.clone()),
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureProbeStage {
+    ShareableContent,
+    Capture,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -998,23 +1025,25 @@ impl PermissionRequestResult {
     }
 }
 
-async fn run_permission_request<F>(
-    request_timeout: Duration,
-    capture_timeout: Duration,
-    dispatch: F,
-) -> PermissionRequestResult
+async fn run_permission_request<F>(request_timeout: Duration, dispatch: F) -> PermissionRequestResult
 where
-    F: FnOnce(oneshot::Sender<PermissionRequestChecks>, oneshot::Sender<CaptureProbeOutcome>) -> Result<(), String>,
+    F: FnOnce(
+        oneshot::Sender<PermissionRequestChecks>,
+        oneshot::Sender<CaptureProbeOutcome>,
+        Instant,
+    ) -> Result<(), String>,
 {
     let (checks_sender, checks_receiver) = oneshot::channel();
     let (capture_sender, capture_receiver) = oneshot::channel();
-    if let Err(error) = dispatch(checks_sender, capture_sender) {
+    let deadline = Instant::now() + request_timeout;
+    if let Err(error) = dispatch(checks_sender, capture_sender, deadline) {
         return PermissionRequestResult {
             checks: None,
             capture: CaptureProbeOutcome::MainThreadDispatchFailed(error),
         };
     }
-    let checks = match timeout(request_timeout, checks_receiver).await {
+    let deadline = tokio::time::Instant::from_std(deadline);
+    let checks = match timeout_at(deadline, checks_receiver).await {
         Ok(Ok(checks)) => checks,
         Ok(Err(_)) => {
             return PermissionRequestResult {
@@ -1029,7 +1058,7 @@ where
             };
         }
     };
-    let capture = match timeout(capture_timeout, capture_receiver).await {
+    let capture = match timeout_at(deadline, capture_receiver).await {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(_)) => CaptureProbeOutcome::CallbackDropped,
         Err(_) => CaptureProbeOutcome::CallbackTimedOut,
@@ -1044,8 +1073,7 @@ async fn request_permissions(app: &AppHandle, diagnostics: &BootstrapLog) -> Gra
     let app = app.clone();
     let result = run_permission_request(
         PERMISSION_REQUEST_TIMEOUT,
-        PERMISSION_REQUEST_TIMEOUT,
-        move |checks_sender, capture_sender| {
+        move |checks_sender, capture_sender, deadline| {
             app.run_on_main_thread(move || {
                 let main_thread = MainThreadMarker::new().is_some();
                 if !main_thread {
@@ -1067,7 +1095,7 @@ async fn request_permissions(app: &AppHandle, diagnostics: &BootstrapLog) -> Gra
                     },
                     main_thread,
                 });
-                one_pixel_capture_probe(capture_sender);
+                one_pixel_capture_probe(capture_sender, deadline);
             })
             .map_err(|error| error.to_string())
         },
@@ -1092,52 +1120,225 @@ fn request_accessibility() -> bool {
     }
 }
 
-fn one_pixel_capture_probe(sender: oneshot::Sender<CaptureProbeOutcome>) {
-    let sender = Arc::new(Mutex::new(Some(sender)));
-    let Some(manager) = AnyClass::get(c"SCScreenshotManager") else {
-        send_capture_outcome(&sender, CaptureProbeOutcome::ClassUnavailable);
-        return;
-    };
-    let selector = sel!(captureImageInRect:completionHandler:);
-    if manager.class_method(selector).is_none() {
-        send_capture_outcome(&sender, CaptureProbeOutcome::SelectorUnavailable);
-        return;
+#[derive(Clone)]
+struct CaptureProbeGate {
+    sender: Arc<Mutex<Option<oneshot::Sender<CaptureProbeOutcome>>>>,
+    deadline: Instant,
+}
+
+impl CaptureProbeGate {
+    fn new(sender: oneshot::Sender<CaptureProbeOutcome>, deadline: Instant) -> Self {
+        Self {
+            sender: Arc::new(Mutex::new(Some(sender))),
+            deadline,
+        }
     }
-    let completion_sender = sender.clone();
-    let completion = RcBlock::new(move |image: *mut AnyObject, error: *mut NSError| {
-        let outcome = if let Some(error) = unsafe { error.as_ref() } {
-            CaptureProbeOutcome::Error {
-                domain: error.domain().to_string(),
-                code: error.code(),
-                description: error.localizedDescription().to_string(),
+
+    fn run_if_active(&self, stage: impl FnOnce()) -> bool {
+        if Instant::now() >= self.deadline {
+            return false;
+        }
+        let active = self
+            .sender
+            .lock()
+            .ok()
+            .and_then(|sender| sender.as_ref().map(|sender| !sender.is_closed()))
+            .unwrap_or(false);
+        if !active {
+            return false;
+        }
+        stage();
+        true
+    }
+
+    fn finish(&self, outcome: CaptureProbeOutcome) {
+        if let Ok(mut sender) = self.sender.lock() {
+            if let Some(sender) = sender.take() {
+                let _ = sender.send(outcome);
             }
-        } else if image.is_null() {
-            CaptureProbeOutcome::EmptyResult
-        } else {
-            CaptureProbeOutcome::Image
-        };
-        send_capture_outcome(&completion_sender, outcome);
-    });
-    let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0));
-    // SAFETY: Availability and selector shape were checked above. The block is
-    // copied by ScreenCaptureKit for the asynchronous completion.
-    unsafe {
-        let _: () = msg_send![
-            manager,
-            captureImageInRect: rect,
-            completionHandler: &*completion
-        ];
+        }
     }
 }
 
-fn send_capture_outcome(
-    sender: &Arc<Mutex<Option<oneshot::Sender<CaptureProbeOutcome>>>>,
-    outcome: CaptureProbeOutcome,
-) {
-    if let Ok(mut sender) = sender.lock() {
-        if let Some(sender) = sender.take() {
-            let _ = sender.send(outcome);
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CaptureProbeGeometry {
+    source: NSRect,
+    destination: NSRect,
+    width: isize,
+    height: isize,
+}
+
+fn one_pixel_probe_geometry() -> CaptureProbeGeometry {
+    // The content filter already selects one display, so (0, 0) is the origin
+    // of that display's logical coordinate system rather than global desktop
+    // space. Setting sourceRect is what keeps the input sample at one pixel;
+    // width and height alone would downsample the whole display.
+    CaptureProbeGeometry {
+        source: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0)),
+        destination: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0)),
+        width: 1,
+        height: 1,
+    }
+}
+
+fn one_pixel_capture_probe(sender: oneshot::Sender<CaptureProbeOutcome>, deadline: Instant) {
+    let gate = CaptureProbeGate::new(sender, deadline);
+    let Some(shareable_content) = AnyClass::get(c"SCShareableContent") else {
+        gate.finish(CaptureProbeOutcome::ClassUnavailable("SCShareableContent"));
+        return;
+    };
+    let selector = sel!(getShareableContentWithCompletionHandler:);
+    if shareable_content.class_method(selector).is_none() {
+        gate.finish(CaptureProbeOutcome::SelectorUnavailable(
+            "getShareableContentWithCompletionHandler:",
+        ));
+        return;
+    }
+    let completion_gate = gate.clone();
+    let completion = RcBlock::new(move |content: *mut AnyObject, error: *mut NSError| {
+        let completion_gate = completion_gate.clone();
+        completion_gate.clone().run_if_active(move || {
+            let error = unsafe { error.as_ref() }.map(capture_probe_error);
+            continue_after_shareable_content(content.is_null(), error, || {
+                // SAFETY: The ScreenCaptureKit completion supplied a non-null
+                // object for the duration of this callback.
+                let content = unsafe { content.as_ref() }.expect("shareable content checked non-null");
+                begin_one_pixel_display_capture(content, completion_gate.clone());
+            })
+            .unwrap_or_else(|outcome| completion_gate.finish(outcome));
+        });
+    });
+    // SAFETY: Availability and selector shape were checked above.
+    // ScreenCaptureKit copies the block for asynchronous completion.
+    unsafe {
+        let _: () = msg_send![shareable_content, getShareableContentWithCompletionHandler: &*completion];
+    }
+}
+
+fn continue_after_shareable_content(
+    content_is_null: bool,
+    error: Option<CaptureProbeError>,
+    capture: impl FnOnce(),
+) -> Result<(), CaptureProbeOutcome> {
+    if let Some(error) = error {
+        return Err(native_capture_error(CaptureProbeStage::ShareableContent, error));
+    }
+    if content_is_null {
+        return Err(CaptureProbeOutcome::EmptyResult(CaptureProbeStage::ShareableContent));
+    }
+    capture();
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CaptureProbeError {
+    domain: String,
+    code: isize,
+    description: String,
+}
+
+fn capture_probe_error(error: &NSError) -> CaptureProbeError {
+    CaptureProbeError {
+        domain: error.domain().to_string(),
+        code: error.code(),
+        description: error.localizedDescription().to_string(),
+    }
+}
+
+fn native_capture_error(stage: CaptureProbeStage, error: CaptureProbeError) -> CaptureProbeOutcome {
+    CaptureProbeOutcome::NativeError {
+        stage,
+        domain: error.domain,
+        code: error.code,
+        description: error.description,
+    }
+}
+
+fn begin_one_pixel_display_capture(content: &AnyObject, gate: CaptureProbeGate) {
+    let displays: Retained<NSArray<AnyObject>> = unsafe { msg_send![content, displays] };
+    if displays.count() == 0 {
+        gate.finish(CaptureProbeOutcome::NoDisplay);
+        return;
+    }
+    let display = displays.objectAtIndex(0);
+    let excluded_windows = NSArray::<AnyObject>::new();
+
+    let Some(filter_class) = AnyClass::get(c"SCContentFilter") else {
+        gate.finish(CaptureProbeOutcome::ClassUnavailable("SCContentFilter"));
+        return;
+    };
+    let filter_selector = sel!(initWithDisplay:excludingWindows:);
+    if filter_class.instance_method(filter_selector).is_none() {
+        gate.finish(CaptureProbeOutcome::SelectorUnavailable(
+            "initWithDisplay:excludingWindows:",
+        ));
+        return;
+    }
+    let allocated_filter: Allocated<AnyObject> = unsafe { msg_send![filter_class, alloc] };
+    let filter: Option<Retained<AnyObject>> = unsafe {
+        msg_send![
+            allocated_filter,
+            initWithDisplay: &*display,
+            excludingWindows: &*excluded_windows
+        ]
+    };
+    let Some(filter) = filter else {
+        gate.finish(CaptureProbeOutcome::ObjectCreationFailed("SCContentFilter"));
+        return;
+    };
+
+    let Some(configuration_class) = AnyClass::get(c"SCStreamConfiguration") else {
+        gate.finish(CaptureProbeOutcome::ClassUnavailable("SCStreamConfiguration"));
+        return;
+    };
+    let configuration: Retained<AnyObject> = unsafe { msg_send![configuration_class, new] };
+    let geometry = one_pixel_probe_geometry();
+    unsafe {
+        let _: () = msg_send![&*configuration, setWidth: geometry.width];
+        let _: () = msg_send![&*configuration, setHeight: geometry.height];
+        let _: () = msg_send![&*configuration, setSourceRect: geometry.source];
+        let _: () = msg_send![&*configuration, setDestinationRect: geometry.destination];
+        let _: () = msg_send![&*configuration, setShowsCursor: false];
+    }
+
+    let Some(manager) = AnyClass::get(c"SCScreenshotManager") else {
+        gate.finish(CaptureProbeOutcome::ClassUnavailable("SCScreenshotManager"));
+        return;
+    };
+    let selector = sel!(captureImageWithFilter:configuration:completionHandler:);
+    if manager.class_method(selector).is_none() {
+        gate.finish(CaptureProbeOutcome::SelectorUnavailable(
+            "captureImageWithFilter:configuration:completionHandler:",
+        ));
+        return;
+    }
+
+    let completion_gate = gate.clone();
+    let completion_filter = filter.clone();
+    let completion_configuration = configuration.clone();
+    let completion = RcBlock::new(move |image: *mut AnyObject, error: *mut NSError| {
+        let _keep_alive = (&completion_filter, &completion_configuration);
+        if let Some(error) = unsafe { error.as_ref() } {
+            completion_gate.finish(native_capture_error(
+                CaptureProbeStage::Capture,
+                capture_probe_error(error),
+            ));
+        } else if image.is_null() {
+            completion_gate.finish(CaptureProbeOutcome::EmptyResult(CaptureProbeStage::Capture));
+        } else {
+            completion_gate.finish(CaptureProbeOutcome::Image);
         }
+    });
+    // SAFETY: The classes/selectors above are available, the retained filter
+    // and configuration stay alive through the copied completion block, and
+    // the callback only reports metadata; the one-pixel image is discarded.
+    unsafe {
+        let _: () = msg_send![
+            manager,
+            captureImageWithFilter: &*filter,
+            configuration: &*configuration,
+            completionHandler: &*completion
+        ];
     }
 }
 
@@ -1328,10 +1529,11 @@ mod tests {
             main_thread: true,
         };
         for outcome in [
-            CaptureProbeOutcome::ClassUnavailable,
-            CaptureProbeOutcome::SelectorUnavailable,
+            CaptureProbeOutcome::ClassUnavailable("SCShareableContent"),
+            CaptureProbeOutcome::SelectorUnavailable("getShareableContentWithCompletionHandler:"),
             CaptureProbeOutcome::MainThreadContextMismatch,
-            CaptureProbeOutcome::Error {
+            CaptureProbeOutcome::NativeError {
+                stage: CaptureProbeStage::ShareableContent,
                 domain: "SCStreamErrorDomain".to_owned(),
                 code: -3801,
                 description: "permission denied".to_owned(),
@@ -1339,43 +1541,117 @@ mod tests {
         ] {
             let expected = outcome.clone();
             let checks = checks.clone();
-            let result = run_permission_request(
-                Duration::from_millis(50),
-                Duration::from_millis(50),
-                move |checks_sender, capture_sender| {
-                    checks_sender.send(checks).expect("request receiver");
-                    capture_sender.send(outcome).expect("capture receiver");
-                    Ok(())
-                },
-            )
+            let result = run_permission_request(Duration::from_millis(50), move |checks_sender, capture_sender, _| {
+                checks_sender.send(checks).expect("request receiver");
+                capture_sender.send(outcome).expect("capture receiver");
+                Ok(())
+            })
             .await;
             assert_eq!(result.capture, expected);
             assert_eq!(result.checks.as_ref().map(|value| value.main_thread), Some(true));
         }
 
-        let dispatch_failure = run_permission_request(Duration::from_millis(50), Duration::from_millis(50), |_, _| {
-            Err("event loop closed".to_owned())
-        })
-        .await;
+        let dispatch_failure =
+            run_permission_request(Duration::from_millis(50), |_, _, _| Err("event loop closed".to_owned())).await;
         assert_eq!(
             dispatch_failure.capture,
             CaptureProbeOutcome::MainThreadDispatchFailed("event loop closed".to_owned())
         );
 
-        let timed_out = run_permission_request(
-            Duration::from_millis(50),
-            Duration::from_millis(5),
-            move |checks_sender, capture_sender| {
-                checks_sender.send(checks).expect("request receiver");
-                tokio::spawn(async move {
-                    sleep(Duration::from_millis(50)).await;
-                    drop(capture_sender);
-                });
-                Ok(())
-            },
-        )
+        let timed_out = run_permission_request(Duration::from_millis(5), move |checks_sender, capture_sender, _| {
+            checks_sender.send(checks).expect("request receiver");
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(50)).await;
+                drop(capture_sender);
+            });
+            Ok(())
+        })
         .await;
         assert_eq!(timed_out.capture, CaptureProbeOutcome::CallbackTimedOut);
+    }
+
+    #[test]
+    fn shareable_content_error_ends_before_the_capture_stage() {
+        let capture_started = std::cell::Cell::new(false);
+        let error = CaptureProbeError {
+            domain: "SCStreamErrorDomain".to_owned(),
+            code: -3801,
+            description: "permission denied".to_owned(),
+        };
+        assert_eq!(
+            continue_after_shareable_content(false, Some(error), || capture_started.set(true)),
+            Err(CaptureProbeOutcome::NativeError {
+                stage: CaptureProbeStage::ShareableContent,
+                domain: "SCStreamErrorDomain".to_owned(),
+                code: -3801,
+                description: "permission denied".to_owned(),
+            })
+        );
+        assert!(!capture_started.get());
+        assert_eq!(
+            continue_after_shareable_content(true, None, || capture_started.set(true)),
+            Err(CaptureProbeOutcome::EmptyResult(CaptureProbeStage::ShareableContent))
+        );
+        assert!(!capture_started.get());
+        assert_eq!(
+            continue_after_shareable_content(false, None, || capture_started.set(true)),
+            Ok(())
+        );
+        assert!(capture_started.get());
+    }
+
+    #[test]
+    fn one_pixel_probe_bounds_source_and_output_without_downsampling_a_display() {
+        let geometry = one_pixel_probe_geometry();
+        assert_eq!(
+            geometry.source,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0))
+        );
+        assert_eq!(
+            geometry.destination,
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0))
+        );
+        assert_eq!((geometry.width, geometry.height), (1, 1));
+    }
+
+    #[test]
+    fn late_shareable_content_completion_cannot_start_the_capture_stage() {
+        let (sender, _receiver) = oneshot::channel();
+        let gate = CaptureProbeGate::new(sender, Instant::now() - Duration::from_millis(1));
+        let started = std::cell::Cell::new(false);
+        assert!(!gate.run_if_active(|| started.set(true)));
+        assert!(!started.get());
+    }
+
+    #[test]
+    fn closed_probe_receiver_cannot_start_the_capture_stage() {
+        let (sender, receiver) = oneshot::channel();
+        drop(receiver);
+        let gate = CaptureProbeGate::new(sender, Instant::now() + Duration::from_secs(1));
+        let started = std::cell::Cell::new(false);
+        assert!(!gate.run_if_active(|| started.set(true)));
+        assert!(!started.get());
+    }
+
+    #[tokio::test]
+    async fn permission_probe_uses_one_deadline_for_request_and_capture() {
+        let result = run_permission_request(Duration::from_millis(200), move |checks_sender, capture_sender, _| {
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(75)).await;
+                let _ = checks_sender.send(PermissionRequestChecks {
+                    grants: Grants {
+                        accessibility: true,
+                        screen_recording: false,
+                    },
+                    main_thread: true,
+                });
+                sleep(Duration::from_millis(150)).await;
+                let _ = capture_sender.send(CaptureProbeOutcome::Image);
+            });
+            Ok(())
+        })
+        .await;
+        assert_eq!(result.capture, CaptureProbeOutcome::CallbackTimedOut);
     }
 
     #[test]
@@ -1393,7 +1669,8 @@ mod tests {
                     },
                     main_thread: true,
                 }),
-                capture: CaptureProbeOutcome::Error {
+                capture: CaptureProbeOutcome::NativeError {
+                    stage: CaptureProbeStage::ShareableContent,
                     domain: "SCStreamErrorDomain".to_owned(),
                     code: -3801,
                     description: "permission denied".to_owned(),
@@ -1403,7 +1680,7 @@ mod tests {
         let written = std::fs::read_to_string(path).expect("diagnostic log");
         assert!(written.contains("computer-use.permission-request"));
         assert!(written.contains("thread=\"main\""));
-        assert!(written.contains("capture=\"error\""));
+        assert!(written.contains("capture=\"shareable_content_error\""));
         assert!(written.contains("SCStreamErrorDomain(-3801): permission denied"));
     }
 }

@@ -763,6 +763,28 @@ mod tests {
     }
 
     #[test]
+    fn denied_permission_probe_stays_in_needs_permission_without_retrying() {
+        let missing = Grants {
+            accessibility: true,
+            screen_recording: false,
+        };
+        let mut lifecycle = ComputerUseLifecycle::off();
+        let toggle = lifecycle.toggle_on(RuntimeSupport::Supported, missing);
+        assert!(toggle.write_state);
+        assert!(toggle.prompt_permissions);
+        assert!(!toggle.spawn_daemon);
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsPermission);
+        assert_eq!(lifecycle.reason(), Some("screen_recording"));
+
+        for _ in 0..3 {
+            let tick = lifecycle.permission_tick(missing);
+            assert_eq!(tick, LifecycleDirective::default());
+            assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsPermission);
+            assert_eq!(lifecycle.reason(), Some("screen_recording"));
+        }
+    }
+
+    #[test]
     fn third_failure_in_five_minutes_enters_sticky_error() {
         let mut lifecycle = ComputerUseLifecycle::off();
         lifecycle.enabled = true;

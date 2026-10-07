@@ -152,10 +152,15 @@ running. The tray keeps the shell alive after the window closes.
     another system dialog.
   - On macOS 26 an app appears in the Screen Recording pane only after a real
     capture attempt. So the request also makes one attempt from the shell
-    process itself: a one-pixel ScreenCaptureKit capture. The shell dispatches
-    both request calls to the AppKit main thread, waits at most 5 s for the
-    capture completion, and records whether it received an image, an
-    `NSError`, an empty result, or no callback in `bootstrap.log`. TCC
+    process itself. It enumerates ordinary `SCShareableContent`, selects a
+    display, and performs a filter-based ScreenCaptureKit capture whose
+    `sourceRect`, output dimensions, and destination are all explicitly
+    bounded to 1 x 1. Pixels are discarded, and the shell neither logs nor
+    retains the enumerated windows and applications. The shell dispatches both
+    request calls to the AppKit main thread, gives enumeration and capture one
+    shared 5 s deadline, and records whether either stage returned an image,
+    an `NSError`, an empty result, or no callback in `bootstrap.log`. A late
+    enumeration callback cannot start capture after that deadline. TCC
     attributes the attempt to Avibe.app, and it needs no daemon, which matters
     because the daemon starts only after both grants exist.
   - Phase 1 acceptance requires the toggle-on request to register the fixed
