@@ -3191,24 +3191,24 @@ class _NonCooperativeReadStream(httpx.AsyncByteStream):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["open", "first_byte", "idle"])
-async def test_shared_driver_bounds_each_network_wait(
+@pytest.mark.parametrize("phase", ["headers", "first_byte", "idle", "after_output"])
+async def test_shared_driver_bounds_each_wait_on_a_silent_provider(
     monkeypatch: pytest.MonkeyPatch,
     phase: str,
 ) -> None:
     import core.agent_core.ai._common as common
 
-    monkeypatch.setattr(common, "CONNECT_TIMEOUT_S", 0.01)
-    monkeypatch.setattr(common, "TIME_TO_FIRST_BYTE_TIMEOUT_S", 0.01)
-    monkeypatch.setattr(common, "IDLE_CHUNK_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(common, "PROVIDER_SILENCE_TIMEOUT_S", 0.01)
     opened = asyncio.Event()
     first_byte_stream = _StalledFirstByteStream()
     idle_stream = _StalledStream(
-        b'data: {"choices":[{"delta":{},"finish_reason":null}]}\n\n'
+        None
+        if phase == "after_output"
+        else b'data: {"choices":[{"delta":{},"finish_reason":null}]}\n\n'
     )
 
     async def handler(_: httpx.Request) -> httpx.Response:
-        if phase == "open":
+        if phase == "headers":
             opened.set()
             await asyncio.Event().wait()
         if phase == "first_byte":
@@ -3227,7 +3227,7 @@ async def test_shared_driver_bounds_each_network_wait(
         task = asyncio.create_task(
             _events(OpenAIChatAdapter(client), _request("openai_chat"))
         )
-        if phase == "open":
+        if phase == "headers":
             await opened.wait()
         elif phase == "first_byte":
             await first_byte_stream.started.wait()
@@ -3235,15 +3235,89 @@ async def test_shared_driver_bounds_each_network_wait(
             await idle_stream.started.wait()
         events = await asyncio.wait_for(task, timeout=1)
 
+    # A connected provider that goes silent stalled; it is not a connection failure.
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert error.kind == "stalled"
+    if phase == "after_output":
+        # Output already reached the user: the stall ends the request with what streamed.
+        assert error.retryable is False
+        assert error.partial is not None
+        assert [block.text for block in error.partial.content] == ["partial"]
+    else:
+        assert error.retryable is True
+        assert error.partial is None
+    if phase == "first_byte":
+        assert first_byte_stream.closed.is_set()
+    elif phase != "headers":
+        assert idle_stream.closed.is_set()
+
+
+class _SlowButAliveStream(httpx.AsyncByteStream):
+    def __init__(self, chunks: list[bytes], gap_s: float) -> None:
+        self.chunks = chunks
+        self.gap_s = gap_s
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            await asyncio.sleep(self.gap_s)
+            yield chunk
+
+
+@pytest.mark.asyncio
+async def test_slow_but_alive_provider_is_bounded_per_silence_not_per_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import core.agent_core.ai._common as common
+
+    # Response headers arrive long after connecting would have timed out, and
+    # the stream outlasts the silence bound, but no single silence reaches it.
+    monkeypatch.setattr(common, "CONNECT_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(common, "PROVIDER_SILENCE_TIMEOUT_S", 0.5)
+    words = [f"w{index} " for index in range(12)]
+    chunks = [
+        b'data: ' + json.dumps({"choices": [{"delta": {"content": word}, "finish_reason": None}]}).encode() + b"\n\n"
+        for word in words
+    ] + [b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n', b"data: [DONE]\n\n"]
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.1)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_SlowButAliveStream(chunks, gap_s=0.05),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await asyncio.wait_for(_events(OpenAIChatAdapter(client), _request("openai_chat")), timeout=5)
+
+    done = events[-1]
+    assert isinstance(done, Done)
+    assert done.message.content[0].text == "".join(words)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ConnectTimeout])
+async def test_only_connecting_is_bounded_by_the_transport_and_its_failure_is_network(
+    failure: type[httpx.TransportError],
+) -> None:
+    import core.agent_core.ai._common as common
+
+    seen: list[dict[str, float | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"])
+        raise failure("connect failed", request=request)
+
+    # A client of its own may carry read limits; the driver's request replaces them.
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    assert seen == [{"connect": common.CONNECT_TIMEOUT_S, "read": None, "write": None, "pool": None}]
     error = events[-1]
     assert isinstance(error, ProviderError)
     assert error.kind == "network"
     assert error.retryable is True
-    assert error.partial is None
-    if phase == "first_byte":
-        assert first_byte_stream.closed.is_set()
-    elif phase == "idle":
-        assert idle_stream.closed.is_set()
 
 
 @pytest.mark.asyncio
@@ -3252,7 +3326,7 @@ async def test_non_cooperative_stream_cancellation_join_does_not_block_driver(
 ) -> None:
     import core.agent_core.ai._common as common
 
-    monkeypatch.setattr(common, "TIME_TO_FIRST_BYTE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(common, "PROVIDER_SILENCE_TIMEOUT_S", 0.01)
     monkeypatch.setattr(common, "CLEANUP_TIMEOUT_S", 0.01)
     stream = _NonCooperativeReadStream()
 
@@ -3270,7 +3344,7 @@ async def test_non_cooperative_stream_cancellation_join_does_not_block_driver(
 
     error = events[-1]
     assert isinstance(error, ProviderError)
-    assert error.kind == "network"
+    assert error.kind == "stalled"
     assert error.retryable is True
     assert stream.cancel_seen.is_set()
     assert stream.cancel_count == 1
@@ -3338,7 +3412,7 @@ async def test_redirect_error_body_read_failure_is_terminal_invalid_request(
 ) -> None:
     import core.agent_core.ai._common as common
 
-    monkeypatch.setattr(common, "TIME_TO_FIRST_BYTE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(common, "PROVIDER_SILENCE_TIMEOUT_S", 0.01)
     stream = _ErrorBodyReadFailure()
 
     def handler(_: httpx.Request) -> httpx.Response:

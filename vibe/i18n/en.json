@@ -1550,6 +1550,7 @@
       "rateLimit": "The model provider is rate-limiting requests. Try again in a moment.",
       "overloaded": "The model provider is overloaded. Try again in a moment.",
       "network": "The model provider could not be reached. Check the network and the Model Hub source.",
+      "stalled": "The model provider sent no new data for more than {minutes} minutes, so this turn was stopped. Try again, or choose another model.",
       "server": "The model provider returned a server error. Try again in a moment.",
       "auth": "The model provider rejected the credentials of this route. Check the Model Hub source.",
       "invalidRequest": "The model provider rejected the request.",

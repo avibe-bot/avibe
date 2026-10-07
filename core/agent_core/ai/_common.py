@@ -16,6 +16,7 @@ from urllib.parse import parse_qsl, unquote, unquote_to_bytes, urlencode, urlspl
 import httpx
 
 from core.agent_core.ai.errors import (
+    ProviderStalled,
     _is_sensitive_key,
     classify_error,
     parse_retry_after,
@@ -35,6 +36,7 @@ from core.agent_core.messages import (
     UserContent,
 )
 from core.agent_core.ai.provider import (
+    RETRYABLE_ERROR_KINDS,
     BlockEnd,
     Done,
     MediaLoader,
@@ -64,13 +66,18 @@ class WireField:
     children: tuple["WireField", ...] = ()
     item_children: tuple["WireField", ...] = ()
 
-# A provider that never produces headers or pauses forever between chunks must
-# not hold an agent turn indefinitely. These bounds are deliberately shared by
-# every native adapter; the loop may retry the resulting network error only
-# when no model output has been emitted.
+# A provider that never answers or stops sending mid-stream must not hold an
+# agent turn forever, but a healthy one can stay silent for minutes: a
+# reasoning model before its first token, or a relay that buffers a long tool
+# call's arguments. Through Model Hub even the response headers wait for the
+# first model output. Codex, Claude Code, Pi, and OpenCode all allow 300s of
+# silence, so the same bound covers every wait on the provider: response
+# headers, the first chunk, and each next chunk. Connecting stays separately
+# short, so an unreachable provider still fails fast. Both bounds are shared
+# by every native adapter; the loop may retry the resulting error only when no
+# model output has been emitted.
 CONNECT_TIMEOUT_S = 10.0
-TIME_TO_FIRST_BYTE_TIMEOUT_S = 30.0
-IDLE_CHUNK_TIMEOUT_S = 30.0
+PROVIDER_SILENCE_TIMEOUT_S = 300.0
 CLEANUP_TIMEOUT_S = 10.0
 MAX_CUMULATIVE_OUTPUT_CHARS = 32 * 1024 * 1024
 # Conservative structural allowances, not a one-byte item counter. These cover
@@ -973,7 +980,7 @@ class StreamAssembler:
             error = ProviderError(
                 kind=kind,
                 message=message,
-                retryable=kind in {"rate_limit", "overloaded", "network", "server"} and not self.streamed,
+                retryable=kind in RETRYABLE_ERROR_KINDS and not self.streamed,
                 retry_after_s=parse_retry_after((headers or {}).get("retry-after")),
                 status=status,
                 partial=partial,
@@ -1367,7 +1374,6 @@ async def iter_sse_events(
 
     parser = SSEParser()
     iterator = response.aiter_bytes().__aiter__()
-    first_chunk = True
     while True:
         if cancel.cancelled:
             return
@@ -1375,17 +1381,12 @@ async def iter_sse_events(
             chunk = await _await_network(
                 iterator.__anext__(),
                 cancel,
-                timeout_s=(
-                    TIME_TO_FIRST_BYTE_TIMEOUT_S
-                    if first_chunk
-                    else IDLE_CHUNK_TIMEOUT_S
-                ),
+                timeout_s=PROVIDER_SILENCE_TIMEOUT_S,
             )
         except StopAsyncIteration:
             break
         if chunk is None:
             return
-        first_chunk = False
         for event in parser.feed(chunk):
             yield event
     for event in parser.finish():
@@ -1423,14 +1424,22 @@ async def drive_sse_stream(
             if cancel.cancelled:
                 candidate = assembler.aborted(cancel.reason)
             else:
-                request = client.build_request(method, url, json=json_body, headers=headers)
+                # The transport bounds only connecting; the wait for response
+                # headers is the provider's silence, bounded below.
+                request = client.build_request(
+                    method,
+                    url,
+                    json=json_body,
+                    headers=headers,
+                    timeout=httpx.Timeout(None, connect=CONNECT_TIMEOUT_S),
+                )
                 # Retain the opening task even if cancellation wins the await:
                 # its successful result still belongs to this driver's finally.
                 opening = asyncio.create_task(client.send(request, stream=True))
                 response = await _await_network(
                     opening,
                     cancel,
-                    timeout_s=CONNECT_TIMEOUT_S,
+                    timeout_s=PROVIDER_SILENCE_TIMEOUT_S,
                 )
                 if response is None:
                     candidate = assembler.aborted(cancel.reason)
@@ -1536,7 +1545,10 @@ async def _await_network(
     *,
     timeout_s: float | None = None,
 ) -> _T | None:
-    """Own one cancellable network await for opening, reads, and body reads."""
+    """Own one cancellable network await for opening, reads, and body reads.
+
+    Running out of ``timeout_s`` raises ``ProviderStalled``.
+    """
 
     if cancel.cancelled:
         close = getattr(awaitable, "close", None)
@@ -1553,14 +1565,12 @@ async def _await_network(
         )
         if not done:
             await _cancel_and_join(operation)
-            raise TimeoutError(
-                f"provider network operation timed out after {timeout_s:.1f}s"
-            )
+            raise ProviderStalled(timeout_s)
         if cancellation in done and cancel.cancelled:
             await _cancel_and_join(operation)
             return None
         return operation.result()
-    except TimeoutError:
+    except ProviderStalled:
         raise
     except BaseException:
         await _cancel_and_join(operation)
@@ -1620,7 +1630,6 @@ async def read_response_body(
     """Read an error body through the shared cancellation owner with a byte cap."""
 
     iterator = response.aiter_bytes().__aiter__()
-    first_chunk = True
     chunks: list[bytes] = []
     size = 0
     while size < max_bytes:
@@ -1628,17 +1637,12 @@ async def read_response_body(
             chunk = await _await_network(
                 iterator.__anext__(),
                 cancel,
-                timeout_s=(
-                    TIME_TO_FIRST_BYTE_TIMEOUT_S
-                    if first_chunk
-                    else IDLE_CHUNK_TIMEOUT_S
-                ),
+                timeout_s=PROVIDER_SILENCE_TIMEOUT_S,
             )
         except StopAsyncIteration:
             break
         if chunk is None:
             return None
-        first_chunk = False
         if not chunk:
             continue
         remaining = max_bytes - size

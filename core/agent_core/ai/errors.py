@@ -18,7 +18,15 @@ from urllib.parse import urlsplit
 import httpx
 
 from core.agent_core.messages import AssistantMessage
-from core.agent_core.ai.provider import ProviderError
+from core.agent_core.ai.provider import RETRYABLE_ERROR_KINDS, ProviderError
+
+class ProviderStalled(TimeoutError):
+    """The connected provider sent nothing for the whole silence bound."""
+
+    def __init__(self, timeout_s: float) -> None:
+        super().__init__(f"provider sent no data for {timeout_s:g}s")
+        self.timeout_s = timeout_s
+
 
 _OVERFLOW_PATTERNS = (
     r"prompt (?:is )?too long",
@@ -140,7 +148,7 @@ def classify_error(
         exc=exc,
         code=effective_code,
     )
-    retryable = kind in {"rate_limit", "overloaded", "network", "server"} and not streamed
+    retryable = kind in RETRYABLE_ERROR_KINDS and not streamed
     return ProviderError(
         kind=kind,
         message=message,
@@ -266,6 +274,10 @@ def _classify_kind(
     if is_overflow_message(message, status=status):
         return "overflow"
     if exc is not None:
+        # A stall is not a connection failure: the provider was reached and
+        # then stopped sending.
+        if isinstance(exc, ProviderStalled):
+            return "stalled"
         if isinstance(
             exc,
             (
