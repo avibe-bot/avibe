@@ -215,8 +215,9 @@ running. The tray keeps the shell alive after the window closes.
   | `needs_runtime` | capabilities now cover the schema, a grant missing | `needs_permission` | none; silent |
   | any `enabled` state except `error` | a successful `/ready` is followed by an unsupported capabilities answer | `needs_runtime` | stop the daemon and any permission-registration child if running |
   | any `enabled` state except `error` | adoption found a new `controller_id` with no definitive supported answer yet | `needs_runtime` | stop the daemon if running |
-  | `needs_permission` | grant check passes | `starting` | spawn |
+  | `needs_permission` | grant check changes from missing to all granted | `starting` | spawn once and consume the edge |
   | `needs_permission` | app activation or 5 s check, grant check still fails | `needs_permission` | none; never start a child |
+  | `needs_permission` | daemon previously reported a missing grant and shell preflight still reports all granted | `needs_permission` | none; wait for a shell-observed missing → granted edge or explicit off/on |
   | `starting` | socket accepts and the health check returns `pass` | `ready` | none |
   | `starting` | the health check returns `missing_grant` | `needs_permission` | stop the daemon; no prompt |
   | `starting` | spawn or socket fails, or the health check returns `unhealthy` | per the failure budget | stop the daemon; apply the failure budget |
@@ -229,7 +230,12 @@ running. The tray keeps the shell alive after the window closes.
     activation and every 5 s. In `needs_permission`, it uses the shell's own
     `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess`. A false result
     leaves the state unchanged and cannot authorize a daemon or registration
-    child. A proven missing→granted transition enters `starting` immediately.
+    child. A proven missing→granted transition enters `starting` immediately
+    and consumes that edge. If daemon startup or a ready heartbeat reports a
+    missing grant, automatic eligibility is disarmed: repeated shell
+    all-granted observations stay in `needs_permission`. The shell must first
+    observe a missing grant and then all granted, or the user must explicitly
+    turn Computer Use off and on, before another daemon can start.
     In `ready`, the 5 s tick runs the daemon health check below instead. The
     same tick also probes the daemon's socket. A wedged daemon that is alive
     but not accepting is treated like one that exited.
@@ -840,6 +846,13 @@ Each case lives in the suite of the component that owns the behavior.
     never spawn or queue a child; a later silent check that proves the grant
     enters `starting` immediately. Explicit toggle-off/on remains the retry
     path.
+  - Permission disagreement: after either startup health or a ready heartbeat
+    reports `missing_grant`, feed repeated all-granted activation and tick
+    observations. Assert no daemon respawn, stable `needs_permission`, and no
+    failure-budget entries. A subsequent shell-observed missing → granted edge
+    starts once, and explicit off/on also remains an authorized retry. Restore
+    and capability adoption deliberately arm only after observing a missing
+    grant.
   - Permission registration: one explicit toggle-on with Screen Recording
     missing starts exactly one direct child capture; an Accessibility-only
     failure does not. A fake child verifies the private
@@ -931,7 +944,9 @@ Each case lives in the suite of the component that owns the behavior.
   - During that request and an idle observation window, record the actual
     helper CHECKIN identity, require no outer bundle id and no helper
     frontmost assertion, and require exactly one registration child with no
-    daemon respawn loop.
+    daemon respawn loop. Continue the idle count while `needs_permission` to
+    prove that a shell/driver grant disagreement cannot cause one daemon spawn
+    per tick.
   - Slack → agent → a background GUI task completes while the user keeps
     working, and the tray toggle stops an in-flight session's access.
   - On an idle desktop, sample the frontmost app and the pointer during AX

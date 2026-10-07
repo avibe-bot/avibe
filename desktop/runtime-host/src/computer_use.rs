@@ -342,6 +342,7 @@ pub struct ComputerUseLifecycle {
     enabled: bool,
     phase: ComputerUsePhase,
     reason: Option<String>,
+    permission_edge_armed: bool,
     failure_budget: FailureBudget,
     consecutive_ready_failures: u8,
 }
@@ -352,6 +353,7 @@ impl ComputerUseLifecycle {
             enabled: false,
             phase: ComputerUsePhase::Off,
             reason: None,
+            permission_edge_armed: false,
             failure_budget: FailureBudget::default(),
             consecutive_ready_failures: 0,
         }
@@ -375,6 +377,7 @@ impl ComputerUseLifecycle {
             } else {
                 None
             },
+            permission_edge_armed: false,
             failure_budget: FailureBudget::default(),
             consecutive_ready_failures: 0,
         }
@@ -396,12 +399,14 @@ impl ComputerUseLifecycle {
         self.enabled = true;
         self.phase = ComputerUsePhase::Error;
         self.reason = Some(reason.into());
+        self.permission_edge_armed = false;
     }
 
     pub fn toggle_off(&mut self) -> LifecycleDirective {
         self.enabled = false;
         self.phase = ComputerUsePhase::Off;
         self.reason = None;
+        self.permission_edge_armed = false;
         self.failure_budget.clear();
         self.consecutive_ready_failures = 0;
         LifecycleDirective {
@@ -423,6 +428,7 @@ impl ComputerUseLifecycle {
         if let Some(reason) = grants.missing_reason() {
             self.phase = ComputerUsePhase::NeedsPermission;
             self.reason = Some(reason.to_owned());
+            self.permission_edge_armed = true;
             return LifecycleDirective {
                 write_state: true,
                 prompt_permissions: true,
@@ -432,6 +438,7 @@ impl ComputerUseLifecycle {
         }
         self.phase = ComputerUsePhase::Starting;
         self.reason = None;
+        self.permission_edge_armed = false;
         LifecycleDirective {
             write_state: true,
             prompt_permissions: true,
@@ -450,6 +457,7 @@ impl ComputerUseLifecycle {
             let stop_daemon = matches!(self.phase, ComputerUsePhase::Starting | ComputerUsePhase::Ready);
             self.phase = ComputerUsePhase::NeedsRuntime;
             self.reason = Some("runtime_too_old".to_owned());
+            self.permission_edge_armed = false;
             return LifecycleDirective {
                 write_state: changed,
                 stop_daemon,
@@ -463,6 +471,7 @@ impl ComputerUseLifecycle {
         if let Some(reason) = grants.missing_reason() {
             self.phase = ComputerUsePhase::NeedsPermission;
             self.reason = Some(reason.to_owned());
+            self.permission_edge_armed = true;
             return LifecycleDirective {
                 write_state: true,
                 ..LifecycleDirective::default()
@@ -470,6 +479,7 @@ impl ComputerUseLifecycle {
         }
         self.phase = ComputerUsePhase::Starting;
         self.reason = None;
+        self.permission_edge_armed = false;
         LifecycleDirective {
             write_state: true,
             spawn_daemon: true,
@@ -482,6 +492,10 @@ impl ComputerUseLifecycle {
             return LifecycleDirective::default();
         }
         let Some(reason) = grants.missing_reason() else {
+            if !self.permission_edge_armed {
+                return LifecycleDirective::default();
+            }
+            self.permission_edge_armed = false;
             self.phase = ComputerUsePhase::Starting;
             self.reason = None;
             return LifecycleDirective {
@@ -491,6 +505,7 @@ impl ComputerUseLifecycle {
                 ..LifecycleDirective::default()
             };
         };
+        self.permission_edge_armed = true;
         if self.reason.as_deref() != Some(reason) {
             self.reason = Some(reason.to_owned());
             return LifecycleDirective {
@@ -509,6 +524,7 @@ impl ComputerUseLifecycle {
             HealthResult::Pass => {
                 self.phase = ComputerUsePhase::Ready;
                 self.reason = None;
+                self.permission_edge_armed = false;
                 self.consecutive_ready_failures = 0;
                 LifecycleDirective {
                     write_state: true,
@@ -518,6 +534,7 @@ impl ComputerUseLifecycle {
             HealthResult::MissingGrant(reason) => {
                 self.phase = ComputerUsePhase::NeedsPermission;
                 self.reason = Some(reason);
+                self.permission_edge_armed = false;
                 LifecycleDirective {
                     write_state: true,
                     stop_daemon: true,
@@ -541,6 +558,7 @@ impl ComputerUseLifecycle {
                 self.consecutive_ready_failures = 0;
                 self.phase = ComputerUsePhase::NeedsPermission;
                 self.reason = Some(reason);
+                self.permission_edge_armed = false;
                 LifecycleDirective {
                     write_state: true,
                     stop_daemon: true,
@@ -572,6 +590,7 @@ impl ComputerUseLifecycle {
         }
         self.phase = ComputerUsePhase::Stopped;
         self.reason = None;
+        self.permission_edge_armed = false;
         LifecycleDirective {
             write_state: true,
             stop_permission_probe: true,
@@ -583,6 +602,7 @@ impl ComputerUseLifecycle {
     fn failed(&mut self, reason: String, now: Duration) -> LifecycleDirective {
         let exhausted = self.failure_budget.record(now);
         self.reason = Some(reason);
+        self.permission_edge_armed = false;
         self.phase = if exhausted {
             ComputerUsePhase::Error
         } else {
@@ -670,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_activation_feedback_cannot_spawn_but_a_real_grant_transition_can() {
+    fn missing_to_granted_edge_spawns_once_and_synthetic_activation_cannot_spawn() {
         let mut lifecycle = ComputerUseLifecycle::off();
         let missing = Grants {
             accessibility: true,
@@ -700,10 +720,114 @@ mod tests {
         );
         assert!(denied.stop_daemon);
         assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsPermission);
+        for _ in 0..32 {
+            assert_eq!(
+                lifecycle.observe_permissions(Grants::all()),
+                LifecycleDirective::default(),
+                "a stale all-granted shell preflight cannot reauthorize the daemon"
+            );
+        }
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsPermission);
+        assert_eq!(lifecycle.reason(), Some("screen_recording"));
+        assert!(lifecycle.failure_budget.failures.is_empty());
+
+        assert_eq!(lifecycle.observe_permissions(missing), LifecycleDirective::default());
+        let rearmed = lifecycle.observe_permissions(Grants::all());
+        assert!(rearmed.spawn_daemon);
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::Starting);
+    }
+
+    #[test]
+    fn ready_permission_disagreement_also_requires_a_new_edge_or_explicit_retry() {
+        let mut lifecycle = ComputerUseLifecycle::off();
+        assert!(
+            lifecycle
+                .toggle_on(RuntimeSupport::Supported, Grants::all())
+                .spawn_daemon
+        );
+        assert!(lifecycle.startup_health(HealthResult::Pass, Duration::ZERO).write_state);
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::Ready);
+
+        let missing_from_driver = lifecycle.ready_heartbeat(
+            HealthResult::MissingGrant("accessibility".to_owned()),
+            Duration::from_secs(5),
+        );
+        assert!(missing_from_driver.stop_daemon);
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsPermission);
+        for _ in 0..10 {
+            assert_eq!(
+                lifecycle.observe_permissions(Grants::all()),
+                LifecycleDirective::default()
+            );
+        }
+        assert!(lifecycle.failure_budget.failures.is_empty());
+
+        let shell_missing = Grants {
+            accessibility: false,
+            screen_recording: true,
+        };
         assert_eq!(
-            lifecycle.observe_permissions(missing),
+            lifecycle.observe_permissions(shell_missing),
+            LifecycleDirective::default()
+        );
+        assert!(lifecycle.observe_permissions(Grants::all()).spawn_daemon);
+
+        assert!(
+            lifecycle
+                .startup_health(
+                    HealthResult::MissingGrant("accessibility".to_owned()),
+                    Duration::from_secs(6),
+                )
+                .stop_daemon
+        );
+        assert!(!lifecycle.observe_permissions(Grants::all()).spawn_daemon);
+        assert!(lifecycle.toggle_off().stop_daemon);
+        assert!(
+            lifecycle
+                .toggle_on(RuntimeSupport::Supported, Grants::all())
+                .spawn_daemon,
+            "explicit off/on remains an authorized retry"
+        );
+    }
+
+    #[test]
+    fn restored_runtime_support_arms_only_after_observing_a_missing_grant() {
+        let stored = record(ComputerUsePhase::NeedsPermission, true);
+        let mut lifecycle = ComputerUseLifecycle::from_record(&stored);
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsRuntime);
+
+        let missing = Grants {
+            accessibility: true,
+            screen_recording: false,
+        };
+        let supported = lifecycle.capabilities(RuntimeSupport::Supported, missing);
+        assert!(supported.write_state);
+        assert!(!supported.spawn_daemon);
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsPermission);
+        assert!(
+            lifecycle.observe_permissions(Grants::all()).spawn_daemon,
+            "the restored missing -> granted edge starts once"
+        );
+
+        let mut all_granted = ComputerUseLifecycle::from_record(&stored);
+        assert!(
+            all_granted
+                .capabilities(RuntimeSupport::Supported, Grants::all())
+                .spawn_daemon,
+            "restore may make one initial attempt when the shell already sees every grant"
+        );
+        assert!(
+            all_granted
+                .startup_health(
+                    HealthResult::MissingGrant("screen_recording".to_owned()),
+                    Duration::ZERO,
+                )
+                .stop_daemon
+        );
+        assert_eq!(
+            all_granted.observe_permissions(Grants::all()),
             LifecycleDirective::default(),
-            "the daemon exit and host reactivation still cannot authorize a child"
+            "the driver's disagreement consumes restore eligibility"
         );
     }
 

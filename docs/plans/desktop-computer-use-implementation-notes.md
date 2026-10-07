@@ -157,6 +157,23 @@ must prove helper identity, no helper foreground assertion, no respawn loop,
 outer-app TCC responsibility, automatic Settings registration, and a visible
 agent cursor during a later authorized action.
 
+Candidate 4 was built from
+`e0e3034ae9314c9312226872c1e47d8fcc4638d6`, installed under the unique
+`bot.avibe.desktop.cua.candidate4` identity, and started once through the
+isolated lane command only to obtain its PID and verify origin. It was stopped
+before any toggle, permission request, child capture, TCC record, or `D` write.
+A source review then found the remaining permission-level feedback path:
+after a daemon reported `missing_grant`, the one-second tick could see a stale
+shell all-granted preflight and spawn again indefinitely. Candidate 4 is
+therefore pre-fix evidence only and is not permission-acceptance evidence.
+
+The lifecycle now consumes automatic spawn eligibility whenever startup health
+or a ready heartbeat reports `missing_grant`. Repeated all-granted tick or
+activation observations remain in `needs_permission`; only a newly observed
+shell missing → granted edge or an explicit off/on can start another daemon.
+This completes the feedback-loop repair without a timer, throttle, or retry
+budget side effect.
+
 Primary diagnostics:
 
 - `screen-registration-diagnostics.log`, SHA-256
