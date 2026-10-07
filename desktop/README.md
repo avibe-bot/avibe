@@ -34,6 +34,10 @@ product logic.
    shell fails or takes longer than 10 seconds. A private Runtime still puts its
    own `bin` and Node directories first. Discovery and the lifecycle verbs do
    not consult the login shell, so adopting a running Runtime never waits on it.
+   The lookup runs on a blocking thread before the launch-state lock is taken, so
+   a concurrent Stop is not held for that budget. A successful lookup lets the
+   shell finish its logout hooks within the remaining time; only a fallback
+   (or a logout that itself hangs) ends the process group.
 5. Polls until the Runtime is ready or the bound expires, then navigates. The
    window never leaves the bootstrap page before combined readiness succeeds.
    If the launcher it started exits non-zero, it gives up immediately instead of

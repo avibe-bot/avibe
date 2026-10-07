@@ -195,6 +195,11 @@ pub trait RuntimeLauncher: Send + Sync {
 /// spawned; readiness is decided by the presence probe.
 pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError>;
+    /// Work that must happen before `launch` and that must not hold the
+    /// launch-state mutex: the login-shell `PATH` lookup, which can wait 10 s
+    /// on a hanging startup file. The default is a no-op so a test launcher
+    /// that never starts a Runtime does not wait on the user's shell.
+    fn prepare_launch(&self) {}
     /// `hand_over` lets the start replace another desktop Runtime serving this
     /// home. The start owns that act and reports it in its exit.
     fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError>;
@@ -443,14 +448,18 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
         query_endpoint(&self.command, &self.log)
     }
 
+    fn prepare_launch(&self) {
+        let _ = cached_login_path(&self.log);
+    }
+
     fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
         // Only this shell's own Runtime is started by a CLI of its version,
         // which knows the flag and exits by the handover contract.
         let identified = self.expected_runtime_id.is_some();
         let hand_over = hand_over && identified;
-        let login_path = resolve_login_path(&self.log);
+        let login_path = cached_login_path(&self.log);
         let started = Instant::now();
-        let child = spawn_detached(&self.command, hand_over, &login_path).map_err(LaunchError::Spawn)?;
+        let child = spawn_detached(&self.command, hand_over, login_path).map_err(LaunchError::Spawn)?;
         let pid = child.id();
         let watch = LaunchWatch::default();
 
@@ -1003,18 +1012,22 @@ fn is_executable(_metadata: &std::fs::Metadata) -> bool {
 /// Only the start needs it: it is the one command whose process outlives this
 /// call and runs the user's agents. Discovery and the lifecycle verbs keep the
 /// shell's own `PATH`, so adopting a running Runtime never waits on the user's
-/// shell startup files.
-fn resolve_login_path(log: &BootstrapLog) -> LoginPath {
-    let started = Instant::now();
-    let login_path = login_shell_path();
-    log.record(
-        "runtime.login_path",
-        &[
-            ("outcome", login_path.outcome().to_owned()),
-            ("ms", started.elapsed().as_millis().to_string()),
-        ],
-    );
-    login_path
+/// shell startup files. Cached so `prepare_launch` can run the lookup off the
+/// launch-state mutex and `launch` can reuse the result without asking again.
+fn cached_login_path(log: &BootstrapLog) -> &'static LoginPath {
+    static LOGIN_PATH: OnceLock<LoginPath> = OnceLock::new();
+    LOGIN_PATH.get_or_init(|| {
+        let started = Instant::now();
+        let login_path = login_shell_path();
+        log.record(
+            "runtime.login_path",
+            &[
+                ("outcome", login_path.outcome().to_owned()),
+                ("ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
+        login_path
+    })
 }
 
 fn spawn_detached(

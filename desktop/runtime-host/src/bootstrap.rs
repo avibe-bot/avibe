@@ -468,6 +468,11 @@ impl RuntimeHost {
             );
         };
 
+        // The login-shell PATH lookup can wait 10 s on a hanging startup file.
+        // It runs here, on a blocking thread, before the launch-state mutex is
+        // taken, so a concurrent recovery or stop is not held for that budget.
+        let prepared = launcher.clone();
+        let _ = tokio::task::spawn_blocking(move || prepared.prepare_launch()).await;
         // The lock makes the decision and launch atomic, so concurrent runs
         // cannot both start the Runtime.
         if let Err(error) = self.launch_if_needed(launcher.clone(), trigger.allows_handover()) {
@@ -782,12 +787,16 @@ fn publish(sink: &dyn StatusSink, status: BootstrapStatus) -> BootstrapStatus {
 mod tests {
     use super::*;
     use crate::launcher::LaunchWatch;
+    use crate::status::BootstrapPhase;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const ORIGIN: &str = "http://127.0.0.1:5123";
 
     /// This app's Runtime, ready.
     struct MineProbe;
+
+    /// Nothing serving the origin: bootstrap will try to start one.
+    struct AbsentProbe;
 
     #[async_trait::async_trait]
     impl HealthProbe for MineProbe {
@@ -796,10 +805,18 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl HealthProbe for AbsentProbe {
+        async fn presence(&self, _origin: &LoopbackOrigin, _expected: Option<&str>) -> Presence {
+            Presence::Absent
+        }
+    }
+
     #[derive(Default)]
     struct CountingLauncher {
         launches: AtomicUsize,
         stops: AtomicUsize,
+        prepares: AtomicUsize,
     }
 
     impl RuntimeLauncher for CountingLauncher {
@@ -811,6 +828,10 @@ mod tests {
     impl ResolvedRuntimeLauncher for Arc<CountingLauncher> {
         fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
             Ok(LoopbackOrigin::parse(ORIGIN).expect("test origin"))
+        }
+
+        fn prepare_launch(&self) {
+            self.prepares.fetch_add(1, Ordering::SeqCst);
         }
 
         fn launch(&self, _hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
@@ -867,6 +888,46 @@ mod tests {
             "a probe during a stop must not restore stop authority"
         );
         assert!(!host.launched_runtime().runtime_may_be_running);
+    }
+
+    /// Resolves to itself so a bootstrap run can reach `prepare_launch`.
+    struct PreparingLauncher {
+        inner: Arc<CountingLauncher>,
+    }
+
+    impl RuntimeLauncher for PreparingLauncher {
+        fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+            Ok(Arc::new(self.inner.clone()))
+        }
+    }
+
+    /// The login-shell PATH lookup lives in `prepare_launch`, which bootstrap
+    /// runs on a blocking thread before taking the launch-state mutex. A Stop
+    /// that already holds that mutex therefore still lets the lookup finish,
+    /// and still fences the spawn itself.
+    #[tokio::test]
+    async fn prepare_launch_runs_before_the_launch_state_mutex_is_taken() {
+        let counting = Arc::new(CountingLauncher::default());
+        let host = RuntimeHost::new(
+            Arc::new(AbsentProbe),
+            Arc::new(PreparingLauncher {
+                inner: counting.clone(),
+            }),
+            RuntimeHostSettings {
+                origin_override: None,
+                ready_timeout: Duration::from_millis(10),
+                poll_interval: Duration::from_millis(1),
+                probe_timeout: Duration::from_millis(10),
+            },
+        );
+        host.launched_runtime().stopping = true;
+
+        let status = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+
+        assert_eq!(counting.prepares.load(Ordering::SeqCst), 1);
+        assert_eq!(counting.launches.load(Ordering::SeqCst), 0);
+        assert_eq!(status.phase, BootstrapPhase::Failed);
+        assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeSpawnFailed);
     }
 
     #[test]

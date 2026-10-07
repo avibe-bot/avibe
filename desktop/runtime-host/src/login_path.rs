@@ -157,8 +157,35 @@ pub(crate) fn resolve_with(shell: &Path, timeout: Duration) -> LoginPath {
             Err(mpsc::RecvTimeoutError::Disconnected) => break LoginPath::Inherited("no_path"),
         }
     };
-    end_process_group(&mut child);
+    // A successful lookup has already printed PATH; let the shell finish its
+    // logout hooks (zsh `.zlogout`) within the remaining budget. Only a
+    // fallback, or a logout that itself hangs, takes the group with it.
+    if matches!(outcome, LoginPath::Resolved(_)) {
+        wait_then_end(&mut child, deadline.saturating_duration_since(Instant::now()));
+    } else {
+        end_process_group(&mut child);
+    }
     outcome
+}
+
+/// Lets a successful shell finish, then ends anything still running.
+///
+/// `try_wait` is non-blocking; a logout hook that finishes promptly is the
+/// common case. The remaining lookup budget is the cap, so a hanging `.zlogout`
+/// cannot stall the Runtime start past the original 10 s.
+#[cfg(target_os = "macos")]
+fn wait_then_end(child: &mut std::process::Child, budget: Duration) {
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                end_process_group(child);
+                return;
+            }
+        }
+    }
 }
 
 /// Ends the login shell and everything its startup files started.
@@ -223,12 +250,17 @@ mod tests {
     }
 
     /// A stand-in login shell: `body` runs first, then the script the shell
-    /// was given, the way a startup file runs before `-c`.
-    fn fake_shell(dir: &Path, body: &str) -> PathBuf {
+    /// was given, the way a startup file runs before `-c`. `after` runs last,
+    /// the way a logout hook would.
+    fn fake_shell_with_after(dir: &Path, body: &str, after: &str) -> PathBuf {
         let shell = dir.join("shell");
-        std::fs::write(&shell, format!("#!/bin/sh\n{body}\nshift 3\neval \"$1\"\n")).expect("fake shell");
+        std::fs::write(&shell, format!("#!/bin/sh\n{body}\nshift 3\neval \"$1\"\n{after}\n")).expect("fake shell");
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         shell
+    }
+
+    fn fake_shell(dir: &Path, body: &str) -> PathBuf {
+        fake_shell_with_after(dir, body, "")
     }
 
     #[test]
@@ -311,6 +343,25 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!alive(), "the startup file's subprocess outlived the fallback");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// zsh runs `.zlogout` after `-c` returns. A successful lookup must let
+    /// that hook finish rather than SIGKILL it the moment PATH is printed.
+    #[test]
+    fn a_successful_lookup_lets_the_logout_hook_finish() {
+        let dir = scratch_dir("logout");
+        let done = dir.join("done");
+        let shell = fake_shell_with_after(&dir, "", &format!("sleep 0.2\necho done > '{}'", done.display()));
+
+        assert!(matches!(
+            resolve_with(&shell, Duration::from_secs(10)),
+            LoginPath::Resolved(_)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&done).expect("logout hook ran to completion"),
+            "done\n"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
