@@ -7574,8 +7574,13 @@ class ModelHubService:
 
     @staticmethod
     def _upstream_failure(source_label: str, outcome: RawCallOutcome) -> TurnUpstreamFailure | None:
+        if not outcome.upstream_detail:
+            return None
+        if outcome.kind in {RawOutcomeKind.NETWORK_ERROR, RawOutcomeKind.TIMEOUT}:
+            # The engine's own connection diagnostic: no upstream answered.
+            return TurnUpstreamFailure(source=source_label, http_status=None, detail=outcome.upstream_detail)
         status = outcome.http_status
-        if not outcome.upstream_detail or type(status) is not int or not 100 <= status <= 599:
+        if type(status) is not int or not 100 <= status <= 599:
             return None
         return TurnUpstreamFailure(source=source_label, http_status=status, detail=outcome.upstream_detail)
 

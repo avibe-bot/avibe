@@ -98,7 +98,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 400,
-            "description": "Optional upstream error message for this attempt, credential-redacted, whitespace-collapsed, and bounded to 400 characters by the engine client. Display only; never read by classification. Absent when no message was observed and in historical records."
+            "description": "Optional error text for this attempt, credential-redacted, stripped of control and bidi characters, whitespace-collapsed, and bounded to 400 characters by the engine client: the upstream's message, or for a network attempt the engine's connection diagnostic. Display only; never read by classification. Absent when no message was observed and in historical records."
           },
           "reason": {
             "enum": [

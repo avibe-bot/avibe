@@ -1331,9 +1331,11 @@ This additive diagnostic changes neither the failure reason nor classifier.
 
 `failed_attempts[].upstream_detail` and `terminal_error.upstream_detail` are
 independently optional strings: the upstream error message the engine client
-projected for that attempt, credential-redacted, whitespace-collapsed, and bounded
-to 400 characters. They are omitted when no message was observed and in older
-records, and are never read by classification.
+projected for that attempt, or for a `network` attempt the engine's own connection
+diagnostic (which carries no `http_status`). The text is credential-redacted, stripped
+of control and bidi characters, whitespace-collapsed, and bounded to 400 characters.
+They are omitted when no message was observed and in older records, and are never
+read by classification.
 
 The dialog independently reads this projection on demand and labels it "Latest recorded
 turn" / "最近已记录回合". Its error panel and details action use the same structured record,

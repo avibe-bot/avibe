@@ -29,6 +29,8 @@ type Row = {
   code: string | null;
   reason: string;
   detail: string | null;
+  // A network attempt's text is the connection failure, not an upstream answer.
+  connection: boolean;
 };
 
 const RECORD_RETRIES = 3;
@@ -100,6 +102,7 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
       code: null,
       reason: t(`chat.failureDetails.reason.${entry.reason}`, { defaultValue: entry.reason }),
       detail: entry.upstream_detail ?? null,
+      connection: entry.reason === 'network',
     }));
     const terminal = record.terminal_error;
     if (terminal) {
@@ -111,6 +114,7 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
         code: terminal.upstream_error_code ?? null,
         reason: t(`settings.models.routing.errorReason.${terminal.reason}`),
         detail: terminal.upstream_detail ?? null,
+        connection: false,
       });
     }
     return attempts;
@@ -125,7 +129,9 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
     const outcome = record.outcome === 'failed_terminal' && record.terminal_error?.reason !== 'invalid_parameter'
       ? 'failed_local'
       : record.outcome;
-    const upstreamFacts = attempts.some((row) => row.status !== null || row.code !== null || row.detail !== null);
+    const upstreamFacts = attempts.some(
+      (row) => row.status !== null || row.code !== null || (row.detail !== null && !row.connection),
+    );
     return (
       <div className="flex flex-col gap-2">
         <p className="text-gold-ink">
@@ -143,7 +149,7 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
                 </span>
                 {row.detail && (
                   <span className="text-gold-ink/70">
-                    {t('chat.failureDetails.upstreamDetail')}:{' '}
+                    {t(row.connection ? 'chat.failureDetails.connectionDetail' : 'chat.failureDetails.upstreamDetail')}:{' '}
                     <span className="whitespace-pre-wrap break-words font-mono text-gold-ink">{row.detail}</span>
                   </span>
                 )}

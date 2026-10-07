@@ -147,10 +147,11 @@ class TurnSupplyFacts:
 
 @dataclass(frozen=True)
 class TurnUpstreamFailure:
-    """The last upstream refusal behind a failed turn, for its reply."""
+    """The last upstream refusal or connection failure behind a failed turn."""
 
     source: str
-    http_status: int
+    # None when no upstream answered: the text is the connection failure.
+    http_status: int | None
     # Redacted and bounded by the engine client; display only.
     detail: str
 
@@ -160,8 +161,10 @@ class TurnOutcomeRenderingRule:
     outcome: str
     discriminator: str
     copy_keys: tuple[tuple[str, str | None], ...]
-    # Appended to the summary when the turn carries its last upstream failure.
+    # Appended to the summary when the turn carries its last upstream failure:
+    # an upstream refusal, or a connection that no upstream answered.
     upstream_failure_key: str | None = None
+    connection_failure_key: str | None = None
 
 
 # This is the only executable projection of the authoritative section 4.5 matrix.
@@ -180,6 +183,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
             ("interrupted", "modelHub.launch.interrupted"),
         ),
         upstream_failure_key="modelHub.launch.last_upstream_failure",
+        connection_failure_key="modelHub.launch.last_connection_failure",
     ),
     "turn.request_nonfallback": TurnOutcomeRenderingRule(
         outcome="failed_terminal",
@@ -207,6 +211,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
             ("transition_unpersisted", "modelHub.errors.stream_interrupted"),
         ),
         upstream_failure_key="modelHub.launch.last_upstream_failure",
+        connection_failure_key="modelHub.launch.last_connection_failure",
     ),
     "turn.no_candidate.unconfigured": TurnOutcomeRenderingRule(
         outcome="no_candidate",
@@ -227,6 +232,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
             ("interrupted", "modelHub.launch.interrupted"),
         ),
         upstream_failure_key="modelHub.launch.last_upstream_failure",
+        connection_failure_key="modelHub.launch.last_connection_failure",
     ),
     "turn.canceled": TurnOutcomeRenderingRule(
         outcome="canceled",
@@ -586,7 +592,11 @@ def render_turn_outcome_copy(
         params["backend"] = i18n_t(f"modelHub.backends.{params['backend']}", language)
     text = i18n_t(copy.key, language, **params)
     failure = projection.last_upstream_failure
-    suffix_key = _turn_outcome_rule(projection).upstream_failure_key
+    rule = _turn_outcome_rule(projection)
+    suffix_key = (
+        rule.upstream_failure_key if failure is not None and failure.http_status is not None
+        else rule.connection_failure_key
+    )
     if failure is not None and suffix_key is not None:
         text = " ".join((
             text,

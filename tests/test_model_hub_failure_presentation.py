@@ -220,7 +220,7 @@ async def test_gateway_terminal_survives_native_recorder_before_shared_notice(
         await gateway.close()
 
 
-@pytest.mark.parametrize("last_said", ["text", "nothing"])
+@pytest.mark.parametrize("last_said", ["text", "nothing", "connection"])
 @pytest.mark.parametrize("backend,endpoint,status", [
     ("codex", "responses", 400), ("claude", "messages", 424),
 ])
@@ -230,14 +230,16 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
 ):
     """MH-UPSTREAM-DETAIL-001: what the upstream said is shown, kept, and logged, not only its class."""
     detail = "upstream request failed: read tcp 198.51.100.7:443: i/o timeout"
-    # Only the first refusal carries text when the last one said nothing.
-    texts = [detail] + [detail if last_said == "text" else None] * 4
+    if last_said == "connection":
+        # The engine's own transport envelope: no upstream answered at all.
+        texts = [detail] * 12
+        failure = _outcome(RawOutcomeKind.NETWORK_ERROR, source_id="src_recovery01")
+    else:
+        # Only the first refusal carries text when the last one said nothing.
+        texts = [detail] + [detail if last_said == "text" else None] * 4
+        failure = _outcome(RawOutcomeKind.HTTP_ERROR, source_id="src_recovery01", status=500, code="server_error")
     service, _clock = clock_service(tmp_path, outcomes=[
-        replace(
-            _outcome(RawOutcomeKind.HTTP_ERROR, source_id="src_recovery01", status=500, code="server_error"),
-            upstream_detail=text,
-        )
-        for text in texts
+        replace(failure, upstream_detail=text) for text in texts
     ])
     service.store.load().sources[0].display_name = "Relay 服务"
     models = _canonicalize_fixed_test_routes(service)
@@ -281,13 +283,17 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
             "modelHub.launch.last_upstream_failure", language,
             source="Relay 服务", status=500, detail=detail,
         )
-        # An older message never stands in for a newer refusal that had none.
+        connection = t("modelHub.launch.last_connection_failure", language, source="Relay 服务", detail=detail)
+        # An older message never stands in for a newer refusal that had none,
+        # and a connection failure is never presented as an upstream answer.
         assert (suffix in notice.args[2]) is (last_said == "text")
+        assert (connection in notice.args[2]) is (last_said == "connection")
         gateway.correlation.settle("turn-detail", settled_by=SETTLED_BY_TERMINAL_RESULT)
         record = service.provenance.get("turn-detail")
         assert [attempt.get("upstream_detail") for attempt in record["failed_attempts"]] == texts[:attempts]
         logged = [entry.getMessage() for entry in caplog.records if "Model Hub attempt failed" in entry.getMessage()]
-        assert len(logged) == attempts and all("http_status=500" in line for line in logged)
+        status_text = "http_status=None" if last_said == "connection" else "http_status=500"
+        assert len(logged) == attempts and all(status_text in line for line in logged)
         assert detail in logged[0]
     finally:
         await gateway.close()

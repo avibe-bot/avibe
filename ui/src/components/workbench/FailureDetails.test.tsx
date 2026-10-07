@@ -195,6 +195,24 @@ describe('failed-turn upstream details', () => {
     }
   });
 
+  it('labels a network attempt\'s text as a connection error, not an upstream answer', async () => {
+    vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({
+      ...record,
+      outcome: 'exhausted',
+      failed_attempts: [{
+        source_id: 'src_a', configured_model_id: 'grok-4.6', channel: 'hub', reason: 'network',
+        upstream_detail: 'read tcp 10.0.0.2:443: i/o timeout',
+      }],
+      terminal_error: null,
+    } as unknown as TurnProvenance);
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '查看详情' }));
+    expect(screen.getByText('read tcp 10.0.0.2:443: i/o timeout')).toBeTruthy();
+    expect(screen.getByText(/连接错误/)).toBeTruthy();
+    expect(screen.queryByText(/上游返回/)).toBeNull();
+    expect(screen.queryByText(/由上游供应商的 API 返回/)).toBeNull();
+  });
+
   it('names Avibe-side terminal failures and localizes every blocker reason', async () => {
     vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({
       ...record,

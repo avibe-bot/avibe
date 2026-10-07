@@ -996,6 +996,7 @@
       "interrupted": "模型 {model} 当前不可用：{blockers}。请前往「模型」页处理。",
       "route_unconfigured": "模型 {model} 尚未配置路由。请前往「模型」页配置。",
       "last_upstream_failure": "上游最后一次报错（{source}，HTTP {status}）：{detail}",
+      "last_connection_failure": "最后一次连接错误（{source}）：{detail}",
       "model_unlisted": "模型 {model} 不在 {backend} 的模型列表中。请选择其他模型后继续。",
       "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。",
       "request_incompatible_detail": "上游拒绝了此请求，切换模型供应商也无法解决。上游返回：{detail}"

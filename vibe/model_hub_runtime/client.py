@@ -64,7 +64,9 @@ _ENGINE_TRANSPORT_FAILURE = re.compile(
     r"http2: (?:client connection lost|server sent GOAWAY)|server closed idle connection|"
     r"no such host|network is unreachable|proxyconnect"
 )
-_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# C0/C1 controls and every Unicode Bidi_Control character: either can act on
+# whatever renders the text (a terminal, a log viewer, a browser).
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
@@ -1606,12 +1608,12 @@ def _reduce_protocol_observation(
             and _engine_transport_failure(observation.error_payload, observation.error_envelope_paths)
         ):
             # The generic type is the engine's label for its own failure, so no
-            # machine code is carried that could outrank the network fact.
+            # machine code is carried that could outrank the network fact. Its
+            # status is the engine's too: no upstream answered.
             return _outcome(
                 kind=RawOutcomeKind.NETWORK_ERROR,
                 source=source,
                 model_id=model_id,
-                http_status=http_status,
                 message="engine could not reach the upstream",
                 stream_started=stream_started,
                 usage=observation.usage,
