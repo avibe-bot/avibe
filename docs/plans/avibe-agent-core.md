@@ -9,8 +9,8 @@ Status: **Approved direction, contracts in draft** · 2026-10-02
 ## 0. Decision summary
 
 Avibe builds its own first-party Agent in Python, inside this repository, as a fourth backend next to Claude Code,
-Codex, and OpenCode. Its backend id is `vibey`, which is also its built-in Agent's name, and users meet it as "Vibey"
-(renamed from `avibe` before release). "Avibe Agent" remains the engine's name in these plans. It reaches models through
+Codex, and OpenCode. Its backend id is `vibey`, which is also its built-in Agent's name, and users meet it as "Vibey".
+"Avibe Agent" remains the engine's name in these plans. It reaches models through
 Model Hub in each vendor's native protocol, and Avibe can steer, fork, resume, and manage its context directly.
 
 Sourcing, by layer:

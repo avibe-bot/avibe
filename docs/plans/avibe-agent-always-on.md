@@ -2,7 +2,7 @@
 
 ## Owner decision (2026-10-06)
 
-Vibey (then the Avibe Agent) is Avibe's own agent and takes part in the platform's core operation. It is listed first in every
+Vibey is Avibe's own agent and takes part in the platform's core operation. It is listed first in every
 backend list, it is always enabled, and it cannot be turned off.
 
 ## Change contract
@@ -21,24 +21,23 @@ backend list, it is always enabled, and it cannot be turned off.
   (`resolve_effective_default_agent`, `_effective_default_agent`), the per-principal fallback
   (`resolve_usable_default_agent`), the archived default's replacement after its same-backend preference, and the
   IM routing modal's fallback selection.
-- **Always on, by construction.** The built-in backend has no `agents.<id>` section: `AvibeAgentConfig` (pre-release
-  `agents.avibe`), its compat projection and every branch reading it are removed. A config written by an earlier build loads unchanged otherwise and drops the key on
-  its next save. The controller registers the adapter at startup and never unregisters it; runtime renewal is a no-op
-  for it.
-- **Built-in Agent.** `get_builtin_default_agent_for_backend` is the one owner of built-in identity: the row the store
-  created for the backend (`source == "builtin"`, which no caller can write), under any name. A marked row wins, then
-  the oldest; the legacy instance default (`default`) counts only if marked. The built-in markers (`builtin`,
-  `builtin_default`, `lock_delete`, `backend_enabled`) are a projection only the store writes: `create` and `update`
-  drop them from caller metadata and keep the row's own. `ensure_builtin_default_agents` always includes the built-in
-  backend, restores the markers of whatever row the lookup names and re-enables it, so the row exists and is enabled
-  when controller startup's sync returns (Model Hub seeds the Vibey supply onto it next). Without such a row it is
-  created at its backend id (`vibey`), or at the next free name (`vibey-2`) when a user's Agent holds `vibey`.
+- **Always on, by construction.** The built-in backend has no `agents.<id>` section; like any unknown `agents.*` key,
+  one in a config file or a `POST /api/config` body is ignored and never saved. The controller registers the adapter at
+  startup and never unregisters it; runtime renewal is a no-op for it.
+- **Built-in Agent.** `get_builtin_default_agent_for_backend` is the one owner of built-in identity: the oldest row the
+  store created and marked for the backend (`source == "builtin"` and the built-in markers, neither of which a caller
+  can write), under any name; the released legacy instance default (`default`) counts only if marked. The built-in
+  markers (`builtin`, `builtin_default`, `lock_delete`, `backend_enabled`) are a projection only the store writes:
+  `create` and `update` drop them from caller metadata and keep the row's own. `ensure_builtin_default_agents` always
+  includes the built-in backend and creates its row when it is missing, so the row exists and is enabled when controller
+  startup's sync returns (Model Hub seeds the Vibey supply onto it next). It is created at its backend id (`vibey`), or
+  at the next free name (`vibey-2`) when a user's own Agent, which a released build may hold, already has `vibey`.
   `VibeAgentStore.update` refuses to disable it (`agent_always_enabled`); its model, effort, prompt and description stay editable.
 - **Backend choices route to the built-in.** A routing picker that chooses a backend saves that backend's built-in
-  Agent's name (`VibeAgentStore.routing_name_for_backend`), never the backend id; a saved backend id that names no
-  Agent resolves to the backend's built-in Agent.
-- **Refusals.** `POST /api/config` with `agents.vibey` returns 400 (`errors.builtinBackendConfig`, in the configured
-  language); `PATCH /api/agents/<built-in name>` (`vibey` on a fresh install) with `enabled: false` returns 400
+  Agent's name (`VibeAgentStore.routing_name_for_backend`), never the backend id. A routing value that equals a backend
+  id stands for that backend only for the native backends, whose released routing can hold one; `vibey` in routing is
+  always an Agent name.
+- **Refusal.** `PATCH /api/agents/<built-in name>` (`vibey` on a fresh install) with `enabled: false` returns 400
   `agent_always_enabled`; the CLI reports the same code.
 - **UI.** The built-in backend shows a "Built-in" badge where other backends have their enable switch, in the list and
   on its page. The built-in Agent's enable switch is locked on. Users meet the backend as Vibey (the catalog's
